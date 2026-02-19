@@ -224,6 +224,15 @@ def test_turn_execution_diagnostics_rebuilds_phase_and_tool_history(monkeypatch)
         request_id="req-e",
         prompt_text="Summarise indexed notes",
         tool_progress_state=snapshot,
+        llm_calls=[
+            {
+                "type": "llm.generate_with_tools",
+                "stage": "tool_execute",
+                "model": "test-model",
+                "duration_ms": 125.8,
+                "provider": "openai",
+            }
+        ],
     )
 
     assert diagnostics["request_id"] == "req-e"
@@ -259,6 +268,29 @@ def test_turn_execution_diagnostics_rebuilds_phase_and_tool_history(monkeypatch)
         "tool_execute",
     ]
     assert workflow_stage_path.get("has_unmapped_runtime_stages") is False
+
+    timing = diagnostics.get("timing_breakdown")
+    assert isinstance(timing, dict)
+    assert timing.get("schema_version") == "conversation_turn_timing_breakdown.v1"
+    stage_rows = timing.get("stages")
+    assert isinstance(stage_rows, list)
+    stage_by_name = {
+        entry.get("stage"): entry
+        for entry in stage_rows
+        if isinstance(entry, dict) and isinstance(entry.get("stage"), str)
+    }
+    tool_stage = stage_by_name.get("tool_execute")
+    assert isinstance(tool_stage, dict)
+    assert tool_stage.get("llm_elapsed_ms") == 125
+    assert tool_stage.get("llm_call_count") == 1
+
+    llm_rows = timing.get("llm_calls_by_stage_model")
+    assert isinstance(llm_rows, list)
+    assert llm_rows
+    first_llm = llm_rows[0]
+    assert first_llm.get("stage") == "tool_execute"
+    assert first_llm.get("model") == "test-model"
+    assert first_llm.get("duration_ms") == 125
 
 
 def test_turn_execution_diagnostics_stage_path_fallback_for_unknown_phase(

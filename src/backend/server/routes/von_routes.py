@@ -32,6 +32,7 @@ from ...services.settings_service import (
     get_internal_mcp_tool_batch_cap,
     get_show_tool_use_during_thinking,
     get_buttonify_model_enabled,
+    get_buttonify_heuristic_preflight_enabled,
 )
 from ...services.feature_flags import (
     get_display_elements_screen_fence_compat_enabled,
@@ -357,6 +358,12 @@ def _normalise_progress_events_from_diagnostic_events(
         if idle_raw is None:
             idle_raw = _progress_number(entry.get("activity_idle_ms"))
         idle_ms = int(idle_raw) if idle_raw is not None else None
+        duration_raw = _progress_number(entry.get("duration_ms"))
+        duration_ms = int(max(0.0, duration_raw)) if duration_raw is not None else None
+        model = _progress_str(entry.get("model"))
+        success = entry.get("success")
+        if not isinstance(success, bool):
+            success = None
 
         progress_events.append(
             {
@@ -367,6 +374,9 @@ def _normalise_progress_events_from_diagnostic_events(
                 "liveness_state": _progress_str(entry.get("liveness_state")),
                 "idle_ms": idle_ms,
                 "subtask": subtask,
+                "duration_ms": duration_ms,
+                "model": model,
+                "success": success,
             }
         )
     return progress_events
@@ -461,6 +471,194 @@ def _derive_tool_history_from_diagnostic_events(
     return tool_history[-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT :]
 
 
+def _latest_event_timestamp_ms(events: list[dict[str, Any]]) -> int | None:
+    for entry in reversed(events):
+        timestamp = _iso_utc_to_epoch_ms(entry.get("at_utc"))
+        if timestamp is not None:
+            return timestamp
+    return None
+
+
+def _normalise_llm_stage_calls(
+    *,
+    llm_calls: list[dict[str, Any]],
+    diagnostic_events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if llm_calls:
+        source_entries: list[dict[str, Any]] = llm_calls
+    else:
+        source_entries = []
+        for event in diagnostic_events:
+            status = (_progress_str(event.get("status")) or "").lower()
+            if status != "llm_call_end":
+                continue
+            source_entries.append(event)
+
+    normalised: list[dict[str, Any]] = []
+    for entry in source_entries:
+        if not isinstance(entry, dict):
+            continue
+        duration_raw = _progress_number(entry.get("duration_ms"))
+        if duration_raw is None:
+            continue
+        duration_ms = int(max(0.0, float(duration_raw)))
+        stage = (
+            _progress_str(entry.get("stage"))
+            or _progress_str(entry.get("phase"))
+            or "unscoped"
+        )
+        model = _progress_str(entry.get("model")) or "unknown"
+        normalised.append(
+            {
+                "stage": stage,
+                "model": model,
+                "provider": _progress_str(entry.get("provider")),
+                "duration_ms": duration_ms,
+            }
+        )
+    return normalised
+
+
+def _build_timing_breakdown(
+    *,
+    diagnostic_events: list[dict[str, Any]],
+    phase_history: list[dict[str, Any]],
+    llm_calls: list[dict[str, Any]],
+    elapsed_ms_value: int | None,
+) -> dict[str, Any]:
+    stage_totals: dict[str, dict[str, Any]] = {}
+    stage_order: dict[str, int] = {}
+    order_counter = 0
+
+    def _touch_stage(stage: str) -> dict[str, Any]:
+        nonlocal order_counter
+        row = stage_totals.get(stage)
+        if row is None:
+            row = {
+                "stage": stage,
+                "elapsed_ms": None,
+                "llm_elapsed_ms": 0,
+                "llm_call_count": 0,
+                "non_llm_elapsed_ms": None,
+            }
+            stage_totals[stage] = row
+        if stage not in stage_order:
+            stage_order[stage] = order_counter
+            order_counter += 1
+        return row
+
+    latest_timestamp = _latest_event_timestamp_ms(diagnostic_events)
+    first_phase_timestamp: int | None = None
+
+    for index, phase_entry in enumerate(phase_history):
+        stage = _progress_str(phase_entry.get("phase"))
+        start_raw = _progress_number(phase_entry.get("timestamp"))
+        if not stage or start_raw is None:
+            continue
+        start_ts = int(start_raw)
+        if first_phase_timestamp is None:
+            first_phase_timestamp = start_ts
+
+        next_ts: int | None = None
+        if index + 1 < len(phase_history):
+            next_raw = _progress_number(phase_history[index + 1].get("timestamp"))
+            if next_raw is not None:
+                next_ts = int(next_raw)
+        if next_ts is None:
+            next_ts = latest_timestamp
+        if next_ts is None:
+            continue
+
+        duration_ms = int(max(0, next_ts - start_ts))
+        stage_row = _touch_stage(stage)
+        existing_elapsed = stage_row.get("elapsed_ms")
+        if isinstance(existing_elapsed, int):
+            stage_row["elapsed_ms"] = existing_elapsed + duration_ms
+        else:
+            stage_row["elapsed_ms"] = duration_ms
+
+    llm_stage_calls = _normalise_llm_stage_calls(
+        llm_calls=llm_calls,
+        diagnostic_events=diagnostic_events,
+    )
+    llm_by_stage_model: dict[tuple[str, str], dict[str, Any]] = {}
+    llm_total_ms = 0
+
+    for entry in llm_stage_calls:
+        stage = cast(str, entry["stage"])
+        model = cast(str, entry["model"])
+        duration_ms = int(entry["duration_ms"])
+        provider = _progress_str(entry.get("provider"))
+
+        stage_row = _touch_stage(stage)
+        stage_row["llm_elapsed_ms"] = int(stage_row["llm_elapsed_ms"]) + duration_ms
+        stage_row["llm_call_count"] = int(stage_row["llm_call_count"]) + 1
+
+        key = (stage, model)
+        bucket = llm_by_stage_model.get(key)
+        if bucket is None:
+            bucket = {
+                "stage": stage,
+                "model": model,
+                "provider": provider,
+                "call_count": 0,
+                "duration_ms": 0,
+            }
+            llm_by_stage_model[key] = bucket
+        bucket["call_count"] = int(bucket["call_count"]) + 1
+        bucket["duration_ms"] = int(bucket["duration_ms"]) + duration_ms
+        if bucket.get("provider") is None and provider is not None:
+            bucket["provider"] = provider
+
+        llm_total_ms += duration_ms
+
+    for row in stage_totals.values():
+        elapsed = row.get("elapsed_ms")
+        llm_elapsed = int(row.get("llm_elapsed_ms") or 0)
+        if isinstance(elapsed, int):
+            row["non_llm_elapsed_ms"] = max(0, elapsed - llm_elapsed)
+
+    stage_rows = sorted(
+        stage_totals.values(),
+        key=lambda item: (stage_order.get(cast(str, item.get("stage")), 1_000_000), cast(str, item.get("stage"))),
+    )
+
+    llm_rows = sorted(
+        llm_by_stage_model.values(),
+        key=lambda item: (
+            stage_order.get(cast(str, item.get("stage")), 1_000_000),
+            -int(item.get("duration_ms") or 0),
+            cast(str, item.get("model")),
+        ),
+    )
+
+    phase_elapsed_total = sum(
+        int(row["elapsed_ms"])
+        for row in stage_rows
+        if isinstance(row.get("elapsed_ms"), int)
+    )
+    observed_timeline_ms: int | None = None
+    if (
+        first_phase_timestamp is not None
+        and latest_timestamp is not None
+        and latest_timestamp >= first_phase_timestamp
+    ):
+        observed_timeline_ms = int(latest_timestamp - first_phase_timestamp)
+
+    return {
+        "schema_version": "conversation_turn_timing_breakdown.v1",
+        "stages": stage_rows,
+        "llm_calls_by_stage_model": llm_rows,
+        "totals": {
+            "elapsed_ms": elapsed_ms_value,
+            "observed_timeline_ms": observed_timeline_ms,
+            "phase_elapsed_ms": phase_elapsed_total,
+            "llm_elapsed_ms": llm_total_ms,
+            "llm_call_count": len(llm_stage_calls),
+        },
+    }
+
+
 def _build_turn_execution_diagnostics(
     *,
     request_id: str | None,
@@ -469,6 +667,7 @@ def _build_turn_execution_diagnostics(
     tool_progress_state: dict[str, Any] | None = None,
     workflow_discovery: dict[str, Any] | None = None,
     generated_at_utc: str | None = None,
+    llm_calls: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     prompt_preview = (
         prompt_text[:_TURN_EXECUTION_DIAGNOSTICS_PROMPT_PREVIEW_LIMIT]
@@ -509,6 +708,17 @@ def _build_turn_execution_diagnostics(
         runtime_stages=runtime_stages,
         workflow_id=None,
     )
+    llm_call_entries = [
+        cast(dict[str, Any], entry)
+        for entry in (llm_calls or [])
+        if isinstance(entry, dict)
+    ]
+    timing_breakdown = _build_timing_breakdown(
+        diagnostic_events=diagnostic_events,
+        phase_history=phase_history,
+        llm_calls=llm_call_entries,
+        elapsed_ms_value=elapsed_ms_value,
+    )
 
     return {
         "generated_at_utc": _progress_str(generated_at_utc) or _now_utc_iso(),
@@ -524,6 +734,7 @@ def _build_turn_execution_diagnostics(
         "workflow_discovery": workflow_payload,
         "workflow_stage_model": build_conversation_turn_stage_model_snapshot(),
         "workflow_stage_path": workflow_stage_path,
+        "timing_breakdown": timing_breakdown,
     }
 
 
@@ -1234,6 +1445,18 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
             "liveness_reason": liveness.get("liveness_reason"),
             "stall_detected": liveness.get("stall_detected"),
         }
+        duration_ms = _progress_number(safe_update.get("duration_ms"))
+        if duration_ms is not None:
+            event_entry["duration_ms"] = int(max(0.0, duration_ms))
+        model_name = _progress_str(safe_update.get("model"))
+        if model_name:
+            event_entry["model"] = model_name
+        provider_name = _progress_str(safe_update.get("provider"))
+        if provider_name:
+            event_entry["provider"] = provider_name
+        success_flag = safe_update.get("success")
+        if isinstance(success_flag, bool):
+            event_entry["success"] = success_flag
         if _progress_str(merged.get("error")):
             event_entry["error"] = str(merged.get("error"))
         trimmed_events = [
@@ -6007,6 +6230,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             and isinstance(response_text, str)
             and response_text
         ):
+            buttonify_preflight_enabled = get_buttonify_heuristic_preflight_enabled()
             if show_tool_use_progress:
                 _set_tool_progress(
                     progress_scope_key,
@@ -6017,114 +6241,125 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         "workflow_task": "buttonify",
                     },
                 )
-            buttonify_prompt_template = (
-                "You generate quick-reply button options for a chat UI.\n\n"
-                "Use the user message and assistant response. Extract up to 4 options that the user could tap next.\n\n"
-                "Rules:\n"
-                "- Return ONLY a JSON array of strings. No prose, no Markdown.\n"
-                "- Each option must be 1-4 words and safe to send verbatim.\n"
-                "- Prefer exact wording from the response when explicit (lists, quoted replies, template choices).\n"
-                '- If the response presents implicit alternatives (e.g. "Would you like to continue or stop?"), convert them into concise options (e.g. ["Continue", "Stop"]).\n'
-                '- If the response is a yes/no question without explicit options, return ["Yes", "No"].\n'
-                "- If there are no clear options or it is open-ended, return [].\n"
-                "- Do not invent options beyond what is stated or clearly implied.\n"
-                "- Avoid punctuation, emojis, or more than 4 words.\n\n"
-                "User message:\n{user_message}\n\nAssistant response:\n{assistant_response}"
-            )
-
-            prompt_service = PromptTemplateService()
-            rendered_buttonify_prompt = None
-            try:
-                rendered_buttonify_prompt = prompt_service.render_prompt(
-                    _BUTTONIFY_PROMPT_IDS,
-                    variables={
-                        "user_message": prompt_text,
-                        "assistant_response": response_text,
-                    },
-                    fallback=buttonify_prompt_template,
-                )
-            except Exception:
-                rendered_buttonify_prompt = None
-
-            if rendered_buttonify_prompt:
-                buttonify_prompt = rendered_buttonify_prompt.text
-                buttonify_prompt_id = rendered_buttonify_prompt.prompt_id
-                buttonify_prompt_truncated = rendered_buttonify_prompt.truncated
-            else:
-                buttonify_prompt = buttonify_prompt_template.format(
-                    user_message=prompt_text,
-                    assistant_response=response_text,
-                )
-                buttonify_prompt_id = None
-                buttonify_prompt_truncated = False
-
-            buttonify_context: list[dict[str, Any]] = []
-            buttonify_response = None
             buttonify_model_used = model_name
-            if orchestrator is not None and hasattr(
-                orchestrator, "_run_llm_with_fallbacks"
-            ):
+            buttonify_source = "none"
+            buttonify_prompt_id = None
+            buttonify_prompt_truncated = False
+
+            if buttonify_preflight_enabled:
+                preflight_options = _extract_buttonify_options_heuristic(response_text)
+                if preflight_options:
+                    buttonify_options = preflight_options
+                    buttonify_source = "heuristic_preflight"
+
+            if not buttonify_options:
+                buttonify_prompt_template = (
+                    "You generate quick-reply button options for a chat UI.\n\n"
+                    "Use the user message and assistant response. Extract up to 4 options that the user could tap next.\n\n"
+                    "Rules:\n"
+                    "- Return ONLY a JSON array of strings. No prose, no Markdown.\n"
+                    "- Each option must be 1-4 words and safe to send verbatim.\n"
+                    "- Prefer exact wording from the response when explicit (lists, quoted replies, template choices).\n"
+                    '- If the response presents implicit alternatives (e.g. "Would you like to continue or stop?"), convert them into concise options (e.g. ["Continue", "Stop"]).\n'
+                    '- If the response is a yes/no question without explicit options, return ["Yes", "No"].\n'
+                    "- If there are no clear options or it is open-ended, return [].\n"
+                    "- Do not invent options beyond what is stated or clearly implied.\n"
+                    "- Avoid punctuation, emojis, or more than 4 words.\n\n"
+                    "User message:\n{user_message}\n\nAssistant response:\n{assistant_response}"
+                )
+
+                prompt_service = PromptTemplateService()
+                rendered_buttonify_prompt = None
                 try:
-                    policy_state, _ = orchestrator._load_workflow_model_policy(
-                        request_language
-                    )
-                    buttonify_response, buttonify_model_used, _ = (
-                        orchestrator._run_llm_with_fallbacks(
-                            stage="buttonify",
-                            prompt=buttonify_prompt,
-                            context=buttonify_context,
-                            default_client=llm_client,
-                            default_model=model_name,
-                            policy_state=policy_state,
-                            user_concept_id=user_concept_id,
-                            org_concept_id=org_concept_id,
-                            llm_calls_log=llm_interaction["calls"],
-                            aux_log=auxiliary_llm_calls,
-                            record_llm_call=_record_stage_llm_call,
-                        )
+                    rendered_buttonify_prompt = prompt_service.render_prompt(
+                        _BUTTONIFY_PROMPT_IDS,
+                        variables={
+                            "user_message": prompt_text,
+                            "assistant_response": response_text,
+                        },
+                        fallback=buttonify_prompt_template,
                     )
                 except Exception:
-                    buttonify_response = None
-            if buttonify_response is None:
-                llm_start = time.perf_counter()
-                buttonify_response = llm_client.generate(
-                    prompt=buttonify_prompt,
-                    context=buttonify_context,
-                    model=buttonify_model_used,
-                )
-                _record_stage_llm_call(
-                    call_type="llm.generate",
-                    model_name=buttonify_model_used,
-                    duration_ms=(time.perf_counter() - llm_start) * 1000.0,
-                    usage=None,
-                    note="Buttonify quick-reply extraction (legacy).",
-                    stage="buttonify",
-                )
-            try:
-                import json as _json
+                    rendered_buttonify_prompt = None
 
-                parsed = _json.loads(str(buttonify_response))
-                if isinstance(parsed, list):
-                    for item in parsed:
-                        if not isinstance(item, str):
-                            continue
-                        cleaned = item.strip()
-                        if not cleaned:
-                            continue
-                        if len(cleaned.split()) > 4:
-                            continue
-                        if len(cleaned) > 60:
-                            continue
-                        buttonify_options.append(cleaned)
-            except Exception:
-                buttonify_options = []
+                if rendered_buttonify_prompt:
+                    buttonify_prompt = rendered_buttonify_prompt.text
+                    buttonify_prompt_id = rendered_buttonify_prompt.prompt_id
+                    buttonify_prompt_truncated = rendered_buttonify_prompt.truncated
+                else:
+                    buttonify_prompt = buttonify_prompt_template.format(
+                        user_message=prompt_text,
+                        assistant_response=response_text,
+                    )
 
-            buttonify_source = "llm" if buttonify_options else "none"
-            if not buttonify_options:
-                heuristic_options = _extract_buttonify_options_heuristic(response_text)
-                if heuristic_options:
-                    buttonify_options = heuristic_options
-                    buttonify_source = "heuristic"
+                buttonify_context: list[dict[str, Any]] = []
+                buttonify_response = None
+                if orchestrator is not None and hasattr(
+                    orchestrator, "_run_llm_with_fallbacks"
+                ):
+                    try:
+                        policy_state, _ = orchestrator._load_workflow_model_policy(
+                            request_language
+                        )
+                        buttonify_response, buttonify_model_used, _ = (
+                            orchestrator._run_llm_with_fallbacks(
+                                stage="buttonify",
+                                prompt=buttonify_prompt,
+                                context=buttonify_context,
+                                default_client=llm_client,
+                                default_model=model_name,
+                                policy_state=policy_state,
+                                user_concept_id=user_concept_id,
+                                org_concept_id=org_concept_id,
+                                llm_calls_log=llm_interaction["calls"],
+                                aux_log=auxiliary_llm_calls,
+                                record_llm_call=_record_stage_llm_call,
+                            )
+                        )
+                    except Exception:
+                        buttonify_response = None
+                if buttonify_response is None:
+                    llm_start = time.perf_counter()
+                    buttonify_response = llm_client.generate(
+                        prompt=buttonify_prompt,
+                        context=buttonify_context,
+                        model=buttonify_model_used,
+                    )
+                    _record_stage_llm_call(
+                        call_type="llm.generate",
+                        model_name=buttonify_model_used,
+                        duration_ms=(time.perf_counter() - llm_start) * 1000.0,
+                        usage=None,
+                        note="Buttonify quick-reply extraction (legacy).",
+                        stage="buttonify",
+                    )
+                try:
+                    import json as _json
+
+                    parsed = _json.loads(str(buttonify_response))
+                    if isinstance(parsed, list):
+                        for item in parsed:
+                            if not isinstance(item, str):
+                                continue
+                            cleaned = item.strip()
+                            if not cleaned:
+                                continue
+                            if len(cleaned.split()) > 4:
+                                continue
+                            if len(cleaned) > 60:
+                                continue
+                            buttonify_options.append(cleaned)
+                except Exception:
+                    buttonify_options = []
+
+                buttonify_source = "llm" if buttonify_options else "none"
+                if not buttonify_options:
+                    heuristic_options = _extract_buttonify_options_heuristic(
+                        response_text
+                    )
+                    if heuristic_options:
+                        buttonify_options = heuristic_options
+                        buttonify_source = "heuristic_fallback"
 
             buttonify_meta = {
                 "enabled": True,
@@ -6133,6 +6368,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 "source": buttonify_source,
                 "prompt_id": buttonify_prompt_id,
                 "prompt_truncated": buttonify_prompt_truncated,
+                "heuristic_preflight_enabled": buttonify_preflight_enabled,
             }
 
         context_stats = _calculate_context_stats(sent_context_stats_messages)
@@ -6254,6 +6490,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             elapsed_ms=(time.perf_counter() - request_start_perf) * 1000.0,
             tool_progress_state=tool_progress_snapshot,
             workflow_discovery=workflow_discovery_result,
+            llm_calls=llm_interaction["calls"],
         )
 
         workflow_use_episodes = [

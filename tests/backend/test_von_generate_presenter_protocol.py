@@ -159,6 +159,29 @@ def test_generate_preserves_fenced_code_inside_screen_block(monkeypatch):
     assert body["response_channels"]["spoken"] == "Talk track."
 
 
+def test_generate_buttonify_heuristic_preflight_skips_model_pass(monkeypatch):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("VON_BUTTONIFY_MODEL_ENABLE", "1")
+    monkeypatch.setenv("VON_BUTTONIFY_HEURISTIC_PREFLIGHT_ENABLE", "1")
+
+    llm = _StubLLM('Please reply with one of: "Proceed", "Hold".')
+    app = _make_app(monkeypatch, llm)
+
+    client = app.test_client()
+    resp = client.post("/von/generate", json={"prompt": "Hello"})
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    llm_debug = body["llm_debug"]
+    buttonify = llm_debug.get("buttonify")
+    assert isinstance(buttonify, dict)
+    assert buttonify.get("source") == "heuristic_preflight"
+    assert buttonify.get("options") == ["Proceed", "Hold"]
+
+    # Preflight should avoid a second model pass for buttonify extraction.
+    assert len(llm.calls) == 1
+
+
 def test_extract_presenter_channels_ignores_tags_inside_fenced_blocks():
     from src.backend.server.routes.von_routes import _extract_presenter_channels
 

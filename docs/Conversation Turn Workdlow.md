@@ -88,10 +88,13 @@ When markdown rendering is active, the UI transforms certain patterns into promp
 - Auto-send uses `submitChatPromptImmediately()`. See [src/frontend/web/von_interface/static/js/chatTab.js](src/frontend/web/von_interface/static/js/chatTab.js#L740-L820).
 
 ### Optional model-driven buttonify
-When `VON_BUTTONIFY_MODEL_ENABLE=1`, the backend runs a lightweight model pass (stage `buttonify`) to emit structured quick replies in `llm_debug.buttonify.options`. The UI renders these buttons if present, otherwise it falls back to the heuristic transforms above.
+When `VON_BUTTONIFY_MODEL_ENABLE=1`, the backend can run a lightweight model pass (stage `buttonify`) to emit structured quick replies in `llm_debug.buttonify.options`.  
+Before that model pass, the route now runs a heuristic preflight (`VON_BUTTONIFY_HEURISTIC_PREFLIGHT_ENABLE=1`, default on). If explicit options are already present, it skips the extra model call and records `llm_debug.buttonify.source="heuristic_preflight"`.  
+If preflight does not find options, the model pass runs and the source is `llm` or `heuristic_fallback`.
 
 ## Observability and Trace Artefacts
 - **LLM debug payload**: response, tool invocations, tool stats, context stats, presenter metadata. See [src/backend/server/routes/von_routes.py](src/backend/server/routes/von_routes.py#L3615-L3845).
+- **Turn execution timing breakdown**: `llm_debug.turn_execution_diagnostics.timing_breakdown` includes per-stage elapsed time, per-stage LLM time, and stage/model LLM duration rows for before/after latency comparisons.
 - **Workflow traces**: stored as execution traces and surfaced via `aux_llm_calls` when enabled. See [src/backend/server/routes/von_routes.py](src/backend/server/routes/von_routes.py#L3400-L3465).
 - **Tool-use progress**: emits progress updates for the UI “Thinking…” indicator. See [src/backend/server/routes/von_routes.py](src/backend/server/routes/von_routes.py#L603-L705).
 - **Model registry snapshot**: summary metadata (source + sample models) attached to `aux_llm_calls` and workflow traces. See [src/backend/integrations/internal_mcp/orchestrator.py](src/backend/integrations/internal_mcp/orchestrator.py#L3668-L3730).
