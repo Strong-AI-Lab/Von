@@ -25,6 +25,8 @@ See JVNAUTOSCI-1044 for an example of namespace rejection breaking tool calls.
 
 from __future__ import annotations
 
+import os
+import re
 from typing import Any, List, Mapping, Sequence
 
 from .gateway import MethodCatalogue, MethodDefinition
@@ -33,6 +35,12 @@ from .workflow_surface_capabilities import (
     build_workflow_surface_capability_matrix,
 )
 from src.backend.services.prompt_template_service import PromptTemplateService
+
+_JIRA_ISSUE_KEY_PATTERN = re.compile(
+    r"\b([A-Z][A-Z0-9]{1,24})-(\d+)\b",
+    re.IGNORECASE,
+)
+_DEFAULT_JIRA_BASE_URL = "https://naoinstitute.atlassian.net"
 
 
 def _utc_now_iso() -> str:
@@ -5014,10 +5022,76 @@ def _build_turn_execution_case_id(request_id: Any, index: int) -> str:
     return f"turn_exec_case_{index:03d}"
 
 
+def _normalise_turn_execution_jira_base_url(raw_value: Any) -> str:
+    if isinstance(raw_value, str) and raw_value.strip():
+        return raw_value.strip().rstrip("/")
+    env_value = os.getenv("ATLASSIAN_BASE_URL")
+    if isinstance(env_value, str) and env_value.strip():
+        return env_value.strip().rstrip("/")
+    return _DEFAULT_JIRA_BASE_URL
+
+
+def _extract_turn_execution_jira_issue_keys_from_text(value: Any) -> list[str]:
+    if not isinstance(value, str) or not value.strip():
+        return []
+    keys: list[str] = []
+    seen: set[str] = set()
+    for match in _JIRA_ISSUE_KEY_PATTERN.finditer(value):
+        project = str(match.group(1)).upper()
+        issue_number = str(match.group(2))
+        issue_key = f"{project}-{issue_number}"
+        if issue_key in seen:
+            continue
+        seen.add(issue_key)
+        keys.append(issue_key)
+    return keys
+
+
+def _extract_turn_execution_jira_issue_keys(item: Mapping[str, Any]) -> list[str]:
+    candidate_values = [
+        item.get("prompt_preview"),
+        item.get("decision_reason"),
+    ]
+    keys: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidate_values:
+        for issue_key in _extract_turn_execution_jira_issue_keys_from_text(candidate):
+            if issue_key in seen:
+                continue
+            seen.add(issue_key)
+            keys.append(issue_key)
+    return keys
+
+
+def _build_turn_execution_case_triage(
+    item: Mapping[str, Any],
+    *,
+    jira_base_url: str,
+) -> dict[str, Any]:
+    issue_keys = _extract_turn_execution_jira_issue_keys(item)
+    browse_urls = [f"{jira_base_url}/browse/{issue_key}" for issue_key in issue_keys]
+    request_id = (
+        str(item.get("request_id")).strip()
+        if isinstance(item.get("request_id"), str)
+        else None
+    )
+    suggested_jql = (
+        f'project = JVNAUTOSCI AND text ~ "\\"{request_id}\\""'
+        if request_id
+        else None
+    )
+    return {
+        "jira_issue_keys": issue_keys,
+        "jira_browse_urls": browse_urls,
+        "suggested_jql": suggested_jql,
+    }
+
+
 def _build_turn_execution_replay_case(
     item: Mapping[str, Any],
     *,
     index: int,
+    jira_base_url: str,
 ) -> dict[str, Any]:
     failure_mode = (
         str(item.get("failure_mode")).strip()
@@ -5053,6 +5127,172 @@ def _build_turn_execution_replay_case(
             ),
             "prompt_preview": item.get("prompt_preview"),
         },
+        "triage": _build_turn_execution_case_triage(
+            item,
+            jira_base_url=jira_base_url,
+        ),
+    }
+
+
+def _build_turn_execution_benchmark_fingerprint(
+    *,
+    filters: Mapping[str, Any],
+    replay_cases: Sequence[Mapping[str, Any]],
+) -> str:
+    import hashlib
+    import json
+
+    canonical_payload = {
+        "filters": dict(filters),
+        "replay_cases": [
+            {
+                "case_id": case.get("case_id"),
+                "request_id": case.get("request_id"),
+                "failure_mode": case.get("failure_mode"),
+                "workflow_id": case.get("workflow_id"),
+            }
+            for case in replay_cases
+        ],
+    }
+    encoded = json.dumps(
+        canonical_payload,
+        sort_keys=True,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def _build_turn_execution_triage_index(
+    replay_cases: Sequence[Mapping[str, Any]],
+    *,
+    jira_base_url: str,
+) -> dict[str, Any]:
+    links_by_issue: dict[str, dict[str, Any]] = {}
+    request_ids_without_issue_keys: list[str] = []
+
+    for case in replay_cases:
+        triage_raw = case.get("triage")
+        triage: Mapping[str, Any] = triage_raw if isinstance(triage_raw, Mapping) else {}
+        issue_keys_raw_value = triage.get("jira_issue_keys")
+        issue_keys_raw = issue_keys_raw_value if isinstance(issue_keys_raw_value, list) else []
+        issue_keys = [
+            key.strip()
+            for key in issue_keys_raw
+            if isinstance(key, str) and key.strip()
+        ]
+        request_id = (
+            str(case.get("request_id")).strip()
+            if isinstance(case.get("request_id"), str)
+            else ""
+        )
+        case_id = (
+            str(case.get("case_id")).strip()
+            if isinstance(case.get("case_id"), str)
+            else ""
+        )
+
+        if not issue_keys and request_id:
+            request_ids_without_issue_keys.append(request_id)
+
+        for issue_key in issue_keys:
+            entry = links_by_issue.setdefault(
+                issue_key,
+                {
+                    "issue_key": issue_key,
+                    "browse_url": f"{jira_base_url}/browse/{issue_key}",
+                    "case_ids": [],
+                    "request_ids": [],
+                },
+            )
+            if case_id and case_id not in entry["case_ids"]:
+                entry["case_ids"].append(case_id)
+            if request_id and request_id not in entry["request_ids"]:
+                entry["request_ids"].append(request_id)
+
+    issue_links = sorted(
+        links_by_issue.values(),
+        key=lambda row: str(row.get("issue_key") or ""),
+    )
+    unique_request_ids_without_issue_keys = list(dict.fromkeys(request_ids_without_issue_keys))
+    return {
+        "jira_base_url": jira_base_url,
+        "issue_link_count": len(issue_links),
+        "issue_links": issue_links,
+        "request_ids_without_issue_keys": unique_request_ids_without_issue_keys,
+        "request_ids_without_issue_keys_count": len(
+            unique_request_ids_without_issue_keys
+        ),
+    }
+
+
+def _safe_float_or_none(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _build_turn_execution_regression_assessment(
+    *,
+    metrics: Mapping[str, Any],
+    baseline_likely_failure_rate_pct: Any,
+    baseline_false_success_rate_pct: Any,
+    baseline_unresolved_follow_up_rate_pct: Any,
+    regression_tolerance_pct: Any,
+) -> dict[str, Any]:
+    tolerance = _safe_float_or_none(regression_tolerance_pct)
+    if tolerance is None or tolerance < 0:
+        tolerance = 0.0
+
+    comparisons: list[dict[str, Any]] = []
+    regression_detected = False
+
+    def _add_comparison(
+        *,
+        metric_name: str,
+        current_key: str,
+        baseline_value_raw: Any,
+    ) -> None:
+        nonlocal regression_detected
+        baseline_value = _safe_float_or_none(baseline_value_raw)
+        current_value = _safe_float_or_none(metrics.get(current_key))
+        if baseline_value is None or current_value is None:
+            return
+        delta_pct = round(current_value - baseline_value, 2)
+        regressed = delta_pct > tolerance
+        if regressed:
+            regression_detected = True
+        comparisons.append(
+            {
+                "metric": metric_name,
+                "baseline_pct": round(baseline_value, 2),
+                "current_pct": round(current_value, 2),
+                "delta_pct": delta_pct,
+                "regressed": regressed,
+            }
+        )
+
+    _add_comparison(
+        metric_name="likely_failure_rate_pct",
+        current_key="likely_failure_rate_pct",
+        baseline_value_raw=baseline_likely_failure_rate_pct,
+    )
+    _add_comparison(
+        metric_name="false_success_rate_pct",
+        current_key="false_success_rate_pct",
+        baseline_value_raw=baseline_false_success_rate_pct,
+    )
+    _add_comparison(
+        metric_name="unresolved_follow_up_rate_pct",
+        current_key="unresolved_follow_up_rate_pct",
+        baseline_value_raw=baseline_unresolved_follow_up_rate_pct,
+    )
+
+    return {
+        "baseline_provided": len(comparisons) > 0,
+        "regression_tolerance_pct": round(tolerance, 2),
+        "regression_detected": regression_detected,
+        "comparisons": comparisons,
     }
 
 
@@ -5208,9 +5448,17 @@ def _turn_execution_build_benchmark(**kwargs):
     ]
     selected_cases = likely_items[:max_cases]
 
+    jira_base_url = _normalise_turn_execution_jira_base_url(kwargs.get("jira_base_url"))
+
     replay_cases: list[dict[str, Any]] = []
     for idx, item in enumerate(selected_cases, start=1):
-        replay_cases.append(_build_turn_execution_replay_case(item, index=idx))
+        replay_cases.append(
+            _build_turn_execution_replay_case(
+                item,
+                index=idx,
+                jira_base_url=jira_base_url,
+            )
+        )
 
     workflow_counts: dict[str, int] = {}
     workflow_failure_counts: dict[str, int] = {}
@@ -5248,48 +5496,72 @@ def _turn_execution_build_benchmark(**kwargs):
                 failure_mode_counts[key_text] = int(value)
             except Exception:
                 failure_mode_counts[key_text] = 0
+    filters_payload = {
+        "namespace": kwargs.get("namespace"),
+        "limit": kwargs.get("limit"),
+        "offset": kwargs.get("offset"),
+        "decision": kwargs.get("decision"),
+        "decisions": kwargs.get("decisions"),
+        "workflow_id": kwargs.get("workflow_id"),
+        "requires_follow_up": kwargs.get("requires_follow_up"),
+        "prompt_contains": kwargs.get("prompt_contains"),
+        "from_utc": kwargs.get("from_utc"),
+        "to_utc": kwargs.get("to_utc"),
+        "include_completed": include_completed,
+        "max_cases": max_cases,
+        "jira_base_url": jira_base_url,
+    }
+    metrics_payload = {
+        "scanned_count": scanned_count,
+        "likely_failure_count": likely_failure_count,
+        "likely_failure_rate_pct": _format_turn_execution_rate(
+            likely_failure_count, scanned_count
+        ),
+        "false_success_count": false_success_count,
+        "false_success_rate_pct": _format_turn_execution_rate(
+            false_success_count, scanned_count
+        ),
+        "unresolved_follow_up_count": unresolved_follow_up_count,
+        "unresolved_follow_up_rate_pct": _format_turn_execution_rate(
+            unresolved_follow_up_count, scanned_count
+        ),
+        "failure_mode_counts": failure_mode_counts,
+        "decision_counts": (
+            result.get("decision_counts")
+            if isinstance(result.get("decision_counts"), dict)
+            else {}
+        ),
+        "workflow_counts": workflow_counts,
+        "workflow_failure_counts": workflow_failure_counts,
+    }
     payload = {
         "collection": "turn_execution_records",
         "benchmark_generated_at_utc": _utc_now_iso(),
-        "filters": {
-            "namespace": kwargs.get("namespace"),
-            "limit": kwargs.get("limit"),
-            "offset": kwargs.get("offset"),
-            "decision": kwargs.get("decision"),
-            "decisions": kwargs.get("decisions"),
-            "workflow_id": kwargs.get("workflow_id"),
-            "requires_follow_up": kwargs.get("requires_follow_up"),
-            "prompt_contains": kwargs.get("prompt_contains"),
-            "from_utc": kwargs.get("from_utc"),
-            "to_utc": kwargs.get("to_utc"),
-            "include_completed": include_completed,
-            "max_cases": max_cases,
-        },
-        "metrics": {
-            "scanned_count": scanned_count,
-            "likely_failure_count": likely_failure_count,
-            "likely_failure_rate_pct": _format_turn_execution_rate(
-                likely_failure_count, scanned_count
-            ),
-            "false_success_count": false_success_count,
-            "false_success_rate_pct": _format_turn_execution_rate(
-                false_success_count, scanned_count
-            ),
-            "unresolved_follow_up_count": unresolved_follow_up_count,
-            "unresolved_follow_up_rate_pct": _format_turn_execution_rate(
-                unresolved_follow_up_count, scanned_count
-            ),
-            "failure_mode_counts": failure_mode_counts,
-            "decision_counts": (
-                result.get("decision_counts")
-                if isinstance(result.get("decision_counts"), dict)
-                else {}
-            ),
-            "workflow_counts": workflow_counts,
-            "workflow_failure_counts": workflow_failure_counts,
-        },
+        "filters": filters_payload,
+        "metrics": metrics_payload,
+        "benchmark_fingerprint": _build_turn_execution_benchmark_fingerprint(
+            filters=filters_payload,
+            replay_cases=replay_cases,
+        ),
         "seeded_cases": replay_cases,
         "replay_cases": replay_cases,
+        "triage_index": _build_turn_execution_triage_index(
+            replay_cases,
+            jira_base_url=jira_base_url,
+        ),
+        "regression_assessment": _build_turn_execution_regression_assessment(
+            metrics=metrics_payload,
+            baseline_likely_failure_rate_pct=kwargs.get(
+                "baseline_likely_failure_rate_pct"
+            ),
+            baseline_false_success_rate_pct=kwargs.get(
+                "baseline_false_success_rate_pct"
+            ),
+            baseline_unresolved_follow_up_rate_pct=kwargs.get(
+                "baseline_unresolved_follow_up_rate_pct"
+            ),
+            regression_tolerance_pct=kwargs.get("regression_tolerance_pct"),
+        ),
         "capability_gaps": _derive_turn_execution_capability_gaps(
             sorted_items,
             failure_mode_counts=failure_mode_counts,
@@ -11990,6 +12262,11 @@ def build_default_catalogue() -> MethodCatalogue:
                     "to_utc": (str, type(None)),
                     "include_completed": (bool,),
                     "max_cases": (int,),
+                    "jira_base_url": (str, type(None)),
+                    "baseline_likely_failure_rate_pct": (int, float),
+                    "baseline_false_success_rate_pct": (int, float),
+                    "baseline_unresolved_follow_up_rate_pct": (int, float),
+                    "regression_tolerance_pct": (int, float),
                 },
                 allow_unknown=True,
                 description=(

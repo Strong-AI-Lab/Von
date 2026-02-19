@@ -252,7 +252,7 @@ def test_turn_execution_list_and_get_wrappers(monkeypatch):
             },
             "required_effects": [{"effect_id": "effect_1", "status": "not_executed"}],
             "workflow_selection": {"selected_workflow_id": "#V#tool_calling_workflow"},
-            "prompt": {"preview": "Relations were not added"},
+            "prompt": {"preview": "JVNAUTOSCI-1202: Relations were not added"},
             "critic": {"summary": {"not_verified_count": 1}},
             "final_response": {
                 "completion_claim_detected": True,
@@ -299,7 +299,7 @@ def test_turn_execution_search_failures_reports_modes_and_recommendations(monkey
                 "selected_workflow_id": "#V#tool_calling_workflow",
                 "selector_verdict": "tool_seeking",
             },
-            "prompt": {"preview": "Relations were not added"},
+            "prompt": {"preview": "JVNAUTOSCI-1202: Relations were not added"},
             "critic": {"summary": {"not_verified_count": 1}},
             "final_response": {
                 "completion_claim_detected": True,
@@ -404,7 +404,7 @@ def test_turn_execution_build_benchmark_returns_metrics_and_replay_cases(monkeyp
                 "selected_workflow_id": "#V#tool_calling_workflow",
                 "selector_verdict": "tool_seeking",
             },
-            "prompt": {"preview": "Relations were not added"},
+            "prompt": {"preview": "JVNAUTOSCI-1202: Relations were not added"},
             "critic": {"summary": {"not_verified_count": 1}},
             "final_response": {
                 "completion_claim_detected": True,
@@ -484,6 +484,8 @@ def test_turn_execution_build_benchmark_returns_metrics_and_replay_cases(monkeyp
     assert metrics["likely_failure_count"] == 2
     assert metrics["likely_failure_rate_pct"] == 66.67
     assert metrics["failure_mode_counts"]["mutation_not_executed"] == 1
+    assert isinstance(result.get("benchmark_fingerprint"), str)
+    assert len(result["benchmark_fingerprint"]) == 16
 
     replay_cases = result.get("replay_cases")
     assert isinstance(replay_cases, list)
@@ -494,9 +496,106 @@ def test_turn_execution_build_benchmark_returns_metrics_and_replay_cases(monkeyp
     assert first_case["pass_criteria"]["action_attempted"] is True
     assert first_case["pass_criteria"]["postcondition_satisfied"] is True
     assert first_case["pass_criteria"]["no_false_success"] is True
+    triage = first_case.get("triage")
+    assert isinstance(triage, dict)
+    assert "JVNAUTOSCI-1202" in triage.get("jira_issue_keys", [])
+    assert (
+        "https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-1202"
+        in triage.get("jira_browse_urls", [])
+    )
 
     seeded_cases = result.get("seeded_cases")
     assert replay_cases == seeded_cases
+
+    triage_index = result.get("triage_index")
+    assert isinstance(triage_index, dict)
+    assert triage_index["issue_link_count"] == 1
+    assert triage_index["issue_links"][0]["issue_key"] == "JVNAUTOSCI-1202"
+
+
+def test_turn_execution_build_benchmark_flags_regression_when_baseline_is_better(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    docs = [
+        {
+            "request_id": "req-fail-1",
+            "session_id": "chat-fail-1",
+            "namespace": "#V#user@org",
+            "created_at_utc": "2026-02-19T00:57:25Z",
+            "completion_gate": {
+                "decision": "escalation_required",
+                "decision_reason": "Required mutation was not executed.",
+                "safe_to_claim_completion": False,
+                "requires_follow_up": True,
+                "blocking_effect_ids": ["effect_1"],
+            },
+            "required_effects": [{"effect_id": "effect_1", "status": "not_executed"}],
+            "workflow_selection": {
+                "selected_workflow_id": "#V#tool_calling_workflow",
+                "selector_verdict": "tool_seeking",
+            },
+            "prompt": {"preview": "Follow up on JVNAUTOSCI-1204 benchmark"},
+            "critic": {"summary": {"not_verified_count": 1}},
+            "final_response": {
+                "completion_claim_detected": True,
+                "completion_claim_validated": False,
+            },
+        },
+        {
+            "request_id": "req-ok-1",
+            "session_id": "chat-ok-1",
+            "namespace": "#V#user@org",
+            "created_at_utc": "2026-02-19T01:10:00Z",
+            "completion_gate": {
+                "decision": "completed",
+                "decision_reason": "No blocking effect detected.",
+                "safe_to_claim_completion": True,
+                "requires_follow_up": False,
+                "blocking_effect_ids": [],
+            },
+            "required_effects": [],
+            "workflow_selection": {
+                "selected_workflow_id": "#V#chat_assistant_workflow",
+                "selector_verdict": "plain_response",
+            },
+            "prompt": {"preview": "What is the current status?"},
+            "critic": {"summary": {"not_verified_count": 0}},
+            "final_response": {
+                "completion_claim_detected": False,
+                "completion_claim_validated": True,
+            },
+        },
+    ]
+
+    coll = _TurnExecutionCollection(docs)
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        lambda: _DB({"turn_execution_records": coll}),
+    )
+
+    result = cat._turn_execution_build_benchmark(
+        namespace="#V#user@org",
+        limit=20,
+        offset=0,
+        baseline_likely_failure_rate_pct=10.0,
+        baseline_false_success_rate_pct=5.0,
+        baseline_unresolved_follow_up_rate_pct=5.0,
+        regression_tolerance_pct=0.5,
+    )
+
+    assert result["success"] is True
+    regression = result.get("regression_assessment")
+    assert isinstance(regression, dict)
+    assert regression["baseline_provided"] is True
+    assert regression["regression_detected"] is True
+    comparisons = regression.get("comparisons")
+    assert isinstance(comparisons, list)
+    assert any(
+        row.get("metric") == "likely_failure_rate_pct" and row.get("regressed") is True
+        for row in comparisons
+    )
 
 
 def test_turn_execution_build_benchmark_reports_gap_when_no_records(monkeypatch):

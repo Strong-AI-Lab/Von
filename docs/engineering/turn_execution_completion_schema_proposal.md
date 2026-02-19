@@ -245,6 +245,8 @@ The existing `message.direct_created` binding to `#V#chat_assistant_workflow` sh
 4. `turn_execution_build_benchmark` (implemented)
 - Produces reproducible corpus-level metrics, seeded replay cases, and capability-gap signals.
 - Intended for ongoing reliability benchmarking and regression tracking.
+- Adds Jira-linkable triage metadata (`triage_index` + per-case issue-key extraction) so replay evidence can be routed directly into issue triage workflows.
+- Supports optional baseline-rate comparison (`baseline_*_rate_pct` + `regression_tolerance_pct`) to flag metric regressions in automated benchmark runs.
 
 5. `turn_execution_backfill_from_chat_history` (implemented)
 - Replays assistant-message `llm_debug_data.turn_execution_record` payloads into `turn_execution_records`.

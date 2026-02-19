@@ -538,6 +538,7 @@
                 "type": "object",
                 "properties": {},
                 "required": [],
+                "additionalProperties": true,
                 "description": "get_context input: no parameters required"
             }
         },
@@ -925,6 +926,7 @@
                 "type": "object",
                 "properties": {},
                 "required": [],
+                "additionalProperties": true,
                 "description": "jira_get_auth_config input: no arguments"
             }
         },
@@ -1566,6 +1568,36 @@
                     },
                     "max_cases": {
                         "type": "integer"
+                    },
+                    "jira_base_url": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "baseline_likely_failure_rate_pct": {
+                        "type": [
+                            "integer",
+                            "number"
+                        ]
+                    },
+                    "baseline_false_success_rate_pct": {
+                        "type": [
+                            "integer",
+                            "number"
+                        ]
+                    },
+                    "baseline_unresolved_follow_up_rate_pct": {
+                        "type": [
+                            "integer",
+                            "number"
+                        ]
+                    },
+                    "regression_tolerance_pct": {
+                        "type": [
+                            "integer",
+                            "number"
+                        ]
                     }
                 },
                 "required": [],
@@ -2370,7 +2402,7 @@
         },
         {
             "name": "workflow_list_instances",
-            "description": "List durable workflow instances. Filter by user, org, namespace, status, or workflow_id. Supports source_event_type/source_event_id filters for event-to-workflow traceability. Valid statuses: pending, running, completed, failed, cancelled, paused.",
+            "description": "List durable workflow instances. Filter by user, org, namespace, status, or workflow_id. Supports source_event_type/source_event_id filters for event-to-workflow traceability, session_id/request_id filters for turn traceability, and from_utc/to_utc date windows. Valid statuses: pending, running, completed, failed, cancelled, paused.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2411,6 +2443,30 @@
                         ]
                     },
                     "source_event_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "session_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "request_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "from_utc": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "to_utc": {
                         "type": [
                             "string",
                             "null"
