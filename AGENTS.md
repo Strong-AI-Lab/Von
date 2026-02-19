@@ -136,6 +136,7 @@ Do not "hack around" MCP failures with ad-hoc scripts or direct REST calls. Fix 
 - Tasks can set an Epic as `parent` via edit tooling (`{"parent": {"key": "JVNAUTOSCI-123"}}`).
 - If an issue is created without an assignee, fix it via the Jira edit tool rather than duplicating.
 - **Deduplicate before create**: when a user asks to create a Jira task, first search for an existing issue with the same intended effect. Prefer updating/expanding the existing issue (and linking/commenting for traceability) instead of creating a new one. Create a new issue only if no suitable existing issue exists, or if the user explicitly asks for a separate task.
+- When creating a new Jira task, include a concise implementation-design note by default (scope, key behaviour, edge cases, acceptance checks). For UI/UX tasks, include placement/layout, visibility rules, accessibility, motion, and responsive expectations.
 - For full Jira Tasks (not sub-tasks), always identify the appropriate epic and attach them to it. In the very unlikely event that a suitable epic isn't available, plan what that epic would look like, and offer to create it.
 - Add appropriate inter-task links (e.g. blocks/depends-on/relates) when the available MCP tooling supports it.
 - **Link hygiene is mandatory**:
