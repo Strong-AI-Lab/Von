@@ -4824,6 +4824,227 @@ def _with_rag_provenance(*, payload: dict, item_kind: str, source_system: str) -
     return result
 
 
+def _classify_turn_execution_failure_mode(item: dict[str, Any]) -> str:
+    """Classify a turn execution record into a reliability failure mode."""
+
+    decision_raw = item.get("decision")
+    decision = str(decision_raw).strip().lower() if decision_raw is not None else ""
+
+    unresolved_effect_count_raw = item.get("unresolved_effect_count")
+    try:
+        unresolved_effect_count = int(unresolved_effect_count_raw or 0)
+    except Exception:
+        unresolved_effect_count = 0
+
+    safe_to_claim_completion = bool(item.get("safe_to_claim_completion", True))
+
+    critic_summary_raw = item.get("critic_summary")
+    critic_summary: dict[str, Any]
+    if isinstance(critic_summary_raw, dict):
+        critic_summary = critic_summary_raw
+    else:
+        critic_summary = {}
+    try:
+        not_verified_count = int(critic_summary.get("not_verified_count") or 0)
+    except Exception:
+        not_verified_count = 0
+    try:
+        inconclusive_count = int(critic_summary.get("inconclusive_count") or 0)
+    except Exception:
+        inconclusive_count = 0
+    try:
+        error_count = int(critic_summary.get("error_count") or 0)
+    except Exception:
+        error_count = 0
+
+    completion_claim_detected = bool(item.get("completion_claim_detected", False))
+    completion_claim_validated = bool(item.get("completion_claim_validated", True))
+
+    if decision == "failed":
+        return "mutation_failed_or_blocked"
+    if decision == "escalation_required":
+        return "mutation_not_executed"
+    if decision == "partial":
+        if unresolved_effect_count > 0:
+            return "unresolved_required_effects"
+        if (not_verified_count + inconclusive_count + error_count) > 0:
+            return "postcondition_inconclusive"
+        return "partial_unspecified"
+    if decision == "completed":
+        if not safe_to_claim_completion:
+            return "false_completion_gate_state"
+        if unresolved_effect_count > 0:
+            return "false_completion_claim"
+        if (not_verified_count + inconclusive_count + error_count) > 0:
+            return "false_completion_claim"
+        if completion_claim_detected and not completion_claim_validated:
+            return "unvalidated_completion_claim"
+        return "completed_verified"
+    if completion_claim_detected and not completion_claim_validated:
+        return "unvalidated_completion_claim"
+    return "unknown"
+
+
+def _is_likely_failure_to_act(failure_mode: str) -> bool:
+    return failure_mode in {
+        "mutation_failed_or_blocked",
+        "mutation_not_executed",
+        "unresolved_required_effects",
+        "postcondition_inconclusive",
+        "false_completion_gate_state",
+        "false_completion_claim",
+        "unvalidated_completion_claim",
+        "partial_unspecified",
+    }
+
+
+def _derive_turn_execution_failure_recommendations(
+    failure_mode_counts: dict[str, int],
+) -> list[str]:
+    recommendations: list[str] = []
+    mutation_not_executed = int(failure_mode_counts.get("mutation_not_executed", 0))
+    failed_or_blocked = int(failure_mode_counts.get("mutation_failed_or_blocked", 0))
+    verification_issues = (
+        int(failure_mode_counts.get("postcondition_inconclusive", 0))
+        + int(failure_mode_counts.get("unresolved_required_effects", 0))
+    )
+    false_completion = int(failure_mode_counts.get("false_completion_claim", 0))
+
+    if mutation_not_executed > 0:
+        recommendations.append(
+            "Increase selector pressure for mutation-intent turns so they route through #V#conversation_turn_execution_workflow and execute write-capable tools."
+        )
+    if failed_or_blocked > 0:
+        recommendations.append(
+            "Capture and surface write-tool failure causes (blocked/permissions/tool errors) and attach deterministic recovery steps."
+        )
+    if verification_issues > 0:
+        recommendations.append(
+            "Strengthen postcondition checks to require state re-query verification before completion is allowed."
+        )
+    if false_completion > 0:
+        recommendations.append(
+            "Tighten completion-gate invariants so completed decisions are impossible while unresolved effects or unverified checks remain."
+        )
+    if not recommendations:
+        recommendations.append(
+            "No dominant failure pattern detected in the sampled window. Expand filters or time range to gather more evidence."
+        )
+    return recommendations
+
+
+def _turn_execution_list(**kwargs):
+    forwarded = dict(kwargs)
+    forwarded["collection"] = "turn_execution_records"
+    return _rag_list_indexed(**forwarded)
+
+
+def _turn_execution_get(**kwargs):
+    request_id = kwargs.get("request_id")
+    session_id = kwargs.get("session_id")
+    target = request_id if request_id is not None else session_id
+    if not isinstance(target, str) or not target.strip():
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: request_id",
+            details={"missing": ["request_id"]},
+            suggestions=["Provide request_id (or session_id alias)"],
+        )
+    forwarded = dict(kwargs)
+    forwarded["collection"] = "turn_execution_records"
+    forwarded["session_id"] = target.strip()
+    return _rag_get_item(**forwarded)
+
+
+def _turn_execution_search_failures(**kwargs):
+    include_completed = bool(kwargs.get("include_completed", False))
+    forwarded = dict(kwargs)
+    forwarded["collection"] = "turn_execution_records"
+
+    # Failure search defaults to follow-up-required records unless explicitly
+    # overridden by caller-provided filters.
+    if (
+        not include_completed
+        and "requires_follow_up" not in forwarded
+        and "decision" not in forwarded
+        and "decisions" not in forwarded
+    ):
+        forwarded["requires_follow_up"] = True
+
+    result = _rag_list_indexed(**forwarded)
+    if not isinstance(result, dict):
+        return result
+    if not result.get("success", False):
+        return result
+
+    raw_items = result.get("items")
+    if not isinstance(raw_items, list):
+        raw_items = []
+
+    analysed_items: list[dict[str, Any]] = []
+    failure_mode_counts: dict[str, int] = {}
+    likely_failure_count = 0
+    example_request_ids: list[str] = []
+
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            continue
+        item = dict(raw_item)
+        failure_mode = _classify_turn_execution_failure_mode(item)
+        likely_failure = _is_likely_failure_to_act(failure_mode)
+        item["failure_mode"] = failure_mode
+        item["likely_failure_to_act"] = likely_failure
+
+        if likely_failure and isinstance(item.get("request_id"), str):
+            request_id = item["request_id"].strip()
+            if request_id and request_id not in example_request_ids:
+                example_request_ids.append(request_id)
+
+        if likely_failure:
+            likely_failure_count += 1
+
+        failure_mode_counts[failure_mode] = failure_mode_counts.get(failure_mode, 0) + 1
+        analysed_items.append(item)
+
+    if not include_completed:
+        analysed_items = [
+            item
+            for item in analysed_items
+            if bool(item.get("likely_failure_to_act", False))
+        ]
+
+    payload = {
+        "collection": "turn_execution_records",
+        "items": analysed_items,
+        "returned_count": len(analysed_items),
+        "total": result.get("total"),
+        "limit": result.get("limit"),
+        "offset": result.get("offset"),
+        "decision_counts": (
+            result.get("decision_counts")
+            if isinstance(result.get("decision_counts"), dict)
+            else {}
+        ),
+        "failure_mode_counts": failure_mode_counts,
+        "likely_failure_count": likely_failure_count,
+        "example_request_ids": example_request_ids[:10],
+        "recommendations": _derive_turn_execution_failure_recommendations(
+            failure_mode_counts
+        ),
+        "effective_namespace": result.get("effective_namespace"),
+        "effective_namespace_source": result.get("effective_namespace_source"),
+        "namespace": result.get("namespace"),
+        "namespace_source": result.get("namespace_source"),
+        "namespace_resolution_note": result.get("namespace_resolution_note"),
+        "success": True,
+    }
+    return _with_rag_provenance(
+        payload=payload,
+        item_kind="turn_execution_failure_report",
+        source_system="mongo.turn_execution_records",
+    )
+
+
 def _search_knowledge_base(**kwargs):
     from ...services.rag_service import get_rag_service, RAGBackendUnavailable
 
@@ -7127,6 +7348,16 @@ def _rag_list_indexed(**kwargs):
                 "$options": "i",
             }
 
+        from_utc = kwargs.get("from_utc")
+        to_utc = kwargs.get("to_utc")
+        created_range: dict[str, str] = {}
+        if isinstance(from_utc, str) and from_utc.strip():
+            created_range["$gte"] = from_utc.strip()
+        if isinstance(to_utc, str) and to_utc.strip():
+            created_range["$lte"] = to_utc.strip()
+        if created_range:
+            query["created_at_utc"] = created_range
+
         cursor = (
             coll.find(
                 query,
@@ -7140,6 +7371,7 @@ def _rag_list_indexed(**kwargs):
                     "workflow_selection": 1,
                     "prompt": 1,
                     "critic": 1,
+                    "final_response": 1,
                 },
             )
             .skip(offset)
@@ -7174,6 +7406,11 @@ def _rag_list_indexed(**kwargs):
                 if isinstance(critic_payload.get("summary"), dict)
                 else {}
             )
+            final_response_payload = (
+                doc.get("final_response")
+                if isinstance(doc.get("final_response"), dict)
+                else {}
+            )
             blocking_effect_ids_raw = completion_gate.get("blocking_effect_ids")
             blocking_effect_ids: list[str] = []
             if isinstance(blocking_effect_ids_raw, list):
@@ -7203,6 +7440,12 @@ def _rag_list_indexed(**kwargs):
                     ),
                     "selector_verdict": workflow_selection.get("selector_verdict"),
                     "prompt_preview": prompt_payload.get("preview"),
+                    "completion_claim_detected": final_response_payload.get(
+                        "completion_claim_detected"
+                    ),
+                    "completion_claim_validated": final_response_payload.get(
+                        "completion_claim_validated"
+                    ),
                     "critic_summary": critic_summary,
                     "item_kind": "turn_execution_record",
                     "source_system": "mongo.turn_execution_records",
@@ -11198,6 +11441,86 @@ def build_default_catalogue() -> MethodCatalogue:
             output_schema=None,
             category="read",
             description="Get one indexed item (session) with a safe text preview. Respects namespace isolation.",
+        ),
+        MethodDefinition(
+            name="turn_execution_list",
+            handler=_turn_execution_list,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "namespace": (str, type(None)),
+                    "limit": (int,),
+                    "offset": (int,),
+                    "decision": (str, type(None)),
+                    "decisions": (list,),
+                    "workflow_id": (str, type(None)),
+                    "requires_follow_up": (bool,),
+                    "prompt_contains": (str, type(None)),
+                    "from_utc": (str, type(None)),
+                    "to_utc": (str, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "List turn execution records with structured filters. "
+                    "This is a convenience wrapper over rag_list_indexed(collection='turn_execution_records')."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "List assistant turn execution records (workflow selection, required effects, postcondition checks, completion gate). "
+                "Use for deterministic evidence triage across conversations."
+            ),
+        ),
+        MethodDefinition(
+            name="turn_execution_get",
+            handler=_turn_execution_get,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "request_id": (str, type(None)),
+                    "session_id": (str, type(None)),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "Get one turn execution record by request_id (session_id accepted as alias)."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Fetch a single turn execution record by request_id for detailed failure analysis."
+            ),
+        ),
+        MethodDefinition(
+            name="turn_execution_search_failures",
+            handler=_turn_execution_search_failures,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "namespace": (str, type(None)),
+                    "limit": (int,),
+                    "offset": (int,),
+                    "decision": (str, type(None)),
+                    "decisions": (list,),
+                    "workflow_id": (str, type(None)),
+                    "requires_follow_up": (bool,),
+                    "prompt_contains": (str, type(None)),
+                    "from_utc": (str, type(None)),
+                    "to_utc": (str, type(None)),
+                    "include_completed": (bool,),
+                },
+                allow_unknown=True,
+                description=(
+                    "Search turn execution records for likely failure-to-act patterns and return aggregated failure modes."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Mine turn execution records for mutation-not-executed, blocked writes, inconclusive postconditions, and false completion claims."
+            ),
         ),
         MethodDefinition(
             name="rag_sync_text_relations",

@@ -6,6 +6,9 @@ def test_internal_mcp_catalogue_builds_and_includes_relationship_tools():
 
     assert "add_relationship" in methods
     assert "remove_relationship" in methods
+    assert "turn_execution_list" in methods
+    assert "turn_execution_get" in methods
+    assert "turn_execution_search_failures" in methods
 
 
 def test_internal_mcp_gmail_list_messages_accepts_max_results_aliases():

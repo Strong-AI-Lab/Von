@@ -227,25 +227,25 @@ Do not bind these new workflows yet. First implement executable definitions and 
 
 The existing `message.direct_created` binding to `#V#chat_assistant_workflow` should be migrated only after parity tests pass.
 
-## 6. Capability Gaps and Proposed MCP Additions
+## 6. MCP Failure-Mining Tooling
 
-Current vonrag can list sessions and fetch previews, but it cannot reliably query structured failure evidence in `llm_debug_data`.
+### 6.1 Implemented tools
 
-### 6.1 Proposed tools
+1. `turn_execution_list` (implemented)
+- Filters: namespace, date range (`from_utc`, `to_utc`), completion decision, workflow_id, `requires_follow_up`, prompt substring.
+- Backed by `turn_execution_records`.
 
-1. `turn_execution_list`
-- Filters: namespace, date range, completion decision, unresolved effects, workflow_id
+2. `turn_execution_get` (implemented)
+- Fetches full structured record by `request_id` (`session_id` alias accepted).
 
-2. `turn_execution_get`
-- Fetch full structured record by `request_id`
+3. `turn_execution_search_failures` (implemented)
+- Returns filtered turn records with deterministic failure-mode classification and aggregate counts.
+- Adds recommendations for workflow/critic/gate hardening based on observed patterns.
 
-3. `turn_execution_search_failures`
-- Structured + semantic search over unresolved effects, missing postconditions, and completion-claim mismatches
+### 6.2 Why this was needed
 
-### 6.2 Why needed
-
-- `search_knowledge_base` is text-centric and timed out in this investigation for targeted failure retrieval.
-- Failure triage requires deterministic filters over structured fields.
+- `search_knowledge_base` is text-centric and not deterministic for structured failure triage.
+- Reliability analysis requires deterministic filtering and aggregation over execution fields.
 
 ## 7. Immediate Implementation Sequence
 
