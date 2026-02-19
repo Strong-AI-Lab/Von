@@ -497,3 +497,29 @@ def test_turn_execution_build_benchmark_returns_metrics_and_replay_cases(monkeyp
 
     seeded_cases = result.get("seeded_cases")
     assert replay_cases == seeded_cases
+
+
+def test_turn_execution_build_benchmark_reports_gap_when_no_records(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    coll = _TurnExecutionCollection([])
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        lambda: _DB({"turn_execution_records": coll}),
+    )
+
+    result = cat._turn_execution_build_benchmark(
+        namespace="#V#user@org",
+        limit=20,
+        offset=0,
+        max_cases=5,
+    )
+
+    assert result["success"] is True
+    metrics = result.get("metrics")
+    assert isinstance(metrics, dict)
+    assert metrics["scanned_count"] == 0
+
+    capability_gaps = result.get("capability_gaps")
+    assert isinstance(capability_gaps, list)
+    assert any(gap.get("gap_id") == "no_turn_execution_records" for gap in capability_gaps)

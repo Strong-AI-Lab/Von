@@ -5063,6 +5063,22 @@ def _derive_turn_execution_capability_gaps(
 ) -> list[dict[str, Any]]:
     gaps: list[dict[str, Any]] = []
 
+    if not items:
+        gaps.append(
+            {
+                "gap_id": "no_turn_execution_records",
+                "title": "No turn execution records found in selected window",
+                "evidence_count": 0,
+                "severity": "high",
+                "description": (
+                    "Benchmark cannot evaluate failure-to-act rates because no "
+                    "turn_execution_records are available for the selected namespace "
+                    "and filters."
+                ),
+            }
+        )
+        return gaps
+
     missing_request_id_count = 0
     missing_workflow_selection_count = 0
     missing_prompt_preview_count = 0

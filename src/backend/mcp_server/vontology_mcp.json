@@ -143,7 +143,7 @@
         },
         {
             "name": "create_concepts",
-            "description": "Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts array of {name, kind?, description?, notes?}. Supports singleton arrays. Use add_names afterward for alternative names/translations.",
+            "description": "Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts array of {name, kind?, description?, notes?}. Default visibility is user+organisation scoped when authenticated context exists. Override with scope_mode='organisation_general' for organisation-shared concepts, or scope_mode='global_general' for broadly visible concepts when the concept is clearly general. Supports singleton arrays. Use add_names afterward for alternative names/translations.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -161,6 +161,30 @@
                             "string",
                             "null"
                         ]
+                    },
+                    "scope_mode": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "visibility_scope_mode": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "created_by_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "organisation_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
                     }
                 },
                 "required": [
@@ -168,7 +192,7 @@
                     "concepts"
                 ],
                 "additionalProperties": true,
-                "description": "create_concepts input: parent_id (str, parent concept_id), concepts (list of {name, kind?, description?, notes?}). kind: 'instance' for individuals, 'type' for subtypes (default), 'predicate' for relationships. By default, deterministic pre-create lookup blocks duplicate instances/types/predicates; set allow_duplicate_instances=true to opt into legacy instance suffixing. Optional namespace is accepted and propagated into event-triggered workflow launches for tenancy attribution. Unknown top-level fields are still tolerated for orchestrator-added context."
+                "description": "create_concepts input: parent_id (str, parent concept_id), concepts (list of {name, kind?, description?, notes?}). kind: 'instance' for individuals, 'type' for subtypes (default), 'predicate' for relationships. By default, deterministic pre-create lookup blocks duplicate instances/types/predicates; set allow_duplicate_instances=true to opt into legacy instance suffixing. Scope defaults to authenticated user+organisation visibility when context is available. Use scope_mode='organisation_general' for organisation-shared concepts, or scope_mode='global_general' for broadly visible concepts. organisation_general requires organisation context (namespace #V#user@org or organisation_concept_id). Optional namespace is accepted and propagated into event-triggered workflow launches for tenancy attribution. Unknown top-level fields are still tolerated for orchestrator-added context."
             }
         },
         {
@@ -1455,6 +1479,225 @@
                 ],
                 "additionalProperties": true,
                 "description": "search_web input: query (str, required), max_results (int, default 10), search_depth (str, 'basic'|'advanced', default 'basic'), include_domains (list of str, domain whitelist), exclude_domains (list of str, domain blacklist), include_answer (bool, AI-generated answer), include_raw_content (bool, full page content), include_images (bool, image URLs)"
+            }
+        },
+        {
+            "name": "turn_execution_build_benchmark",
+            "description": "Generate corpus-level turn execution reliability metrics, seeded replay cases, and capability-gap signals.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "limit": {
+                        "type": "integer"
+                    },
+                    "offset": {
+                        "type": "integer"
+                    },
+                    "decision": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "decisions": {
+                        "type": "array"
+                    },
+                    "workflow_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "requires_follow_up": {
+                        "type": "boolean"
+                    },
+                    "prompt_contains": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "from_utc": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "to_utc": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "include_completed": {
+                        "type": "boolean"
+                    },
+                    "max_cases": {
+                        "type": "integer"
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Build reproducible failure-mining benchmark metrics and replay cases from turn execution records."
+            }
+        },
+        {
+            "name": "turn_execution_get",
+            "description": "Fetch a single turn execution record by request_id for detailed failure analysis.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "request_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "session_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Get one turn execution record by request_id (session_id accepted as alias)."
+            }
+        },
+        {
+            "name": "turn_execution_list",
+            "description": "List assistant turn execution records (workflow selection, required effects, postcondition checks, completion gate). Use for deterministic evidence triage across conversations.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "limit": {
+                        "type": "integer"
+                    },
+                    "offset": {
+                        "type": "integer"
+                    },
+                    "decision": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "decisions": {
+                        "type": "array"
+                    },
+                    "workflow_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "requires_follow_up": {
+                        "type": "boolean"
+                    },
+                    "prompt_contains": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "from_utc": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "to_utc": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "List turn execution records with structured filters. This is a convenience wrapper over rag_list_indexed(collection='turn_execution_records')."
+            }
+        },
+        {
+            "name": "turn_execution_search_failures",
+            "description": "Mine turn execution records for mutation-not-executed, blocked writes, inconclusive postconditions, and false completion claims.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "limit": {
+                        "type": "integer"
+                    },
+                    "offset": {
+                        "type": "integer"
+                    },
+                    "decision": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "decisions": {
+                        "type": "array"
+                    },
+                    "workflow_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "requires_follow_up": {
+                        "type": "boolean"
+                    },
+                    "prompt_contains": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "from_utc": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "to_utc": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "include_completed": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Search turn execution records for likely failure-to-act patterns and return aggregated failure modes."
             }
         },
         {
