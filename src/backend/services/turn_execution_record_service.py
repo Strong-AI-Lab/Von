@@ -1331,9 +1331,11 @@ def build_turn_execution_namespace_coverage_report(
     }
 
 
-def _infer_synthesised_workflow_routing(
-    *, llm_debug: Mapping[str, Any]
+def infer_turn_execution_workflow_routing_from_debug(
+    *, llm_debug: Mapping[str, Any] | None
 ) -> dict[str, Any] | None:
+    if not isinstance(llm_debug, Mapping):
+        return None
     existing = llm_debug.get("workflow_routing")
     if isinstance(existing, Mapping):
         cleaned: dict[str, Any] = {}
@@ -1473,7 +1475,9 @@ def backfill_turn_execution_records_from_chat_history(
                 if isinstance(llm_debug.get("tool_invocations"), list)
                 else []
             )
-            workflow_routing = _infer_synthesised_workflow_routing(llm_debug=llm_debug)
+            workflow_routing = infer_turn_execution_workflow_routing_from_debug(
+                llm_debug=llm_debug
+            )
 
             record = llm_debug.get("turn_execution_record")
             record_source = "embedded"

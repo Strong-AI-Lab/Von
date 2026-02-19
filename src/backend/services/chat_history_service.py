@@ -10,7 +10,11 @@ from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import PyMongoError
 from ..db.mongo_client import get_db
 from ..models.chat_history_model import chat_history_collection_name
-from .turn_execution_record_service import upsert_turn_execution_record_projection
+from .turn_execution_record_service import (
+    build_turn_execution_record,
+    infer_turn_execution_workflow_routing_from_debug,
+    upsert_turn_execution_record_projection,
+)
 
 # Try to import RAG service, but don't fail if it's not available (circular imports etc)
 try:
@@ -155,6 +159,116 @@ def _truncate_for_rag(text: str, *, max_chars: int = 5000) -> str:
     if len(txt) > max_chars:
         txt = txt[:max_chars]
     return txt
+
+
+def _safe_str(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _extract_prompt_text_from_llm_debug_data(
+    llm_debug_data: Optional[Dict[str, Any]],
+) -> Optional[str]:
+    if not isinstance(llm_debug_data, dict):
+        return None
+
+    direct_prompt = _safe_str(llm_debug_data.get("prompt_text"))
+    if direct_prompt:
+        return direct_prompt
+
+    messages = llm_debug_data.get("messages")
+    if isinstance(messages, list):
+        for item in reversed(messages):
+            if not isinstance(item, dict):
+                continue
+            if item.get("role") != "user":
+                continue
+            content = _safe_str(item.get("content"))
+            if content:
+                return content
+
+    user_prompt = llm_debug_data.get("user_prompt")
+    if isinstance(user_prompt, dict):
+        for key in ("prompt_text", "content", "preview"):
+            candidate = _safe_str(user_prompt.get(key))
+            if candidate:
+                return candidate
+
+    return None
+
+
+def _ensure_turn_execution_record_for_assistant_message(
+    *,
+    message: Dict[str, Any],
+    llm_debug_data: Optional[Dict[str, Any]],
+    user_id: str,
+    session_id: str,
+    namespace: Optional[str],
+    org_id: Optional[str],
+    interaction_timestamp_utc: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    if message.get("role") != "assistant":
+        return llm_debug_data
+    if not isinstance(llm_debug_data, dict):
+        return llm_debug_data
+    existing = llm_debug_data.get("turn_execution_record")
+    if isinstance(existing, dict):
+        return llm_debug_data
+
+    request_id = _safe_str(llm_debug_data.get("request_id"))
+    if not request_id:
+        return llm_debug_data
+
+    try:
+        rebuilt = build_turn_execution_record(
+            request_id=request_id,
+            session_id=session_id,
+            namespace=namespace,
+            user_id=user_id,
+            org_id=org_id,
+            prompt_text=_extract_prompt_text_from_llm_debug_data(llm_debug_data),
+            response_text=_safe_str(message.get("content")),
+            interaction_timestamp_utc=interaction_timestamp_utc,
+            workflow_discovery=(
+                llm_debug_data.get("workflow_discovery")
+                if isinstance(llm_debug_data.get("workflow_discovery"), dict)
+                else None
+            ),
+            workflow_routing=infer_turn_execution_workflow_routing_from_debug(
+                llm_debug=llm_debug_data
+            ),
+            tool_invocations=(
+                llm_debug_data.get("tool_invocations")
+                if isinstance(llm_debug_data.get("tool_invocations"), list)
+                else []
+            ),
+            turn_execution_diagnostics=(
+                llm_debug_data.get("turn_execution_diagnostics")
+                if isinstance(llm_debug_data.get("turn_execution_diagnostics"), dict)
+                else None
+            ),
+            aux_llm_calls=(
+                llm_debug_data.get("aux_llm_calls")
+                if isinstance(llm_debug_data.get("aux_llm_calls"), list)
+                else []
+            ),
+        )
+        if isinstance(rebuilt, dict):
+            rebuilt["reconstruction"] = {
+                "source": "chat_history_service.add_message_to_history",
+                "method": "build_turn_execution_record",
+            }
+            llm_debug_data["turn_execution_record"] = rebuilt
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug(
+            "Could not synthesise turn_execution_record for request_id=%s: %s",
+            request_id,
+            exc,
+        )
+
+    return llm_debug_data
 
 
 def get_session_context() -> Dict[str, Any]:
@@ -961,6 +1075,13 @@ def add_message_to_history(
         # Determine namespace used for both persistence and RAG indexing.
         ns = _derive_rag_namespace(session_context=session_context, user_id=user_id)
 
+        org_concept_id = session_context.get("organisation_concept_id")
+        org_id_value = (
+            org_concept_id.strip()
+            if isinstance(org_concept_id, str) and org_concept_id.strip()
+            else None
+        )
+
         # Add timestamp to message (and llm_debug_data if present)
         message_with_timestamp = {**message, "timestamp": datetime.now(timezone.utc)}
         author_user_id = message.get("author_user_id")
@@ -970,8 +1091,17 @@ def add_message_to_history(
             author_user_id = user_id
         if author_user_id:
             message_with_timestamp["author_user_id"] = author_user_id
+        llm_debug_payload = _ensure_turn_execution_record_for_assistant_message(
+            message=message,
+            llm_debug_data=llm_debug_data,
+            user_id=user_id,
+            session_id=session_id,
+            namespace=ns.strip() if isinstance(ns, str) and ns.strip() else None,
+            org_id=org_id_value,
+            interaction_timestamp_utc=message_with_timestamp["timestamp"].isoformat(),
+        )
         if llm_debug_data:
-            message_with_timestamp["llm_debug_data"] = llm_debug_data
+            message_with_timestamp["llm_debug_data"] = llm_debug_payload
 
         set_fields: Dict[str, Any] = {"updated_at": datetime.now(timezone.utc)}
         # NOTE: namespace is intentionally NOT in $set - it should only be set
@@ -989,7 +1119,6 @@ def add_message_to_history(
             set_on_insert["namespace"] = ns.strip()
         if session_name:
             set_on_insert["session_name"] = session_name
-        org_concept_id = session_context.get("organisation_concept_id")
         if isinstance(org_concept_id, str) and org_concept_id.strip():
             set_on_insert["organisation_concept_id"] = org_concept_id.strip()
         role_in_org = session_context.get("role_in_org")
@@ -1013,15 +1142,11 @@ def add_message_to_history(
 
         _upsert_turn_execution_projection_for_message(
             message=message,
-            llm_debug_data=llm_debug_data,
+            llm_debug_data=llm_debug_payload,
             user_id=user_id,
             session_id=session_id,
             namespace=ns.strip() if isinstance(ns, str) and ns.strip() else None,
-            org_id=(
-                org_concept_id.strip()
-                if isinstance(org_concept_id, str) and org_concept_id.strip()
-                else None
-            ),
+            org_id=org_id_value,
         )
 
         # Index to RAG (Best effort)

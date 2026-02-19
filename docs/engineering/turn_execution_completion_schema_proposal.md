@@ -256,6 +256,10 @@ The existing `message.direct_created` binding to `#V#chat_assistant_workflow` sh
 - Produces namespace-level instrumentation/projection coverage, request-id overlap, and gap signals.
 - Intended to validate benchmark readiness before interpreting failure-rate metrics.
 
+7. Chat-history write-path synthesis guardrail (implemented)
+- `add_message_to_history(...)` now synthesises `turn_execution_record` for assistant turns when `llm_debug_data.request_id` exists but embedded record is missing.
+- Ensures both persisted `llm_debug_data.turn_execution_record` and projection upsert occur on forward writes.
+
 ### 6.2 Why this was needed
 
 - `search_knowledge_base` is text-centric and not deterministic for structured failure triage.
