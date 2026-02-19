@@ -6776,6 +6776,13 @@ def _resolve_rag_collection_from_kwargs(kwargs: dict) -> dict[str, object]:
         "text_relation": "vontology_text_relations",
         "text": "vontology_text_relations",
         "vontology_text_relations": "vontology_text_relations",
+        "turn_execution": "turn_execution_records",
+        "turn_execution_record": "turn_execution_records",
+        "turn_execution_records": "turn_execution_records",
+        "execution_record": "turn_execution_records",
+        "execution_records": "turn_execution_records",
+        "turn_record": "turn_execution_records",
+        "turn_records": "turn_execution_records",
     }
     effective = aliases.get(lowered, lowered)
     return {
@@ -6839,6 +6846,25 @@ def _rag_list_collections(**kwargs):
             "get_supported_reason": None,
             "item_kind": "chat_history_session",
             "source_system": "mongo.chat_history",
+        },
+        {
+            "collection": "turn_execution_records",
+            "label": "Turn execution records",
+            "description": (
+                "Assistant turn execution records stored in MongoDB (turn_execution_records). "
+                "Includes workflow selection, required effects, postcondition checks, and completion-gate decisions. "
+                "Use to analyse failed or incomplete action execution across conversations."
+            ),
+            "list_tool": "rag_list_indexed",
+            "get_tool": "rag_get_item",
+            "search_tool": None,
+            "list_supported": True,
+            "get_supported": True,
+            "search_supported": False,
+            "list_supported_reason": None,
+            "get_supported_reason": None,
+            "item_kind": "turn_execution_record",
+            "source_system": "mongo.turn_execution_records",
         },
         {
             "collection": "rag_documents",
@@ -7056,6 +7082,168 @@ def _rag_list_indexed(**kwargs):
             payload=payload,
             item_kind="rag_chat_session_list",
             source_system="mongo.chat_history",
+        )
+
+    if collection == "turn_execution_records":
+        coll = db["turn_execution_records"]
+
+        query: dict[str, Any] = {"namespace": ns}
+
+        decision_values: list[str] = []
+        decision_single = kwargs.get("decision")
+        if isinstance(decision_single, str) and decision_single.strip():
+            decision_values.append(decision_single.strip())
+        decisions_many = kwargs.get("decisions")
+        if isinstance(decisions_many, list):
+            for item in decisions_many:
+                if isinstance(item, str) and item.strip():
+                    decision_values.append(item.strip())
+        if decision_values:
+            unique_decisions: list[str] = []
+            seen_decisions: set[str] = set()
+            for value in decision_values:
+                lowered = value.lower()
+                if lowered in seen_decisions:
+                    continue
+                seen_decisions.add(lowered)
+                unique_decisions.append(value)
+            if len(unique_decisions) == 1:
+                query["completion_gate.decision"] = unique_decisions[0]
+            else:
+                query["completion_gate.decision"] = {"$in": unique_decisions}
+
+        workflow_id = kwargs.get("workflow_id")
+        if isinstance(workflow_id, str) and workflow_id.strip():
+            query["workflow_selection.selected_workflow_id"] = workflow_id.strip()
+
+        requires_follow_up = kwargs.get("requires_follow_up")
+        if isinstance(requires_follow_up, bool):
+            query["completion_gate.requires_follow_up"] = requires_follow_up
+
+        prompt_contains = kwargs.get("prompt_contains")
+        if isinstance(prompt_contains, str) and prompt_contains.strip():
+            query["prompt.preview"] = {
+                "$regex": prompt_contains.strip(),
+                "$options": "i",
+            }
+
+        cursor = (
+            coll.find(
+                query,
+                {
+                    "request_id": 1,
+                    "session_id": 1,
+                    "created_at_utc": 1,
+                    "namespace": 1,
+                    "completion_gate": 1,
+                    "required_effects": 1,
+                    "workflow_selection": 1,
+                    "prompt": 1,
+                    "critic": 1,
+                },
+            )
+            .skip(offset)
+            .limit(limit)
+        )
+
+        items: list[dict[str, Any]] = []
+        for doc in cursor:
+            completion_gate = (
+                doc.get("completion_gate") if isinstance(doc.get("completion_gate"), dict) else {}
+            )
+            required_effects = (
+                doc.get("required_effects") if isinstance(doc.get("required_effects"), list) else []
+            )
+            unresolved_effect_count = 0
+            for effect in required_effects:
+                if not isinstance(effect, dict):
+                    continue
+                status = effect.get("status")
+                if isinstance(status, str) and status in {"not_executed", "not_satisfied"}:
+                    unresolved_effect_count += 1
+
+            workflow_selection = (
+                doc.get("workflow_selection")
+                if isinstance(doc.get("workflow_selection"), dict)
+                else {}
+            )
+            prompt_payload = doc.get("prompt") if isinstance(doc.get("prompt"), dict) else {}
+            critic_payload = doc.get("critic") if isinstance(doc.get("critic"), dict) else {}
+            critic_summary = (
+                critic_payload.get("summary")
+                if isinstance(critic_payload.get("summary"), dict)
+                else {}
+            )
+            blocking_effect_ids_raw = completion_gate.get("blocking_effect_ids")
+            blocking_effect_ids: list[str] = []
+            if isinstance(blocking_effect_ids_raw, list):
+                for effect_id in blocking_effect_ids_raw:
+                    if isinstance(effect_id, str) and effect_id.strip():
+                        blocking_effect_ids.append(effect_id.strip())
+
+            items.append(
+                {
+                    "collection": collection,
+                    "session_id": doc.get("request_id"),
+                    "request_id": doc.get("request_id"),
+                    "chat_session_id": doc.get("session_id"),
+                    "created_at_utc": doc.get("created_at_utc"),
+                    "namespace": doc.get("namespace"),
+                    "decision": completion_gate.get("decision"),
+                    "decision_reason": completion_gate.get("decision_reason"),
+                    "safe_to_claim_completion": completion_gate.get(
+                        "safe_to_claim_completion"
+                    ),
+                    "requires_follow_up": completion_gate.get("requires_follow_up"),
+                    "blocking_effect_ids": blocking_effect_ids,
+                    "required_effect_count": len(required_effects),
+                    "unresolved_effect_count": unresolved_effect_count,
+                    "selected_workflow_id": workflow_selection.get(
+                        "selected_workflow_id"
+                    ),
+                    "selector_verdict": workflow_selection.get("selector_verdict"),
+                    "prompt_preview": prompt_payload.get("preview"),
+                    "critic_summary": critic_summary,
+                    "item_kind": "turn_execution_record",
+                    "source_system": "mongo.turn_execution_records",
+                    "namespace_source": ns_report.get("namespace_source"),
+                }
+            )
+
+        total = coll.count_documents(query)
+        decision_counts: dict[str, int] = {}
+        try:
+            decision_pipeline = [
+                {"$match": query},
+                {"$group": {"_id": "$completion_gate.decision", "count": {"$sum": 1}}},
+            ]
+            for row in coll.aggregate(decision_pipeline):
+                key = row.get("_id")
+                if key is None:
+                    key = "unknown"
+                key_text = str(key).strip() or "unknown"
+                decision_counts[key_text] = int(row.get("count") or 0)
+        except Exception:
+            decision_counts = {}
+
+        payload = {
+            "collection": collection,
+            **collection_report,
+            "items": items,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "decision_counts": decision_counts,
+            "effective_namespace": ns,
+            "effective_namespace_source": ns_report.get("namespace_source"),
+            **ns_report,
+            "success": True,
+        }
+
+        return _with_rag_provenance(
+            payload=payload,
+            item_kind="turn_execution_record_list",
+            source_system="mongo.turn_execution_records",
         )
 
     if collection == "vontology_text_relations":
@@ -7289,6 +7477,74 @@ def _rag_get_item(**kwargs):
             payload=payload,
             item_kind="rag_chat_session_item",
             source_system="mongo.chat_history",
+        )
+
+    if collection == "turn_execution_records":
+        coll = db["turn_execution_records"]
+        doc = coll.find_one({"request_id": session_id, "namespace": ns})
+        if not doc:
+            return make_error_response(
+                "not_found",
+                f"Turn execution record {session_id} not found",
+                details={"request_id": session_id, "namespace": ns},
+                suggestions=["Check the request_id and namespace"],
+            )
+
+        completion_gate = (
+            doc.get("completion_gate")
+            if isinstance(doc.get("completion_gate"), dict)
+            else {}
+        )
+        workflow_selection = (
+            doc.get("workflow_selection")
+            if isinstance(doc.get("workflow_selection"), dict)
+            else {}
+        )
+        prompt_payload = doc.get("prompt") if isinstance(doc.get("prompt"), dict) else {}
+        required_effects = (
+            doc.get("required_effects") if isinstance(doc.get("required_effects"), list) else []
+        )
+        postcondition_checks = (
+            doc.get("postcondition_checks")
+            if isinstance(doc.get("postcondition_checks"), list)
+            else []
+        )
+        critic_payload = doc.get("critic") if isinstance(doc.get("critic"), dict) else {}
+
+        payload = {
+            "collection": collection,
+            **collection_report,
+            "session_id": doc.get("request_id"),
+            "request_id": doc.get("request_id"),
+            "chat_session_id": doc.get("session_id"),
+            "created_at_utc": doc.get("created_at_utc"),
+            "updated_at_utc": doc.get("updated_at_utc"),
+            "namespace": doc.get("namespace"),
+            "decision": completion_gate.get("decision"),
+            "decision_reason": completion_gate.get("decision_reason"),
+            "safe_to_claim_completion": completion_gate.get(
+                "safe_to_claim_completion"
+            ),
+            "requires_follow_up": completion_gate.get("requires_follow_up"),
+            "blocking_effect_ids": completion_gate.get("blocking_effect_ids"),
+            "selected_workflow_id": workflow_selection.get("selected_workflow_id"),
+            "selector_verdict": workflow_selection.get("selector_verdict"),
+            "prompt_preview": prompt_payload.get("preview"),
+            "required_effects": required_effects,
+            "postcondition_checks": postcondition_checks,
+            "critic": critic_payload,
+            "item_kind": "turn_execution_record",
+            "source_system": "mongo.turn_execution_records",
+            "namespace_source": ns_report.get("namespace_source"),
+            "effective_namespace": ns,
+            "effective_namespace_source": ns_report.get("namespace_source"),
+            **ns_report,
+            "success": True,
+        }
+        return _with_rag_provenance(
+            payload=payload,
+            item_kind="turn_execution_record_item",
+            source_system="mongo.turn_execution_records",
         )
 
     if collection == "vontology_text_relations":

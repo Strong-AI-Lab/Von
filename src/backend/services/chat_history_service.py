@@ -10,6 +10,7 @@ from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import PyMongoError
 from ..db.mongo_client import get_db
 from ..models.chat_history_model import chat_history_collection_name
+from .turn_execution_record_service import upsert_turn_execution_record_projection
 
 # Try to import RAG service, but don't fail if it's not available (circular imports etc)
 try:
@@ -880,6 +881,48 @@ def update_llm_debug_data_for_request_id(
         ) from e
 
 
+def _upsert_turn_execution_projection_for_message(
+    *,
+    message: Dict[str, Any],
+    llm_debug_data: Optional[Dict[str, Any]],
+    user_id: str,
+    session_id: str,
+    namespace: Optional[str],
+    org_id: Optional[str],
+) -> None:
+    if message.get("role") != "assistant":
+        return
+    if not isinstance(llm_debug_data, dict):
+        return
+
+    record = llm_debug_data.get("turn_execution_record")
+    if not isinstance(record, dict):
+        return
+
+    try:
+        outcome = upsert_turn_execution_record_projection(
+            record=record,
+            user_id=user_id,
+            session_id=session_id,
+            namespace=namespace,
+            org_id=org_id,
+        )
+        if isinstance(outcome, dict) and not outcome.get("updated", False):
+            reason = outcome.get("reason")
+            if isinstance(reason, str) and reason:
+                logger.debug(
+                    "turn_execution_records projection not updated for request_id=%s (%s)",
+                    record.get("request_id"),
+                    reason,
+                )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "Failed to persist turn_execution_record projection for request_id=%s: %s",
+            record.get("request_id"),
+            exc,
+        )
+
+
 def add_message_to_history(
     user_id: str,
     session_id: str,
@@ -966,6 +1009,19 @@ def add_message_to_history(
 
         logger.debug(
             f"Added message to history for user {user_id}, session {session_id}"
+        )
+
+        _upsert_turn_execution_projection_for_message(
+            message=message,
+            llm_debug_data=llm_debug_data,
+            user_id=user_id,
+            session_id=session_id,
+            namespace=ns.strip() if isinstance(ns, str) and ns.strip() else None,
+            org_id=(
+                org_concept_id.strip()
+                if isinstance(org_concept_id, str) and org_concept_id.strip()
+                else None
+            ),
         )
 
         # Index to RAG (Best effort)
