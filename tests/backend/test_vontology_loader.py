@@ -543,8 +543,16 @@ class TestLambdaClosureCapture:
         a_transitions = defn.states["#V#branch_a"].transitions
         assert a_transitions[0].to_state == "#V#yes_a"
         assert a_transitions[0].reason == "on_true"
+        assert a_transitions[0].condition_spec == {
+            "kind": "transition_result_truth",
+            "expected": True,
+        }
         assert a_transitions[1].to_state == "#V#no_a"
         assert a_transitions[1].reason == "on_false"
+        assert a_transitions[1].condition_spec == {
+            "kind": "transition_result_truth",
+            "expected": False,
+        }
 
         # branch_b on_true goes to yes_b (NOT yes_a — that would be the closure bug).
         b_transitions = defn.states["#V#branch_b"].transitions
@@ -588,6 +596,11 @@ class TestOnFailureTransitions:
         )
         assert failure_transition is not None
         assert failure_transition.to_state == "#V#recovery"
+        assert failure_transition.condition_spec == {
+            "kind": "context_flag",
+            "key": "last_action_failed",
+            "expected": True,
+        }
 
         # The condition should fire when last_action_failed is True.
         assert failure_transition.condition({"last_action_failed": True}) is True
@@ -655,6 +668,11 @@ class TestOnUnknownTransitions:
         )
         assert unknown_transition is not None
         assert unknown_transition.to_state == "#V#escalate"
+        assert unknown_transition.condition_spec == {
+            "kind": "context_flag",
+            "key": "last_action_unknown",
+            "expected": True,
+        }
         assert unknown_transition.condition({"last_action_unknown": True}) is True
         assert unknown_transition.condition({"last_action_unknown": False}) is False
         assert unknown_transition.condition({}) is False
@@ -684,6 +702,75 @@ class TestOnUnknownTransitions:
         transitions = defn.states["#V#step"].transitions
         assert transitions[0].reason == "on_unknown"
         assert transitions[1].reason == "next_step"
+
+
+class TestDeclarativeConditionBranches:
+    def test_explicit_condition_branch_compiles_to_declarative_spec(self):
+        steps = [
+            _make_step("#V#branch", invokes_action="route.action", next_step="#V#fallback"),
+            _make_step("#V#preferred"),
+            _make_step("#V#fallback"),
+        ]
+        steps[0]["control_flow"]["conditions"] = [
+            {
+                "to": "#V#preferred",
+                "reason": "context_route_preferred",
+                "condition": {
+                    "kind": "context_value_equals",
+                    "key": "route",
+                    "value": "preferred",
+                },
+            }
+        ]
+        graph = _make_graph(initial_step="#V#branch", steps=steps)
+
+        with _stub_fetch_concepts(), _stub_narrative():
+            with patch(
+                "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+                return_value=(graph, []),
+            ):
+                defn = load_workflow_definition_from_vontology("#V#test_workflow")
+
+        assert defn is not None
+        branch_transitions = defn.states["#V#branch"].transitions
+        assert branch_transitions[0].reason == "context_route_preferred"
+        assert branch_transitions[0].to_state == "#V#preferred"
+        assert branch_transitions[0].condition_spec == {
+            "kind": "context_value_equals",
+            "key": "route",
+            "value": "preferred",
+        }
+        assert branch_transitions[0].condition({"route": "preferred"}) is True
+        assert branch_transitions[0].condition({"route": "fallback"}) is False
+        assert branch_transitions[1].reason == "next_step"
+
+    def test_invalid_explicit_condition_branch_fails_fast_with_reason_code(self):
+        steps = [
+            _make_step("#V#branch", invokes_action="route.action", next_step="#V#fallback"),
+            _make_step("#V#fallback"),
+        ]
+        steps[0]["control_flow"]["conditions"] = [
+            {
+                "to": "#V#fallback",
+                "reason": "broken_branch",
+                "condition": {
+                    "kind": "context_flag",
+                    # Missing key -> actionable validation failure.
+                },
+            }
+        ]
+        graph = _make_graph(initial_step="#V#branch", steps=steps)
+
+        with _stub_fetch_concepts(), _stub_narrative():
+            with patch(
+                "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+                return_value=(graph, []),
+            ):
+                with pytest.raises(ValueError) as exc_info:
+                    load_workflow_definition_from_vontology("#V#test_workflow")
+
+        assert "workflow_transition_condition_invalid" in str(exc_info.value)
+        assert "context_flag_key_missing" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------

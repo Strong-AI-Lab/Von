@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..services.text_value_service import (
@@ -15,6 +15,7 @@ from .engine import (
     WorkflowStateSpec,
     WorkflowActionInvocation,
     WorkflowTransitionSpec,
+    build_transition_condition,
 )
 
 logger = logging.getLogger(__name__)
@@ -1106,8 +1107,8 @@ def load_workflow_definition_from_vontology(
 
     Fixes applied (Phase 3.2):
     - Correct key: reads ``initial_step`` (not ``initial_state``) from graph.
-    - Lambda capture: transition conditions capture control-flow values by
-      default-argument binding to avoid Python late-binding closure bugs.
+    - Declarative transition conditions: control-flow branches are compiled
+      into validated declarative condition specs + deterministic evaluators.
     - ``on_failure`` transitions: mapped to a condition checking the
       ``last_action_failed`` context flag (set by the action registry on error).
     - ``on_unknown`` transitions: mapped to a condition checking the
@@ -1256,10 +1257,7 @@ def load_workflow_definition_from_vontology(
                     )
 
         transitions: list[WorkflowTransitionSpec] = []
-
-        # --- Build transitions with correct variable capture ---
-        # Use default-argument binding (val=val) to capture the current
-        # loop iteration's values, avoiding Python's late-binding closure bug.
+        transition_condition_specs: list[Dict[str, Any]] = []
 
         on_failure_target = control_flow.get("on_failure")
         on_unknown_target = control_flow.get("on_unknown")
@@ -1267,63 +1265,130 @@ def load_workflow_definition_from_vontology(
         on_false_target = control_flow.get("on_false")
         next_target = control_flow.get("next")
 
-        # Priority: on_failure → on_unknown → on_true/on_false → next
-        # (unconditional).
-
-        if on_failure_target:
+        def _append_transition_from_spec(
+            *,
+            to_state: str,
+            reason: str,
+            condition_spec: Mapping[str, Any],
+        ) -> None:
+            if not isinstance(to_state, str) or not to_state.strip():
+                raise ValueError(
+                    "workflow_transition_condition_invalid:"
+                    f"missing_target:{workflow_id}:{step_id}:{reason}"
+                )
+            try:
+                normalised_spec, compiled_condition = build_transition_condition(
+                    condition_spec
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    "workflow_transition_condition_invalid:"
+                    f"{workflow_id}:{step_id}:{reason}:{exc}"
+                ) from exc
             transitions.append(
                 WorkflowTransitionSpec(
-                    to_state=on_failure_target,
-                    condition=lambda ctx, _t=on_failure_target: bool(
-                        ctx.get("last_action_failed")
-                    ),
-                    reason="on_failure",
+                    to_state=to_state,
+                    condition=compiled_condition,
+                    condition_spec=normalised_spec,
+                    reason=reason,
                 )
+            )
+            transition_condition_specs.append(
+                {
+                    "to_state": to_state,
+                    "reason": reason,
+                    "condition_spec": normalised_spec,
+                }
+            )
+
+        explicit_condition_branches = control_flow.get("conditions")
+        if explicit_condition_branches is None:
+            explicit_condition_branches = control_flow.get("declarative_conditions")
+        if explicit_condition_branches is not None:
+            if not isinstance(explicit_condition_branches, list):
+                raise ValueError(
+                    "workflow_transition_condition_invalid:"
+                    f"{workflow_id}:{step_id}:conditions_not_list"
+                )
+            for index, branch in enumerate(explicit_condition_branches):
+                if not isinstance(branch, Mapping):
+                    raise ValueError(
+                        "workflow_transition_condition_invalid:"
+                        f"{workflow_id}:{step_id}:branch_not_mapping:{index}"
+                    )
+                to_state = (
+                    str(
+                        branch.get("to")
+                        or branch.get("to_state")
+                        or branch.get("next")
+                        or ""
+                    ).strip()
+                )
+                reason = str(branch.get("reason") or f"condition_{index + 1}").strip()
+                raw_condition_spec = branch.get("condition")
+                if not isinstance(raw_condition_spec, Mapping):
+                    raise ValueError(
+                        "workflow_transition_condition_invalid:"
+                        f"{workflow_id}:{step_id}:{reason}:condition_missing"
+                    )
+                _append_transition_from_spec(
+                    to_state=to_state,
+                    reason=reason,
+                    condition_spec=raw_condition_spec,
+                )
+
+        # Priority: on_failure → on_unknown → on_true/on_false → next.
+        # Canonical Vontology workflows rely on this deterministic ordering.
+        if on_failure_target:
+            _append_transition_from_spec(
+                to_state=on_failure_target,
+                reason="on_failure",
+                condition_spec={
+                    "kind": "context_flag",
+                    "key": "last_action_failed",
+                    "expected": True,
+                },
             )
 
         if on_unknown_target:
-            transitions.append(
-                WorkflowTransitionSpec(
-                    to_state=on_unknown_target,
-                    condition=lambda ctx, _t=on_unknown_target: bool(
-                        ctx.get("last_action_unknown")
-                    ),
-                    reason="on_unknown",
-                )
+            _append_transition_from_spec(
+                to_state=on_unknown_target,
+                reason="on_unknown",
+                condition_spec={
+                    "kind": "context_flag",
+                    "key": "last_action_unknown",
+                    "expected": True,
+                },
             )
 
         if on_true_target:
-            transitions.append(
-                WorkflowTransitionSpec(
-                    to_state=on_true_target,
-                    condition=lambda ctx, _t=on_true_target: _evaluate_transition_result_truth(
-                        ctx
-                    ),
-                    reason="on_true",
-                )
+            _append_transition_from_spec(
+                to_state=on_true_target,
+                reason="on_true",
+                condition_spec={
+                    "kind": "transition_result_truth",
+                    "expected": True,
+                },
             )
 
         if on_false_target:
-            transitions.append(
-                WorkflowTransitionSpec(
-                    to_state=on_false_target,
-                    condition=lambda ctx, _t=on_false_target: not _evaluate_transition_result_truth(
-                        ctx
-                    ),
-                    reason="on_false",
-                )
+            _append_transition_from_spec(
+                to_state=on_false_target,
+                reason="on_false",
+                condition_spec={
+                    "kind": "transition_result_truth",
+                    "expected": False,
+                },
             )
 
         if next_target:
-            transitions.append(
-                WorkflowTransitionSpec(
-                    to_state=next_target,
-                    condition=lambda ctx, _t=next_target: True,
-                    reason="next_step",
-                )
+            _append_transition_from_spec(
+                to_state=next_target,
+                reason="next_step",
+                condition_spec={"kind": "always"},
             )
 
-        is_terminal = not transitions and not next_target
+        is_terminal = not transitions
 
         # Carry Vontology metadata through for introspection.
         step_metadata: Dict[str, Any] = {}
@@ -1354,6 +1419,8 @@ def load_workflow_definition_from_vontology(
             step_metadata["unresolved_output_mappings"] = unresolved_output_mappings
         if invalid_output_mapping_specs:
             step_metadata["invalid_output_mapping_specs"] = invalid_output_mapping_specs
+        if transition_condition_specs:
+            step_metadata["transition_condition_specs"] = transition_condition_specs
 
         states[step_id] = WorkflowStateSpec(
             state_id=step_id,

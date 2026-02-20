@@ -257,6 +257,199 @@ def apply_tool_output_context_mappings(
     return events
 
 
+def _coerce_bool_like(
+    value: Any,
+    *,
+    field_name: str,
+) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "on"}:
+            return True
+        if lowered in {"false", "0", "no", "off"}:
+            return False
+    raise ValueError(f"workflow_condition_invalid:{field_name}_not_boolean")
+
+
+def _normalise_transition_condition_spec(
+    condition_spec: Mapping[str, Any],
+) -> Dict[str, Any]:
+    if not isinstance(condition_spec, Mapping):
+        raise ValueError("workflow_condition_invalid:condition_spec_not_mapping")
+
+    raw_kind = condition_spec.get("kind")
+    kind = str(raw_kind or "").strip().lower()
+    if not kind:
+        raise ValueError("workflow_condition_invalid:condition_kind_missing")
+
+    if kind == "always":
+        return {"kind": "always"}
+
+    if kind == "context_flag":
+        raw_key = condition_spec.get("key")
+        key = str(raw_key or "").strip()
+        if not key:
+            raise ValueError("workflow_condition_invalid:context_flag_key_missing")
+        expected = _coerce_bool_like(
+            condition_spec.get("expected", True),
+            field_name="context_flag_expected",
+        )
+        return {"kind": "context_flag", "key": key, "expected": expected}
+
+    if kind == "context_value_equals":
+        raw_key = condition_spec.get("key")
+        key = str(raw_key or "").strip()
+        if not key:
+            raise ValueError("workflow_condition_invalid:context_value_key_missing")
+        if "value" not in condition_spec:
+            raise ValueError("workflow_condition_invalid:context_value_missing")
+        return {
+            "kind": "context_value_equals",
+            "key": key,
+            "value": condition_spec.get("value"),
+        }
+
+    if kind == "transition_result_truth":
+        expected = _coerce_bool_like(
+            condition_spec.get("expected", True),
+            field_name="transition_result_truth_expected",
+        )
+        return {
+            "kind": "transition_result_truth",
+            "expected": expected,
+        }
+
+    if kind == "all":
+        children = condition_spec.get("conditions")
+        if not isinstance(children, list) or not children:
+            raise ValueError("workflow_condition_invalid:all_conditions_missing")
+        return {
+            "kind": "all",
+            "conditions": [
+                _normalise_transition_condition_spec(item)
+                for item in children
+                if isinstance(item, Mapping)
+            ],
+        }
+
+    if kind == "any":
+        children = condition_spec.get("conditions")
+        if not isinstance(children, list) or not children:
+            raise ValueError("workflow_condition_invalid:any_conditions_missing")
+        normalised_children = [
+            _normalise_transition_condition_spec(item)
+            for item in children
+            if isinstance(item, Mapping)
+        ]
+        if not normalised_children:
+            raise ValueError("workflow_condition_invalid:any_conditions_missing")
+        return {
+            "kind": "any",
+            "conditions": normalised_children,
+        }
+
+    if kind == "not":
+        child = condition_spec.get("condition")
+        if not isinstance(child, Mapping):
+            raise ValueError("workflow_condition_invalid:not_condition_missing")
+        return {
+            "kind": "not",
+            "condition": _normalise_transition_condition_spec(child),
+        }
+
+    raise ValueError(f"workflow_condition_invalid:unsupported_kind:{kind}")
+
+
+def _evaluate_transition_result_truth(context: Mapping[str, Any]) -> bool:
+    transition_result = context.get("transition_result")
+    if transition_result is not None:
+        if isinstance(transition_result, Mapping) and "result" in transition_result:
+            return bool(transition_result.get("result"))
+        return bool(transition_result)
+
+    if "result" in context:
+        result_value = context.get("result")
+        if isinstance(result_value, Mapping) and "result" in result_value:
+            return bool(result_value.get("result"))
+        return bool(result_value)
+    return bool(context.get("last_step_ok"))
+
+
+def evaluate_transition_condition_spec(
+    *,
+    context: Mapping[str, Any],
+    condition_spec: Mapping[str, Any],
+) -> bool:
+    kind = str(condition_spec.get("kind") or "").strip().lower()
+    if kind == "always":
+        return True
+    if kind == "context_flag":
+        key = str(condition_spec.get("key") or "")
+        expected = bool(condition_spec.get("expected", True))
+        return bool(context.get(key)) is expected
+    if kind == "context_value_equals":
+        key = str(condition_spec.get("key") or "")
+        return context.get(key) == condition_spec.get("value")
+    if kind == "transition_result_truth":
+        expected = bool(condition_spec.get("expected", True))
+        return _evaluate_transition_result_truth(context) is expected
+    if kind == "all":
+        children = condition_spec.get("conditions") or []
+        if not isinstance(children, list):
+            return False
+        return all(
+            evaluate_transition_condition_spec(
+                context=context,
+                condition_spec=child,
+            )
+            for child in children
+            if isinstance(child, Mapping)
+        )
+    if kind == "any":
+        children = condition_spec.get("conditions") or []
+        if not isinstance(children, list):
+            return False
+        return any(
+            evaluate_transition_condition_spec(
+                context=context,
+                condition_spec=child,
+            )
+            for child in children
+            if isinstance(child, Mapping)
+        )
+    if kind == "not":
+        child = condition_spec.get("condition")
+        if not isinstance(child, Mapping):
+            return False
+        return not evaluate_transition_condition_spec(
+            context=context,
+            condition_spec=child,
+        )
+    return False
+
+
+def compile_transition_condition_spec(
+    condition_spec: Mapping[str, Any],
+) -> Dict[str, Any]:
+    return _normalise_transition_condition_spec(condition_spec)
+
+
+def build_transition_condition(
+    condition_spec: Mapping[str, Any],
+) -> tuple[Dict[str, Any], Callable[[Dict[str, Any]], bool]]:
+    normalised = compile_transition_condition_spec(condition_spec)
+
+    def _condition(context: Dict[str, Any]) -> bool:
+        return evaluate_transition_condition_spec(
+            context=context,
+            condition_spec=normalised,
+        )
+
+    return normalised, _condition
+
+
 @dataclass(frozen=True)
 class WorkflowActionInvocation:
     action_id: str
@@ -268,6 +461,7 @@ class WorkflowActionInvocation:
 class WorkflowTransitionSpec:
     to_state: str
     condition: Callable[[Dict[str, Any]], bool]
+    condition_spec: Mapping[str, Any] | None = None
     description: str | None = None
     reason: str | None = None
 
@@ -551,7 +745,16 @@ class WorkflowExecutor:
             transition_reason = None
             for transition in state_spec.transitions:
                 try:
-                    if transition.condition(context):
+                    condition_result = bool(transition.condition(context))
+                    if (
+                        not condition_result
+                        and isinstance(transition.condition_spec, Mapping)
+                    ):
+                        condition_result = evaluate_transition_condition_spec(
+                            context=context,
+                            condition_spec=transition.condition_spec,
+                        )
+                    if condition_result:
                         next_state = transition.to_state
                         transition_reason = transition.reason
                         break
