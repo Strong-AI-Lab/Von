@@ -92,12 +92,40 @@ When `VON_BUTTONIFY_MODEL_ENABLE=1`, the backend can run a lightweight model pas
 Before that model pass, the route now runs a heuristic preflight (`VON_BUTTONIFY_HEURISTIC_PREFLIGHT_ENABLE=1`, default on). If explicit options are already present, it skips the extra model call and records `llm_debug.buttonify.source="heuristic_preflight"`.  
 If preflight does not find options, the model pass runs and the source is `llm` or `heuristic_fallback`.
 
+### Canonical response-transformation telemetry contract
+All response transformations now emit a canonical, per-turn telemetry payload in `llm_debug.response_transformations` (schema `response_transformations_v1`).
+
+Each transformation event includes mandatory fields:
+- `transform_name`
+- `transform_version`
+- `status`
+- `input_summary`
+- `output_summary`
+- `options_emitted_count`
+- `source_path`
+- `latency_ms`
+- `model_id`
+- `suppression_reason`
+- `error_class`
+- `timestamp_utc`
+
+Current required adopters:
+- `buttonify`
+- `screen_backfill`
+- `spoken_backfill`
+
+The contract is emitted for success, fallback, no-op, skipped, and failure paths.
+
 ## Observability and Trace Artefacts
 - **LLM debug payload**: response, tool invocations, tool stats, context stats, presenter metadata. See [src/backend/server/routes/von_routes.py](src/backend/server/routes/von_routes.py#L3615-L3845).
+- **Response transformation telemetry**: canonical transformation events at `llm_debug.response_transformations`.
 - **Turn execution timing breakdown**: `llm_debug.turn_execution_diagnostics.timing_breakdown` includes per-stage elapsed time, per-stage LLM time, and stage/model LLM duration rows for before/after latency comparisons.
 - **Workflow traces**: stored as execution traces and surfaced via `aux_llm_calls` when enabled. See [src/backend/server/routes/von_routes.py](src/backend/server/routes/von_routes.py#L3400-L3465).
 - **Tool-use progress**: emits progress updates for the UI “Thinking…” indicator. See [src/backend/server/routes/von_routes.py](src/backend/server/routes/von_routes.py#L603-L705).
 - **Model registry snapshot**: summary metadata (source + sample models) attached to `aux_llm_calls` and workflow traces. See [src/backend/integrations/internal_mcp/orchestrator.py](src/backend/integrations/internal_mcp/orchestrator.py#L3668-L3730).
+
+### Lightweight telemetry introspection by turn
+`GET /von/history/debug?session_id=<id>&history_index=<n>&view=transformations` now returns only the response-transformation telemetry payload for that turn (`response_transformations` + `transformations_count`), which is useful for sampled quality audits.
 
 ## Observed Failure Modes (from recent traces)
 1. **Screen backfill over-asserts tool outcomes**

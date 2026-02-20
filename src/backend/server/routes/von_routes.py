@@ -45,6 +45,11 @@ from ...services.display_elements_service import (
     build_canonical_table_payload_from_records,
     build_turn_display_elements,
 )
+from ...services.response_transformation_telemetry import (
+    build_response_transformation_event,
+    build_response_transformation_telemetry_payload,
+    record_response_transformation_event,
+)
 from ...services.turn_execution_record_service import build_turn_execution_record
 from ...workflows import (
     CHAT_NARRATION_WORKFLOW_ID,
@@ -5020,6 +5025,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         "tool_stats": tool_stats,
                         "tool_invocations": tool_invocations,
                         "aux_llm_calls": [],
+                        "response_transformations": (
+                            build_response_transformation_telemetry_payload(
+                                request_id=request_id
+                            )
+                        ),
                         "turn_execution_diagnostics": turn_execution_diagnostics,
                     }
                     llm_debug_info = _finalise_llm_debug_info(
@@ -5405,17 +5415,28 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         presenter_channels_missing = (
             not isinstance(presenter_channels, dict) or not presenter_channels
         )
+        has_tool_messages = bool(tool_messages)
+        response_transformations = build_response_transformation_telemetry_payload(
+            request_id=request_id
+        )
 
+        screen_backfill_started_perf = time.perf_counter()
         screen_backfill_second_pass_attempted = False
         screen_backfill_second_pass_reason = None
+        screen_backfill_source = None
+        screen_backfill_model_id = None
+        screen_backfill_error_class = None
+        screen_backfill_applied = False
+        screen_backfill_screen_tag_present: bool | None = None
+        needs_screen_backfill = False
         required_screen_json_fence = None
         screen_fence_compat_enabled = (
             get_display_elements_screen_fence_compat_enabled(default=True)
         )
 
         if presenter_mode_requested:
-            has_tool_messages = bool(tool_messages)
             screen_tag_present = _presenter_tag_present(response_text, "screen")
+            screen_backfill_screen_tag_present = screen_tag_present
             required_screen_json_fence = _extract_required_screen_json_fence(prompt_text)
             screen_text = None
             spoken_text = None
@@ -5682,11 +5703,13 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                         record_llm_call=_record_stage_llm_call,
                                     )
                                 )
+                                screen_backfill_model_id = screen_model_used
                             except Exception:
                                 synthesis_response = None
                         if synthesis_response is None:
                             llm_start = time.perf_counter()
                             screen_model_used = model_name
+                            screen_backfill_model_id = screen_model_used
                             synthesis_response = llm_client.generate(
                                 prompt="Generate <screen> display content",
                                 context=[
@@ -5712,7 +5735,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                 screen_candidate = raw
                         if screen_candidate:
                             screen_backfill_source = "llm_synthesis"
-                    except Exception:
+                    except Exception as exc:
+                        screen_backfill_error_class = type(exc).__name__
                         screen_candidate = None
 
                 # If the LLM tries to claim a description write without evidence,
@@ -5762,6 +5786,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     else:
                         base_channels["format"] = "screen_backfill_from_tools_v1"
                     presenter_channels = base_channels
+                    screen_backfill_applied = True
 
                     auxiliary_llm_calls.append(
                         {
@@ -5772,6 +5797,65 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             "format": base_channels.get("format"),
                         }
                     )
+
+        screen_backfill_latency_ms = (
+            time.perf_counter() - screen_backfill_started_perf
+        ) * 1000.0
+        if not presenter_mode_requested:
+            screen_backfill_status = "skipped"
+            screen_backfill_suppression_reason = "presenter_mode_disabled"
+        elif not needs_screen_backfill:
+            screen_backfill_status = "skipped"
+            screen_backfill_suppression_reason = "not_required"
+        elif screen_backfill_applied:
+            screen_backfill_status = (
+                "success"
+                if screen_backfill_source == "llm_synthesis"
+                else "fallback_success"
+            )
+            screen_backfill_suppression_reason = None
+        elif screen_backfill_error_class:
+            screen_backfill_status = "failure"
+            screen_backfill_suppression_reason = "model_error"
+        else:
+            screen_backfill_status = "no_op"
+            screen_backfill_suppression_reason = (
+                screen_backfill_second_pass_reason or "no_candidates"
+            )
+
+        record_response_transformation_event(
+            response_transformations,
+            event=build_response_transformation_event(
+                transform_name="screen_backfill",
+                transform_version="v1",
+                status=screen_backfill_status,
+                input_summary={
+                    "presenter_mode_requested": presenter_mode_requested,
+                    "screen_tag_present": screen_backfill_screen_tag_present,
+                    "needs_backfill": needs_screen_backfill,
+                    "tool_message_count": len(tool_messages),
+                    "required_screen_json_fence": bool(
+                        isinstance(required_screen_json_fence, str)
+                        and required_screen_json_fence.strip()
+                    ),
+                },
+                output_summary={
+                    "applied": screen_backfill_applied,
+                    "presenter_format": (
+                        presenter_channels.get("format")
+                        if isinstance(presenter_channels, dict)
+                        else None
+                    ),
+                    "reason": screen_backfill_second_pass_reason,
+                },
+                options_emitted_count=0,
+                source_path=screen_backfill_source,
+                latency_ms=screen_backfill_latency_ms,
+                model_id=screen_backfill_model_id,
+                suppression_reason=screen_backfill_suppression_reason,
+                error_class=screen_backfill_error_class,
+            ),
+        )
 
         def _extract_spoken_only(text: str) -> str | None:
             return _extract_tagged_block(text, "spoken")
@@ -5824,8 +5908,13 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
             return raw or None
 
+        spoken_backfill_started_perf = time.perf_counter()
         spoken_backfill_second_pass_attempted = False
         spoken_backfill_second_pass_reason = None
+        spoken_backfill_source = None
+        spoken_backfill_model_id = None
+        spoken_backfill_error_class = None
+        spoken_backfill_applied = False
 
         # If presenter mode was requested but the model didn't produce a usable
         # <spoken> channel, generate it in a second pass for reliability.
@@ -5834,6 +5923,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         # we still generate <spoken> using the narration prompt rather than
         # falling back to reading the screen/markdown verbatim.
         needs_spoken_backfill = False
+        spoken_from_screen_text = False
         if presenter_mode_requested:
             if presenter_channels_missing:
                 needs_spoken_backfill = True
@@ -5923,11 +6013,18 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     )
 
                 if workflow_result is not None:
+                    spoken_backfill_source = "workflow"
                     channels = workflow_result.data.get(
                         "presenter_channels", presenter_channels
                     )
                     if isinstance(channels, dict) and channels:
                         presenter_channels = channels
+                        workflow_spoken = channels.get("spoken")
+                        if (
+                            isinstance(workflow_spoken, str)
+                            and workflow_spoken.strip()
+                        ):
+                            spoken_backfill_applied = True
                     if narration_trace_enabled and narration_trace is not None:
                         try:
                             if workflow_result.completed:
@@ -6037,12 +6134,15 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         ],
                         model=model_name,
                     )
+                    spoken_backfill_source = "llm_synthesis"
+                    spoken_backfill_model_id = model_name
 
                     spoken_fallback = _coerce_spoken_text(narration_response)
-                    spoken_from_screen_text = False
                     if not spoken_fallback:
                         spoken_fallback = _coerce_spoken_text(screen_text)
                         spoken_from_screen_text = bool(spoken_fallback)
+                        if spoken_from_screen_text:
+                            spoken_backfill_source = "screen_text_fallback"
 
                     if spoken_fallback:
                         base_channels = (
@@ -6083,9 +6183,67 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         else:
                             base_channels["format"] = "narration_fallback_v1"
                         presenter_channels = base_channels
-            except Exception:
+                        spoken_backfill_applied = True
+            except Exception as exc:
                 # Defensive: never fail the request just because narration generation failed.
+                spoken_backfill_error_class = type(exc).__name__
                 presenter_channels = presenter_channels
+
+        spoken_backfill_latency_ms = (
+            time.perf_counter() - spoken_backfill_started_perf
+        ) * 1000.0
+        if not presenter_mode_requested:
+            spoken_backfill_status = "skipped"
+            spoken_backfill_suppression_reason = "presenter_mode_disabled"
+        elif not needs_spoken_backfill:
+            spoken_backfill_status = "skipped"
+            spoken_backfill_suppression_reason = "not_required"
+        elif spoken_backfill_applied:
+            spoken_backfill_status = (
+                "fallback_success"
+                if spoken_backfill_source == "screen_text_fallback"
+                else "success"
+            )
+            spoken_backfill_suppression_reason = None
+        elif spoken_backfill_error_class:
+            spoken_backfill_status = "failure"
+            spoken_backfill_suppression_reason = "model_error"
+        else:
+            spoken_backfill_status = "no_op"
+            spoken_backfill_suppression_reason = (
+                spoken_backfill_second_pass_reason or "no_spoken_generated"
+            )
+
+        record_response_transformation_event(
+            response_transformations,
+            event=build_response_transformation_event(
+                transform_name="spoken_backfill",
+                transform_version="v1",
+                status=spoken_backfill_status,
+                input_summary={
+                    "presenter_mode_requested": presenter_mode_requested,
+                    "needs_backfill": needs_spoken_backfill,
+                    "reason": spoken_backfill_second_pass_reason,
+                    "tool_message_count": len(tool_messages),
+                },
+                output_summary={
+                    "applied": spoken_backfill_applied,
+                    "source": spoken_backfill_source,
+                    "spoken_from_screen_text": spoken_from_screen_text,
+                    "presenter_format": (
+                        presenter_channels.get("format")
+                        if isinstance(presenter_channels, dict)
+                        else None
+                    ),
+                },
+                options_emitted_count=0,
+                source_path=spoken_backfill_source,
+                latency_ms=spoken_backfill_latency_ms,
+                model_id=spoken_backfill_model_id,
+                suppression_reason=spoken_backfill_suppression_reason,
+                error_class=spoken_backfill_error_class,
+            ),
+        )
 
         if presenter_channels is not None:
             # Screen channel becomes the stored/displayed response.
@@ -6224,6 +6382,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             if normalised_messages:
                 sent_context_stats_messages = normalised_messages
 
+        buttonify_started_perf = time.perf_counter()
         buttonify_options: list[str] = []
         buttonify_meta: dict[str, Any] | None = None
         buttonify_enabled = get_buttonify_model_enabled()
@@ -6234,12 +6393,24 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 orchestrator is None or hasattr(orchestrator, "_run_llm_with_fallbacks")
             )
         )
-        if (
-            buttonify_enabled
-            and buttonify_allowed
-            and isinstance(response_text, str)
-            and response_text
-        ):
+        buttonify_preflight_enabled = False
+        buttonify_model_used = model_name
+        buttonify_source = "none"
+        buttonify_prompt_id = None
+        buttonify_prompt_truncated = False
+        buttonify_status = "skipped"
+        buttonify_error_class = None
+        buttonify_suppression_reason = None
+        buttonify_model_attempted = False
+
+        if not buttonify_enabled:
+            buttonify_suppression_reason = "buttonify_disabled"
+        elif not buttonify_allowed:
+            buttonify_suppression_reason = "buttonify_not_allowed"
+        elif not isinstance(response_text, str) or not response_text.strip():
+            buttonify_suppression_reason = "empty_response"
+        else:
+            buttonify_status = "no_op"
             buttonify_preflight_enabled = get_buttonify_heuristic_preflight_enabled()
             if show_tool_use_progress:
                 _set_tool_progress(
@@ -6251,10 +6422,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         "workflow_task": "buttonify",
                     },
                 )
-            buttonify_model_used = model_name
-            buttonify_source = "none"
-            buttonify_prompt_id = None
-            buttonify_prompt_truncated = False
 
             if buttonify_preflight_enabled:
                 preflight_options = _extract_buttonify_options_heuristic(response_text)
@@ -6263,6 +6430,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     buttonify_source = "heuristic_preflight"
 
             if not buttonify_options:
+                buttonify_model_attempted = True
                 buttonify_prompt_template = (
                     "You generate quick-reply button options for a chat UI.\n\n"
                     "Use the user message and assistant response. Extract up to 4 options that the user could tap next.\n\n"
@@ -6326,7 +6494,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                 record_llm_call=_record_stage_llm_call,
                             )
                         )
-                    except Exception:
+                    except Exception as exc:
+                        buttonify_error_class = type(exc).__name__
                         buttonify_response = None
                 if buttonify_response is None:
                     llm_start = time.perf_counter()
@@ -6359,7 +6528,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             if len(cleaned) > 60:
                                 continue
                             buttonify_options.append(cleaned)
-                except Exception:
+                except Exception as exc:
+                    buttonify_error_class = type(exc).__name__
                     buttonify_options = []
 
                 buttonify_source = "llm" if buttonify_options else "none"
@@ -6371,6 +6541,18 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         buttonify_options = heuristic_options
                         buttonify_source = "heuristic_fallback"
 
+            if buttonify_source in {"heuristic_preflight", "llm"}:
+                buttonify_status = "success"
+            elif buttonify_source == "heuristic_fallback":
+                buttonify_status = "fallback_success"
+                buttonify_suppression_reason = "fallback_heuristic_used"
+            else:
+                buttonify_status = "no_op"
+                if buttonify_error_class:
+                    buttonify_suppression_reason = "model_error"
+                else:
+                    buttonify_suppression_reason = "no_candidates"
+
             buttonify_meta = {
                 "enabled": True,
                 "model": buttonify_model_used,
@@ -6380,6 +6562,36 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 "prompt_truncated": buttonify_prompt_truncated,
                 "heuristic_preflight_enabled": buttonify_preflight_enabled,
             }
+
+        buttonify_latency_ms = (time.perf_counter() - buttonify_started_perf) * 1000.0
+        record_response_transformation_event(
+            response_transformations,
+            event=build_response_transformation_event(
+                transform_name="buttonify",
+                transform_version="v1",
+                status=buttonify_status,
+                input_summary={
+                    "buttonify_enabled": buttonify_enabled,
+                    "buttonify_allowed": buttonify_allowed,
+                    "heuristic_preflight_enabled": buttonify_preflight_enabled,
+                    "response_text_chars": (
+                        len(response_text) if isinstance(response_text, str) else 0
+                    ),
+                },
+                output_summary={
+                    "options": list(buttonify_options),
+                    "source": buttonify_source,
+                    "prompt_id": buttonify_prompt_id,
+                    "prompt_truncated": buttonify_prompt_truncated,
+                },
+                options_emitted_count=len(buttonify_options),
+                source_path=buttonify_source,
+                latency_ms=buttonify_latency_ms,
+                model_id=buttonify_model_used if buttonify_model_attempted else None,
+                suppression_reason=buttonify_suppression_reason,
+                error_class=buttonify_error_class,
+            ),
+        )
 
         context_stats = _calculate_context_stats(sent_context_stats_messages)
 
@@ -6573,6 +6785,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             "aux_llm_calls": auxiliary_llm_calls,
             "workflow_use_episodes": workflow_use_episodes,
             "buttonify": buttonify_meta,
+            "response_transformations": response_transformations,
             # JVNAUTOSCI-1076: Workflow discovery results for Thinking context
             "workflow_discovery": workflow_discovery_result,
             "workflow_routing": workflow_routing_info,
@@ -6726,6 +6939,16 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 user_prompt_debug if "user_prompt_debug" in locals() else None
             ),
             "tool_invocations": [],
+            "response_transformations": (
+                response_transformations
+                if (
+                    "response_transformations" in locals()
+                    and isinstance(response_transformations, dict)
+                )
+                else build_response_transformation_telemetry_payload(
+                    request_id=request_id if "request_id" in locals() else None
+                )
+            ),
             "turn_execution_diagnostics": _build_turn_execution_diagnostics(
                 request_id=request_id if "request_id" in locals() else None,
                 prompt_text=prompt_text if "prompt_text" in locals() else None,
@@ -6949,6 +7172,7 @@ def history_debug():
     history_index = request.args.get("history_index", default=None, type=int)
     if history_index is None or history_index < 0:
         return jsonify({"error": "history_index required"}), 400
+    view = str(request.args.get("view") or "").strip().lower()
 
     try:
         session_id = session_id.strip()
@@ -7008,6 +7232,34 @@ def history_debug():
                         "session_id": session_id,
                         "history_index": history_index,
                     },
+                }
+            )
+        if view in {"transformations", "response_transformations"}:
+            transformation_payload = None
+            if isinstance(debug_data, dict):
+                candidate = debug_data.get("response_transformations")
+                if isinstance(candidate, dict):
+                    transformation_payload = candidate
+            if transformation_payload is None:
+                transformation_payload = build_response_transformation_telemetry_payload(
+                    request_id=(
+                        debug_data.get("request_id")
+                        if isinstance(debug_data, dict)
+                        else None
+                    )
+                )
+            transformations = transformation_payload.get("transformations")
+            return jsonify(
+                {
+                    "success": True,
+                    "history_location": {
+                        "session_id": session_id,
+                        "history_index": history_index,
+                    },
+                    "response_transformations": transformation_payload,
+                    "transformations_count": (
+                        len(transformations) if isinstance(transformations, list) else 0
+                    ),
                 }
             )
         return jsonify(

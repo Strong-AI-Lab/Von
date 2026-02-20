@@ -77,6 +77,17 @@ def _make_app(monkeypatch, llm: _LLMProtocol) -> Flask:
     return flask_app
 
 
+def _find_transformation_event(llm_debug: dict, transform_name: str) -> dict:
+    telemetry = llm_debug.get("response_transformations")
+    assert isinstance(telemetry, dict)
+    transformations = telemetry.get("transformations")
+    assert isinstance(transformations, list)
+    for event in transformations:
+        if isinstance(event, dict) and event.get("transform_name") == transform_name:
+            return event
+    raise AssertionError(f"Missing transformation event: {transform_name}")
+
+
 def test_generate_extracts_presenter_blocks_and_returns_response_channels(monkeypatch):
     llm = _StubLLM(
         "<spoken>Hello there.</spoken>\n<screen>Here is the on-screen content.</screen>"
@@ -120,6 +131,12 @@ def test_generate_extracts_presenter_blocks_and_returns_response_channels(monkey
     assert screen_element["payload"]["text"] == "Here is the on-screen content."
     assert spoken_element["payload"]["text"] == "Hello there."
     assert llm_debug["display_elements"]["schema_version"] == "turn_display_elements_v1"
+    screen_backfill_event = _find_transformation_event(llm_debug, "screen_backfill")
+    assert screen_backfill_event["status"] == "skipped"
+    assert screen_backfill_event["suppression_reason"] == "not_required"
+    spoken_backfill_event = _find_transformation_event(llm_debug, "spoken_backfill")
+    assert spoken_backfill_event["status"] == "skipped"
+    assert spoken_backfill_event["suppression_reason"] == "not_required"
 
     assert len(llm.calls) == 1
     sent_context = llm.calls[0]["context"]
@@ -177,9 +194,103 @@ def test_generate_buttonify_heuristic_preflight_skips_model_pass(monkeypatch):
     assert isinstance(buttonify, dict)
     assert buttonify.get("source") == "heuristic_preflight"
     assert buttonify.get("options") == ["Proceed", "Hold"]
+    buttonify_event = _find_transformation_event(llm_debug, "buttonify")
+    assert buttonify_event["status"] == "success"
+    assert buttonify_event["source_path"] == "heuristic_preflight"
+    assert buttonify_event["options_emitted_count"] == 2
+    assert "timestamp_utc" in buttonify_event
 
     # Preflight should avoid a second model pass for buttonify extraction.
     assert len(llm.calls) == 1
+
+
+def test_generate_buttonify_telemetry_reports_skipped_when_disabled(monkeypatch):
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_buttonify_model_enabled",
+        lambda: False,
+    )
+    llm = _StubLLM("No options here.")
+    app = _make_app(monkeypatch, llm)
+
+    client = app.test_client()
+    resp = client.post("/von/generate", json={"prompt": "Hello"})
+
+    assert resp.status_code == 200
+    llm_debug = resp.get_json()["llm_debug"]
+    buttonify_event = _find_transformation_event(llm_debug, "buttonify")
+    assert buttonify_event["status"] == "skipped"
+    assert buttonify_event["suppression_reason"] == "buttonify_disabled"
+    assert buttonify_event["options_emitted_count"] == 0
+
+
+def test_history_debug_transformations_view_returns_lightweight_payload(monkeypatch):
+    llm = _StubLLM("Hello")
+    app = _make_app(monkeypatch, llm)
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#user",
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_effective_context",
+        lambda *_args, **_kwargs: {"namespace": "#V#user"},
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes._derive_namespace_for_user_org",
+        lambda *_args, **_kwargs: "#V#user",
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.has_chat_history_session",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.resolve_chat_history_namespace",
+        lambda *_args, **_kwargs: "#V#user",
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.get_chat_history_debug_entry",
+        lambda **_kwargs: {
+            "request_id": "req-123",
+            "response_transformations": {
+                "schema_version": "response_transformations_v1",
+                "event_schema_version": "response_transformation_event_v1",
+                "generated_at_utc": "2026-02-20T00:00:00Z",
+                "transformations": [
+                    {
+                        "transform_name": "buttonify",
+                        "transform_version": "v1",
+                        "status": "success",
+                        "input_summary": {},
+                        "output_summary": {},
+                        "options_emitted_count": 1,
+                        "source_path": "heuristic_preflight",
+                        "latency_ms": 1.0,
+                        "model_id": None,
+                        "suppression_reason": None,
+                        "error_class": None,
+                        "timestamp_utc": "2026-02-20T00:00:00Z",
+                    }
+                ],
+            },
+        },
+    )
+
+    client = app.test_client()
+    resp = client.get(
+        "/von/history/debug",
+        query_string={
+            "session_id": "session-1",
+            "history_index": 0,
+            "view": "transformations",
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["success"] is True
+    assert "llm_debug_data" not in body
+    assert body["transformations_count"] == 1
+    assert body["response_transformations"]["schema_version"] == "response_transformations_v1"
 
 
 def test_extract_presenter_channels_ignores_tags_inside_fenced_blocks():
@@ -262,6 +373,12 @@ def test_generate_presenter_mode_falls_back_to_second_pass_spoken(monkeypatch):
         llm_debug.get("spoken_backfill_second_pass_reason")
         == "missing_presenter_channels"
     )
+    screen_backfill_event = _find_transformation_event(llm_debug, "screen_backfill")
+    assert screen_backfill_event["status"] == "fallback_success"
+    assert screen_backfill_event["source_path"] == "response_text"
+    spoken_backfill_event = _find_transformation_event(llm_debug, "spoken_backfill")
+    assert spoken_backfill_event["status"] == "success"
+    assert spoken_backfill_event["source_path"] == "llm_synthesis"
 
     assert len(llm.calls) == 2
     assert llm.calls[1]["prompt"] == "Generate <spoken> talk track"
