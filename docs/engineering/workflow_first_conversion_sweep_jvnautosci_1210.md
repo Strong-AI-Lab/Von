@@ -76,3 +76,9 @@ These are workflow-first migration candidates for follow-on work:
 1. Persist or mirror built-in workflow definitions as Vontology process graphs.
 2. Keep registry/graph parity so monitor executability and routing eligibility are consistent.
 3. Continue this under existing umbrella work in `JVNAUTOSCI-803` (linked from `JVNAUTOSCI-1210`).
+
+## Authoritative Publication Follow-On
+
+`JVNAUTOSCI-1217` adds strict publication/runnability gates and deterministic definition identity/hash telemetry for workflow monitor/introspection surfaces.
+
+See `docs/engineering/workflow_authoritative_publication_process.md` for the authoritative publication procedure and validation expectations.

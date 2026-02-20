@@ -202,6 +202,9 @@ def test_workflow_definition_endpoint_uses_best_effort_text(monkeypatch, app_cli
     assert any(
         edge["predicate"] == "onFalseNextStep" for edge in data["definition"]["edges"]
     )
+    assert data["definition_identity"]["schema_version"] == "workflow_definition_identity.v1"
+    assert data["definition_identity"]["source"] == "vontology"
+    assert data["definition_identity"]["definition_hash"]
     assert data["raw"] is None
     assert data["raw_source"] == "none"
 
@@ -348,6 +351,9 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
     assert items[0]["description_source"] == "registration.purpose"
     assert items[0]["initial_state"] == "alpha_start"
     assert items[0]["source"] == "built_in"
+    assert items[0]["definition_identity"]["schema_version"] == "workflow_definition_identity.v1"
+    assert items[0]["definition_identity"]["source"] == "built_in"
+    assert items[0]["definition_identity"]["definition_hash"]
     assert items[0]["attempts"] == 8
     assert items[0]["completions"] == 6
     assert items[0]["completion_rate"] == pytest.approx(0.75)
@@ -363,6 +369,8 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
     assert items[1]["description_source"] == "definition.purpose"
     assert items[1]["initial_state"] == "beta_start"
     assert items[1]["source"] == "vontology"
+    assert items[1]["definition_identity"]["source"] == "vontology"
+    assert items[1]["definition_identity"]["definition_hash"]
     assert items[1]["attempts"] == 2
     assert items[1]["completions"] == 1
     assert items[1]["completion_rate"] == pytest.approx(0.5)
@@ -462,6 +470,7 @@ def test_workflow_definitions_list_includes_relation_description_source(monkeypa
     assert item["workflow_id"] == "#V#legacy_workflow"
     assert item["description"] == "Workflow description from relation"
     assert item["description_source"] == "text_relation:hasDescription"
+    assert item["definition_identity"]["source"] == "vontology"
 
 
 def test_workflow_episodes_list_endpoint(monkeypatch, app_client):

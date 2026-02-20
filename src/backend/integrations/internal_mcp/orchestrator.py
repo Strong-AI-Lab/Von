@@ -10256,6 +10256,39 @@ class InternalMCPChatOrchestrator:
             or "workflow_execution"
         )
         resolved_stage = data.get("workflow_episode_stage")
+        workflow_registration = None
+        workflow_definition_for_identity = None
+        workflow_definition_identity: dict[str, Any] | None = None
+        try:
+            from ...workflows.workflow_definition_identity_service import (
+                build_workflow_definition_identity,
+            )
+
+            workflow_registration = self._workflow_registry.get_registration(workflow_id)
+            workflow_definition_for_identity = (
+                workflow_registration.definition
+                if workflow_registration is not None
+                else self._workflow_registry.get(workflow_id)
+            )
+            workflow_source = (
+                str(getattr(workflow_registration, "source", "") or "").strip()
+                if workflow_registration is not None
+                else "unknown"
+            ) or "unknown"
+            workflow_definition_identity = build_workflow_definition_identity(
+                workflow_id=workflow_id,
+                source=workflow_source,
+                definition=workflow_definition_for_identity,
+                authoritative_definition=(
+                    workflow_definition_for_identity
+                    if workflow_source.lower() == "vontology"
+                    else None
+                ),
+            )
+        except Exception:
+            workflow_registration = None
+            workflow_definition_for_identity = None
+            workflow_definition_identity = None
 
         def _safe_scalar_text(value: Any) -> str | None:
             if not isinstance(value, str):
@@ -10626,6 +10659,7 @@ class InternalMCPChatOrchestrator:
                 # conversation-turn orchestration representation.
                 "workflow_stage_model": build_conversation_turn_stage_model_snapshot(),
                 "workflow_stage_path": stage_path,
+                "workflow_definition_identity": workflow_definition_identity,
             }
 
         def _build_turn_execution_outcome(
@@ -10856,6 +10890,7 @@ class InternalMCPChatOrchestrator:
                 .isoformat()
                 .replace("+00:00", "Z"),
                 "contract": contract,
+                "workflow_definition_identity": workflow_definition_identity,
                 "terminal_stage": terminal_stage,
                 "termination_code": termination_code,
             }
@@ -10920,6 +10955,7 @@ class InternalMCPChatOrchestrator:
                 "workflow_discovery_result": _safe_mapping_snapshot(
                     data.get("workflow_discovery_result")
                 ),
+                "workflow_definition_identity": workflow_definition_identity,
                 # Canonical per-turn contract persisted at workflow start.
                 "turn_execution_contract": _build_turn_execution_contract_snapshot(data),
             }
@@ -10938,6 +10974,7 @@ class InternalMCPChatOrchestrator:
                 "final_state": final_state,
                 "termination_code": termination_code,
                 "termination_detail": termination_detail,
+                "workflow_definition_identity": workflow_definition_identity,
             }
             if not isinstance(workflow_data, Mapping):
                 return payload
@@ -11181,6 +11218,7 @@ class InternalMCPChatOrchestrator:
                         "code": termination_code,
                         "detail": termination_detail,
                     },
+                    "workflow_definition_identity": workflow_definition_identity,
                 }
             )
 
@@ -11231,6 +11269,7 @@ class InternalMCPChatOrchestrator:
                     metadata={
                         "stage": resolved_stage,
                         "path": "orchestrator.execute_workflow",
+                        "workflow_definition_identity": workflow_definition_identity,
                     },
                 )
                 if isinstance(start_payload, Mapping):
@@ -11240,7 +11279,11 @@ class InternalMCPChatOrchestrator:
             except Exception:
                 episode_id = None
 
-        workflow_def = self._workflow_registry.get(workflow_id)
+        workflow_def = (
+            workflow_definition_for_identity
+            if workflow_definition_for_identity is not None
+            else self._workflow_registry.get(workflow_id)
+        )
         if workflow_def is None:
             if callable(finalise_episode_fn):
                 try:
@@ -11255,6 +11298,7 @@ class InternalMCPChatOrchestrator:
                         termination_detail="workflow_definition_not_found",
                         metadata={
                             "path": "orchestrator.execute_workflow",
+                            "workflow_definition_identity": workflow_definition_identity,
                         },
                     )
                 except Exception:
@@ -11317,6 +11361,7 @@ class InternalMCPChatOrchestrator:
                         termination_detail=termination_detail,
                         metadata={
                             "path": "orchestrator.execute_workflow",
+                            "workflow_definition_identity": workflow_definition_identity,
                         },
                     )
                 except Exception:
@@ -11351,6 +11396,7 @@ class InternalMCPChatOrchestrator:
                         termination_detail=str(exc),
                         metadata={
                             "path": "orchestrator.execute_workflow",
+                            "workflow_definition_identity": workflow_definition_identity,
                         },
                     )
                 except Exception:
@@ -11762,9 +11808,38 @@ class InternalMCPChatOrchestrator:
             try:
                 from ...workflows.trace_model import WorkflowExecutionTrace
                 from ...workflows.trace_store import insert_workflow_execution_trace
+                from ...workflows.workflow_definition_identity_service import (
+                    build_workflow_definition_identity,
+                )
 
                 trace = WorkflowExecutionTrace(workflow_id="#V#chat_assistant_workflow")
                 trace.user_namespace = user_namespace
+                try:
+                    registration = self._workflow_registry.get_registration(
+                        CHAT_ASSISTANT_WORKFLOW_ID
+                    )
+                    definition = (
+                        registration.definition
+                        if registration is not None
+                        else self._workflow_registry.get(CHAT_ASSISTANT_WORKFLOW_ID)
+                    )
+                    source = (
+                        str(getattr(registration, "source", "") or "").strip()
+                        if registration is not None
+                        else "unknown"
+                    ) or "unknown"
+                    trace.metadata["workflow_definition_identity"] = (
+                        build_workflow_definition_identity(
+                            workflow_id=CHAT_ASSISTANT_WORKFLOW_ID,
+                            source=source,
+                            definition=definition,
+                            authoritative_definition=(
+                                definition if source.lower() == "vontology" else None
+                            ),
+                        )
+                    )
+                except Exception:
+                    pass
                 trace_store_fn = insert_workflow_execution_trace
             except Exception:
                 trace_enabled = False

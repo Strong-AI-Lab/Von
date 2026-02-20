@@ -21,12 +21,14 @@ def _make_definition(*, include_action: bool) -> WorkflowDefinition:
                 if include_action
                 else ()
             ),
+            terminal=True,
         )
     }
     return WorkflowDefinition(
         workflow_id="#V#candidate_workflow",
         initial_state="#V#start",
         states=states,
+        termination_states=("#V#start",),
     )
 
 
@@ -81,6 +83,7 @@ def test_verify_workflow_runnable_rejects_initial_vacuous_step() -> None:
     assert verification.unsupported_action_ids == ()
     assert "workflow_step_contract_integrity_issue" in verification.errors
     assert len(verification.integrity_issues) == 1
+    assert verification.contract_validation is not None
     issue = verification.integrity_issues[0]
     assert issue["step_id"] == "#V#start"
     previous = issue["previous_steps"][0]
@@ -187,3 +190,48 @@ def test_verify_workflow_runnable_allows_workflows_with_contracts() -> None:
     assert verification.runnable_verification_success is True
     assert verification.integrity_issues == ()
     assert verification.errors == ()
+    assert verification.definition_identity is not None
+    assert verification.contract_validation is not None
+    assert verification.contract_validation.get("valid") is True
+
+
+def test_verify_workflow_runnable_rejects_missing_transition_from_action_state() -> None:
+    graph = {
+        "workflow_id": "#V#candidate_workflow",
+        "initial_step": "#V#start",
+        "steps": [
+            {
+                "step_id": "#V#start",
+                "name": "Start",
+                "invokes_action": "tool.initial",
+            }
+        ],
+        "edges": [],
+        "warnings": [],
+    }
+    definition = WorkflowDefinition(
+        workflow_id="#V#candidate_workflow",
+        initial_state="#V#start",
+        states={
+            "#V#start": WorkflowStateSpec(
+                state_id="#V#start",
+                actions=(WorkflowActionInvocation(action_id="tool.initial"),),
+                terminal=False,
+            )
+        },
+    )
+
+    with patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_process_graph",
+        return_value=(graph, []),
+    ), patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_registry_read_only",
+        return_value=_make_registry(definition),
+    ), patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.build_durable_action_registry",
+        return_value=_make_action_registry(supports_action=True),
+    ):
+        verification = verify_workflow_runnable("#V#candidate_workflow")
+
+    assert verification.runnable_verification_success is False
+    assert "workflow_control_flow_incomplete" in verification.errors

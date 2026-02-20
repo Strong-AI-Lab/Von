@@ -4,6 +4,9 @@ from typing import Any, cast
 import pytest
 
 from src.backend.workflows import workflow_concept_authority_service as authority_service
+from src.backend.workflows.workflow_definition_identity_service import (
+    build_workflow_definition_identity,
+)
 
 
 class _DummyRegistry:
@@ -251,3 +254,84 @@ def test_bootstrap_publishes_canonical_chat_graphs_with_loader_runtime_parity(
         )
         assert is_executable is True, f"{workflow_id}: {reason}: {detail}"
         assert reason == EXECUTABILITY_EXECUTABLE_NOW
+
+
+def test_canonical_workflow_runtime_identity_matches_authoritative_loader(
+    _reset_mock_workflow_graph_db,
+):
+    from src.backend.workflows.definitions import register_default_workflows
+    from src.backend.workflows.vontology_loader import (
+        load_workflow_definition_from_vontology,
+    )
+    from src.backend.workflows.workflow_registry import WorkflowRegistry
+
+    registry = WorkflowRegistry()
+    register_default_workflows(registry)
+    authority_service.bootstrap_workflow_concepts(registry=cast(Any, registry))
+
+    from src.backend.workflows.durable.registry_factory import build_workflow_registry_read_only
+
+    runtime_registry = build_workflow_registry_read_only()
+
+    for workflow_id in authority_service.CANONICAL_CHAT_WORKFLOW_IDS:
+        registration = runtime_registry.get_registration(workflow_id)
+        assert registration is not None
+        assert str(registration.source or "").strip().lower() == "vontology"
+
+        authoritative_definition = load_workflow_definition_from_vontology(workflow_id)
+        assert authoritative_definition is not None
+
+        identity = build_workflow_definition_identity(
+            workflow_id=workflow_id,
+            source=registration.source,
+            definition=registration.definition,
+            authoritative_definition=authoritative_definition,
+        )
+        assert identity["runtime_definition_hash"]
+        assert identity["authoritative_definition_hash"]
+        assert identity["hash_mismatch"] is False
+
+
+def test_publish_canonical_graphs_reports_validation_failures(
+    _reset_mock_workflow_graph_db,
+    monkeypatch,
+):
+    from src.backend.workflows.definitions import register_default_workflows
+    from src.backend.workflows.workflow_registry import WorkflowRegistry
+
+    registry = WorkflowRegistry()
+    register_default_workflows(registry)
+    authority_service.bootstrap_workflow_concepts(registry=cast(Any, registry))
+
+    monkeypatch.setattr(
+        authority_service,
+        "validate_workflow_definition_contract",
+        lambda **_kwargs: {
+            "valid": False,
+            "errors": ["workflow_control_flow_incomplete"],
+            "unsupported_action_ids": [],
+            "missing_transition_state_ids": ["#V#state"],
+            "unknown_transition_targets": [],
+            "vacuous_state_ids": [],
+            "unresolved_input_mapping_states": [],
+            "invalid_input_mapping_specs": [],
+            "unresolved_output_mapping_states": [],
+            "invalid_output_mapping_specs": [],
+        },
+    )
+
+    report = authority_service.publish_canonical_chat_workflow_graphs(
+        registry=cast(Any, registry)
+    )
+    counts = report.get("counts") or {}
+    assert counts.get("validation_failures") == len(
+        authority_service.CANONICAL_CHAT_WORKFLOW_IDS
+    )
+    assert counts.get("workflows_published") == 0
+    validation_failures = report.get("validation_failures_by_workflow_id") or {}
+    assert validation_failures
+    errors = report.get("errors_by_workflow_id") or {}
+    assert all(
+        str(errors.get(workflow_id, "")).startswith("publication_validation_failed:")
+        for workflow_id in authority_service.CANONICAL_CHAT_WORKFLOW_IDS
+    )

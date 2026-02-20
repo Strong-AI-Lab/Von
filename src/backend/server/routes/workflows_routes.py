@@ -33,6 +33,10 @@ from ...workflows.vontology_loader import (
     resolve_workflow_description,
     resolve_workflow_narrative_text,
 )
+from ...workflows.workflow_definition_identity_service import (
+    build_workflow_definition_identity,
+    build_workflow_definition_identity_from_graph,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +58,7 @@ def api_get_workflow_definition(workflow_id: str):
                     "definition": {"representation": "narrative_only"},
                     "raw": raw,
                     "raw_source": raw_source,
+                    "definition_identity": None,
                     "warnings": warnings,
                 }
             )
@@ -65,12 +70,18 @@ def api_get_workflow_definition(workflow_id: str):
             404,
         )
 
+    definition_identity = build_workflow_definition_identity_from_graph(
+        workflow_id=workflow_id,
+        graph=definition if isinstance(definition, dict) else None,
+    )
+
     return jsonify(
         {
             "workflow_id": workflow_id,
             "definition": definition,
             "raw": raw,
             "raw_source": raw_source,
+            "definition_identity": definition_identity,
             "warnings": warnings,
         }
     )
@@ -139,6 +150,16 @@ def api_list_workflow_definitions():
             if registration is not None:
                 if isinstance(registration.source, str) and registration.source.strip():
                     source = registration.source.strip()
+            definition_identity = build_workflow_definition_identity(
+                workflow_id=workflow_id,
+                source=source,
+                definition=definition,
+                authoritative_definition=(
+                    definition
+                    if source.lower() == "vontology" and definition is not None
+                    else None
+                ),
+            )
 
             initial_state = ""
             if definition is not None:
@@ -176,6 +197,7 @@ def api_list_workflow_definitions():
                     "description_source": description_source,
                     "initial_state": initial_state,
                     "source": source,
+                    "definition_identity": definition_identity,
                     "attempts": (
                         int(attempts) if isinstance(attempts, (int, float)) else 0
                     ),

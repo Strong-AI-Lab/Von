@@ -24,7 +24,15 @@ from .definitions import (
     TOOL_CALLING_WORKFLOW_ID,
     WRITE_TOOL_POLICY_WORKFLOW_ID,
 )
-from .vontology_loader import WORKFLOW_GRAPH_PREDICATE_ALIASES
+from .vontology_loader import (
+    WORKFLOW_GRAPH_PREDICATE_ALIASES,
+    build_workflow_process_graph,
+    load_workflow_definition_from_vontology,
+)
+from .workflow_definition_identity_service import (
+    collect_workflow_action_ids,
+    validate_workflow_definition_contract,
+)
 from .workflow_registry import WorkflowRegistry
 
 logger = logging.getLogger(__name__)
@@ -335,6 +343,7 @@ def publish_canonical_chat_workflow_graphs(
     skipped_missing_registration: list[str] = []
     skipped_missing_concept: list[str] = []
     errors_by_workflow_id: dict[str, str] = {}
+    validation_failures_by_workflow_id: dict[str, Dict[str, Any]] = {}
     created_step_ids: list[str] = []
     created_action_concept_ids: list[str] = []
 
@@ -489,6 +498,59 @@ def publish_canonical_chat_workflow_graphs(
                 break
 
         if not step_update_failed:
+            registration_definition = (
+                getattr(registration, "definition", None)
+                if registration is not None
+                else None
+            )
+            supported_action_ids = (
+                collect_workflow_action_ids(registration_definition)
+                if registration_definition is not None
+                else ()
+            )
+            published_definition = load_workflow_definition_from_vontology(workflow_id)
+            if published_definition is None:
+                errors_by_workflow_id[workflow_id] = (
+                    "publication_validation_failed:definition_not_loadable"
+                )
+                validation_failures_by_workflow_id[workflow_id] = {
+                    "errors": ["workflow_definition_not_loadable"],
+                    "supported_action_ids": list(supported_action_ids),
+                }
+                continue
+
+            contract_validation = validate_workflow_definition_contract(
+                definition=published_definition,
+                supported_action_ids=supported_action_ids,
+                enforce_supported_actions=True,
+            )
+            _graph, graph_warnings = build_workflow_process_graph(workflow_id)
+            warning_items = [
+                str(item).strip()
+                for item in (graph_warnings or [])
+                if isinstance(item, str) and str(item).strip()
+            ]
+            validation_errors = [
+                code
+                for code in contract_validation.get("errors", [])
+                if isinstance(code, str) and code.strip()
+            ]
+            if warning_items:
+                validation_errors.append("workflow_graph_warnings_present")
+
+            if validation_errors:
+                validation_failures_by_workflow_id[workflow_id] = {
+                    "errors": validation_errors,
+                    "graph_warnings": warning_items,
+                    "contract_validation": contract_validation,
+                    "supported_action_ids": list(supported_action_ids),
+                }
+                errors_by_workflow_id[workflow_id] = (
+                    "publication_validation_failed:"
+                    + ",".join(validation_errors)
+                )
+                continue
+
             published.append(workflow_id)
 
     return {
@@ -499,6 +561,7 @@ def publish_canonical_chat_workflow_graphs(
             "workflows_skipped_missing_concept": len(skipped_missing_concept),
             "step_concepts_created": len(created_step_ids),
             "action_concepts_created": len(created_action_concept_ids),
+            "validation_failures": len(validation_failures_by_workflow_id),
             "errors": len(errors_by_workflow_id),
         },
         "published_workflow_ids": published,
@@ -506,6 +569,7 @@ def publish_canonical_chat_workflow_graphs(
         "skipped_missing_concept_workflow_ids": skipped_missing_concept,
         "created_step_concept_ids": created_step_ids,
         "created_action_concept_ids": created_action_concept_ids,
+        "validation_failures_by_workflow_id": validation_failures_by_workflow_id,
         "errors_by_workflow_id": errors_by_workflow_id,
     }
 
@@ -592,6 +656,7 @@ def bootstrap_workflow_concepts(
             "workflows_skipped_missing_concept": 0,
             "step_concepts_created": 0,
             "action_concepts_created": 0,
+            "validation_failures": 0,
             "errors": 0,
         },
         "published_workflow_ids": [],
@@ -599,6 +664,7 @@ def bootstrap_workflow_concepts(
         "skipped_missing_concept_workflow_ids": [],
         "created_step_concept_ids": [],
         "created_action_concept_ids": [],
+        "validation_failures_by_workflow_id": {},
         "errors_by_workflow_id": {},
     }
 
@@ -664,6 +730,7 @@ def bootstrap_workflow_concepts(
                     "workflows_skipped_missing_concept": 0,
                     "step_concepts_created": 0,
                     "action_concepts_created": 0,
+                    "validation_failures": 0,
                     "errors": 1,
                 },
                 "published_workflow_ids": [],
@@ -671,6 +738,7 @@ def bootstrap_workflow_concepts(
                 "skipped_missing_concept_workflow_ids": [],
                 "created_step_concept_ids": [],
                 "created_action_concept_ids": [],
+                "validation_failures_by_workflow_id": {},
                 "errors_by_workflow_id": {"__publication__": str(exc)},
             }
 

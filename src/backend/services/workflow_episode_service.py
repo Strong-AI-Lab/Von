@@ -245,6 +245,11 @@ def _serialise_episode(doc: Mapping[str, Any]) -> dict[str, Any]:
             "code": _safe_str(reason_raw.get("code")),
             "detail": _safe_str(reason_raw.get("detail")),
         }
+    metadata_raw = doc.get("metadata")
+    metadata = metadata_raw if isinstance(metadata_raw, Mapping) else {}
+    workflow_definition_identity = metadata.get("workflow_definition_identity")
+    if not isinstance(workflow_definition_identity, Mapping):
+        workflow_definition_identity = None
 
     return {
         "episode_id": _safe_str(doc.get("episode_id")),
@@ -265,6 +270,11 @@ def _serialise_episode(doc: Mapping[str, Any]) -> dict[str, Any]:
         "org_id": _safe_str(doc.get("org_id")),
         "instance_id": _safe_str(doc.get("instance_id")),
         "stable_key": _safe_str(doc.get("stable_key")),
+        "workflow_definition_identity": (
+            dict(workflow_definition_identity)
+            if isinstance(workflow_definition_identity, Mapping)
+            else None
+        ),
     }
 
 

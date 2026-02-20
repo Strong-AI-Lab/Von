@@ -291,6 +291,11 @@ def test_workflow_list_definitions_exists_and_returns_data():
     assert "#V#rag_text_relation_sync_workflow" in def_ids
     assert "#V#generate_considerations_workflow" in def_ids
     assert any("description_source" in d for d in result["definitions"])
+    assert any("definition_identity" in d for d in result["definitions"])
+    first_definition = result["definitions"][0]
+    identity = first_definition.get("definition_identity") or {}
+    assert identity.get("schema_version") == "workflow_definition_identity.v1"
+    assert identity.get("definition_hash")
 
     parity_inventory = result["parity_inventory"]
     assert isinstance(parity_inventory, dict)

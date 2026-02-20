@@ -6327,6 +6327,9 @@ def _workflow_list_definitions(**kwargs):
         build_durable_workflow_registry_read_only,
         get_workflow_registry_inventory_snapshot,
     )
+    from ...workflows.workflow_definition_identity_service import (
+        build_workflow_definition_identity,
+    )
     from ...workflows.vontology_loader import resolve_workflow_description
     from ...workflows.workflow_baseline_telemetry import (
         get_workflow_baseline_telemetry_snapshot,
@@ -6345,6 +6348,11 @@ def _workflow_list_definitions(**kwargs):
         for wid in ids[:limit]:
             registration = registry.get_registration(wid)
             defn = registration.definition if registration is not None else registry.get(wid)
+            source = (
+                str(getattr(registration, "source", "") or "").strip()
+                if registration is not None
+                else "unknown"
+            ) or "unknown"
             description, description_source = resolve_workflow_description(
                 wid,
                 workflow_source=(registration.source if registration is not None else None),
@@ -6359,6 +6367,13 @@ def _workflow_list_definitions(**kwargs):
                     "description": description,
                     "description_source": description_source,
                     "initial_state": defn.initial_state if defn else "",
+                    "source": source,
+                    "definition_identity": build_workflow_definition_identity(
+                        workflow_id=wid,
+                        source=source,
+                        definition=defn,
+                        authoritative_definition=defn if source.lower() == "vontology" else None,
+                    ),
                 }
             )
 

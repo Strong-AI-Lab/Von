@@ -20,6 +20,11 @@ from typing import Any, Dict, List, Mapping, Sequence
 
 from ..engine import WorkflowDefinition
 from ..vontology_loader import build_workflow_process_graph, detect_vacuous_workflow_steps
+from ..workflow_definition_identity_service import (
+    build_workflow_definition_identity,
+    collect_workflow_action_ids,
+    validate_workflow_definition_contract,
+)
 from .instance_manager import WorkflowInstanceManager
 from .registry_factory import (
     build_durable_action_registry,
@@ -39,9 +44,11 @@ class WorkflowRunnableVerification:
     integrity_issues: tuple[Dict[str, Any], ...]
     warnings: tuple[str, ...]
     errors: tuple[str, ...]
+    definition_identity: Mapping[str, Any] | None = None
+    contract_validation: Mapping[str, Any] | None = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        payload = {
             "workflow_id": self.workflow_id,
             "conceptual_representation_success": self.conceptual_representation_success,
             "executable_registration_success": self.executable_registration_success,
@@ -53,6 +60,11 @@ class WorkflowRunnableVerification:
             "warnings": list(self.warnings),
             "errors": list(self.errors),
         }
+        if isinstance(self.definition_identity, Mapping):
+            payload["definition_identity"] = dict(self.definition_identity)
+        if isinstance(self.contract_validation, Mapping):
+            payload["contract_validation"] = dict(self.contract_validation)
+        return payload
 
 
 @dataclass(frozen=True)
@@ -87,16 +99,6 @@ def _normalise_warning_items(items: Sequence[Any] | None) -> List[str]:
         for item in (items or [])
         if isinstance(item, str) and str(item).strip()
     ]
-
-
-def _collect_action_ids(definition: WorkflowDefinition) -> tuple[str, ...]:
-    action_ids: set[str] = set()
-    for state in definition.states.values():
-        for action in state.actions:
-            action_id = str(action.action_id or "").strip()
-            if action_id:
-                action_ids.add(action_id)
-    return tuple(sorted(action_ids))
 
 
 @lru_cache(maxsize=1)
@@ -135,6 +137,23 @@ def verify_workflow_runnable(workflow_id: str) -> WorkflowRunnableVerification:
 
     registry = build_workflow_registry_read_only()
     definition = registry.get(workflow_id)
+    registration = getattr(registry, "get_registration", lambda _wid: None)(workflow_id)
+    registration_source = (
+        str(getattr(registration, "source", "") or "").strip() if registration else "unknown"
+    )
+    authoritative_definition = None
+    try:
+        from ..vontology_loader import load_workflow_definition_from_vontology
+
+        authoritative_definition = load_workflow_definition_from_vontology(workflow_id)
+    except Exception:
+        authoritative_definition = None
+    definition_identity = build_workflow_definition_identity(
+        workflow_id=workflow_id,
+        source=registration_source or "unknown",
+        definition=definition,
+        authoritative_definition=authoritative_definition,
+    )
     executable_registration_success = definition is not None
     if definition is None:
         error_items = ("workflow_definition_not_registered",)
@@ -149,6 +168,8 @@ def verify_workflow_runnable(workflow_id: str) -> WorkflowRunnableVerification:
             integrity_issues=(),
             warnings=tuple(warnings),
             errors=error_items,
+            definition_identity=definition_identity,
+            contract_validation={"valid": False, "errors": list(error_items)},
         )
 
     integrity_issues = tuple(
@@ -161,27 +182,40 @@ def verify_workflow_runnable(workflow_id: str) -> WorkflowRunnableVerification:
 
     action_registry = build_durable_action_registry()
     fallback_enabled = action_registry.has_fallback_handler()
-    action_ids = _collect_action_ids(definition)
-
-    unsupported: list[str] = []
+    action_ids = collect_workflow_action_ids(definition)
+    supported_actions: set[str] = set()
     fallback_tool_names = _internal_mcp_method_names() if fallback_enabled else frozenset()
     if fallback_enabled and not fallback_tool_names:
         warnings.append("internal_tool_catalogue_unavailable")
 
     for action_id in action_ids:
         if action_registry.has(action_id):
+            supported_actions.add(action_id)
             continue
         if fallback_enabled:
             if not fallback_tool_names or action_id in fallback_tool_names:
+                supported_actions.add(action_id)
                 continue
-        unsupported.append(action_id)
-
-    runnable_verification_success = len(unsupported) == 0 and not integrity_issues
-    errors: list[str] = []
-    if unsupported:
-        errors.append("unsupported_workflow_actions")
+    contract_validation = validate_workflow_definition_contract(
+        definition=definition,
+        supported_action_ids=supported_actions,
+        enforce_supported_actions=True,
+    )
+    unsupported = [
+        item
+        for item in contract_validation.get("unsupported_action_ids", [])
+        if isinstance(item, str) and item.strip()
+    ]
+    errors = [
+        code
+        for code in contract_validation.get("errors", [])
+        if isinstance(code, str) and code.strip()
+    ]
     if integrity_issues:
-        errors.append("workflow_step_contract_integrity_issue")
+        if "workflow_step_contract_integrity_issue" not in errors:
+            errors.append("workflow_step_contract_integrity_issue")
+
+    runnable_verification_success = len(errors) == 0
 
     return WorkflowRunnableVerification(
         workflow_id=workflow_id,
@@ -194,6 +228,8 @@ def verify_workflow_runnable(workflow_id: str) -> WorkflowRunnableVerification:
         integrity_issues=integrity_issues,
         warnings=tuple(warnings),
         errors=tuple(errors),
+        definition_identity=definition_identity,
+        contract_validation=contract_validation,
     )
 
 
