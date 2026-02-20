@@ -10717,6 +10717,162 @@ def _task_search(**kwargs):
         return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
 
 
+def _normalise_issue_keys_input(raw_issue_keys: Any) -> list[str]:
+    if not isinstance(raw_issue_keys, list):
+        return []
+    seen: set[str] = set()
+    result: list[str] = []
+    for raw in raw_issue_keys:
+        if not isinstance(raw, str):
+            continue
+        cleaned = raw.strip().upper()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        result.append(cleaned)
+    return result
+
+
+def _task_import_jira_issues(**kwargs):
+    """Import Jira issues into Von tasks with dry-run and idempotent reruns."""
+    from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
+    from ...services.jira_task_import_service import import_jira_issues_to_tasks
+
+    issue_keys = _normalise_issue_keys_input(kwargs.get("issue_keys"))
+    jql = kwargs.get("jql")
+    if not issue_keys and (not isinstance(jql, str) or not jql.strip()):
+        return make_error_response(
+            "MISSING_PARAM",
+            "Provide either issue_keys (list) or jql (string).",
+            suggestions=[
+                "Pass issue_keys=['JVNAUTOSCI-123', ...] for explicit import",
+                "Or pass a JQL query via jql",
+            ],
+        )
+
+    try:
+        max_results = int(kwargs.get("max_results", 50))
+    except (TypeError, ValueError):
+        max_results = 50
+    max_results = max(1, min(max_results, 200))
+    dry_run = bool(kwargs.get("dry_run", True))
+
+    assignee_map_raw = kwargs.get("assignee_account_id_to_concept_id")
+    assignee_map = assignee_map_raw if isinstance(assignee_map_raw, dict) else {}
+
+    async def _fetch_jira_issues() -> dict[str, Any]:
+        proxy = await get_jira_proxy()
+        discovered_keys = list(issue_keys)
+        fetch_errors: list[dict[str, str]] = []
+        search_count = 0
+
+        if isinstance(jql, str) and jql.strip():
+            search_result = await proxy.search(
+                jql=jql.strip(),
+                max_results=max_results,
+                fields=["key"],
+            )
+            issues = (
+                search_result.get("issues")
+                if isinstance(search_result, dict)
+                else None
+            )
+            if isinstance(issues, list):
+                search_count = len(issues)
+                for item in issues:
+                    if not isinstance(item, dict):
+                        continue
+                    key_value = item.get("key")
+                    if isinstance(key_value, str):
+                        cleaned = key_value.strip().upper()
+                        if cleaned and cleaned not in discovered_keys:
+                            discovered_keys.append(cleaned)
+
+        issue_docs: list[dict[str, Any]] = []
+        for issue_key in discovered_keys:
+            try:
+                issue_doc = await proxy.get_issue(issue_key=issue_key)
+            except Exception as exc:
+                fetch_errors.append(
+                    {
+                        "issue_key": issue_key,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                continue
+
+            if not isinstance(issue_doc, dict):
+                fetch_errors.append(
+                    {
+                        "issue_key": issue_key,
+                        "error": "jira_get_issue returned non-dict payload",
+                    }
+                )
+                continue
+            resolved_key = issue_doc.get("key")
+            if not isinstance(resolved_key, str) or not resolved_key.strip():
+                fetch_errors.append(
+                    {
+                        "issue_key": issue_key,
+                        "error": "jira_get_issue payload missing key",
+                    }
+                )
+                continue
+            issue_docs.append(issue_doc)
+
+        return {
+            "issues": issue_docs,
+            "requested_issue_keys": discovered_keys,
+            "search_result_count": search_count,
+            "fetch_errors": fetch_errors,
+        }
+
+    try:
+        fetch_payload = _run_async_compat(_fetch_jira_issues)
+    except JiraProxyError as exc:
+        return make_error_response(
+            "jira_proxy_error",
+            str(exc),
+            details={"exception_type": "JiraProxyError"},
+            suggestions=["Check Jira connectivity and authentication"],
+        )
+    except Exception as exc:
+        return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
+
+    issue_docs = fetch_payload.get("issues") if isinstance(fetch_payload, dict) else None
+    if not isinstance(issue_docs, list):
+        issue_docs = []
+    report = import_jira_issues_to_tasks(
+        issues=[item for item in issue_docs if isinstance(item, dict)],
+        dry_run=dry_run,
+        actor_concept_id=kwargs.get("namespace"),
+        organisation_concept_id=kwargs.get("organisation_concept_id"),
+        assignee_account_id_to_concept_id=assignee_map,
+        update_existing=bool(kwargs.get("update_existing", True)),
+    )
+    if not isinstance(report, dict):
+        return make_error_response("UNEXPECTED_ERROR", "Importer returned invalid payload")
+
+    report["success"] = bool(report.get("success", True))
+    report["fetch"] = {
+        "requested_issue_count": len(fetch_payload.get("requested_issue_keys", []))
+        if isinstance(fetch_payload, dict)
+        else 0,
+        "fetched_issue_count": len(issue_docs),
+        "search_result_count": (
+            fetch_payload.get("search_result_count", 0)
+            if isinstance(fetch_payload, dict)
+            else 0
+        ),
+        "fetch_errors": (
+            fetch_payload.get("fetch_errors", [])
+            if isinstance(fetch_payload, dict)
+            else []
+        ),
+    }
+    return report
+
+
 def _task_update_fields(**kwargs):
     from ...services.task_management_service import (
         InvalidTaskDataError,
@@ -11335,6 +11491,9 @@ def build_default_catalogue() -> MethodCatalogue:
     task_get_output_schema = _task_generic_output_schema("get")
     task_list_output_schema = _task_generic_output_schema("list")
     task_search_output_schema = _task_generic_output_schema("search")
+    task_import_jira_issues_output_schema = _task_generic_output_schema(
+        "import_jira_issues"
+    )
     task_update_status_output_schema = _task_generic_output_schema("update_status")
     task_update_fields_output_schema = _task_generic_output_schema("update_fields")
     task_get_transitions_output_schema = _task_generic_output_schema("get_transitions")
@@ -12516,6 +12675,34 @@ def build_default_catalogue() -> MethodCatalogue:
             description=(
                 "Search Von tasks with rich filters (status, assignee, labels, hierarchy, "
                 "date ranges, dependency state) to support Jira-like triage and planning."
+            ),
+        ),
+        MethodDefinition(
+            name="task_import_jira_issues",
+            handler=_task_import_jira_issues,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "issue_keys": (list, type(None)),
+                    "jql": (str, type(None)),
+                    "max_results": (int, type(None)),
+                    "dry_run": (bool, type(None)),
+                    "update_existing": (bool, type(None)),
+                    "assignee_account_id_to_concept_id": (dict, type(None)),
+                    "organisation_concept_id": (str, type(None)),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "Import Jira issues into Von tasks using issue_keys and/or jql. "
+                    "Dry-run is enabled by default for preview-safe execution."
+                ),
+            ),
+            output_schema=task_import_jira_issues_output_schema,
+            category="write",
+            description=(
+                "Migrate Jira issues to Von tasks with idempotent reruns keyed by Jira issue key. "
+                "Produces a mapping report listing mapped/dropped fields and relation outcomes."
             ),
         ),
         MethodDefinition(

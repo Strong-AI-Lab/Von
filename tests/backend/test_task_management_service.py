@@ -28,6 +28,8 @@ from src.backend.services.task_management_service import (
     InvalidTaskDataError,
     create_task,
     get_task,
+    find_task_by_external_reference,
+    upsert_task_external_reference,
     update_task_status,
     update_task_fields,
     assign_task,
@@ -587,3 +589,83 @@ class TestTaskParityDatesAndEpic:
 
         assert result["count"] == 1
         assert result["tasks"][0]["task_concept_id"] == "#V#task_1"
+
+
+class TestTaskExternalReferences:
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.get_texts_for_concept")
+    def test_find_task_by_external_reference_returns_task(
+        self,
+        mock_get_texts: MagicMock,
+        mock_repo: MagicMock,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        mock_repo.find_one.return_value = {
+            "concept_id": "#V#task_imported_1",
+            "relationships": {"is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID]},
+            "metadata": {
+                "external_references": {
+                    "jira": {
+                        "external_id": "JVNAUTOSCI-777",
+                    }
+                }
+            },
+            "created_at": now,
+            "updated_at": now,
+        }
+        mock_get_texts.return_value = [
+            {"predicate": "#V#hasName", "text": "Imported task"},
+            {"predicate": "#V#hasTaskStatus", "text": "pending"},
+        ]
+
+        result = find_task_by_external_reference(
+            source_system="jira",
+            external_id="JVNAUTOSCI-777",
+        )
+
+        assert result is not None
+        assert result["task_concept_id"] == "#V#task_imported_1"
+        assert (
+            result.get("external_references", {})
+            .get("jira", {})
+            .get("external_id")
+            == "JVNAUTOSCI-777"
+        )
+
+    @patch("src.backend.services.task_management_service.get_task")
+    @patch("src.backend.services.task_management_service._get_task_doc")
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    def test_upsert_task_external_reference_updates_metadata(
+        self,
+        mock_repo: MagicMock,
+        mock_get_task_doc: MagicMock,
+        mock_get_task: MagicMock,
+    ) -> None:
+        mock_get_task_doc.return_value = ("#V#task_imported_1", {})
+        mock_get_task.return_value = {"task_concept_id": "#V#task_imported_1"}
+
+        result = upsert_task_external_reference(
+            "#V#task_imported_1",
+            source_system="jira",
+            external_id="JVNAUTOSCI-888",
+            reference_payload={"status_name": "In Progress"},
+        )
+
+        assert result["task_concept_id"] == "#V#task_imported_1"
+        update_payloads = [
+            call.args[1]
+            for call in mock_repo.update_one.call_args_list
+            if len(call.args) >= 2 and isinstance(call.args[1], dict)
+        ]
+        metadata_updates = [
+            payload
+            for payload in update_payloads
+            if "metadata.external_references.jira" in payload.get("$set", {})
+        ]
+        assert metadata_updates
+        assert (
+            metadata_updates[0]["$set"]["metadata.external_references.jira"][
+                "external_id"
+            ]
+            == "JVNAUTOSCI-888"
+        )

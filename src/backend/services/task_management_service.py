@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..services.text_value_service import (
@@ -79,6 +79,7 @@ TASK_METADATA_KEY_COMMENTS = "comments"
 TASK_METADATA_KEY_ATTACHMENTS = "attachments"
 TASK_METADATA_KEY_WORKLOG = "worklog"
 TASK_METADATA_KEY_HISTORY = "task_history"
+TASK_METADATA_KEY_EXTERNAL_REFERENCES = "external_references"
 
 # Valid task statuses
 TASK_STATUS_PENDING = "pending"
@@ -674,6 +675,7 @@ def create_task(
             TASK_METADATA_KEY_ATTACHMENTS: [],
             TASK_METADATA_KEY_WORKLOG: [],
             TASK_METADATA_KEY_HISTORY: [],
+            TASK_METADATA_KEY_EXTERNAL_REFERENCES: {},
         },
     }
 
@@ -884,6 +886,10 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
     attachments = _list_metadata_items(doc, TASK_METADATA_KEY_ATTACHMENTS)
     worklog = _list_metadata_items(doc, TASK_METADATA_KEY_WORKLOG)
     history = _list_metadata_items(doc, TASK_METADATA_KEY_HISTORY)
+    raw_external_references = metadata.get(TASK_METADATA_KEY_EXTERNAL_REFERENCES)
+    external_references = (
+        raw_external_references if isinstance(raw_external_references, dict) else {}
+    )
     parent_task_id = _task_parent_id_from_doc(doc)
     epic_task_id = _task_epic_id_from_doc(doc)
     subtask_ids = _task_subtask_ids_from_doc(doc)
@@ -951,6 +957,7 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
         "worklog_entries_count": len(worklog),
         "worklog_total_minutes": worklog_total_minutes,
         "history_count": len(history),
+        "external_references": external_references,
         "created_at": doc.get("created_at"),
         "updated_at": doc.get("updated_at"),
     }
@@ -2397,6 +2404,97 @@ def update_task_fields(
     }
 
 
+def _normalise_external_reference_source_system(source_system: Any) -> str:
+    if not isinstance(source_system, str) or not source_system.strip():
+        raise InvalidTaskDataError("source_system is required")
+    cleaned = source_system.strip().lower().replace("-", "_").replace(" ", "_")
+    if not cleaned:
+        raise InvalidTaskDataError("source_system is required")
+    if any(not (ch.isalnum() or ch == "_") for ch in cleaned):
+        raise InvalidTaskDataError(
+            "source_system may only include letters, digits, and underscores"
+        )
+    return cleaned
+
+
+def _normalise_external_reference_id(external_id: Any) -> str:
+    if not isinstance(external_id, str) or not external_id.strip():
+        raise InvalidTaskDataError("external_id is required")
+    return external_id.strip()
+
+
+def find_task_by_external_reference(
+    *,
+    source_system: str,
+    external_id: str,
+    organisation_concept_id: str | None = None,
+) -> Dict[str, Any] | None:
+    source_key = _normalise_external_reference_source_system(source_system)
+    external_value = _normalise_external_reference_id(external_id)
+
+    query: Dict[str, Any] = {
+        "relationships.is_an_instance_of": TASK_SPECIFICATION_TYPE_ID,
+        f"metadata.{TASK_METADATA_KEY_EXTERNAL_REFERENCES}.{source_key}.external_id": external_value,
+    }
+    if organisation_concept_id:
+        org_id = _normalise_optional_concept_id(organisation_concept_id)
+        if not org_id:
+            raise InvalidTaskDataError(
+                f"Invalid organisation_concept_id: {organisation_concept_id}"
+            )
+        query[f"metadata.{TASK_METADATA_KEY_ORGANISATION}"] = org_id
+
+    doc = ConceptsRepository.find_one(query)
+    if not isinstance(doc, dict) or not _is_task_doc(doc):
+        return None
+    return _build_task_response(doc)
+
+
+def upsert_task_external_reference(
+    task_concept_id: str,
+    *,
+    source_system: str,
+    external_id: str,
+    reference_payload: Mapping[str, Any] | None = None,
+    actor_concept_id: str | None = None,
+) -> Dict[str, Any]:
+    task_concept_id, _ = _get_task_doc(task_concept_id)
+    source_key = _normalise_external_reference_source_system(source_system)
+    external_value = _normalise_external_reference_id(external_id)
+
+    payload: Dict[str, Any] = (
+        dict(reference_payload) if isinstance(reference_payload, Mapping) else {}
+    )
+    payload["external_id"] = external_value
+    payload["source_system"] = source_key
+    payload["updated_at"] = _now().isoformat()
+
+    ConceptsRepository.update_one(
+        {"concept_id": task_concept_id},
+        {
+            "$set": {
+                f"metadata.{TASK_METADATA_KEY_EXTERNAL_REFERENCES}.{source_key}": payload,
+                "updated_at": _now(),
+            }
+        },
+    )
+    try:
+        _append_task_history_event(
+            task_concept_id=task_concept_id,
+            event_type="task_external_reference_upserted",
+            actor_concept_id=actor_concept_id,
+            details={
+                "source_system": source_key,
+                "external_id": external_value,
+            },
+            touch_updated_at=False,
+        )
+    except Exception as e:
+        logger.debug("Failed to append external-reference history event: %s", e)
+
+    return get_task(task_concept_id)
+
+
 def bulk_update_tasks(
     task_concept_ids: Iterable[str],
     *,
@@ -2522,6 +2620,8 @@ __all__ = [
     "list_task_worklog",
     "get_task_history",
     "update_task_fields",
+    "find_task_by_external_reference",
+    "upsert_task_external_reference",
     "bulk_update_tasks",
     "delete_task",
 ]

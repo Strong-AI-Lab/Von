@@ -33,6 +33,7 @@ def test_task_parity_methods_registered_in_catalogue():
     methods = set(build_default_catalogue().list_methods())
     expected = {
         "task_search",
+        "task_import_jira_issues",
         "task_update_fields",
         "task_get_transitions",
         "task_transition",
@@ -52,6 +53,61 @@ def test_task_parity_methods_registered_in_catalogue():
     }
     missing = sorted(expected - methods)
     assert not missing, f"Missing expected task parity methods: {missing}"
+
+
+def test_task_import_jira_issues_gateway_dry_run_and_schema(monkeypatch):
+    gateway = _build_gateway()
+
+    class _FakeProxy:
+        async def get_issue(self, *, issue_key: str, fields=None):  # noqa: ARG002
+            return {
+                "key": issue_key,
+                "fields": {
+                    "summary": "Imported issue",
+                    "description": {
+                        "type": "doc",
+                        "version": 1,
+                        "content": [
+                            {
+                                "type": "paragraph",
+                                "content": [{"type": "text", "text": "Desc"}],
+                            }
+                        ],
+                    },
+                    "status": {"name": "To Do"},
+                    "priority": {"name": "Medium"},
+                    "labels": ["migration"],
+                    "issuelinks": [],
+                },
+            }
+
+        async def search(
+            self,
+            *,
+            jql: str,  # noqa: ARG002
+            max_results=None,  # noqa: ARG002
+            start_at=None,  # noqa: ARG002
+            next_page_token=None,  # noqa: ARG002
+            fields=None,  # noqa: ARG002
+        ):
+            return {"issues": [{"key": "JVNAUTOSCI-3001"}]}
+
+    async def _fake_get_jira_proxy():
+        return _FakeProxy()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.jira_proxy_mcp.get_jira_proxy",
+        _fake_get_jira_proxy,
+    )
+
+    payload = gateway.invoke(
+        "task_import_jira_issues",
+        {"issue_keys": ["JVNAUTOSCI-3001"], "dry_run": True},
+    ).payload
+    assert payload.get("success") is True
+    assert payload.get("dry_run") is True
+    assert payload.get("summary", {}).get("total_issues") == 1
+    _assert_schema_conformance(gateway, "task_import_jira_issues", payload)
 
 
 def test_task_transition_gateway_success_and_error_schema(monkeypatch):
