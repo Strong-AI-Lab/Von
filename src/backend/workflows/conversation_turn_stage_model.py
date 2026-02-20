@@ -1,16 +1,15 @@
-"""Canonical conversation-turn stage model and runtime mapping helpers.
+"""Conversation-turn stage model derived from workflow metadata.
 
-This module defines one authoritative stage catalogue for turn orchestration,
-covering both formal workflow-engine states and non-formal route/orchestrator
-phases. Runtime telemetry can then map stage tokens into a single,
-query-oriented representation rooted at
-``#V#conversation_turn_execution_workflow``.
+Formal stage entries are derived from the authoritative workflow registry so
+state-to-stage mapping follows Vontology-authored workflow definitions instead
+of a duplicated static state catalogue.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Sequence
+from functools import lru_cache
+from typing import Any, Iterable, Sequence
 
 from .definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
@@ -21,6 +20,8 @@ from .definitions import (
     TURN_COMPLETION_GATE_WORKFLOW_ID,
     WRITE_TOOL_POLICY_WORKFLOW_ID,
 )
+from .durable.registry_factory import build_workflow_registry_read_only
+from .engine import WorkflowDefinition
 
 CONVERSATION_TURN_STAGE_MODEL_SCHEMA_VERSION = "conversation_turn_stage_model.v1"
 CONVERSATION_TURN_STAGE_PATH_SCHEMA_VERSION = "conversation_turn_stage_path.v1"
@@ -39,7 +40,16 @@ class _StageSpec:
     runtime_aliases: tuple[str, ...] = ()
 
 
-_STAGE_SPECS: tuple[_StageSpec, ...] = (
+@dataclass(frozen=True)
+class _DerivedFormalStageProfile:
+    stage_id: str
+    stage_label: str
+    order: int
+    boundary_type: str
+    runtime_aliases: tuple[str, ...] = ()
+
+
+_NON_FORMAL_STAGE_SPECS: tuple[_StageSpec, ...] = (
     _StageSpec(
         stage_id="context_build",
         stage_label="Build context",
@@ -78,116 +88,6 @@ _STAGE_SPECS: tuple[_StageSpec, ...] = (
         runtime_aliases=("tool_calling",),
     ),
     _StageSpec(
-        stage_id="write_policy",
-        stage_label="Write-tool policy",
-        order=45,
-        stage_kind="formal",
-        boundary_type="policy",
-        stage_concept_id="#V#conversation_turn_stage_write_policy",
-        workflow_id=WRITE_TOOL_POLICY_WORKFLOW_ID,
-        workflow_state_id="decide",
-        runtime_aliases=("write_policy",),
-    ),
-    _StageSpec(
-        stage_id="tool_plan",
-        stage_label="Plan tool calls",
-        order=50,
-        stage_kind="formal",
-        boundary_type="execution",
-        stage_concept_id="#V#conversation_turn_stage_tool_plan",
-        workflow_id=TOOL_CALLING_WORKFLOW_ID,
-        workflow_state_id="plan",
-        runtime_aliases=("tool_plan", "plan"),
-    ),
-    _StageSpec(
-        stage_id="tool_validate",
-        stage_label="Validate tool calls",
-        order=60,
-        stage_kind="formal",
-        boundary_type="execution",
-        stage_concept_id="#V#conversation_turn_stage_tool_validate",
-        workflow_id=TOOL_CALLING_WORKFLOW_ID,
-        workflow_state_id="validate",
-        runtime_aliases=("validate",),
-    ),
-    _StageSpec(
-        stage_id="tool_execute",
-        stage_label="Execute tool calls",
-        order=70,
-        stage_kind="formal",
-        boundary_type="execution",
-        stage_concept_id="#V#conversation_turn_stage_tool_execute",
-        workflow_id=TOOL_CALLING_WORKFLOW_ID,
-        workflow_state_id="execute",
-        runtime_aliases=("tool_execute", "execute"),
-    ),
-    _StageSpec(
-        stage_id="screen_backfill",
-        stage_label="Summarise/backfill response",
-        order=80,
-        stage_kind="formal",
-        boundary_type="execution",
-        stage_concept_id="#V#conversation_turn_stage_screen_backfill",
-        workflow_id=TOOL_CALLING_WORKFLOW_ID,
-        workflow_state_id="backfill",
-        runtime_aliases=("screen_backfill", "backfill"),
-    ),
-    _StageSpec(
-        stage_id="postcondition_critic",
-        stage_label="Postcondition critic",
-        order=90,
-        stage_kind="formal",
-        boundary_type="postcondition",
-        stage_concept_id="#V#conversation_turn_stage_postcondition_critic",
-        workflow_id=TOOL_CALLING_WORKFLOW_ID,
-        workflow_state_id="postcondition_critic",
-        runtime_aliases=("postcondition_critic",),
-    ),
-    _StageSpec(
-        stage_id="postcondition_critic",
-        stage_label="Postcondition critic",
-        order=90,
-        stage_kind="formal",
-        boundary_type="postcondition",
-        stage_concept_id="#V#conversation_turn_stage_postcondition_critic",
-        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
-        workflow_state_id="critic",
-        runtime_aliases=("critic",),
-    ),
-    _StageSpec(
-        stage_id="completion_gate",
-        stage_label="Completion gate",
-        order=100,
-        stage_kind="formal",
-        boundary_type="completion_gate",
-        stage_concept_id="#V#conversation_turn_stage_completion_gate",
-        workflow_id=TOOL_CALLING_WORKFLOW_ID,
-        workflow_state_id="completion_gate",
-        runtime_aliases=("completion_gate",),
-    ),
-    _StageSpec(
-        stage_id="completion_gate",
-        stage_label="Completion gate",
-        order=100,
-        stage_kind="formal",
-        boundary_type="completion_gate",
-        stage_concept_id="#V#conversation_turn_stage_completion_gate",
-        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
-        workflow_state_id="completion_gate",
-        runtime_aliases=("completion_gate",),
-    ),
-    _StageSpec(
-        stage_id="completion_gate",
-        stage_label="Completion gate",
-        order=100,
-        stage_kind="formal",
-        boundary_type="completion_gate",
-        stage_concept_id="#V#conversation_turn_stage_completion_gate",
-        workflow_id=TURN_COMPLETION_GATE_WORKFLOW_ID,
-        workflow_state_id="decide",
-        runtime_aliases=("decide",),
-    ),
-    _StageSpec(
         stage_id="narration",
         stage_label="Narration rendering",
         order=120,
@@ -218,24 +118,6 @@ _STAGE_SPECS: tuple[_StageSpec, ...] = (
         runtime_aliases=("plain_response",),
     ),
     _StageSpec(
-        stage_id="completed",
-        stage_label="Completed",
-        order=190,
-        stage_kind="formal",
-        boundary_type="terminal",
-        stage_concept_id="#V#conversation_turn_stage_completed",
-        runtime_aliases=("completed",),
-    ),
-    _StageSpec(
-        stage_id="failed",
-        stage_label="Failed",
-        order=191,
-        stage_kind="formal",
-        boundary_type="terminal",
-        stage_concept_id="#V#conversation_turn_stage_failed",
-        runtime_aliases=("failed", "error", "workflow_exception"),
-    ),
-    _StageSpec(
         stage_id="cancelled",
         stage_label="Cancelled",
         order=192,
@@ -253,6 +135,86 @@ _STAGE_SPECS: tuple[_StageSpec, ...] = (
         stage_concept_id="#V#conversation_turn_stage_terminated",
         runtime_aliases=("terminated", "workflow_lookup"),
     ),
+)
+
+_GLOBAL_TERMINAL_FORMAL_SPECS: tuple[_StageSpec, ...] = (
+    _StageSpec(
+        stage_id="completed",
+        stage_label="Completed",
+        order=190,
+        stage_kind="formal",
+        boundary_type="terminal",
+        stage_concept_id="#V#conversation_turn_stage_completed",
+        runtime_aliases=("completed",),
+    ),
+    _StageSpec(
+        stage_id="failed",
+        stage_label="Failed",
+        order=191,
+        stage_kind="formal",
+        boundary_type="terminal",
+        stage_concept_id="#V#conversation_turn_stage_failed",
+        runtime_aliases=("failed", "error", "workflow_exception"),
+    ),
+)
+
+_FORMAL_STAGE_PROFILE_BY_ACTION_ID: dict[str, _DerivedFormalStageProfile] = {
+    "write_policy.decide": _DerivedFormalStageProfile(
+        stage_id="write_policy",
+        stage_label="Write-tool policy",
+        order=45,
+        boundary_type="policy",
+        runtime_aliases=("write_policy",),
+    ),
+    "tool_calling.plan": _DerivedFormalStageProfile(
+        stage_id="tool_plan",
+        stage_label="Plan tool calls",
+        order=50,
+        boundary_type="execution",
+        runtime_aliases=("tool_plan", "plan"),
+    ),
+    "tool_calling.validate": _DerivedFormalStageProfile(
+        stage_id="tool_validate",
+        stage_label="Validate tool calls",
+        order=60,
+        boundary_type="execution",
+        runtime_aliases=("validate",),
+    ),
+    "tool_calling.execute": _DerivedFormalStageProfile(
+        stage_id="tool_execute",
+        stage_label="Execute tool calls",
+        order=70,
+        boundary_type="execution",
+        runtime_aliases=("tool_execute", "execute"),
+    ),
+    "tool_calling.backfill": _DerivedFormalStageProfile(
+        stage_id="screen_backfill",
+        stage_label="Summarise/backfill response",
+        order=80,
+        boundary_type="execution",
+        runtime_aliases=("screen_backfill", "backfill"),
+    ),
+    "turn_execution.critic": _DerivedFormalStageProfile(
+        stage_id="postcondition_critic",
+        stage_label="Postcondition critic",
+        order=90,
+        boundary_type="postcondition",
+        runtime_aliases=("postcondition_critic", "critic"),
+    ),
+    "turn_execution.completion_gate": _DerivedFormalStageProfile(
+        stage_id="completion_gate",
+        stage_label="Completion gate",
+        order=100,
+        boundary_type="completion_gate",
+        runtime_aliases=("completion_gate",),
+    ),
+}
+
+_CANONICAL_CONVERSATION_STAGE_WORKFLOW_IDS: tuple[str, ...] = (
+    WRITE_TOOL_POLICY_WORKFLOW_ID,
+    TOOL_CALLING_WORKFLOW_ID,
+    CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+    TURN_COMPLETION_GATE_WORKFLOW_ID,
 )
 
 
@@ -273,9 +235,147 @@ def _normalise_workflow_id(value: Any) -> str | None:
     return cleaned or None
 
 
-def _build_alias_index() -> dict[str, tuple[_StageSpec, ...]]:
+def _titleise_stage_token(token: str) -> str:
+    words = [part for part in token.replace("-", "_").split("_") if part]
+    if not words:
+        return "Stage"
+    return " ".join(word.capitalize() for word in words)
+
+
+def _iter_action_ids(definition: WorkflowDefinition, state_id: str) -> tuple[str, ...]:
+    state_spec = definition.states.get(state_id)
+    if state_spec is None:
+        return ()
+    action_ids: list[str] = []
+    for action in state_spec.actions:
+        action_id = str(action.action_id or "").strip()
+        if action_id:
+            action_ids.append(action_id)
+    return tuple(action_ids)
+
+
+def _derive_formal_stage_spec(
+    *,
+    workflow_id: str,
+    state_id: str,
+    action_ids: Iterable[str],
+) -> _StageSpec | None:
+    normalised_state = _normalise_runtime_stage(state_id)
+    if normalised_state in {"completed", "failed"}:
+        return None
+
+    profile: _DerivedFormalStageProfile | None = None
+    for action_id in action_ids:
+        profile = _FORMAL_STAGE_PROFILE_BY_ACTION_ID.get(action_id)
+        if profile is not None:
+            break
+
+    if profile is None:
+        fallback_stage_id = normalised_state or "unknown_stage"
+        profile = _DerivedFormalStageProfile(
+            stage_id=fallback_stage_id,
+            stage_label=_titleise_stage_token(fallback_stage_id),
+            order=160,
+            boundary_type="execution",
+            runtime_aliases=(fallback_stage_id,),
+        )
+
+    alias_tokens = list(profile.runtime_aliases)
+    if normalised_state and normalised_state not in alias_tokens:
+        alias_tokens.append(normalised_state)
+
+    return _StageSpec(
+        stage_id=profile.stage_id,
+        stage_label=profile.stage_label,
+        order=profile.order,
+        stage_kind="formal",
+        boundary_type=profile.boundary_type,
+        stage_concept_id=f"#V#conversation_turn_stage_{profile.stage_id}",
+        workflow_id=workflow_id,
+        workflow_state_id=state_id,
+        runtime_aliases=tuple(alias_tokens),
+    )
+
+
+def _iter_conversation_stage_workflow_ids(
+    *,
+    registry_workflow_ids: Sequence[str],
+) -> tuple[str, ...]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for workflow_id in _CANONICAL_CONVERSATION_STAGE_WORKFLOW_IDS:
+        if workflow_id in registry_workflow_ids and workflow_id not in seen:
+            ordered.append(workflow_id)
+            seen.add(workflow_id)
+    return tuple(ordered)
+
+
+def _derive_formal_stage_specs() -> tuple[_StageSpec, ...]:
+    registry = build_workflow_registry_read_only()
+    workflow_ids = tuple(registry.all_workflow_ids())
+    candidates = _iter_conversation_stage_workflow_ids(registry_workflow_ids=workflow_ids)
+    stage_specs: list[_StageSpec] = []
+    seen_keys: set[tuple[str, str, str | None]] = set()
+
+    for workflow_id in candidates:
+        definition = registry.get(workflow_id)
+        if definition is None:
+            continue
+        for state_id in definition.states.keys():
+            action_ids = _iter_action_ids(definition, state_id)
+            stage_spec = _derive_formal_stage_spec(
+                workflow_id=workflow_id,
+                state_id=state_id,
+                action_ids=action_ids,
+            )
+            if stage_spec is None:
+                continue
+            dedupe_key = (
+                stage_spec.stage_id,
+                stage_spec.workflow_id or "",
+                stage_spec.workflow_state_id,
+            )
+            if dedupe_key in seen_keys:
+                continue
+            seen_keys.add(dedupe_key)
+            stage_specs.append(stage_spec)
+
+    stage_specs.sort(
+        key=lambda spec: (
+            spec.order,
+            str(spec.workflow_id or ""),
+            str(spec.workflow_state_id or spec.stage_id),
+        )
+    )
+    return tuple(stage_specs)
+
+
+@lru_cache(maxsize=1)
+def _load_stage_specs() -> tuple[_StageSpec, ...]:
+    formal_stage_specs = _derive_formal_stage_specs()
+    combined_specs = (
+        *_NON_FORMAL_STAGE_SPECS,
+        *formal_stage_specs,
+        *_GLOBAL_TERMINAL_FORMAL_SPECS,
+    )
+    return tuple(
+        sorted(
+            combined_specs,
+            key=lambda spec: (
+                spec.order,
+                0 if spec.workflow_id is None else 1,
+                str(spec.workflow_id or ""),
+                str(spec.workflow_state_id or spec.stage_id),
+            ),
+        )
+    )
+
+
+def _build_alias_index(
+    stage_specs: Sequence[_StageSpec],
+) -> dict[str, tuple[_StageSpec, ...]]:
     alias_index: dict[str, list[_StageSpec]] = {}
-    for spec in _STAGE_SPECS:
+    for spec in stage_specs:
         candidates = {spec.stage_id, *spec.runtime_aliases}
         if spec.workflow_state_id:
             candidates.add(spec.workflow_state_id)
@@ -287,7 +387,9 @@ def _build_alias_index() -> dict[str, tuple[_StageSpec, ...]]:
     return {token: tuple(specs) for token, specs in alias_index.items()}
 
 
-_ALIAS_INDEX = _build_alias_index()
+@lru_cache(maxsize=1)
+def _load_alias_index() -> dict[str, tuple[_StageSpec, ...]]:
+    return _build_alias_index(_load_stage_specs())
 
 
 def _serialise_stage_spec(spec: _StageSpec) -> dict[str, Any]:
@@ -305,11 +407,11 @@ def _serialise_stage_spec(spec: _StageSpec) -> dict[str, Any]:
 
 
 def build_conversation_turn_stage_model_snapshot() -> dict[str, Any]:
-    """Return the canonical conversation-turn stage catalogue."""
+    """Return the conversation-turn stage catalogue."""
     return {
         "schema_version": CONVERSATION_TURN_STAGE_MODEL_SCHEMA_VERSION,
         "workflow_representation_id": CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
-        "stages": [_serialise_stage_spec(spec) for spec in _STAGE_SPECS],
+        "stages": [_serialise_stage_spec(spec) for spec in _load_stage_specs()],
     }
 
 
@@ -318,12 +420,12 @@ def resolve_conversation_turn_stage(
     runtime_stage: Any,
     workflow_id: str | None = None,
 ) -> dict[str, Any] | None:
-    """Resolve one runtime stage token into the canonical stage catalogue."""
+    """Resolve one runtime stage token into the stage catalogue."""
     normalised_stage = _normalise_runtime_stage(runtime_stage)
     if not normalised_stage:
         return None
 
-    candidates = _ALIAS_INDEX.get(normalised_stage, ())
+    candidates = _load_alias_index().get(normalised_stage, ())
     if not candidates:
         return None
 
@@ -345,11 +447,7 @@ def build_conversation_turn_stage_path(
     runtime_stages: Sequence[Any],
     workflow_id: str | None = None,
 ) -> dict[str, Any]:
-    """Map a runtime stage sequence into canonical stage entries.
-
-    Unknown stage tokens are preserved using an explicit fallback entry so
-    introspection can still show full execution paths.
-    """
+    """Map a runtime stage sequence into stage catalogue entries."""
 
     path: list[dict[str, Any]] = []
     unmapped_runtime_stages: list[str] = []
@@ -413,4 +511,3 @@ def build_conversation_turn_stage_path(
         "has_unmapped_runtime_stages": bool(unmapped_runtime_stages),
         "unmapped_runtime_stages": unmapped_runtime_stages,
     }
-
