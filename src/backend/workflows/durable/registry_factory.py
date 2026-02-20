@@ -60,6 +60,7 @@ def register_workflow_from_vontology(
     *,
     registry: WorkflowRegistry,
     workflow_id: str,
+    replace_existing: bool = False,
 ) -> tuple[bool, str | None]:
     """Try to register a single Vontology-defined workflow into ``registry``.
 
@@ -71,7 +72,8 @@ def register_workflow_from_vontology(
         return False, "invalid_workflow_id"
 
     workflow_id = workflow_id.strip()
-    if workflow_id in set(registry.all_workflow_ids()):
+    existing_registration = registry.get_registration(workflow_id)
+    if existing_registration is not None and not replace_existing:
         return True, None
 
     definition = load_workflow_definition_from_vontology(workflow_id)
@@ -86,8 +88,14 @@ def register_workflow_from_vontology(
         purpose=definition.purpose,
         source="vontology",
     )
+    if replace_existing:
+        registry.register_or_replace(registration)
+        return True, None
+
     registered = registry.register_if_absent(registration)
-    return registered, None
+    if not registered:
+        return False, "registration_conflict"
+    return True, None
 
 
 def _get_or_build_durable_mcp_gateway():
@@ -394,23 +402,38 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
     discovered_workflow_ids: List[str] = []
     try:
         discovered_workflow_ids = discover_workflow_ids()
-        registered_ids = set(registry.all_workflow_ids())
 
         for wf_id in discovered_workflow_ids:
-            if wf_id in registered_ids:
-                logger.debug(
-                    "Skipping Vontology workflow %s: already registered via code.",
-                    wf_id,
-                )
-                continue
-
             try:
+                existing_registration = registry.get_registration(wf_id)
+                existing_source = ""
+                if existing_registration is not None:
+                    existing_source = str(
+                        getattr(existing_registration, "source", "") or ""
+                    ).strip()
+                replace_existing = bool(existing_registration) and (
+                    existing_source.lower() != "vontology"
+                )
+
                 registered, error_code = register_workflow_from_vontology(
                     registry=registry,
                     workflow_id=wf_id,
+                    replace_existing=replace_existing,
                 )
                 if registered:
-                    logger.info("Registered Vontology workflow: %s", wf_id)
+                    if replace_existing:
+                        logger.info(
+                            "Registered Vontology workflow override: %s (replaced source=%s)",
+                            wf_id,
+                            existing_source or "unknown",
+                        )
+                    elif existing_registration is None:
+                        logger.info("Registered Vontology workflow: %s", wf_id)
+                    else:
+                        logger.debug(
+                            "Vontology workflow %s already authoritative.",
+                            wf_id,
+                        )
                 elif error_code:
                     logger.debug(
                         "Skipping Vontology workflow %s (%s)",

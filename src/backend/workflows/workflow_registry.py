@@ -37,6 +37,15 @@ class WorkflowRegistry:
         self._workflows[registration.workflow_id] = registration
         return True
 
+    def register_or_replace(self, registration: WorkflowRegistration) -> bool:
+        """Register *registration*, replacing any existing workflow_id entry.
+
+        Returns True when an existing registration was replaced.
+        """
+        replaced = registration.workflow_id in self._workflows
+        self._workflows[registration.workflow_id] = registration
+        return replaced
+
     def has(self, workflow_id: str) -> bool:
         """Return True if *workflow_id* is registered."""
         return workflow_id in self._workflows
