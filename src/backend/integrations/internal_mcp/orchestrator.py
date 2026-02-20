@@ -1186,6 +1186,7 @@ class InternalMCPChatOrchestrator:
             "missing_tool_call_retry_remaining": retries_remaining_before,
             "missing_tool_call_retry_suppressed": retry_suppressed,
             "tool_call_parse_error": data.get("tool_call_parse_error"),
+            "result": retry_needed,
         }
 
         if request.trace is not None:
@@ -1362,6 +1363,7 @@ class InternalMCPChatOrchestrator:
                     "missing_tool_call_retry_budget": retry_budget,
                     "missing_tool_call_retry_remaining": 0,
                     "missing_tool_call_retry_suppressed": True,
+                    "result": False,
                 },
                 duration_ms=0.0,
             )
@@ -1439,6 +1441,7 @@ class InternalMCPChatOrchestrator:
                     "missing_tool_call_retry_budget": retry_budget,
                     "missing_tool_call_retry_remaining": retries_remaining_after,
                     "missing_tool_call_retry_suppressed": False,
+                    "result": True,
                 },
                 duration_ms=0.0,
             )
@@ -1577,6 +1580,7 @@ class InternalMCPChatOrchestrator:
             "missing_tool_call_retry_budget": retry_budget,
             "missing_tool_call_retry_remaining": retries_remaining_after,
             "missing_tool_call_retry_suppressed": False,
+            "result": success,
         }
 
         if emit_progress_cb is not None:
@@ -1715,6 +1719,7 @@ class InternalMCPChatOrchestrator:
         return WorkflowActionResult(
             outputs={
                 "narration_required": required,
+                "result": required,
             }
         )
 
@@ -1876,6 +1881,7 @@ class InternalMCPChatOrchestrator:
             "narration_rendered": bool(spoken),
             "narration_spoken": spoken,
             "narration_raw_response": narration_response,
+            "result": bool(spoken),
         }
         return WorkflowActionResult(outputs=outputs)
 
@@ -2219,7 +2225,9 @@ class InternalMCPChatOrchestrator:
         if not user_ns:
             # No user context - nothing to cache-check; proceed with refresh.
             self._logger.debug("[todo_refresh] No user namespace; skipping cache check")
-            return WorkflowActionResult(outputs={"todo_refresh_needed": True})
+            return WorkflowActionResult(
+                outputs={"todo_refresh_needed": True, "result": True}
+            )
 
         try:
             existing_tasks = get_tasks_for_user(user_ns)
@@ -2228,10 +2236,14 @@ class InternalMCPChatOrchestrator:
                 "[todo_refresh] Cache check failed: %s - proceeding with refresh",
                 exc,
             )
-            return WorkflowActionResult(outputs={"todo_refresh_needed": True})
+            return WorkflowActionResult(
+                outputs={"todo_refresh_needed": True, "result": True}
+            )
 
         if not existing_tasks:
-            return WorkflowActionResult(outputs={"todo_refresh_needed": True})
+            return WorkflowActionResult(
+                outputs={"todo_refresh_needed": True, "result": True}
+            )
 
         # Find most recent updated_at / created_at.
         from datetime import datetime, timezone
@@ -2255,7 +2267,9 @@ class InternalMCPChatOrchestrator:
                         newest_ts = raw
 
         if newest_ts is None:
-            return WorkflowActionResult(outputs={"todo_refresh_needed": True})
+            return WorkflowActionResult(
+                outputs={"todo_refresh_needed": True, "result": True}
+            )
 
         age_seconds = (now - newest_ts).total_seconds()
         stale = age_seconds > self._TODO_CACHE_TTL_SECONDS
@@ -2265,7 +2279,7 @@ class InternalMCPChatOrchestrator:
             self._TODO_CACHE_TTL_SECONDS,
             "stale" if stale else "fresh",
         )
-        return WorkflowActionResult(outputs={"todo_refresh_needed": stale})
+        return WorkflowActionResult(outputs={"todo_refresh_needed": stale, "result": stale})
 
     def _action_todo_refresh_fetch_gmail(self, request: Any) -> WorkflowActionResult:
         """Fetch recent Gmail messages via the MCP gateway.
@@ -2925,6 +2939,7 @@ class InternalMCPChatOrchestrator:
                     "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
                     "missing_tool_call_retry_remaining": missing_tool_call_retry_remaining,
                     "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
+                    "result": True,
                 }
             )
 
@@ -2942,6 +2957,7 @@ class InternalMCPChatOrchestrator:
                         "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
                         "missing_tool_call_retry_remaining": missing_tool_call_retry_remaining,
                         "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
+                        "result": False,
                     }
                 )
 
@@ -2956,6 +2972,7 @@ class InternalMCPChatOrchestrator:
                 "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
                 "missing_tool_call_retry_remaining": missing_tool_call_retry_remaining,
                 "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
+                "result": False,
             }
         )
 
@@ -2977,7 +2994,11 @@ class InternalMCPChatOrchestrator:
         tool_calls = data.get("tool_calls")
         if not tool_calls:
             return WorkflowActionResult(
-                outputs={"tool_calls_validated": False, "tool_calls_present": False}
+                outputs={
+                    "tool_calls_validated": False,
+                    "tool_calls_present": False,
+                    "result": False,
+                }
             )
 
         prompt = data.get("prompt", "")
@@ -3081,10 +3102,11 @@ class InternalMCPChatOrchestrator:
                     outputs={
                         "tool_calls_validated": False,
                         "orchestrator_result": error_result,
+                        "result": False,
                     }
                 )
             return WorkflowActionResult(
-                outputs={"tool_calls_validated": False},
+                outputs={"tool_calls_validated": False, "result": False},
                 status="failed",
                 error="validation_failed: " + "; ".join(preflight.errors),
             )
@@ -3093,6 +3115,7 @@ class InternalMCPChatOrchestrator:
             outputs={
                 "tool_calls_validated": True,
                 "tool_calls": tool_calls,
+                "result": True,
             }
         )
 
@@ -3478,6 +3501,7 @@ class InternalMCPChatOrchestrator:
                         - missing_tool_call_retry_attempts,
                     ),
                     "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
+                    "result": True,
                 }
             )
 
@@ -3524,6 +3548,7 @@ class InternalMCPChatOrchestrator:
                             - missing_tool_call_retry_attempts,
                         ),
                         "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
+                        "result": True,
                     }
                 )
 
@@ -3739,6 +3764,7 @@ class InternalMCPChatOrchestrator:
                                     - missing_tool_call_retry_attempts,
                                 ),
                                 "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
+                                "result": True,
                             }
                         )
 
@@ -3763,6 +3789,7 @@ class InternalMCPChatOrchestrator:
                                     - missing_tool_call_retry_attempts,
                                 ),
                                 "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
+                                "result": False,
                             }
                         )
 
@@ -3806,6 +3833,7 @@ class InternalMCPChatOrchestrator:
                     missing_tool_call_retry_budget - missing_tool_call_retry_attempts,
                 ),
                 "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
+                "result": False,
             }
         )
 
@@ -4018,6 +4046,7 @@ class InternalMCPChatOrchestrator:
                 "completion_gate_blocking_effect_ids": list(blocking_effect_ids),
                 "completion_gate_safe_to_claim_completion": safe_to_claim_completion,
                 "completion_gate_requires_follow_up": requires_follow_up,
+                "result": requires_follow_up,
             }
         )
 

@@ -9,11 +9,22 @@ provides one canonical pathway to:
 from __future__ import annotations
 
 import logging
+import re
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..services import concept_service
 from ..services.concept_service import ConceptNotFoundError
+from .definitions import (
+    CHAT_NARRATION_WORKFLOW_ID,
+    CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+    MISSING_TOOL_CALL_WORKFLOW_ID,
+    TODO_REFRESH_WORKFLOW_ID,
+    TOOL_CALLING_WORKFLOW_ID,
+    WRITE_TOOL_POLICY_WORKFLOW_ID,
+)
+from .vontology_loader import WORKFLOW_GRAPH_PREDICATE_ALIASES
 from .workflow_registry import WorkflowRegistry
 
 logger = logging.getLogger(__name__)
@@ -27,6 +38,476 @@ WORKFLOW_INSTANCE_TYPE_ID_CANDIDATES: tuple[str, ...] = (
     "#V#workflow",
     "#V#llm_workflow",
 )
+
+
+# Canonical workflows that should be represented in Vontology as process graphs.
+CANONICAL_CHAT_WORKFLOW_IDS: tuple[str, ...] = (
+    MISSING_TOOL_CALL_WORKFLOW_ID,
+    CHAT_NARRATION_WORKFLOW_ID,
+    TODO_REFRESH_WORKFLOW_ID,
+    WRITE_TOOL_POLICY_WORKFLOW_ID,
+    TOOL_CALLING_WORKFLOW_ID,
+    CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+)
+
+_CANONICAL_GRAPH_PREDICATES: Dict[str, str] = {
+    key: aliases[0] for key, aliases in WORKFLOW_GRAPH_PREDICATE_ALIASES.items()
+}
+_WORKFLOW_RELATIONSHIP_ALIAS_KEYS: tuple[str, ...] = tuple(
+    dict.fromkeys(
+        (
+            *WORKFLOW_GRAPH_PREDICATE_ALIASES["hasInitialStep"],
+            *WORKFLOW_GRAPH_PREDICATE_ALIASES["hasStep"],
+        )
+    )
+)
+_STEP_RELATIONSHIP_ALIAS_KEYS: tuple[str, ...] = tuple(
+    dict.fromkeys(
+        (
+            *WORKFLOW_GRAPH_PREDICATE_ALIASES["invokesAction"],
+            *WORKFLOW_GRAPH_PREDICATE_ALIASES["workflowStepInvokesTool"],
+            *WORKFLOW_GRAPH_PREDICATE_ALIASES["nextStep"],
+            *WORKFLOW_GRAPH_PREDICATE_ALIASES["onTrueNextStep"],
+            *WORKFLOW_GRAPH_PREDICATE_ALIASES["onFalseNextStep"],
+            *WORKFLOW_GRAPH_PREDICATE_ALIASES["onFailureNextStep"],
+            *WORKFLOW_GRAPH_PREDICATE_ALIASES["onUnknownNextStep"],
+            *WORKFLOW_GRAPH_PREDICATE_ALIASES["hasEffect"],
+        )
+    )
+)
+
+_SLUG_SANITISER_RE = re.compile(r"[^a-z0-9_]+")
+
+
+@dataclass(frozen=True)
+class _CanonicalStepPublicationSpec:
+    state_id: str
+    action_id: str | None = None
+    next_state: str | None = None
+    on_true_state: str | None = None
+    on_false_state: str | None = None
+    on_failure_state: str | None = None
+    on_unknown_state: str | None = None
+    effects: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _CanonicalWorkflowPublicationSpec:
+    initial_state: str
+    steps: tuple[_CanonicalStepPublicationSpec, ...]
+
+
+# Keep this mapping deterministic so publication is stable across runs.
+_CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSpec] = {
+    MISSING_TOOL_CALL_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state="observed",
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id="observed",
+                action_id="missing_tool_call.assess",
+                on_true_state="needs_retry",
+                on_false_state="completed",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="needs_retry",
+                action_id="missing_tool_call.retry",
+                on_true_state="completed",
+                on_false_state="failed",
+            ),
+            _CanonicalStepPublicationSpec(state_id="completed"),
+            _CanonicalStepPublicationSpec(state_id="failed"),
+        ),
+    ),
+    CHAT_NARRATION_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state="classify_need",
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id="classify_need",
+                action_id="narration.classify",
+                on_true_state="select_prompt_fragments",
+                on_false_state="completed",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="select_prompt_fragments",
+                action_id="narration.select_prompts",
+                next_state="render_narration",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="render_narration",
+                action_id="narration.render",
+                on_true_state="emit_audio",
+                on_false_state="failed",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="emit_audio",
+                action_id="narration.emit_audio",
+                next_state="completed",
+            ),
+            _CanonicalStepPublicationSpec(state_id="completed"),
+            _CanonicalStepPublicationSpec(state_id="failed"),
+        ),
+    ),
+    TODO_REFRESH_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state="check_cache_freshness",
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id="check_cache_freshness",
+                action_id="todo_refresh.check_cache",
+                on_true_state="maybe_fetch_gmail",
+                on_false_state="completed",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="maybe_fetch_gmail",
+                action_id="todo_refresh.fetch_gmail",
+                next_state="extract_tasks",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="extract_tasks",
+                action_id="todo_refresh.extract_tasks",
+                next_state="prioritise",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="prioritise",
+                action_id="todo_refresh.prioritise",
+                next_state="summarise",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="summarise",
+                action_id="todo_refresh.summarise",
+                next_state="completed",
+            ),
+            _CanonicalStepPublicationSpec(state_id="completed"),
+        ),
+    ),
+    WRITE_TOOL_POLICY_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state="decide",
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id="decide",
+                action_id="write_policy.decide",
+                next_state="completed",
+            ),
+            _CanonicalStepPublicationSpec(state_id="completed"),
+        ),
+    ),
+    TOOL_CALLING_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state="plan",
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id="plan",
+                action_id="tool_calling.plan",
+                on_true_state="validate",
+                on_false_state="postcondition_critic",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="validate",
+                action_id="tool_calling.validate",
+                on_true_state="execute",
+                on_false_state="postcondition_critic",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="execute",
+                action_id="tool_calling.execute",
+                next_state="backfill",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="backfill",
+                action_id="tool_calling.backfill",
+                on_true_state="validate",
+                on_false_state="postcondition_critic",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="postcondition_critic",
+                action_id="turn_execution.critic",
+                next_state="completion_gate",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="completion_gate",
+                action_id="turn_execution.completion_gate",
+                on_true_state="completed",
+                on_false_state="completed",
+            ),
+            _CanonicalStepPublicationSpec(state_id="completed"),
+            _CanonicalStepPublicationSpec(state_id="failed"),
+        ),
+    ),
+    CONVERSATION_TURN_EXECUTION_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state="critic",
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id="critic",
+                action_id="turn_execution.critic",
+                next_state="completion_gate",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="completion_gate",
+                action_id="turn_execution.completion_gate",
+                next_state="completed",
+            ),
+            _CanonicalStepPublicationSpec(state_id="completed"),
+        ),
+    ),
+}
+
+
+def _slugify_token(value: str) -> str:
+    raw = str(value or "").strip().lower()
+    if raw.startswith("#v#"):
+        raw = raw[3:]
+    raw = raw.replace("-", "_").replace(".", "_").replace("/", "_").replace(" ", "_")
+    raw = _SLUG_SANITISER_RE.sub("_", raw)
+    raw = re.sub(r"_+", "_", raw).strip("_")
+    return raw or "item"
+
+
+def _workflow_slug(workflow_id: str) -> str:
+    return _slugify_token(workflow_id)
+
+
+def _step_concept_id(*, workflow_id: str, state_id: str) -> str:
+    return f"#V#workflow_step_{_workflow_slug(workflow_id)}_{_slugify_token(state_id)}"
+
+
+def _terminal_effect_id(*, workflow_id: str, state_id: str) -> str:
+    return f"#V#workflow_effect_{_workflow_slug(workflow_id)}_{_slugify_token(state_id)}_terminal"
+
+
+def _normalise_relationships(concept_doc: Dict[str, Any] | None) -> Dict[str, Any]:
+    relationships = concept_doc.get("relationships") if isinstance(concept_doc, dict) else {}
+    if not isinstance(relationships, dict):
+        return {}
+    return dict(relationships)
+
+
+def _strip_relationship_aliases(
+    relationships: Dict[str, Any],
+    *,
+    alias_keys: tuple[str, ...],
+) -> Dict[str, Any]:
+    cleaned = dict(relationships)
+    for key in alias_keys:
+        cleaned.pop(key, None)
+    return cleaned
+
+
+def _ensure_concept_exists(
+    *,
+    concept_id: str,
+    name: str,
+    description: str | None = None,
+    parent_concept_ids: list[str] | None = None,
+) -> tuple[Dict[str, Any] | None, bool, str | None]:
+    existing_doc, load_error = _load_concept(concept_id)
+    if load_error:
+        return None, False, f"lookup_failed:{load_error}"
+    if existing_doc is not None:
+        return existing_doc, False, None
+
+    try:
+        concept_service.create_concept(
+            name=name,
+            concept_id=concept_id,
+            description=description,
+            parent_concept_ids=parent_concept_ids or [],
+            create_as_instance=True,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        return None, False, f"create_failed:{exc}"
+
+    created_doc, created_error = _load_concept(concept_id)
+    if created_error:
+        return None, False, f"lookup_after_create_failed:{created_error}"
+    return created_doc, True, None
+
+
+def publish_canonical_chat_workflow_graphs(
+    *,
+    registry: WorkflowRegistry,
+    create_missing: bool = True,
+) -> Dict[str, Any]:
+    """Publish canonical chat workflows as Vontology process graphs.
+
+    The canonical chat workflows remain executable in Python runtime, but their
+    workflow topology must be published into Vontology so graph loading and
+    introspection surfaces use the same authority.
+    """
+    published: list[str] = []
+    skipped_missing_registration: list[str] = []
+    skipped_missing_concept: list[str] = []
+    errors_by_workflow_id: dict[str, str] = {}
+    created_step_ids: list[str] = []
+    created_action_concept_ids: list[str] = []
+
+    workflow_type_ids = list(resolve_available_workflow_type_ids())
+    preferred_workflow_type = workflow_type_ids[0] if workflow_type_ids else None
+
+    for workflow_id in CANONICAL_CHAT_WORKFLOW_IDS:
+        spec = _CANONICAL_WORKFLOW_PUBLICATION_SPECS.get(workflow_id)
+        registration = registry.get_registration(workflow_id)
+        if spec is None or registration is None:
+            skipped_missing_registration.append(workflow_id)
+            continue
+
+        workflow_doc, workflow_load_error = _load_concept(workflow_id)
+        if workflow_load_error:
+            errors_by_workflow_id[workflow_id] = f"workflow_lookup_failed:{workflow_load_error}"
+            continue
+        if workflow_doc is None:
+            if not create_missing:
+                skipped_missing_concept.append(workflow_id)
+                continue
+            workflow_doc, created, create_error = _ensure_concept_exists(
+                concept_id=workflow_id,
+                name=_titleise_workflow_id(workflow_id),
+                description=registration.purpose if isinstance(registration.purpose, str) else None,
+                parent_concept_ids=[preferred_workflow_type] if preferred_workflow_type else [],
+            )
+            if create_error:
+                errors_by_workflow_id[workflow_id] = (
+                    f"workflow_create_failed:{create_error}"
+                )
+                continue
+            if created:
+                logger.info(
+                    "workflow_authority: created canonical workflow concept %s",
+                    workflow_id,
+                )
+
+        step_id_by_state: Dict[str, str] = {
+            step.state_id: _step_concept_id(workflow_id=workflow_id, state_id=step.state_id)
+            for step in spec.steps
+        }
+        ordered_step_ids = [step_id_by_state[step.state_id] for step in spec.steps]
+        initial_step_id = step_id_by_state.get(spec.initial_state)
+        if not initial_step_id:
+            errors_by_workflow_id[workflow_id] = "initial_step_not_defined"
+            continue
+
+        workflow_relationships = _strip_relationship_aliases(
+            _normalise_relationships(workflow_doc),
+            alias_keys=_WORKFLOW_RELATIONSHIP_ALIAS_KEYS,
+        )
+        workflow_relationships[_CANONICAL_GRAPH_PREDICATES["hasInitialStep"]] = [
+            initial_step_id
+        ]
+        workflow_relationships[_CANONICAL_GRAPH_PREDICATES["hasStep"]] = ordered_step_ids
+
+        try:
+            concept_service.update_concept(
+                workflow_id,
+                {"relationships": workflow_relationships},
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            errors_by_workflow_id[workflow_id] = f"workflow_update_failed:{exc}"
+            continue
+
+        step_update_failed = False
+        for step in spec.steps:
+            step_concept_id = step_id_by_state[step.state_id]
+            step_doc, step_load_error = _load_concept(step_concept_id)
+            if step_load_error:
+                errors_by_workflow_id[workflow_id] = (
+                    f"step_lookup_failed:{step_concept_id}:{step_load_error}"
+                )
+                step_update_failed = True
+                break
+            if step_doc is None:
+                if not create_missing:
+                    errors_by_workflow_id[workflow_id] = (
+                        f"step_missing:{step_concept_id}"
+                    )
+                    step_update_failed = True
+                    break
+                step_doc, step_created, step_create_error = _ensure_concept_exists(
+                    concept_id=step_concept_id,
+                    name=f"{_titleise_workflow_id(workflow_id)} {step.state_id}",
+                    description=(
+                        f"Canonical step '{step.state_id}' for workflow {workflow_id}."
+                    ),
+                )
+                if step_create_error:
+                    errors_by_workflow_id[workflow_id] = (
+                        f"step_create_failed:{step_concept_id}:{step_create_error}"
+                    )
+                    step_update_failed = True
+                    break
+                if step_created:
+                    created_step_ids.append(step_concept_id)
+
+            step_relationships = _strip_relationship_aliases(
+                _normalise_relationships(step_doc),
+                alias_keys=_STEP_RELATIONSHIP_ALIAS_KEYS,
+            )
+
+            if isinstance(step.action_id, str) and step.action_id.strip():
+                step_relationships[_CANONICAL_GRAPH_PREDICATES["invokesAction"]] = [
+                    step.action_id.strip()
+                ]
+
+            if isinstance(step.next_state, str) and step.next_state.strip():
+                step_relationships[_CANONICAL_GRAPH_PREDICATES["nextStep"]] = [
+                    step_id_by_state[step.next_state]
+                ]
+            if isinstance(step.on_true_state, str) and step.on_true_state.strip():
+                step_relationships[_CANONICAL_GRAPH_PREDICATES["onTrueNextStep"]] = [
+                    step_id_by_state[step.on_true_state]
+                ]
+            if isinstance(step.on_false_state, str) and step.on_false_state.strip():
+                step_relationships[_CANONICAL_GRAPH_PREDICATES["onFalseNextStep"]] = [
+                    step_id_by_state[step.on_false_state]
+                ]
+            if isinstance(step.on_failure_state, str) and step.on_failure_state.strip():
+                step_relationships[_CANONICAL_GRAPH_PREDICATES["onFailureNextStep"]] = [
+                    step_id_by_state[step.on_failure_state]
+                ]
+            if isinstance(step.on_unknown_state, str) and step.on_unknown_state.strip():
+                step_relationships[_CANONICAL_GRAPH_PREDICATES["onUnknownNextStep"]] = [
+                    step_id_by_state[step.on_unknown_state]
+                ]
+
+            effects = list(step.effects)
+            if (not step.action_id) and not effects:
+                effects = [
+                    _terminal_effect_id(
+                        workflow_id=workflow_id,
+                        state_id=step.state_id,
+                    )
+                ]
+            if effects:
+                step_relationships[_CANONICAL_GRAPH_PREDICATES["hasEffect"]] = effects
+
+            try:
+                concept_service.update_concept(
+                    step_concept_id,
+                    {"relationships": step_relationships},
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                errors_by_workflow_id[workflow_id] = (
+                    f"step_update_failed:{step_concept_id}:{exc}"
+                )
+                step_update_failed = True
+                break
+
+        if not step_update_failed:
+            published.append(workflow_id)
+
+    return {
+        "counts": {
+            "workflows_targeted": len(CANONICAL_CHAT_WORKFLOW_IDS),
+            "workflows_published": len(published),
+            "workflows_skipped_missing_registration": len(skipped_missing_registration),
+            "workflows_skipped_missing_concept": len(skipped_missing_concept),
+            "step_concepts_created": len(created_step_ids),
+            "action_concepts_created": len(created_action_concept_ids),
+            "errors": len(errors_by_workflow_id),
+        },
+        "published_workflow_ids": published,
+        "skipped_missing_registration_workflow_ids": skipped_missing_registration,
+        "skipped_missing_concept_workflow_ids": skipped_missing_concept,
+        "created_step_concept_ids": created_step_ids,
+        "created_action_concept_ids": created_action_concept_ids,
+        "errors_by_workflow_id": errors_by_workflow_id,
+    }
 
 
 def _titleise_workflow_id(workflow_id: str) -> str:
@@ -92,8 +573,9 @@ def bootstrap_workflow_concepts(
     registry: WorkflowRegistry,
     create_missing: bool = True,
     enforce_required_type: bool = True,
+    publish_canonical_graphs: bool = True,
 ) -> Dict[str, Any]:
-    """Ensure registered workflows have concept identities and required typing."""
+    """Ensure registered workflows have concept identities, typing, and graphs."""
     workflow_ids = sorted(set(registry.all_workflow_ids()))
     required_type_ids = list(resolve_available_workflow_type_ids())
     preferred_type_id = required_type_ids[0] if required_type_ids else None
@@ -102,6 +584,23 @@ def bootstrap_workflow_concepts(
     updated: list[str] = []
     unchanged: list[str] = []
     errors: dict[str, str] = {}
+    graph_publication_report: dict[str, Any] = {
+        "counts": {
+            "workflows_targeted": 0,
+            "workflows_published": 0,
+            "workflows_skipped_missing_registration": 0,
+            "workflows_skipped_missing_concept": 0,
+            "step_concepts_created": 0,
+            "action_concepts_created": 0,
+            "errors": 0,
+        },
+        "published_workflow_ids": [],
+        "skipped_missing_registration_workflow_ids": [],
+        "skipped_missing_concept_workflow_ids": [],
+        "created_step_concept_ids": [],
+        "created_action_concept_ids": [],
+        "errors_by_workflow_id": {},
+    }
 
     for workflow_id in workflow_ids:
         registration = registry.get_registration(workflow_id)
@@ -150,6 +649,31 @@ def bootstrap_workflow_concepts(
         except Exception as exc:  # pragma: no cover - defensive
             errors[workflow_id] = f"type_enforcement_failed:{exc}"
 
+    if publish_canonical_graphs:
+        try:
+            graph_publication_report = publish_canonical_chat_workflow_graphs(
+                registry=registry,
+                create_missing=create_missing,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            graph_publication_report = {
+                "counts": {
+                    "workflows_targeted": len(CANONICAL_CHAT_WORKFLOW_IDS),
+                    "workflows_published": 0,
+                    "workflows_skipped_missing_registration": 0,
+                    "workflows_skipped_missing_concept": 0,
+                    "step_concepts_created": 0,
+                    "action_concepts_created": 0,
+                    "errors": 1,
+                },
+                "published_workflow_ids": [],
+                "skipped_missing_registration_workflow_ids": [],
+                "skipped_missing_concept_workflow_ids": [],
+                "created_step_concept_ids": [],
+                "created_action_concept_ids": [],
+                "errors_by_workflow_id": {"__publication__": str(exc)},
+            }
+
     return {
         "counts": {
             "registry_workflows": len(workflow_ids),
@@ -164,6 +688,7 @@ def bootstrap_workflow_concepts(
         "updated_workflow_ids": updated,
         "unchanged_workflow_ids": unchanged,
         "errors_by_workflow_id": errors,
+        "graph_publication": graph_publication_report,
     }
 
 

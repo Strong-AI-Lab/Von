@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
+
 from src.backend.workflows import workflow_concept_authority_service as authority_service
 
 
@@ -139,3 +141,113 @@ def test_bootstrap_workflow_concepts_enforces_required_type(monkeypatch):
     assert update_payloads
     payload = update_payloads[0]["payload"]
     assert "#V#ai_workflow" in payload["relationships"]["is_an_instance_of"]
+
+
+@pytest.fixture
+def _reset_mock_workflow_graph_db(monkeypatch):
+    monkeypatch.setenv("VON_USE_MOCK_DB", "1")
+    authority_service.clear_workflow_type_resolution_cache()
+
+    from src.backend.db.mongo_client import get_db
+    from src.backend.services.workflow_discovery_service import (
+        invalidate_workflow_discovery_executability_caches,
+    )
+
+    db = get_db()
+    if db is not None:
+        for collection_name in ("concepts", "text_relations", "text_values"):
+            try:
+                db.drop_collection(collection_name)
+            except Exception:
+                pass
+    invalidate_workflow_discovery_executability_caches()
+    yield
+    invalidate_workflow_discovery_executability_caches()
+    authority_service.clear_workflow_type_resolution_cache()
+
+
+def test_bootstrap_publishes_canonical_chat_graphs_with_loader_runtime_parity(
+    _reset_mock_workflow_graph_db,
+):
+    from src.backend.services.workflow_discovery_service import (
+        EXECUTABILITY_EXECUTABLE_NOW,
+        classify_workflow_concept_executability,
+        invalidate_workflow_discovery_executability_caches,
+    )
+    from src.backend.workflows.definitions import register_default_workflows
+    from src.backend.workflows.vontology_loader import (
+        build_workflow_process_graph,
+        load_workflow_definition_from_vontology,
+    )
+    from src.backend.workflows.workflow_registry import WorkflowRegistry
+
+    registry = WorkflowRegistry()
+    register_default_workflows(registry)
+
+    report = authority_service.bootstrap_workflow_concepts(registry=cast(Any, registry))
+    graph_publication = report.get("graph_publication") or {}
+    counts = graph_publication.get("counts") or {}
+    assert counts.get("workflows_published") == len(
+        authority_service.CANONICAL_CHAT_WORKFLOW_IDS
+    )
+    assert counts.get("errors") == 0
+
+    invalidate_workflow_discovery_executability_caches()
+
+    for workflow_id in authority_service.CANONICAL_CHAT_WORKFLOW_IDS:
+        graph, warnings = build_workflow_process_graph(workflow_id)
+        assert isinstance(graph, dict), f"{workflow_id}: graph_missing {warnings}"
+        assert warnings == []
+
+        steps = graph.get("steps")
+        assert isinstance(steps, list)
+        assert len(steps) > 0
+        step_ids = {
+            step.get("step_id")
+            for step in steps
+            if isinstance(step, dict) and isinstance(step.get("step_id"), str)
+        }
+        assert graph.get("initial_step") in step_ids
+
+        loaded_definition = load_workflow_definition_from_vontology(workflow_id)
+        assert loaded_definition is not None
+        built_in_definition = registry.get(workflow_id)
+        assert built_in_definition is not None
+
+        expected_initial_state = authority_service._step_concept_id(
+            workflow_id=workflow_id,
+            state_id=built_in_definition.initial_state,
+        )
+        assert loaded_definition.initial_state == expected_initial_state
+
+        expected_loaded_state_ids = {
+            authority_service._step_concept_id(
+                workflow_id=workflow_id,
+                state_id=state_id,
+            )
+            for state_id in built_in_definition.states.keys()
+        }
+        assert set(loaded_definition.states.keys()) == expected_loaded_state_ids
+
+        for state_id, built_state in built_in_definition.states.items():
+            loaded_state_id = authority_service._step_concept_id(
+                workflow_id=workflow_id,
+                state_id=state_id,
+            )
+            loaded_state = loaded_definition.states[loaded_state_id]
+            assert tuple(action.action_id for action in loaded_state.actions) == tuple(
+                action.action_id for action in built_state.actions
+            )
+            assert {transition.to_state for transition in loaded_state.transitions} == {
+                authority_service._step_concept_id(
+                    workflow_id=workflow_id,
+                    state_id=transition.to_state,
+                )
+                for transition in built_state.transitions
+            }
+
+        is_executable, reason, detail = classify_workflow_concept_executability(
+            workflow_id
+        )
+        assert is_executable is True, f"{workflow_id}: {reason}: {detail}"
+        assert reason == EXECUTABILITY_EXECUTABLE_NOW
