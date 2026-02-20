@@ -687,6 +687,22 @@ def _normalise_invoked_action_target(raw_target: str) -> str | None:
     return target
 
 
+def _evaluate_transition_result_truth(context: Dict[str, Any]) -> bool:
+    """Evaluate branching truth from explicit test outcomes when present.
+
+    Read-back test steps can return payloads like ``{"result": False}`` while
+    invocation status remains successful. Branch routing should therefore honour
+    explicit test outcomes before falling back to generic success flags.
+    """
+
+    if "result" in context:
+        result_value = context.get("result")
+        if isinstance(result_value, dict) and "result" in result_value:
+            return bool(result_value.get("result"))
+        return bool(result_value)
+    return bool(context.get("last_step_ok"))
+
+
 def _normalise_non_empty_text(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -1280,8 +1296,8 @@ def load_workflow_definition_from_vontology(
             transitions.append(
                 WorkflowTransitionSpec(
                     to_state=on_true_target,
-                    condition=lambda ctx, _t=on_true_target: bool(
-                        ctx.get("last_step_ok") or ctx.get("result")
+                    condition=lambda ctx, _t=on_true_target: _evaluate_transition_result_truth(
+                        ctx
                     ),
                     reason="on_true",
                 )
@@ -1291,8 +1307,8 @@ def load_workflow_definition_from_vontology(
             transitions.append(
                 WorkflowTransitionSpec(
                     to_state=on_false_target,
-                    condition=lambda ctx, _t=on_false_target: not bool(
-                        ctx.get("last_step_ok") or ctx.get("result")
+                    condition=lambda ctx, _t=on_false_target: not _evaluate_transition_result_truth(
+                        ctx
                     ),
                     reason="on_false",
                 )

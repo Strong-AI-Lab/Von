@@ -1288,6 +1288,22 @@ class TestFullWorkflowConversion:
         # on_true fires when result is truthy.
         assert check.transitions[2].condition({"result": True}) is True
         assert check.transitions[2].condition({"result": False}) is False
+        # Explicit nested result must override generic success flags.
+        assert (
+            check.transitions[2].condition(
+                {"last_step_ok": True, "result": {"result": False}}
+            )
+            is False
+        )
+        assert (
+            check.transitions[3].condition(
+                {"last_step_ok": True, "result": {"result": False}}
+            )
+            is True
+        )
+        # When no explicit result exists, fallback uses last_step_ok.
+        assert check.transitions[2].condition({"last_step_ok": True}) is True
+        assert check.transitions[3].condition({"last_step_ok": False}) is True
 
         # Terminal states.
         assert defn.states["#V#proceed"].terminal is True
