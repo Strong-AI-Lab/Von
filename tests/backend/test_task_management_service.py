@@ -29,9 +29,11 @@ from src.backend.services.task_management_service import (
     create_task,
     get_task,
     update_task_status,
+    update_task_fields,
     assign_task,
     get_tasks_for_user,
     list_tasks,
+    search_tasks,
     delete_task,
 )
 
@@ -412,3 +414,176 @@ class TestDeleteTask:
 
         with pytest.raises(TaskNotFoundError):
             delete_task("#V#task_nonexistent")
+
+
+class TestTaskParityDatesAndEpic:
+    """Coverage for Jira-parity start-date and epic-link task fields."""
+
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.upsert_text_for_concept")
+    @patch("src.backend.services.task_management_service._get_task_doc")
+    @patch(
+        "src.backend.services.task_management_service.maybe_launch_task_created_workflow"
+    )
+    def test_create_task_stores_start_date_and_epic(
+        self,
+        mock_launch_workflow: MagicMock,
+        mock_get_task_doc: MagicMock,
+        mock_upsert: MagicMock,
+        mock_repo: MagicMock,
+    ) -> None:
+        mock_repo.insert_one.return_value = None
+        mock_get_task_doc.return_value = (
+            "#V#task_epic_1",
+            {
+                "concept_id": "#V#task_epic_1",
+                "relationships": {"is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID]},
+            },
+        )
+
+        start_date = datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
+        due_date = datetime(2026, 3, 5, 10, 0, 0, tzinfo=timezone.utc)
+        result = create_task(
+            title="Task with dates",
+            description="Description",
+            start_date=start_date,
+            due_date=due_date,
+            epic_task_concept_id="#V#task_epic_1",
+        )
+
+        assert result["start_date"] == "2026-03-01T10:00:00+00:00"
+        assert result["due_date"] == "2026-03-05T10:00:00+00:00"
+        assert result["epic_task_concept_id"] == "#V#task_epic_1"
+        inserted_doc = mock_repo.insert_one.call_args.args[0]
+        assert (
+            inserted_doc["relationships"]["#V#hasEpicTask"] == ["#V#task_epic_1"]
+        )
+        predicates = [call.kwargs.get("predicate") for call in mock_upsert.call_args_list]
+        assert "#V#hasStartDate" in predicates
+        assert "#V#hasDueDate" in predicates
+        mock_launch_workflow.assert_called_once()
+
+    def test_create_task_rejects_start_after_due(self) -> None:
+        with pytest.raises(
+            InvalidTaskDataError, match="start_date must be before or equal to due_date"
+        ):
+            create_task(
+                title="Invalid date order",
+                description="Description",
+                start_date="2026-03-10T00:00:00Z",
+                due_date="2026-03-01T00:00:00Z",
+            )
+
+    @patch("src.backend.services.task_management_service.get_task")
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.get_texts_for_concept")
+    @patch("src.backend.services.task_management_service.upsert_text_for_concept")
+    def test_update_task_fields_start_date_and_epic(
+        self,
+        mock_upsert: MagicMock,
+        mock_get_texts: MagicMock,
+        mock_repo: MagicMock,
+        mock_get_task: MagicMock,
+    ) -> None:
+        task_doc = {
+            "concept_id": "#V#task_1",
+            "relationships": {"is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID]},
+            "metadata": {},
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+        }
+        epic_doc = {
+            "concept_id": "#V#task_epic_1",
+            "relationships": {"is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID]},
+            "metadata": {},
+        }
+
+        def _fake_find_one(query: Dict[str, Any], projection: Optional[Dict[str, Any]] = None):
+            concept_id = query.get("concept_id")
+            if concept_id == "#V#task_epic_1":
+                return epic_doc
+            if concept_id == "#V#task_1":
+                return task_doc
+            return None
+
+        mock_repo.find_one.side_effect = _fake_find_one
+        mock_get_texts.return_value = []
+        mock_get_task.return_value = {
+            "task_concept_id": "#V#task_1",
+            "start_date": "2026-03-01T10:00:00+00:00",
+            "epic_task_concept_id": "#V#task_epic_1",
+        }
+
+        result = update_task_fields(
+            "#V#task_1",
+            fields={
+                "start_date": "2026-03-01T10:00:00Z",
+                "epic_task_concept_id": "#V#task_epic_1",
+            },
+            actor_concept_id="#V#user_alice",
+        )
+
+        assert "start_date" in result["changed_fields"]
+        assert "epic_task_concept_id" in result["changed_fields"]
+        assert result["task"]["epic_task_concept_id"] == "#V#task_epic_1"
+        assert any(
+            call.kwargs.get("predicate") == "#V#hasStartDate"
+            for call in mock_upsert.call_args_list
+        )
+        assert any(
+            call.kwargs.get("kind") == "#V#hasEpicTask" and call.kwargs.get("action") == "add"
+            for call in mock_repo.mutate_relationship_edge.call_args_list
+        )
+
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.get_texts_for_concept")
+    def test_search_tasks_filters_start_date_and_epic(
+        self,
+        mock_get_texts: MagicMock,
+        mock_repo: MagicMock,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        mock_repo.find.return_value = [
+            {
+                "concept_id": "#V#task_1",
+                "relationships": {
+                    "is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID],
+                    "#V#hasEpicTask": ["#V#task_epic_1"],
+                },
+                "metadata": {},
+                "created_at": now,
+                "updated_at": now,
+            },
+            {
+                "concept_id": "#V#task_2",
+                "relationships": {"is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID]},
+                "metadata": {},
+                "created_at": now,
+                "updated_at": now,
+            },
+        ]
+
+        def _fake_get_texts(concept_id: str, *args: Any, **kwargs: Any) -> list[dict[str, str]]:
+            if concept_id == "#V#task_1":
+                return [
+                    {"predicate": "#V#hasName", "text": "Task 1"},
+                    {"predicate": "#V#hasStartDate", "text": "2026-03-02T00:00:00+00:00"},
+                    {"predicate": "#V#hasTaskStatus", "text": "pending"},
+                ]
+            return [
+                {"predicate": "#V#hasName", "text": "Task 2"},
+                {"predicate": "#V#hasStartDate", "text": "2026-04-10T00:00:00+00:00"},
+                {"predicate": "#V#hasTaskStatus", "text": "pending"},
+            ]
+
+        mock_get_texts.side_effect = _fake_get_texts
+
+        result = search_tasks(
+            epic_task_concept_id="#V#task_epic_1",
+            start_from="2026-03-01T00:00:00Z",
+            start_to="2026-03-05T00:00:00Z",
+            limit=10,
+        )
+
+        assert result["count"] == 1
+        assert result["tasks"][0]["task_concept_id"] == "#V#task_1"

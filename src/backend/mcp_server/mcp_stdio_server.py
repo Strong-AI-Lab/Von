@@ -2618,7 +2618,9 @@ async def _handle_create_task(arguments: dict[str, Any]) -> list[TextContent]:
             assignee_concept_id=arguments.get("assignee_concept_id"),
             created_by_concept_id=arguments.get("creator_concept_id"),
             originating_session_id=arguments.get("session_id"),
+            start_date=arguments.get("start_date"),
             due_date=arguments.get("due_date"),
+            epic_task_concept_id=arguments.get("epic_task_concept_id"),
             priority=arguments.get("priority", "medium"),
             organisation_concept_id=arguments.get("organisation_concept_id"),
         )

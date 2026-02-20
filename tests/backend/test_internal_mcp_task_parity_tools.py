@@ -224,3 +224,100 @@ def test_task_attachment_gateway_success_and_error_schema(monkeypatch):
     assert error_payload.get("success") is False
     assert error_payload.get("error_code") == "MISSING_PARAM"
     _assert_schema_conformance(gateway, "task_add_attachment", error_payload)
+
+
+def test_task_create_gateway_supports_start_date_and_epic(monkeypatch):
+    gateway = _build_gateway()
+
+    def _fake_create_task(
+        title: str,
+        description: str,
+        *,
+        assignee_concept_id=None,
+        originating_session_id=None,
+        created_by_concept_id=None,
+        start_date=None,
+        due_date=None,
+        epic_task_concept_id=None,
+        priority="medium",
+        organisation_concept_id=None,
+    ):
+        return {
+            "task_concept_id": "#V#task_123",
+            "title": title,
+            "description": description,
+            "status": "pending",
+            "priority": priority,
+            "assignee_concept_id": assignee_concept_id,
+            "created_by_concept_id": created_by_concept_id,
+            "originating_conversation_id": originating_session_id,
+            "start_date": start_date.isoformat() if start_date is not None else None,
+            "due_date": due_date.isoformat() if due_date is not None else None,
+            "epic_task_concept_id": epic_task_concept_id,
+            "organisation_concept_id": organisation_concept_id,
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.task_management_service.create_task",
+        _fake_create_task,
+    )
+
+    payload = gateway.invoke(
+        "task_create",
+        {
+            "title": "Task with dates",
+            "description": "Details",
+            "start_date": "2026-03-01T10:00:00Z",
+            "due_date": "2026-03-05T10:00:00Z",
+            "epic_task_concept_id": "#V#task_epic_1",
+        },
+    ).payload
+    assert payload.get("success") is True
+    assert payload.get("start_date") == "2026-03-01T10:00:00+00:00"
+    assert payload.get("due_date") == "2026-03-05T10:00:00+00:00"
+    assert payload.get("epic_task_concept_id") == "#V#task_epic_1"
+    _assert_schema_conformance(gateway, "task_create", payload)
+
+
+def test_task_search_gateway_supports_start_and_epic_filters(monkeypatch):
+    gateway = _build_gateway()
+    definition = gateway.get_method_definition("task_search")
+    assert definition is not None
+    assert definition.input_schema is not None
+    assert "start_from" in definition.input_schema.optional
+    assert "start_to" in definition.input_schema.optional
+    assert "epic_task_concept_id" in definition.input_schema.optional
+    assert "has_epic" in definition.input_schema.optional
+
+    captured: dict = {}
+
+    def _fake_search_tasks(**kwargs):
+        captured.update(kwargs)
+        return {
+            "tasks": [],
+            "total": 0,
+            "count": 0,
+            "offset": kwargs.get("offset", 0),
+            "limit": kwargs.get("limit", 50),
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.task_management_service.search_tasks",
+        _fake_search_tasks,
+    )
+
+    payload = gateway.invoke(
+        "task_search",
+        {
+            "start_from": "2026-03-01T00:00:00Z",
+            "start_to": "2026-03-15T00:00:00Z",
+            "epic_task_concept_id": "#V#task_epic_1",
+            "has_epic": True,
+        },
+    ).payload
+    assert payload.get("success") is True
+    assert captured.get("start_from") == "2026-03-01T00:00:00Z"
+    assert captured.get("start_to") == "2026-03-15T00:00:00Z"
+    assert captured.get("epic_task_concept_id") == "#V#task_epic_1"
+    assert captured.get("has_epic") is True
+    _assert_schema_conformance(gateway, "task_search", payload)

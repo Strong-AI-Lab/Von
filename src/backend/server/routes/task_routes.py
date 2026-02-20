@@ -4,18 +4,20 @@ Provides endpoints for creating, reading, updating, and deleting tasks.
 Tasks are stored as Vontology concepts.
 """
 
+from datetime import datetime, timezone
+import logging
+
 from flask import Blueprint, request, jsonify, session
 from flask.typing import ResponseReturnValue
-import logging
 
 from ...services.task_management_service import (
     create_task,
     get_task,
-    update_task_status,
-    assign_task,
+    update_task_fields,
     get_tasks_for_user,
     get_tasks_for_conversation,
     list_tasks,
+    search_tasks,
     delete_task,
     TaskNotFoundError,
     InvalidTaskDataError,
@@ -25,6 +27,60 @@ from ...services.task_management_service import (
 logger = logging.getLogger(__name__)
 
 task_bp = Blueprint("tasks", __name__)
+
+
+def _parse_optional_datetime(value: object, field_name: str) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if not isinstance(value, str):
+        raise InvalidTaskDataError(f"{field_name} must be an ISO 8601 datetime string")
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    try:
+        parsed = datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise InvalidTaskDataError(
+            f"{field_name} must be an ISO 8601 datetime string"
+        ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _parse_optional_bool(raw_value: str | None, field_name: str) -> bool | None:
+    if raw_value is None:
+        return None
+    lowered = raw_value.strip().lower()
+    if not lowered:
+        return None
+    if lowered in {"true", "1", "yes", "y"}:
+        return True
+    if lowered in {"false", "0", "no", "n"}:
+        return False
+    raise InvalidTaskDataError(f"{field_name} must be a boolean")
+
+
+def _parse_csv_param(raw_value: str | None) -> list[str] | None:
+    if raw_value is None:
+        return None
+    values = [item.strip() for item in raw_value.split(",") if item.strip()]
+    return values or None
+
+
+def _parse_int_param(raw_value: str | None, default: int) -> int:
+    if raw_value is None or not raw_value.strip():
+        return default
+    try:
+        return int(raw_value.strip())
+    except ValueError:
+        raise InvalidTaskDataError(
+            f"Expected integer query parameter, received: {raw_value}"
+        )
 
 
 def _get_current_user_concept_id() -> str | None:
@@ -61,7 +117,9 @@ def create_task_route() -> ResponseReturnValue:
         title: str (required)
         description: str (required)
         assignee_concept_id: str (optional)
+        start_date: str (optional, ISO 8601)
         due_date: str (optional, ISO 8601)
+        epic_task_concept_id: str (optional)
         priority: str (optional, default: medium)
         session_id: str (optional, link to conversation)
     """
@@ -79,6 +137,8 @@ def create_task_route() -> ResponseReturnValue:
         # Get creator from session
         creator_concept_id = _get_current_user_concept_id()
         organisation_concept_id = _get_current_org_concept_id()
+        parsed_start_date = _parse_optional_datetime(data.get("start_date"), "start_date")
+        parsed_due_date = _parse_optional_datetime(data.get("due_date"), "due_date")
 
         result = create_task(
             title=title,
@@ -86,7 +146,9 @@ def create_task_route() -> ResponseReturnValue:
             assignee_concept_id=data.get("assignee_concept_id"),
             created_by_concept_id=creator_concept_id,
             originating_session_id=data.get("session_id"),
-            due_date=data.get("due_date"),
+            start_date=parsed_start_date,
+            due_date=parsed_due_date,
+            epic_task_concept_id=data.get("epic_task_concept_id"),
             priority=data.get("priority", "medium"),
             organisation_concept_id=organisation_concept_id,
         )
@@ -124,18 +186,26 @@ def update_task_route(task_concept_id: str) -> ResponseReturnValue:
     Request body (all fields optional):
         status: str (pending, in_progress, completed, cancelled, blocked)
         assignee_concept_id: str
+        title: str
+        description: str
+        priority: str
+        start_date: str (ISO 8601)
+        due_date: str (ISO 8601)
+        labels: list[str]
+        parent_task_concept_id: str
+        epic_task_concept_id: str
     """
     try:
         data = request.get_json() or {}
-
-        # Handle status update
-        if "status" in data:
-            result = update_task_status(task_concept_id, data["status"])
-        # Handle assignee update
-        elif "assignee_concept_id" in data:
-            result = assign_task(task_concept_id, data["assignee_concept_id"])
-        else:
+        if not data:
             return jsonify({"error": "No update fields provided"}), 400
+
+        actor_concept_id = _get_current_user_concept_id()
+        result = update_task_fields(
+            task_concept_id,
+            fields=data,
+            actor_concept_id=actor_concept_id,
+        )
 
         return jsonify(result), 200
 
@@ -207,6 +277,62 @@ def list_tasks_route() -> ResponseReturnValue:
 
     except Exception as e:
         logger.error(f"Unexpected error listing tasks: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@task_bp.route("/search", methods=["GET"])
+def search_tasks_route() -> ResponseReturnValue:
+    """Search tasks with rich filters."""
+    try:
+        statuses = request.args.getlist("status")
+        if not statuses:
+            statuses = request.args.getlist("statuses")
+        if not statuses:
+            statuses = _parse_csv_param(request.args.get("statuses")) or []
+
+        labels = request.args.getlist("label")
+        if not labels:
+            labels = request.args.getlist("labels")
+        if not labels:
+            labels = _parse_csv_param(request.args.get("labels")) or []
+
+        result = search_tasks(
+            query=request.args.get("query"),
+            status_filter=request.args.get("status_filter"),
+            statuses=statuses or None,
+            assignee_concept_id=request.args.get("assignee_concept_id")
+            or request.args.get("assignee_id")
+            or request.args.get("user_concept_id"),
+            labels=labels or None,
+            parent_task_concept_id=request.args.get("parent_task_concept_id"),
+            epic_task_concept_id=request.args.get("epic_task_concept_id"),
+            has_parent=_parse_optional_bool(request.args.get("has_parent"), "has_parent"),
+            has_subtasks=_parse_optional_bool(
+                request.args.get("has_subtasks"), "has_subtasks"
+            ),
+            has_epic=_parse_optional_bool(request.args.get("has_epic"), "has_epic"),
+            start_from=request.args.get("start_from"),
+            start_to=request.args.get("start_to"),
+            due_from=request.args.get("due_from"),
+            due_to=request.args.get("due_to"),
+            created_from=request.args.get("created_from"),
+            created_to=request.args.get("created_to"),
+            updated_from=request.args.get("updated_from"),
+            updated_to=request.args.get("updated_to"),
+            dependency_state=request.args.get("dependency_state"),
+            organisation_concept_id=request.args.get("organisation_concept_id")
+            or _get_current_org_concept_id(),
+            limit=_parse_int_param(request.args.get("limit"), 50),
+            offset=_parse_int_param(request.args.get("offset"), 0),
+        )
+        return jsonify(result), 200
+    except InvalidTaskDataError as e:
+        return jsonify({"error": str(e)}), 400
+    except TaskManagementError as e:
+        logger.error(f"Failed to search tasks: {e}")
+        return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        logger.error(f"Unexpected error searching tasks: {e}")
         return jsonify({"error": "Internal server error"}), 500
 
 

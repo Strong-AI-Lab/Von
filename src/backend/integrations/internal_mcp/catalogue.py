@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import datetime
 from typing import Any, List, Mapping, Sequence
 
 from .gateway import MethodCatalogue, MethodDefinition
@@ -10420,6 +10421,34 @@ def _chat_introspect(
 # --------------------------------------------------------------------------- #
 
 
+def _parse_optional_iso_datetime_param(
+    value: Any,
+    *,
+    field_name: str,
+) -> tuple[datetime | None, dict[str, Any] | None]:
+    if value is None:
+        return None, None
+    if not isinstance(value, str) or not value.strip():
+        return None, make_error_response(
+            "INVALID_DATE",
+            f"Invalid {field_name} format: {value}",
+            suggestions=[
+                f"Use ISO format for {field_name} (for example '2025-12-31' or '2025-12-31T23:59:59Z')"
+            ],
+        )
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None, make_error_response(
+            "INVALID_DATE",
+            f"Invalid {field_name} format: {value}",
+            suggestions=[
+                f"Use ISO format for {field_name} (for example '2025-12-31' or '2025-12-31T23:59:59Z')"
+            ],
+        )
+    return parsed, None
+
+
 def _task_create(**kwargs):
     """Create a new task via the task management service."""
     from ...services.task_management_service import (
@@ -10427,7 +10456,6 @@ def _task_create(**kwargs):
         TaskManagementError,
         create_task,
     )
-    from datetime import datetime
 
     title = kwargs.get("title")
     description = kwargs.get("description")
@@ -10449,20 +10477,20 @@ def _task_create(**kwargs):
     created_by = kwargs.get("created_by_concept_id") or kwargs.get("namespace")
     priority = kwargs.get("priority", "medium")
     org_id = kwargs.get("organisation_concept_id")
+    epic_task_concept_id = kwargs.get("epic_task_concept_id")
 
-    due_date = None
-    due_str = kwargs.get("due_date")
-    if due_str and isinstance(due_str, str):
-        try:
-            due_date = datetime.fromisoformat(due_str.replace("Z", "+00:00"))
-        except ValueError:
-            return make_error_response(
-                "INVALID_DATE",
-                f"Invalid due_date format: {due_str}",
-                suggestions=[
-                    "Use ISO format (e.g. '2025-12-31' or '2025-12-31T23:59:59Z')"
-                ],
-            )
+    start_date, start_error = _parse_optional_iso_datetime_param(
+        kwargs.get("start_date"),
+        field_name="start_date",
+    )
+    if start_error:
+        return start_error
+    due_date, due_error = _parse_optional_iso_datetime_param(
+        kwargs.get("due_date"),
+        field_name="due_date",
+    )
+    if due_error:
+        return due_error
 
     try:
         result = create_task(
@@ -10471,7 +10499,9 @@ def _task_create(**kwargs):
             assignee_concept_id=assignee_id,
             originating_session_id=session_id,
             created_by_concept_id=created_by,
+            start_date=start_date,
             due_date=due_date,
+            epic_task_concept_id=epic_task_concept_id,
             priority=priority,
             organisation_concept_id=org_id,
         )
@@ -10662,8 +10692,12 @@ def _task_search(**kwargs):
             or kwargs.get("user_concept_id"),
             labels=kwargs.get("labels"),
             parent_task_concept_id=kwargs.get("parent_task_concept_id"),
+            epic_task_concept_id=kwargs.get("epic_task_concept_id"),
             has_parent=kwargs.get("has_parent"),
             has_subtasks=kwargs.get("has_subtasks"),
+            has_epic=kwargs.get("has_epic"),
+            start_from=kwargs.get("start_from"),
+            start_to=kwargs.get("start_to"),
             due_from=kwargs.get("due_from"),
             due_to=kwargs.get("due_to"),
             created_from=kwargs.get("created_from"),
@@ -10846,8 +10880,6 @@ def _task_set_parent(**kwargs):
 
 
 def _task_create_subtask(**kwargs):
-    from datetime import datetime
-
     from ...services.task_management_service import (
         InvalidTaskDataError,
         TaskNotFoundError,
@@ -10879,19 +10911,18 @@ def _task_create_subtask(**kwargs):
             suggestions=["Provide a non-empty description string for the subtask"],
         )
 
-    due_date = None
-    due_str = kwargs.get("due_date")
-    if due_str and isinstance(due_str, str):
-        try:
-            due_date = datetime.fromisoformat(due_str.replace("Z", "+00:00"))
-        except ValueError:
-            return make_error_response(
-                "INVALID_DATE",
-                f"Invalid due_date format: {due_str}",
-                suggestions=[
-                    "Use ISO format (e.g. '2025-12-31' or '2025-12-31T23:59:59Z')"
-                ],
-            )
+    start_date, start_error = _parse_optional_iso_datetime_param(
+        kwargs.get("start_date"),
+        field_name="start_date",
+    )
+    if start_error:
+        return start_error
+    due_date, due_error = _parse_optional_iso_datetime_param(
+        kwargs.get("due_date"),
+        field_name="due_date",
+    )
+    if due_error:
+        return due_error
 
     try:
         result = create_subtask(
@@ -10902,7 +10933,9 @@ def _task_create_subtask(**kwargs):
             or kwargs.get("assignee_id"),
             created_by_concept_id=kwargs.get("created_by_concept_id")
             or kwargs.get("namespace"),
+            start_date=start_date,
             due_date=due_date,
+            epic_task_concept_id=kwargs.get("epic_task_concept_id"),
             priority=kwargs.get("priority", "medium"),
             organisation_concept_id=kwargs.get("organisation_concept_id"),
             originating_session_id=kwargs.get("originating_session_id")
@@ -12381,7 +12414,9 @@ def build_default_catalogue() -> MethodCatalogue:
                     "created_by_concept_id": (str, type(None)),
                     "namespace": (str, type(None)),
                     "priority": (str,),
+                    "start_date": (str, type(None)),
                     "due_date": (str, type(None)),
+                    "epic_task_concept_id": (str, type(None)),
                     "organisation_concept_id": (str, type(None)),
                 },
                 allow_unknown=True,
@@ -12456,8 +12491,12 @@ def build_default_catalogue() -> MethodCatalogue:
                     "user_concept_id": (str, type(None)),
                     "labels": (list, type(None)),
                     "parent_task_concept_id": (str, type(None)),
+                    "epic_task_concept_id": (str, type(None)),
                     "has_parent": (bool, type(None)),
                     "has_subtasks": (bool, type(None)),
+                    "has_epic": (bool, type(None)),
+                    "start_from": (str, type(None)),
+                    "start_to": (str, type(None)),
                     "due_from": (str, type(None)),
                     "due_to": (str, type(None)),
                     "created_from": (str, type(None)),
@@ -12495,7 +12534,8 @@ def build_default_catalogue() -> MethodCatalogue:
                 description=(
                     "Update multiple task fields in one operation. "
                     "Supported fields: status, assignee_concept_id, title, description, "
-                    "priority, due_date, labels, parent_task_concept_id."
+                    "priority, start_date, due_date, labels, parent_task_concept_id, "
+                    "epic_task_concept_id."
                 ),
             ),
             output_schema=task_update_fields_output_schema,
@@ -12606,7 +12646,9 @@ def build_default_catalogue() -> MethodCatalogue:
                     "created_by_concept_id": (str, type(None)),
                     "namespace": (str, type(None)),
                     "priority": (str,),
+                    "start_date": (str, type(None)),
                     "due_date": (str, type(None)),
+                    "epic_task_concept_id": (str, type(None)),
                     "organisation_concept_id": (str, type(None)),
                 },
                 allow_unknown=True,

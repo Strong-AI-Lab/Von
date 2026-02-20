@@ -37,6 +37,7 @@ CONVERSATION_TYPE_ID = "#V#conversation"
 PREDICATE_HAS_ASSIGNEE = "#V#hasAssignee"
 PREDICATE_HAS_CREATED_BY = "#V#hasCreatedBy"
 PREDICATE_HAS_ORIGINATING_CONVERSATION = "#V#hasOriginatingConversation"
+PREDICATE_HAS_START_DATE = "#V#hasStartDate"
 PREDICATE_HAS_DUE_DATE = "#V#hasDueDate"
 PREDICATE_HAS_PRIORITY = "#V#hasPriority"
 PREDICATE_HAS_TASK_STATUS = "#V#hasTaskStatus"
@@ -44,6 +45,7 @@ PREDICATE_HAS_DESCRIPTION = "#V#hasDescription"
 PREDICATE_HAS_NAME = "#V#hasName"
 PREDICATE_HAS_PARENT_TASK = "#V#hasParentTask"
 PREDICATE_HAS_SUBTASK = "#V#hasSubtask"
+PREDICATE_HAS_EPIC_TASK = "#V#hasEpicTask"
 
 # Task dependency/link predicates
 PREDICATE_TASK_DEPENDS_ON = "#V#dependsOnTask"
@@ -416,6 +418,18 @@ def _task_parent_id_from_doc(doc: Dict[str, Any]) -> str | None:
     return None
 
 
+def _task_epic_id_from_doc(doc: Dict[str, Any]) -> str | None:
+    relationships = doc.get("relationships", {})
+    epic_candidates = relationships.get(PREDICATE_HAS_EPIC_TASK) or []
+    if isinstance(epic_candidates, list):
+        for candidate in epic_candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate
+    if isinstance(epic_candidates, str) and epic_candidates.strip():
+        return epic_candidates
+    return None
+
+
 def _first_relationship_value(raw: Any) -> str | None:
     if isinstance(raw, list):
         for candidate in raw:
@@ -435,6 +449,31 @@ def _task_subtask_ids_from_doc(doc: Dict[str, Any]) -> list[str]:
     if not isinstance(raw, list):
         return []
     return [item for item in raw if isinstance(item, str) and item.strip()]
+
+
+def _clear_task_datetime_text_relations(
+    *,
+    task_concept_id: str,
+    predicate: str,
+    log_field_name: str,
+) -> None:
+    from ..services.text_value_service import delete_text_relation
+
+    for existing in get_texts_for_concept(
+        task_concept_id,
+        predicate=predicate,
+        limit=100,
+    ):
+        relation_id = existing.get("relation_id")
+        if isinstance(relation_id, str) and relation_id:
+            try:
+                delete_text_relation(task_concept_id, relation_id)
+            except Exception as e:
+                logger.debug(
+                    "Failed to delete %s text relation: %s",
+                    log_field_name,
+                    e,
+                )
 
 
 def _task_links_from_doc(doc: Dict[str, Any]) -> list[Dict[str, str]]:
@@ -510,7 +549,9 @@ def create_task(
     assignee_concept_id: Optional[str] = None,
     originating_session_id: Optional[str] = None,
     created_by_concept_id: Optional[str] = None,
-    due_date: Optional[datetime] = None,
+    start_date: datetime | str | None = None,
+    due_date: datetime | str | None = None,
+    epic_task_concept_id: Optional[str] = None,
     priority: str = PRIORITY_MEDIUM,
     organisation_concept_id: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -522,7 +563,9 @@ def create_task(
         assignee_concept_id: Person/org concept_id responsible for the task
         originating_session_id: Chat session_id where task was created
         created_by_concept_id: Person/agent who created the task
-        due_date: Optional deadline
+        start_date: Optional start datetime (ISO string or datetime)
+        due_date: Optional deadline datetime (ISO string or datetime)
+        epic_task_concept_id: Optional epic concept_id for Jira-style epic linkage
         priority: Task priority (low, medium, high, critical)
         organisation_concept_id: Organisation context, if applicable
 
@@ -543,6 +586,21 @@ def create_task(
             f"Invalid priority '{priority}'. Must be one of: {VALID_PRIORITIES}"
         )
 
+    parsed_start_date = _parse_datetime(start_date)
+    if start_date is not None and parsed_start_date is None:
+        raise InvalidTaskDataError("start_date must be an ISO 8601 datetime string")
+
+    parsed_due_date = _parse_datetime(due_date)
+    if due_date is not None and parsed_due_date is None:
+        raise InvalidTaskDataError("due_date must be an ISO 8601 datetime string")
+
+    if (
+        parsed_start_date is not None
+        and parsed_due_date is not None
+        and parsed_start_date > parsed_due_date
+    ):
+        raise InvalidTaskDataError("start_date must be before or equal to due_date")
+
     # Generate unique concept_id
     task_concept_id = _generate_task_concept_id(title)
 
@@ -553,6 +611,11 @@ def create_task(
         created_by_concept_id = ensure_v_concept_prefix(created_by_concept_id)
     if organisation_concept_id:
         organisation_concept_id = ensure_v_concept_prefix(organisation_concept_id)
+    epic_task_concept_id = _normalise_optional_concept_id(epic_task_concept_id)
+    if epic_task_concept_id and epic_task_concept_id == task_concept_id:
+        raise InvalidTaskDataError("A task cannot reference itself as epic")
+    if epic_task_concept_id:
+        _get_task_doc(epic_task_concept_id)
 
     now = _now()
 
@@ -565,6 +628,8 @@ def create_task(
         relationships[PREDICATE_HAS_ASSIGNEE] = [assignee_concept_id]
     if created_by_concept_id:
         relationships[PREDICATE_HAS_CREATED_BY] = [created_by_concept_id]
+    if epic_task_concept_id:
+        relationships[PREDICATE_HAS_EPIC_TASK] = [epic_task_concept_id]
 
     # Visibility scoping - task visible to creator and assignee
     visible_to_users = []
@@ -663,13 +728,25 @@ def create_task(
     except Exception as e:
         logger.warning(f"Failed to store task priority: {e}")
 
+    # Store start date if provided
+    if parsed_start_date:
+        try:
+            upsert_text_for_concept(
+                subject_concept_id=task_concept_id,
+                predicate=PREDICATE_HAS_START_DATE,
+                text=parsed_start_date.isoformat(),
+                lang="en",
+            )
+        except Exception as e:
+            logger.warning(f"Failed to store task start date: {e}")
+
     # Store due date if provided
-    if due_date:
+    if parsed_due_date:
         try:
             upsert_text_for_concept(
                 subject_concept_id=task_concept_id,
                 predicate=PREDICATE_HAS_DUE_DATE,
-                text=due_date.isoformat(),
+                text=parsed_due_date.isoformat(),
                 lang="en",
             )
         except Exception as e:
@@ -684,7 +761,9 @@ def create_task(
         "assignee_concept_id": assignee_concept_id,
         "created_by_concept_id": created_by_concept_id,
         "originating_conversation_id": conversation_concept_id,
-        "due_date": due_date.isoformat() if due_date else None,
+        "start_date": parsed_start_date.isoformat() if parsed_start_date else None,
+        "due_date": parsed_due_date.isoformat() if parsed_due_date else None,
+        "epic_task_concept_id": epic_task_concept_id,
         "organisation_concept_id": organisation_concept_id,
         "created_at": now.isoformat(),
     }
@@ -699,6 +778,11 @@ def create_task(
                 "priority": priority,
                 "assignee_concept_id": assignee_concept_id,
                 "originating_conversation_id": conversation_concept_id,
+                "start_date": (
+                    parsed_start_date.isoformat() if parsed_start_date else None
+                ),
+                "due_date": parsed_due_date.isoformat() if parsed_due_date else None,
+                "epic_task_concept_id": epic_task_concept_id,
             },
             touch_updated_at=False,
         )
@@ -753,7 +837,7 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
     task_concept_id = doc.get("concept_id", "")
     relationships = doc.get("relationships", {})
 
-    # Get text relations for title, description, status, priority, due date
+    # Get text relations for title, description, status, priority, start/due dates
     texts = []
     try:
         texts = get_texts_for_concept(task_concept_id) or []
@@ -764,6 +848,7 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
     description = None
     status = TASK_STATUS_PENDING
     priority = PRIORITY_MEDIUM
+    start_date = None
     due_date = None
 
     for text_item in texts:
@@ -778,6 +863,8 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
             status = text_value
         elif predicate in (PREDICATE_HAS_PRIORITY, "hasPriority"):
             priority = text_value
+        elif predicate in (PREDICATE_HAS_START_DATE, "hasStartDate"):
+            start_date = text_value
         elif predicate in (PREDICATE_HAS_DUE_DATE, "hasDueDate"):
             due_date = text_value
 
@@ -798,6 +885,7 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
     worklog = _list_metadata_items(doc, TASK_METADATA_KEY_WORKLOG)
     history = _list_metadata_items(doc, TASK_METADATA_KEY_HISTORY)
     parent_task_id = _task_parent_id_from_doc(doc)
+    epic_task_id = _task_epic_id_from_doc(doc)
     subtask_ids = _task_subtask_ids_from_doc(doc)
     links = _task_links_from_doc(doc)
     worklog_total_minutes = 0
@@ -850,10 +938,12 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
         "originating_conversation_id": originating_conversation,
         "conversation_session_id": conversation_session_id,
         "conversation_name": conversation_name,
+        "start_date": start_date,
         "due_date": due_date,
         "organisation_concept_id": metadata.get(TASK_METADATA_KEY_ORGANISATION),
         "labels": labels,
         "parent_task_concept_id": parent_task_id,
+        "epic_task_concept_id": epic_task_id,
         "subtask_concept_ids": subtask_ids,
         "task_links": links,
         "comments_count": len(comments),
@@ -1165,8 +1255,12 @@ def search_tasks(
     assignee_concept_id: str | None = None,
     labels: list[str] | None = None,
     parent_task_concept_id: str | None = None,
+    epic_task_concept_id: str | None = None,
     has_parent: bool | None = None,
     has_subtasks: bool | None = None,
+    has_epic: bool | None = None,
+    start_from: str | None = None,
+    start_to: str | None = None,
     due_from: str | None = None,
     due_to: str | None = None,
     created_from: str | None = None,
@@ -1261,6 +1355,14 @@ def search_tasks(
             if task.get("parent_task_concept_id") == parent_id
         ]
 
+    if epic_task_concept_id is not None:
+        epic_id = _normalise_optional_concept_id(epic_task_concept_id)
+        if not epic_id:
+            raise InvalidTaskDataError(
+                f"Invalid epic_task_concept_id: {epic_task_concept_id}"
+            )
+        tasks = [task for task in tasks if task.get("epic_task_concept_id") == epic_id]
+
     if isinstance(has_parent, bool):
         tasks = [
             task
@@ -1273,6 +1375,24 @@ def search_tasks(
             task
             for task in tasks
             if bool(task.get("subtask_concept_ids")) is has_subtasks
+        ]
+
+    if isinstance(has_epic, bool):
+        tasks = [
+            task for task in tasks if bool(task.get("epic_task_concept_id")) is has_epic
+        ]
+
+    start_from_dt = _parse_datetime(start_from)
+    start_to_dt = _parse_datetime(start_to)
+    if start_from or start_to:
+        tasks = [
+            task
+            for task in tasks
+            if (
+                (parsed_start := _parse_datetime(task.get("start_date"))) is not None
+                and (start_from_dt is None or parsed_start >= start_from_dt)
+                and (start_to_dt is None or parsed_start <= start_to_dt)
+            )
         ]
 
     due_from_dt = _parse_datetime(due_from)
@@ -1578,7 +1698,9 @@ def create_subtask(
     description: str,
     assignee_concept_id: str | None = None,
     created_by_concept_id: str | None = None,
-    due_date: datetime | None = None,
+    start_date: datetime | str | None = None,
+    due_date: datetime | str | None = None,
+    epic_task_concept_id: str | None = None,
     priority: str = PRIORITY_MEDIUM,
     organisation_concept_id: str | None = None,
     originating_session_id: str | None = None,
@@ -1589,7 +1711,9 @@ def create_subtask(
         description=description,
         assignee_concept_id=assignee_concept_id,
         created_by_concept_id=created_by_concept_id,
+        start_date=start_date,
         due_date=due_date,
+        epic_task_concept_id=epic_task_concept_id,
         priority=priority,
         organisation_concept_id=organisation_concept_id,
         originating_session_id=originating_session_id,
@@ -1605,6 +1729,63 @@ def create_subtask(
         "parent_task_concept_id": parent_task_concept_id,
         "subtask_concept_id": subtask_id,
     }
+
+
+def set_task_epic(
+    task_concept_id: str,
+    epic_task_concept_id: str | None,
+    *,
+    actor_concept_id: str | None = None,
+) -> Dict[str, Any]:
+    task_concept_id, task_doc = _get_task_doc(task_concept_id)
+    old_epic_id = _task_epic_id_from_doc(task_doc)
+
+    new_epic_id = _normalise_optional_concept_id(epic_task_concept_id)
+    if epic_task_concept_id and not new_epic_id:
+        raise InvalidTaskDataError(
+            f"Invalid epic_task_concept_id: {epic_task_concept_id}"
+        )
+    if new_epic_id == task_concept_id:
+        raise InvalidTaskDataError("A task cannot be its own epic")
+    if new_epic_id:
+        _get_task_doc(new_epic_id)
+
+    if old_epic_id and old_epic_id != new_epic_id:
+        ConceptsRepository.mutate_relationship_edge(
+            source_id=task_concept_id,
+            kind=PREDICATE_HAS_EPIC_TASK,
+            target_id=old_epic_id,
+            action="remove",
+            maintain_inverse=False,
+        )
+
+    if new_epic_id and new_epic_id != old_epic_id:
+        ConceptsRepository.mutate_relationship_edge(
+            source_id=task_concept_id,
+            kind=PREDICATE_HAS_EPIC_TASK,
+            target_id=new_epic_id,
+            action="add",
+            maintain_inverse=False,
+        )
+
+    ConceptsRepository.update_one(
+        {"concept_id": task_concept_id},
+        {"$set": {"updated_at": _now()}},
+    )
+    try:
+        _append_task_history_event(
+            task_concept_id=task_concept_id,
+            event_type="task_epic_changed",
+            actor_concept_id=actor_concept_id,
+            details={
+                "previous_epic_task_concept_id": old_epic_id,
+                "epic_task_concept_id": new_epic_id,
+            },
+        )
+    except Exception as e:
+        logger.debug("Failed to append epic-change history event: %s", e)
+
+    return get_task(task_concept_id)
 
 
 def link_tasks(
@@ -2002,13 +2183,42 @@ def update_task_fields(
     actor_concept_id: str | None = None,
 ) -> Dict[str, Any]:
     task_concept_id = _normalise_task_concept_id(task_concept_id)
-    _, _ = _get_task_doc(task_concept_id)
+    _, task_doc = _get_task_doc(task_concept_id)
 
     if not isinstance(fields, dict) or not fields:
         raise InvalidTaskDataError("fields must be a non-empty dict")
 
+    existing_task = _build_task_response(task_doc)
     changed_fields: list[str] = []
     warnings: list[str] = []
+
+    current_start = _parse_datetime(existing_task.get("start_date"))
+    current_due = _parse_datetime(existing_task.get("due_date"))
+    next_start = current_start
+    next_due = current_due
+
+    if "start_date" in fields:
+        raw_start = fields.get("start_date")
+        if raw_start is None or (isinstance(raw_start, str) and not raw_start.strip()):
+            next_start = None
+        else:
+            next_start = _parse_datetime(raw_start)
+            if next_start is None:
+                raise InvalidTaskDataError(
+                    "start_date must be an ISO 8601 datetime string"
+                )
+
+    if "due_date" in fields:
+        raw_due = fields.get("due_date")
+        if raw_due is None or (isinstance(raw_due, str) and not raw_due.strip()):
+            next_due = None
+        else:
+            next_due = _parse_datetime(raw_due)
+            if next_due is None:
+                raise InvalidTaskDataError("due_date must be an ISO 8601 datetime string")
+
+    if next_start is not None and next_due is not None and next_start > next_due:
+        raise InvalidTaskDataError("start_date must be before or equal to due_date")
 
     if "status" in fields:
         update_task_status(task_concept_id, str(fields.get("status") or ""))
@@ -2067,19 +2277,11 @@ def update_task_fields(
     if "due_date" in fields:
         due_value = fields.get("due_date")
         if due_value is None or (isinstance(due_value, str) and not due_value.strip()):
-            from ..services.text_value_service import delete_text_relation
-
-            for existing in get_texts_for_concept(
-                task_concept_id,
+            _clear_task_datetime_text_relations(
+                task_concept_id=task_concept_id,
                 predicate=PREDICATE_HAS_DUE_DATE,
-                limit=100,
-            ):
-                relation_id = existing.get("relation_id")
-                if isinstance(relation_id, str) and relation_id:
-                    try:
-                        delete_text_relation(task_concept_id, relation_id)
-                    except Exception as e:
-                        logger.debug("Failed to delete due-date text relation: %s", e)
+                log_field_name="due-date",
+            )
             changed_fields.append("due_date")
         else:
             parsed_due = _parse_datetime(due_value)
@@ -2092,6 +2294,31 @@ def update_task_fields(
                 lang="en",
             )
             changed_fields.append("due_date")
+
+    if "start_date" in fields:
+        start_value = fields.get("start_date")
+        if start_value is None or (
+            isinstance(start_value, str) and not start_value.strip()
+        ):
+            _clear_task_datetime_text_relations(
+                task_concept_id=task_concept_id,
+                predicate=PREDICATE_HAS_START_DATE,
+                log_field_name="start-date",
+            )
+            changed_fields.append("start_date")
+        else:
+            parsed_start = _parse_datetime(start_value)
+            if not parsed_start:
+                raise InvalidTaskDataError(
+                    "start_date must be an ISO 8601 datetime string"
+                )
+            upsert_text_for_concept(
+                subject_concept_id=task_concept_id,
+                predicate=PREDICATE_HAS_START_DATE,
+                text=parsed_start.isoformat(),
+                lang="en",
+            )
+            changed_fields.append("start_date")
 
     if "labels" in fields:
         labels_value = _normalise_labels(fields.get("labels"))
@@ -2114,6 +2341,18 @@ def update_task_fields(
             )
         changed_fields.append("parent_task_concept_id")
 
+    if "epic_task_concept_id" in fields:
+        epic_raw = fields.get("epic_task_concept_id")
+        if epic_raw is None or (isinstance(epic_raw, str) and not epic_raw.strip()):
+            set_task_epic(task_concept_id, None, actor_concept_id=actor_concept_id)
+        else:
+            set_task_epic(
+                task_concept_id,
+                str(epic_raw),
+                actor_concept_id=actor_concept_id,
+            )
+        changed_fields.append("epic_task_concept_id")
+
     unknown_keys = sorted(
         key
         for key in fields.keys()
@@ -2125,9 +2364,11 @@ def update_task_fields(
             "title",
             "description",
             "priority",
+            "start_date",
             "due_date",
             "labels",
             "parent_task_concept_id",
+            "epic_task_concept_id",
         }
     )
     if unknown_keys:
@@ -2269,6 +2510,7 @@ __all__ = [
     "get_task_transitions",
     "transition_task",
     "set_task_parent",
+    "set_task_epic",
     "create_subtask",
     "link_tasks",
     "unlink_tasks",
