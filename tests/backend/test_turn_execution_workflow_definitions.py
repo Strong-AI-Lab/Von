@@ -1,7 +1,9 @@
 from src.backend.workflows.definitions import (
+    CHAT_BUTTONIFY_WORKFLOW_ID,
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
     KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
     TURN_COMPLETION_GATE_WORKFLOW_ID,
+    build_chat_buttonify_workflow,
     build_tool_calling_workflow,
     register_default_workflows,
 )
@@ -42,6 +44,21 @@ def test_register_default_workflows_includes_turn_execution_workflows() -> None:
     registry = WorkflowRegistry()
     register_default_workflows(registry)
 
+    assert registry.get(CHAT_BUTTONIFY_WORKFLOW_ID) is not None
     assert registry.get(KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID) is not None
     assert registry.get(TURN_COMPLETION_GATE_WORKFLOW_ID) is not None
     assert registry.get(CONVERSATION_TURN_EXECUTION_WORKFLOW_ID) is not None
+
+
+def test_buttonify_workflow_exposes_transformation_states() -> None:
+    workflow = build_chat_buttonify_workflow()
+
+    assert workflow.initial_state == "assess_input"
+    assert "assess_input" in workflow.states
+    assert "select_prompt" in workflow.states
+    assert "extract_options" in workflow.states
+    assert "completed" in workflow.states
+
+    assess = workflow.states["assess_input"]
+    assert assess.actions[0].action_id == "buttonify.assess_input"
+    assert any(t.to_state == "select_prompt" for t in assess.transitions)

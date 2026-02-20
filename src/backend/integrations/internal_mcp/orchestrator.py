@@ -43,6 +43,7 @@ from ...workflows.action_registry import (
 )
 from ...workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
+    CHAT_BUTTONIFY_WORKFLOW_ID,
     CHAT_NARRATION_WORKFLOW_ID,
     KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
     MISSING_TOOL_CALL_WORKFLOW_ID,
@@ -66,6 +67,13 @@ from src.backend.workflows.write_tool_policy import (
     prompt_explicitly_denies_write,
 )
 from ...services.turn_execution_record_service import build_turn_execution_record
+from src.backend.services.buttonify_service import (
+    BUTTONIFY_PROMPT_IDS,
+    BUTTONIFY_PROMPT_TEMPLATE,
+    extract_buttonify_options_heuristic,
+    parse_buttonify_options_json,
+    dedupe_buttonify_options,
+)
 
 # Tool metadata service for Vontology-driven tool display (JVNAUTOSCI-1073)
 from src.backend.services.tool_metadata_service import (
@@ -226,6 +234,7 @@ class ProgressTracker:
         "tool_execute": "Executing tools",
         "screen_backfill": "Generating response",
         "narration": "Generating narration",
+        "buttonify": "Generating quick replies",
         "completed": "Complete",
         "error": "Error",
         "cancelled": "Cancelled",
@@ -407,6 +416,7 @@ class InternalMCPChatOrchestrator:
     PHASE_TOOL_EXECUTE = "tool_execute"
     PHASE_SCREEN_BACKFILL = "screen_backfill"
     PHASE_NARRATION = "narration"
+    PHASE_BUTTONIFY = "buttonify"
     PHASE_COMPLETED = "completed"
     PHASE_ERROR = "error"
 
@@ -416,6 +426,7 @@ class InternalMCPChatOrchestrator:
         PHASE_TOOL_EXECUTE: "Executing tools",
         PHASE_SCREEN_BACKFILL: "Generating response",
         PHASE_NARRATION: "Generating narration",
+        PHASE_BUTTONIFY: "Generating quick replies",
         PHASE_COMPLETED: "Complete",
         PHASE_ERROR: "Error",
     }
@@ -822,6 +833,27 @@ class InternalMCPChatOrchestrator:
                 action_id="narration.emit_audio",
                 handler=self._action_narration_emit_audio,
                 description="Attach narration output to presenter channels.",
+            )
+        )
+        registry.register(
+            ActionSpec(
+                action_id="buttonify.assess_input",
+                handler=self._action_buttonify_assess_input,
+                description="Assess whether buttonify output transformation should run.",
+            )
+        )
+        registry.register(
+            ActionSpec(
+                action_id="buttonify.select_prompt",
+                handler=self._action_buttonify_select_prompt,
+                description="Resolve buttonify prompt from Vontology with fallback template.",
+            )
+        )
+        registry.register(
+            ActionSpec(
+                action_id="buttonify.extract_options",
+                handler=self._action_buttonify_extract_options,
+                description="Extract quick-reply options via heuristic/model/fallback chain.",
             )
         )
         # Todo-refresh workflow actions (JVNAUTOSCI-922 Phase 2.3).
@@ -1861,6 +1893,290 @@ class InternalMCPChatOrchestrator:
             outputs={
                 "presenter_channels": presenter_channels,
                 "narration_emitted": bool(spoken),
+            }
+        )
+
+    @staticmethod
+    def _build_output_transformation_contract(
+        *,
+        transform_name: str,
+        transform_version: str,
+        workflow_id: str,
+        stage_id: str,
+        input_payload: Mapping[str, Any],
+        output_payload: Mapping[str, Any],
+        diagnostics: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Build a reusable output-transformation workflow result envelope."""
+        return {
+            "schema_version": "output_transformation_workflow_contract_v1",
+            "transform_name": transform_name,
+            "transform_version": transform_version,
+            "stage_metadata": {
+                "workflow_id": workflow_id,
+                "stage_id": stage_id,
+            },
+            "input_payload": dict(input_payload),
+            "output_payload": dict(output_payload),
+            "diagnostics": dict(diagnostics),
+        }
+
+    def _action_buttonify_assess_input(self, request: Any) -> WorkflowActionResult:
+        buttonify_enabled = bool(request.data.get("buttonify_enabled"))
+        buttonify_allowed = bool(request.data.get("buttonify_allowed"))
+        screen_text = request.data.get("screen_text")
+
+        suppression_reason: str | None = None
+        should_run = True
+        if not buttonify_enabled:
+            should_run = False
+            suppression_reason = "buttonify_disabled"
+        elif not buttonify_allowed:
+            should_run = False
+            suppression_reason = "buttonify_not_allowed"
+        elif not isinstance(screen_text, str) or not screen_text.strip():
+            should_run = False
+            suppression_reason = "empty_response"
+
+        return WorkflowActionResult(
+            outputs={
+                "buttonify_should_run": should_run,
+                "buttonify_status": "no_op" if should_run else "skipped",
+                "buttonify_source": "none",
+                "buttonify_suppression_reason": suppression_reason,
+                "buttonify_error_class": None,
+                "buttonify_model_attempted": False,
+                "buttonify_model_used": request.data.get("default_model")
+                or request.environment.model,
+                "buttonify_options": [],
+            }
+        )
+
+    def _action_buttonify_select_prompt(self, request: Any) -> WorkflowActionResult:
+        prompt_ids_raw = request.data.get("buttonify_prompt_ids")
+        prompt_ids = tuple(
+            item.strip()
+            for item in (
+                prompt_ids_raw
+                if isinstance(prompt_ids_raw, (list, tuple))
+                else BUTTONIFY_PROMPT_IDS
+            )
+            if isinstance(item, str) and item.strip()
+        )
+        if not prompt_ids:
+            prompt_ids = BUTTONIFY_PROMPT_IDS
+
+        fallback_template = request.data.get("buttonify_prompt_template")
+        if not isinstance(fallback_template, str) or not fallback_template.strip():
+            fallback_template = BUTTONIFY_PROMPT_TEMPLATE
+
+        variables = {
+            "user_message": request.data.get("user_prompt") or "",
+            "assistant_response": request.data.get("screen_text") or "",
+        }
+        rendered = None
+        try:
+            rendered = self._prompt_templates.render_prompt(
+                prompt_ids,
+                fallback=fallback_template,
+                variables=variables,
+                max_chars=6000,
+            )
+        except Exception:
+            rendered = None
+
+        if rendered:
+            prompt_text = rendered.text
+            prompt_id = rendered.prompt_id
+            prompt_truncated = rendered.truncated
+        else:
+            try:
+                prompt_text = fallback_template.format(**variables)
+            except Exception:
+                prompt_text = str(fallback_template)
+            prompt_id = None
+            prompt_truncated = False
+
+        if request.trace is not None and prompt_text:
+            request.trace.record_prompt(
+                prompt_id=prompt_id,
+                resolved_prompt=prompt_text,
+                variables=variables,
+            )
+
+        return WorkflowActionResult(
+            outputs={
+                "buttonify_prompt_text": prompt_text,
+                "buttonify_prompt_id": prompt_id,
+                "buttonify_prompt_truncated": prompt_truncated,
+            }
+        )
+
+    def _action_buttonify_extract_options(self, request: Any) -> WorkflowActionResult:
+        screen_text = request.data.get("screen_text")
+        if not isinstance(screen_text, str):
+            screen_text = ""
+        user_prompt = request.data.get("user_prompt")
+        if not isinstance(user_prompt, str):
+            user_prompt = ""
+
+        buttonify_preflight_enabled = bool(
+            request.data.get("buttonify_preflight_enabled")
+        )
+        buttonify_prompt_text = request.data.get("buttonify_prompt_text")
+        if not isinstance(buttonify_prompt_text, str):
+            buttonify_prompt_text = ""
+
+        buttonify_prompt_id = request.data.get("buttonify_prompt_id")
+        if not isinstance(buttonify_prompt_id, str):
+            buttonify_prompt_id = None
+        buttonify_prompt_truncated = bool(request.data.get("buttonify_prompt_truncated"))
+
+        buttonify_model_used = request.data.get("default_model") or request.environment.model
+        buttonify_options: list[str] = []
+        buttonify_source = "none"
+        buttonify_error_class: str | None = None
+        buttonify_model_attempted = False
+        buttonify_suppression_reason = request.data.get("buttonify_suppression_reason")
+        if not isinstance(buttonify_suppression_reason, str):
+            buttonify_suppression_reason = None
+
+        if buttonify_preflight_enabled:
+            preflight_options = extract_buttonify_options_heuristic(screen_text)
+            if preflight_options:
+                buttonify_options = preflight_options
+                buttonify_source = "heuristic_preflight"
+
+        if not buttonify_options:
+            buttonify_model_attempted = True
+            buttonify_response = None
+
+            policy_state = request.data.get("policy_state")
+            record_llm_call = request.data.get("record_llm_call")
+            aux_llm_calls = request.data.get("aux_llm_calls")
+            registry_snapshot = request.data.get("registry_snapshot")
+            user_concept_id = request.data.get("user_concept_id")
+            org_concept_id = request.data.get("org_concept_id")
+            llm_calls_log = request.data.get("llm_calls_log")
+
+            if (
+                isinstance(policy_state, _WorkflowModelPolicyState)
+                and callable(record_llm_call)
+                and isinstance(aux_llm_calls, list)
+                and isinstance(llm_calls_log, list)
+            ):
+                try:
+                    buttonify_response, buttonify_model_used, _ = (
+                        self._run_llm_with_fallbacks(
+                            stage="buttonify",
+                            prompt=buttonify_prompt_text,
+                            context=[],
+                            default_client=request.environment.llm_client,
+                            default_model=buttonify_model_used,
+                            policy_state=policy_state,
+                            registry_snapshot=(
+                                registry_snapshot
+                                if isinstance(registry_snapshot, Mapping)
+                                else None
+                            ),
+                            user_concept_id=(
+                                user_concept_id if isinstance(user_concept_id, str) else None
+                            ),
+                            org_concept_id=(
+                                org_concept_id if isinstance(org_concept_id, str) else None
+                            ),
+                            llm_calls_log=llm_calls_log,
+                            aux_log=aux_llm_calls,
+                            record_llm_call=cast(Callable[..., Any], record_llm_call),
+                        )
+                    )
+                except Exception as exc:
+                    buttonify_error_class = type(exc).__name__
+                    buttonify_response = None
+
+            if buttonify_response is None:
+                llm_start = time.perf_counter()
+                try:
+                    buttonify_response = request.environment.llm_client.generate(
+                        prompt=buttonify_prompt_text,
+                        context=[],
+                        model=buttonify_model_used,
+                    )
+                    if callable(record_llm_call):
+                        cast(Callable[..., Any], record_llm_call)(
+                            call_type="llm.generate",
+                            model_name=buttonify_model_used,
+                            duration_ms=(time.perf_counter() - llm_start) * 1000.0,
+                            usage=None,
+                            note="Buttonify quick-reply extraction (workflow fallback).",
+                            stage="buttonify",
+                        )
+                except Exception as exc:
+                    buttonify_error_class = type(exc).__name__
+                    buttonify_response = None
+
+            buttonify_options = parse_buttonify_options_json(buttonify_response)
+            buttonify_source = "llm" if buttonify_options else "none"
+
+            if not buttonify_options:
+                heuristic_options = extract_buttonify_options_heuristic(screen_text)
+                if heuristic_options:
+                    buttonify_options = heuristic_options
+                    buttonify_source = "heuristic_fallback"
+
+        # Defensively re-normalise options to preserve deterministic UI constraints.
+        buttonify_options = dedupe_buttonify_options(buttonify_options)
+
+        if buttonify_source in {"heuristic_preflight", "llm"}:
+            buttonify_status = "success"
+            buttonify_suppression_reason = None
+        elif buttonify_source == "heuristic_fallback":
+            buttonify_status = "fallback_success"
+            buttonify_suppression_reason = "fallback_heuristic_used"
+        else:
+            buttonify_status = "no_op"
+            if not buttonify_suppression_reason:
+                if buttonify_error_class:
+                    buttonify_suppression_reason = "model_error"
+                else:
+                    buttonify_suppression_reason = "no_candidates"
+
+        contract = self._build_output_transformation_contract(
+            transform_name="buttonify",
+            transform_version="v1",
+            workflow_id=CHAT_BUTTONIFY_WORKFLOW_ID,
+            stage_id="extract_options",
+            input_payload={
+                "screen_text_chars": len(screen_text),
+                "user_prompt_chars": len(user_prompt),
+                "heuristic_preflight_enabled": buttonify_preflight_enabled,
+            },
+            output_payload={
+                "options": list(buttonify_options),
+                "source": buttonify_source,
+                "prompt_id": buttonify_prompt_id,
+                "prompt_truncated": buttonify_prompt_truncated,
+            },
+            diagnostics={
+                "status": buttonify_status,
+                "suppression_reason": buttonify_suppression_reason,
+                "error_class": buttonify_error_class,
+                "model": buttonify_model_used if buttonify_model_attempted else None,
+            },
+        )
+
+        return WorkflowActionResult(
+            outputs={
+                "buttonify_status": buttonify_status,
+                "buttonify_options": buttonify_options,
+                "buttonify_source": buttonify_source,
+                "buttonify_prompt_id": buttonify_prompt_id,
+                "buttonify_prompt_truncated": buttonify_prompt_truncated,
+                "buttonify_model_used": buttonify_model_used,
+                "buttonify_model_attempted": buttonify_model_attempted,
+                "buttonify_error_class": buttonify_error_class,
+                "buttonify_suppression_reason": buttonify_suppression_reason,
+                "output_transformation_contract": contract,
             }
         )
 

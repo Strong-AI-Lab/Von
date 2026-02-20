@@ -14,6 +14,7 @@ from typing import Any, Sequence
 
 from .definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
+    CHAT_BUTTONIFY_WORKFLOW_ID,
     CHAT_NARRATION_WORKFLOW_ID,
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
@@ -195,6 +196,16 @@ _STAGE_SPECS: tuple[_StageSpec, ...] = (
         stage_concept_id="#V#conversation_turn_stage_narration",
         workflow_id=CHAT_NARRATION_WORKFLOW_ID,
         runtime_aliases=("narration",),
+    ),
+    _StageSpec(
+        stage_id="buttonify",
+        stage_label="Buttonify output transformation",
+        order=125,
+        stage_kind="non_formal",
+        boundary_type="render",
+        stage_concept_id="#V#conversation_turn_stage_buttonify",
+        workflow_id=CHAT_BUTTONIFY_WORKFLOW_ID,
+        runtime_aliases=("buttonify",),
     ),
     _StageSpec(
         stage_id="plain_response",

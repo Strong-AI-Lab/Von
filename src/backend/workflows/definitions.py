@@ -15,6 +15,7 @@ from .workflow_registry import WorkflowRegistration, WorkflowRegistry
 
 MISSING_TOOL_CALL_WORKFLOW_ID = "#V#missing_tool_call_workflow"
 CHAT_NARRATION_WORKFLOW_ID = "#V#chat_narration_workflow"
+CHAT_BUTTONIFY_WORKFLOW_ID = "#V#chat_buttonify_workflow"
 CHAT_ASSISTANT_WORKFLOW_ID = "#V#chat_assistant_workflow"
 TODO_REFRESH_WORKFLOW_ID = "#V#todo_refresh_workflow"
 WRITE_TOOL_POLICY_WORKFLOW_ID = "#V#write_tool_policy_workflow"
@@ -173,6 +174,70 @@ def build_chat_narration_workflow() -> WorkflowDefinition:
         },
         termination_states=("completed", "failed"),
         purpose="Generate and emit narration for chat responses.",
+    )
+
+
+def build_chat_buttonify_workflow() -> WorkflowDefinition:
+    """Build workflow for quick-reply option extraction from final screen text.
+
+    This is a concrete output-transformation workflow instance and is intended
+    to be reusable as a pattern for additional response transforms.
+    """
+
+    assess = WorkflowStateSpec(
+        state_id="assess_input",
+        actions=(WorkflowActionInvocation(action_id="buttonify.assess_input"),),
+        transitions=(
+            _transition_if_flag_set(
+                "buttonify_should_run",
+                to_state="select_prompt",
+                reason="eligible",
+            ),
+            WorkflowTransitionSpec(
+                to_state="completed",
+                condition=lambda ctx: True,
+                reason="skipped",
+            ),
+        ),
+    )
+
+    select_prompt = WorkflowStateSpec(
+        state_id="select_prompt",
+        actions=(WorkflowActionInvocation(action_id="buttonify.select_prompt"),),
+        transitions=(
+            WorkflowTransitionSpec(
+                to_state="extract_options",
+                condition=lambda ctx: True,
+                reason="prompt_selected",
+            ),
+        ),
+    )
+
+    extract = WorkflowStateSpec(
+        state_id="extract_options",
+        actions=(WorkflowActionInvocation(action_id="buttonify.extract_options"),),
+        transitions=(
+            WorkflowTransitionSpec(
+                to_state="completed",
+                condition=lambda ctx: True,
+                reason="transformation_completed",
+            ),
+        ),
+    )
+
+    completed = WorkflowStateSpec(state_id="completed", terminal=True)
+
+    return WorkflowDefinition(
+        workflow_id=CHAT_BUTTONIFY_WORKFLOW_ID,
+        initial_state="assess_input",
+        states={
+            "assess_input": assess,
+            "select_prompt": select_prompt,
+            "extract_options": extract,
+            "completed": completed,
+        },
+        termination_states=("completed",),
+        purpose="Produce quick-reply action options as output transformation.",
     )
 
 
@@ -596,6 +661,12 @@ def register_default_workflows(registry: WorkflowRegistry) -> None:
             workflow_id=CHAT_NARRATION_WORKFLOW_ID,
             definition=build_chat_narration_workflow(),
             purpose="Narration generation pipeline.",
+            source="built_in",
+        ),
+        WorkflowRegistration(
+            workflow_id=CHAT_BUTTONIFY_WORKFLOW_ID,
+            definition=build_chat_buttonify_workflow(),
+            purpose="Buttonify output-transformation pipeline.",
             source="built_in",
         ),
         WorkflowRegistration(

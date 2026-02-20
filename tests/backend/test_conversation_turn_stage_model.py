@@ -2,7 +2,10 @@ from src.backend.workflows.conversation_turn_stage_model import (
     build_conversation_turn_stage_model_snapshot,
     build_conversation_turn_stage_path,
 )
-from src.backend.workflows.definitions import TOOL_CALLING_WORKFLOW_ID
+from src.backend.workflows.definitions import (
+    CHAT_BUTTONIFY_WORKFLOW_ID,
+    TOOL_CALLING_WORKFLOW_ID,
+)
 
 
 def test_stage_model_snapshot_exposes_formal_and_non_formal_stages() -> None:
@@ -53,3 +56,16 @@ def test_stage_path_preserves_unmapped_runtime_stage_fallback() -> None:
     assert path[-1]["mapping_status"] == "fallback_unmapped_runtime_stage"
     assert path[-1]["runtime_stage_normalised"] == "brand_new_runtime_stage"
     assert path[-1]["stage_id"] is None
+
+
+def test_stage_path_maps_buttonify_runtime_stage() -> None:
+    result = build_conversation_turn_stage_path(
+        runtime_stages=["buttonify"],
+        workflow_id=CHAT_BUTTONIFY_WORKFLOW_ID,
+    )
+
+    assert result["has_unmapped_runtime_stages"] is False
+    path = result["path"]
+    assert len(path) == 1
+    assert path[0]["stage_id"] == "buttonify"
+    assert path[0]["workflow_id"] == CHAT_BUTTONIFY_WORKFLOW_ID

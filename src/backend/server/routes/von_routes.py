@@ -40,7 +40,13 @@ from ...services.feature_flags import (
 from ...services.chat_concept_reference_service import (
     build_context_concept_reference_metadata,
 )
-from ...services.prompt_template_service import PromptTemplateService
+from ...services.buttonify_service import (
+    BUTTONIFY_PROMPT_IDS,
+    BUTTONIFY_PROMPT_TEMPLATE,
+    dedupe_buttonify_options,
+    extract_buttonify_options_heuristic as _extract_buttonify_options_heuristic,
+    parse_buttonify_options_json,
+)
 from ...services.display_elements_service import (
     build_canonical_table_payload_from_records,
     build_turn_display_elements,
@@ -52,6 +58,7 @@ from ...services.response_transformation_telemetry import (
 )
 from ...services.turn_execution_record_service import build_turn_execution_record
 from ...workflows import (
+    CHAT_BUTTONIFY_WORKFLOW_ID,
     CHAT_NARRATION_WORKFLOW_ID,
     WorkflowExecutionTrace,
     insert_workflow_execution_trace,
@@ -135,6 +142,7 @@ def _default_stage_label(stage: str) -> str:
         "tool_execute": "Executing tools",
         "screen_backfill": "Generating response",
         "narration": "Generating narration",
+        "buttonify": "Generating quick replies",
         "tool_recovery": "Recovering tool call",
         "orchestrator_start": "Starting orchestrator",
         "orchestrator_end": "Finishing orchestrator",
@@ -1772,109 +1780,6 @@ def _limit_context_size(context: list[dict], max_messages: int = 20) -> list[dic
         return system_msg + recent_msgs
     else:
         return context[-max_messages:]
-
-
-_BUTTONIFY_PROMPT_IDS = ("#V#buttonify_prompt_v1",)
-
-
-def _normalise_buttonify_option(value: str | None) -> str | None:
-    if not isinstance(value, str):
-        return None
-    cleaned = re.sub(r"\s+", " ", value).strip()
-    if not cleaned:
-        return None
-    cleaned = cleaned.strip("-–—•*\t ")
-    cleaned = re.sub(r"^[\"'“‘]+|[\"'”’]+$", "", cleaned).strip()
-    cleaned = cleaned.rstrip(".,;:")
-    if not cleaned:
-        return None
-    if len(cleaned) > 60:
-        return None
-    if len(cleaned.split()) > 4:
-        return None
-    return cleaned
-
-
-def _add_buttonify_option(
-    options: list[str],
-    seen: set[str],
-    value: str | None,
-) -> None:
-    cleaned = _normalise_buttonify_option(value)
-    if not cleaned:
-        return
-    key = cleaned.lower()
-    if key in seen:
-        return
-    seen.add(key)
-    options.append(cleaned)
-
-
-def _extract_buttonify_options_heuristic(text: str | None) -> list[str]:
-    if not isinstance(text, str) or not text.strip():
-        return []
-
-    options: list[str] = []
-    seen: set[str] = set()
-
-    quote_patterns = [
-        r'"([^"\n\r]{1,200})"',
-        r"“([^”\n\r]{1,200})”",
-        r"‘([^’\n\r]{1,200})’",
-        r"(?<!\w)'([^'\n\r]{1,200})'(?!\w)",
-    ]
-
-    for pattern in quote_patterns:
-        for match in re.findall(pattern, text):
-            _add_buttonify_option(options, seen, match)
-            if len(options) >= 4:
-                return options[:4]
-
-    for line in text.splitlines():
-        match = re.match(r"\s*(?:[-*•]|\d+[.)])\s+(.+)", line)
-        if not match:
-            continue
-        _add_buttonify_option(options, seen, match.group(1))
-        if len(options) >= 4:
-            return options[:4]
-
-    if not options:
-        marker = re.search(
-            r"(?:reply|respond|answer|choose|pick)\s+(?:with\s+)?one\s+of\s*[:\-–—]?\s*(.+)",
-            text,
-            re.IGNORECASE,
-        )
-        if marker:
-            tail = marker.group(1)
-            for part in re.split(r"\s*(?:,|/|;|\bor\b)\s*", tail):
-                _add_buttonify_option(options, seen, part)
-                if len(options) >= 4:
-                    return options[:4]
-
-    implicit = re.search(
-        r"\b(?:would|do)\s+(?:you\s+)?(?:like|want)\s+(?:to\s+)?([^?.!\n]{1,80}?)\s+or\s+([^?.!\n]{1,80}?)[?.!]",
-        text,
-        re.IGNORECASE,
-    )
-    if implicit:
-        _add_buttonify_option(options, seen, implicit.group(1))
-        _add_buttonify_option(options, seen, implicit.group(2))
-
-    if not options:
-        if re.search(r"\byes\s*/\s*no\b|\byes\s+or\s+no\b", text, re.IGNORECASE):
-            _add_buttonify_option(options, seen, "Yes")
-            _add_buttonify_option(options, seen, "No")
-        else:
-            trimmed = text.strip()
-            if trimmed.endswith("?") and re.match(
-                r"\s*(?:Do|Would|Is|Are|Did|Can|Should|Will|Have|Has)\b",
-                trimmed,
-                re.IGNORECASE,
-            ):
-                _add_buttonify_option(options, seen, "Yes")
-                _add_buttonify_option(options, seen, "No")
-
-    return options[:4]
 
 
 def _calculate_context_stats(messages: list[dict]) -> dict:
@@ -5106,6 +5011,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             note: str | None = None,
             stage: str | None = None,
             provider: str | None = None,
+            candidate: Mapping[str, Any] | None = None,
         ) -> None:
             payload = {
                 "type": call_type,
@@ -5119,6 +5025,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 payload["stage"] = stage
             if note:
                 payload["note"] = note
+            if isinstance(candidate, Mapping):
+                payload["candidate"] = dict(candidate)
             llm_interaction["calls"].append(payload)
 
         if orchestrator is None:
@@ -6385,6 +6293,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         buttonify_started_perf = time.perf_counter()
         buttonify_options: list[str] = []
         buttonify_meta: dict[str, Any] | None = None
+        buttonify_workflow_contract: dict[str, Any] | None = None
         buttonify_enabled = get_buttonify_model_enabled()
         buttonify_allowed = (
             not current_app.testing
@@ -6392,6 +6301,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             and (
                 orchestrator is None or hasattr(orchestrator, "_run_llm_with_fallbacks")
             )
+        )
+        buttonify_workflow_available = bool(
+            orchestrator is not None
+            and hasattr(orchestrator, "execute_workflow")
+            and hasattr(orchestrator, "_run_llm_with_fallbacks")
         )
         buttonify_preflight_enabled = False
         buttonify_model_used = model_name
@@ -6402,6 +6316,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         buttonify_error_class = None
         buttonify_suppression_reason = None
         buttonify_model_attempted = False
+        buttonify_workflow_used = False
 
         if not buttonify_enabled:
             buttonify_suppression_reason = "buttonify_disabled"
@@ -6423,123 +6338,146 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     },
                 )
 
-            if buttonify_preflight_enabled:
-                preflight_options = _extract_buttonify_options_heuristic(response_text)
-                if preflight_options:
-                    buttonify_options = preflight_options
-                    buttonify_source = "heuristic_preflight"
-
-            if not buttonify_options:
-                buttonify_model_attempted = True
-                buttonify_prompt_template = (
-                    "You generate quick-reply button options for a chat UI.\n\n"
-                    "Use the user message and assistant response. Extract up to 4 options that the user could tap next.\n\n"
-                    "Rules:\n"
-                    "- Return ONLY a JSON array of strings. No prose, no Markdown.\n"
-                    "- Each option must be 1-4 words and safe to send verbatim.\n"
-                    "- Prefer exact wording from the response when explicit (lists, quoted replies, template choices).\n"
-                    '- If the response presents implicit alternatives (e.g. "Would you like to continue or stop?"), convert them into concise options (e.g. ["Continue", "Stop"]).\n'
-                    '- If the response is a yes/no question without explicit options, return ["Yes", "No"].\n'
-                    "- If there are no clear options or it is open-ended, return [].\n"
-                    "- Do not invent options beyond what is stated or clearly implied.\n"
-                    "- Avoid punctuation, emojis, or more than 4 words.\n\n"
-                    "User message:\n{user_message}\n\nAssistant response:\n{assistant_response}"
-                )
-
-                prompt_service = PromptTemplateService()
-                rendered_buttonify_prompt = None
+            if buttonify_workflow_available:
+                buttonify_workflow_used = True
+                buttonify_workflow_result = None
+                policy_state = None
                 try:
-                    rendered_buttonify_prompt = prompt_service.render_prompt(
-                        _BUTTONIFY_PROMPT_IDS,
-                        variables={
-                            "user_message": prompt_text,
-                            "assistant_response": response_text,
-                        },
-                        fallback=buttonify_prompt_template,
+                    policy_state, _ = orchestrator._load_workflow_model_policy(
+                        request_language
                     )
                 except Exception:
-                    rendered_buttonify_prompt = None
+                    policy_state = None
 
-                if rendered_buttonify_prompt:
-                    buttonify_prompt = rendered_buttonify_prompt.text
-                    buttonify_prompt_id = rendered_buttonify_prompt.prompt_id
-                    buttonify_prompt_truncated = rendered_buttonify_prompt.truncated
-                else:
-                    buttonify_prompt = buttonify_prompt_template.format(
-                        user_message=prompt_text,
-                        assistant_response=response_text,
+                try:
+                    buttonify_workflow_result = orchestrator.execute_workflow(
+                        CHAT_BUTTONIFY_WORKFLOW_ID,
+                        data={
+                            "screen_text": response_text,
+                            "user_prompt": prompt_text,
+                            "buttonify_enabled": buttonify_enabled,
+                            "buttonify_allowed": buttonify_allowed,
+                            "buttonify_preflight_enabled": buttonify_preflight_enabled,
+                            "buttonify_prompt_ids": list(BUTTONIFY_PROMPT_IDS),
+                            "buttonify_prompt_template": BUTTONIFY_PROMPT_TEMPLATE,
+                            "default_model": model_name,
+                            "policy_state": policy_state,
+                            "record_llm_call": _record_stage_llm_call,
+                            "llm_calls_log": llm_interaction["calls"],
+                            "aux_llm_calls": auxiliary_llm_calls,
+                            "user_concept_id": user_concept_id,
+                            "org_concept_id": org_concept_id,
+                            "workflow_episode_stage": "buttonify",
+                        },
+                        llm_client=llm_client,
+                        model=model_name,
+                        user_namespace=user_namespace,
+                        auxiliary_system_prompt=auxiliary_system_prompt,
+                        trace=None,
+                        conversation_session_id=session_id,
+                        turn_id=request_id,
+                        episode_source="chat_turn_workflow",
                     )
+                except Exception as exc:
+                    buttonify_error_class = type(exc).__name__
+                    buttonify_workflow_result = None
 
-                buttonify_context: list[dict[str, Any]] = []
-                buttonify_response = None
-                if orchestrator is not None and hasattr(
-                    orchestrator, "_run_llm_with_fallbacks"
+                workflow_payload: Mapping[str, Any] = {}
+                if buttonify_workflow_result is not None and isinstance(
+                    buttonify_workflow_result.data, Mapping
                 ):
+                    workflow_payload = buttonify_workflow_result.data
+
+                raw_options = workflow_payload.get("buttonify_options")
+                if isinstance(raw_options, list):
+                    buttonify_options = dedupe_buttonify_options(raw_options)
+
+                if isinstance(workflow_payload.get("buttonify_source"), str):
+                    buttonify_source = workflow_payload.get("buttonify_source", "none")
+                if isinstance(workflow_payload.get("buttonify_prompt_id"), str):
+                    buttonify_prompt_id = workflow_payload.get("buttonify_prompt_id")
+                buttonify_prompt_truncated = bool(
+                    workflow_payload.get("buttonify_prompt_truncated")
+                )
+                if isinstance(workflow_payload.get("buttonify_status"), str):
+                    buttonify_status = workflow_payload.get("buttonify_status", "no_op")
+                if isinstance(workflow_payload.get("buttonify_error_class"), str):
+                    buttonify_error_class = workflow_payload.get("buttonify_error_class")
+                if isinstance(workflow_payload.get("buttonify_model_used"), str):
+                    buttonify_model_used = workflow_payload.get("buttonify_model_used")
+                buttonify_model_attempted = bool(
+                    workflow_payload.get("buttonify_model_attempted")
+                )
+                if isinstance(workflow_payload.get("buttonify_suppression_reason"), str):
+                    buttonify_suppression_reason = workflow_payload.get(
+                        "buttonify_suppression_reason"
+                    )
+                contract_payload = workflow_payload.get("output_transformation_contract")
+                if isinstance(contract_payload, Mapping):
+                    buttonify_workflow_contract = dict(contract_payload)
+
+                # Deterministic guardrail: if workflow output is empty/invalid,
+                # always attempt heuristic fallback before surfacing no-op.
+                if not buttonify_options:
+                    fallback_options = _extract_buttonify_options_heuristic(response_text)
+                    if fallback_options:
+                        buttonify_options = fallback_options
+                        buttonify_source = "heuristic_fallback"
+                        buttonify_status = "fallback_success"
+                        buttonify_suppression_reason = "fallback_heuristic_used"
+                        buttonify_workflow_contract = None
+            else:
+                # Keep deterministic behaviour when workflow execution is not available.
+                if buttonify_preflight_enabled:
+                    preflight_options = _extract_buttonify_options_heuristic(response_text)
+                    if preflight_options:
+                        buttonify_options = preflight_options
+                        buttonify_source = "heuristic_preflight"
+
+                if not buttonify_options:
+                    buttonify_model_attempted = True
                     try:
-                        policy_state, _ = orchestrator._load_workflow_model_policy(
-                            request_language
+                        buttonify_prompt = BUTTONIFY_PROMPT_TEMPLATE.format(
+                            user_message=prompt_text,
+                            assistant_response=response_text,
                         )
-                        buttonify_response, buttonify_model_used, _ = (
-                            orchestrator._run_llm_with_fallbacks(
-                                stage="buttonify",
-                                prompt=buttonify_prompt,
-                                context=buttonify_context,
-                                default_client=llm_client,
-                                default_model=model_name,
-                                policy_state=policy_state,
-                                user_concept_id=user_concept_id,
-                                org_concept_id=org_concept_id,
-                                llm_calls_log=llm_interaction["calls"],
-                                aux_log=auxiliary_llm_calls,
-                                record_llm_call=_record_stage_llm_call,
-                            )
+                    except Exception:
+                        buttonify_prompt = str(BUTTONIFY_PROMPT_TEMPLATE)
+
+                    llm_start = time.perf_counter()
+                    buttonify_response = None
+                    try:
+                        buttonify_response = llm_client.generate(
+                            prompt=buttonify_prompt,
+                            context=[],
+                            model=buttonify_model_used,
+                        )
+                        _record_stage_llm_call(
+                            call_type="llm.generate",
+                            model_name=buttonify_model_used,
+                            duration_ms=(time.perf_counter() - llm_start) * 1000.0,
+                            usage=None,
+                            note="Buttonify quick-reply extraction (workflow unavailable).",
+                            stage="buttonify",
                         )
                     except Exception as exc:
                         buttonify_error_class = type(exc).__name__
                         buttonify_response = None
-                if buttonify_response is None:
-                    llm_start = time.perf_counter()
-                    buttonify_response = llm_client.generate(
-                        prompt=buttonify_prompt,
-                        context=buttonify_context,
-                        model=buttonify_model_used,
-                    )
-                    _record_stage_llm_call(
-                        call_type="llm.generate",
-                        model_name=buttonify_model_used,
-                        duration_ms=(time.perf_counter() - llm_start) * 1000.0,
-                        usage=None,
-                        note="Buttonify quick-reply extraction (legacy).",
-                        stage="buttonify",
-                    )
-                try:
-                    import json as _json
 
-                    parsed = _json.loads(str(buttonify_response))
-                    if isinstance(parsed, list):
-                        for item in parsed:
-                            if not isinstance(item, str):
-                                continue
-                            cleaned = item.strip()
-                            if not cleaned:
-                                continue
-                            if len(cleaned.split()) > 4:
-                                continue
-                            if len(cleaned) > 60:
-                                continue
-                            buttonify_options.append(cleaned)
-                except Exception as exc:
-                    buttonify_error_class = type(exc).__name__
-                    buttonify_options = []
+                    buttonify_options = parse_buttonify_options_json(buttonify_response)
+                    buttonify_source = "llm" if buttonify_options else "none"
+                    if not buttonify_options:
+                        fallback_options = _extract_buttonify_options_heuristic(
+                            response_text
+                        )
+                        if fallback_options:
+                            buttonify_options = fallback_options
+                            buttonify_source = "heuristic_fallback"
 
-                buttonify_source = "llm" if buttonify_options else "none"
-                if not buttonify_options:
-                    heuristic_options = _extract_buttonify_options_heuristic(
-                        response_text
+                if not buttonify_workflow_available and not buttonify_options:
+                    buttonify_suppression_reason = (
+                        buttonify_suppression_reason or "workflow_unavailable"
                     )
-                    if heuristic_options:
-                        buttonify_options = heuristic_options
-                        buttonify_source = "heuristic_fallback"
 
             if buttonify_source in {"heuristic_preflight", "llm"}:
                 buttonify_status = "success"
@@ -6550,7 +6488,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 buttonify_status = "no_op"
                 if buttonify_error_class:
                     buttonify_suppression_reason = "model_error"
-                else:
+                elif not buttonify_suppression_reason:
                     buttonify_suppression_reason = "no_candidates"
 
             buttonify_meta = {
@@ -6561,7 +6499,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 "prompt_id": buttonify_prompt_id,
                 "prompt_truncated": buttonify_prompt_truncated,
                 "heuristic_preflight_enabled": buttonify_preflight_enabled,
+                "workflow_used": buttonify_workflow_used,
+                "workflow_available": buttonify_workflow_available,
             }
+            if buttonify_workflow_contract is not None:
+                buttonify_meta["workflow_contract"] = buttonify_workflow_contract
 
         buttonify_latency_ms = (time.perf_counter() - buttonify_started_perf) * 1000.0
         record_response_transformation_event(

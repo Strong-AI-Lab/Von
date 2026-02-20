@@ -32,9 +32,20 @@ class _StubLLMSequence:
 
 
 class _StubOrchestrator:
-    def __init__(self, result):
+    def __init__(
+        self,
+        result,
+        *,
+        workflow_result=None,
+        workflow_capable: bool = False,
+    ):
         self._result = result
         self.calls: list[dict] = []
+        self.workflow_calls: list[dict] = []
+        self._workflow_result = workflow_result
+        if workflow_capable:
+            # Presence is used as capability check before workflow execution.
+            self._run_llm_with_fallbacks = object()
 
     def configure_execution_caps(self, **_kwargs) -> None:
         return None
@@ -42,12 +53,23 @@ class _StubOrchestrator:
     def set_progress_callback(self, _callback) -> None:
         return None
 
+    def _load_workflow_model_policy(self, *_args, **_kwargs):
+        return (None, None)
+
     def run(self, **kwargs):
         self.calls.append(dict(kwargs))
         return self._result
 
-    def execute_workflow(self, *_args, **_kwargs):
-        return None
+    def execute_workflow(self, *args, **kwargs):
+        self.workflow_calls.append({"args": args, "kwargs": kwargs})
+        return self._workflow_result
+
+
+class _StubWorkflowResult:
+    def __init__(self, data: dict, *, completed: bool = True, error: str | None = None):
+        self.data = dict(data)
+        self.completed = completed
+        self.error = error
 
 
 def _make_app(monkeypatch, llm: _LLMProtocol) -> Flask:
@@ -221,6 +243,118 @@ def test_generate_buttonify_telemetry_reports_skipped_when_disabled(monkeypatch)
     assert buttonify_event["status"] == "skipped"
     assert buttonify_event["suppression_reason"] == "buttonify_disabled"
     assert buttonify_event["options_emitted_count"] == 0
+
+
+def test_generate_buttonify_uses_workflow_when_available(monkeypatch):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+    from src.backend.workflows import CHAT_BUTTONIFY_WORKFLOW_ID
+
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+
+    llm = _StubLLM("unused")
+    app = _make_app(monkeypatch, llm)
+
+    orchestrator_result = OrchestratorResult(
+        response_text="Assistant response with actionable options.",
+        extra_messages=[],
+        tool_invocations=(),
+        aux_llm_calls=(),
+    )
+    workflow_result = _StubWorkflowResult(
+        {
+            "buttonify_status": "success",
+            "buttonify_options": ["Proceed", "Hold"],
+            "buttonify_source": "llm",
+            "buttonify_prompt_id": "#V#buttonify_prompt_v1",
+            "buttonify_prompt_truncated": False,
+            "buttonify_model_used": "test-model",
+            "buttonify_model_attempted": True,
+            "buttonify_error_class": None,
+            "buttonify_suppression_reason": None,
+            "output_transformation_contract": {
+                "schema_version": "output_transformation_workflow_contract_v1",
+                "transform_name": "buttonify",
+            },
+        }
+    )
+    stub_orchestrator = _StubOrchestrator(
+        orchestrator_result,
+        workflow_result=workflow_result,
+        workflow_capable=True,
+    )
+    app.config["INTERNAL_MCP_ORCHESTRATOR"] = stub_orchestrator
+
+    client = app.test_client()
+    resp = client.post("/von/generate", json={"prompt": "Hello"})
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    llm_debug = body["llm_debug"]
+    buttonify = llm_debug.get("buttonify")
+    assert isinstance(buttonify, dict)
+    assert buttonify.get("source") == "llm"
+    assert buttonify.get("options") == ["Proceed", "Hold"]
+    assert buttonify.get("workflow_used") is True
+    assert buttonify.get("workflow_available") is True
+    assert isinstance(buttonify.get("workflow_contract"), dict)
+
+    buttonify_event = _find_transformation_event(llm_debug, "buttonify")
+    assert buttonify_event["status"] == "success"
+    assert buttonify_event["source_path"] == "llm"
+    assert buttonify_event["options_emitted_count"] == 2
+
+    assert stub_orchestrator.workflow_calls
+    first_call = stub_orchestrator.workflow_calls[0]
+    assert first_call["args"][0] == CHAT_BUTTONIFY_WORKFLOW_ID
+    assert len(llm.calls) == 0
+
+
+def test_generate_buttonify_workflow_invalid_output_uses_heuristic_fallback(monkeypatch):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+
+    llm = _StubLLM("unused")
+    app = _make_app(monkeypatch, llm)
+
+    orchestrator_result = OrchestratorResult(
+        response_text='Please reply with one of: "Proceed", "Hold".',
+        extra_messages=[],
+        tool_invocations=(),
+        aux_llm_calls=(),
+    )
+    workflow_result = _StubWorkflowResult(
+        {
+            "buttonify_status": "no_op",
+            "buttonify_options": [],
+            "buttonify_source": "none",
+            "buttonify_model_used": "test-model",
+            "buttonify_model_attempted": True,
+            "buttonify_error_class": "ValueError",
+            "buttonify_suppression_reason": "no_candidates",
+        }
+    )
+    app.config["INTERNAL_MCP_ORCHESTRATOR"] = _StubOrchestrator(
+        orchestrator_result,
+        workflow_result=workflow_result,
+        workflow_capable=True,
+    )
+
+    client = app.test_client()
+    resp = client.post("/von/generate", json={"prompt": "Hello"})
+
+    assert resp.status_code == 200
+    llm_debug = resp.get_json()["llm_debug"]
+    buttonify = llm_debug.get("buttonify")
+    assert isinstance(buttonify, dict)
+    assert buttonify.get("source") == "heuristic_fallback"
+    assert buttonify.get("options") == ["Proceed", "Hold"]
+
+    buttonify_event = _find_transformation_event(llm_debug, "buttonify")
+    assert buttonify_event["status"] == "fallback_success"
+    assert buttonify_event["suppression_reason"] == "fallback_heuristic_used"
+    assert buttonify_event["options_emitted_count"] == 2
+    assert len(llm.calls) == 0
 
 
 def test_history_debug_transformations_view_returns_lightweight_payload(monkeypatch):

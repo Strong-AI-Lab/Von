@@ -46,6 +46,7 @@ from ...services.feature_flags import (
     get_expert_footer_enabled,
     get_expert_tabs_enabled,
 )
+from ...services.buttonify_service import BUTTONIFY_PROMPT_IDS
 from ...integrations.google.gmail_service import list_profile_ids_from_env
 from ...services.concept_service import list_concepts, get_concept_by_id
 from ...languagemodels.llm_interface import OpenAIClient
@@ -147,9 +148,6 @@ def _validate_unified_concept_schema(concept, index):
 settings_bp = Blueprint(
     "settings", __name__
 )  # REMOVED url_prefix, as it's set during registration
-
-_BUTTONIFY_PROMPT_IDS = ("#V#buttonify_prompt_v1",)
-
 
 def _is_admin_or_owner_session() -> bool:
     """Best-effort check for admin/owner privileges.
@@ -574,9 +572,9 @@ def get_all_settings_data():
         # Merge DB settings with computed/env-var settings
         return {
             **db_settings,  # active_llm, openai_api_key_env_var, fetch_counts_on_load, etc.
-            "buttonify_prompt_ids": list(_BUTTONIFY_PROMPT_IDS),
+            "buttonify_prompt_ids": list(BUTTONIFY_PROMPT_IDS),
             "buttonify_prompt_active": (
-                _BUTTONIFY_PROMPT_IDS[0] if _BUTTONIFY_PROMPT_IDS else None
+                BUTTONIFY_PROMPT_IDS[0] if BUTTONIFY_PROMPT_IDS else None
             ),
             "expert_tabs_enabled": get_expert_tabs_enabled(),
             "expert_footer_enabled": get_expert_footer_enabled(),
