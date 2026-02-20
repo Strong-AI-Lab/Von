@@ -1504,6 +1504,24 @@ const RELATION_TRUTH_STATE_FALLBACK_MAX_LINES = 300;
 const RELATION_TRUTH_STATE_FALLBACK_MAX_ASSERTIONS = 120;
 const JIRA_ISSUE_KEY_PATTERN = /^[A-Z][A-Z0-9]+-\d+$/;
 
+// Keep heading resolution centralised so new display element families stay consistent.
+function normaliseOptionalDisplayElementTitle(value) {
+    if (typeof value !== 'string') {
+        return '';
+    }
+    return value.trim();
+}
+
+function resolveDisplayElementSectionTitle(explicitTitle, fallbackLabel, index, totalElements) {
+    const semanticTitle = normaliseOptionalDisplayElementTitle(explicitTitle);
+    if (semanticTitle) {
+        return semanticTitle;
+    }
+    const safeIndex = Number.isInteger(index) && index >= 0 ? index : 0;
+    const multipleElements = Number.isInteger(totalElements) && totalElements > 1;
+    return multipleElements ? `${fallbackLabel} ${safeIndex + 1}` : fallbackLabel;
+}
+
 function normaliseTableSortMetadata(value, columns) {
     if (!value || typeof value !== 'object') {
         return null;
@@ -1746,6 +1764,7 @@ function normaliseTableDisplayElement(element) {
 
     return {
         element_id: typeof element.element_id === 'string' ? element.element_id : null,
+        title: normaliseOptionalDisplayElementTitle(payload.title),
         columns,
         rows,
         sort,
@@ -1993,6 +2012,7 @@ function normaliseWorkflowDisplayElement(element) {
 
     return {
         element_id: typeof element.element_id === 'string' ? element.element_id : null,
+        title: normaliseOptionalDisplayElementTitle(payload.title),
         nodes,
         edges,
         layout: typeof payload.layout === 'string' && payload.layout.trim()
@@ -2043,6 +2063,7 @@ function normaliseTaskViewDisplayElement(element) {
 
     return {
         element_id: typeof element.element_id === 'string' ? element.element_id : null,
+        title: normaliseOptionalDisplayElementTitle(payload.title),
         tasks
     };
 }
@@ -2181,6 +2202,7 @@ function normaliseKanbanDisplayElement(element) {
 
     return {
         element_id: typeof element.element_id === 'string' ? element.element_id : null,
+        title: normaliseOptionalDisplayElementTitle(payload.title),
         columns: orderedColumns,
         cards
     };
@@ -2324,6 +2346,7 @@ function normaliseTimelineDisplayElement(element) {
 
     return {
         element_id: typeof element.element_id === 'string' ? element.element_id : null,
+        title: normaliseOptionalDisplayElementTitle(payload.title),
         items
     };
 }
@@ -2500,6 +2523,7 @@ function normaliseCalendarDisplayElement(element) {
 
     return {
         element_id: typeof element.element_id === 'string' ? element.element_id.trim() : null,
+        title: normaliseOptionalDisplayElementTitle(payload.title),
         default_granularity: normaliseCalendarGranularity(payload.default_granularity),
         focus_date: derivedFocusDate,
         items
@@ -2706,6 +2730,7 @@ function normaliseDocumentDisplayElement(element) {
 
     return {
         element_id: typeof element.element_id === 'string' ? element.element_id.trim() : null,
+        title: normaliseOptionalDisplayElementTitle(payload.title),
         documents
     };
 }
@@ -2843,6 +2868,7 @@ function normaliseRelationGraphDisplayElement(element) {
 
     return {
         element_id: typeof element.element_id === 'string' ? element.element_id.trim() : null,
+        title: normaliseOptionalDisplayElementTitle(payload.title),
         nodes: Array.from(nodeMap.values()),
         edges,
         layout_hint: layoutHint,
@@ -3495,7 +3521,12 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
 
         const title = document.createElement('div');
         title.className = 'chat-display-elements-table-title';
-        title.textContent = tableElements.length > 1 ? `Table ${tableIndex + 1}` : 'Table';
+        title.textContent = resolveDisplayElementSectionTitle(
+            tableElement.title,
+            'Table',
+            tableIndex,
+            tableElements.length
+        );
         title.style.cssText = 'font-weight: 600; font-size: 0.85em; color: #2f4f6f; margin-bottom: 6px;';
         section.appendChild(title);
 
@@ -3612,9 +3643,12 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
 
         const title = document.createElement('div');
         title.className = 'chat-display-elements-workflow-title';
-        title.textContent = workflowElements.length > 1
-            ? `Workflow view ${workflowIndex + 1}`
-            : 'Workflow view';
+        title.textContent = resolveDisplayElementSectionTitle(
+            workflowElement.title,
+            'Workflow view',
+            workflowIndex,
+            workflowElements.length
+        );
         title.style.cssText = 'font-weight: 600; font-size: 0.85em; color: #2f4f6f; margin-bottom: 6px;';
         section.appendChild(title);
 
@@ -3697,9 +3731,12 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
 
         const title = document.createElement('div');
         title.className = 'chat-display-elements-task-view-title';
-        title.textContent = taskViewElements.length > 1
-            ? `Task view ${taskViewIndex + 1}`
-            : 'Task view';
+        title.textContent = resolveDisplayElementSectionTitle(
+            taskViewElement.title,
+            'Task view',
+            taskViewIndex,
+            taskViewElements.length
+        );
         title.style.cssText = 'font-weight: 600; font-size: 0.85em; color: #2f4f6f; margin-bottom: 6px;';
         section.appendChild(title);
 
@@ -3787,9 +3824,12 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
 
         const title = document.createElement('div');
         title.className = 'chat-display-elements-kanban-title';
-        title.textContent = kanbanElements.length > 1
-            ? `Kanban view ${kanbanIndex + 1}`
-            : 'Kanban view';
+        title.textContent = resolveDisplayElementSectionTitle(
+            kanbanElement.title,
+            'Kanban view',
+            kanbanIndex,
+            kanbanElements.length
+        );
         title.style.cssText = 'font-weight: 600; font-size: 0.85em; color: #2f4f6f; margin-bottom: 6px;';
         section.appendChild(title);
 
@@ -3929,9 +3969,12 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
 
         const title = document.createElement('div');
         title.className = 'chat-display-elements-timeline-title';
-        title.textContent = timelineElements.length > 1
-            ? `Timeline ${timelineIndex + 1}`
-            : 'Timeline';
+        title.textContent = resolveDisplayElementSectionTitle(
+            timelineElement.title,
+            'Timeline',
+            timelineIndex,
+            timelineElements.length
+        );
         title.style.cssText = 'font-weight: 600; font-size: 0.85em; color: #2f4f6f; margin-bottom: 6px;';
         section.appendChild(title);
 
@@ -4013,9 +4056,12 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
 
         const title = document.createElement('div');
         title.className = 'chat-display-elements-calendar-title';
-        title.textContent = calendarElements.length > 1
-            ? `Calendar view ${calendarIndex + 1}`
-            : 'Calendar view';
+        title.textContent = resolveDisplayElementSectionTitle(
+            calendarElement.title,
+            'Calendar view',
+            calendarIndex,
+            calendarElements.length
+        );
         title.style.cssText = 'font-weight: 600; font-size: 0.85em; color: #2f4f6f; margin-bottom: 6px;';
         section.appendChild(title);
 
@@ -4146,9 +4192,12 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
 
         const title = document.createElement('div');
         title.className = 'chat-display-elements-document-title';
-        title.textContent = documentElements.length > 1
-            ? `Document view ${documentIndex + 1}`
-            : 'Document view';
+        title.textContent = resolveDisplayElementSectionTitle(
+            documentElement.title,
+            'Document view',
+            documentIndex,
+            documentElements.length
+        );
         title.style.cssText = 'font-weight: 600; font-size: 0.85em; color: #2f4f6f; margin-bottom: 6px;';
         section.appendChild(title);
 
@@ -4294,9 +4343,12 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
 
         const title = document.createElement('div');
         title.className = 'chat-display-elements-relation-graph-title';
-        title.textContent = relationGraphElements.length > 1
-            ? `Relation graph view ${relationGraphIndex + 1}`
-            : 'Relation graph view';
+        title.textContent = resolveDisplayElementSectionTitle(
+            relationGraphElement.title,
+            'Relation graph view',
+            relationGraphIndex,
+            relationGraphElements.length
+        );
         title.style.cssText = 'font-weight: 600; font-size: 0.85em; color: #2f4f6f; margin-bottom: 6px;';
         section.appendChild(title);
 

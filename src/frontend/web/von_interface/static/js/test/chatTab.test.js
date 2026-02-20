@@ -721,6 +721,7 @@ describe('kanban display elements', () => {
                         order: 33,
                         intent: 'structured_kanban_view',
                         payload: {
+                            title: 'Task board',
                             columns: [
                                 { column_id: 'pending', label: 'Pending', order: 10 },
                                 { column_id: 'done', label: 'Done', order: 20 }
@@ -757,6 +758,7 @@ describe('kanban display elements', () => {
 
         const section = container.querySelector('.chat-display-elements-kanban-section');
         expect(section).not.toBeNull();
+        expect(section.textContent).toContain('Task board');
 
         const columns = container.querySelectorAll('.chat-display-elements-kanban-column');
         expect(columns.length).toBe(2);
@@ -789,6 +791,7 @@ describe('calendar display elements', () => {
                         order: 38,
                         intent: 'structured_calendar_view',
                         payload: {
+                            title: 'Upcoming schedule',
                             default_granularity: 'month',
                             focus_date: '2026-02-17',
                             items: [
@@ -824,7 +827,7 @@ describe('calendar display elements', () => {
 
         const section = container.querySelector('.chat-display-elements-calendar-section');
         expect(section).not.toBeNull();
-        expect(section.textContent).toContain('Calendar view');
+        expect(section.textContent).toContain('Upcoming schedule');
         expect(section.textContent).toContain('Alpha task');
 
         const dayCards = container.querySelectorAll('.chat-display-elements-calendar-day');
@@ -854,6 +857,7 @@ describe('document display elements', () => {
                         order: 40,
                         intent: 'structured_document_view',
                         payload: {
+                            title: 'Knowledge snippets',
                             documents: [
                                 {
                                     document_id: 'doc_alpha',
@@ -891,7 +895,7 @@ describe('document display elements', () => {
 
         const section = container.querySelector('.chat-display-elements-document-section');
         expect(section).not.toBeNull();
-        expect(section.textContent).toContain('Document view');
+        expect(section.textContent).toContain('Knowledge snippets');
         expect(section.textContent).toContain('Alpha document');
         expect(section.textContent).toContain('Excerpt truncated');
 
@@ -927,6 +931,7 @@ describe('relation graph display elements', () => {
                         order: 43,
                         intent: 'relation_graph_view',
                         payload: {
+                            title: 'Predicate relation graph',
                             nodes: [
                                 {
                                     node_id: '#V#michael_witbrock',
@@ -960,7 +965,7 @@ describe('relation graph display elements', () => {
 
         const section = container.querySelector('.chat-display-elements-relation-graph-section');
         expect(section).not.toBeNull();
-        expect(section.textContent).toContain('Relation graph view');
+        expect(section.textContent).toContain('Predicate relation graph');
 
         const nodes = container.querySelectorAll('.chat-display-elements-relation-graph-node');
         expect(nodes.length).toBe(2);

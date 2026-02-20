@@ -2585,6 +2585,15 @@ def _extract_screen_table_elements_from_render_plan(
             if isinstance(page_size_raw, int) and page_size_raw > 0
             else None
         )
+        record_set_title = (
+            str(record_set.get("title"))
+            if isinstance(record_set.get("title"), str)
+            else (
+                str(record_set.get("label"))
+                if isinstance(record_set.get("label"), str)
+                else None
+            )
+        )
 
         filters = record_set.get("filters")
         payload = build_canonical_table_payload_from_records(
@@ -2613,6 +2622,7 @@ def _extract_screen_table_elements_from_render_plan(
             filters=filters if isinstance(filters, list) else None,
             pagination_enabled=bool(record_set.get("pagination_enabled", True)),
             page_size=page_size,
+            title=record_set_title,
         )
 
         spec: dict[str, Any] = {"payload": payload}

@@ -1459,3 +1459,251 @@ def test_task_and_predicate_extent_payloads_validate_under_same_table_contract()
     assert valid is True
     assert errors == []
     assert predicate_payload["rows"][0]["provenance"]["assertion_id"] == "assertion_1"
+
+
+def test_extract_markdown_tables_derives_context_title() -> None:
+    tables = extract_markdown_tables(
+        (
+            "### Predicate status snapshot\n"
+            "| Predicate | Status |\n"
+            "| --- | --- |\n"
+            "| #V#attended_event | asserted |\n"
+        )
+    )
+
+    assert len(tables) == 1
+    assert tables[0]["title"] == "Predicate status snapshot"
+
+
+def test_build_turn_display_elements_preserves_optional_payload_titles() -> None:
+    contract = build_turn_display_elements(
+        response_text="Structured summary",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Structured summary",
+            "spoken": None,
+        },
+        screen_table_elements=[
+            {
+                "payload": {
+                    "title": "Task status table",
+                    "columns": [
+                        {
+                            "column_id": "task",
+                            "label": "Task",
+                            "data_type": "text",
+                        },
+                        {
+                            "column_id": "status",
+                            "label": "Status",
+                            "data_type": "text",
+                        },
+                    ],
+                    "rows": [
+                        {
+                            "row_id": "row_1",
+                            "cells": [
+                                {
+                                    "column_id": "task",
+                                    "value_raw": "Alpha",
+                                    "value_display": "Alpha",
+                                    "value_type": "text",
+                                },
+                                {
+                                    "column_id": "status",
+                                    "value_raw": "done",
+                                    "value_display": "done",
+                                    "value_type": "text",
+                                },
+                            ],
+                        }
+                    ],
+                }
+            }
+        ],
+        screen_workflow_elements=[
+            {
+                "payload": {
+                    "title": "Workflow executions",
+                    "nodes": [
+                        {
+                            "node_id": "inst_1",
+                            "label": "Workflow 1",
+                            "status": "running",
+                        }
+                    ],
+                    "edges": [],
+                }
+            }
+        ],
+        screen_task_view_elements=[
+            {
+                "payload": {
+                    "title": "Action items",
+                    "tasks": [
+                        {
+                            "task_id": "#V#task_alpha",
+                            "title": "Alpha task",
+                        }
+                    ],
+                }
+            }
+        ],
+        screen_kanban_elements=[
+            {
+                "payload": {
+                    "title": "Kanban backlog",
+                    "columns": [
+                        {"column_id": "pending", "label": "Pending"},
+                    ],
+                    "cards": [],
+                }
+            }
+        ],
+        screen_timeline_elements=[
+            {
+                "payload": {
+                    "title": "Timeline of changes",
+                    "items": [
+                        {
+                            "item_id": "event_1",
+                            "label": "Updated task",
+                            "start_at": "2026-02-17T09:10:00Z",
+                        }
+                    ],
+                }
+            }
+        ],
+        screen_calendar_elements=[
+            {
+                "payload": {
+                    "title": "Calendar schedule",
+                    "items": [
+                        {
+                            "item_id": "calendar_1",
+                            "title": "Alpha task",
+                            "start_at": "2026-02-17",
+                        }
+                    ],
+                }
+            }
+        ],
+        screen_document_elements=[
+            {
+                "payload": {
+                    "title": "Document excerpts",
+                    "documents": [
+                        {
+                            "document_id": "doc_1",
+                            "title": "Doc one",
+                            "source_label": "search_knowledge_base",
+                            "sections": [
+                                {
+                                    "section_id": "sec_1",
+                                    "heading": "Summary",
+                                    "excerpt": "Alpha excerpt",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            }
+        ],
+        screen_relation_graph_elements=[
+            {
+                "payload": {
+                    "title": "Relation network",
+                    "nodes": [
+                        {
+                            "node_id": "#V#a",
+                            "label": "A",
+                            "node_kind": "individual",
+                        },
+                        {
+                            "node_id": "#V#b",
+                            "label": "B",
+                            "node_kind": "individual",
+                        },
+                    ],
+                    "edges": [
+                        {
+                            "edge_id": "edge_1",
+                            "source": "#V#a",
+                            "target": "#V#b",
+                            "predicate": "#V#related_to",
+                        }
+                    ],
+                }
+            }
+        ],
+    )
+
+    payload_title_by_type = {
+        element["element_type"]: element["payload"].get("title")
+        for element in contract["elements"]
+        if element["element_type"] in {
+            "table",
+            "workflow_view",
+            "task_view",
+            "kanban_view",
+            "timeline",
+            "calendar_view",
+            "document_view",
+            "relation_graph_view",
+        }
+    }
+
+    assert payload_title_by_type["table"] == "Task status table"
+    assert payload_title_by_type["workflow_view"] == "Workflow executions"
+    assert payload_title_by_type["task_view"] == "Action items"
+    assert payload_title_by_type["kanban_view"] == "Kanban backlog"
+    assert payload_title_by_type["timeline"] == "Timeline of changes"
+    assert payload_title_by_type["calendar_view"] == "Calendar schedule"
+    assert payload_title_by_type["document_view"] == "Document excerpts"
+    assert payload_title_by_type["relation_graph_view"] == "Relation network"
+    assert contract["validation"]["valid"] is True
+
+
+def test_validate_turn_display_elements_rejects_blank_optional_payload_title() -> None:
+    valid, errors = validate_turn_display_elements(
+        {
+            "schema_version": "turn_display_elements_v1",
+            "elements": [
+                {
+                    "element_id": "screen_table_1",
+                    "element_type": "table",
+                    "channel": "screen",
+                    "order": 15,
+                    "intent": "structured_tabular_view",
+                    "payload": {
+                        "title": "   ",
+                        "columns": [
+                            {
+                                "column_id": "task",
+                                "label": "Task",
+                                "data_type": "text",
+                            }
+                        ],
+                        "rows": [
+                            {
+                                "row_id": "row_1",
+                                "cells": [
+                                    {
+                                        "column_id": "task",
+                                        "value_raw": "Alpha",
+                                        "value_display": "Alpha",
+                                        "value_type": "text",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    "provenance": {"source": "test"},
+                }
+            ],
+            "reason_codes": [],
+        }
+    )
+
+    assert valid is False
+    assert any(".payload.title must be a non-empty string when provided" in message for message in errors)

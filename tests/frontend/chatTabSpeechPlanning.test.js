@@ -332,6 +332,7 @@ describe('chat speech planning (presenter channels)', () => {
             screenText: 'Task summary',
             spokenText: 'Here is the task summary table.',
             tablePayload: {
+                title: 'Predicate status matrix',
                 columns: [
                     { column_id: 'task', label: 'Task', data_type: 'text', position: 0 },
                     { column_id: 'status', label: 'Status', data_type: 'text', position: 1 }
@@ -401,6 +402,9 @@ describe('chat speech planning (presenter channels)', () => {
 
         const renderedTable = document.querySelector('.chat-display-elements-table');
         expect(renderedTable).toBeTruthy();
+        const tableTitle = document.querySelector('.chat-display-elements-table-title');
+        expect(tableTitle).toBeTruthy();
+        expect(tableTitle.textContent).toBe('Predicate status matrix');
 
         const headers = Array.from(renderedTable.querySelectorAll('thead th')).map((cell) => cell.textContent);
         expect(headers).toEqual(['Task', 'Status']);
@@ -506,6 +510,9 @@ describe('chat speech planning (presenter channels)', () => {
 
         const renderedTable = document.querySelector('.chat-display-elements-table');
         expect(renderedTable).toBeTruthy();
+        const tableTitle = document.querySelector('.chat-display-elements-table-title');
+        expect(tableTitle).toBeTruthy();
+        expect(tableTitle.textContent).toBe('Table');
 
         const firstPageRows = renderedTable.querySelectorAll('tbody tr');
         expect(firstPageRows.length).toBe(2);
@@ -542,6 +549,7 @@ describe('chat speech planning (presenter channels)', () => {
             screenText: 'Workflow summary',
             spokenText: 'Here is the workflow summary.',
             workflowPayload: {
+                title: 'Workflow execution overview',
                 layout: 'list',
                 nodes: [
                     {
@@ -616,6 +624,9 @@ describe('chat speech planning (presenter channels)', () => {
 
         const workflowNode = document.querySelector('.chat-display-elements-workflow-node');
         expect(workflowNode).toBeTruthy();
+        const workflowTitle = document.querySelector('.chat-display-elements-workflow-title');
+        expect(workflowTitle).toBeTruthy();
+        expect(workflowTitle.textContent).toBe('Workflow execution overview');
         expect(workflowNode.textContent).toContain('#V#salient_predicate_governance_workflow');
         expect(workflowNode.textContent).toContain('running');
 
@@ -650,6 +661,7 @@ describe('chat speech planning (presenter channels)', () => {
             screenText: 'Timeline summary',
             spokenText: 'Here is the task timeline.',
             timelinePayload: {
+                title: 'Task lifecycle timeline',
                 items: [
                     {
                         item_id: 'event_alpha',
@@ -722,6 +734,9 @@ describe('chat speech planning (presenter channels)', () => {
 
         const timelineItem = document.querySelector('.chat-display-elements-timeline-item');
         expect(timelineItem).toBeTruthy();
+        const timelineTitle = document.querySelector('.chat-display-elements-timeline-title');
+        expect(timelineTitle).toBeTruthy();
+        expect(timelineTitle.textContent).toBe('Task lifecycle timeline');
         expect(timelineItem.textContent).toContain('Task status updated');
         expect(timelineItem.textContent).toContain('Changed from pending to in_progress');
 
@@ -755,6 +770,7 @@ describe('chat speech planning (presenter channels)', () => {
             screenText: 'Task summary',
             spokenText: 'Here are the task cards.',
             taskViewPayload: {
+                title: 'Current action items',
                 tasks: [
                     {
                         task_id: '#V#task_alpha',
@@ -830,6 +846,9 @@ describe('chat speech planning (presenter channels)', () => {
 
         const taskCard = document.querySelector('.chat-display-elements-task-view-item');
         expect(taskCard).toBeTruthy();
+        const taskViewTitle = document.querySelector('.chat-display-elements-task-view-title');
+        expect(taskViewTitle).toBeTruthy();
+        expect(taskViewTitle.textContent).toBe('Current action items');
         expect(taskCard.textContent).toContain('Alpha task');
         expect(taskCard.textContent).toContain('Priority: high');
         expect(taskCard.textContent).toContain('Assignee: #V#user_alpha');

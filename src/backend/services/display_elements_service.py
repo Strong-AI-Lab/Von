@@ -28,6 +28,18 @@ ALLOWED_DISPLAY_ELEMENT_TYPES = frozenset(
         "workflow_view",
     }
 )
+OPTIONAL_PAYLOAD_TITLE_ELEMENT_TYPES = frozenset(
+    {
+        "calendar_view",
+        "document_view",
+        "kanban_view",
+        "relation_graph_view",
+        "table",
+        "timeline",
+        "task_view",
+        "workflow_view",
+    }
+)
 RELATION_TRUTH_STATE_GROUP_STATUSES = frozenset(
     {"asserted", "missing_expected", "uncertain"}
 )
@@ -50,8 +62,11 @@ _FENCED_CODE_BLOCK_PATTERN = re.compile(
 _MARKDOWN_TABLE_SEPARATOR_PATTERN = re.compile(
     r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$"
 )
+_MARKDOWN_HEADING_PATTERN = re.compile(r"^\s{0,3}#{1,6}\s+(?P<title>.+?)\s*$")
+_MARKDOWN_STRONG_LINE_PATTERN = re.compile(r"^\*\*(?P<title>.+?)\*\*$")
 _NUMBER_PATTERN = re.compile(r"^-?(?:\d+|\d+\.\d+)$")
 _ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_MARKDOWN_TABLE_TITLE_LOOKBACK_LINES = 5
 
 
 def _normalise_text(value: object) -> str | None:
@@ -59,6 +74,63 @@ def _normalise_text(value: object) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned or None
+
+
+def _resolve_optional_payload_title(
+    payload: Mapping[str, Any] | None,
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> str | None:
+    candidates: list[object] = []
+    if isinstance(payload, Mapping):
+        candidates.append(payload.get("title"))
+    if isinstance(metadata, Mapping):
+        metadata_payload = metadata.get("payload")
+        if isinstance(metadata_payload, Mapping):
+            candidates.extend(
+                [
+                    metadata_payload.get("title"),
+                    metadata_payload.get("section_title"),
+                ]
+            )
+        candidates.extend(
+            [
+                metadata.get("title"),
+                metadata.get("section_title"),
+            ]
+        )
+    for candidate in candidates:
+        title = _normalise_text(candidate)
+        if title:
+            return title
+    return None
+
+
+def _with_optional_payload_title(
+    payload: Mapping[str, Any],
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    canonical_payload = dict(payload)
+    title = _resolve_optional_payload_title(payload, metadata=metadata)
+    if title:
+        canonical_payload["title"] = title
+    else:
+        canonical_payload.pop("title", None)
+    return canonical_payload
+
+
+def _validate_optional_payload_title(
+    *,
+    payload: Mapping[str, Any],
+    label: str,
+    errors: list[str],
+) -> None:
+    if "title" not in payload:
+        return
+    title = payload.get("title")
+    if not isinstance(title, str) or not title.strip():
+        errors.append(f"{label}.payload.title must be a non-empty string when provided")
 
 
 def _truncate_document_text(
@@ -153,6 +225,45 @@ def _infer_cell_value_type(value: str) -> str:
     return "text"
 
 
+def _extract_context_title_line(raw_line: str) -> str | None:
+    line = raw_line.strip()
+    if not line or "|" in line:
+        return None
+    line = re.sub(r"^[-*+]\s+", "", line).strip()
+
+    heading_match = _MARKDOWN_HEADING_PATTERN.match(line)
+    if heading_match:
+        return _normalise_text(heading_match.group("title"))
+
+    strong_match = _MARKDOWN_STRONG_LINE_PATTERN.match(line)
+    if strong_match:
+        return _normalise_text(strong_match.group("title"))
+
+    if line.endswith(":"):
+        return _normalise_text(line[:-1])
+    return None
+
+
+def _extract_markdown_table_context_title(
+    lines: Sequence[str],
+    *,
+    header_line_index: int,
+) -> str | None:
+    lookback_start = max(0, header_line_index - _MARKDOWN_TABLE_TITLE_LOOKBACK_LINES)
+    for cursor in range(header_line_index - 1, lookback_start - 1, -1):
+        candidate_line = lines[cursor]
+        if not isinstance(candidate_line, str):
+            continue
+        if not candidate_line.strip():
+            continue
+        title = _extract_context_title_line(candidate_line)
+        if title:
+            return title
+        # Stop on first non-empty line without a robust title signal.
+        break
+    return None
+
+
 def extract_markdown_tables(text: str | None) -> list[dict[str, Any]]:
     """Extract structured markdown tables from non-code-fenced text."""
     if not isinstance(text, str) or not text.strip():
@@ -216,6 +327,10 @@ def extract_markdown_tables(text: str | None) -> list[dict[str, Any]]:
                 record[f"col_{column_index + 1}"] = value.strip()
             records.append(record)
 
+        table_title = _extract_markdown_table_context_title(
+            lines,
+            header_line_index=index,
+        )
         payload = build_canonical_table_payload_from_records(
             records=records,
             columns=column_configs,
@@ -227,6 +342,7 @@ def extract_markdown_tables(text: str | None) -> list[dict[str, Any]]:
             default_sort_direction="asc",
             pagination_enabled=True,
             page_size=min(100, len(records)),
+            title=table_title,
         )
         payload["source_span"] = {
             "start_line": index + 1,
@@ -278,6 +394,7 @@ def build_canonical_table_payload_from_records(
     filters: Sequence[Mapping[str, Any]] | None = None,
     pagination_enabled: bool = True,
     page_size: int | None = None,
+    title: str | None = None,
 ) -> dict[str, Any]:
     """Build one canonical table payload from configured column metadata + records.
 
@@ -364,7 +481,7 @@ def build_canonical_table_payload_from_records(
             if isinstance(value, Mapping):
                 table_filters.append(dict(value))
 
-    return {
+    payload = {
         "columns": canonical_columns,
         "rows": canonical_rows,
         "sort": {
@@ -378,6 +495,10 @@ def build_canonical_table_payload_from_records(
             "total_rows": len(canonical_rows),
         },
     }
+    normalised_title = _normalise_text(title)
+    if normalised_title:
+        payload["title"] = normalised_title
+    return payload
 
 
 def _validate_task_links(
@@ -473,6 +594,13 @@ def validate_turn_display_elements(
         provenance = element.get("provenance")
         if not isinstance(provenance, Mapping):
             errors.append(f"{label}.provenance must be a mapping")
+
+        if element_type in OPTIONAL_PAYLOAD_TITLE_ELEMENT_TYPES:
+            _validate_optional_payload_title(
+                payload=payload,
+                label=label,
+                errors=errors,
+            )
 
         if element_type == "text_block":
             text_value = payload.get("text")
@@ -1294,6 +1422,7 @@ def _normalise_supplied_screen_tables(
         provenance = metadata.get("provenance")
         if not isinstance(provenance, Mapping):
             provenance = {}
+        canonical_payload = _with_optional_payload_title(payload, metadata=metadata)
 
         # Keep externally supplied payloads from invalidating the whole contract.
         # Invalid payloads are dropped and surfaced via reason codes.
@@ -1307,7 +1436,7 @@ def _normalise_supplied_screen_tables(
                         "channel": "screen",
                         "order": 16,
                         "intent": intent,
-                        "payload": dict(payload),
+                        "payload": dict(canonical_payload),
                         "constraints": dict(constraints),
                         "provenance": dict(provenance),
                     }
@@ -1324,7 +1453,7 @@ def _normalise_supplied_screen_tables(
                 "element_id": _normalise_text(metadata.get("element_id")),
                 "order": metadata.get("order") if isinstance(metadata.get("order"), int) else None,
                 "intent": intent,
-                "payload": dict(payload),
+                "payload": dict(canonical_payload),
                 "constraints": dict(constraints),
                 "provenance": dict(provenance),
             }
@@ -1376,6 +1505,7 @@ def _normalise_supplied_screen_workflows(
         provenance = metadata.get("provenance")
         if not isinstance(provenance, Mapping):
             provenance = {}
+        canonical_payload = _with_optional_payload_title(payload, metadata=metadata)
 
         is_valid, _errors = validate_turn_display_elements(
             {
@@ -1387,7 +1517,7 @@ def _normalise_supplied_screen_workflows(
                         "channel": "screen",
                         "order": 26,
                         "intent": intent,
-                        "payload": dict(payload),
+                        "payload": dict(canonical_payload),
                         "constraints": dict(constraints),
                         "provenance": dict(provenance),
                     }
@@ -1406,7 +1536,7 @@ def _normalise_supplied_screen_workflows(
                 if isinstance(metadata.get("order"), int)
                 else None,
                 "intent": intent,
-                "payload": dict(payload),
+                "payload": dict(canonical_payload),
                 "constraints": dict(constraints),
                 "provenance": dict(provenance),
             }
@@ -1458,6 +1588,7 @@ def _normalise_supplied_screen_timelines(
         provenance = metadata.get("provenance")
         if not isinstance(provenance, Mapping):
             provenance = {}
+        canonical_payload = _with_optional_payload_title(payload, metadata=metadata)
 
         is_valid, _errors = validate_turn_display_elements(
             {
@@ -1469,7 +1600,7 @@ def _normalise_supplied_screen_timelines(
                         "channel": "screen",
                         "order": 36,
                         "intent": intent,
-                        "payload": dict(payload),
+                        "payload": dict(canonical_payload),
                         "constraints": dict(constraints),
                         "provenance": dict(provenance),
                     }
@@ -1488,7 +1619,7 @@ def _normalise_supplied_screen_timelines(
                 if isinstance(metadata.get("order"), int)
                 else None,
                 "intent": intent,
-                "payload": dict(payload),
+                "payload": dict(canonical_payload),
                 "constraints": dict(constraints),
                 "provenance": dict(provenance),
             }
@@ -1540,6 +1671,7 @@ def _normalise_supplied_screen_calendar_views(
         provenance = metadata.get("provenance")
         if not isinstance(provenance, Mapping):
             provenance = {}
+        canonical_payload = _with_optional_payload_title(payload, metadata=metadata)
 
         is_valid, _errors = validate_turn_display_elements(
             {
@@ -1551,7 +1683,7 @@ def _normalise_supplied_screen_calendar_views(
                         "channel": "screen",
                         "order": 38,
                         "intent": intent,
-                        "payload": dict(payload),
+                        "payload": dict(canonical_payload),
                         "constraints": dict(constraints),
                         "provenance": dict(provenance),
                     }
@@ -1570,7 +1702,7 @@ def _normalise_supplied_screen_calendar_views(
                 if isinstance(metadata.get("order"), int)
                 else None,
                 "intent": intent,
-                "payload": dict(payload),
+                "payload": dict(canonical_payload),
                 "constraints": dict(constraints),
                 "provenance": dict(provenance),
             }
@@ -1755,7 +1887,10 @@ def _normalise_supplied_screen_document_views(
                     document_payload["updated_at"] = updated_at
                 canonical_documents.append(document_payload)
 
-        canonical_payload = {"documents": canonical_documents}
+        canonical_payload = _with_optional_payload_title(
+            {"documents": canonical_documents},
+            metadata=metadata,
+        )
 
         is_valid, _errors = validate_turn_display_elements(
             {
@@ -1838,6 +1973,7 @@ def _normalise_supplied_screen_task_views(
         provenance = metadata.get("provenance")
         if not isinstance(provenance, Mapping):
             provenance = {}
+        canonical_payload = _with_optional_payload_title(payload, metadata=metadata)
 
         is_valid, _errors = validate_turn_display_elements(
             {
@@ -1849,7 +1985,7 @@ def _normalise_supplied_screen_task_views(
                         "channel": "screen",
                         "order": 31,
                         "intent": intent,
-                        "payload": dict(payload),
+                        "payload": dict(canonical_payload),
                         "constraints": dict(constraints),
                         "provenance": dict(provenance),
                     }
@@ -1868,7 +2004,7 @@ def _normalise_supplied_screen_task_views(
                 if isinstance(metadata.get("order"), int)
                 else None,
                 "intent": intent,
-                "payload": dict(payload),
+                "payload": dict(canonical_payload),
                 "constraints": dict(constraints),
                 "provenance": dict(provenance),
             }
@@ -1917,6 +2053,7 @@ def _normalise_supplied_screen_kanban_views(
         provenance = metadata.get("provenance")
         if not isinstance(provenance, Mapping):
             provenance = {}
+        canonical_payload = _with_optional_payload_title(payload, metadata=metadata)
 
         is_valid, _errors = validate_turn_display_elements(
             {
@@ -1928,7 +2065,7 @@ def _normalise_supplied_screen_kanban_views(
                         "channel": "screen",
                         "order": 33,
                         "intent": intent,
-                        "payload": dict(payload),
+                        "payload": dict(canonical_payload),
                         "constraints": dict(constraints),
                         "provenance": dict(provenance),
                     }
@@ -1947,7 +2084,7 @@ def _normalise_supplied_screen_kanban_views(
                 if isinstance(metadata.get("order"), int)
                 else None,
                 "intent": intent,
-                "payload": dict(payload),
+                "payload": dict(canonical_payload),
                 "constraints": dict(constraints),
                 "provenance": dict(provenance),
             }
@@ -1996,6 +2133,7 @@ def _normalise_supplied_screen_relation_graph_views(
         provenance = metadata.get("provenance")
         if not isinstance(provenance, Mapping):
             provenance = {}
+        canonical_payload = _with_optional_payload_title(payload, metadata=metadata)
 
         is_valid, _errors = validate_turn_display_elements(
             {
@@ -2007,7 +2145,7 @@ def _normalise_supplied_screen_relation_graph_views(
                         "channel": "screen",
                         "order": 43,
                         "intent": intent,
-                        "payload": dict(payload),
+                        "payload": dict(canonical_payload),
                         "constraints": dict(constraints),
                         "provenance": dict(provenance),
                     }
@@ -2026,7 +2164,7 @@ def _normalise_supplied_screen_relation_graph_views(
                 if isinstance(metadata.get("order"), int)
                 else None,
                 "intent": intent,
-                "payload": dict(payload),
+                "payload": dict(canonical_payload),
                 "constraints": dict(constraints),
                 "provenance": dict(provenance),
             }
@@ -2078,6 +2216,7 @@ def _normalise_supplied_screen_relation_truth_states(
         provenance = metadata.get("provenance")
         if not isinstance(provenance, Mapping):
             provenance = {}
+        canonical_payload = _with_optional_payload_title(payload, metadata=metadata)
 
         is_valid, _errors = validate_turn_display_elements(
             {
@@ -2089,7 +2228,7 @@ def _normalise_supplied_screen_relation_truth_states(
                         "channel": "screen",
                         "order": 41,
                         "intent": intent,
-                        "payload": dict(payload),
+                        "payload": dict(canonical_payload),
                         "constraints": dict(constraints),
                         "provenance": dict(provenance),
                     }
@@ -2108,7 +2247,7 @@ def _normalise_supplied_screen_relation_truth_states(
                 if isinstance(metadata.get("order"), int)
                 else None,
                 "intent": intent,
-                "payload": dict(payload),
+                "payload": dict(canonical_payload),
                 "constraints": dict(constraints),
                 "provenance": dict(provenance),
             }
