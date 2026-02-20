@@ -67,6 +67,9 @@ _MARKDOWN_STRONG_LINE_PATTERN = re.compile(r"^\*\*(?P<title>.+?)\*\*$")
 _NUMBER_PATTERN = re.compile(r"^-?(?:\d+|\d+\.\d+)$")
 _ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _MARKDOWN_TABLE_TITLE_LOOKBACK_LINES = 5
+_RELATION_EXTENT_ARG1_TOKENS = frozenset({"arg1", "subject", "left", "source"})
+_RELATION_EXTENT_PREDICATE_TOKENS = frozenset({"predicate", "relation"})
+_RELATION_EXTENT_ARG2_TOKENS = frozenset({"arg2", "object", "right", "target"})
 
 
 def _normalise_text(value: object) -> str | None:
@@ -74,6 +77,13 @@ def _normalise_text(value: object) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned or None
+
+
+def _normalise_relation_extent_column_token(value: object) -> str:
+    text = _normalise_text(value)
+    if not text:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "", text.lower())
 
 
 def _resolve_optional_payload_title(
@@ -131,6 +141,96 @@ def _validate_optional_payload_title(
     title = payload.get("title")
     if not isinstance(title, str) or not title.strip():
         errors.append(f"{label}.payload.title must be a non-empty string when provided")
+
+
+def _resolve_relation_extent_compact_column_ids(
+    columns: Sequence[Mapping[str, Any]],
+) -> list[str] | None:
+    role_to_column_id: dict[str, str] = {}
+
+    for column in columns:
+        if not isinstance(column, Mapping):
+            continue
+        column_id = _normalise_text(column.get("column_id"))
+        if not column_id:
+            continue
+
+        candidate_tokens = {
+            _normalise_relation_extent_column_token(column_id),
+            _normalise_relation_extent_column_token(column.get("label")),
+            _normalise_relation_extent_column_token(column.get("source_key")),
+        }
+        candidate_tokens.discard("")
+
+        if "arg1" not in role_to_column_id and (
+            candidate_tokens & _RELATION_EXTENT_ARG1_TOKENS
+        ):
+            role_to_column_id["arg1"] = column_id
+        if "predicate" not in role_to_column_id and (
+            candidate_tokens & _RELATION_EXTENT_PREDICATE_TOKENS
+        ):
+            role_to_column_id["predicate"] = column_id
+        if "arg2" not in role_to_column_id and (
+            candidate_tokens & _RELATION_EXTENT_ARG2_TOKENS
+        ):
+            role_to_column_id["arg2"] = column_id
+
+        if len(role_to_column_id) == 3:
+            break
+
+    if len(role_to_column_id) < 3:
+        return None
+
+    compact_column_ids = [
+        role_to_column_id["arg1"],
+        role_to_column_id["predicate"],
+        role_to_column_id["arg2"],
+    ]
+    if len(set(compact_column_ids)) < 3:
+        return None
+    return compact_column_ids
+
+
+def _build_default_table_column_visibility(
+    columns: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(columns, Sequence) or isinstance(
+        columns, (str, bytes, bytearray)
+    ):
+        return None
+
+    declared_column_count = sum(
+        1
+        for column in columns
+        if isinstance(column, Mapping) and _normalise_text(column.get("column_id"))
+    )
+    if declared_column_count <= 3:
+        return None
+
+    compact_column_ids = _resolve_relation_extent_compact_column_ids(columns)
+    if not compact_column_ids:
+        return None
+
+    return {
+        "default_mode": "compact",
+        "compact_column_ids": compact_column_ids,
+        "expand_label": "Expand table",
+        "collapse_label": "Show compact view",
+    }
+
+
+def _with_default_table_column_visibility(payload: Mapping[str, Any]) -> dict[str, Any]:
+    canonical_payload = dict(payload)
+    existing_column_visibility = canonical_payload.get("column_visibility")
+    if isinstance(existing_column_visibility, Mapping):
+        return canonical_payload
+
+    inferred_column_visibility = _build_default_table_column_visibility(
+        canonical_payload.get("columns")
+    )
+    if inferred_column_visibility:
+        canonical_payload["column_visibility"] = inferred_column_visibility
+    return canonical_payload
 
 
 def _truncate_document_text(
@@ -495,6 +595,9 @@ def build_canonical_table_payload_from_records(
             "total_rows": len(canonical_rows),
         },
     }
+    inferred_column_visibility = _build_default_table_column_visibility(canonical_columns)
+    if inferred_column_visibility:
+        payload["column_visibility"] = inferred_column_visibility
     normalised_title = _normalise_text(title)
     if normalised_title:
         payload["title"] = normalised_title
@@ -1422,7 +1525,9 @@ def _normalise_supplied_screen_tables(
         provenance = metadata.get("provenance")
         if not isinstance(provenance, Mapping):
             provenance = {}
-        canonical_payload = _with_optional_payload_title(payload, metadata=metadata)
+        canonical_payload = _with_default_table_column_visibility(
+            _with_optional_payload_title(payload, metadata=metadata)
+        )
 
         # Keep externally supplied payloads from invalidating the whole contract.
         # Invalid payloads are dropped and surfaced via reason codes.

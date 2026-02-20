@@ -417,6 +417,121 @@ describe('chat speech planning (presenter channels)', () => {
         expect(firstRowCells[1].textContent).toBe('done');
     });
 
+    test('renders compact relation extent columns by default and expands on demand', async () => {
+        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        const promptInput = document.getElementById('promptInput');
+        promptInput.value = 'show relation extent table';
+
+        const displayElements = buildDisplayElementsContract({
+            screenText: 'Relation extent summary',
+            spokenText: 'Here is the relation extent summary.',
+            tablePayload: {
+                title: 'Relation extent',
+                columns: [
+                    { column_id: 'arg1', label: 'Arg1', data_type: 'text', position: 0 },
+                    { column_id: 'predicate', label: 'Predicate', data_type: 'text', position: 1 },
+                    { column_id: 'arg2', label: 'Arg2', data_type: 'text', position: 2 },
+                    { column_id: 'status', label: 'Status', data_type: 'text', position: 3 },
+                    { column_id: 'assertion_id', label: 'Assertion ID', data_type: 'text', position: 4 }
+                ],
+                rows: [
+                    {
+                        row_id: 'row_1',
+                        cells: [
+                            { column_id: 'arg1', value_raw: '#V#michael_witbrock', value_display: '#V#michael_witbrock', value_type: 'text' },
+                            { column_id: 'predicate', value_raw: '#V#attended_event', value_display: '#V#attended_event', value_type: 'text' },
+                            { column_id: 'arg2', value_raw: '#V#iaicgf_2025', value_display: '#V#iaicgf_2025', value_type: 'text' },
+                            { column_id: 'status', value_raw: 'asserted', value_display: 'asserted', value_type: 'text' },
+                            { column_id: 'assertion_id', value_raw: 'assertion_1', value_display: 'assertion_1', value_type: 'text' }
+                        ]
+                    }
+                ],
+                column_visibility: {
+                    default_mode: 'compact',
+                    compact_column_ids: ['arg1', 'predicate', 'arg2'],
+                    expand_label: 'Expand table',
+                    collapse_label: 'Show compact view'
+                },
+                pagination: { enabled: true, page_size: 50, total_rows: 1 }
+            }
+        });
+
+        global.fetch = jest.fn((url, options) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                let text = '';
+                try {
+                    text = JSON.parse(options?.body ?? '{}')?.text ?? '';
+                } catch (_) {
+                    text = '';
+                }
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ html: String(text) })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        response: 'Relation extent summary',
+                        display_elements: displayElements,
+                        llm_debug: {
+                            model: 'gpt-5.2',
+                            response: 'Relation extent summary',
+                            messages: [],
+                            display_elements: displayElements
+                        }
+                    })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        await sendMessage();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const renderedTable = document.querySelector('.chat-display-elements-table');
+        expect(renderedTable).toBeTruthy();
+
+        let headers = Array.from(renderedTable.querySelectorAll('thead th')).map((cell) => cell.textContent);
+        expect(headers).toEqual(['Arg1', 'Predicate', 'Arg2']);
+
+        let rowCells = renderedTable.querySelectorAll('tbody tr')[0].querySelectorAll('td');
+        expect(rowCells.length).toBe(3);
+
+        const toggleButton = document.querySelector('.chat-display-elements-table-column-toggle');
+        expect(toggleButton).toBeTruthy();
+        expect(toggleButton.textContent).toBe('Expand table');
+
+        toggleButton.click();
+
+        headers = Array.from(renderedTable.querySelectorAll('thead th')).map((cell) => cell.textContent);
+        expect(headers).toEqual(['Arg1', 'Predicate', 'Arg2', 'Status', 'Assertion ID']);
+        rowCells = renderedTable.querySelectorAll('tbody tr')[0].querySelectorAll('td');
+        expect(rowCells.length).toBe(5);
+        expect(toggleButton.textContent).toBe('Show compact view');
+
+        toggleButton.click();
+        headers = Array.from(renderedTable.querySelectorAll('thead th')).map((cell) => cell.textContent);
+        expect(headers).toEqual(['Arg1', 'Predicate', 'Arg2']);
+    });
+
     test('applies configured table sort and pagination metadata', async () => {
         const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
         getUserContext.mockReturnValue({

@@ -1461,6 +1461,37 @@ def test_task_and_predicate_extent_payloads_validate_under_same_table_contract()
     assert predicate_payload["rows"][0]["provenance"]["assertion_id"] == "assertion_1"
 
 
+def test_build_canonical_table_payload_infers_relation_extent_compact_visibility() -> None:
+    payload = build_canonical_table_payload_from_records(
+        records=[
+            {
+                "assertion_id": "assertion_1",
+                "subject": "#V#michael_witbrock",
+                "predicate": "#V#attended_event",
+                "object": "#V#iaicgf_2025",
+                "status": "asserted",
+            }
+        ],
+        columns=[
+            {"column_id": "arg1", "label": "Arg1", "source_key": "subject"},
+            {"column_id": "predicate", "label": "Predicate", "source_key": "predicate"},
+            {"column_id": "arg2", "label": "Arg2", "source_key": "object"},
+            {"column_id": "status", "label": "Status", "source_key": "status"},
+        ],
+        row_id_field="assertion_id",
+        default_sort_column_id="arg1",
+    )
+
+    assert payload["column_visibility"]["default_mode"] == "compact"
+    assert payload["column_visibility"]["compact_column_ids"] == [
+        "arg1",
+        "predicate",
+        "arg2",
+    ]
+    assert payload["column_visibility"]["expand_label"] == "Expand table"
+    assert payload["column_visibility"]["collapse_label"] == "Show compact view"
+
+
 def test_extract_markdown_tables_derives_context_title() -> None:
     tables = extract_markdown_tables(
         (
@@ -1473,6 +1504,72 @@ def test_extract_markdown_tables_derives_context_title() -> None:
 
     assert len(tables) == 1
     assert tables[0]["title"] == "Predicate status snapshot"
+
+
+def test_build_turn_display_elements_infers_compact_relation_extent_columns() -> None:
+    contract = build_turn_display_elements(
+        response_text="Relation extent summary",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Relation extent summary",
+            "spoken": None,
+        },
+        screen_table_elements=[
+            {
+                "payload": {
+                    "columns": [
+                        {"column_id": "arg1", "label": "Arg1", "data_type": "text"},
+                        {"column_id": "predicate", "label": "Predicate", "data_type": "text"},
+                        {"column_id": "arg2", "label": "Arg2", "data_type": "text"},
+                        {"column_id": "status", "label": "Status", "data_type": "text"},
+                    ],
+                    "rows": [
+                        {
+                            "row_id": "row_1",
+                            "cells": [
+                                {
+                                    "column_id": "arg1",
+                                    "value_raw": "#V#a",
+                                    "value_display": "#V#a",
+                                    "value_type": "text",
+                                },
+                                {
+                                    "column_id": "predicate",
+                                    "value_raw": "#V#p",
+                                    "value_display": "#V#p",
+                                    "value_type": "text",
+                                },
+                                {
+                                    "column_id": "arg2",
+                                    "value_raw": "#V#b",
+                                    "value_display": "#V#b",
+                                    "value_type": "text",
+                                },
+                                {
+                                    "column_id": "status",
+                                    "value_raw": "asserted",
+                                    "value_display": "asserted",
+                                    "value_type": "text",
+                                },
+                            ],
+                        }
+                    ],
+                }
+            }
+        ],
+    )
+
+    table_payload = next(
+        element["payload"]
+        for element in contract["elements"]
+        if element["element_type"] == "table"
+    )
+    assert table_payload["column_visibility"]["default_mode"] == "compact"
+    assert table_payload["column_visibility"]["compact_column_ids"] == [
+        "arg1",
+        "predicate",
+        "arg2",
+    ]
 
 
 def test_build_turn_display_elements_preserves_optional_payload_titles() -> None:

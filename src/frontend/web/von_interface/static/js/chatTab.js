@@ -1569,6 +1569,47 @@ function normaliseTablePaginationMetadata(value, rowCount) {
     };
 }
 
+function normaliseTableColumnVisibilityMetadata(value, columns) {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+
+    const knownColumnIds = new Set(columns.map((column) => column.column_id));
+    const rawCompactColumnIds = Array.isArray(value.compact_column_ids) ? value.compact_column_ids : [];
+    const compactColumnIds = [];
+    const seenColumnIds = new Set();
+
+    rawCompactColumnIds.forEach((candidate) => {
+        if (typeof candidate !== 'string') {
+            return;
+        }
+        const columnId = candidate.trim();
+        if (!columnId || seenColumnIds.has(columnId) || !knownColumnIds.has(columnId)) {
+            return;
+        }
+        seenColumnIds.add(columnId);
+        compactColumnIds.push(columnId);
+    });
+
+    if (!compactColumnIds.length || compactColumnIds.length >= knownColumnIds.size) {
+        return null;
+    }
+
+    const defaultMode = String(value.default_mode || 'full').trim().toLowerCase() === 'compact'
+        ? 'compact'
+        : 'full';
+
+    const expandLabel = normaliseOptionalDisplayElementTitle(value.expand_label) || 'Expand table';
+    const collapseLabel = normaliseOptionalDisplayElementTitle(value.collapse_label) || 'Show compact view';
+
+    return {
+        default_mode: defaultMode,
+        compact_column_ids: compactColumnIds,
+        expand_label: expandLabel,
+        collapse_label: collapseLabel
+    };
+}
+
 function normaliseTableCellValueDisplay(valueRaw, valueDisplay) {
     if (typeof valueDisplay === 'string') {
         return valueDisplay;
@@ -1658,9 +1699,23 @@ function sortTableRows(rows, columns, sortMetadata) {
         .map(({ row }) => row);
 }
 
-function appendTableRow(tbody, row) {
+function appendTableRow(tbody, row, visibleColumns) {
     const tr = document.createElement('tr');
-    row.cells.forEach((cell) => {
+    const cellsByColumnId = new Map();
+    const rowCells = Array.isArray(row?.cells) ? row.cells : [];
+    rowCells.forEach((cell) => {
+        const columnId = typeof cell?.column_id === 'string' ? cell.column_id.trim() : '';
+        if (!columnId || cellsByColumnId.has(columnId)) {
+            return;
+        }
+        cellsByColumnId.set(columnId, cell);
+    });
+
+    visibleColumns.forEach((column) => {
+        const cell = cellsByColumnId.get(column.column_id) || {
+            value_display: '',
+            value_type: 'text'
+        };
         const td = document.createElement('td');
         td.textContent = cell.value_display;
         td.dataset.valueType = cell.value_type || 'text';
@@ -1761,6 +1816,7 @@ function normaliseTableDisplayElement(element) {
 
     const sort = normaliseTableSortMetadata(payload.sort, columns);
     const pagination = normaliseTablePaginationMetadata(payload.pagination, rows.length);
+    const columnVisibility = normaliseTableColumnVisibilityMetadata(payload.column_visibility, columns);
 
     return {
         element_id: typeof element.element_id === 'string' ? element.element_id : null,
@@ -1768,7 +1824,8 @@ function normaliseTableDisplayElement(element) {
         columns,
         rows,
         sort,
-        pagination
+        pagination,
+        column_visibility: columnVisibility
     };
 }
 
@@ -3530,6 +3587,16 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
         title.style.cssText = 'font-weight: 600; font-size: 0.85em; color: #2f4f6f; margin-bottom: 6px;';
         section.appendChild(title);
 
+        const columnVisibility = tableElement.column_visibility;
+        const compactColumnIdSet = new Set(columnVisibility?.compact_column_ids || []);
+        const canToggleColumnVisibility = (
+            !!columnVisibility
+            && compactColumnIdSet.size > 0
+            && compactColumnIdSet.size < tableElement.columns.length
+        );
+        let showFullColumns = !(canToggleColumnVisibility && columnVisibility.default_mode === 'compact');
+        let rerenderCurrentSlice = null;
+
         const scrollWrap = document.createElement('div');
         scrollWrap.style.cssText = 'overflow-x: auto;';
 
@@ -3539,12 +3606,6 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
 
         const thead = document.createElement('thead');
         const headRow = document.createElement('tr');
-        tableElement.columns.forEach((column) => {
-            const th = document.createElement('th');
-            th.textContent = column.label;
-            th.style.cssText = 'text-align: left; border-bottom: 1px solid #dce3ea; padding: 4px 6px; font-size: 0.82em; color: #1f3d5a; background: #f5f8fb;';
-            headRow.appendChild(th);
-        });
         thead.appendChild(headRow);
         table.appendChild(thead);
 
@@ -3555,10 +3616,58 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
         let paginationControls = null;
         let truncationNotice = null;
 
-        const renderRows = (rows) => {
-            tbody.innerHTML = '';
-            rows.forEach((row) => appendTableRow(tbody, row));
+        const resolveVisibleColumns = () => {
+            if (!canToggleColumnVisibility || showFullColumns) {
+                return tableElement.columns;
+            }
+            const compactColumns = tableElement.columns.filter((column) => compactColumnIdSet.has(column.column_id));
+            return compactColumns.length ? compactColumns : tableElement.columns;
         };
+
+        const renderHeader = (visibleColumns) => {
+            headRow.innerHTML = '';
+            visibleColumns.forEach((column) => {
+                const th = document.createElement('th');
+                th.textContent = column.label;
+                th.style.cssText = 'text-align: left; border-bottom: 1px solid #dce3ea; padding: 4px 6px; font-size: 0.82em; color: #1f3d5a; background: #f5f8fb;';
+                headRow.appendChild(th);
+            });
+        };
+
+        let currentRows = [];
+        const renderRows = (rows) => {
+            currentRows = Array.isArray(rows) ? rows : [];
+            const visibleColumns = resolveVisibleColumns();
+            renderHeader(visibleColumns);
+            tbody.innerHTML = '';
+            currentRows.forEach((row) => appendTableRow(tbody, row, visibleColumns));
+        };
+
+        if (canToggleColumnVisibility) {
+            const columnToggle = document.createElement('button');
+            columnToggle.type = 'button';
+            columnToggle.className = 'chat-display-elements-table-column-toggle';
+            columnToggle.style.cssText = 'border: 1px solid #cad5df; background: #f8fbff; border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: 0.78em; color: #2f4f6f; margin-bottom: 6px;';
+
+            const syncColumnToggleLabel = () => {
+                columnToggle.textContent = showFullColumns
+                    ? columnVisibility.collapse_label
+                    : columnVisibility.expand_label;
+            };
+
+            columnToggle.addEventListener('click', () => {
+                showFullColumns = !showFullColumns;
+                syncColumnToggleLabel();
+                if (typeof rerenderCurrentSlice === 'function') {
+                    rerenderCurrentSlice();
+                    return;
+                }
+                renderRows(currentRows);
+            });
+
+            syncColumnToggleLabel();
+            section.appendChild(columnToggle);
+        }
 
         if (usePagination) {
             const pageSize = Math.max(1, Number(pagination.page_size) || TABLE_DEFAULT_PAGE_SIZE);
@@ -3607,12 +3716,18 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
             controls.appendChild(status);
             controls.appendChild(nextButton);
             paginationControls = controls;
+            rerenderCurrentSlice = () => {
+                renderPage(currentPage);
+            };
             renderPage(1);
         } else {
             const rowsToRender = pagination.enabled
                 ? sortedRows
                 : sortedRows.slice(0, TABLE_NON_PAGINATED_ROW_LIMIT);
             renderRows(rowsToRender);
+            rerenderCurrentSlice = () => {
+                renderRows(rowsToRender);
+            };
 
             if (!pagination.enabled && sortedRows.length > TABLE_NON_PAGINATED_ROW_LIMIT) {
                 const notice = document.createElement('div');
