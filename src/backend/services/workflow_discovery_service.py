@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
@@ -81,6 +82,71 @@ def _count_workflow_steps(graph: Optional[Dict[str, Any]]) -> int:
         if step_id:
             count += 1
     return count
+
+
+def _classify_registry_workflow_executability(
+    concept_id: str,
+) -> Tuple[bool, str, Optional[str]] | None:
+    """Classify executability from registry definitions when graph data is absent.
+
+    JVNAUTOSCI-803 follow-on: built-in workflow registrations can be executable
+    without a Vontology process graph mirror. This fallback closes monitor/
+    discovery parity for registry-backed (non-Vontology) workflows.
+    """
+
+    try:
+        from ..workflows.durable.registry_factory import (
+            build_durable_workflow_registry_read_only,
+        )
+    except Exception:
+        return None
+
+    try:
+        registry = build_durable_workflow_registry_read_only()
+        registration = registry.get_registration(concept_id)
+    except Exception:
+        return None
+
+    source = ""
+    definition = None
+    if registration is not None:
+        source = str(getattr(registration, "source", "") or "").strip().lower()
+        definition = getattr(registration, "definition", None)
+    else:
+        try:
+            definition = registry.get(concept_id)
+        except Exception:
+            definition = None
+
+    # Preserve Vontology graph authority for Vontology-sourced registrations.
+    if source == "vontology":
+        return None
+    if definition is None:
+        return None
+
+    initial_state = str(getattr(definition, "initial_state", "") or "").strip()
+    if not initial_state:
+        return (
+            False,
+            EXECUTABILITY_GRAPH_INCOMPLETE,
+            "registry_initial_state_missing",
+        )
+
+    states = getattr(definition, "states", None)
+    if not isinstance(states, Mapping) or not states:
+        return (
+            False,
+            EXECUTABILITY_GRAPH_INCOMPLETE,
+            "registry_states_missing",
+        )
+    if initial_state not in states:
+        return (
+            False,
+            EXECUTABILITY_GRAPH_INCOMPLETE,
+            "registry_initial_state_unresolved",
+        )
+
+    return (True, EXECUTABILITY_EXECUTABLE_NOW, None)
 
 
 @dataclass
@@ -429,6 +495,11 @@ def _classify_workflow_concept_executability(
                     ),
                 )
             return (True, EXECUTABILITY_EXECUTABLE_NOW, None)
+
+        if not isinstance(graph, dict):
+            registry_fallback = _classify_registry_workflow_executability(concept_id)
+            if registry_fallback is not None:
+                return registry_fallback
 
         if isinstance(graph, dict):
             detail = warning_items[0] if warning_items else "workflow_graph_not_loadable"

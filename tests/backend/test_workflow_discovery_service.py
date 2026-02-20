@@ -9,6 +9,7 @@ Validates workflow discovery during conversation turns including:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -614,3 +615,71 @@ def test_classify_workflow_treats_completely_vacuous_steps_as_non_executable() -
     assert "count=2" in str(detail)
     assert "total=2" in str(detail)
     assert "first_step=#V#step_one" in str(detail)
+
+
+def test_classify_workflow_uses_registry_fallback_for_built_in_workflow() -> None:
+    _classify_workflow_concept_executability.cache_clear()
+    fake_definition = SimpleNamespace(
+        initial_state="start",
+        states={"start": object()},
+    )
+    fake_registration = SimpleNamespace(
+        source="built_in",
+        definition=fake_definition,
+    )
+    fake_registry = SimpleNamespace(
+        get_registration=lambda workflow_id: fake_registration,
+        get=lambda workflow_id: None,
+    )
+
+    with patch(
+        "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+        return_value=(None, ["workflow_concept_not_found"]),
+    ), patch(
+        "src.backend.workflows.vontology_loader.load_workflow_definition_from_vontology",
+        return_value=None,
+    ), patch(
+        "src.backend.workflows.durable.registry_factory.build_durable_workflow_registry_read_only",
+        return_value=fake_registry,
+    ):
+        is_executable, reason, detail = _classify_workflow_concept_executability(
+            "#V#chat_assistant_workflow"
+        )
+
+    assert is_executable is True
+    assert reason == EXECUTABILITY_EXECUTABLE_NOW
+    assert detail is None
+
+
+def test_classify_workflow_keeps_vontology_source_graph_authoritative() -> None:
+    _classify_workflow_concept_executability.cache_clear()
+    fake_definition = SimpleNamespace(
+        initial_state="start",
+        states={"start": object()},
+    )
+    fake_registration = SimpleNamespace(
+        source="vontology",
+        definition=fake_definition,
+    )
+    fake_registry = SimpleNamespace(
+        get_registration=lambda workflow_id: fake_registration,
+        get=lambda workflow_id: None,
+    )
+
+    with patch(
+        "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+        return_value=(None, ["workflow_concept_not_found"]),
+    ), patch(
+        "src.backend.workflows.vontology_loader.load_workflow_definition_from_vontology",
+        return_value=None,
+    ), patch(
+        "src.backend.workflows.durable.registry_factory.build_durable_workflow_registry_read_only",
+        return_value=fake_registry,
+    ):
+        is_executable, reason, detail = _classify_workflow_concept_executability(
+            "#V#vontology_workflow_without_graph"
+        )
+
+    assert is_executable is False
+    assert reason == EXECUTABILITY_GRAPH_INCOMPLETE
+    assert detail == "workflow_concept_not_found"
