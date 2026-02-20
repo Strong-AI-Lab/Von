@@ -256,6 +256,19 @@
           <option value="cancelled">❌ Cancelled</option>
           <option value="blocked">🚫 Blocked</option>
         </select>
+        <select id="taskPriorityFilter" class="task-select" aria-label="Filter by priority">
+          <option value="all">All priorities</option>
+          <option value="low">🟢 Low</option>
+          <option value="medium">🟡 Medium</option>
+          <option value="high">🟠 High</option>
+          <option value="critical">🔴 Critical</option>
+        </select>
+        <select id="taskViewMode" class="task-select" aria-label="Task view mode">
+          <option value="board" selected>Board view</option>
+          <option value="list">List view</option>
+        </select>
+        <input id="taskQueryFilter" type="search" class="task-filter-query"
+          placeholder="Search tasks…" aria-label="Search tasks" />
       </div>
 
       <!-- Task list -->

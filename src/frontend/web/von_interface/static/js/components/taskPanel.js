@@ -18,7 +18,11 @@ let _currentSessionId = null;
 let _isVisible = false;
 let _isLoading = false;
 let _filterStatus = 'all';
+let _filterPriority = 'all';
+let _queryFilter = '';
+let _viewMode = 'board';
 let _isGlobalTabMode = false;  // True when rendering into global tasks tab
+let _taskDetailState = {};  // taskId -> detail panel state
 
 // Constants
 const TASK_STATUS_OPTIONS = [
@@ -36,6 +40,14 @@ const PRIORITY_OPTIONS = [
     { value: 'critical', label: 'Critical', icon: '🔴' },
 ];
 
+const TASK_LINK_OPTIONS = [
+    { value: 'depends_on', label: 'Depends on' },
+    { value: 'required_by', label: 'Required by' },
+    { value: 'blocks', label: 'Blocks' },
+    { value: 'blocked_by', label: 'Blocked by' },
+    { value: 'relates_to', label: 'Relates to' },
+];
+
 /**
  * Get status display info.
  */
@@ -48,6 +60,67 @@ function getStatusInfo(status) {
  */
 function getPriorityInfo(priority) {
     return PRIORITY_OPTIONS.find(p => p.value === priority) || { value: priority, label: priority, icon: '⚪' };
+}
+
+function parseCsvList(rawValue) {
+    if (typeof rawValue !== 'string') return [];
+    const seen = new Set();
+    return rawValue
+        .split(',')
+        .map((part) => part.trim())
+        .filter((part) => {
+            if (!part) return false;
+            const lowered = part.toLowerCase();
+            if (seen.has(lowered)) return false;
+            seen.add(lowered);
+            return true;
+        });
+}
+
+function isoToLocalInputValue(isoValue) {
+    if (!isoValue || typeof isoValue !== 'string') return '';
+    const parsed = new Date(isoValue);
+    if (Number.isNaN(parsed.getTime())) return '';
+    const local = new Date(parsed.getTime() - (parsed.getTimezoneOffset() * 60000));
+    return local.toISOString().slice(0, 16);
+}
+
+function localInputValueToIso(rawValue) {
+    if (!rawValue || typeof rawValue !== 'string' || !rawValue.trim()) return null;
+    const parsed = new Date(rawValue);
+    if (Number.isNaN(parsed.getTime())) return null;
+    return parsed.toISOString();
+}
+
+function formatDateTimeOrDash(value) {
+    if (!value || typeof value !== 'string') return '—';
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return '—';
+    return parsed.toLocaleString();
+}
+
+function getTaskDetailState(taskId) {
+    if (!_taskDetailState[taskId]) {
+        _taskDetailState[taskId] = {
+            expanded: false,
+            loading: false,
+            error: null,
+            task: null,
+            comments: [],
+            attachments: [],
+            history: [],
+        };
+    }
+    return _taskDetailState[taskId];
+}
+
+function pruneTaskDetailState() {
+    const activeIds = new Set(_tasks.map((task) => getTaskId(task)));
+    Object.keys(_taskDetailState).forEach((taskId) => {
+        if (!activeIds.has(taskId)) {
+            delete _taskDetailState[taskId];
+        }
+    });
 }
 
 /**
@@ -84,6 +157,30 @@ export function initializeTaskPanel() {
         });
     }
 
+    const priorityFilter = document.getElementById('taskPriorityFilter');
+    if (priorityFilter) {
+        priorityFilter.addEventListener('change', (e) => {
+            _filterPriority = e.target.value;
+            renderTaskList();
+        });
+    }
+
+    const queryFilter = document.getElementById('taskQueryFilter');
+    if (queryFilter) {
+        queryFilter.addEventListener('input', (e) => {
+            _queryFilter = (e.target.value || '').trim().toLowerCase();
+            renderTaskList();
+        });
+    }
+
+    const viewModeSelect = document.getElementById('taskViewMode');
+    if (viewModeSelect) {
+        viewModeSelect.addEventListener('change', (e) => {
+            _viewMode = e.target.value === 'list' ? 'list' : 'board';
+            renderTaskList();
+        });
+    }
+
     // Set up refresh button
     const refreshBtn = document.getElementById('refreshTasksBtn');
     if (refreshBtn) {
@@ -98,6 +195,8 @@ export function initializeTaskPanel() {
  */
 export function showTaskPanel() {
     if (_panelEl) {
+        _isGlobalTabMode = false;
+        _taskListEl = document.getElementById('taskList') || _taskListEl;
         _panelEl.classList.remove('hidden');
         _panelEl.setAttribute('aria-hidden', 'false');
         _isVisible = true;
@@ -171,6 +270,18 @@ function renderGlobalTasksTabContent() {
                     <option value="cancelled">Cancelled</option>
                     <option value="blocked">Blocked</option>
                 </select>
+                <select id="globalTaskPriorityFilter" class="task-filter-select" title="Filter by priority">
+                    <option value="all">All priorities</option>
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
+                    <option value="critical">Critical</option>
+                </select>
+                <select id="globalTaskViewMode" class="task-filter-select" title="Task view mode">
+                    <option value="board" selected>Board view</option>
+                    <option value="list">List view</option>
+                </select>
+                <input id="globalTaskQueryFilter" class="task-filter-query" type="search" placeholder="Search tasks..." aria-label="Search tasks" />
                 <button id="refreshGlobalTasksBtn" class="task-refresh-btn" title="Refresh tasks">🔄</button>
             </div>
         </div>
@@ -196,6 +307,33 @@ function renderGlobalTasksTabContent() {
         filterSelect.value = _filterStatus;
         filterSelect.addEventListener('change', (e) => {
             _filterStatus = e.target.value;
+            renderTaskList();
+        });
+    }
+
+    const priorityFilter = _globalTasksContainer.querySelector('#globalTaskPriorityFilter');
+    if (priorityFilter) {
+        priorityFilter.value = _filterPriority;
+        priorityFilter.addEventListener('change', (e) => {
+            _filterPriority = e.target.value;
+            renderTaskList();
+        });
+    }
+
+    const queryFilter = _globalTasksContainer.querySelector('#globalTaskQueryFilter');
+    if (queryFilter) {
+        queryFilter.value = _queryFilter;
+        queryFilter.addEventListener('input', (e) => {
+            _queryFilter = (e.target.value || '').trim().toLowerCase();
+            renderTaskList();
+        });
+    }
+
+    const viewModeSelect = _globalTasksContainer.querySelector('#globalTaskViewMode');
+    if (viewModeSelect) {
+        viewModeSelect.value = _viewMode;
+        viewModeSelect.addEventListener('change', (e) => {
+            _viewMode = e.target.value === 'list' ? 'list' : 'board';
             renderTaskList();
         });
     }
@@ -308,6 +446,7 @@ export async function loadTasks(sessionId = null) {
 
         const response = await getJson(url);
         _tasks = response.tasks || [];
+        pruneTaskDetailState();
         renderTaskList();
         updateTaskCountBadge();
 
@@ -344,6 +483,7 @@ export async function loadMyTasks(statusFilter = null) {
 
         const response = await getJson(url);
         _tasks = response.tasks || [];
+        pruneTaskDetailState();
         renderTaskList();
         updateTaskCountBadge();
 
@@ -362,42 +502,80 @@ export async function loadMyTasks(statusFilter = null) {
 function renderTaskList() {
     if (!_taskListEl) return;
 
-    // Filter tasks based on status filter
-    const filteredTasks = _filterStatus === 'all'
-        ? _tasks
-        : _tasks.filter(t => t.status === _filterStatus);
+    // Filter tasks based on status, priority, and free-text query filters.
+    const filteredTasks = _tasks.filter((task) => {
+        if (_filterStatus !== 'all' && task.status !== _filterStatus) {
+            return false;
+        }
+        if (_filterPriority !== 'all' && task.priority !== _filterPriority) {
+            return false;
+        }
+        if (_queryFilter) {
+            const searchable = [
+                task.title,
+                task.description,
+                ...(Array.isArray(task.labels) ? task.labels : []),
+                ...(Array.isArray(task.components) ? task.components : []),
+                ...(Array.isArray(task.fix_versions) ? task.fix_versions : []),
+                ...(Array.isArray(task.sprint_values) ? task.sprint_values : []),
+                task.parent_task_concept_id,
+                task.epic_task_concept_id,
+                task.backlog_rank,
+            ]
+                .filter((value) => typeof value === 'string' && value.trim())
+                .join(' ')
+                .toLowerCase();
+            if (!searchable.includes(_queryFilter)) {
+                return false;
+            }
+        }
+        return true;
+    });
 
     if (filteredTasks.length === 0) {
         _taskListEl.innerHTML = `
             <div class="task-empty-state">
                 <span class="task-empty-icon">📋</span>
-                <p>No tasks ${_filterStatus !== 'all' ? `with status "${_filterStatus}"` : ''}</p>
+                <p>No tasks match the active filters</p>
                 <p class="task-empty-hint">Create a task using the form above</p>
             </div>
         `;
         return;
     }
 
-    // Group by status for better organisation
-    const grouped = groupTasksByStatus(filteredTasks);
-
     let html = '';
+    if (_viewMode === 'list') {
+        const sortedTasks = [...filteredTasks].sort((left, right) => {
+            const leftTimestamp = new Date(left.updated_at || left.created_at || 0).getTime();
+            const rightTimestamp = new Date(right.updated_at || right.created_at || 0).getTime();
+            return rightTimestamp - leftTimestamp;
+        });
+        html = '<div class="task-list-mode">';
+        sortedTasks.forEach((task) => {
+            html += renderTaskItem(task);
+        });
+        html += '</div>';
+    } else {
+        // Group by status for board-like organisation.
+        const grouped = groupTasksByStatus(filteredTasks);
 
-    // Render active tasks first (pending, in_progress, blocked)
-    ['in_progress', 'pending', 'blocked'].forEach(status => {
-        if (grouped[status] && grouped[status].length > 0) {
-            html += renderTaskGroup(status, grouped[status]);
-        }
-    });
+        // Render active tasks first (pending, in_progress, blocked).
+        ['in_progress', 'pending', 'blocked'].forEach(status => {
+            if (grouped[status] && grouped[status].length > 0) {
+                html += renderTaskGroup(status, grouped[status]);
+            }
+        });
 
-    // Then completed/cancelled
-    ['completed', 'cancelled'].forEach(status => {
-        if (grouped[status] && grouped[status].length > 0) {
-            html += renderTaskGroup(status, grouped[status]);
-        }
-    });
+        // Then completed/cancelled.
+        ['completed', 'cancelled'].forEach(status => {
+            if (grouped[status] && grouped[status].length > 0) {
+                html += renderTaskGroup(status, grouped[status]);
+            }
+        });
+    }
 
     _taskListEl.innerHTML = html;
+    _taskListEl.dataset.viewMode = _viewMode;
 
     // Attach event listeners
     attachTaskEventListeners();
@@ -447,14 +625,232 @@ function getTaskId(task) {
     return task.task_concept_id || task.concept_id || '';
 }
 
+function renderTaskMetaChips(chips, cssClass) {
+    if (!Array.isArray(chips) || chips.length === 0) return '';
+    const display = chips.slice(0, 4).map((value) => `
+        <span class="${cssClass}">${escapeHtml(value)}</span>
+    `).join('');
+    const remainder = chips.length - 4;
+    const remainderChip = remainder > 0 ? `<span class="${cssClass}">+${remainder} more</span>` : '';
+    return `
+        <div class="task-meta-chip-row">
+            ${display}
+            ${remainderChip}
+        </div>
+    `;
+}
+
+function renderTaskLinkRows(task) {
+    const links = Array.isArray(task.task_links) ? task.task_links : [];
+    if (links.length === 0) {
+        return '<p class="task-detail-empty">No task links</p>';
+    }
+    return links.map((link) => {
+        const linkType = escapeHtml(link.link_type || 'relates_to');
+        const targetId = escapeHtml(link.target_task_concept_id || '');
+        return `
+            <li class="task-link-row">
+                <span class="task-link-type">${linkType}</span>
+                <span class="task-link-target">${targetId}</span>
+                <button class="task-link-remove-btn"
+                    data-task-id="${escapeHtml(getTaskId(task))}"
+                    data-link-type="${linkType}"
+                    data-target-task-id="${targetId}"
+                    title="Remove link">
+                    Remove
+                </button>
+            </li>
+        `;
+    }).join('');
+}
+
+function renderTaskCommentRows(comments) {
+    if (!Array.isArray(comments) || comments.length === 0) {
+        return '<p class="task-detail-empty">No comments</p>';
+    }
+    return comments.map((comment) => `
+        <li class="task-detail-row">
+            <div class="task-detail-row-main">${escapeHtml(comment.body || '')}</div>
+            <div class="task-detail-row-meta">
+                ${escapeHtml(comment.author_concept_id || 'Unknown author')}
+                • ${escapeHtml(formatDateTimeOrDash(comment.created_at))}
+            </div>
+        </li>
+    `).join('');
+}
+
+function renderTaskAttachmentRows(attachments) {
+    if (!Array.isArray(attachments) || attachments.length === 0) {
+        return '<p class="task-detail-empty">No attachments</p>';
+    }
+    return attachments.map((attachment) => {
+        const uri = escapeHtml(attachment.uri || '');
+        const filename = escapeHtml(attachment.filename || 'Attachment');
+        const note = attachment.note ? `<span class="task-detail-row-meta">Note: ${escapeHtml(attachment.note)}</span>` : '';
+        return `
+            <li class="task-detail-row">
+                <a class="task-attachment-link" href="${uri}" target="_blank" rel="noopener noreferrer">${filename}</a>
+                <div class="task-detail-row-meta">${escapeHtml(formatDateTimeOrDash(attachment.created_at))}</div>
+                ${note}
+            </li>
+        `;
+    }).join('');
+}
+
+function renderTaskHistoryRows(history) {
+    if (!Array.isArray(history) || history.length === 0) {
+        return '<p class="task-detail-empty">No history events</p>';
+    }
+    return history.slice(0, 20).map((eventRow) => `
+        <li class="task-detail-row">
+            <div class="task-detail-row-main">${escapeHtml(eventRow.event_type || 'event')}</div>
+            <div class="task-detail-row-meta">${escapeHtml(formatDateTimeOrDash(eventRow.created_at))}</div>
+        </li>
+    `).join('');
+}
+
+function renderTaskDetailsPanel(task, detailState) {
+    const taskId = getTaskId(task);
+    const detailTask = detailState.task || task;
+
+    if (detailState.loading) {
+        return `
+            <div class="task-detail-panel" data-task-id="${escapeHtml(taskId)}">
+                <div class="task-detail-loading">Loading task details…</div>
+            </div>
+        `;
+    }
+
+    if (detailState.error) {
+        return `
+            <div class="task-detail-panel" data-task-id="${escapeHtml(taskId)}">
+                <div class="task-detail-error">${escapeHtml(detailState.error)}</div>
+            </div>
+        `;
+    }
+
+    const labelsValue = Array.isArray(detailTask.labels) ? detailTask.labels.join(', ') : '';
+    const componentsValue = Array.isArray(detailTask.components) ? detailTask.components.join(', ') : '';
+    const fixVersionsValue = Array.isArray(detailTask.fix_versions) ? detailTask.fix_versions.join(', ') : '';
+    const sprintValues = Array.isArray(detailTask.sprint_values) ? detailTask.sprint_values.join(', ') : '';
+    const backlogRankValue = typeof detailTask.backlog_rank === 'string' ? detailTask.backlog_rank : '';
+    const parentValue = detailTask.parent_task_concept_id || '';
+    const epicValue = detailTask.epic_task_concept_id || '';
+    const startValue = isoToLocalInputValue(detailTask.start_date);
+    const dueValue = isoToLocalInputValue(detailTask.due_date);
+
+    return `
+        <div class="task-detail-panel" data-task-id="${escapeHtml(taskId)}">
+            <div class="task-detail-section">
+                <h4>Editable parity fields</h4>
+                <div class="task-detail-grid">
+                    <label class="task-detail-label">
+                        Labels (comma separated)
+                        <input class="task-detail-input task-detail-labels-input" type="text" value="${escapeHtml(labelsValue)}" />
+                    </label>
+                    <label class="task-detail-label">
+                        Components (comma separated)
+                        <input class="task-detail-input task-detail-components-input" type="text" value="${escapeHtml(componentsValue)}" />
+                    </label>
+                    <label class="task-detail-label">
+                        Fix versions (comma separated)
+                        <input class="task-detail-input task-detail-fix-versions-input" type="text" value="${escapeHtml(fixVersionsValue)}" />
+                    </label>
+                    <label class="task-detail-label">
+                        Sprint values (comma separated)
+                        <input class="task-detail-input task-detail-sprint-values-input" type="text" value="${escapeHtml(sprintValues)}" />
+                    </label>
+                    <label class="task-detail-label">
+                        Backlog rank
+                        <input class="task-detail-input task-detail-backlog-rank-input" type="text" value="${escapeHtml(backlogRankValue)}" />
+                    </label>
+                    <label class="task-detail-label">
+                        Parent task concept ID
+                        <input class="task-detail-input task-detail-parent-input" type="text" value="${escapeHtml(parentValue)}" />
+                    </label>
+                    <label class="task-detail-label">
+                        Epic task concept ID
+                        <input class="task-detail-input task-detail-epic-input" type="text" value="${escapeHtml(epicValue)}" />
+                    </label>
+                    <label class="task-detail-label">
+                        Start date/time
+                        <input class="task-detail-input task-detail-start-input" type="datetime-local" value="${escapeHtml(startValue)}" />
+                    </label>
+                    <label class="task-detail-label">
+                        Due date/time
+                        <input class="task-detail-input task-detail-due-input" type="datetime-local" value="${escapeHtml(dueValue)}" />
+                    </label>
+                </div>
+                <button class="task-save-fields-btn" data-task-id="${escapeHtml(taskId)}">Save fields</button>
+            </div>
+
+            <div class="task-detail-section">
+                <h4>Task links</h4>
+                <ul class="task-detail-list">
+                    ${renderTaskLinkRows(detailTask)}
+                </ul>
+                <div class="task-detail-inline-form">
+                    <input class="task-detail-input task-link-target-input" type="text" placeholder="Target task concept ID (e.g. #V#task_2)" />
+                    <select class="task-detail-input task-link-type-input">
+                        ${TASK_LINK_OPTIONS.map((option) => `
+                            <option value="${option.value}">${option.label}</option>
+                        `).join('')}
+                    </select>
+                    <button class="task-add-link-btn" data-task-id="${escapeHtml(taskId)}">Add link</button>
+                </div>
+            </div>
+
+            <div class="task-detail-section">
+                <h4>Comments</h4>
+                <ul class="task-detail-list">
+                    ${renderTaskCommentRows(detailState.comments)}
+                </ul>
+                <div class="task-detail-inline-form">
+                    <textarea class="task-detail-input task-comment-input" rows="2" placeholder="Add a comment…"></textarea>
+                    <button class="task-add-comment-btn" data-task-id="${escapeHtml(taskId)}">Add comment</button>
+                </div>
+            </div>
+
+            <div class="task-detail-section">
+                <h4>Attachments</h4>
+                <ul class="task-detail-list">
+                    ${renderTaskAttachmentRows(detailState.attachments)}
+                </ul>
+                <div class="task-detail-grid">
+                    <label class="task-detail-label">
+                        Filename
+                        <input class="task-detail-input task-attachment-filename-input" type="text" placeholder="spec.pdf" />
+                    </label>
+                    <label class="task-detail-label">
+                        URI
+                        <input class="task-detail-input task-attachment-uri-input" type="url" placeholder="https://example.org/spec.pdf" />
+                    </label>
+                    <label class="task-detail-label">
+                        Note
+                        <input class="task-detail-input task-attachment-note-input" type="text" placeholder="Optional note" />
+                    </label>
+                </div>
+                <button class="task-add-attachment-btn" data-task-id="${escapeHtml(taskId)}">Add attachment</button>
+            </div>
+
+            <div class="task-detail-section">
+                <h4>History</h4>
+                <ul class="task-detail-list">
+                    ${renderTaskHistoryRows(detailState.history)}
+                </ul>
+            </div>
+        </div>
+    `;
+}
+
 /**
  * Render a single task item.
  */
 function renderTaskItem(task) {
     const taskId = getTaskId(task);
     const priorityInfo = getPriorityInfo(task.priority);
-    // Status info available if needed for future enhancements
-    const _statusInfo = getStatusInfo(task.status);
+    const statusInfo = getStatusInfo(task.status);
+    const detailState = getTaskDetailState(taskId);
 
     // Escape HTML in title/description
     const title = escapeHtml(task.title || 'Untitled Task');
@@ -463,7 +859,17 @@ function renderTaskItem(task) {
         ? description.substring(0, 120) + '...'
         : description;
 
-    // Format due date if present
+    // Format dates if present
+    let startDateHtml = '';
+    if (task.start_date) {
+        const startDate = new Date(task.start_date);
+        startDateHtml = `
+            <span class="task-start-date" title="Start date">
+                🟢 ${startDate.toLocaleDateString()}
+            </span>
+        `;
+    }
+
     let dueDateHtml = '';
     if (task.due_date) {
         const dueDate = new Date(task.due_date);
@@ -488,19 +894,43 @@ function renderTaskItem(task) {
         `;
     }
 
+    const labelsHtml = renderTaskMetaChips(task.labels, 'task-label-chip');
+    const componentsHtml = renderTaskMetaChips(task.components, 'task-component-chip');
+    const hierarchyHtml = `
+        <div class="task-hierarchy-row">
+            ${task.parent_task_concept_id ? `<span class="task-hierarchy-chip">Parent: ${escapeHtml(task.parent_task_concept_id)}</span>` : ''}
+            ${task.epic_task_concept_id ? `<span class="task-hierarchy-chip">Epic: ${escapeHtml(task.epic_task_concept_id)}</span>` : ''}
+        </div>
+    `;
+    const linksCount = Array.isArray(task.task_links) ? task.task_links.length : 0;
+
     return `
         <div class="task-item" data-task-id="${taskId}">
             <div class="task-item-header">
                 <span class="task-priority" title="Priority: ${priorityInfo.label}">${priorityInfo.icon}</span>
                 <span class="task-title">${title}</span>
+                <span class="task-status-badge" title="Status">${statusInfo.icon} ${escapeHtml(statusInfo.label)}</span>
             </div>
             <div class="task-item-body">
                 <p class="task-description">${truncatedDescription}</p>
+                ${labelsHtml}
+                ${componentsHtml}
+                ${hierarchyHtml}
                 ${conversationLinkHtml}
             </div>
             <div class="task-item-footer">
+                ${startDateHtml}
                 ${dueDateHtml}
+                <span class="task-meta-counts">
+                    💬 ${task.comments_count || 0}
+                    📎 ${task.attachments_count || 0}
+                    🕓 ${task.history_count || 0}
+                    🔗 ${linksCount}
+                </span>
                 <div class="task-actions">
+                    <button class="task-detail-toggle-btn" data-task-id="${taskId}" title="Show task details">
+                        ${detailState.expanded ? 'Hide details' : 'Details'}
+                    </button>
                     <select class="task-status-select" data-task-id="${taskId}" title="Change status">
                         ${TASK_STATUS_OPTIONS.map(opt => `
                             <option value="${opt.value}" ${task.status === opt.value ? 'selected' : ''}>
@@ -511,6 +941,7 @@ function renderTaskItem(task) {
                     <button class="task-delete-btn" data-task-id="${taskId}" title="Delete task">🗑️</button>
                 </div>
             </div>
+            ${detailState.expanded ? renderTaskDetailsPanel(task, detailState) : ''}
         </div>
     `;
 }
@@ -526,6 +957,150 @@ function escapeHtml(str) {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#039;');
+}
+
+function replaceCachedTask(updatedTask) {
+    const updatedTaskId = getTaskId(updatedTask);
+    if (!updatedTaskId) return;
+    const existingIndex = _tasks.findIndex((item) => getTaskId(item) === updatedTaskId);
+    if (existingIndex >= 0) {
+        _tasks[existingIndex] = updatedTask;
+    }
+}
+
+async function loadTaskDetails(taskId, { refreshList = false } = {}) {
+    const detailState = getTaskDetailState(taskId);
+    detailState.loading = true;
+    detailState.error = null;
+    renderTaskList();
+
+    try {
+        const [task, commentsResult, attachmentsResult, historyResult] = await Promise.all([
+            getJson(`/api/tasks/${encodeURIComponent(taskId)}`),
+            getJson(`/api/tasks/${encodeURIComponent(taskId)}/comments?limit=100`),
+            getJson(`/api/tasks/${encodeURIComponent(taskId)}/attachments?limit=100`),
+            getJson(`/api/tasks/${encodeURIComponent(taskId)}/history?limit=200`),
+        ]);
+        detailState.task = task;
+        detailState.comments = commentsResult.comments || [];
+        detailState.attachments = attachmentsResult.attachments || [];
+        detailState.history = historyResult.history || [];
+        replaceCachedTask(task);
+        if (refreshList) {
+            updateTaskCountBadge();
+        }
+    } catch (err) {
+        console.error('[taskPanel] Failed to load task details:', err);
+        detailState.error = 'Failed to load task details';
+    } finally {
+        detailState.loading = false;
+        renderTaskList();
+    }
+}
+
+async function toggleTaskDetails(taskId) {
+    const detailState = getTaskDetailState(taskId);
+    detailState.expanded = !detailState.expanded;
+    renderTaskList();
+    if (detailState.expanded) {
+        await loadTaskDetails(taskId);
+    }
+}
+
+async function saveTaskParityFields(taskId, panelEl) {
+    const labelsRaw = panelEl.querySelector('.task-detail-labels-input')?.value || '';
+    const componentsRaw = panelEl.querySelector('.task-detail-components-input')?.value || '';
+    const fixVersionsRaw = panelEl.querySelector('.task-detail-fix-versions-input')?.value || '';
+    const sprintValuesRaw = panelEl.querySelector('.task-detail-sprint-values-input')?.value || '';
+    const backlogRankRaw = panelEl.querySelector('.task-detail-backlog-rank-input')?.value || '';
+    const parentRaw = panelEl.querySelector('.task-detail-parent-input')?.value || '';
+    const epicRaw = panelEl.querySelector('.task-detail-epic-input')?.value || '';
+    const startRaw = panelEl.querySelector('.task-detail-start-input')?.value || '';
+    const dueRaw = panelEl.querySelector('.task-detail-due-input')?.value || '';
+
+    const payload = {
+        labels: parseCsvList(labelsRaw),
+        components: parseCsvList(componentsRaw),
+        fix_versions: parseCsvList(fixVersionsRaw),
+        sprint_values: parseCsvList(sprintValuesRaw),
+        backlog_rank: backlogRankRaw.trim() || null,
+        parent_task_concept_id: parentRaw.trim() || null,
+        epic_task_concept_id: epicRaw.trim() || null,
+        start_date: localInputValueToIso(startRaw),
+        due_date: localInputValueToIso(dueRaw),
+    };
+
+    await patchJson(`/api/tasks/${encodeURIComponent(taskId)}`, payload);
+    showToast('Task fields updated', 'success');
+    await loadTaskDetails(taskId, { refreshList: true });
+}
+
+async function addTaskLink(taskId, panelEl) {
+    const targetRaw = panelEl.querySelector('.task-link-target-input')?.value || '';
+    const linkType = panelEl.querySelector('.task-link-type-input')?.value || 'relates_to';
+    const targetTaskId = targetRaw.trim();
+    if (!targetTaskId) {
+        showToast('Target task concept ID is required', 'warning');
+        return;
+    }
+
+    await postJson(`/api/tasks/${encodeURIComponent(taskId)}/links`, {
+        target_task_concept_id: targetTaskId,
+        link_type: linkType,
+    });
+    const targetInput = panelEl.querySelector('.task-link-target-input');
+    if (targetInput) targetInput.value = '';
+    showToast('Task link added', 'success');
+    await loadTaskDetails(taskId, { refreshList: true });
+}
+
+async function removeTaskLink(taskId, targetTaskId, linkType) {
+    await postJson(`/api/tasks/${encodeURIComponent(taskId)}/links/remove`, {
+        target_task_concept_id: targetTaskId,
+        link_type: linkType,
+    });
+    showToast('Task link removed', 'success');
+    await loadTaskDetails(taskId, { refreshList: true });
+}
+
+async function addTaskComment(taskId, panelEl) {
+    const bodyRaw = panelEl.querySelector('.task-comment-input')?.value || '';
+    const body = bodyRaw.trim();
+    if (!body) {
+        showToast('Comment body is required', 'warning');
+        return;
+    }
+
+    await postJson(`/api/tasks/${encodeURIComponent(taskId)}/comments`, { body });
+    const input = panelEl.querySelector('.task-comment-input');
+    if (input) input.value = '';
+    showToast('Comment added', 'success');
+    await loadTaskDetails(taskId, { refreshList: true });
+}
+
+async function addTaskAttachment(taskId, panelEl) {
+    const filename = (panelEl.querySelector('.task-attachment-filename-input')?.value || '').trim();
+    const uri = (panelEl.querySelector('.task-attachment-uri-input')?.value || '').trim();
+    const note = (panelEl.querySelector('.task-attachment-note-input')?.value || '').trim();
+
+    if (!filename || !uri) {
+        showToast('Filename and URI are required', 'warning');
+        return;
+    }
+
+    await postJson(`/api/tasks/${encodeURIComponent(taskId)}/attachments`, {
+        filename,
+        uri,
+        note: note || null,
+    });
+    const filenameInput = panelEl.querySelector('.task-attachment-filename-input');
+    const uriInput = panelEl.querySelector('.task-attachment-uri-input');
+    const noteInput = panelEl.querySelector('.task-attachment-note-input');
+    if (filenameInput) filenameInput.value = '';
+    if (uriInput) uriInput.value = '';
+    if (noteInput) noteInput.value = '';
+    showToast('Attachment added', 'success');
+    await loadTaskDetails(taskId, { refreshList: true });
 }
 
 /**
@@ -549,6 +1124,86 @@ function attachTaskEventListeners() {
             const taskId = e.target.dataset.taskId;
             if (confirm('Delete this task?')) {
                 await deleteTask(taskId);
+            }
+        });
+    });
+
+    _taskListEl.querySelectorAll('.task-detail-toggle-btn').forEach((btn) => {
+        btn.addEventListener('click', async (e) => {
+            const taskId = e.currentTarget.dataset.taskId;
+            if (taskId) {
+                await toggleTaskDetails(taskId);
+            }
+        });
+    });
+
+    _taskListEl.querySelectorAll('.task-save-fields-btn').forEach((btn) => {
+        btn.addEventListener('click', async (e) => {
+            const taskId = e.currentTarget.dataset.taskId;
+            const panelEl = e.currentTarget.closest('.task-detail-panel');
+            if (!taskId || !panelEl) return;
+            try {
+                await saveTaskParityFields(taskId, panelEl);
+            } catch (err) {
+                console.error('[taskPanel] Failed to save task fields:', err);
+                showToast('Failed to update task fields', 'error');
+            }
+        });
+    });
+
+    _taskListEl.querySelectorAll('.task-add-link-btn').forEach((btn) => {
+        btn.addEventListener('click', async (e) => {
+            const taskId = e.currentTarget.dataset.taskId;
+            const panelEl = e.currentTarget.closest('.task-detail-panel');
+            if (!taskId || !panelEl) return;
+            try {
+                await addTaskLink(taskId, panelEl);
+            } catch (err) {
+                console.error('[taskPanel] Failed to add task link:', err);
+                showToast('Failed to add task link', 'error');
+            }
+        });
+    });
+
+    _taskListEl.querySelectorAll('.task-link-remove-btn').forEach((btn) => {
+        btn.addEventListener('click', async (e) => {
+            const taskId = e.currentTarget.dataset.taskId;
+            const targetTaskId = e.currentTarget.dataset.targetTaskId;
+            const linkType = e.currentTarget.dataset.linkType;
+            if (!taskId || !targetTaskId || !linkType) return;
+            try {
+                await removeTaskLink(taskId, targetTaskId, linkType);
+            } catch (err) {
+                console.error('[taskPanel] Failed to remove task link:', err);
+                showToast('Failed to remove task link', 'error');
+            }
+        });
+    });
+
+    _taskListEl.querySelectorAll('.task-add-comment-btn').forEach((btn) => {
+        btn.addEventListener('click', async (e) => {
+            const taskId = e.currentTarget.dataset.taskId;
+            const panelEl = e.currentTarget.closest('.task-detail-panel');
+            if (!taskId || !panelEl) return;
+            try {
+                await addTaskComment(taskId, panelEl);
+            } catch (err) {
+                console.error('[taskPanel] Failed to add task comment:', err);
+                showToast('Failed to add comment', 'error');
+            }
+        });
+    });
+
+    _taskListEl.querySelectorAll('.task-add-attachment-btn').forEach((btn) => {
+        btn.addEventListener('click', async (e) => {
+            const taskId = e.currentTarget.dataset.taskId;
+            const panelEl = e.currentTarget.closest('.task-detail-panel');
+            if (!taskId || !panelEl) return;
+            try {
+                await addTaskAttachment(taskId, panelEl);
+            } catch (err) {
+                console.error('[taskPanel] Failed to add task attachment:', err);
+                showToast('Failed to add attachment', 'error');
             }
         });
     });

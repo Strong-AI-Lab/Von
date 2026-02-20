@@ -19,6 +19,13 @@ from ...services.task_management_service import (
     list_tasks,
     search_tasks,
     delete_task,
+    add_task_comment,
+    list_task_comments,
+    add_task_attachment,
+    list_task_attachments,
+    get_task_history,
+    link_tasks,
+    unlink_tasks,
     TaskNotFoundError,
     InvalidTaskDataError,
     TaskManagementError,
@@ -401,3 +408,213 @@ def my_tasks_route() -> ResponseReturnValue:
     except Exception as e:
         logger.error(f"Unexpected error listing my tasks: {e}")
         return jsonify({"error": "Internal server error"}), 500
+
+
+@task_bp.route("/<task_concept_id>/comments", methods=["GET"])
+def list_task_comments_route(task_concept_id: str) -> ResponseReturnValue:
+    """List comments for a task."""
+    try:
+        limit = _parse_int_param(request.args.get("limit"), 100)
+        offset = _parse_int_param(request.args.get("offset"), 0)
+        result = list_task_comments(
+            task_concept_id,
+            limit=limit,
+            offset=offset,
+        )
+        return jsonify(result), 200
+    except TaskNotFoundError as e:
+        return jsonify({"error": str(e)}), 404
+    except InvalidTaskDataError as e:
+        return jsonify({"error": str(e)}), 400
+    except TaskManagementError as e:
+        logger.error(f"Failed to list task comments: {e}")
+        return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        logger.error(f"Unexpected error listing task comments: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@task_bp.route("/<task_concept_id>/comments", methods=["POST"])
+def add_task_comment_route(task_concept_id: str) -> ResponseReturnValue:
+    """Add a comment to a task."""
+    try:
+        data = request.get_json() or {}
+        body = data.get("body")
+        if not isinstance(body, str) or not body.strip():
+            return jsonify({"error": "body is required"}), 400
+
+        author_concept_id = _get_current_user_concept_id()
+        comment = add_task_comment(
+            task_concept_id,
+            body=body,
+            author_concept_id=author_concept_id,
+        )
+        return jsonify(comment), 201
+    except TaskNotFoundError as e:
+        return jsonify({"error": str(e)}), 404
+    except InvalidTaskDataError as e:
+        return jsonify({"error": str(e)}), 400
+    except TaskManagementError as e:
+        logger.error(f"Failed to add task comment: {e}")
+        return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        logger.error(f"Unexpected error adding task comment: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@task_bp.route("/<task_concept_id>/attachments", methods=["GET"])
+def list_task_attachments_route(task_concept_id: str) -> ResponseReturnValue:
+    """List attachments for a task."""
+    try:
+        limit = _parse_int_param(request.args.get("limit"), 100)
+        offset = _parse_int_param(request.args.get("offset"), 0)
+        result = list_task_attachments(
+            task_concept_id,
+            limit=limit,
+            offset=offset,
+        )
+        return jsonify(result), 200
+    except TaskNotFoundError as e:
+        return jsonify({"error": str(e)}), 404
+    except InvalidTaskDataError as e:
+        return jsonify({"error": str(e)}), 400
+    except TaskManagementError as e:
+        logger.error(f"Failed to list task attachments: {e}")
+        return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        logger.error(f"Unexpected error listing task attachments: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@task_bp.route("/<task_concept_id>/attachments", methods=["POST"])
+def add_task_attachment_route(task_concept_id: str) -> ResponseReturnValue:
+    """Add an attachment record to a task."""
+    try:
+        data = request.get_json() or {}
+        filename = data.get("filename")
+        uri = data.get("uri")
+        if not isinstance(filename, str) or not filename.strip():
+            return jsonify({"error": "filename is required"}), 400
+        if not isinstance(uri, str) or not uri.strip():
+            return jsonify({"error": "uri is required"}), 400
+
+        raw_size = data.get("size_bytes")
+        size_bytes = None
+        if raw_size is not None:
+            try:
+                size_bytes = int(raw_size)
+            except (TypeError, ValueError):
+                raise InvalidTaskDataError("size_bytes must be an integer")
+
+        attachment = add_task_attachment(
+            task_concept_id,
+            filename=filename,
+            uri=uri,
+            media_type=data.get("media_type"),
+            size_bytes=size_bytes,
+            added_by_concept_id=_get_current_user_concept_id(),
+            note=data.get("note"),
+        )
+        return jsonify(attachment), 201
+    except TaskNotFoundError as e:
+        return jsonify({"error": str(e)}), 404
+    except InvalidTaskDataError as e:
+        return jsonify({"error": str(e)}), 400
+    except TaskManagementError as e:
+        logger.error(f"Failed to add task attachment: {e}")
+        return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        logger.error(f"Unexpected error adding task attachment: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@task_bp.route("/<task_concept_id>/history", methods=["GET"])
+def get_task_history_route(task_concept_id: str) -> ResponseReturnValue:
+    """List task history events."""
+    try:
+        limit = _parse_int_param(request.args.get("limit"), 200)
+        offset = _parse_int_param(request.args.get("offset"), 0)
+        result = get_task_history(
+            task_concept_id,
+            limit=limit,
+            offset=offset,
+        )
+        return jsonify(result), 200
+    except TaskNotFoundError as e:
+        return jsonify({"error": str(e)}), 404
+    except InvalidTaskDataError as e:
+        return jsonify({"error": str(e)}), 400
+    except TaskManagementError as e:
+        logger.error(f"Failed to get task history: {e}")
+        return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        logger.error(f"Unexpected error getting task history: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@task_bp.route("/<task_concept_id>/links", methods=["POST"])
+def add_task_link_route(task_concept_id: str) -> ResponseReturnValue:
+    """Add a typed link between tasks."""
+    try:
+        data = request.get_json() or {}
+        target_task_concept_id = data.get("target_task_concept_id")
+        link_type = data.get("link_type")
+        if not isinstance(target_task_concept_id, str) or not target_task_concept_id.strip():
+            return jsonify({"error": "target_task_concept_id is required"}), 400
+        if not isinstance(link_type, str) or not link_type.strip():
+            return jsonify({"error": "link_type is required"}), 400
+
+        result = link_tasks(
+            task_concept_id,
+            target_task_concept_id,
+            link_type=link_type,
+            actor_concept_id=_get_current_user_concept_id(),
+        )
+        return jsonify(result), 201
+    except TaskNotFoundError as e:
+        return jsonify({"error": str(e)}), 404
+    except InvalidTaskDataError as e:
+        return jsonify({"error": str(e)}), 400
+    except TaskManagementError as e:
+        logger.error(f"Failed to add task link: {e}")
+        return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        logger.error(f"Unexpected error adding task link: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@task_bp.route("/<task_concept_id>/links", methods=["DELETE"])
+def remove_task_link_route(task_concept_id: str) -> ResponseReturnValue:
+    """Remove a typed link between tasks."""
+    try:
+        data = request.get_json() or {}
+        target_task_concept_id = data.get("target_task_concept_id")
+        link_type = data.get("link_type")
+        if not isinstance(target_task_concept_id, str) or not target_task_concept_id.strip():
+            return jsonify({"error": "target_task_concept_id is required"}), 400
+        if not isinstance(link_type, str) or not link_type.strip():
+            return jsonify({"error": "link_type is required"}), 400
+
+        result = unlink_tasks(
+            task_concept_id,
+            target_task_concept_id,
+            link_type=link_type,
+            actor_concept_id=_get_current_user_concept_id(),
+        )
+        return jsonify(result), 200
+    except TaskNotFoundError as e:
+        return jsonify({"error": str(e)}), 404
+    except InvalidTaskDataError as e:
+        return jsonify({"error": str(e)}), 400
+    except TaskManagementError as e:
+        logger.error(f"Failed to remove task link: {e}")
+        return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        logger.error(f"Unexpected error removing task link: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@task_bp.route("/<task_concept_id>/links/remove", methods=["POST"])
+def remove_task_link_post_route(task_concept_id: str) -> ResponseReturnValue:
+    """Remove a typed link between tasks via POST payload."""
+    return remove_task_link_route(task_concept_id)
