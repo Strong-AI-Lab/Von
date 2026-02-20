@@ -16,6 +16,9 @@ def _jira_issue(
     parent_key: str | None = None,
     links: list[dict[str, Any]] | None = None,
     assignee_account_id: str | None = None,
+    project_key: str = "JVNAUTOSCI",
+    project_name: str = "JVNAUTOSCI Project",
+    extra_fields: dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     fields: Dict[str, Any] = {
         "summary": summary,
@@ -33,7 +36,10 @@ def _jira_issue(
         "priority": {"name": priority},
         "labels": labels or [],
         "issuelinks": links or [],
+        "project": {"key": project_key, "name": project_name},
     }
+    if isinstance(extra_fields, dict):
+        fields.update(extra_fields)
     if parent_key:
         fields["parent"] = {"key": parent_key}
     if assignee_account_id:
@@ -208,3 +214,52 @@ def test_import_jira_issues_maps_parent_and_links_when_targets_available(monkeyp
     assert report["success"] is True
     assert ("#V#task_child", "#V#task_parent") in parent_calls
     assert ("#V#task_child", "#V#task_parent", "relates_to") in link_calls
+
+
+def test_import_jira_issues_reports_project_level_parity_findings(monkeypatch):
+    monkeypatch.setattr(
+        import_service,
+        "find_task_by_external_reference",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        import_service,
+        "create_task",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("dry_run should not write")),
+    )
+
+    issue = _jira_issue(
+        "JVNAUTOSCI-2300",
+        status="Ready for QA",
+        extra_fields={
+            "components": [{"name": "Workflow Engine"}],
+            "fixVersions": [{"name": "R1"}],
+            "customfield_10020": [{"name": "Sprint 6"}],
+            "customfield_10019": "0|i000ab:",
+        },
+    )
+    report = import_service.import_jira_issues_to_tasks(
+        issues=[issue],
+        dry_run=True,
+    )
+
+    project_parity = report.get("project_parity") or {}
+    assert project_parity.get("summary", {}).get("projects_scanned") == 1
+    project_rows = project_parity.get("projects")
+    assert isinstance(project_rows, list)
+    assert len(project_rows) == 1
+    row = project_rows[0]
+    assert row.get("project_key") == "JVNAUTOSCI"
+    assert row.get("issue_count") == 1
+    dropped_fields = row.get("dropped_fields")
+    assert isinstance(dropped_fields, list)
+    dropped_field_names = {
+        item.get("field")
+        for item in dropped_fields
+        if isinstance(item, dict)
+    }
+    assert "status_mapping" in dropped_field_names
+    assert "components" in dropped_field_names
+    assert "fixVersions" in dropped_field_names
+    assert "sprint" in dropped_field_names
+    assert "rank" in dropped_field_names

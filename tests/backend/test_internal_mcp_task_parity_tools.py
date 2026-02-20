@@ -110,6 +110,52 @@ def test_task_import_jira_issues_gateway_dry_run_and_schema(monkeypatch):
     _assert_schema_conformance(gateway, "task_import_jira_issues", payload)
 
 
+def test_task_import_jira_issues_gateway_accepts_issue_objects_from_discovery(monkeypatch):
+    gateway = _build_gateway()
+    fetched_issue_keys: list[str] = []
+
+    class _FakeProxy:
+        async def get_issue(self, *, issue_key: str, fields=None):  # noqa: ARG002
+            fetched_issue_keys.append(issue_key)
+            return {
+                "key": issue_key,
+                "fields": {
+                    "summary": "Imported issue",
+                    "description": {
+                        "type": "doc",
+                        "version": 1,
+                        "content": [
+                            {
+                                "type": "paragraph",
+                                "content": [{"type": "text", "text": "Desc"}],
+                            }
+                        ],
+                    },
+                    "status": {"name": "To Do"},
+                    "priority": {"name": "Medium"},
+                    "project": {"key": "JVNAUTOSCI", "name": "JVNAUTOSCI Project"},
+                    "issuelinks": [],
+                },
+            }
+
+    async def _fake_get_jira_proxy():
+        return _FakeProxy()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.jira_proxy_mcp.get_jira_proxy",
+        _fake_get_jira_proxy,
+    )
+
+    payload = gateway.invoke(
+        "task_import_jira_issues",
+        {"issue_keys": [{"key": "JVNAUTOSCI-3002"}], "dry_run": True},
+    ).payload
+    assert payload.get("success") is True
+    assert payload.get("summary", {}).get("total_issues") == 1
+    assert fetched_issue_keys == ["JVNAUTOSCI-3002"]
+    _assert_schema_conformance(gateway, "task_import_jira_issues", payload)
+
+
 def test_task_transition_gateway_success_and_error_schema(monkeypatch):
     gateway = _build_gateway()
 

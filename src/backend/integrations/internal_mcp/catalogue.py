@@ -10723,14 +10723,38 @@ def _normalise_issue_keys_input(raw_issue_keys: Any) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
     for raw in raw_issue_keys:
-        if not isinstance(raw, str):
+        cleaned: str | None = None
+        if isinstance(raw, str):
+            cleaned = raw.strip().upper()
+        elif isinstance(raw, Mapping):
+            for key in ("key", "issue_key", "external_id"):
+                value = raw.get(key)
+                if isinstance(value, str) and value.strip():
+                    cleaned = value.strip().upper()
+                    break
+        if not isinstance(cleaned, str):
             continue
-        cleaned = raw.strip().upper()
         if not cleaned or cleaned in seen:
             continue
         seen.add(cleaned)
         result.append(cleaned)
     return result
+
+
+def _coerce_bool_input(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return default
 
 
 def _task_import_jira_issues(**kwargs):
@@ -10755,7 +10779,7 @@ def _task_import_jira_issues(**kwargs):
     except (TypeError, ValueError):
         max_results = 50
     max_results = max(1, min(max_results, 200))
-    dry_run = bool(kwargs.get("dry_run", True))
+    dry_run = _coerce_bool_input(kwargs.get("dry_run"), default=True)
 
     assignee_map_raw = kwargs.get("assignee_account_id_to_concept_id")
     assignee_map = assignee_map_raw if isinstance(assignee_map_raw, dict) else {}
@@ -10848,7 +10872,10 @@ def _task_import_jira_issues(**kwargs):
         actor_concept_id=kwargs.get("namespace"),
         organisation_concept_id=kwargs.get("organisation_concept_id"),
         assignee_account_id_to_concept_id=assignee_map,
-        update_existing=bool(kwargs.get("update_existing", True)),
+        update_existing=_coerce_bool_input(
+            kwargs.get("update_existing"),
+            default=True,
+        ),
     )
     if not isinstance(report, dict):
         return make_error_response("UNEXPECTED_ERROR", "Importer returned invalid payload")

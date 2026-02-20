@@ -103,6 +103,26 @@ def _extract_status_name(fields: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _extract_project_identity(fields: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    project = fields.get("project")
+    if not isinstance(project, Mapping):
+        return None, None
+
+    project_key_raw = project.get("key")
+    project_name_raw = project.get("name")
+    project_key = (
+        str(project_key_raw).strip().upper()
+        if isinstance(project_key_raw, str) and project_key_raw.strip()
+        else None
+    )
+    project_name = (
+        str(project_name_raw).strip()
+        if isinstance(project_name_raw, str) and project_name_raw.strip()
+        else None
+    )
+    return project_key, project_name
+
+
 def _extract_priority_name(fields: Mapping[str, Any]) -> str | None:
     priority = fields.get("priority")
     if isinstance(priority, Mapping):
@@ -151,6 +171,57 @@ def _normalise_labels(raw_labels: Any) -> list[str]:
         seen.add(lowered)
         labels.append(cleaned)
     return labels
+
+
+def _extract_named_values(raw_value: Any) -> list[str]:
+    if not isinstance(raw_value, list):
+        return []
+    values: list[str] = []
+    seen: set[str] = set()
+    for item in raw_value:
+        candidate: str | None = None
+        if isinstance(item, Mapping):
+            for key in ("name", "value", "key"):
+                raw_candidate = item.get(key)
+                if isinstance(raw_candidate, str) and raw_candidate.strip():
+                    candidate = raw_candidate.strip()
+                    break
+        elif isinstance(item, str) and item.strip():
+            candidate = item.strip()
+
+        if not candidate:
+            continue
+        lowered = candidate.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        values.append(candidate)
+    return values
+
+
+def _extract_sprint_values(fields: Mapping[str, Any]) -> list[str]:
+    for key in ("customfield_10020", "sprint", "sprints"):
+        values = _extract_named_values(fields.get(key))
+        if values:
+            return values
+
+        raw_value = fields.get(key)
+        if isinstance(raw_value, str) and raw_value.strip():
+            return [raw_value.strip()]
+    return []
+
+
+def _extract_rank_value(fields: Mapping[str, Any]) -> str | None:
+    for key in ("customfield_10019", "customfield_10027", "rank"):
+        raw_value = fields.get(key)
+        if isinstance(raw_value, str) and raw_value.strip():
+            return raw_value.strip()
+        if isinstance(raw_value, Mapping):
+            for candidate_key in ("rank", "value", "name"):
+                candidate = raw_value.get(candidate_key)
+                if isinstance(candidate, str) and candidate.strip():
+                    return candidate.strip()
+    return None
 
 
 def _normalise_datetime_or_date(value: Any) -> str | None:
@@ -387,6 +458,188 @@ def _resolve_existing_task_id(
     return task_id
 
 
+def _build_project_parity_report(
+    project_observations: Mapping[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    project_rows: list[Dict[str, Any]] = []
+    projects_with_follow_up = 0
+    follow_up_items = 0
+
+    for project_key in sorted(
+        key for key in project_observations.keys() if isinstance(key, str)
+    ):
+        observation = project_observations.get(project_key) or {}
+        issue_count = int(observation.get("issue_count", 0))
+        status_names = sorted(
+            str(item)
+            for item in observation.get("status_names", set())
+            if isinstance(item, str) and item
+        )
+        mapped_status_names = sorted(
+            str(item)
+            for item in observation.get("mapped_status_names", set())
+            if isinstance(item, str) and item
+        )
+        unmapped_status_names = sorted(
+            str(item)
+            for item in observation.get("unmapped_status_names", set())
+            if isinstance(item, str) and item
+        )
+        priority_names = sorted(
+            str(item)
+            for item in observation.get("priority_names", set())
+            if isinstance(item, str) and item
+        )
+        mapped_priority_names = sorted(
+            str(item)
+            for item in observation.get("mapped_priority_names", set())
+            if isinstance(item, str) and item
+        )
+        unmapped_priority_names = sorted(
+            str(item)
+            for item in observation.get("unmapped_priority_names", set())
+            if isinstance(item, str) and item
+        )
+        component_names = sorted(
+            str(item)
+            for item in observation.get("component_names", set())
+            if isinstance(item, str) and item
+        )
+        fix_version_names = sorted(
+            str(item)
+            for item in observation.get("fix_version_names", set())
+            if isinstance(item, str) and item
+        )
+        sprint_values = sorted(
+            str(item)
+            for item in observation.get("sprint_values", set())
+            if isinstance(item, str) and item
+        )
+        rank_values = sorted(
+            str(item)
+            for item in observation.get("rank_values", set())
+            if isinstance(item, str) and item
+        )
+
+        dropped_fields: list[Dict[str, Any]] = []
+        follow_up_work: list[str] = []
+        if unmapped_status_names:
+            dropped_fields.append(
+                {
+                    "field": "status_mapping",
+                    "reason": "jira_statuses_unmapped_in_von_status_vocabulary",
+                    "values": unmapped_status_names,
+                }
+            )
+            follow_up_work.append(
+                "Add/approve explicit Jira->Von status mapping for project workflow-specific states."
+            )
+        if unmapped_priority_names:
+            dropped_fields.append(
+                {
+                    "field": "priority_mapping",
+                    "reason": "jira_priorities_unmapped_in_von_priority_vocabulary",
+                    "values": unmapped_priority_names,
+                }
+            )
+            follow_up_work.append(
+                "Extend Jira->Von priority mapping for project-specific priority names."
+            )
+        if component_names:
+            dropped_fields.append(
+                {
+                    "field": "components",
+                    "reason": "jira_components_not_first_class_in_von_task_model",
+                    "values": component_names,
+                }
+            )
+            follow_up_work.append(
+                "Add first-class task component modelling and migration mapping."
+            )
+        if fix_version_names:
+            dropped_fields.append(
+                {
+                    "field": "fixVersions",
+                    "reason": "jira_fix_versions_not_first_class_in_von_task_model",
+                    "values": fix_version_names,
+                }
+            )
+            follow_up_work.append(
+                "Add first-class release/fix-version modelling for tasks."
+            )
+        if sprint_values:
+            dropped_fields.append(
+                {
+                    "field": "sprint",
+                    "reason": "jira_sprint_metadata_not_first_class_in_von_task_model",
+                    "values": sprint_values,
+                }
+            )
+            follow_up_work.append(
+                "Add first-class sprint/iteration modelling for task planning."
+            )
+        if rank_values:
+            dropped_fields.append(
+                {
+                    "field": "rank",
+                    "reason": "jira_rank_metadata_not_first_class_in_von_task_model",
+                    "values": rank_values,
+                }
+            )
+            follow_up_work.append(
+                "Add first-class backlog rank/order modelling for tasks."
+            )
+
+        if follow_up_work:
+            projects_with_follow_up += 1
+            follow_up_items += len(follow_up_work)
+
+        project_rows.append(
+            {
+                "project_key": (
+                    project_key if project_key != "__unknown_project__" else None
+                ),
+                "project_name": (
+                    observation.get("project_name")
+                    if isinstance(observation.get("project_name"), str)
+                    else None
+                ),
+                "issue_count": issue_count,
+                "mapped_fields": [
+                    "project.identity",
+                    "status_mapping",
+                    "priority_mapping",
+                ],
+                "dropped_fields": dropped_fields,
+                "status_mapping": {
+                    "observed_status_names": status_names,
+                    "mapped_status_names": mapped_status_names,
+                    "unmapped_status_names": unmapped_status_names,
+                },
+                "priority_mapping": {
+                    "observed_priority_names": priority_names,
+                    "mapped_priority_names": mapped_priority_names,
+                    "unmapped_priority_names": unmapped_priority_names,
+                },
+                "follow_up_work": follow_up_work,
+            }
+        )
+
+    return {
+        "summary": {
+            "projects_scanned": len(project_rows),
+            "issues_scanned": sum(
+                int(row.get("issue_count", 0))
+                for row in project_rows
+                if isinstance(row, dict)
+            ),
+            "projects_with_follow_up": projects_with_follow_up,
+            "follow_up_items": follow_up_items,
+        },
+        "projects": project_rows,
+    }
+
+
 def import_jira_issues_to_tasks(
     *,
     issues: Sequence[Mapping[str, Any]],
@@ -421,6 +674,7 @@ def import_jira_issues_to_tasks(
     issue_results: list[Dict[str, Any]] = []
     existing_cache: dict[str, str | None] = {}
     task_id_by_issue_key: dict[str, str] = {}
+    project_observations: dict[str, Dict[str, Any]] = {}
 
     summary = {
         "total_issues": 0,
@@ -445,6 +699,30 @@ def import_jira_issues_to_tasks(
         summary["total_issues"] += 1
 
         fields = _extract_issue_fields(raw_issue)
+        project_key, project_name = _extract_project_identity(fields)
+        project_bucket_key = project_key or "__unknown_project__"
+        project_observation = project_observations.setdefault(
+            project_bucket_key,
+            {
+                "project_name": project_name,
+                "issue_count": 0,
+                "status_names": set(),
+                "mapped_status_names": set(),
+                "unmapped_status_names": set(),
+                "priority_names": set(),
+                "mapped_priority_names": set(),
+                "unmapped_priority_names": set(),
+                "component_names": set(),
+                "fix_version_names": set(),
+                "sprint_values": set(),
+                "rank_values": set(),
+            },
+        )
+        project_observation["issue_count"] = int(
+            project_observation.get("issue_count", 0)
+        ) + 1
+        if project_name and not project_observation.get("project_name"):
+            project_observation["project_name"] = project_name
         mapped_fields: list[str] = []
         dropped_fields: list[Dict[str, str]] = []
         relation_results: list[Dict[str, Any]] = []
@@ -473,12 +751,24 @@ def import_jira_issues_to_tasks(
 
         jira_status_name = _extract_status_name(fields)
         mapped_status, status_warning = _map_status(jira_status_name)
+        if jira_status_name:
+            project_observation["status_names"].add(jira_status_name)
+            if status_warning and status_warning.startswith("jira_status_unmapped"):
+                project_observation["unmapped_status_names"].add(jira_status_name)
+            else:
+                project_observation["mapped_status_names"].add(jira_status_name)
         if status_warning:
             dropped_fields.append({"field": "status", "reason": status_warning})
         mapped_fields.append("status")
 
         jira_priority_name = _extract_priority_name(fields)
         mapped_priority, priority_warning = _map_priority(jira_priority_name)
+        if jira_priority_name:
+            project_observation["priority_names"].add(jira_priority_name)
+            if priority_warning and priority_warning.startswith("jira_priority_unmapped"):
+                project_observation["unmapped_priority_names"].add(jira_priority_name)
+            else:
+                project_observation["mapped_priority_names"].add(jira_priority_name)
         if priority_warning:
             dropped_fields.append({"field": "priority", "reason": priority_warning})
         mapped_fields.append("priority")
@@ -532,6 +822,22 @@ def import_jira_issues_to_tasks(
         issue_links = _extract_issue_links(fields)
         if issue_links:
             mapped_fields.append("links")
+
+        component_names = _extract_named_values(fields.get("components"))
+        if component_names:
+            project_observation["component_names"].update(component_names)
+
+        fix_version_names = _extract_named_values(fields.get("fixVersions"))
+        if fix_version_names:
+            project_observation["fix_version_names"].update(fix_version_names)
+
+        sprint_values = _extract_sprint_values(fields)
+        if sprint_values:
+            project_observation["sprint_values"].update(sprint_values)
+
+        rank_value = _extract_rank_value(fields)
+        if rank_value:
+            project_observation["rank_values"].add(rank_value)
 
         status_history, status_history_warning = _extract_status_history(raw_issue)
         if status_history_warning:
@@ -666,6 +972,8 @@ def import_jira_issues_to_tasks(
                 "epic_issue_key": epic_issue_key,
                 "issue_links": issue_links,
                 "relation_results": relation_results,
+                "project_key": project_key,
+                "project_name": project_name,
             }
         )
 
@@ -872,4 +1180,5 @@ def import_jira_issues_to_tasks(
         "update_existing": bool(update_existing),
         "summary": summary,
         "issues": issue_results,
+        "project_parity": _build_project_parity_report(project_observations),
     }
