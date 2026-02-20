@@ -30,6 +30,10 @@ def test_create_task_route_parses_start_and_due_dates(monkeypatch):
             else None,
             "due_date": kwargs["due_date"].isoformat() if kwargs.get("due_date") else None,
             "epic_task_concept_id": kwargs.get("epic_task_concept_id"),
+            "components": kwargs.get("components"),
+            "fix_versions": kwargs.get("fix_versions"),
+            "sprint_values": kwargs.get("sprint_values"),
+            "backlog_rank": kwargs.get("backlog_rank"),
         }
 
     monkeypatch.setattr(
@@ -49,6 +53,10 @@ def test_create_task_route_parses_start_and_due_dates(monkeypatch):
             "start_date": "2026-03-01T10:00:00Z",
             "due_date": "2026-03-05T10:00:00Z",
             "epic_task_concept_id": "#V#task_epic_1",
+            "components": ["Workflow Engine"],
+            "fix_versions": ["R1"],
+            "sprint_values": ["Sprint 6"],
+            "backlog_rank": "0|i00123:",
         },
     )
 
@@ -56,6 +64,10 @@ def test_create_task_route_parses_start_and_due_dates(monkeypatch):
     assert captured["start_date"].isoformat() == "2026-03-01T10:00:00+00:00"
     assert captured["due_date"].isoformat() == "2026-03-05T10:00:00+00:00"
     assert captured["epic_task_concept_id"] == "#V#task_epic_1"
+    assert captured["components"] == ["Workflow Engine"]
+    assert captured["fix_versions"] == ["R1"]
+    assert captured["sprint_values"] == ["Sprint 6"]
+    assert captured["backlog_rank"] == "0|i00123:"
 
 
 def test_update_task_route_uses_update_task_fields(monkeypatch):
@@ -81,12 +93,20 @@ def test_update_task_route_uses_update_task_fields(monkeypatch):
         json={
             "start_date": "2026-03-01T10:00:00Z",
             "epic_task_concept_id": "#V#task_epic_1",
+            "components": ["Workflow Engine"],
+            "fix_versions": ["R1"],
+            "sprint_values": ["Sprint 6"],
+            "backlog_rank": "0|i00123:",
         },
     )
 
     assert response.status_code == 200
     assert captured["task_concept_id"] == "#V#task_1"
     assert captured["fields"]["epic_task_concept_id"] == "#V#task_epic_1"
+    assert captured["fields"]["components"] == ["Workflow Engine"]
+    assert captured["fields"]["fix_versions"] == ["R1"]
+    assert captured["fields"]["sprint_values"] == ["Sprint 6"]
+    assert captured["fields"]["backlog_rank"] == "0|i00123:"
     assert captured["actor_concept_id"] == "#V#user_alice"
 
 
@@ -106,6 +126,8 @@ def test_search_tasks_route_supports_start_and_epic_filters(monkeypatch):
     response = client.get(
         "/api/tasks/search?epic_task_concept_id=%23V%23task_epic_1&has_epic=true"
         "&start_from=2026-03-01T00:00:00Z&start_to=2026-03-05T00:00:00Z"
+        "&components=Workflow%20Engine&fix_versions=R1&sprints=Sprint%206"
+        "&backlog_rank=0%7Ci00123%3A&has_backlog_rank=true"
     )
 
     assert response.status_code == 200
@@ -113,3 +135,8 @@ def test_search_tasks_route_supports_start_and_epic_filters(monkeypatch):
     assert captured["has_epic"] is True
     assert captured["start_from"] == "2026-03-01T00:00:00Z"
     assert captured["start_to"] == "2026-03-05T00:00:00Z"
+    assert captured["components"] == ["Workflow Engine"]
+    assert captured["fix_versions"] == ["R1"]
+    assert captured["sprint_values"] == ["Sprint 6"]
+    assert captured["backlog_rank"] == "0|i00123:"
+    assert captured["has_backlog_rank"] is True

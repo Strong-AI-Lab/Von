@@ -537,6 +537,62 @@ class TestTaskParityDatesAndEpic:
             for call in mock_repo.mutate_relationship_edge.call_args_list
         )
 
+    @patch("src.backend.services.task_management_service.get_task")
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.get_texts_for_concept")
+    def test_update_task_fields_supports_planning_metadata(
+        self,
+        mock_get_texts: MagicMock,
+        mock_repo: MagicMock,
+        mock_get_task: MagicMock,
+    ) -> None:
+        task_doc = {
+            "concept_id": "#V#task_1",
+            "relationships": {"is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID]},
+            "metadata": {},
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+        }
+        mock_repo.find_one.return_value = task_doc
+        mock_get_texts.return_value = []
+        mock_get_task.return_value = {
+            "task_concept_id": "#V#task_1",
+            "components": ["Workflow Engine"],
+            "fix_versions": ["R1"],
+            "sprint_values": ["Sprint 6"],
+            "backlog_rank": "0|i00123:",
+        }
+
+        result = update_task_fields(
+            "#V#task_1",
+            fields={
+                "components": ["Workflow Engine"],
+                "fix_versions": ["R1"],
+                "sprint_values": ["Sprint 6"],
+                "backlog_rank": "0|i00123:",
+            },
+            actor_concept_id="#V#user_alice",
+        )
+
+        assert "components" in result["changed_fields"]
+        assert "fix_versions" in result["changed_fields"]
+        assert "sprint_values" in result["changed_fields"]
+        assert "backlog_rank" in result["changed_fields"]
+        update_payloads = [
+            call.args[1]
+            for call in mock_repo.update_one.call_args_list
+            if len(call.args) >= 2 and isinstance(call.args[1], dict)
+        ]
+        set_payloads = [
+            payload.get("$set", {})
+            for payload in update_payloads
+            if isinstance(payload.get("$set"), dict)
+        ]
+        assert any("metadata.components" in payload for payload in set_payloads)
+        assert any("metadata.fix_versions" in payload for payload in set_payloads)
+        assert any("metadata.sprint_values" in payload for payload in set_payloads)
+        assert any("metadata.backlog_rank" in payload for payload in set_payloads)
+
     @patch("src.backend.services.task_management_service.ConceptsRepository")
     @patch("src.backend.services.task_management_service.get_texts_for_concept")
     def test_search_tasks_filters_start_date_and_epic(
@@ -584,6 +640,60 @@ class TestTaskParityDatesAndEpic:
             epic_task_concept_id="#V#task_epic_1",
             start_from="2026-03-01T00:00:00Z",
             start_to="2026-03-05T00:00:00Z",
+            limit=10,
+        )
+
+        assert result["count"] == 1
+        assert result["tasks"][0]["task_concept_id"] == "#V#task_1"
+
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.get_texts_for_concept")
+    def test_search_tasks_filters_planning_metadata(
+        self,
+        mock_get_texts: MagicMock,
+        mock_repo: MagicMock,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        mock_repo.find.return_value = [
+            {
+                "concept_id": "#V#task_1",
+                "relationships": {"is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID]},
+                "metadata": {
+                    "components": ["Workflow Engine"],
+                    "fix_versions": ["R1"],
+                    "sprint_values": ["Sprint 6"],
+                    "backlog_rank": "0|i00123:",
+                },
+                "created_at": now,
+                "updated_at": now,
+            },
+            {
+                "concept_id": "#V#task_2",
+                "relationships": {"is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID]},
+                "metadata": {
+                    "components": ["Frontend Chat UX"],
+                    "fix_versions": ["R2"],
+                    "sprint_values": ["Sprint 7"],
+                    "backlog_rank": None,
+                },
+                "created_at": now,
+                "updated_at": now,
+            },
+        ]
+
+        def _fake_get_texts(concept_id: str, *args: Any, **kwargs: Any) -> list[dict[str, str]]:
+            return [
+                {"predicate": "#V#hasName", "text": concept_id},
+                {"predicate": "#V#hasTaskStatus", "text": "pending"},
+            ]
+
+        mock_get_texts.side_effect = _fake_get_texts
+
+        result = search_tasks(
+            components=["Workflow Engine"],
+            fix_versions=["R1"],
+            sprint_values=["Sprint 6"],
+            has_backlog_rank=True,
             limit=10,
         )
 

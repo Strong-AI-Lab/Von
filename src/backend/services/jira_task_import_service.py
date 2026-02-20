@@ -39,11 +39,17 @@ _JIRA_STATUS_TO_VON_STATUS = {
     "doing": "in_progress",
     "in review": "in_progress",
     "review": "in_progress",
+    "ready for qa": "in_progress",
+    "qa": "in_progress",
+    "suspended": "blocked",
     "blocked": "blocked",
     "on hold": "blocked",
     "done": "completed",
     "closed": "completed",
     "resolved": "completed",
+    "superseded": "cancelled",
+    "won't fix": "cancelled",
+    "wont fix": "cancelled",
     "cancelled": "cancelled",
     "canceled": "cancelled",
 }
@@ -396,6 +402,10 @@ def _issue_reference_payload(
     *,
     issue_key: str,
     labels: list[str],
+    component_names: list[str],
+    fix_version_names: list[str],
+    sprint_values: list[str],
+    rank_value: str | None,
     status_history: list[Dict[str, Any]],
     parent_issue_key: str | None,
     epic_issue_key: str | None,
@@ -417,6 +427,10 @@ def _issue_reference_payload(
         "status_name": status.get("name") if isinstance(status, Mapping) else None,
         "priority_name": priority.get("name") if isinstance(priority, Mapping) else None,
         "labels": labels,
+        "components": component_names,
+        "fix_versions": fix_version_names,
+        "sprint_values": sprint_values,
+        "backlog_rank": rank_value,
         "created": fields.get("created"),
         "updated": fields.get("updated"),
         "due_date": fields.get("duedate"),
@@ -456,6 +470,28 @@ def _resolve_existing_task_id(
             task_id = raw_task_id.strip()
     cache[jira_issue_key] = task_id
     return task_id
+
+
+_PARITY_CLASS_MUST_FIX = "must_fix"
+_PARITY_CLASS_ACCEPTABLE_DEFER = "acceptable_defer"
+
+_PARITY_FIELD_CLASSIFICATION: Dict[str, str] = {
+    "status_mapping": _PARITY_CLASS_MUST_FIX,
+    "priority_mapping": _PARITY_CLASS_MUST_FIX,
+    "components": _PARITY_CLASS_ACCEPTABLE_DEFER,
+    "fixVersions": _PARITY_CLASS_ACCEPTABLE_DEFER,
+    "sprint": _PARITY_CLASS_ACCEPTABLE_DEFER,
+    "rank": _PARITY_CLASS_ACCEPTABLE_DEFER,
+}
+
+
+def _classify_parity_gap(field_name: Any) -> str:
+    if not isinstance(field_name, str):
+        return _PARITY_CLASS_ACCEPTABLE_DEFER
+    return _PARITY_FIELD_CLASSIFICATION.get(
+        field_name,
+        _PARITY_CLASS_ACCEPTABLE_DEFER,
+    )
 
 
 def _build_project_parity_report(
@@ -545,54 +581,24 @@ def _build_project_parity_report(
             follow_up_work.append(
                 "Extend Jira->Von priority mapping for project-specific priority names."
             )
-        if component_names:
-            dropped_fields.append(
-                {
-                    "field": "components",
-                    "reason": "jira_components_not_first_class_in_von_task_model",
-                    "values": component_names,
-                }
-            )
-            follow_up_work.append(
-                "Add first-class task component modelling and migration mapping."
-            )
-        if fix_version_names:
-            dropped_fields.append(
-                {
-                    "field": "fixVersions",
-                    "reason": "jira_fix_versions_not_first_class_in_von_task_model",
-                    "values": fix_version_names,
-                }
-            )
-            follow_up_work.append(
-                "Add first-class release/fix-version modelling for tasks."
-            )
-        if sprint_values:
-            dropped_fields.append(
-                {
-                    "field": "sprint",
-                    "reason": "jira_sprint_metadata_not_first_class_in_von_task_model",
-                    "values": sprint_values,
-                }
-            )
-            follow_up_work.append(
-                "Add first-class sprint/iteration modelling for task planning."
-            )
-        if rank_values:
-            dropped_fields.append(
-                {
-                    "field": "rank",
-                    "reason": "jira_rank_metadata_not_first_class_in_von_task_model",
-                    "values": rank_values,
-                }
-            )
-            follow_up_work.append(
-                "Add first-class backlog rank/order modelling for tasks."
-            )
 
         if follow_up_work:
             projects_with_follow_up += 1
             follow_up_items += len(follow_up_work)
+
+        mapped_fields = [
+            "project.identity",
+            "status_mapping",
+            "priority_mapping",
+        ]
+        if component_names:
+            mapped_fields.append("components")
+        if fix_version_names:
+            mapped_fields.append("fixVersions")
+        if sprint_values:
+            mapped_fields.append("sprint")
+        if rank_values:
+            mapped_fields.append("rank")
 
         project_rows.append(
             {
@@ -605,11 +611,7 @@ def _build_project_parity_report(
                     else None
                 ),
                 "issue_count": issue_count,
-                "mapped_fields": [
-                    "project.identity",
-                    "status_mapping",
-                    "priority_mapping",
-                ],
+                "mapped_fields": mapped_fields,
                 "dropped_fields": dropped_fields,
                 "status_mapping": {
                     "observed_status_names": status_names,
@@ -620,6 +622,12 @@ def _build_project_parity_report(
                     "observed_priority_names": priority_names,
                     "mapped_priority_names": mapped_priority_names,
                     "unmapped_priority_names": unmapped_priority_names,
+                },
+                "planning_fields": {
+                    "components": component_names,
+                    "fix_versions": fix_version_names,
+                    "sprint_values": sprint_values,
+                    "rank_values": rank_values,
                 },
                 "follow_up_work": follow_up_work,
             }
@@ -637,6 +645,110 @@ def _build_project_parity_report(
             "follow_up_items": follow_up_items,
         },
         "projects": project_rows,
+    }
+
+
+def _build_pilot_validation_report(
+    *,
+    project_parity: Mapping[str, Any],
+    summary: Mapping[str, Any],
+) -> Dict[str, Any]:
+    raw_project_rows = project_parity.get("projects")
+    project_rows = raw_project_rows if isinstance(raw_project_rows, list) else []
+
+    must_fix_gaps: list[Dict[str, Any]] = []
+    defer_gaps: list[Dict[str, Any]] = []
+    for project_row in project_rows:
+        if not isinstance(project_row, Mapping):
+            continue
+        project_key = (
+            project_row.get("project_key")
+            if isinstance(project_row.get("project_key"), str)
+            else None
+        )
+        dropped_fields_raw = project_row.get("dropped_fields")
+        if not isinstance(dropped_fields_raw, list):
+            dropped_fields_raw = []
+        for dropped_field in dropped_fields_raw:
+            if not isinstance(dropped_field, Mapping):
+                continue
+            field_name = (
+                dropped_field.get("field")
+                if isinstance(dropped_field.get("field"), str)
+                else None
+            )
+            classification = _classify_parity_gap(field_name)
+            gap_row = {
+                "project_key": project_key,
+                "field": field_name,
+                "reason": dropped_field.get("reason"),
+                "values": dropped_field.get("values"),
+                "classification": classification,
+            }
+            if classification == _PARITY_CLASS_MUST_FIX:
+                must_fix_gaps.append(gap_row)
+            else:
+                defer_gaps.append(gap_row)
+
+        planning_fields_raw = project_row.get("planning_fields")
+        planning_fields: Mapping[str, Any]
+        if isinstance(planning_fields_raw, Mapping):
+            planning_fields = planning_fields_raw
+        else:
+            planning_fields = {}
+        planning_gap_specs = (
+            ("components", planning_fields.get("components")),
+            ("fix_versions", planning_fields.get("fix_versions")),
+            ("sprint_values", planning_fields.get("sprint_values")),
+            ("rank_values", planning_fields.get("rank_values")),
+        )
+        for field_name, values in planning_gap_specs:
+            if not isinstance(values, list) or not values:
+                continue
+            defer_gaps.append(
+                {
+                    "project_key": project_key,
+                    "field": field_name,
+                    "reason": "mapped_to_task_metadata_pending_typed_planning_model",
+                    "values": values,
+                    "classification": _PARITY_CLASS_ACCEPTABLE_DEFER,
+                }
+            )
+
+    if must_fix_gaps:
+        recommendation = "no_go"
+        recommendation_reason = (
+            "Must-fix parity gaps remain. Address these before relying on Von as the "
+            "primary task system for Jira-style operations."
+        )
+    elif defer_gaps:
+        recommendation = "go_with_conditions"
+        recommendation_reason = (
+            "Core operational parity is sufficient for Von-first task operations, with "
+            "acceptable planning-model gaps deferred."
+        )
+    else:
+        recommendation = "go"
+        recommendation_reason = (
+            "Parity checks found no blocking or deferred gaps in the evaluated sample."
+        )
+
+    return {
+        "summary": {
+            "issues_scanned": int(summary.get("total_issues", 0)),
+            "must_fix_gap_count": len(must_fix_gaps),
+            "acceptable_defer_gap_count": len(defer_gaps),
+        },
+        "recommendation": recommendation,
+        "recommendation_reason": recommendation_reason,
+        "must_fix_gaps": must_fix_gaps,
+        "acceptable_defer_gaps": defer_gaps,
+        "operational_surface": {
+            "create_update_query": True,
+            "hierarchy_links": True,
+            "transitions": True,
+            "comments_attachments_history": True,
+        },
     }
 
 
@@ -826,18 +938,22 @@ def import_jira_issues_to_tasks(
         component_names = _extract_named_values(fields.get("components"))
         if component_names:
             project_observation["component_names"].update(component_names)
+            mapped_fields.append("components")
 
         fix_version_names = _extract_named_values(fields.get("fixVersions"))
         if fix_version_names:
             project_observation["fix_version_names"].update(fix_version_names)
+            mapped_fields.append("fix_versions")
 
         sprint_values = _extract_sprint_values(fields)
         if sprint_values:
             project_observation["sprint_values"].update(sprint_values)
+            mapped_fields.append("sprint_values")
 
         rank_value = _extract_rank_value(fields)
         if rank_value:
             project_observation["rank_values"].add(rank_value)
+            mapped_fields.append("backlog_rank")
 
         status_history, status_history_warning = _extract_status_history(raw_issue)
         if status_history_warning:
@@ -867,6 +983,14 @@ def import_jira_issues_to_tasks(
             update_fields_payload["start_date"] = start_date
         if assignee_concept_id is not None:
             update_fields_payload["assignee_concept_id"] = assignee_concept_id
+        if component_names:
+            update_fields_payload["components"] = component_names
+        if fix_version_names:
+            update_fields_payload["fix_versions"] = fix_version_names
+        if sprint_values:
+            update_fields_payload["sprint_values"] = sprint_values
+        if rank_value:
+            update_fields_payload["backlog_rank"] = rank_value
 
         try:
             if existing_task_id:
@@ -889,6 +1013,10 @@ def import_jira_issues_to_tasks(
                         raw_issue,
                         issue_key=issue_key,
                         labels=labels,
+                        component_names=component_names,
+                        fix_version_names=fix_version_names,
+                        sprint_values=sprint_values,
+                        rank_value=rank_value,
                         status_history=status_history,
                         parent_issue_key=parent_issue_key,
                         epic_issue_key=epic_issue_key,
@@ -930,6 +1058,10 @@ def import_jira_issues_to_tasks(
                         raw_issue,
                         issue_key=issue_key,
                         labels=labels,
+                        component_names=component_names,
+                        fix_version_names=fix_version_names,
+                        sprint_values=sprint_values,
+                        rank_value=rank_value,
                         status_history=status_history,
                         parent_issue_key=parent_issue_key,
                         epic_issue_key=epic_issue_key,
@@ -1173,6 +1305,12 @@ def import_jira_issues_to_tasks(
                 )
                 summary["dropped_relations"] += 1
 
+    project_parity_report = _build_project_parity_report(project_observations)
+    pilot_validation = _build_pilot_validation_report(
+        project_parity=project_parity_report,
+        summary=summary,
+    )
+
     return {
         "success": True,
         "source_system": _JIRA_SOURCE_SYSTEM,
@@ -1180,5 +1318,6 @@ def import_jira_issues_to_tasks(
         "update_existing": bool(update_existing),
         "summary": summary,
         "issues": issue_results,
-        "project_parity": _build_project_parity_report(project_observations),
+        "project_parity": project_parity_report,
+        "pilot_validation": pilot_validation,
     }

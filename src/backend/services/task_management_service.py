@@ -75,6 +75,10 @@ TASK_LINK_PREDICATES: set[str] = set(TASK_LINK_TYPE_TO_PREDICATE.values())
 TASK_METADATA_KEY_CONCEPT_TYPE = "concept_type"
 TASK_METADATA_KEY_ORGANISATION = "organisation_concept_id"
 TASK_METADATA_KEY_LABELS = "labels"
+TASK_METADATA_KEY_COMPONENTS = "components"
+TASK_METADATA_KEY_FIX_VERSIONS = "fix_versions"
+TASK_METADATA_KEY_SPRINT_VALUES = "sprint_values"
+TASK_METADATA_KEY_BACKLOG_RANK = "backlog_rank"
 TASK_METADATA_KEY_COMMENTS = "comments"
 TASK_METADATA_KEY_ATTACHMENTS = "attachments"
 TASK_METADATA_KEY_WORKLOG = "worklog"
@@ -314,15 +318,15 @@ def _parse_datetime(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _normalise_labels(labels: Any) -> list[str]:
-    if labels is None:
+def _normalise_string_list(value: Any, *, field_name: str) -> list[str]:
+    if value is None:
         return []
-    if not isinstance(labels, list):
-        raise InvalidTaskDataError("labels must be a list of non-empty strings")
+    if not isinstance(value, list):
+        raise InvalidTaskDataError(f"{field_name} must be a list of non-empty strings")
 
     seen: set[str] = set()
     result: list[str] = []
-    for raw in labels:
+    for raw in value:
         if not isinstance(raw, str):
             continue
         cleaned = raw.strip()
@@ -334,6 +338,39 @@ def _normalise_labels(labels: Any) -> list[str]:
         seen.add(lowered)
         result.append(cleaned)
     return result
+
+
+def _metadata_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+
+    seen: set[str] = set()
+    result: list[str] = []
+    for raw in value:
+        if not isinstance(raw, str):
+            continue
+        cleaned = raw.strip()
+        if not cleaned:
+            continue
+        lowered = cleaned.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        result.append(cleaned)
+    return result
+
+
+def _normalise_optional_string(value: Any, *, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return cleaned or None
+    raise InvalidTaskDataError(f"{field_name} must be a string")
+
+
+def _normalise_labels(labels: Any) -> list[str]:
+    return _normalise_string_list(labels, field_name="labels")
 
 
 def _is_task_doc(doc: Dict[str, Any]) -> bool:
@@ -401,6 +438,23 @@ def _replace_task_metadata_list(
         {
             "$set": {
                 f"metadata.{metadata_key}": entries,
+                "updated_at": _now(),
+            }
+        },
+    )
+
+
+def _set_task_metadata_value(
+    *,
+    task_concept_id: str,
+    metadata_key: str,
+    value: Any,
+) -> None:
+    ConceptsRepository.update_one(
+        {"concept_id": task_concept_id},
+        {
+            "$set": {
+                f"metadata.{metadata_key}": value,
                 "updated_at": _now(),
             }
         },
@@ -553,6 +607,10 @@ def create_task(
     start_date: datetime | str | None = None,
     due_date: datetime | str | None = None,
     epic_task_concept_id: Optional[str] = None,
+    components: list[str] | None = None,
+    fix_versions: list[str] | None = None,
+    sprint_values: list[str] | None = None,
+    backlog_rank: str | None = None,
     priority: str = PRIORITY_MEDIUM,
     organisation_concept_id: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -567,6 +625,10 @@ def create_task(
         start_date: Optional start datetime (ISO string or datetime)
         due_date: Optional deadline datetime (ISO string or datetime)
         epic_task_concept_id: Optional epic concept_id for Jira-style epic linkage
+        components: Optional Jira component names for planning parity
+        fix_versions: Optional release/fix-version values for planning parity
+        sprint_values: Optional sprint values for planning parity
+        backlog_rank: Optional backlog rank marker for ordering parity
         priority: Task priority (low, medium, high, critical)
         organisation_concept_id: Organisation context, if applicable
 
@@ -586,6 +648,20 @@ def create_task(
         raise InvalidTaskDataError(
             f"Invalid priority '{priority}'. Must be one of: {VALID_PRIORITIES}"
         )
+
+    normalised_components = _normalise_string_list(components, field_name="components")
+    normalised_fix_versions = _normalise_string_list(
+        fix_versions,
+        field_name="fix_versions",
+    )
+    normalised_sprint_values = _normalise_string_list(
+        sprint_values,
+        field_name="sprint_values",
+    )
+    normalised_backlog_rank = _normalise_optional_string(
+        backlog_rank,
+        field_name="backlog_rank",
+    )
 
     parsed_start_date = _parse_datetime(start_date)
     if start_date is not None and parsed_start_date is None:
@@ -671,6 +747,10 @@ def create_task(
             TASK_METADATA_KEY_CONCEPT_TYPE: "task_specification",
             TASK_METADATA_KEY_ORGANISATION: organisation_concept_id,
             TASK_METADATA_KEY_LABELS: [],
+            TASK_METADATA_KEY_COMPONENTS: normalised_components,
+            TASK_METADATA_KEY_FIX_VERSIONS: normalised_fix_versions,
+            TASK_METADATA_KEY_SPRINT_VALUES: normalised_sprint_values,
+            TASK_METADATA_KEY_BACKLOG_RANK: normalised_backlog_rank,
             TASK_METADATA_KEY_COMMENTS: [],
             TASK_METADATA_KEY_ATTACHMENTS: [],
             TASK_METADATA_KEY_WORKLOG: [],
@@ -766,6 +846,10 @@ def create_task(
         "start_date": parsed_start_date.isoformat() if parsed_start_date else None,
         "due_date": parsed_due_date.isoformat() if parsed_due_date else None,
         "epic_task_concept_id": epic_task_concept_id,
+        "components": normalised_components,
+        "fix_versions": normalised_fix_versions,
+        "sprint_values": normalised_sprint_values,
+        "backlog_rank": normalised_backlog_rank,
         "organisation_concept_id": organisation_concept_id,
         "created_at": now.isoformat(),
     }
@@ -785,6 +869,10 @@ def create_task(
                 ),
                 "due_date": parsed_due_date.isoformat() if parsed_due_date else None,
                 "epic_task_concept_id": epic_task_concept_id,
+                "components": normalised_components,
+                "fix_versions": normalised_fix_versions,
+                "sprint_values": normalised_sprint_values,
+                "backlog_rank": normalised_backlog_rank,
             },
             touch_updated_at=False,
         )
@@ -878,10 +966,16 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     metadata = doc.get("metadata", {})
-    raw_labels = metadata.get(TASK_METADATA_KEY_LABELS)
-    labels = []
-    if isinstance(raw_labels, list):
-        labels = [label for label in raw_labels if isinstance(label, str) and label.strip()]
+    labels = _metadata_string_list(metadata.get(TASK_METADATA_KEY_LABELS))
+    components = _metadata_string_list(metadata.get(TASK_METADATA_KEY_COMPONENTS))
+    fix_versions = _metadata_string_list(metadata.get(TASK_METADATA_KEY_FIX_VERSIONS))
+    sprint_values = _metadata_string_list(metadata.get(TASK_METADATA_KEY_SPRINT_VALUES))
+    backlog_rank_raw = metadata.get(TASK_METADATA_KEY_BACKLOG_RANK)
+    backlog_rank = (
+        backlog_rank_raw.strip()
+        if isinstance(backlog_rank_raw, str) and backlog_rank_raw.strip()
+        else None
+    )
     comments = _list_metadata_items(doc, TASK_METADATA_KEY_COMMENTS)
     attachments = _list_metadata_items(doc, TASK_METADATA_KEY_ATTACHMENTS)
     worklog = _list_metadata_items(doc, TASK_METADATA_KEY_WORKLOG)
@@ -948,6 +1042,10 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
         "due_date": due_date,
         "organisation_concept_id": metadata.get(TASK_METADATA_KEY_ORGANISATION),
         "labels": labels,
+        "components": components,
+        "fix_versions": fix_versions,
+        "sprint_values": sprint_values,
+        "backlog_rank": backlog_rank,
         "parent_task_concept_id": parent_task_id,
         "epic_task_concept_id": epic_task_id,
         "subtask_concept_ids": subtask_ids,
@@ -1261,11 +1359,16 @@ def search_tasks(
     statuses: list[str] | None = None,
     assignee_concept_id: str | None = None,
     labels: list[str] | None = None,
+    components: list[str] | None = None,
+    fix_versions: list[str] | None = None,
+    sprint_values: list[str] | None = None,
+    backlog_rank: str | None = None,
     parent_task_concept_id: str | None = None,
     epic_task_concept_id: str | None = None,
     has_parent: bool | None = None,
     has_subtasks: bool | None = None,
     has_epic: bool | None = None,
+    has_backlog_rank: bool | None = None,
     start_from: str | None = None,
     start_to: str | None = None,
     due_from: str | None = None,
@@ -1350,6 +1453,92 @@ def search_tasks(
                 )
             ]
 
+    if components is not None:
+        required_components = {
+            component.lower()
+            for component in _normalise_string_list(
+                components,
+                field_name="components",
+            )
+            if component.strip()
+        }
+        if required_components:
+            tasks = [
+                task
+                for task in tasks
+                if required_components.issubset(
+                    {
+                        str(item).lower()
+                        for item in (task.get("components") or [])
+                        if isinstance(item, str)
+                    }
+                )
+            ]
+
+    if fix_versions is not None:
+        required_fix_versions = {
+            fix_version.lower()
+            for fix_version in _normalise_string_list(
+                fix_versions,
+                field_name="fix_versions",
+            )
+            if fix_version.strip()
+        }
+        if required_fix_versions:
+            tasks = [
+                task
+                for task in tasks
+                if required_fix_versions.issubset(
+                    {
+                        str(item).lower()
+                        for item in (task.get("fix_versions") or [])
+                        if isinstance(item, str)
+                    }
+                )
+            ]
+
+    if sprint_values is not None:
+        required_sprints = {
+            sprint.lower()
+            for sprint in _normalise_string_list(
+                sprint_values,
+                field_name="sprint_values",
+            )
+            if sprint.strip()
+        }
+        if required_sprints:
+            tasks = [
+                task
+                for task in tasks
+                if required_sprints.issubset(
+                    {
+                        str(item).lower()
+                        for item in (task.get("sprint_values") or [])
+                        if isinstance(item, str)
+                    }
+                )
+            ]
+
+    if backlog_rank is not None:
+        rank_value = _normalise_optional_string(
+            backlog_rank,
+            field_name="backlog_rank",
+        )
+        if rank_value:
+            tasks = [
+                task
+                for task in tasks
+                if isinstance(task.get("backlog_rank"), str)
+                and str(task.get("backlog_rank")).strip() == rank_value
+            ]
+        else:
+            tasks = [
+                task
+                for task in tasks
+                if not isinstance(task.get("backlog_rank"), str)
+                or not str(task.get("backlog_rank")).strip()
+            ]
+
     if parent_task_concept_id is not None:
         parent_id = _normalise_optional_concept_id(parent_task_concept_id)
         if not parent_id:
@@ -1387,6 +1576,17 @@ def search_tasks(
     if isinstance(has_epic, bool):
         tasks = [
             task for task in tasks if bool(task.get("epic_task_concept_id")) is has_epic
+        ]
+
+    if isinstance(has_backlog_rank, bool):
+        tasks = [
+            task
+            for task in tasks
+            if bool(
+                isinstance(task.get("backlog_rank"), str)
+                and str(task.get("backlog_rank")).strip()
+            )
+            is has_backlog_rank
         ]
 
     start_from_dt = _parse_datetime(start_from)
@@ -2336,6 +2536,54 @@ def update_task_fields(
         )
         changed_fields.append("labels")
 
+    if "components" in fields:
+        components_value = _normalise_string_list(
+            fields.get("components"),
+            field_name="components",
+        )
+        _replace_task_metadata_list(
+            task_concept_id=task_concept_id,
+            metadata_key=TASK_METADATA_KEY_COMPONENTS,
+            entries=components_value,
+        )
+        changed_fields.append("components")
+
+    if "fix_versions" in fields:
+        fix_versions_value = _normalise_string_list(
+            fields.get("fix_versions"),
+            field_name="fix_versions",
+        )
+        _replace_task_metadata_list(
+            task_concept_id=task_concept_id,
+            metadata_key=TASK_METADATA_KEY_FIX_VERSIONS,
+            entries=fix_versions_value,
+        )
+        changed_fields.append("fix_versions")
+
+    if "sprint_values" in fields:
+        sprint_values_value = _normalise_string_list(
+            fields.get("sprint_values"),
+            field_name="sprint_values",
+        )
+        _replace_task_metadata_list(
+            task_concept_id=task_concept_id,
+            metadata_key=TASK_METADATA_KEY_SPRINT_VALUES,
+            entries=sprint_values_value,
+        )
+        changed_fields.append("sprint_values")
+
+    if "backlog_rank" in fields:
+        backlog_rank_value = _normalise_optional_string(
+            fields.get("backlog_rank"),
+            field_name="backlog_rank",
+        )
+        _set_task_metadata_value(
+            task_concept_id=task_concept_id,
+            metadata_key=TASK_METADATA_KEY_BACKLOG_RANK,
+            value=backlog_rank_value,
+        )
+        changed_fields.append("backlog_rank")
+
     if "parent_task_concept_id" in fields:
         parent_raw = fields.get("parent_task_concept_id")
         if parent_raw is None or (isinstance(parent_raw, str) and not parent_raw.strip()):
@@ -2374,6 +2622,10 @@ def update_task_fields(
             "start_date",
             "due_date",
             "labels",
+            "components",
+            "fix_versions",
+            "sprint_values",
+            "backlog_rank",
             "parent_task_concept_id",
             "epic_task_concept_id",
         }

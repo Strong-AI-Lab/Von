@@ -230,7 +230,7 @@ def test_import_jira_issues_reports_project_level_parity_findings(monkeypatch):
 
     issue = _jira_issue(
         "JVNAUTOSCI-2300",
-        status="Ready for QA",
+        status="Custom Workflow State",
         extra_fields={
             "components": [{"name": "Workflow Engine"}],
             "fixVersions": [{"name": "R1"}],
@@ -259,7 +259,43 @@ def test_import_jira_issues_reports_project_level_parity_findings(monkeypatch):
         if isinstance(item, dict)
     }
     assert "status_mapping" in dropped_field_names
-    assert "components" in dropped_field_names
-    assert "fixVersions" in dropped_field_names
-    assert "sprint" in dropped_field_names
-    assert "rank" in dropped_field_names
+    assert "components" not in dropped_field_names
+    assert "fixVersions" not in dropped_field_names
+    assert "sprint" not in dropped_field_names
+    assert "rank" not in dropped_field_names
+    assert "components" in row.get("mapped_fields", [])
+    assert "fixVersions" in row.get("mapped_fields", [])
+    assert "sprint" in row.get("mapped_fields", [])
+    assert "rank" in row.get("mapped_fields", [])
+
+
+def test_import_jira_issues_pilot_validation_recommends_go_with_conditions(monkeypatch):
+    monkeypatch.setattr(
+        import_service,
+        "find_task_by_external_reference",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        import_service,
+        "create_task",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("dry_run should not write")),
+    )
+
+    issue = _jira_issue(
+        "JVNAUTOSCI-2301",
+        status="To Do",
+        extra_fields={
+            "components": [{"name": "Workflow Engine"}],
+            "customfield_10019": "0|i000ac:",
+        },
+    )
+    report = import_service.import_jira_issues_to_tasks(
+        issues=[issue],
+        dry_run=True,
+    )
+
+    pilot_validation = report.get("pilot_validation") or {}
+    assert pilot_validation.get("recommendation") == "go_with_conditions"
+    summary = pilot_validation.get("summary") or {}
+    assert summary.get("must_fix_gap_count") == 0
+    assert summary.get("acceptable_defer_gap_count", 0) >= 1

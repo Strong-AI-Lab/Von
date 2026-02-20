@@ -10478,6 +10478,10 @@ def _task_create(**kwargs):
     priority = kwargs.get("priority", "medium")
     org_id = kwargs.get("organisation_concept_id")
     epic_task_concept_id = kwargs.get("epic_task_concept_id")
+    components = kwargs.get("components")
+    fix_versions = kwargs.get("fix_versions")
+    sprint_values = kwargs.get("sprint_values")
+    backlog_rank = kwargs.get("backlog_rank")
 
     start_date, start_error = _parse_optional_iso_datetime_param(
         kwargs.get("start_date"),
@@ -10502,6 +10506,10 @@ def _task_create(**kwargs):
             start_date=start_date,
             due_date=due_date,
             epic_task_concept_id=epic_task_concept_id,
+            components=components,
+            fix_versions=fix_versions,
+            sprint_values=sprint_values,
+            backlog_rank=backlog_rank,
             priority=priority,
             organisation_concept_id=org_id,
         )
@@ -10691,11 +10699,16 @@ def _task_search(**kwargs):
             or kwargs.get("assignee_id")
             or kwargs.get("user_concept_id"),
             labels=kwargs.get("labels"),
+            components=kwargs.get("components"),
+            fix_versions=kwargs.get("fix_versions") or kwargs.get("fixVersions"),
+            sprint_values=kwargs.get("sprint_values") or kwargs.get("sprints"),
+            backlog_rank=kwargs.get("backlog_rank"),
             parent_task_concept_id=kwargs.get("parent_task_concept_id"),
             epic_task_concept_id=kwargs.get("epic_task_concept_id"),
             has_parent=kwargs.get("has_parent"),
             has_subtasks=kwargs.get("has_subtasks"),
             has_epic=kwargs.get("has_epic"),
+            has_backlog_rank=kwargs.get("has_backlog_rank"),
             start_from=kwargs.get("start_from"),
             start_to=kwargs.get("start_to"),
             due_from=kwargs.get("due_from"),
@@ -12603,6 +12616,10 @@ def build_default_catalogue() -> MethodCatalogue:
                     "start_date": (str, type(None)),
                     "due_date": (str, type(None)),
                     "epic_task_concept_id": (str, type(None)),
+                    "components": (list, type(None)),
+                    "fix_versions": (list, type(None)),
+                    "sprint_values": (list, type(None)),
+                    "backlog_rank": (str, type(None)),
                     "organisation_concept_id": (str, type(None)),
                 },
                 allow_unknown=True,
@@ -12613,7 +12630,8 @@ def build_default_catalogue() -> MethodCatalogue:
             description=(
                 "Create a Von task (stored as a Vontology concept). Use this to track work items, "
                 "action items, or to-dos. Tasks can be assigned to users and linked to conversations. "
-                "Priority: low, medium, high, critical. Tasks start in 'pending' status."
+                "Priority: low, medium, high, critical. Tasks start in 'pending' status and can include "
+                "planning metadata (components, fix versions, sprint values, backlog rank)."
             ),
         ),
         MethodDefinition(
@@ -12676,11 +12694,18 @@ def build_default_catalogue() -> MethodCatalogue:
                     "assignee_id": (str, type(None)),
                     "user_concept_id": (str, type(None)),
                     "labels": (list, type(None)),
+                    "components": (list, type(None)),
+                    "fix_versions": (list, type(None)),
+                    "fixVersions": (list, type(None)),
+                    "sprint_values": (list, type(None)),
+                    "sprints": (list, type(None)),
+                    "backlog_rank": (str, type(None)),
                     "parent_task_concept_id": (str, type(None)),
                     "epic_task_concept_id": (str, type(None)),
                     "has_parent": (bool, type(None)),
                     "has_subtasks": (bool, type(None)),
                     "has_epic": (bool, type(None)),
+                    "has_backlog_rank": (bool, type(None)),
                     "start_from": (str, type(None)),
                     "start_to": (str, type(None)),
                     "due_from": (str, type(None)),
@@ -12700,8 +12725,9 @@ def build_default_catalogue() -> MethodCatalogue:
             output_schema=task_search_output_schema,
             category="read",
             description=(
-                "Search Von tasks with rich filters (status, assignee, labels, hierarchy, "
-                "date ranges, dependency state) to support Jira-like triage and planning."
+                "Search Von tasks with rich filters (status, assignee, labels, planning "
+                "metadata, hierarchy, date ranges, dependency state) to support Jira-like "
+                "triage and planning."
             ),
         ),
         MethodDefinition(
@@ -12729,7 +12755,8 @@ def build_default_catalogue() -> MethodCatalogue:
             category="write",
             description=(
                 "Migrate Jira issues to Von tasks with idempotent reruns keyed by Jira issue key. "
-                "Produces a mapping report listing mapped/dropped fields and relation outcomes."
+                "Produces a mapping report listing mapped/dropped fields, relation outcomes, "
+                "and pilot validation recommendations."
             ),
         ),
         MethodDefinition(
@@ -12748,8 +12775,8 @@ def build_default_catalogue() -> MethodCatalogue:
                 description=(
                     "Update multiple task fields in one operation. "
                     "Supported fields: status, assignee_concept_id, title, description, "
-                    "priority, start_date, due_date, labels, parent_task_concept_id, "
-                    "epic_task_concept_id."
+                    "priority, start_date, due_date, labels, components, fix_versions, "
+                    "sprint_values, backlog_rank, parent_task_concept_id, epic_task_concept_id."
                 ),
             ),
             output_schema=task_update_fields_output_schema,

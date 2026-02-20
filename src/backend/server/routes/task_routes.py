@@ -120,6 +120,10 @@ def create_task_route() -> ResponseReturnValue:
         start_date: str (optional, ISO 8601)
         due_date: str (optional, ISO 8601)
         epic_task_concept_id: str (optional)
+        components: list[str] (optional)
+        fix_versions: list[str] (optional)
+        sprint_values: list[str] (optional)
+        backlog_rank: str (optional)
         priority: str (optional, default: medium)
         session_id: str (optional, link to conversation)
     """
@@ -149,6 +153,10 @@ def create_task_route() -> ResponseReturnValue:
             start_date=parsed_start_date,
             due_date=parsed_due_date,
             epic_task_concept_id=data.get("epic_task_concept_id"),
+            components=data.get("components"),
+            fix_versions=data.get("fix_versions"),
+            sprint_values=data.get("sprint_values"),
+            backlog_rank=data.get("backlog_rank"),
             priority=data.get("priority", "medium"),
             organisation_concept_id=organisation_concept_id,
         )
@@ -192,6 +200,10 @@ def update_task_route(task_concept_id: str) -> ResponseReturnValue:
         start_date: str (ISO 8601)
         due_date: str (ISO 8601)
         labels: list[str]
+        components: list[str]
+        fix_versions: list[str]
+        sprint_values: list[str]
+        backlog_rank: str
         parent_task_concept_id: str
         epic_task_concept_id: str
     """
@@ -296,6 +308,24 @@ def search_tasks_route() -> ResponseReturnValue:
         if not labels:
             labels = _parse_csv_param(request.args.get("labels")) or []
 
+        components = request.args.getlist("component")
+        if not components:
+            components = request.args.getlist("components")
+        if not components:
+            components = _parse_csv_param(request.args.get("components")) or []
+
+        fix_versions = request.args.getlist("fix_version")
+        if not fix_versions:
+            fix_versions = request.args.getlist("fix_versions")
+        if not fix_versions:
+            fix_versions = _parse_csv_param(request.args.get("fix_versions")) or []
+
+        sprint_values = request.args.getlist("sprint")
+        if not sprint_values:
+            sprint_values = request.args.getlist("sprints")
+        if not sprint_values:
+            sprint_values = _parse_csv_param(request.args.get("sprints")) or []
+
         result = search_tasks(
             query=request.args.get("query"),
             status_filter=request.args.get("status_filter"),
@@ -304,6 +334,10 @@ def search_tasks_route() -> ResponseReturnValue:
             or request.args.get("assignee_id")
             or request.args.get("user_concept_id"),
             labels=labels or None,
+            components=components or None,
+            fix_versions=fix_versions or None,
+            sprint_values=sprint_values or None,
+            backlog_rank=request.args.get("backlog_rank"),
             parent_task_concept_id=request.args.get("parent_task_concept_id"),
             epic_task_concept_id=request.args.get("epic_task_concept_id"),
             has_parent=_parse_optional_bool(request.args.get("has_parent"), "has_parent"),
@@ -311,6 +345,10 @@ def search_tasks_route() -> ResponseReturnValue:
                 request.args.get("has_subtasks"), "has_subtasks"
             ),
             has_epic=_parse_optional_bool(request.args.get("has_epic"), "has_epic"),
+            has_backlog_rank=_parse_optional_bool(
+                request.args.get("has_backlog_rank"),
+                "has_backlog_rank",
+            ),
             start_from=request.args.get("start_from"),
             start_to=request.args.get("start_to"),
             due_from=request.args.get("due_from"),

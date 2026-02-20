@@ -16,6 +16,10 @@ This matrix defines the current parity position for Jira-style task operations i
 | Parent/subtask | `#V#hasParentTask` + `#V#hasSubtask` | Supported | Cycle protection in parent assignment path. |
 | Epic linkage | `#V#hasEpicTask` relationship | Supported | CRUD/query available in service, REST, MCP. |
 | Labels | `metadata.labels` | Supported | Normalised + deduplicated list semantics. |
+| Components | `metadata.components` | Supported | Imported from Jira `components` and exposed in REST/MCP search and updates. |
+| Fix versions | `metadata.fix_versions` | Supported | Imported from Jira `fixVersions` and exposed in REST/MCP search and updates. |
+| Sprint values | `metadata.sprint_values` | Supported | Imported from Jira sprint fields and exposed in REST/MCP search and updates. |
+| Backlog rank | `metadata.backlog_rank` | Supported | Imported from Jira rank fields and exposed in REST/MCP search and updates. |
 | Start date | `#V#hasStartDate` text relation | Supported | CRUD/query available in service, REST, MCP. |
 | Due date | `#V#hasDueDate` text relation | Supported | CRUD/query available in service, REST, MCP. |
 | Typed dependencies | `#V#dependsOnTask`, `#V#blocksTask`, etc. | Supported | Link/unlink + dependency-state filtering. |
@@ -40,9 +44,17 @@ Recommended mapping from Jira issue export/import payloads:
 12. `comments[]` -> `metadata.comments`
 13. `attachments[]` -> `metadata.attachments`
 14. `changelog/status transitions` -> `metadata.task_history`
+15. `components[]` -> `metadata.components`
+16. `fixVersions[]` -> `metadata.fix_versions`
+17. `sprint/customfield_10020` -> `metadata.sprint_values`
+18. `rank/customfield_10019` -> `metadata.backlog_rank`
+
+## Pilot Validation Surface (JVNAUTOSCI-1114)
+`task_import_jira_issues` now emits:
+1. `project_parity`: per-project mapped/dropped parity details.
+2. `pilot_validation`: deterministic `must_fix` vs `acceptable_defer` gap classification plus `go` / `go_with_conditions` / `no_go` recommendation.
 
 ## Remaining Gaps and Phased Closure
 1. Multi-party collaboration roles (watchers/collaborators) are not first-class yet.
 2. Resolution semantics remain status-coupled (no separate canonical resolution model).
-3. Release planning fields (fix version, sprint, components, rank) are not yet first-class.
-4. Dedicated Jira import/export tooling with fidelity metrics is still required.
+3. Planning fields are represented as task metadata; full typed ontology modelling for components/releases/sprints/rank remains deferred.

@@ -341,6 +341,10 @@ def test_task_create_gateway_supports_start_date_and_epic(monkeypatch):
         start_date=None,
         due_date=None,
         epic_task_concept_id=None,
+        components=None,
+        fix_versions=None,
+        sprint_values=None,
+        backlog_rank=None,
         priority="medium",
         organisation_concept_id=None,
     ):
@@ -356,6 +360,10 @@ def test_task_create_gateway_supports_start_date_and_epic(monkeypatch):
             "start_date": start_date.isoformat() if start_date is not None else None,
             "due_date": due_date.isoformat() if due_date is not None else None,
             "epic_task_concept_id": epic_task_concept_id,
+            "components": components,
+            "fix_versions": fix_versions,
+            "sprint_values": sprint_values,
+            "backlog_rank": backlog_rank,
             "organisation_concept_id": organisation_concept_id,
         }
 
@@ -390,6 +398,11 @@ def test_task_search_gateway_supports_start_and_epic_filters(monkeypatch):
     assert "start_to" in definition.input_schema.optional
     assert "epic_task_concept_id" in definition.input_schema.optional
     assert "has_epic" in definition.input_schema.optional
+    assert "components" in definition.input_schema.optional
+    assert "fix_versions" in definition.input_schema.optional
+    assert "sprint_values" in definition.input_schema.optional
+    assert "backlog_rank" in definition.input_schema.optional
+    assert "has_backlog_rank" in definition.input_schema.optional
 
     captured: dict = {}
 
@@ -415,6 +428,11 @@ def test_task_search_gateway_supports_start_and_epic_filters(monkeypatch):
             "start_to": "2026-03-15T00:00:00Z",
             "epic_task_concept_id": "#V#task_epic_1",
             "has_epic": True,
+            "components": ["Workflow Engine"],
+            "fix_versions": ["R1"],
+            "sprint_values": ["Sprint 6"],
+            "backlog_rank": "0|i00123:",
+            "has_backlog_rank": True,
         },
     ).payload
     assert payload.get("success") is True
@@ -422,4 +440,9 @@ def test_task_search_gateway_supports_start_and_epic_filters(monkeypatch):
     assert captured.get("start_to") == "2026-03-15T00:00:00Z"
     assert captured.get("epic_task_concept_id") == "#V#task_epic_1"
     assert captured.get("has_epic") is True
+    assert captured.get("components") == ["Workflow Engine"]
+    assert captured.get("fix_versions") == ["R1"]
+    assert captured.get("sprint_values") == ["Sprint 6"]
+    assert captured.get("backlog_rank") == "0|i00123:"
+    assert captured.get("has_backlog_rank") is True
     _assert_schema_conformance(gateway, "task_search", payload)

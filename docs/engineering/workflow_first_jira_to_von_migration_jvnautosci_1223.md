@@ -28,20 +28,27 @@ Current findings from the implemented parity analyser:
    - project identity (`project.key`, `project.name`)
    - Jira status -> Von status mapping diagnostics
    - Jira priority -> Von priority mapping diagnostics
-2. Explicitly deferred (reported with reasons when present):
-   - `components`
-   - `fixVersions`
-   - sprint metadata
-   - backlog rank metadata
+   - `components` -> task metadata mapping
+   - `fixVersions` -> task metadata mapping
+   - sprint metadata -> task metadata mapping
+   - backlog rank metadata -> task metadata mapping
 
 ## Follow-Up Work
 
 The following remain open parity improvements under `JVNAUTOSCI-1108` scope:
 
-1. First-class task component modelling and migration mapping.
-2. First-class release/fix-version modelling.
-3. First-class sprint/iteration modelling.
-4. First-class backlog rank/order modelling.
-5. Project-specific status/priority mapping expansions where unmapped values are observed.
+1. Typed planning ontology modelling (components/releases/sprints/rank) beyond metadata-level storage.
+2. Project-specific status/priority mapping expansions where unmapped values are observed.
 
 These are surfaced directly in migration reports so pilot validation work (`JVNAUTOSCI-1114`) can prioritise closure using real project data.
+
+## JVNAUTOSCI-1114 Update (2026-02-20)
+
+Pilot validation now adds `pilot_validation` to the importer report with:
+
+1. Deterministic gap classification (`must_fix`, `acceptable_defer`).
+2. Recommendation output (`go`, `go_with_conditions`, `no_go`).
+3. Expanded Jira status mapping for real JVNAUTOSCI backlog states:
+   - `SUPERSEDED` -> `cancelled`
+   - `Won't Fix` -> `cancelled`
+   - `SUSPENDED` -> `blocked`
