@@ -70,6 +70,7 @@ _MARKDOWN_TABLE_TITLE_LOOKBACK_LINES = 5
 _RELATION_EXTENT_ARG1_TOKENS = frozenset({"arg1", "subject", "left", "source"})
 _RELATION_EXTENT_PREDICATE_TOKENS = frozenset({"predicate", "relation"})
 _RELATION_EXTENT_ARG2_TOKENS = frozenset({"arg2", "object", "right", "target"})
+_TABLE_COLUMN_VISIBILITY_DEFAULT_MODES = frozenset({"compact", "full"})
 
 
 def _normalise_text(value: object) -> str | None:
@@ -141,6 +142,73 @@ def _validate_optional_payload_title(
     title = payload.get("title")
     if not isinstance(title, str) or not title.strip():
         errors.append(f"{label}.payload.title must be a non-empty string when provided")
+
+
+def _validate_table_column_visibility(
+    *,
+    payload: Mapping[str, Any],
+    label: str,
+    valid_column_ids: set[str],
+    errors: list[str],
+) -> None:
+    raw_visibility = payload.get("column_visibility")
+    if raw_visibility is None:
+        return
+    if not isinstance(raw_visibility, Mapping):
+        errors.append(f"{label}.payload.column_visibility must be a mapping when provided")
+        return
+
+    default_mode = raw_visibility.get("default_mode")
+    if default_mode is not None:
+        if not isinstance(default_mode, str) or not default_mode.strip():
+            errors.append(
+                f"{label}.payload.column_visibility.default_mode must be a non-empty string when provided"
+            )
+        elif default_mode.strip().lower() not in _TABLE_COLUMN_VISIBILITY_DEFAULT_MODES:
+            errors.append(
+                f"{label}.payload.column_visibility.default_mode must be one of {sorted(_TABLE_COLUMN_VISIBILITY_DEFAULT_MODES)}"
+            )
+
+    compact_column_ids = raw_visibility.get("compact_column_ids")
+    if not isinstance(compact_column_ids, list) or not compact_column_ids:
+        errors.append(
+            f"{label}.payload.column_visibility.compact_column_ids must be a non-empty list"
+        )
+        compact_column_ids = []
+
+    seen_column_ids: set[str] = set()
+    for compact_index, raw_column_id in enumerate(compact_column_ids):
+        compact_label = (
+            f"{label}.payload.column_visibility.compact_column_ids[{compact_index}]"
+        )
+        if not isinstance(raw_column_id, str) or not raw_column_id.strip():
+            errors.append(f"{compact_label} must be a non-empty string")
+            continue
+        column_id = raw_column_id.strip()
+        if column_id in seen_column_ids:
+            errors.append(f"{compact_label} must not duplicate another compact column id")
+            continue
+        seen_column_ids.add(column_id)
+        if valid_column_ids and column_id not in valid_column_ids:
+            errors.append(f"{compact_label} must reference a declared column")
+
+    if (
+        valid_column_ids
+        and len(seen_column_ids) > 0
+        and len(seen_column_ids) >= len(valid_column_ids)
+    ):
+        errors.append(
+            f"{label}.payload.column_visibility.compact_column_ids must be a strict subset of declared columns"
+        )
+
+    for label_key in ("expand_label", "collapse_label"):
+        raw_label = raw_visibility.get(label_key)
+        if raw_label is not None and (
+            not isinstance(raw_label, str) or not raw_label.strip()
+        ):
+            errors.append(
+                f"{label}.payload.column_visibility.{label_key} must be a non-empty string when provided"
+            )
 
 
 def _resolve_relation_extent_compact_column_ids(
@@ -739,6 +807,13 @@ def validate_turn_display_elements(
                 data_type = column.get("data_type")
                 if not isinstance(data_type, str) or not data_type.strip():
                     errors.append(f"{column_label}.data_type must be a non-empty string")
+
+            _validate_table_column_visibility(
+                payload=payload,
+                label=label,
+                valid_column_ids=valid_column_ids,
+                errors=errors,
+            )
 
             rows = payload.get("rows")
             if not isinstance(rows, list):

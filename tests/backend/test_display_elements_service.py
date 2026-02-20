@@ -1804,3 +1804,77 @@ def test_validate_turn_display_elements_rejects_blank_optional_payload_title() -
 
     assert valid is False
     assert any(".payload.title must be a non-empty string when provided" in message for message in errors)
+
+
+def test_validate_turn_display_elements_rejects_invalid_table_column_visibility() -> None:
+    valid, errors = validate_turn_display_elements(
+        {
+            "schema_version": "turn_display_elements_v1",
+            "elements": [
+                {
+                    "element_id": "screen_table_1",
+                    "element_type": "table",
+                    "channel": "screen",
+                    "order": 15,
+                    "intent": "structured_tabular_view",
+                    "payload": {
+                        "columns": [
+                            {"column_id": "arg1", "label": "Arg1", "data_type": "text"},
+                            {
+                                "column_id": "predicate",
+                                "label": "Predicate",
+                                "data_type": "text",
+                            },
+                            {"column_id": "arg2", "label": "Arg2", "data_type": "text"},
+                            {"column_id": "status", "label": "Status", "data_type": "text"},
+                        ],
+                        "rows": [
+                            {
+                                "row_id": "row_1",
+                                "cells": [
+                                    {
+                                        "column_id": "arg1",
+                                        "value_raw": "#V#a",
+                                        "value_display": "#V#a",
+                                        "value_type": "text",
+                                    },
+                                    {
+                                        "column_id": "predicate",
+                                        "value_raw": "#V#p",
+                                        "value_display": "#V#p",
+                                        "value_type": "text",
+                                    },
+                                    {
+                                        "column_id": "arg2",
+                                        "value_raw": "#V#b",
+                                        "value_display": "#V#b",
+                                        "value_type": "text",
+                                    },
+                                    {
+                                        "column_id": "status",
+                                        "value_raw": "asserted",
+                                        "value_display": "asserted",
+                                        "value_type": "text",
+                                    },
+                                ],
+                            }
+                        ],
+                        "column_visibility": {
+                            "default_mode": "compact",
+                            "compact_column_ids": ["arg1", "predicate", "missing_column"],
+                            "expand_label": "Expand table",
+                            "collapse_label": "Show compact view",
+                        },
+                    },
+                    "provenance": {"source": "test"},
+                }
+            ],
+            "reason_codes": [],
+        }
+    )
+
+    assert valid is False
+    assert any(
+        "compact_column_ids[2] must reference a declared column" in message
+        for message in errors
+    )

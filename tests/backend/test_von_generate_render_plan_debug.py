@@ -189,6 +189,7 @@ def test_generate_builds_display_tables_from_render_plan_record_sets(monkeypatch
                         "subject": "#V#task_alpha",
                         "predicate": "#V#depends_on",
                         "object": "#V#task_beta",
+                        "status": "asserted",
                         "assertion_meta": {"assertion_id": "assertion_1"},
                     }
                 ],
@@ -209,6 +210,12 @@ def test_generate_builds_display_tables_from_render_plan_record_sets(monkeypatch
                         "column_id": "object",
                         "label": "Object",
                         "source_key": "object",
+                        "data_type": "text",
+                    },
+                    {
+                        "column_id": "status",
+                        "label": "Status",
+                        "source_key": "status",
                         "data_type": "text",
                     },
                 ],
@@ -264,6 +271,12 @@ def test_generate_builds_display_tables_from_render_plan_record_sets(monkeypatch
         predicate_table["payload"]["rows"][0]["provenance"]["assertion_id"]
         == "assertion_1"
     )
+    assert predicate_table["payload"]["column_visibility"]["default_mode"] == "compact"
+    assert predicate_table["payload"]["column_visibility"]["compact_column_ids"] == [
+        "subject",
+        "predicate",
+        "object",
+    ]
 
 
 def test_generate_drops_invalid_tables_from_render_plan_record_sets(monkeypatch):
