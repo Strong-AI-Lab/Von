@@ -29,6 +29,7 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     OrchestratorResult,
     WorkflowRoutingInfo,
 )
+from src.backend.workflows import WorkflowDefinition, WorkflowRegistration
 from src.backend.workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
     CHAT_NARRATION_WORKFLOW_ID,
@@ -2289,6 +2290,85 @@ def test_non_standard_workflow_routes_via_execute_workflow(monkeypatch):
     assert execution_entry is not None
     assert execution_entry["workflow_id"] == TODO_REFRESH_WORKFLOW_ID
     assert execution_entry["completed"] is True
+
+
+def test_custom_tool_pipeline_workflow_dispatches_without_id_special_casing(monkeypatch):
+    """Custom discovered workflows that satisfy the tool pipeline contract should
+    execute through the tool workflow path without a workflow-ID allowlist.
+    """
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    custom_workflow_id = "#V#custom_tool_pipeline_workflow"
+
+    tool_workflow_def = orchestrator._workflow_registry.get(TOOL_CALLING_WORKFLOW_ID)
+    assert tool_workflow_def is not None
+    orchestrator._workflow_registry.register_if_absent(
+        WorkflowRegistration(
+            workflow_id=custom_workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=custom_workflow_id,
+                initial_state=tool_workflow_def.initial_state,
+                states=tool_workflow_def.states,
+                termination_states=tool_workflow_def.termination_states,
+                purpose="Custom tool pipeline workflow for dispatch parity tests.",
+            ),
+            purpose="Custom tool pipeline workflow for dispatch parity tests.",
+            source="test",
+        )
+    )
+
+    class _WorkflowResult:
+        def __init__(self):
+            self.data = {
+                "final_response": "Custom tool pipeline response.",
+                "tool_messages": [],
+                "invocations": [],
+                "iteration_count": 1,
+            }
+            self.final_state = "completed"
+            self.completed = True
+
+    execute_calls: list[dict[str, Any]] = []
+
+    def _execute_workflow(workflow_id: str, **kwargs: Any):
+        call = {
+            "workflow_id": workflow_id,
+            "episode_stage": kwargs.get("data", {}).get("workflow_episode_stage"),
+        }
+        execute_calls.append(call)
+        if call["episode_stage"] != "tool_calling":
+            raise AssertionError(
+                "Custom tool-pipeline workflow should dispatch via tool_calling stage."
+            )
+        return _WorkflowResult()
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    llm = _CapturingLLM([custom_workflow_id.lower()])
+    discovery_result = {
+        "matches": [
+            {
+                "concept_id": custom_workflow_id,
+                "name": "Custom Tool Pipeline Workflow",
+                "description": "Test workflow mirroring tool-calling actions.",
+            }
+        ],
+        "match_count": 1,
+    }
+
+    result = orchestrator.run(
+        prompt="Use the custom tool pipeline",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result=discovery_result,
+    )
+
+    assert result.response_text == "Custom tool pipeline response."
+    assert len(execute_calls) == 1
+    assert execute_calls[0]["workflow_id"] == custom_workflow_id
+    assert execute_calls[0]["episode_stage"] == "tool_calling"
 
 
 # ---------------------------------------------------------------------------

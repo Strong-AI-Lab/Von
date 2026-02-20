@@ -12199,6 +12199,92 @@ class InternalMCPChatOrchestrator:
                     source="default",
                 )
 
+        _STATIC_SELECTOR_VERDICTS = frozenset(
+            {"plain_response", "tool_seeking", "summarisation", "narration", "fallback"}
+        )
+        _TOOL_PIPELINE_ACTION_IDS = frozenset(
+            {
+                "tool_calling.plan",
+                "tool_calling.validate",
+                "tool_calling.execute",
+                "tool_calling.backfill",
+            }
+        )
+        _NARRATION_ACTION_IDS = frozenset(
+            {
+                "narration.classify",
+                "narration.select_prompts",
+                "narration.render",
+                "narration.emit_audio",
+            }
+        )
+        selected_workflow_id_text = (
+            selected_workflow_id.strip()
+            if isinstance(selected_workflow_id, str) and selected_workflow_id.strip()
+            else None
+        )
+        selector_verdict = (
+            routing_info.verdict.strip().lower()
+            if isinstance(routing_info, WorkflowRoutingInfo)
+            and isinstance(routing_info.verdict, str)
+            and routing_info.verdict.strip()
+            else ""
+        )
+        selector_requests_narration = selector_verdict == "narration"
+        selector_requests_custom_workflow = bool(
+            selector_verdict
+            and selector_verdict not in _STATIC_SELECTOR_VERDICTS
+            and selected_workflow_id_text
+            and selected_workflow_id_text.lower() == selector_verdict
+        )
+
+        def _workflow_action_ids(workflow_id: str | None) -> set[str]:
+            if not isinstance(workflow_id, str) or not workflow_id.strip():
+                return set()
+            workflow_def = self._workflow_registry.get(workflow_id.strip())
+            if workflow_def is None:
+                return set()
+            action_ids: set[str] = set()
+            for state in workflow_def.states.values():
+                for action in state.actions:
+                    action_id = str(action.action_id or "").strip()
+                    if action_id:
+                        action_ids.add(action_id)
+            return action_ids
+
+        def _workflow_matches_action_contract(
+            workflow_id: str | None,
+            *,
+            required_action_ids: frozenset[str],
+        ) -> bool:
+            action_ids = _workflow_action_ids(workflow_id)
+            return bool(action_ids) and required_action_ids.issubset(action_ids)
+
+        def _resolve_workflow_id_for_action_contract(
+            *,
+            required_action_ids: frozenset[str],
+            preferred_workflow_id: str | None = None,
+        ) -> str | None:
+            preferred = (
+                preferred_workflow_id.strip()
+                if isinstance(preferred_workflow_id, str)
+                and preferred_workflow_id.strip()
+                else None
+            )
+            if preferred and _workflow_matches_action_contract(
+                preferred, required_action_ids=required_action_ids
+            ):
+                return preferred
+            for workflow_id in self._workflow_registry.all_workflow_ids():
+                candidate = str(workflow_id).strip()
+                if not candidate:
+                    continue
+                if _workflow_matches_action_contract(
+                    candidate, required_action_ids=required_action_ids
+                ):
+                    return candidate
+            return None
+
         # Feature-flagged step toward ontology-driven render planning:
         # resolve whether narration should be part of the response rendering.
         # Enabled by default; set VON_RENDERER_APPLICABILITY_ROUTING_ENABLE=0
@@ -14385,11 +14471,11 @@ class InternalMCPChatOrchestrator:
             context_tags: list[str] = ["chat_turn_rendering"]
             if presenter_mode_requested:
                 context_tags.append("presenter_mode")
-            if selected_workflow_id == CHAT_NARRATION_WORKFLOW_ID:
+            if selector_verdict == "narration":
                 context_tags.append("workflow:narration")
-            elif selected_workflow_id == TOOL_CALLING_WORKFLOW_ID:
+            elif selector_verdict in {"tool_seeking", "summarisation"}:
                 context_tags.append("workflow:tool_calling")
-            elif selected_workflow_id == CHAT_ASSISTANT_WORKFLOW_ID:
+            elif selector_verdict in {"plain_response", "fallback"}:
                 context_tags.append("workflow:assistant")
 
             temporal_metadata: dict[str, Any] = {}
@@ -14879,10 +14965,15 @@ class InternalMCPChatOrchestrator:
             )
             renderer_mode = str(renderer_plan.get("render_mode") or "").strip().lower()
             should_route_narration = (
-                selected_workflow_id == CHAT_NARRATION_WORKFLOW_ID
-                or renderer_mode == "spoken+screen"
+                selector_requests_narration or renderer_mode == "spoken+screen"
             )
             if not should_route_narration:
+                return screen_text
+            narration_workflow_id = _resolve_workflow_id_for_action_contract(
+                required_action_ids=_NARRATION_ACTION_IDS,
+                preferred_workflow_id=selected_workflow_id_text,
+            )
+            if narration_workflow_id is None:
                 return screen_text
 
             try:
@@ -14911,7 +15002,7 @@ class InternalMCPChatOrchestrator:
                 }
 
                 narration_result = self.execute_workflow(
-                    CHAT_NARRATION_WORKFLOW_ID,
+                    narration_workflow_id,
                     data=narration_data,
                     llm_client=llm_client,
                     model=_model_for_stage("narration"),
@@ -14944,7 +15035,7 @@ class InternalMCPChatOrchestrator:
                         aux_llm_calls.append(
                             {
                                 "type": "narration",
-                                "workflow_id": CHAT_NARRATION_WORKFLOW_ID,
+                                "workflow_id": narration_workflow_id,
                                 "presenter_channels": {
                                     "spoken": spoken,
                                     "screen": screen,
@@ -14969,25 +15060,20 @@ class InternalMCPChatOrchestrator:
         #
         # Three routing tiers:
         #   1. plain_response  — direct LLM call without tool context
-        #   2. Non-standard    — execute_workflow() for discovered/custom
-        #   3. Standard        — tool-calling or narration pipeline
+        #   2. custom_workflow — execute selected discovered workflow
+        #   3. tool_pipeline   — execute registry workflow matching tool contract
         # ----------------------------------------------------------------
-        _STANDARD_WORKFLOW_IDS = {
-            CHAT_ASSISTANT_WORKFLOW_ID,
-            TOOL_CALLING_WORKFLOW_ID,
-            CHAT_NARRATION_WORKFLOW_ID,
-        }
+        selected_uses_tool_pipeline_contract = _workflow_matches_action_contract(
+            selected_workflow_id_text,
+            required_action_ids=_TOOL_PIPELINE_ACTION_IDS,
+        )
 
         # Tier 1: Plain response — skip tool-calling overhead entirely.
         # When the classifier says "plain_response", there is no need
         # to build tool context, inject write-policy, or run the
         # plan→validate→execute→backfill pipeline.  This saves an LLM
         # round-trip worth of system prompt tokens and reduces latency.
-        if (
-            selected_workflow_id == CHAT_ASSISTANT_WORKFLOW_ID
-            and routing_info is not None
-            and routing_info.verdict == "plain_response"
-        ):
+        if selector_verdict == "plain_response":
             planner_model = _model_for_stage("planner")
             if trace_enabled and trace is not None:
                 llm_step = trace.start_step(
@@ -15040,13 +15126,16 @@ class InternalMCPChatOrchestrator:
             _persist_trace(status="completed")
             return result
 
-        # Tier 2: Non-standard workflow — discovered or custom Vontology
-        # workflows get their own execute_workflow() dispatch.
-        if selected_workflow_id and selected_workflow_id not in _STANDARD_WORKFLOW_IDS:
-            # Attempt to execute a discovered/non-standard workflow.
+        # Tier 2: Discovered workflow — dispatch directly through the
+        # registry path when the selector explicitly chose a custom ID.
+        if (
+            selector_requests_custom_workflow
+            and selected_workflow_id_text
+            and not selected_uses_tool_pipeline_contract
+        ):
             try:
                 wf_result = self.execute_workflow(
-                    selected_workflow_id,
+                    selected_workflow_id_text,
                     data={
                         "prompt": prompt,
                         "augmented_context": augmented_context,
@@ -15071,20 +15160,19 @@ class InternalMCPChatOrchestrator:
                     episode_source="chat_turn_workflow",
                 )
                 if wf_result is not None:
-                    # Build an OrchestratorResult from the workflow output.
                     wf_response = wf_result.data.get("response_text", "")
                     if not isinstance(wf_response, str) or not wf_response.strip():
                         wf_response = wf_result.data.get("summary", "")
                     if not isinstance(wf_response, str) or not wf_response.strip():
                         wf_response = (
-                            f"Workflow {selected_workflow_id} completed "
+                            f"Workflow {selected_workflow_id_text} completed "
                             f"(state: {wf_result.final_state})."
                         )
                     wf_response = _maybe_append_completion_claim_validation(wf_response)
                     aux_llm_calls.append(
                         {
                             "type": "workflow_execution",
-                            "workflow_id": selected_workflow_id,
+                            "workflow_id": selected_workflow_id_text,
                             "final_state": wf_result.final_state,
                             "completed": wf_result.completed,
                         }
@@ -15101,36 +15189,35 @@ class InternalMCPChatOrchestrator:
                     )
                     _persist_trace(status="completed")
                     return result
-                else:
-                    # Workflow definition not found in registry — fall through
-                    # to tool-calling as a safe default.
-                    self._logger.warning(
-                        "[mcp_orchestrator] Selected workflow %s not in registry; "
-                        "falling through to tool-calling.",
-                        selected_workflow_id,
-                    )
+                self._logger.warning(
+                    "[mcp_orchestrator] Selected workflow %s not in registry; "
+                    "falling through to tool-calling.",
+                    selected_workflow_id_text,
+                )
             except Exception as exc:
                 self._logger.warning(
-                    "[mcp_orchestrator] Non-standard workflow %s failed: %s; "
+                    "[mcp_orchestrator] Selected workflow %s failed: %s; "
                     "falling through to tool-calling.",
-                    selected_workflow_id,
+                    selected_workflow_id_text,
                     exc,
                 )
 
         # ----------------------------------------------------------------
         # JVNAUTOSCI-922 Phase 2: Route tool calling through the workflow
-        # engine instead of inline procedural code.
+        # engine via a registry-discovered tool pipeline workflow.
         # ----------------------------------------------------------------
-        tool_calling_def = self._workflow_registry.get(TOOL_CALLING_WORKFLOW_ID)
-        if tool_calling_def is None:
-            # Safety fallback — should never happen since the workflow is
-            # registered by default, but return a plain LLM response.
+        tool_dispatch_workflow_id = _resolve_workflow_id_for_action_contract(
+            required_action_ids=_TOOL_PIPELINE_ACTION_IDS,
+            preferred_workflow_id=selected_workflow_id_text,
+        )
+        if tool_dispatch_workflow_id is None:
             self._logger.error(
-                "[mcp_orchestrator] tool_calling_workflow not found in registry"
+                "[mcp_orchestrator] no registry workflow satisfies the "
+                "tool-calling action contract"
             )
             response_text = _maybe_apply_narration_routing(
-                "I attempted to use tools but the tool-calling workflow is not "
-                "available.  Please try again or report this issue.",
+                "I attempted to use tools but no executable tool-calling workflow "
+                "is available. Please try again or report this issue.",
                 tool_invocations=(),
                 tool_messages=(),
             )
@@ -15216,7 +15303,7 @@ class InternalMCPChatOrchestrator:
         }
 
         tc_result = self.execute_workflow(
-            TOOL_CALLING_WORKFLOW_ID,
+            tool_dispatch_workflow_id,
             data=tc_data,
             llm_client=llm_client,
             model=model,
@@ -15231,8 +15318,8 @@ class InternalMCPChatOrchestrator:
         if tc_result is None:
             result = OrchestratorResult(
                 response_text=(
-                    "I attempted to use tools but the tool-calling workflow is not "
-                    "available. Please try again or report this issue."
+                    "I attempted to use tools but the selected tool-calling "
+                    "workflow is not available. Please try again or report this issue."
                 ),
                 extra_messages=(),
                 tool_invocations=(),
