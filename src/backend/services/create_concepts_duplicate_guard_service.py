@@ -24,6 +24,14 @@ from ..workflows.workflow_concept_authority_service import (
     resolve_available_workflow_type_ids,
 )
 
+_SAFE_CREATE_DUPLICATE_RESOLUTION_STAGES = {
+    "code_string",
+    "exact",
+    "casefold_exact",
+    "diacritic_insensitive",
+    "token_exact",
+}
+
 
 @dataclass(frozen=True)
 class CreateConceptDuplicateGuardMatch:
@@ -195,6 +203,19 @@ def find_existing_concept_for_create_concepts(
         return None
 
     if not isinstance(resolution, dict) or resolution.get("status") != "resolved":
+        return None
+
+    # JVNAUTOSCI-1211:
+    # create_concepts duplicate blocking must stay conservative. We only accept
+    # strict match stages and ignore heuristic stages (for example
+    # "person_signature"), which can over-match non-person labels like tool names.
+    match_payload = resolution.get("match")
+    match_stage = (
+        str(match_payload.get("stage")).strip()
+        if isinstance(match_payload, dict)
+        else ""
+    )
+    if match_stage not in _SAFE_CREATE_DUPLICATE_RESOLUTION_STAGES:
         return None
 
     resolved_id = resolution.get("resolved_concept_id")

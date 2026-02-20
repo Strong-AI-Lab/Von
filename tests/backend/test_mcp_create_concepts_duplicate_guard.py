@@ -33,6 +33,13 @@ def seed_core_types():
             "relationships": {"is_a_type_of": ["#V#thing"], "is_an_instance_of": []},
         },
         {
+            "concept_id": "#V#mcp_tool",
+            "relationships": {
+                "is_a_type_of": ["#V#abstract_object"],
+                "is_an_instance_of": [],
+            },
+        },
+        {
             "concept_id": "#V#predicate",
             "relationships": {"is_a_type_of": ["#V#thing"], "is_an_instance_of": []},
         },
@@ -113,6 +120,25 @@ def test_create_concepts_can_allow_legacy_suffix_when_requested():
     assert second["created_concept_ids"][0] == "#V#duplicate_guard_legacy_opt_in_2"
 
 
+def test_create_concepts_does_not_block_near_match_name_resolution_for_tools():
+    first = _create_concepts(
+        parent_id="#V#mcp_tool",
+        concepts=[{"name": "duplicate_guard_test_org_exists tool", "kind": "instance"}],
+    )
+    assert first.get("successful") == 1
+    assert first.get("created_concept_ids") == ["#V#duplicate_guard_test_org_exists_tool"]
+
+    second = _create_concepts(
+        parent_id="#V#mcp_tool",
+        concepts=[{"name": "duplicate_guard_test_org_evidence tool", "kind": "instance"}],
+    )
+    assert second.get("successful") == 1
+    assert second.get("already_existed") == 0
+    assert second.get("created_concept_ids") == [
+        "#V#duplicate_guard_test_org_evidence_tool"
+    ]
+
+
 def test_stdio_create_concepts_blocks_duplicate_workflow_instance():
     async def _invoke() -> dict:
         raw_response = await mcp_stdio_server.call_tool(
@@ -172,4 +198,31 @@ def test_stdio_create_concepts_can_allow_legacy_suffix_when_requested():
     assert second.get("already_existed") == 0
     assert second.get("created_concept_ids") == [
         "#V#duplicate_guard_stdio_legacy_opt_in_2"
+    ]
+
+
+def test_stdio_create_concepts_does_not_block_near_match_name_resolution_for_tools():
+    async def _invoke(name: str) -> dict:
+        raw_response = await mcp_stdio_server.call_tool(
+            "create_concepts",
+            {
+                "parent_id": "#V#mcp_tool",
+                "concepts": [{"name": name, "kind": "instance"}],
+            },
+        )
+        response = cast(list[Any], raw_response)
+        assert response
+        text = getattr(response[0], "text", None)
+        assert isinstance(text, str)
+        return json.loads(text)
+
+    first = asyncio.run(_invoke("duplicate_guard_stdio_test_org_exists tool"))
+    assert first.get("successful") == 1
+    assert first.get("created_concept_ids") == ["#V#duplicate_guard_stdio_test_org_exists_tool"]
+
+    second = asyncio.run(_invoke("duplicate_guard_stdio_test_org_evidence tool"))
+    assert second.get("successful") == 1
+    assert second.get("already_existed") == 0
+    assert second.get("created_concept_ids") == [
+        "#V#duplicate_guard_stdio_test_org_evidence_tool"
     ]
