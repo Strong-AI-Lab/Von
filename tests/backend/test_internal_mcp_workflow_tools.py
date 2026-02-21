@@ -8,7 +8,10 @@ from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
 from src.backend.integrations.internal_mcp.workflow_surface_capabilities import (
     tracked_workflow_surface_tool_names,
 )
-from src.backend.workflows.durable.models import EventWorkflowBinding
+from src.backend.workflows.durable.models import (
+    EventWorkflowBinding,
+    WorkflowInstanceStatus,
+)
 from src.backend.workflows.durable.scheduler import WorkflowScheduler
 
 
@@ -20,9 +23,60 @@ def _build_gateway() -> InternalMCPGateway:
     )
 
 
-class _StubStatus:
-    def __init__(self, value: str) -> None:
-        self.value = value
+def _patch_submit_verified_instance_success(monkeypatch) -> None:
+    """Make success-path tests independent of external workflow authority state."""
+    from src.backend.workflows.durable.workflow_instance_submission_service import (
+        WorkflowInstanceSubmissionResult,
+    )
+
+    def _fake_submit_verified_workflow_instance(**kwargs):
+        manager = kwargs["manager"]
+        workflow_id = str(kwargs.get("workflow_id") or "").strip()
+        user_id = str(kwargs.get("user_id") or "anonymous").strip() or "anonymous"
+        org_id = str(kwargs.get("org_id") or "default").strip() or "default"
+        namespace = (
+            str(kwargs.get("namespace") or f"{user_id}/{org_id}").strip()
+            or f"{user_id}/{org_id}"
+        )
+        inputs = kwargs.get("inputs")
+        max_retries_raw = kwargs.get("max_retries", 3)
+        try:
+            max_retries = int(max_retries_raw)
+        except (TypeError, ValueError):
+            max_retries = 3
+
+        instance_id = manager.create_instance(
+            workflow_id,
+            user_id=user_id,
+            org_id=org_id,
+            namespace=namespace,
+            inputs=dict(inputs) if isinstance(inputs, dict) else {},
+            max_retries=max_retries,
+            schedule_id=kwargs.get("schedule_id"),
+        )
+
+        return WorkflowInstanceSubmissionResult(
+            success=True,
+            workflow_id=workflow_id,
+            status="created",
+            instance_id=instance_id,
+            verification={
+                "preflight_passed": True,
+                "postflight_passed": True,
+                "runnable_verification_success": True,
+                "preflight": {"errors": []},
+                "postflight": {"errors": []},
+            },
+        )
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.workflow_instance_submission_service.submit_verified_workflow_instance",
+        _fake_submit_verified_workflow_instance,
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.scheduler.submit_verified_workflow_instance",
+        _fake_submit_verified_workflow_instance,
+    )
 
 
 class _StubInstance:
@@ -39,22 +93,22 @@ class _StubInstance:
     ) -> None:
         self.instance_id = instance_id
         self.workflow_id = workflow_id
-        self.status = _StubStatus("pending")
-        self.current_state = None
+        self.status = WorkflowInstanceStatus.PENDING
+        self.current_state: str | None = None
         self.step_index = 0
         self.inputs = inputs
-        self.outputs = None
+        self.outputs: dict[str, object] | None = None
         self.user_id = user_id
         self.org_id = org_id
         self.namespace = namespace
-        self.error = None
-        self.error_step = None
-        self.schedule_id = None
-        self.workflow_data = {}
+        self.error: str | None = None
+        self.error_step: str | None = None
+        self.schedule_id: str | None = None
+        self.workflow_data: dict[str, object] = {}
         self.retry_count = 0
         self.max_retries = max_retries
-        self.source_event_type = None
-        self.source_event_id = None
+        self.source_event_type: str | None = None
+        self.source_event_id: str | None = None
         self.created_at = datetime.now(timezone.utc)
 
     def to_status_dict(self) -> dict[str, object]:
@@ -152,6 +206,70 @@ class _StubWorkflowManager:
     def get_instance(self, instance_id: str) -> _StubInstance | None:
         return self.instances.get(instance_id)
 
+    def checkpoint(
+        self,
+        instance_id: str,
+        *,
+        state: str | None = None,
+        step_index: int | None = None,
+        workflow_data: dict[str, object] | None = None,
+    ) -> bool:
+        instance = self.instances.get(instance_id)
+        if instance is None:
+            return False
+        instance.status = WorkflowInstanceStatus.RUNNING
+        if state is not None:
+            instance.current_state = state
+        if isinstance(step_index, int):
+            instance.step_index = step_index
+        if isinstance(workflow_data, dict):
+            instance.workflow_data = dict(workflow_data)
+        return True
+
+    def mark_failed(
+        self,
+        instance_id: str,
+        *,
+        error: str = "failed",
+        error_step: str | None = None,
+        increment_retry: bool = False,
+    ) -> bool:
+        instance = self.instances.get(instance_id)
+        if instance is None:
+            return False
+        instance.status = WorkflowInstanceStatus.FAILED
+        instance.error = error
+        instance.error_step = error_step
+        if increment_retry:
+            instance.retry_count += 1
+        return True
+
+    def mark_cancelled(self, instance_id: str) -> bool:
+        instance = self.instances.get(instance_id)
+        if instance is None:
+            return False
+        if instance.status in {
+            WorkflowInstanceStatus.COMPLETED,
+            WorkflowInstanceStatus.FAILED,
+            WorkflowInstanceStatus.CANCELLED,
+        }:
+            return False
+        instance.status = WorkflowInstanceStatus.CANCELLED
+        return True
+
+    def reset_for_retry(self, instance_id: str) -> bool:
+        instance = self.instances.get(instance_id)
+        if instance is None:
+            return False
+        if instance.status != WorkflowInstanceStatus.FAILED:
+            return False
+        if instance.retry_count >= instance.max_retries:
+            return False
+        instance.status = WorkflowInstanceStatus.PENDING
+        instance.error = None
+        instance.error_step = None
+        return True
+
     def upsert_event_binding(
         self,
         *,
@@ -205,6 +323,7 @@ class _InMemoryScheduleWorkflowManager:
     def __init__(self) -> None:
         self.schedules: dict[str, Any] = {}
         self.instances: list[dict[str, object]] = []
+        self._instance_lookup: dict[str, _StubInstance] = {}
         self._instance_counter = 0
 
     def create_schedule(self, schedule):
@@ -257,7 +376,72 @@ class _InMemoryScheduleWorkflowManager:
                 "schedule_id": schedule_id,
             }
         )
+        stub_instance = _StubInstance(
+            instance_id=instance_id,
+            workflow_id=workflow_id,
+            user_id=user_id,
+            org_id=org_id,
+            namespace=namespace,
+            inputs=dict(inputs or {}),
+            max_retries=3,
+        )
+        stub_instance.schedule_id = schedule_id
+        self._instance_lookup[instance_id] = stub_instance
         return instance_id
+
+    def get_instance(self, instance_id: str):
+        return self._instance_lookup.get(instance_id)
+
+    def checkpoint(
+        self,
+        instance_id: str,
+        *,
+        state: str | None = None,
+        step_index: int | None = None,
+        workflow_data: dict[str, object] | None = None,
+    ) -> bool:
+        instance = self._instance_lookup.get(instance_id)
+        if instance is None:
+            return False
+        instance.status = WorkflowInstanceStatus.RUNNING
+        if state is not None:
+            instance.current_state = state
+        if isinstance(step_index, int):
+            instance.step_index = step_index
+        if isinstance(workflow_data, dict):
+            instance.workflow_data = dict(workflow_data)
+        return True
+
+    def mark_failed(
+        self,
+        instance_id: str,
+        *,
+        error: str = "failed",
+        error_step: str | None = None,
+        increment_retry: bool = False,
+    ) -> bool:
+        instance = self._instance_lookup.get(instance_id)
+        if instance is None:
+            return False
+        instance.status = WorkflowInstanceStatus.FAILED
+        instance.error = error
+        instance.error_step = error_step
+        if increment_retry:
+            instance.retry_count += 1
+        return True
+
+    def reset_for_retry(self, instance_id: str) -> bool:
+        instance = self._instance_lookup.get(instance_id)
+        if instance is None:
+            return False
+        if instance.status != WorkflowInstanceStatus.FAILED:
+            return False
+        if instance.retry_count >= instance.max_retries:
+            return False
+        instance.status = WorkflowInstanceStatus.PENDING
+        instance.error = None
+        instance.error_step = None
+        return True
 
     def update_schedule_after_run(self, schedule_id: str, *, next_run_at=None):
         schedule = self.schedules.get(schedule_id)
@@ -355,6 +539,7 @@ def test_workflow_list_instances_gateway_invoke_error_path():
 
 def test_workflow_create_list_get_instance_gateway_paths(monkeypatch):
     manager = _StubWorkflowManager()
+    _patch_submit_verified_instance_success(monkeypatch)
     workflow_id = "#V#generate_considerations_workflow"
     monkeypatch.setattr(
         "src.backend.workflows.durable.WorkflowInstanceManager",
@@ -400,6 +585,7 @@ def test_workflow_create_list_get_instance_gateway_paths(monkeypatch):
 
 def test_workflow_list_instances_supports_turn_and_date_filters(monkeypatch):
     manager = _StubWorkflowManager()
+    _patch_submit_verified_instance_success(monkeypatch)
     monkeypatch.setattr(
         "src.backend.workflows.durable.WorkflowInstanceManager",
         lambda: manager,
@@ -458,6 +644,7 @@ def test_workflow_list_instances_supports_turn_and_date_filters(monkeypatch):
 
 def test_workflow_create_instance_normalises_inputs(monkeypatch):
     manager = _StubWorkflowManager()
+    _patch_submit_verified_instance_success(monkeypatch)
     workflow_id = "#V#generate_considerations_workflow"
     monkeypatch.setattr(
         "src.backend.workflows.durable.WorkflowInstanceManager",
@@ -512,6 +699,153 @@ def test_workflow_create_instance_rejects_unrunnable_workflow(monkeypatch):
     preflight = verification.get("preflight") or {}
     assert "workflow_definition_not_registered" in (preflight.get("errors") or [])
     assert manager.instances == {}
+
+
+def test_workflow_cancel_instance_gateway_paths(monkeypatch):
+    manager = _StubWorkflowManager()
+    _patch_submit_verified_instance_success(monkeypatch)
+    workflow_id = "#V#generate_considerations_workflow"
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    gateway = _build_gateway()
+
+    created = gateway.invoke(
+        "workflow_create_instance",
+        {
+            "workflow_id": workflow_id,
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "inputs": {"seed": "value"},
+        },
+    ).payload
+    assert created.get("success") is True
+    instance_id = created.get("instance_id")
+    assert isinstance(instance_id, str)
+
+    cancelled = gateway.invoke(
+        "workflow_cancel_instance",
+        {"instance_id": instance_id},
+    ).payload
+    assert cancelled.get("success") is True
+    assert cancelled.get("instance_id") == instance_id
+    assert cancelled.get("status") == "cancelled"
+
+    detail = gateway.invoke(
+        "workflow_get_instance",
+        {"instance_id": instance_id},
+    ).payload
+    assert detail.get("success") is True
+    assert detail.get("status") == "cancelled"
+
+    repeated = gateway.invoke(
+        "workflow_cancel_instance",
+        {"instance_id": instance_id},
+    ).payload
+    assert repeated.get("success") is False
+    assert repeated.get("error_code") == "already_terminal"
+
+
+def test_workflow_retry_instance_restores_pending_and_keeps_checkpoint_state(monkeypatch):
+    manager = _StubWorkflowManager()
+    _patch_submit_verified_instance_success(monkeypatch)
+    workflow_id = "#V#generate_considerations_workflow"
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    gateway = _build_gateway()
+
+    created = gateway.invoke(
+        "workflow_create_instance",
+        {
+            "workflow_id": workflow_id,
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "inputs": {"seed": "value"},
+            "max_retries": 2,
+        },
+    ).payload
+    assert created.get("success") is True
+    instance_id = created.get("instance_id")
+    assert isinstance(instance_id, str)
+
+    assert manager.checkpoint(
+        instance_id,
+        state="tool_calling",
+        step_index=3,
+        workflow_data={"checkpoint_token": "cpt-1"},
+    )
+    assert manager.mark_failed(
+        instance_id,
+        error="tool_timeout",
+        error_step="tool_calling",
+    )
+
+    retried = gateway.invoke(
+        "workflow_retry_instance",
+        {"instance_id": instance_id},
+    ).payload
+    assert retried.get("success") is True
+    assert retried.get("instance_id") == instance_id
+    assert retried.get("status") == "pending"
+
+    detail = gateway.invoke(
+        "workflow_get_instance",
+        {"instance_id": instance_id},
+    ).payload
+    assert detail.get("success") is True
+    assert detail.get("status") == "pending"
+    assert detail.get("error") is None
+    assert detail.get("error_step") is None
+    # Retry should preserve workflow progress metadata for resume semantics.
+    assert detail.get("current_state") == "tool_calling"
+    assert detail.get("step_index") == 3
+    assert detail.get("workflow_data") == {"checkpoint_token": "cpt-1"}
+
+
+def test_workflow_retry_instance_rejects_non_failed_and_retry_limit(monkeypatch):
+    manager = _StubWorkflowManager()
+    _patch_submit_verified_instance_success(monkeypatch)
+    workflow_id = "#V#generate_considerations_workflow"
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    gateway = _build_gateway()
+
+    created = gateway.invoke(
+        "workflow_create_instance",
+        {
+            "workflow_id": workflow_id,
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "max_retries": 1,
+        },
+    ).payload
+    assert created.get("success") is True
+    instance_id = created.get("instance_id")
+    assert isinstance(instance_id, str)
+
+    not_failed = gateway.invoke(
+        "workflow_retry_instance",
+        {"instance_id": instance_id},
+    ).payload
+    assert not_failed.get("success") is False
+    assert not_failed.get("error_code") == "not_failed"
+
+    assert manager.mark_failed(
+        instance_id,
+        error="retry_budget_exhausted",
+        increment_retry=True,
+    )
+    blocked = gateway.invoke(
+        "workflow_retry_instance",
+        {"instance_id": instance_id},
+    ).payload
+    assert blocked.get("success") is False
+    assert blocked.get("error_code") == "retry_limit_exceeded"
 
 
 def test_workflow_mcp_health_check_exists_and_runs():
@@ -626,6 +960,7 @@ def test_workflow_bind_event_conflict_requires_replace(monkeypatch):
 
 def test_workflow_schedule_gateway_tools_integrate_with_scheduler(monkeypatch):
     manager = _InMemoryScheduleWorkflowManager()
+    _patch_submit_verified_instance_success(monkeypatch)
     monkeypatch.setattr(
         "src.backend.workflows.durable.WorkflowInstanceManager",
         lambda: manager,
@@ -668,6 +1003,70 @@ def test_workflow_schedule_gateway_tools_integrate_with_scheduler(monkeypatch):
     assert trigger_result.get("schedule_id") == schedule_id
     assert trigger_result.get("status") == "triggered"
     assert len(manager.instances) == 2
+
+
+def test_workflow_schedule_execute_checkpoint_fail_retry_resume(monkeypatch):
+    manager = _InMemoryScheduleWorkflowManager()
+    _patch_submit_verified_instance_success(monkeypatch)
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    gateway = _build_gateway()
+
+    run_at = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    created_schedule = gateway.invoke(
+        "workflow_create_schedule",
+        {
+            "workflow_id": "#V#generate_considerations_workflow",
+            "schedule_type": "once",
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "namespace": "#V#user/#V#org",
+            "run_at": run_at,
+            "default_inputs": {"task": "resume-check"},
+            "description": "JVNAUTOSCI-926 schedule->retry e2e",
+        },
+    ).payload
+    assert created_schedule.get("success") is True
+    schedule_id = created_schedule.get("schedule_id")
+    assert isinstance(schedule_id, str)
+
+    scheduler = WorkflowScheduler(manager, check_interval_seconds=0.01)  # type: ignore[arg-type]
+    scheduler._process_due_schedules()
+    assert len(manager.instances) == 1
+    instance_id = manager.instances[0]["instance_id"]
+    assert isinstance(instance_id, str)
+
+    assert manager.checkpoint(
+        instance_id,
+        state="awaiting_tool_result",
+        step_index=2,
+        workflow_data={"checkpoint_token": "checkpoint-1"},
+    )
+    assert manager.mark_failed(
+        instance_id,
+        error="transient_tool_failure",
+        error_step="awaiting_tool_result",
+    )
+
+    retried = gateway.invoke(
+        "workflow_retry_instance",
+        {"instance_id": instance_id},
+    ).payload
+    assert retried.get("success") is True
+    assert retried.get("status") == "pending"
+
+    detail = gateway.invoke(
+        "workflow_get_instance",
+        {"instance_id": instance_id},
+    ).payload
+    assert detail.get("success") is True
+    assert detail.get("status") == "pending"
+    assert detail.get("schedule_id") == schedule_id
+    assert detail.get("current_state") == "awaiting_tool_result"
+    assert detail.get("step_index") == 2
+    assert detail.get("workflow_data") == {"checkpoint_token": "checkpoint-1"}
 
 
 def test_workflow_trigger_schedule_rejects_unrunnable_workflow(monkeypatch):
