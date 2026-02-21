@@ -821,6 +821,82 @@ def test_presenter_mode_preserves_required_screen_json_fence_from_prompt(monkeyp
     assert any(element["payload"]["fence"] == expected_fence for element in json_blocks)
 
 
+def test_tool_messages_prompt_blob_includes_create_concepts_canonical_ids():
+    import json
+
+    from src.backend.server.routes.von_routes import _build_tool_messages_prompt_blob
+
+    tool_messages = [
+        {
+            "role": "tool",
+            "content": json.dumps(
+                {
+                    "tool": "create_concepts",
+                    "status": "ok",
+                    "payload": {
+                        "total": 2,
+                        "successful": 2,
+                        "results": [
+                            {
+                                "success": True,
+                                "requested_name": "Otter Session",
+                                "concept_id": "#V#otter_session",
+                            },
+                            {
+                                "success": True,
+                                "requested_name": "Otter Session 2",
+                                "canonical_concept_id": "#V#otter_session_2",
+                            },
+                        ],
+                    },
+                }
+            ),
+        }
+    ]
+
+    blob = _build_tool_messages_prompt_blob(tool_messages)
+
+    assert "TOOL WRITES LEDGER (authoritative):" in blob
+    assert "Otter Session (#V#otter_session)" in blob
+    assert "Otter Session 2 (#V#otter_session_2)" in blob
+
+
+def test_presenter_screen_summary_includes_create_concepts_canonical_ids():
+    import json
+
+    from src.backend.server.routes.von_routes import (
+        _build_presenter_screen_summary_from_tool_messages,
+    )
+
+    tool_messages = [
+        {
+            "role": "tool",
+            "content": json.dumps(
+                {
+                    "tool": "create_concepts",
+                    "status": "ok",
+                    "payload": {
+                        "total": 1,
+                        "successful": 1,
+                        "results": [
+                            {
+                                "success": True,
+                                "requested_name": "Planck Mission",
+                                "canonical_concept_id": "#V#planck_mission",
+                            }
+                        ],
+                    },
+                }
+            ),
+        }
+    ]
+
+    summary = _build_presenter_screen_summary_from_tool_messages(tool_messages)
+
+    assert isinstance(summary, str)
+    assert "Planck Mission (#V#planck_mission)" in summary
+
+
 def test_presenter_mode_can_disable_legacy_screen_fence_insertion(monkeypatch):
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
 

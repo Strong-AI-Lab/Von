@@ -2922,6 +2922,68 @@ def _extract_screen_only(text: str) -> str | None:
     return _extract_tagged_block(text, "screen")
 
 
+def _extract_created_concept_labels_from_payload(
+    payload: dict[str, Any], *, max_items: int = 3
+) -> list[str]:
+    """Extract stable, human-readable created concept labels from tool payloads."""
+    if not isinstance(payload, dict):
+        return []
+
+    labels: list[str] = []
+    seen: set[str] = set()
+
+    def _append_label(label: str | None) -> None:
+        if not isinstance(label, str):
+            return
+        cleaned = label.strip()
+        if not cleaned or cleaned in seen:
+            return
+        seen.add(cleaned)
+        labels.append(cleaned)
+
+    results = payload.get("results")
+    if isinstance(results, list):
+        for item in results:
+            if not isinstance(item, dict) or not bool(item.get("success")):
+                continue
+            requested_name_raw = (
+                item.get("requested_name") or item.get("input_name") or item.get("name")
+            )
+            requested_name = (
+                requested_name_raw.strip()
+                if isinstance(requested_name_raw, str) and requested_name_raw.strip()
+                else None
+            )
+
+            concept_id_value: str | None = None
+            for key in ("concept_id", "canonical_concept_id", "existing_concept_id"):
+                raw = item.get(key)
+                if isinstance(raw, str) and raw.strip():
+                    concept_id_value = raw.strip()
+                    break
+            if concept_id_value is None:
+                nested_concept = item.get("concept")
+                if isinstance(nested_concept, dict):
+                    nested_id = nested_concept.get("concept_id")
+                    if isinstance(nested_id, str) and nested_id.strip():
+                        concept_id_value = nested_id.strip()
+
+            if requested_name and concept_id_value:
+                _append_label(f"{requested_name} ({concept_id_value})")
+            elif concept_id_value:
+                _append_label(concept_id_value)
+            elif requested_name:
+                _append_label(requested_name)
+
+    created_ids = payload.get("created_concept_ids")
+    if isinstance(created_ids, list):
+        for concept_id in created_ids:
+            if isinstance(concept_id, str) and concept_id.strip():
+                _append_label(concept_id.strip())
+
+    return labels[: max(1, max_items)]
+
+
 def _build_presenter_screen_summary_from_tool_messages(
     tool_messages: list[dict],
 ) -> str | None:
@@ -3006,6 +3068,10 @@ def _build_presenter_screen_summary_from_tool_messages(
                 value = payload.get(key)
                 if isinstance(value, str) and value.strip():
                     lines.append(f"   {key}: {value.strip()}")
+            if tool_name_lower in {"create_concepts", "create_concept"}:
+                concept_labels = _extract_created_concept_labels_from_payload(payload)
+                if concept_labels:
+                    lines.append(f"   created: {', '.join(concept_labels)}")
 
     if index == 0:
         return None
@@ -3139,6 +3205,13 @@ def _build_tool_messages_prompt_blob(
 
         if name_lower in {"create_concepts", "create_concept"}:
             concept_create_seen = True
+            concept_labels = _extract_created_concept_labels_from_payload(payload)
+            if concept_labels:
+                suffix = ""
+                total_created = payload.get("successful")
+                if isinstance(total_created, int) and total_created > len(concept_labels):
+                    suffix = f" (+{total_created - len(concept_labels)} more)"
+                return f"- Concepts created: {', '.join(concept_labels)}{suffix}"
             total = payload.get("total")
             if isinstance(total, int):
                 return f"- Concepts created: {total}"

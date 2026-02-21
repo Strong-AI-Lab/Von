@@ -28,8 +28,10 @@ def test_launch_event_workflow_integration_flag_disables_trigger(monkeypatch) ->
 
     assert result["success"] is False
     assert result["triggered"] is False
+    assert result["outcome"] == "not_triggered"
     assert result["event_type"] == EVENT_TYPE_TASK_CREATED
     assert result["reason"] == "integration_disabled"
+    assert "hint" in result
 
 
 def test_launch_event_workflow_durable_gate_disables_trigger(monkeypatch) -> None:
@@ -45,6 +47,7 @@ def test_launch_event_workflow_durable_gate_disables_trigger(monkeypatch) -> Non
 
     assert result["success"] is False
     assert result["triggered"] is False
+    assert result["outcome"] == "not_triggered"
     assert result["event_type"] == EVENT_TYPE_TASK_CREATED
     assert result["reason"] == "durable_disabled"
     assert "hint" in result
@@ -64,9 +67,11 @@ def test_launch_event_workflow_requires_configured_workflow(monkeypatch) -> None
 
     assert result["success"] is False
     assert result["triggered"] is False
+    assert result["outcome"] == "not_triggered"
     assert result["event_type"] == EVENT_TYPE_TASK_CREATED
     assert result["reason"] == "workflow_not_configured"
     assert result["workflow_id_env"] == "VON_EVENT_TASK_CREATED_WORKFLOW_ID"
+    assert "hint" in result
 
 
 @patch("src.backend.services.workflow_event_integration_service.get_instance_manager")
@@ -92,6 +97,8 @@ def test_launch_event_workflow_creates_instance_when_configured(
 
     assert result["success"] is True
     assert result["triggered"] is True
+    assert result["outcome"] == "triggered"
+    assert result["reason"] == "created_new_instance"
     assert result["workflow_id"] == "#V#task_event_workflow"
     assert result["instance_id"] == "instance-123"
 
@@ -104,6 +111,39 @@ def test_launch_event_workflow_creates_instance_when_configured(
     assert called_args.kwargs["event_idempotency_key"].startswith(
         "evt:task.created:",
     )
+
+
+@patch("src.backend.services.workflow_event_integration_service.get_instance_manager")
+def test_launch_event_workflow_reports_reused_idempotent_instance(
+    mock_get_instance_manager: MagicMock,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", "1")
+    monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "1")
+    monkeypatch.setenv("VON_EVENT_TASK_CREATED_WORKFLOW_ID", "#V#task_event_workflow")
+
+    mock_manager = MagicMock()
+    mock_manager.create_instance_for_event.return_value = ("instance-123", False)
+    mock_get_instance_manager.return_value = mock_manager
+
+    result = launch_event_workflow(
+        event_type=EVENT_TYPE_TASK_CREATED,
+        event_id="task-1",
+        user_id="#V#user_alice",
+        org_id="#V#org_nao",
+        inputs={"task_concept_id": "#V#task_1"},
+    )
+
+    assert result["success"] is True
+    assert result["triggered"] is False
+    assert result["idempotent_reused"] is True
+    assert result["outcome"] == "reused"
+    assert result["reason"] == "idempotent_reuse"
+    assert "hint" in result
+    assert result["triggered_count"] == 0
+    assert result["reused_count"] == 1
+    assert result["success_count"] == 1
+    assert result["failure_count"] == 0
 
 
 def test_maybe_launch_task_status_workflow_skips_unconfigured_status(monkeypatch) -> None:
@@ -120,8 +160,10 @@ def test_maybe_launch_task_status_workflow_skips_unconfigured_status(monkeypatch
 
     assert result["success"] is False
     assert result["triggered"] is False
+    assert result["outcome"] == "not_triggered"
     assert result["event_type"] == "task.status_changed"
     assert result["reason"] == "status_not_configured_for_trigger"
+    assert "hint" in result
 
 
 @patch("src.backend.services.workflow_event_integration_service.launch_event_workflow")

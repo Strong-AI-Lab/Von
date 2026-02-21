@@ -537,9 +537,19 @@ def _launch_single_event_binding(
         instance_id,
         created_new,
     )
+    outcome = "triggered" if created_new else "reused"
+    reason = "created_new_instance" if created_new else "idempotent_reuse"
+    hint = (
+        "Created a new durable workflow instance for this event."
+        if created_new
+        else "Reused an existing durable workflow instance for this event idempotency key."
+    )
     return {
         "success": True,
         "triggered": created_new,
+        "outcome": outcome,
+        "reason": reason,
+        "hint": hint,
         "workflow_id": resolved_workflow_id,
         "instance_id": instance_id,
         "event_type": event_type,
@@ -567,8 +577,10 @@ def launch_event_workflow(
         return {
             "success": False,
             "triggered": False,
+            "outcome": "not_triggered",
             "event_type": event_type,
             "reason": "integration_disabled",
+            "hint": "Set VON_EVENT_WORKFLOW_INTEGRATION_ENABLE=1 to enable event-driven workflow integration.",
         }
 
     durable_enabled = get_durable_workflows_enabled(default=False)
@@ -576,6 +588,7 @@ def launch_event_workflow(
         return {
             "success": False,
             "triggered": False,
+            "outcome": "not_triggered",
             "event_type": event_type,
             "reason": "durable_disabled",
             "hint": "Set VON_DURABLE_WORKFLOWS_ENABLE=1 to enable event-driven workflow execution.",
@@ -586,8 +599,10 @@ def launch_event_workflow(
         return {
             "success": False,
             "triggered": False,
+            "outcome": "not_triggered",
             "event_type": event_type,
             "reason": "missing_event_id",
+            "hint": "Provide a non-empty event_id so idempotent event workflow launch can proceed.",
         }
     resolved_user, resolved_org = resolve_event_actor_context(
         user_id=user_id,
@@ -621,6 +636,7 @@ def launch_event_workflow(
         return {
             "success": False,
             "triggered": False,
+            "outcome": "not_triggered",
             "event_type": event_type,
             "reason": "workflow_not_configured",
             "workflow_id_env": env_name,
@@ -674,12 +690,15 @@ def launch_event_workflow(
                 {
                     "success": False,
                     "triggered": False,
+                    "outcome": "not_triggered",
                     "event_type": event_type,
                     "event_id": safe_event_id,
                     "workflow_id": binding_workflow_id,
                     "binding_source": binding.get("source"),
                     "binding_id": binding.get("binding_id"),
                     "error": str(exc),
+                    "reason": "launch_failed",
+                    "hint": "Inspect error details for this binding launch failure.",
                     "error_code": "launch_failed",
                     "unresolved_input_mappings": unresolved_targets,
                 }
@@ -689,30 +708,82 @@ def launch_event_workflow(
         return {
             "success": False,
             "triggered": False,
+            "outcome": "not_triggered",
             "event_type": event_type,
             "event_id": safe_event_id,
             "reason": "workflow_not_configured",
+            "hint": "No executable event binding resolved for this event launch request.",
         }
 
     if len(launches) == 1:
         result = dict(launches[0])
+        if not isinstance(result.get("outcome"), str):
+            if bool(result.get("triggered")):
+                result["outcome"] = "triggered"
+            elif bool(result.get("idempotent_reused")):
+                result["outcome"] = "reused"
+            else:
+                result["outcome"] = "not_triggered"
+        if not isinstance(result.get("reason"), str) or not result.get("reason"):
+            if result["outcome"] == "triggered":
+                result["reason"] = "created_new_instance"
+            elif result["outcome"] == "reused":
+                result["reason"] = "idempotent_reuse"
+            else:
+                result["reason"] = "not_triggered"
         result["launches"] = launches
         result["launch_count"] = 1
         result["triggered_count"] = 1 if bool(result.get("triggered")) else 0
+        result["reused_count"] = 1 if bool(result.get("idempotent_reused")) else 0
+        result["success_count"] = 1 if bool(result.get("success")) else 0
+        result["failure_count"] = 0 if bool(result.get("success")) else 1
         return result
 
     triggered_count = sum(1 for item in launches if bool(item.get("triggered")))
     success_count = sum(1 for item in launches if bool(item.get("success")))
+    reused_count = sum(1 for item in launches if bool(item.get("idempotent_reused")))
+    non_trigger_reasons = sorted(
+        {
+            str(item.get("reason")).strip()
+            for item in launches
+            if isinstance(item.get("reason"), str) and str(item.get("reason")).strip()
+        }
+    )
+
+    if triggered_count > 0:
+        outcome = "triggered"
+        reason = "at_least_one_binding_triggered"
+        hint = "At least one event binding created a new workflow instance."
+    elif reused_count > 0:
+        outcome = "reused"
+        reason = "idempotent_reuse"
+        hint = "No new instance was created because an idempotent event instance already exists."
+    else:
+        outcome = "not_triggered"
+        reason = (
+            non_trigger_reasons[0]
+            if len(non_trigger_reasons) == 1
+            else "multiple_non_trigger_reasons"
+            if non_trigger_reasons
+            else "not_triggered"
+        )
+        hint = "Inspect launches[] for per-binding reason/error details."
+
     return {
         "success": success_count == len(launches),
         "triggered": triggered_count > 0,
+        "outcome": outcome,
+        "reason": reason,
+        "hint": hint,
         "event_type": event_type,
         "event_id": safe_event_id,
         "launches": launches,
         "launch_count": len(launches),
         "triggered_count": triggered_count,
+        "reused_count": reused_count,
         "success_count": success_count,
         "failure_count": len(launches) - success_count,
+        "non_trigger_reasons": non_trigger_reasons,
     }
 
 
@@ -759,11 +830,13 @@ def maybe_launch_task_status_workflow(
         return {
             "success": False,
             "triggered": False,
+            "outcome": "not_triggered",
             "event_type": EVENT_TYPE_TASK_STATUS_CHANGED,
             "workflow_id_env": EVENT_WORKFLOW_ID_ENV_MAP.get(
                 EVENT_TYPE_TASK_STATUS_CHANGED
             ),
             "reason": "status_not_configured_for_trigger",
+            "hint": "Update VON_EVENT_TASK_STATUS_TRIGGER_VALUES to include this status if a trigger is expected.",
         }
 
     # Include timestamp so different real transitions can still trigger while
