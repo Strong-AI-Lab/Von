@@ -113,6 +113,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 - Use Atlassian MCP OAuth tools only when explicitly needed for capabilities not available in Von's internal Jira tools.
 - When Jira friction is discovered, prefer improving Von's internal Jira path (tooling, diagnostics, schemas, guardrails) and document the issue/capability gap in code/docs/Jira so reliability improves over time.
 - Where Vontology search, analysis or manipulation is impeded by the current vontology MCP tools, suggest code improvements to those tools that will facilitate high quality ontological engineering in future.
+- Failures in Von's own MCP tools are bugs: report them as Jira bug work items with reproducible steps, observed error payloads, and related-issue links.
 - If a tool category is not enabled, request enabling it by exact name.
 - If Vontology or Vonrag MCP tools are not exposed in this session, use the stdio proxy scripts (`scripts/query_vontology_mcp.py`, `scripts/query_vonrag_mcp.py`) and check cached tool lists in `data/mcp_tool_cache/`.
 - After implementing a fix and tests pass, post a Jira summary comment and transition the issue to the correct state.
