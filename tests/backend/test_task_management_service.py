@@ -246,6 +246,76 @@ class TestUpdateTaskStatus:
         mock_upsert.assert_called()
         mock_launch_workflow.assert_called_once()
 
+    @patch("src.backend.services.task_management_service.get_task")
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.get_texts_for_concept")
+    @patch("src.backend.services.task_management_service.upsert_text_for_concept")
+    @patch("src.backend.services.task_management_service.ensure_effort_unit_ontology")
+    @patch(
+        "src.backend.services.task_management_service.maybe_launch_effort_unit_completed_workflow"
+    )
+    @patch(
+        "src.backend.services.task_management_service.persist_successor_effort_unit_type_links"
+    )
+    @patch(
+        "src.backend.services.task_management_service.resolve_successor_effort_unit_type_ids"
+    )
+    @patch(
+        "src.backend.services.task_management_service.maybe_launch_task_status_workflow"
+    )
+    def test_update_status_completed_persists_successor_linkage(
+        self,
+        mock_launch_status_workflow: MagicMock,
+        mock_resolve_successors: MagicMock,
+        mock_persist_successors: MagicMock,
+        mock_launch_completion_workflow: MagicMock,
+        mock_ensure_effort_unit: MagicMock,
+        mock_upsert: MagicMock,
+        mock_get_texts: MagicMock,
+        mock_repo: MagicMock,
+        mock_get_task: MagicMock,
+    ) -> None:
+        mock_repo.find_one.return_value = {
+            "concept_id": "#V#task_abc",
+            "relationships": {"is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID]},
+            "metadata": {},
+        }
+        mock_get_texts.return_value = [
+            {"predicate": "#V#hasTaskStatus", "text": "in_progress"},
+        ]
+        mock_get_task.return_value = {
+            "task_concept_id": "#V#task_abc",
+            "status": "completed",
+            "updated_at": datetime.now(timezone.utc),
+            "created_by_concept_id": "#V#user_alice",
+            "organisation_concept_id": "#V#org_nao",
+        }
+        mock_resolve_successors.return_value = ["#V#conference_presentation"]
+        mock_persist_successors.return_value = {
+            "success": True,
+            "linked_type_ids": ["#V#conference_presentation"],
+            "already_linked_type_ids": [],
+            "skipped_missing_target_type_ids": [],
+            "errors": [],
+        }
+        mock_launch_completion_workflow.return_value = {
+            "success": True,
+            "triggered": True,
+        }
+        mock_launch_status_workflow.return_value = {"success": True, "triggered": True}
+
+        result = update_task_status("#V#task_abc", "completed")
+
+        assert result["status"] == "completed"
+        assert result["successor_effort_unit_linkage"]["linked_type_ids"] == [
+            "#V#conference_presentation"
+        ]
+        mock_ensure_effort_unit.assert_called_once()
+        mock_resolve_successors.assert_called_once()
+        mock_persist_successors.assert_called_once()
+        mock_launch_completion_workflow.assert_called_once()
+        mock_launch_status_workflow.assert_called_once()
+
     @patch("src.backend.services.task_management_service.ConceptsRepository")
     @patch("src.backend.services.task_management_service.get_texts_for_concept")
     @patch("src.backend.services.task_management_service.upsert_text_for_concept")

@@ -144,6 +144,14 @@ _CONVERSATION_PREDICATE_IDS = [
     "#V#hasTopic",
 ]
 
+# Effort-unit predicates (JVNAUTOSCI-1238/JVNAUTOSCI-1240)
+_EFFORT_UNIT_PREDICATE_IDS = [
+    "#V#has_effort_unit_goal",
+    "#V#completion_triggers_successor_effort_unit_type",
+    "#V#has_successor_effort_unit_type",
+    "#V#completion_produces_support_object",
+]
+
 # These are the canonical predicate concepts that we treat as built-in and
 # surfaced in the UI even when no Mongo concept document exists.
 _CODE_PREDICATE_IDS = _unique_ids(
@@ -156,6 +164,7 @@ _CODE_PREDICATE_IDS = _unique_ids(
         *_OTHER_PREDICATE_IDS,
         *_TASK_PREDICATE_IDS,
         *_CONVERSATION_PREDICATE_IDS,
+        *_EFFORT_UNIT_PREDICATE_IDS,
     ]
 )
 

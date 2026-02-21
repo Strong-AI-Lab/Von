@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..services import concept_service
 from ..services.concept_service import ConceptNotFoundError
+from ..services.effort_unit_ontology_service import ensure_effort_unit_ontology
 from .definitions import (
     CHAT_NARRATION_WORKFLOW_ID,
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
@@ -640,6 +641,19 @@ def bootstrap_workflow_concepts(
     publish_canonical_graphs: bool = True,
 ) -> Dict[str, Any]:
     """Ensure registered workflows have concept identities, typing, and graphs."""
+    effort_unit_ontology_report: dict[str, Any] = {
+        "success": False,
+        "reason": "not_run",
+    }
+    try:
+        effort_unit_ontology_report = ensure_effort_unit_ontology()
+    except Exception as exc:  # pragma: no cover - defensive
+        effort_unit_ontology_report = {
+            "success": False,
+            "reason": "bootstrap_failed",
+            "error": str(exc),
+        }
+
     workflow_ids = sorted(set(registry.all_workflow_ids()))
     required_type_ids = list(resolve_available_workflow_type_ids())
     preferred_type_id = required_type_ids[0] if required_type_ids else None
@@ -757,6 +771,7 @@ def bootstrap_workflow_concepts(
         "unchanged_workflow_ids": unchanged,
         "errors_by_workflow_id": errors,
         "graph_publication": graph_publication_report,
+        "effort_unit_ontology": effort_unit_ontology_report,
     }
 
 

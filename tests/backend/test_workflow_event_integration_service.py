@@ -7,9 +7,11 @@ from unittest.mock import MagicMock, patch
 from src.backend.workflows.durable.models import EventWorkflowBinding
 from src.backend.services.workflow_event_integration_service import (
     EVENT_TYPE_CONCEPT_UPDATED,
+    EVENT_TYPE_EFFORT_UNIT_COMPLETED,
     EVENT_TYPE_TASK_CREATED,
     EVENT_TYPE_VONTOLOGY_MUTATED,
     launch_event_workflow,
+    maybe_launch_effort_unit_completed_workflow,
     maybe_launch_vontology_mutation_workflow,
     maybe_launch_task_status_workflow,
 )
@@ -345,6 +347,34 @@ def test_launch_event_workflow_uses_user_only_namespace_when_org_unknown(
     called_args = mock_manager.create_instance_for_event.call_args
     assert called_args is not None
     assert called_args.kwargs["namespace"] == "#V#user_alice"
+
+
+@patch("src.backend.services.workflow_event_integration_service.launch_event_workflow")
+def test_maybe_launch_effort_unit_completed_workflow_emits_completion_event(
+    mock_launch_event_workflow: MagicMock,
+) -> None:
+    mock_launch_event_workflow.return_value = {"success": True, "triggered": True}
+
+    result = maybe_launch_effort_unit_completed_workflow(
+        effort_unit_concept_id="#V#task_1",
+        effort_unit_type_ids=["#V#task_specification"],
+        successor_effort_unit_type_ids=["#V#conference_presentation"],
+        completed_at_iso="2026-02-21T12:00:00+00:00",
+        created_by_concept_id="#V#user_alice",
+        organisation_concept_id="#V#org_nao",
+    )
+
+    assert result == {"success": True, "triggered": True}
+    called_args = mock_launch_event_workflow.call_args
+    assert called_args is not None
+    assert called_args.kwargs["event_type"] == EVENT_TYPE_EFFORT_UNIT_COMPLETED
+    assert (
+        called_args.kwargs["event_id"]
+        == "#V#task_1:completed:2026-02-21T12:00:00+00:00"
+    )
+    assert called_args.kwargs["event_payload"]["successor_effort_unit_type_ids"] == [
+        "#V#conference_presentation"
+    ]
 
 
 @patch("src.backend.services.workflow_event_integration_service.launch_event_workflow")

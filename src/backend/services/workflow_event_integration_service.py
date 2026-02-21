@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 # Canonical event type labels for traceability.
 EVENT_TYPE_TASK_CREATED = "task.created"
 EVENT_TYPE_TASK_STATUS_CHANGED = "task.status_changed"
+EVENT_TYPE_EFFORT_UNIT_COMPLETED = "effort_unit.completed"
 EVENT_TYPE_DIRECT_MESSAGE_CREATED = "message.direct_created"
 EVENT_TYPE_TYPE_CREATED = "type.created"
 EVENT_TYPE_CONCEPT_CREATED = "concept.created"
@@ -40,6 +41,7 @@ EVENT_TYPE_VONTOLOGY_MUTATED = "vontology.mutated"
 EVENT_WORKFLOW_ID_ENV_MAP: dict[str, str] = {
     EVENT_TYPE_TASK_CREATED: "VON_EVENT_TASK_CREATED_WORKFLOW_ID",
     EVENT_TYPE_TASK_STATUS_CHANGED: "VON_EVENT_TASK_STATUS_CHANGED_WORKFLOW_ID",
+    EVENT_TYPE_EFFORT_UNIT_COMPLETED: "VON_EVENT_EFFORT_UNIT_COMPLETED_WORKFLOW_ID",
     EVENT_TYPE_DIRECT_MESSAGE_CREATED: "VON_EVENT_DIRECT_MESSAGE_WORKFLOW_ID",
     EVENT_TYPE_TYPE_CREATED: "VON_EVENT_TYPE_CREATED_WORKFLOW_ID",
 }
@@ -861,6 +863,45 @@ def maybe_launch_task_status_workflow(
             "previous_status": previous_status,
             "new_status": new_status,
             "status_changed_at": updated_at_iso,
+        },
+    )
+
+
+def maybe_launch_effort_unit_completed_workflow(
+    *,
+    effort_unit_concept_id: str,
+    effort_unit_type_ids: list[str],
+    successor_effort_unit_type_ids: list[str],
+    completed_at_iso: str | None,
+    created_by_concept_id: str | None,
+    organisation_concept_id: str | None,
+    namespace: str | None = None,
+) -> dict[str, Any]:
+    """Emit an effort_unit.completed event for lifecycle workflows."""
+
+    event_id = (
+        f"{effort_unit_concept_id}:completed:{completed_at_iso or 'na'}"
+    )
+    return launch_event_workflow(
+        event_type=EVENT_TYPE_EFFORT_UNIT_COMPLETED,
+        event_id=event_id,
+        user_id=created_by_concept_id,
+        org_id=organisation_concept_id,
+        namespace=namespace,
+        event_payload={
+            "effort_unit_concept_id": effort_unit_concept_id,
+            "effort_unit_type_ids": list(effort_unit_type_ids),
+            "successor_effort_unit_type_ids": list(successor_effort_unit_type_ids),
+            "completed_at": completed_at_iso,
+            "completion_status": "completed",
+            "concept_id": effort_unit_concept_id,
+        },
+        inputs={
+            "effort_unit_concept_id": effort_unit_concept_id,
+            "effort_unit_type_ids": list(effort_unit_type_ids),
+            "successor_effort_unit_type_ids": list(successor_effort_unit_type_ids),
+            "completed_at": completed_at_iso,
+            "completion_status": "completed",
         },
     )
 

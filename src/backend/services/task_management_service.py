@@ -21,7 +21,14 @@ from ..services.text_value_service import (
 from ..utils.concept_id_utils import (
     ensure_v_concept_prefix,
 )
+from .effort_unit_ontology_service import (
+    ensure_effort_unit_ontology,
+    extract_effort_unit_type_ids,
+    persist_successor_effort_unit_type_links,
+    resolve_successor_effort_unit_type_ids,
+)
 from .workflow_event_integration_service import (
+    maybe_launch_effort_unit_completed_workflow,
     maybe_launch_task_created_workflow,
     maybe_launch_task_status_workflow,
 )
@@ -681,6 +688,14 @@ def create_task(
     # Generate unique concept_id
     task_concept_id = _generate_task_concept_id(title)
 
+    # Best-effort ontology bootstrap so effort-unit predicates/types are available
+    # for downstream lifecycle wiring. Task writes must remain available even if
+    # ontology bootstrap encounters recoverable issues.
+    try:
+        ensure_effort_unit_ontology()
+    except Exception as exc:
+        logger.debug("Effort-unit ontology bootstrap skipped during task create: %s", exc)
+
     # Normalise concept IDs
     if assignee_concept_id:
         assignee_concept_id = ensure_v_concept_prefix(assignee_concept_id)
@@ -1124,16 +1139,53 @@ def update_task_status(task_concept_id: str, status: str) -> Dict[str, Any]:
     except Exception as e:
         logger.debug("Failed to append task status history event: %s", e)
     updated_task = get_task(task_concept_id)
+    updated_at = updated_task.get("updated_at")
+    if isinstance(updated_at, datetime):
+        updated_at_iso: str | None = updated_at.isoformat()
+    elif updated_at is not None:
+        updated_at_iso = str(updated_at)
+    else:
+        updated_at_iso = None
+
+    if status == TASK_STATUS_COMPLETED:
+        try:
+            ensure_effort_unit_ontology()
+            _, refreshed_doc = _get_task_doc(task_concept_id)
+            successor_type_ids = resolve_successor_effort_unit_type_ids(
+                effort_unit_doc=refreshed_doc
+            )
+            successor_linkage = persist_successor_effort_unit_type_links(
+                source_effort_unit_id=task_concept_id,
+                successor_type_ids=successor_type_ids,
+            )
+            updated_task["successor_effort_unit_linkage"] = successor_linkage
+
+            completion_event_launch = maybe_launch_effort_unit_completed_workflow(
+                effort_unit_concept_id=task_concept_id,
+                effort_unit_type_ids=extract_effort_unit_type_ids(refreshed_doc),
+                successor_effort_unit_type_ids=successor_type_ids,
+                completed_at_iso=updated_at_iso,
+                created_by_concept_id=updated_task.get("created_by_concept_id"),
+                organisation_concept_id=updated_task.get("organisation_concept_id"),
+            )
+            updated_task["effort_unit_completion_workflow_event_launch"] = (
+                completion_event_launch
+            )
+            if not bool(completion_event_launch.get("triggered")):
+                logger.info(
+                    "Effort-unit completion workflow not triggered for %s: reason=%s hint=%s",
+                    task_concept_id,
+                    completion_event_launch.get("reason"),
+                    completion_event_launch.get("hint"),
+                )
+        except Exception as exc:
+            logger.warning(
+                "Effort-unit completion lifecycle linkage skipped for %s: %s",
+                task_concept_id,
+                exc,
+            )
 
     try:
-        updated_at = updated_task.get("updated_at")
-        if isinstance(updated_at, datetime):
-            updated_at_iso: str | None = updated_at.isoformat()
-        elif updated_at is not None:
-            updated_at_iso = str(updated_at)
-        else:
-            updated_at_iso = None
-
         workflow_event_launch = maybe_launch_task_status_workflow(
             task_concept_id=task_concept_id,
             previous_status=previous_status if isinstance(previous_status, str) else None,
