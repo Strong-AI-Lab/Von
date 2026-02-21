@@ -2166,6 +2166,7 @@ def _finalise_llm_debug_info(
     response_text: str | None,
     session_id: str | None,
     namespace: str | None,
+    actor_concept_id: str | None = None,
     user_id: str | None,
     org_id: str | None,
     workflow_discovery: dict[str, Any] | None = None,
@@ -2185,11 +2186,24 @@ def _finalise_llm_debug_info(
         raw_routing = llm_debug_info.get("workflow_routing")
         workflow_routing_payload = _normalise_workflow_routing_payload(raw_routing)
 
+    resolved_actor_concept_id = actor_concept_id
+    if not isinstance(resolved_actor_concept_id, str) or not resolved_actor_concept_id.strip():
+        raw_actor_concept_id = llm_debug_info.get("actor_concept_id")
+        if isinstance(raw_actor_concept_id, str) and raw_actor_concept_id.strip():
+            resolved_actor_concept_id = raw_actor_concept_id.strip()
+        elif isinstance(namespace, str) and namespace.strip():
+            resolved_actor_concept_id = namespace.strip()
+        else:
+            resolved_actor_concept_id = None
+    if isinstance(resolved_actor_concept_id, str) and resolved_actor_concept_id.strip():
+        llm_debug_info["actor_concept_id"] = resolved_actor_concept_id
+
     try:
         turn_execution_record = build_turn_execution_record(
             request_id=llm_debug_info.get("request_id"),
             session_id=session_id,
             namespace=namespace,
+            actor_concept_id=resolved_actor_concept_id,
             user_id=user_id,
             org_id=org_id,
             prompt_text=prompt_text,

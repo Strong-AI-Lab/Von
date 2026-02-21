@@ -67,6 +67,7 @@ def test_turn_execution_critic_detects_unresolved_kb_mutation() -> None:
     record = result.outputs.get("turn_execution_record")
     assert isinstance(record, dict)
     assert record.get("request_id") == "req-turn-critic-1"
+    assert record.get("actor_concept_id") == "#V#test_user"
 
     required_effects = record.get("required_effects")
     assert isinstance(required_effects, list)
@@ -83,6 +84,33 @@ def test_turn_execution_critic_detects_unresolved_kb_mutation() -> None:
         for entry in aux_llm_calls
         if isinstance(entry, dict)
     )
+
+
+def test_turn_execution_critic_prefers_explicit_actor_concept_id() -> None:
+    orchestrator = _build_orchestrator()
+    request = _build_request(
+        action_id="turn_execution.critic",
+        data={
+            "prompt": "Please proceed",
+            "final_response": "Done.",
+            "invocations": [],
+            "aux_llm_calls": [],
+            "turn_id": "req-turn-critic-actor",
+            "conversation_session_id": "session-critic-actor",
+            "actor_concept_id": "#V#github_copilot_instance",
+            "workflow_discovery_result": None,
+            "workflow_routing": {
+                "workflow_id": "#V#chat_assistant_workflow",
+                "verdict": "plain_response",
+            },
+        },
+    )
+
+    result = orchestrator._action_turn_execution_critic(request)
+    assert result.ok
+    record = result.outputs.get("turn_execution_record")
+    assert isinstance(record, dict)
+    assert record.get("actor_concept_id") == "#V#github_copilot_instance"
 
 
 def test_turn_completion_gate_appends_execution_status_for_unresolved_effect() -> None:

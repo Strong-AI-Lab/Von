@@ -226,6 +226,12 @@ def _ensure_turn_execution_record_for_assistant_message(
             request_id=request_id,
             session_id=session_id,
             namespace=namespace,
+            actor_concept_id=(
+                llm_debug_data.get("actor_concept_id")
+                if isinstance(llm_debug_data.get("actor_concept_id"), str)
+                and llm_debug_data.get("actor_concept_id", "").strip()
+                else namespace
+            ),
             user_id=user_id,
             org_id=org_id,
             prompt_text=_extract_prompt_text_from_llm_debug_data(llm_debug_data),

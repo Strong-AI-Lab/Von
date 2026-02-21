@@ -573,6 +573,7 @@ def build_turn_execution_record(
     request_id: Any,
     session_id: Any,
     namespace: Any,
+    actor_concept_id: Any = None,
     user_id: Any,
     org_id: Any,
     prompt_text: Any,
@@ -584,6 +585,7 @@ def build_turn_execution_record(
     turn_execution_diagnostics: Mapping[str, Any] | None = None,
     aux_llm_calls: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    resolved_actor_concept_id = _safe_str(actor_concept_id) or _safe_str(namespace)
     workflow_discovery_normalised = _extract_workflow_discovery(workflow_discovery)
     selected_workflow_id = None
     selector_verdict = None
@@ -691,6 +693,7 @@ def build_turn_execution_record(
         "request_id": _safe_str(request_id),
         "session_id": _safe_str(session_id),
         "namespace": _safe_str(namespace),
+        "actor_concept_id": resolved_actor_concept_id,
         "user_id": _safe_str(user_id),
         "org_id": _safe_str(org_id),
         "created_at_utc": _normalise_iso_timestamp(interaction_timestamp_utc),
@@ -1526,10 +1529,15 @@ def backfill_turn_execution_records_from_chat_history(
                 if not run_synthesis or not debug_request_id:
                     continue
                 try:
+                    raw_actor_concept_id = llm_debug.get("actor_concept_id")
+                    actor_concept_id = (
+                        _safe_str(raw_actor_concept_id) or _safe_str(namespace_value)
+                    )
                     record = build_turn_execution_record(
                         request_id=debug_request_id,
                         session_id=session_id,
                         namespace=namespace_value,
+                        actor_concept_id=actor_concept_id,
                         user_id=user_id,
                         org_id=org_id,
                         prompt_text=latest_user_prompt,

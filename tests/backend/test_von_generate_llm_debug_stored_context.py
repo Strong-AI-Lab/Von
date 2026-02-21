@@ -103,3 +103,23 @@ def test_generate_debug_stored_context_uses_persisted_history_for_authenticated_
     assert isinstance(execution, dict)
     assert isinstance(execution.get("workflow_stage_model"), dict)
     assert isinstance(execution.get("workflow_stage_path"), dict)
+
+
+def test_generate_debug_turn_execution_record_attributes_coding_agent_actor(
+    app, monkeypatch
+):
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#github_copilot_instance",
+    )
+
+    client = app.test_client()
+    resp = client.post("/von/generate", json={"prompt": "Hello"})
+    assert resp.status_code == 200
+
+    body = resp.get_json()
+    llm_debug = body["llm_debug"]
+    turn_execution_record = llm_debug.get("turn_execution_record")
+    assert isinstance(turn_execution_record, dict)
+    assert turn_execution_record.get("actor_concept_id") == "#V#github_copilot_instance"
+    assert llm_debug.get("actor_concept_id") == "#V#github_copilot_instance"

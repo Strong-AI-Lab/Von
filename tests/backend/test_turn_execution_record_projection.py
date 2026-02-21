@@ -89,6 +89,7 @@ def test_add_message_to_history_synthesises_turn_execution_projection_without_re
             message={"role": "assistant", "content": "Done."},
             llm_debug_data={
                 "request_id": "req-turn-2",
+                "actor_concept_id": "#V#github_copilot_instance",
                 "messages": [{"role": "user", "content": "Please update predicates"}],
             },
         )
@@ -96,6 +97,7 @@ def test_add_message_to_history_synthesises_turn_execution_projection_without_re
     mock_build.assert_called_once()
     kwargs = mock_build.call_args.kwargs
     assert kwargs["request_id"] == "req-turn-2"
+    assert kwargs["actor_concept_id"] == "#V#github_copilot_instance"
     assert kwargs["prompt_text"] == "Please update predicates"
     assert kwargs["response_text"] == "Done."
 

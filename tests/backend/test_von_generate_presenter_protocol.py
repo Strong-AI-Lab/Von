@@ -226,6 +226,66 @@ def test_generate_buttonify_heuristic_preflight_skips_model_pass(monkeypatch):
     assert len(llm.calls) == 1
 
 
+def test_generate_coding_agent_turn_captures_narration_buttonify_and_layout(monkeypatch):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("VON_BUTTONIFY_MODEL_ENABLE", "1")
+    monkeypatch.setenv("VON_BUTTONIFY_HEURISTIC_PREFLIGHT_ENABLE", "1")
+
+    llm = _StubLLM(
+        "<spoken>Proceed with the update.</spoken>\n"
+        '<screen>Please reply with one of: "Proceed", "Hold".</screen>'
+    )
+    app = _make_app(monkeypatch, llm)
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#github_copilot_instance",
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.add_message_to_history",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.get_chat_history",
+        lambda *_args, **_kwargs: [],
+    )
+
+    client = app.test_client()
+    resp = client.post(
+        "/von/generate",
+        json={"prompt": "Hello", "presenter_mode": True},
+    )
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    llm_debug = body["llm_debug"]
+
+    assert body["response_channels"]["spoken"] == "Proceed with the update."
+    assert body["response_channels"]["screen"] == 'Please reply with one of: "Proceed", "Hold".'
+
+    buttonify_event = _find_transformation_event(llm_debug, "buttonify")
+    assert buttonify_event["status"] == "success"
+    assert buttonify_event["source_path"] == "heuristic_preflight"
+    assert buttonify_event["options_emitted_count"] == 2
+
+    display_elements = body["display_elements"]
+    assert display_elements["schema_version"] == "turn_display_elements_v1"
+    assert display_elements["validation"]["valid"] is True
+    element_ids = [element["element_id"] for element in display_elements["elements"]]
+    assert "screen_text" in element_ids
+    assert "spoken_text" in element_ids
+
+    turn_execution_record = llm_debug.get("turn_execution_record")
+    assert isinstance(turn_execution_record, dict)
+    assert turn_execution_record.get("actor_concept_id") == "#V#github_copilot_instance"
+    assert llm_debug.get("actor_concept_id") == "#V#github_copilot_instance"
+    execution = turn_execution_record.get("execution")
+    assert isinstance(execution, dict)
+    workflow_stage_path = execution.get("workflow_stage_path")
+    assert isinstance(workflow_stage_path, dict)
+    assert isinstance(workflow_stage_path.get("path"), list)
+
+
 def test_generate_buttonify_telemetry_reports_skipped_when_disabled(monkeypatch):
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.get_buttonify_model_enabled",
