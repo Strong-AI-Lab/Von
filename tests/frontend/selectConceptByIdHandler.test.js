@@ -134,8 +134,8 @@ describe('handleSelectConceptByIdDetail', () => {
         expect(chooseCreateOptionsFn).toHaveBeenCalled();
         expect(createOrActivateConceptTab).toHaveBeenCalledWith('#V#disambiguation_result', 'Loading…', false);
         expect(createOrActivateConceptTab).toHaveBeenCalledWith('#V#disambiguation_result', 'Disambiguation result', false);
-        // Initial existence check + re-check before create + create + metadata fetch.
-        expect(fetchFn).toHaveBeenCalledTimes(4);
+        // Includes existence checks/create/metadata and proposal hydration fetches.
+        expect(fetchFn.mock.calls.length).toBeGreaterThanOrEqual(4);
 
         expect(cartouche.querySelector('.vontology-cartouche-name').textContent).toBe('Disambiguation result');
         expect(cartouche.querySelector('.vontology-cartouche-kind').textContent).toBe('Type');
@@ -446,5 +446,108 @@ describe('handleSelectConceptByIdDetail', () => {
         expect(chooseCreateOptionsFn).toHaveBeenCalled();
         expect(existenceChecks).toBe(2);
         expect(createOrActivateConceptTab).toHaveBeenCalledWith('#V#race_concept', 'Race concept', false);
+    });
+
+    test('hydrates implicit parent suggestions from annotation workflow when confidence passes threshold', async () => {
+        const { handleSelectConceptByIdDetail } = require(handlerPath);
+
+        const createOrActivateConceptTab = jest.fn();
+        const activateTab = jest.fn();
+        const selectVontologyNodeByIdentifier = jest.fn();
+        const chooseCreateOptionsFn = jest.fn(async ({ proposal }) => {
+            expect(Array.isArray(proposal.parentSuggestions)).toBe(true);
+            const implicitSuggestion = proposal.parentSuggestions.find((item) => item.conceptId === '#V#algorithm');
+            expect(implicitSuggestion).toBeTruthy();
+            expect((implicitSuggestion.provenance || '').toLowerCase()).toContain('implicit');
+            expect(implicitSuggestion.confidence).toBeCloseTo(0.82, 3);
+            return null;
+        });
+
+        const fetchFn = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/vontology/api/vontology/node_content')) {
+                return Promise.resolve({ ok: false, status: 404, text: async () => 'missing' });
+            }
+            if (typeof url === 'string' && url.startsWith('/vontology/api/vontology/search?')) {
+                return Promise.resolve({ ok: true, status: 200, json: async () => ({ results: [] }) });
+            }
+            if (typeof url === 'string' && url === '/api/annotations/turn') {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        suggestions: [{
+                            span: { text: 'quantum optimiser', source: ['llm'] },
+                            suggested_type_id: '#V#algorithm',
+                            confidence_score: 0.82,
+                            candidates: [{ concept_id: '#V#algorithm', name: 'Algorithm', confidence: 0.82 }]
+                        }]
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({}) });
+        });
+
+        await handleSelectConceptByIdDetail(
+            {
+                conceptId: '#V#quantum_optimiser',
+                createConceptTab: true,
+                kind: 'type',
+                contextText: 'quantum optimiser'
+            },
+            { createOrActivateConceptTab, activateTab, selectVontologyNodeByIdentifier, fetchFn, chooseCreateOptionsFn }
+        );
+
+        expect(chooseCreateOptionsFn).toHaveBeenCalled();
+        expect(fetchFn).toHaveBeenCalledWith('/api/annotations/turn', expect.objectContaining({ method: 'POST' }));
+    });
+
+    test('filters low-confidence implicit annotation suggestions', async () => {
+        const { handleSelectConceptByIdDetail } = require(handlerPath);
+
+        const createOrActivateConceptTab = jest.fn();
+        const activateTab = jest.fn();
+        const selectVontologyNodeByIdentifier = jest.fn();
+        const chooseCreateOptionsFn = jest.fn(async ({ proposal }) => {
+            const implicitSuggestion = proposal.parentSuggestions.find((item) => item.conceptId === '#V#algorithm');
+            expect(implicitSuggestion).toBeFalsy();
+            expect(proposal.lowConfidence).toBe(true);
+            return null;
+        });
+
+        const fetchFn = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/vontology/api/vontology/node_content')) {
+                return Promise.resolve({ ok: false, status: 404, text: async () => 'missing' });
+            }
+            if (typeof url === 'string' && url.startsWith('/vontology/api/vontology/search?')) {
+                return Promise.resolve({ ok: true, status: 200, json: async () => ({ results: [] }) });
+            }
+            if (typeof url === 'string' && url === '/api/annotations/turn') {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        suggestions: [{
+                            span: { text: 'quantum optimiser', source: ['llm'] },
+                            suggested_type_id: '#V#algorithm',
+                            confidence_score: 0.25,
+                            candidates: [{ concept_id: '#V#algorithm', name: 'Algorithm', confidence: 0.25 }]
+                        }]
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({}) });
+        });
+
+        await handleSelectConceptByIdDetail(
+            {
+                conceptId: '#V#quantum_optimiser',
+                createConceptTab: true,
+                kind: 'type',
+                contextText: 'quantum optimiser'
+            },
+            { createOrActivateConceptTab, activateTab, selectVontologyNodeByIdentifier, fetchFn, chooseCreateOptionsFn }
+        );
+
+        expect(chooseCreateOptionsFn).toHaveBeenCalled();
     });
 });

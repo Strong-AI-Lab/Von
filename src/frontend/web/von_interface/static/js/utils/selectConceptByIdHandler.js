@@ -48,6 +48,9 @@ function normaliseKind(kind) {
     return '';
 }
 
+const IMPLICIT_PARENT_CONFIDENCE_THRESHOLD = 0.55;
+const MAX_PARENT_SUGGESTIONS = 3;
+
 async function conceptExists(conceptId, fetchFn) {
     const id = normaliseVontologyId(conceptId);
     if (!id) return false;
@@ -107,6 +110,50 @@ function mergeParentSuggestions(preferred, fallback) {
     append(preferred);
     append(fallback);
     return merged;
+}
+
+function deriveProvenanceCounts(parentSuggestions) {
+    let explicitCount = 0;
+    let implicitCount = 0;
+    let unknownCount = 0;
+    const rows = Array.isArray(parentSuggestions) ? parentSuggestions : [];
+    for (const row of rows) {
+        const provenance = (row?.provenance || '').toString().toLowerCase();
+        if (!provenance) {
+            unknownCount += 1;
+            continue;
+        }
+        if (provenance.includes('implicit')) {
+            implicitCount += 1;
+            continue;
+        }
+        if (provenance.includes('explicit')) {
+            explicitCount += 1;
+            continue;
+        }
+        unknownCount += 1;
+    }
+    return { explicitCount, implicitCount, unknownCount };
+}
+
+function normaliseAnnotationSources(value) {
+    const input = Array.isArray(value) ? value : (typeof value === 'string' ? [value] : []);
+    const seen = new Set();
+    const out = [];
+    for (const item of input) {
+        const source = (item || '').toString().trim().toLowerCase();
+        if (!source || seen.has(source)) continue;
+        seen.add(source);
+        out.push(source);
+    }
+    return out;
+}
+
+function confidenceFromAnnotationSuggestion(suggestion) {
+    const direct = normaliseConfidence(suggestion?.confidence_score ?? suggestion?.confidence);
+    if (direct !== null) return direct;
+    const candidate = Array.isArray(suggestion?.candidates) ? suggestion.candidates[0] : null;
+    return normaliseConfidence(candidate?.confidence ?? candidate?.relevance_score ?? candidate?.score);
 }
 
 function deriveParentSearchQuery(conceptId, detail) {
@@ -182,9 +229,90 @@ async function fetchParentSuggestionsBySearch(conceptId, kind, detail, fetchFn) 
             provenance: 'explicit',
             exists: true
         });
-        if (suggestions.length >= 3) break;
+        if (suggestions.length >= MAX_PARENT_SUGGESTIONS) break;
     }
     return suggestions;
+}
+
+async function fetchImplicitParentSuggestionsByAnnotations(conceptId, detail, fetchFn) {
+    const queryText = deriveParentSearchQuery(conceptId, detail);
+    if (!queryText) return [];
+
+    const payload = {
+        conversation_id: 'create-proposal',
+        turn_id: `create-proposal-${Date.now()}`,
+        speaker: 'user',
+        text: queryText,
+        metadata: {
+            llm_enrich: true,
+            match: true
+        },
+        context: {
+            language: getPreferredLanguage()
+        }
+    };
+
+    let res;
+    try {
+        res = await fetchFn('/api/annotations/turn', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+    } catch (_) {
+        return [];
+    }
+    if (!res.ok) return [];
+
+    let json = null;
+    try {
+        if (typeof res.json === 'function') {
+            json = await res.json();
+        } else if (typeof res.text === 'function') {
+            const text = await res.text();
+            json = text ? JSON.parse(text) : null;
+        }
+    } catch (_) {
+        json = null;
+    }
+
+    const rows = Array.isArray(json?.suggestions) ? json.suggestions : [];
+    const derived = [];
+    for (const row of rows) {
+        const sources = normaliseAnnotationSources(row?.span?.source || row?.source);
+        if (!sources.includes('llm') && !sources.includes('fallback')) continue;
+
+        const suggestedTypeId = normaliseVontologyId(
+            row?.suggested_type_id || row?.suggestedTypeId || row?.type_id || row?.typeId || ''
+        );
+        if (!suggestedTypeId || suggestedTypeId === conceptId) continue;
+
+        const confidence = confidenceFromAnnotationSuggestion(row);
+        if (confidence === null || confidence < IMPLICIT_PARENT_CONFIDENCE_THRESHOLD) continue;
+
+        const matchingCandidate = Array.isArray(row?.candidates)
+            ? row.candidates.find((candidate) => normaliseVontologyId(candidate?.concept_id || candidate?.conceptId || candidate?.id || '') === suggestedTypeId)
+            : null;
+        const name = buildReadableName(
+            matchingCandidate?.name || matchingCandidate?.display_name || '',
+            suggestedTypeId
+        );
+        const spanText = (row?.span?.text || '').toString().trim();
+        const sourceLabel = sources.join('+') || 'annotation';
+        const rationale = spanText
+            ? `Implicit type inferred from "${spanText}" (${sourceLabel})`
+            : `Implicit type inferred (${sourceLabel})`;
+
+        derived.push({
+            conceptId: suggestedTypeId,
+            name,
+            confidence,
+            rationale,
+            provenance: 'implicit(annotation)',
+            exists: true
+        });
+    }
+    return derived;
 }
 
 async function updateConceptDescription(conceptId, description, fetchFn) {
@@ -403,7 +531,7 @@ export function openCreateConceptModal(conceptId, initialKind, proposal = null) 
 
     const proposalData = proposal && typeof proposal === 'object' ? proposal : {};
     const mergedSuggestions = mergeParentSuggestions(proposalData.parentSuggestions, []);
-    const parentSuggestions = mergedSuggestions.slice(0, 3);
+    const parentSuggestions = mergedSuggestions.slice(0, MAX_PARENT_SUGGESTIONS);
     const proposedNameDefault = (proposalData.proposedName || '').toString().trim() || deriveNameFromConceptId(id);
     const proposedDescriptionDefault = (proposalData.proposedDescription || '').toString().trim();
     const breadcrumbs = Array.isArray(proposalData.breadcrumbs)
@@ -746,17 +874,19 @@ function deriveKindFromCreateOptions(createOpts, fallbackKind) {
 }
 
 function shouldHydrateCreateProposal(detail, chooseCreateOptionsFn, deps) {
-    if (!detail || typeof detail !== 'object') return !chooseCreateOptionsFn;
+    if (detail?.skipCreateProposalHydration) return false;
+    if (!detail || typeof detail !== 'object') return true;
     if (detail.createProposal) return true;
     if (detail.proposalContext) return true;
     if (typeof deps?.fetchCreateProposalFn === 'function') return true;
-    return !chooseCreateOptionsFn;
+    return true;
 }
 
 async function buildCreateProposalForConcept(conceptId, kind, detail, fetchFn, fetchCreateProposalFn) {
     const baseProposal = deriveCreateProposal(conceptId, detail);
     const fetcher = fetchCreateProposalFn;
     let fetchedSuggestions = [];
+    let annotationSuggestions = [];
     if (typeof fetcher === 'function') {
         try {
             const fetched = await fetcher({ conceptId, kind, detail });
@@ -775,7 +905,14 @@ async function buildCreateProposalForConcept(conceptId, kind, detail, fetchFn, f
     } else {
         fetchedSuggestions = await fetchParentSuggestionsBySearch(conceptId, kind, detail, fetchFn);
     }
-    const mergedParentSuggestions = mergeParentSuggestions(baseProposal.parentSuggestions, fetchedSuggestions).slice(0, 3);
+    try {
+        annotationSuggestions = await fetchImplicitParentSuggestionsByAnnotations(conceptId, detail, fetchFn);
+    } catch (err) {
+        console.warn('[selectConceptById] annotation suggestion fetch failed', err);
+    }
+    const preferredSuggestions = mergeParentSuggestions(baseProposal.parentSuggestions, fetchedSuggestions);
+    const mergedParentSuggestions = mergeParentSuggestions(preferredSuggestions, annotationSuggestions)
+        .slice(0, MAX_PARENT_SUGGESTIONS);
     return {
         proposedName: baseProposal.proposedName || deriveNameFromConceptId(conceptId),
         proposedDescription: baseProposal.proposedDescription || '',
@@ -789,6 +926,7 @@ function buildCreateDecisionTelemetryPayload({ conceptId, stage, createOpts, cre
     const normalisedConceptId = normaliseVontologyId(conceptId);
     const parentId = normaliseVontologyId(createOpts?.parentId || '');
     const chosenKind = deriveKindFromCreateOptions(createOpts, createOpts?.kind);
+    const provenanceCounts = deriveProvenanceCounts(createProposal?.parentSuggestions);
     return {
         conceptId: normalisedConceptId,
         stage,
@@ -796,6 +934,11 @@ function buildCreateDecisionTelemetryPayload({ conceptId, stage, createOpts, cre
         parentId: parentId || null,
         parentDecision: createOpts?.parentDecision || null,
         suggestionCount: Array.isArray(createProposal?.parentSuggestions) ? createProposal.parentSuggestions.length : 0,
+        explicitSuggestionCount: provenanceCounts.explicitCount,
+        implicitSuggestionCount: provenanceCounts.implicitCount,
+        unknownSuggestionCount: provenanceCounts.unknownCount,
+        selectedParentProvenance: createOpts?.selectedParentProvenance || null,
+        lowConfidenceProposal: !!createProposal?.lowConfidence,
         selectedParentSuggested: !!createOpts?.selectedParentSuggested,
         selectedParentConfidence: createOpts?.selectedParentConfidence ?? null,
         error: error ? String(error.message || error) : null
