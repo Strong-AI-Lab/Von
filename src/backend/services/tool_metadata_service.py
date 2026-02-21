@@ -118,6 +118,31 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "category": "task",
         "display_template": "Deleted task: {task_id}",
     },
+    "shared_conversation_create_session": {
+        "salience": "high",
+        "category": "conversation",
+        "display_template": "Session ready: {session_id}",
+    },
+    "shared_conversation_join_session": {
+        "salience": "high",
+        "category": "conversation",
+        "display_template": "Joined session: {session_id}",
+    },
+    "shared_conversation_invite_create": {
+        "salience": "high",
+        "category": "conversation",
+        "display_template": "Invite created: {invite_id}",
+    },
+    "shared_conversation_list_invites": {
+        "salience": "medium",
+        "category": "conversation",
+        "display_template": "{count} invites",
+    },
+    "shared_conversation_respond_invite": {
+        "salience": "high",
+        "category": "conversation",
+        "display_template": "Invite {action}: {invite_id}",
+    },
     # Jira tools (HIGH salience)
     "jira_create_issue": {
         "salience": "high",

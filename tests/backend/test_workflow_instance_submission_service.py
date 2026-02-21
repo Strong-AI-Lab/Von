@@ -235,3 +235,62 @@ def test_verify_workflow_runnable_rejects_missing_transition_from_action_state()
 
     assert verification.runnable_verification_success is False
     assert "workflow_control_flow_incomplete" in verification.errors
+
+
+def test_verify_workflow_runnable_accepts_shared_conversation_actions_via_fallback() -> None:
+    workflow_action_ids = (
+        "shared_conversation_create_session",
+        "shared_conversation_join_session",
+        "shared_conversation_invite_create",
+        "shared_conversation_list_invites",
+        "shared_conversation_respond_invite",
+    )
+    graph = {
+        "workflow_id": "#V#candidate_workflow",
+        "initial_step": "#V#start",
+        "steps": [
+            {
+                "step_id": "#V#start",
+                "name": "Start",
+                "invokes_action": workflow_action_ids[0],
+            }
+        ],
+        "edges": [],
+        "warnings": [],
+    }
+    definition = WorkflowDefinition(
+        workflow_id="#V#candidate_workflow",
+        initial_state="#V#start",
+        states={
+            "#V#start": WorkflowStateSpec(
+                state_id="#V#start",
+                actions=tuple(
+                    WorkflowActionInvocation(action_id=action_id)
+                    for action_id in workflow_action_ids
+                ),
+                terminal=True,
+            )
+        },
+        termination_states=("#V#start",),
+    )
+
+    with patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_process_graph",
+        return_value=(graph, []),
+    ), patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_registry_read_only",
+        return_value=_make_registry(definition),
+    ), patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.build_durable_action_registry",
+        return_value=_make_action_registry(supports_action=False, fallback=True),
+    ), patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service._internal_mcp_method_names",
+        return_value=frozenset(workflow_action_ids),
+    ):
+        verification = verify_workflow_runnable("#V#candidate_workflow")
+
+    assert verification.runnable_verification_success is True
+    assert set(verification.discovered_action_ids) == set(workflow_action_ids)
+    assert verification.unsupported_action_ids == ()
+    assert verification.contract_validation is not None
+    assert verification.contract_validation.get("valid") is True

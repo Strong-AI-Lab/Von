@@ -7638,6 +7638,161 @@ def _task_generic_output_schema(action: str) -> Schema:
     )
 
 
+def _shared_conversation_generic_output_schema(action: str) -> Schema:
+    return Schema(
+        required={"success": bool},
+        optional={
+            "error": (str, type(None)),
+            "error_code": (str, type(None)),
+            "error_details": (dict, type(None)),
+            "suggestions": (list, type(None)),
+            "session": (dict, type(None)),
+            "invite": (dict, type(None)),
+            "invites": (list, type(None)),
+            "count": (int, type(None)),
+            "created": (bool, type(None)),
+            "joined": (bool, type(None)),
+            "created_session": (bool, type(None)),
+            "is_owner": (bool, type(None)),
+            "has_accepted_invite": (bool, type(None)),
+            "access_mode": (str, type(None)),
+            "session_id": (str, type(None)),
+            "invite_id": (str, type(None)),
+            "action": (str, type(None)),
+            "user_concept_id": (str, type(None)),
+            "actor_user_id": (str, type(None)),
+            "actor_concept_id": (str, type(None)),
+            "organisation_concept_id": (str, type(None)),
+            "owner_user_id": (str, type(None)),
+            "episode_id": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            f"shared_conversation_{action} output: shared-conversation MCP operation response "
+            "with success/error fields and operation-specific payload."
+        ),
+    )
+
+
+def _shared_conversation_create_session_input_schema() -> Schema:
+    return Schema(
+        required={"session_id": str},
+        optional={
+            "session_name": (str, type(None)),
+            "user_concept_id": (str, type(None)),
+            "acting_user_concept_id": (str, type(None)),
+            "actor_user_id": (str, type(None)),
+            "on_behalf_of_user_concept_id": (str, type(None)),
+            "actor_concept_id": (str, type(None)),
+            "agent_concept_id": (str, type(None)),
+            "organisation_concept_id": (str, type(None)),
+            "org_id": (str, type(None)),
+            "role_in_org": (str, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "Create or materialise a chat session for a user in shared conversation workflows. "
+            "Requires session_id; user can be provided directly or inferred from namespace."
+        ),
+    )
+
+
+def _shared_conversation_join_session_input_schema() -> Schema:
+    return Schema(
+        required={"session_id": str},
+        optional={
+            "session_name": (str, type(None)),
+            "user_concept_id": (str, type(None)),
+            "acting_user_concept_id": (str, type(None)),
+            "actor_user_id": (str, type(None)),
+            "on_behalf_of_user_concept_id": (str, type(None)),
+            "actor_concept_id": (str, type(None)),
+            "agent_concept_id": (str, type(None)),
+            "organisation_concept_id": (str, type(None)),
+            "org_id": (str, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "Validate shared-conversation access for a user and materialise a local session record "
+            "if needed for participation workflows."
+        ),
+    )
+
+
+def _shared_conversation_invite_create_input_schema() -> Schema:
+    return Schema(
+        required={"session_id": str},
+        optional={
+            "invitee_concept_id": (str, type(None)),
+            "invitee_user_id": (str, type(None)),
+            "user_concept_id": (str, type(None)),
+            "acting_user_concept_id": (str, type(None)),
+            "actor_user_id": (str, type(None)),
+            "on_behalf_of_user_concept_id": (str, type(None)),
+            "actor_concept_id": (str, type(None)),
+            "agent_concept_id": (str, type(None)),
+            "organisation_concept_id": (str, type(None)),
+            "org_id": (str, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "Create a shared-conversation invite for an invitee in the active organisation scope."
+        ),
+    )
+
+
+def _shared_conversation_list_invites_input_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "status": (str, type(None)),
+            "direction": (str, type(None)),
+            "session_id": (str, type(None)),
+            "user_concept_id": (str, type(None)),
+            "acting_user_concept_id": (str, type(None)),
+            "actor_user_id": (str, type(None)),
+            "on_behalf_of_user_concept_id": (str, type(None)),
+            "actor_concept_id": (str, type(None)),
+            "agent_concept_id": (str, type(None)),
+            "organisation_concept_id": (str, type(None)),
+            "org_id": (str, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "List shared-conversation invites for a user. Supports incoming/outgoing direction, "
+            "status filtering, and optional session scoping."
+        ),
+    )
+
+
+def _shared_conversation_respond_invite_input_schema() -> Schema:
+    return Schema(
+        required={"invite_id": str, "action": str},
+        optional={
+            "join_session_on_accept": (bool, type(None)),
+            "session_name": (str, type(None)),
+            "user_concept_id": (str, type(None)),
+            "acting_user_concept_id": (str, type(None)),
+            "actor_user_id": (str, type(None)),
+            "on_behalf_of_user_concept_id": (str, type(None)),
+            "actor_concept_id": (str, type(None)),
+            "agent_concept_id": (str, type(None)),
+            "organisation_concept_id": (str, type(None)),
+            "org_id": (str, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "Accept or decline a shared-conversation invite for a user. "
+            "Optionally materialises a session entry on accept."
+        ),
+    )
+
+
 # RAG metadata/content MCP tools
 def _rag_get_status(**kwargs):
     import requests
@@ -11510,6 +11665,741 @@ def _task_bulk_update(**kwargs):
         return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
 
 
+def _normalise_optional_concept_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if not cleaned.startswith("#V#"):
+        cleaned = f"#V#{cleaned}"
+    return cleaned
+
+
+def _clean_optional_string(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _concept_id_to_namespace_slug(concept_id: str | None) -> str | None:
+    if not isinstance(concept_id, str):
+        return None
+    cleaned = concept_id.strip()
+    if not cleaned:
+        return None
+    if cleaned.startswith("#V#"):
+        cleaned = cleaned[3:]
+    cleaned = cleaned.strip()
+    return cleaned or None
+
+
+def _derive_namespace_for_actor(
+    user_concept_id: str | None,
+    organisation_concept_id: str | None,
+) -> str | None:
+    from ...services.namespace_service import derive_namespace
+
+    user_slug = _concept_id_to_namespace_slug(user_concept_id)
+    if not user_slug:
+        return None
+    org_slug = _concept_id_to_namespace_slug(organisation_concept_id)
+    try:
+        return derive_namespace(user_slug, org_slug)
+    except Exception:
+        return None
+
+
+def _bootstrap_coding_agent_identity_for_actor(actor_concept_id: str | None) -> None:
+    if actor_concept_id not in {"#V#coding_agent", "#V#github_copilot_instance"}:
+        return
+    try:
+        from ...services.coding_agent_identity_bootstrap_service import (
+            ensure_coding_agent_identity_concepts,
+        )
+
+        ensure_coding_agent_identity_concepts()
+    except Exception:
+        # Best effort only: conversation actions should still proceed even if bootstrap fails.
+        return
+
+
+def _resolve_shared_conversation_actor_context(
+    payload: Mapping[str, Any],
+) -> tuple[str | None, str | None, str | None, str | None]:
+    from ...services.workflow_event_integration_service import resolve_event_actor_context
+
+    namespace = _clean_optional_string(payload.get("namespace"))
+    requested_user = _normalise_optional_concept_id(
+        payload.get("user_concept_id")
+        or payload.get("acting_user_concept_id")
+        or payload.get("actor_user_id")
+        or payload.get("on_behalf_of_user_concept_id")
+    )
+    requested_org = _normalise_optional_concept_id(
+        payload.get("organisation_concept_id") or payload.get("org_id")
+    )
+    actor_concept_id = _normalise_optional_concept_id(
+        payload.get("actor_concept_id") or payload.get("agent_concept_id")
+    )
+    _bootstrap_coding_agent_identity_for_actor(actor_concept_id)
+
+    resolved_user, resolved_org = resolve_event_actor_context(
+        user_id=requested_user,
+        org_id=requested_org,
+        namespace=namespace,
+    )
+
+    user_concept_id = _normalise_optional_concept_id(resolved_user) or requested_user
+    organisation_concept_id = (
+        _normalise_optional_concept_id(resolved_org) or requested_org
+    )
+    return user_concept_id, organisation_concept_id, actor_concept_id, namespace
+
+
+def _is_user_member_of_organisation(
+    *,
+    user_concept_id: str,
+    organisation_concept_id: str,
+) -> bool:
+    from ...services.organisation_membership_service import get_user_memberships
+
+    memberships = get_user_memberships(user_concept_id)
+    for membership in memberships.get("memberships", []):
+        if not isinstance(membership, dict):
+            continue
+        member_org = _normalise_optional_concept_id(
+            membership.get("organisation_concept_id")
+        )
+        if member_org == organisation_concept_id:
+            return True
+    return False
+
+
+def _shared_conversation_create_session(**kwargs):
+    from ...services import chat_history_service
+    from ...services.episode_logging_service import log_episode
+
+    user_concept_id, organisation_concept_id, actor_concept_id, namespace = (
+        _resolve_shared_conversation_actor_context(kwargs)
+    )
+    session_id = _clean_optional_string(kwargs.get("session_id"))
+    session_name = _clean_optional_string(kwargs.get("session_name"))
+    role_in_org = _clean_optional_string(kwargs.get("role_in_org"))
+
+    if not user_concept_id:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: user_concept_id",
+            suggestions=[
+                "Provide user_concept_id (or acting_user_concept_id) explicitly",
+                "Or pass namespace containing a user identity (for example #V#user@org)",
+            ],
+        )
+    if not session_id:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: session_id",
+            suggestions=["Provide a non-empty session_id"],
+        )
+
+    try:
+        if organisation_concept_id and not _is_user_member_of_organisation(
+            user_concept_id=user_concept_id,
+            organisation_concept_id=organisation_concept_id,
+        ):
+            return make_error_response(
+                "PERMISSION_DENIED",
+                f"User {user_concept_id} is not a member of {organisation_concept_id}",
+                details={
+                    "user_concept_id": user_concept_id,
+                    "organisation_concept_id": organisation_concept_id,
+                },
+            )
+    except PermissionError as exc:
+        return make_error_response("PERMISSION_DENIED", str(exc))
+    except ValueError as exc:
+        return make_error_response("INVALID_DATA", str(exc))
+    except Exception as exc:
+        return make_error_response(
+            "ORG_MEMBERSHIP_CHECK_FAILED",
+            f"Failed to verify organisation membership: {exc}",
+        )
+
+    effective_namespace = namespace or _derive_namespace_for_actor(
+        user_concept_id, organisation_concept_id
+    )
+    created = True
+    try:
+        created = not chat_history_service.has_chat_history_session(
+            user_concept_id,
+            session_id,
+            namespace=effective_namespace,
+            include_legacy=True,
+        )
+    except Exception:
+        # Best effort: session creation remains idempotent even without pre-check.
+        created = True
+
+    try:
+        session_result = chat_history_service.create_chat_session(
+            user_id=user_concept_id,
+            session_id=session_id,
+            session_name=session_name,
+            namespace=effective_namespace,
+            organisation_concept_id=organisation_concept_id,
+            role_in_org=role_in_org,
+        )
+    except Exception as exc:
+        return make_error_response("CHAT_HISTORY_ERROR", str(exc))
+
+    episode_id = log_episode(
+        episode_type="shared_conversation_session_created",
+        actor_user_id=user_concept_id,
+        organisation_concept_id=organisation_concept_id,
+        session_id=session_id,
+        payload={
+            "actor_concept_id": actor_concept_id,
+            "created": created,
+            "namespace": effective_namespace,
+        },
+        status="created" if created else "exists",
+    )
+
+    return {
+        "success": True,
+        "created": created,
+        "session_id": session_id,
+        "session": session_result,
+        "user_concept_id": user_concept_id,
+        "actor_user_id": user_concept_id,
+        "actor_concept_id": actor_concept_id,
+        "organisation_concept_id": organisation_concept_id,
+        "episode_id": episode_id,
+    }
+
+
+def _shared_conversation_join_session(**kwargs):
+    from ...services import chat_history_service
+    from ...services.episode_logging_service import log_episode
+    from ...services.shared_conversation_service import (
+        get_accepted_invite_for_user_session,
+        resolve_conversation_owner,
+    )
+
+    user_concept_id, organisation_concept_id, actor_concept_id, namespace = (
+        _resolve_shared_conversation_actor_context(kwargs)
+    )
+    session_id = _clean_optional_string(kwargs.get("session_id"))
+    session_name = _clean_optional_string(kwargs.get("session_name"))
+
+    if not user_concept_id:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: user_concept_id",
+            suggestions=[
+                "Provide user_concept_id (or acting_user_concept_id) explicitly",
+                "Or pass namespace containing a user identity (for example #V#user@org)",
+            ],
+        )
+    if not session_id:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: session_id",
+            suggestions=["Provide a non-empty session_id"],
+        )
+
+    try:
+        invite = get_accepted_invite_for_user_session(
+            user_concept_id=user_concept_id,
+            session_id=session_id,
+        )
+        owner_user_id = _normalise_optional_concept_id(
+            resolve_conversation_owner(session_id=session_id)
+        )
+        has_accepted_invite = isinstance(invite, dict)
+        is_owner = owner_user_id == user_concept_id
+    except Exception as exc:
+        return make_error_response(
+            "SHARED_CONVERSATION_LOOKUP_FAILED",
+            f"Failed to resolve shared conversation access: {exc}",
+        )
+
+    if not is_owner and not has_accepted_invite:
+        return make_error_response(
+            "PERMISSION_DENIED",
+            "User does not own this conversation and has no accepted invite",
+            details={
+                "user_concept_id": user_concept_id,
+                "session_id": session_id,
+            },
+        )
+
+    invite_org = (
+        _normalise_optional_concept_id((invite or {}).get("organisation_concept_id"))
+        if isinstance(invite, dict)
+        else None
+    )
+    effective_org = organisation_concept_id or invite_org
+    if effective_org:
+        try:
+            if not _is_user_member_of_organisation(
+                user_concept_id=user_concept_id,
+                organisation_concept_id=effective_org,
+            ):
+                return make_error_response(
+                    "PERMISSION_DENIED",
+                    f"User {user_concept_id} is not a member of {effective_org}",
+                    details={
+                        "user_concept_id": user_concept_id,
+                        "organisation_concept_id": effective_org,
+                    },
+                )
+        except PermissionError as exc:
+            return make_error_response("PERMISSION_DENIED", str(exc))
+        except ValueError as exc:
+            return make_error_response("INVALID_DATA", str(exc))
+        except Exception as exc:
+            return make_error_response(
+                "ORG_MEMBERSHIP_CHECK_FAILED",
+                f"Failed to verify organisation membership: {exc}",
+            )
+
+    effective_namespace = namespace or _derive_namespace_for_actor(
+        user_concept_id, effective_org
+    )
+    session_exists = False
+    try:
+        session_exists = chat_history_service.has_chat_history_session(
+            user_concept_id,
+            session_id,
+            namespace=effective_namespace,
+            include_legacy=True,
+        )
+    except Exception:
+        session_exists = False
+
+    try:
+        if session_exists:
+            session_result = chat_history_service.get_chat_history_session_summary(
+                user_concept_id,
+                session_id,
+                namespace=effective_namespace,
+                include_legacy=True,
+                summary_mode="light",
+            ) or {"session_id": session_id}
+        else:
+            session_result = chat_history_service.create_chat_session(
+                user_id=user_concept_id,
+                session_id=session_id,
+                session_name=session_name,
+                namespace=effective_namespace,
+                organisation_concept_id=effective_org,
+            )
+    except Exception as exc:
+        return make_error_response("CHAT_HISTORY_ERROR", str(exc))
+
+    access_mode = "owner" if is_owner else "invitee"
+    created_session = not session_exists
+    episode_id = log_episode(
+        episode_type="shared_conversation_session_joined",
+        actor_user_id=user_concept_id,
+        organisation_concept_id=effective_org,
+        session_id=session_id,
+        payload={
+            "actor_concept_id": actor_concept_id,
+            "access_mode": access_mode,
+            "has_accepted_invite": has_accepted_invite,
+            "created_session": created_session,
+            "owner_user_id": owner_user_id,
+        },
+        status="joined",
+    )
+
+    return {
+        "success": True,
+        "joined": True,
+        "created_session": created_session,
+        "access_mode": access_mode,
+        "is_owner": is_owner,
+        "has_accepted_invite": has_accepted_invite,
+        "session_id": session_id,
+        "session": session_result,
+        "invite": invite if isinstance(invite, dict) else None,
+        "owner_user_id": owner_user_id,
+        "user_concept_id": user_concept_id,
+        "actor_user_id": user_concept_id,
+        "actor_concept_id": actor_concept_id,
+        "organisation_concept_id": effective_org,
+        "episode_id": episode_id,
+    }
+
+
+def _shared_conversation_invite_create(**kwargs):
+    from ...services.episode_logging_service import log_episode
+    from ...services.organisation_membership_service import (
+        get_organisation_members,
+    )
+    from ...services.shared_conversation_service import create_invite
+
+    user_concept_id, organisation_concept_id, actor_concept_id, _namespace = (
+        _resolve_shared_conversation_actor_context(kwargs)
+    )
+    session_id = _clean_optional_string(kwargs.get("session_id"))
+    invitee_concept_id = _normalise_optional_concept_id(
+        kwargs.get("invitee_concept_id") or kwargs.get("invitee_user_id")
+    )
+
+    if not user_concept_id:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: user_concept_id",
+            suggestions=[
+                "Provide user_concept_id (or acting_user_concept_id) explicitly",
+                "Or pass namespace containing a user identity (for example #V#user@org)",
+            ],
+        )
+    if not session_id:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: session_id",
+            suggestions=["Provide a non-empty session_id"],
+        )
+    if not invitee_concept_id:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: invitee_concept_id",
+            suggestions=["Provide invitee_concept_id (or invitee_user_id)"],
+        )
+    if invitee_concept_id == user_concept_id:
+        return make_error_response(
+            "INVALID_DATA",
+            "Cannot invite the actor to their own conversation",
+            details={"invitee_concept_id": invitee_concept_id},
+        )
+    if not organisation_concept_id:
+        return make_error_response(
+            "MISSING_ORGANISATION_CONTEXT",
+            "organisation_concept_id is required for shared conversation invites",
+            suggestions=[
+                "Provide organisation_concept_id (or org_id)",
+                "Or pass namespace in #V#user@org format",
+            ],
+        )
+
+    try:
+        if not _is_user_member_of_organisation(
+            user_concept_id=user_concept_id,
+            organisation_concept_id=organisation_concept_id,
+        ):
+            return make_error_response(
+                "PERMISSION_DENIED",
+                f"User {user_concept_id} is not a member of {organisation_concept_id}",
+                details={
+                    "user_concept_id": user_concept_id,
+                    "organisation_concept_id": organisation_concept_id,
+                },
+            )
+    except PermissionError as exc:
+        return make_error_response("PERMISSION_DENIED", str(exc))
+    except ValueError as exc:
+        return make_error_response("INVALID_DATA", str(exc))
+    except Exception as exc:
+        return make_error_response(
+            "ORG_MEMBERSHIP_CHECK_FAILED",
+            f"Failed to verify organisation membership: {exc}",
+        )
+
+    try:
+        organisation_members = get_organisation_members(organisation_concept_id)
+        valid_member_ids = {
+            _normalise_optional_concept_id(member.get("user_concept_id"))
+            for member in organisation_members.get("members", [])
+            if isinstance(member, dict)
+        }
+        if invitee_concept_id not in valid_member_ids:
+            return make_error_response(
+                "PERMISSION_DENIED",
+                "Invitee is not a member of the organisation",
+                details={
+                    "invitee_concept_id": invitee_concept_id,
+                    "organisation_concept_id": organisation_concept_id,
+                },
+            )
+    except PermissionError as exc:
+        return make_error_response("PERMISSION_DENIED", str(exc))
+    except ValueError as exc:
+        return make_error_response("INVALID_DATA", str(exc))
+    except Exception as exc:
+        return make_error_response(
+            "ORGANISATION_MEMBER_LOOKUP_FAILED",
+            f"Failed to validate organisation members: {exc}",
+        )
+
+    try:
+        invite_result = create_invite(
+            session_id=session_id,
+            inviter_user_id=user_concept_id,
+            invitee_user_id=invitee_concept_id,
+            organisation_concept_id=organisation_concept_id,
+        )
+    except Exception as exc:
+        return make_error_response("SHARED_CONVERSATION_INVITE_FAILED", str(exc))
+
+    invite_payload = invite_result.get("invite", {})
+    episode_id = log_episode(
+        episode_type="shared_conversation_invite_created",
+        actor_user_id=user_concept_id,
+        organisation_concept_id=organisation_concept_id,
+        session_id=session_id,
+        related_invite_id=invite_payload.get("invite_id"),
+        payload={
+            "actor_concept_id": actor_concept_id,
+            "invitee_user_id": invitee_concept_id,
+            "created": bool(invite_result.get("created")),
+        },
+        status="created" if invite_result.get("created") else "exists",
+    )
+
+    return {
+        "success": True,
+        "created": bool(invite_result.get("created")),
+        "invite": invite_payload if isinstance(invite_payload, dict) else None,
+        "session_id": session_id,
+        "user_concept_id": user_concept_id,
+        "actor_user_id": user_concept_id,
+        "actor_concept_id": actor_concept_id,
+        "organisation_concept_id": organisation_concept_id,
+        "episode_id": episode_id,
+    }
+
+
+def _shared_conversation_list_invites(**kwargs):
+    from ...services.shared_conversation_service import list_invites_for_user
+
+    user_concept_id, organisation_concept_id, actor_concept_id, _namespace = (
+        _resolve_shared_conversation_actor_context(kwargs)
+    )
+    direction_raw = _clean_optional_string(kwargs.get("direction")) or "incoming"
+    direction_value = direction_raw.lower()
+    if direction_value in {"incoming", "in"}:
+        direction = "incoming"
+    elif direction_value in {"outgoing", "out"}:
+        direction = "outgoing"
+    else:
+        return make_error_response(
+            "INVALID_DATA",
+            f"Invalid direction: {direction_raw}",
+            suggestions=["Use direction='incoming' or direction='outgoing'"],
+        )
+
+    status_raw = _clean_optional_string(kwargs.get("status"))
+    status = status_raw if status_raw is not None else "pending"
+    session_id = _clean_optional_string(kwargs.get("session_id"))
+
+    if not user_concept_id:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: user_concept_id",
+            suggestions=[
+                "Provide user_concept_id (or acting_user_concept_id) explicitly",
+                "Or pass namespace containing a user identity (for example #V#user@org)",
+            ],
+        )
+
+    if organisation_concept_id:
+        try:
+            if not _is_user_member_of_organisation(
+                user_concept_id=user_concept_id,
+                organisation_concept_id=organisation_concept_id,
+            ):
+                return make_error_response(
+                    "PERMISSION_DENIED",
+                    f"User {user_concept_id} is not a member of {organisation_concept_id}",
+                    details={
+                        "user_concept_id": user_concept_id,
+                        "organisation_concept_id": organisation_concept_id,
+                    },
+                )
+        except PermissionError as exc:
+            return make_error_response("PERMISSION_DENIED", str(exc))
+        except ValueError as exc:
+            return make_error_response("INVALID_DATA", str(exc))
+        except Exception as exc:
+            return make_error_response(
+                "ORG_MEMBERSHIP_CHECK_FAILED",
+                f"Failed to verify organisation membership: {exc}",
+            )
+
+    try:
+        invites = list_invites_for_user(
+            user_concept_id=user_concept_id,
+            status=status,
+            direction=direction,
+            session_id=session_id,
+        )
+    except Exception as exc:
+        return make_error_response("SHARED_CONVERSATION_LOOKUP_FAILED", str(exc))
+
+    if organisation_concept_id:
+        invites = [
+            invite
+            for invite in invites
+            if (
+                _normalise_optional_concept_id(invite.get("organisation_concept_id"))
+                in (None, organisation_concept_id)
+            )
+        ]
+
+    return {
+        "success": True,
+        "invites": invites,
+        "count": len(invites),
+        "user_concept_id": user_concept_id,
+        "actor_user_id": user_concept_id,
+        "actor_concept_id": actor_concept_id,
+        "organisation_concept_id": organisation_concept_id,
+    }
+
+
+def _shared_conversation_respond_invite(**kwargs):
+    from ...services import chat_history_service
+    from ...services.episode_logging_service import log_episode
+    from ...services.shared_conversation_service import respond_to_invite
+
+    user_concept_id, organisation_concept_id, actor_concept_id, namespace = (
+        _resolve_shared_conversation_actor_context(kwargs)
+    )
+    invite_id = _clean_optional_string(kwargs.get("invite_id"))
+    action = (_clean_optional_string(kwargs.get("action")) or "").lower()
+    session_name = _clean_optional_string(kwargs.get("session_name"))
+    join_session_on_accept = _coerce_bool_input(
+        kwargs.get("join_session_on_accept"),
+        default=True,
+    )
+
+    if not user_concept_id:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: user_concept_id",
+            suggestions=[
+                "Provide user_concept_id (or acting_user_concept_id) explicitly",
+                "Or pass namespace containing a user identity (for example #V#user@org)",
+            ],
+        )
+    if not invite_id:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: invite_id",
+            suggestions=["Provide a non-empty invite_id"],
+        )
+    if action not in {"accept", "decline"}:
+        return make_error_response(
+            "INVALID_DATA",
+            "action must be 'accept' or 'decline'",
+            details={"action": kwargs.get("action")},
+        )
+
+    try:
+        invite = respond_to_invite(
+            invite_id=invite_id,
+            user_concept_id=user_concept_id,
+            action=action,
+        )
+    except ValueError as exc:
+        return make_error_response("INVALID_DATA", str(exc))
+    except Exception as exc:
+        return make_error_response("SHARED_CONVERSATION_UPDATE_FAILED", str(exc))
+
+    if not isinstance(invite, dict):
+        return make_error_response(
+            "NOT_FOUND",
+            "Invite not found",
+            details={"invite_id": invite_id},
+        )
+
+    invite_org = _normalise_optional_concept_id(invite.get("organisation_concept_id"))
+    effective_org = organisation_concept_id or invite_org
+    if organisation_concept_id and invite_org and invite_org != organisation_concept_id:
+        return make_error_response(
+            "PERMISSION_DENIED",
+            "Invite organisation scope does not match supplied organisation_concept_id",
+            details={
+                "invite_id": invite_id,
+                "invite_organisation_concept_id": invite_org,
+                "organisation_concept_id": organisation_concept_id,
+            },
+        )
+
+    created_session = False
+    session_result = None
+    session_id = _clean_optional_string(invite.get("session_id"))
+    if action == "accept" and join_session_on_accept and session_id:
+        join_namespace = namespace or _derive_namespace_for_actor(
+            user_concept_id, effective_org
+        )
+        try:
+            session_exists = chat_history_service.has_chat_history_session(
+                user_concept_id,
+                session_id,
+                namespace=join_namespace,
+                include_legacy=True,
+            )
+        except Exception:
+            session_exists = False
+        try:
+            if session_exists:
+                session_result = chat_history_service.get_chat_history_session_summary(
+                    user_concept_id,
+                    session_id,
+                    namespace=join_namespace,
+                    include_legacy=True,
+                    summary_mode="light",
+                ) or {"session_id": session_id}
+            else:
+                session_result = chat_history_service.create_chat_session(
+                    user_id=user_concept_id,
+                    session_id=session_id,
+                    session_name=session_name,
+                    namespace=join_namespace,
+                    organisation_concept_id=effective_org,
+                )
+                created_session = True
+        except Exception as exc:
+            return make_error_response("CHAT_HISTORY_ERROR", str(exc))
+
+    episode_id = log_episode(
+        episode_type="shared_conversation_invite_responded",
+        actor_user_id=user_concept_id,
+        organisation_concept_id=effective_org,
+        session_id=session_id,
+        related_invite_id=invite_id,
+        payload={
+            "actor_concept_id": actor_concept_id,
+            "action": action,
+            "join_session_on_accept": join_session_on_accept,
+            "created_session": created_session,
+        },
+        status=invite.get("status"),
+    )
+
+    return {
+        "success": True,
+        "invite_id": invite_id,
+        "action": action,
+        "invite": invite,
+        "session_id": session_id,
+        "session": session_result,
+        "created_session": created_session,
+        "user_concept_id": user_concept_id,
+        "actor_user_id": user_concept_id,
+        "actor_concept_id": actor_concept_id,
+        "organisation_concept_id": effective_org,
+        "episode_id": episode_id,
+    }
+
+
 def build_default_catalogue() -> MethodCatalogue:
     """Return a catalogue pre-populated with the baseline method set."""
 
@@ -11555,6 +12445,21 @@ def build_default_catalogue() -> MethodCatalogue:
     task_get_history_output_schema = _task_generic_output_schema("get_history")
     task_bulk_update_output_schema = _task_generic_output_schema("bulk_update")
     task_delete_output_schema = _task_generic_output_schema("delete")
+    shared_conversation_create_session_output_schema = (
+        _shared_conversation_generic_output_schema("create_session")
+    )
+    shared_conversation_join_session_output_schema = (
+        _shared_conversation_generic_output_schema("join_session")
+    )
+    shared_conversation_invite_create_output_schema = (
+        _shared_conversation_generic_output_schema("invite_create")
+    )
+    shared_conversation_list_invites_output_schema = (
+        _shared_conversation_generic_output_schema("list_invites")
+    )
+    shared_conversation_respond_invite_output_schema = (
+        _shared_conversation_generic_output_schema("respond_invite")
+    )
     gmail_list_messages_input_schema = Schema(
         required={"profile": str},
         optional={
@@ -13171,6 +14076,61 @@ def build_default_catalogue() -> MethodCatalogue:
             description=(
                 "Delete a Von task by marking it as cancelled. The task remains in the system "
                 "but is no longer active."
+            ),
+        ),
+        MethodDefinition(
+            name="shared_conversation_create_session",
+            handler=_shared_conversation_create_session,
+            input_schema=_shared_conversation_create_session_input_schema(),
+            output_schema=shared_conversation_create_session_output_schema,
+            category="write",
+            description=(
+                "Create or materialise a chat session for a user in shared-conversation "
+                "flows. Supports actor/on-behalf context for coding-agent execution."
+            ),
+        ),
+        MethodDefinition(
+            name="shared_conversation_join_session",
+            handler=_shared_conversation_join_session,
+            input_schema=_shared_conversation_join_session_input_schema(),
+            output_schema=shared_conversation_join_session_output_schema,
+            category="write",
+            description=(
+                "Validate owner/invite access to a shared conversation and materialise "
+                "a user session record for participation."
+            ),
+        ),
+        MethodDefinition(
+            name="shared_conversation_invite_create",
+            handler=_shared_conversation_invite_create,
+            input_schema=_shared_conversation_invite_create_input_schema(),
+            output_schema=shared_conversation_invite_create_output_schema,
+            category="write",
+            description=(
+                "Create a shared-conversation invite with organisation-membership checks "
+                "for inviter and invitee."
+            ),
+        ),
+        MethodDefinition(
+            name="shared_conversation_list_invites",
+            handler=_shared_conversation_list_invites,
+            input_schema=_shared_conversation_list_invites_input_schema(),
+            output_schema=shared_conversation_list_invites_output_schema,
+            category="read",
+            description=(
+                "List incoming or outgoing shared-conversation invites for a user, with "
+                "optional organisation and session filtering."
+            ),
+        ),
+        MethodDefinition(
+            name="shared_conversation_respond_invite",
+            handler=_shared_conversation_respond_invite,
+            input_schema=_shared_conversation_respond_invite_input_schema(),
+            output_schema=shared_conversation_respond_invite_output_schema,
+            category="write",
+            description=(
+                "Accept or decline a shared-conversation invite. On acceptance, can also "
+                "materialise a participant session record for immediate join."
             ),
         ),
         # Description generation tools (JVNAUTOSCI-1044)
