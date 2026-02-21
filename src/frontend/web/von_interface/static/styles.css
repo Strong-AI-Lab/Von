@@ -784,6 +784,82 @@ body {
     color: #555;
 }
 
+/* Missing-concept modal workflow */
+.create-concept-modal-form {
+    display: grid;
+    gap: 10px;
+}
+
+.create-concept-modal-row {
+    display: grid;
+    gap: 4px;
+}
+
+.create-concept-modal-row label {
+    font-size: 0.86rem;
+    font-weight: 600;
+    color: #1f2937;
+}
+
+.create-concept-modal-row input,
+.create-concept-modal-row select,
+.create-concept-modal-row textarea {
+    width: 100%;
+    box-sizing: border-box;
+    font-size: 0.9rem;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    padding: 8px 10px;
+    background: #ffffff;
+}
+
+.create-concept-modal-row textarea {
+    resize: vertical;
+}
+
+.create-concept-parent-suggestions {
+    display: grid;
+    gap: 6px;
+}
+
+.create-concept-parent-suggestion {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    align-items: start;
+    gap: 8px;
+    border: 1px solid #dbe4f0;
+    border-radius: 6px;
+    padding: 6px 8px;
+    background: #f8fbff;
+}
+
+.create-concept-parent-suggestion-text {
+    display: grid;
+    gap: 2px;
+}
+
+.create-concept-parent-suggestion-title {
+    font-size: 0.86rem;
+    color: #0f172a;
+}
+
+.create-concept-parent-suggestion-meta {
+    font-size: 0.72rem;
+    color: #475569;
+}
+
+.create-concept-modal-breadcrumb {
+    font-size: 0.78rem;
+    color: #475569;
+    margin: 0;
+}
+
+.create-concept-modal-hint {
+    margin: 0;
+    font-size: 0.78rem;
+    color: #475569;
+}
+
 /* Reuse screen-reader only helper */
 .sr-only,
 .manual-instance-panel .sr-only {

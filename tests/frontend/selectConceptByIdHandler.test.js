@@ -244,4 +244,162 @@ describe('handleSelectConceptByIdDetail', () => {
         expect(chooseCreateOptionsFn).toHaveBeenCalled();
         expect(createOrActivateConceptTab).toHaveBeenCalledWith('#V#cafe', 'Loading…', false);
     });
+
+    test('passes proposal payload to chooser and persists description when provided', async () => {
+        const { handleSelectConceptByIdDetail } = require(handlerPath);
+
+        const createOrActivateConceptTab = jest.fn();
+        const activateTab = jest.fn();
+        const selectVontologyNodeByIdentifier = jest.fn();
+        const chooseCreateOptionsFn = jest.fn(async ({ proposal }) => {
+            expect(proposal).toBeTruthy();
+            expect(Array.isArray(proposal.parentSuggestions)).toBe(true);
+            return {
+                createAsInstance: false,
+                parentId: '#V#thing',
+                kind: 'type',
+                name: 'Workflow result',
+                description: 'Created from explicit proposal'
+            };
+        });
+        const fetchCreateProposalFn = jest.fn(async () => ({
+            proposedName: 'Workflow result',
+            parentSuggestions: [
+                { conceptId: '#V#process', name: 'Process', confidence: 0.75, rationale: 'Matched context' }
+            ]
+        }));
+
+        let created = false;
+        let updateDescriptionCalled = false;
+        const fetchFn = jest.fn((url, opts) => {
+            if (typeof url === 'string' && url.startsWith('/vontology/api/vontology/node_content')) {
+                if (url.includes('raw_only=1')) {
+                    if (!created) {
+                        return Promise.resolve({ ok: false, status: 404, text: async () => 'not found' });
+                    }
+                    return Promise.resolve({
+                        ok: true,
+                        status: 200,
+                        json: async () => ({ display_name: 'Workflow result', kind: 'type', concept_id: '#V#workflow_result' })
+                    });
+                }
+                return Promise.resolve({ ok: false, status: 404, text: async () => 'not found' });
+            }
+            if (typeof url === 'string' && url === '/vontology/api/vontology/create_concept') {
+                created = true;
+                return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({ concept_id: '#V#workflow_result' }) });
+            }
+            if (typeof url === 'string' && url === '/vontology/api/vontology/update_description') {
+                const body = JSON.parse(opts.body);
+                expect(body.identifier).toBe('#V#workflow_result');
+                expect(body.description).toBe('Created from explicit proposal');
+                updateDescriptionCalled = true;
+                return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({ success: true }) });
+            }
+            return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({}) });
+        });
+
+        await handleSelectConceptByIdDetail(
+            {
+                conceptId: '#V#workflow_result',
+                createConceptTab: true,
+                kind: 'type',
+                createProposal: {
+                    parentSuggestions: [{ conceptId: '#V#process', name: 'Process', confidence: 0.75 }]
+                }
+            },
+            {
+                createOrActivateConceptTab,
+                activateTab,
+                selectVontologyNodeByIdentifier,
+                fetchFn,
+                chooseCreateOptionsFn,
+                fetchCreateProposalFn
+            }
+        );
+
+        expect(chooseCreateOptionsFn).toHaveBeenCalled();
+        expect(fetchCreateProposalFn).toHaveBeenCalled();
+        expect(updateDescriptionCalled).toBe(true);
+    });
+
+    test('creates missing parent recursively before child concept', async () => {
+        const { handleSelectConceptByIdDetail } = require(handlerPath);
+
+        const createOrActivateConceptTab = jest.fn();
+        const activateTab = jest.fn();
+        const selectVontologyNodeByIdentifier = jest.fn();
+        const createOrder = [];
+        const chooseCreateOptionsFn = jest.fn(async (payload) => {
+            if (payload.isRecursiveParentCreate) {
+                return {
+                    createAsInstance: false,
+                    parentId: '#V#thing',
+                    kind: 'type',
+                    name: 'Missing parent'
+                };
+            }
+            return {
+                createAsInstance: false,
+                parentId: '#V#missing_parent',
+                kind: 'type',
+                name: 'Child concept'
+            };
+        });
+
+        let childCreated = false;
+        const fetchFn = jest.fn((url, opts) => {
+            if (typeof url === 'string' && url.startsWith('/vontology/api/vontology/node_content')) {
+                if (url.includes('identifier=%23V%23child_concept') && !url.includes('raw_only=1')) {
+                    return Promise.resolve({ ok: false, status: 404, text: async () => 'missing child' });
+                }
+                if (url.includes('identifier=%23V%23missing_parent') && !url.includes('raw_only=1')) {
+                    return Promise.resolve({ ok: false, status: 404, text: async () => 'missing parent' });
+                }
+                if (url.includes('raw_only=1')) {
+                    if (!childCreated) {
+                        return Promise.resolve({ ok: false, status: 404, text: async () => 'not found' });
+                    }
+                    return Promise.resolve({
+                        ok: true,
+                        status: 200,
+                        json: async () => ({ display_name: 'Child concept', kind: 'type', concept_id: '#V#child_concept' })
+                    });
+                }
+                return Promise.resolve({ ok: false, status: 404, text: async () => 'not found' });
+            }
+            if (typeof url === 'string' && url === '/vontology/api/vontology/create_concept') {
+                const body = JSON.parse(opts.body);
+                createOrder.push(body.new_concept_name);
+                if (body.new_concept_name === 'child_concept') {
+                    childCreated = true;
+                }
+                return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({ concept_id: `#V#${body.new_concept_name}` }) });
+            }
+            return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({}) });
+        });
+
+        await handleSelectConceptByIdDetail(
+            {
+                conceptId: '#V#child_concept',
+                createConceptTab: true,
+                kind: 'type',
+                modifierKeys: {}
+            },
+            {
+                createOrActivateConceptTab,
+                activateTab,
+                selectVontologyNodeByIdentifier,
+                fetchFn,
+                chooseCreateOptionsFn
+            }
+        );
+
+        expect(chooseCreateOptionsFn).toHaveBeenCalledWith(expect.objectContaining({
+            conceptId: '#V#missing_parent',
+            isRecursiveParentCreate: true,
+            childConceptId: '#V#child_concept'
+        }));
+        expect(createOrder).toEqual(['Missing parent', 'Child concept']);
+    });
 });

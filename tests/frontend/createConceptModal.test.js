@@ -24,7 +24,7 @@ describe('openCreateConceptModal', () => {
         expect(kindSelect).not.toBeNull();
         expect(kindSelect.value).toBe('predicate');
 
-        const parentInput = modal.querySelector('input');
+        const parentInput = modal.querySelector('input[id$="_parent"]');
         expect(parentInput).not.toBeNull();
         expect(parentInput.value).toBe('');
         expect(parentInput.placeholder).toBe('#V#predicate');
@@ -36,7 +36,13 @@ describe('openCreateConceptModal', () => {
         createBtn.click();
 
         const result = await p;
-        expect(result).toEqual({ createAsInstance: true, parentId: '#V#predicate', kind: 'predicate' });
+        expect(result).toEqual(expect.objectContaining({
+            createAsInstance: true,
+            parentId: '#V#predicate',
+            kind: 'predicate',
+            name: 'has_affiliation',
+            description: ''
+        }));
     });
 
     test('cancel returns null', async () => {
@@ -54,5 +60,67 @@ describe('openCreateConceptModal', () => {
 
         const result = await p;
         expect(result).toBeNull();
+    });
+
+    test('prefers top suggested parent and editable best-guess fields', async () => {
+        const { openCreateConceptModal } = require(handlerPath);
+
+        const p = openCreateConceptModal('#V#workflow_run', 'type', {
+            proposedName: 'Workflow run',
+            proposedDescription: 'Suggested from context',
+            parentSuggestions: [
+                { conceptId: '#V#process', name: 'Process', confidence: 0.82, rationale: 'Closest type', provenance: 'explicit' },
+                { conceptId: '#V#workflow', name: 'Workflow', confidence: 0.61, rationale: 'Alternative', provenance: 'implicit' }
+            ]
+        });
+
+        const modal = document.querySelector('.modal');
+        expect(modal).not.toBeNull();
+
+        const nameInput = modal.querySelector('input[id$="_name"]');
+        const descriptionInput = modal.querySelector('textarea[id$="_description"]');
+        expect(nameInput.value).toBe('Workflow run');
+        expect(descriptionInput.value).toBe('Suggested from context');
+
+        const createBtn = Array.from(modal.querySelectorAll('button')).find(b => b.textContent === 'Create');
+        createBtn.click();
+
+        const result = await p;
+        expect(result).toEqual(expect.objectContaining({
+            parentId: '#V#process',
+            name: 'Workflow run',
+            description: 'Suggested from context',
+            selectedParentSuggested: true,
+            parentDecision: 'accept_top_suggestion'
+        }));
+    });
+
+    test('manual parent override still works when suggestions are present', async () => {
+        const { openCreateConceptModal } = require(handlerPath);
+
+        const p = openCreateConceptModal('#V#workflow_result', 'type', {
+            parentSuggestions: [
+                { conceptId: '#V#process', name: 'Process', confidence: 0.8, rationale: 'Top', provenance: 'explicit' }
+            ]
+        });
+
+        const modal = document.querySelector('.modal');
+        expect(modal).not.toBeNull();
+
+        const manualRadio = modal.querySelector('input[type="radio"][value="__manual__"]');
+        manualRadio.click();
+
+        const parentInput = modal.querySelector('input[id$="_parent"]');
+        parentInput.value = '#V#custom_parent';
+
+        const createBtn = Array.from(modal.querySelectorAll('button')).find(b => b.textContent === 'Create');
+        createBtn.click();
+
+        const result = await p;
+        expect(result).toEqual(expect.objectContaining({
+            parentId: '#V#custom_parent',
+            selectedParentSuggested: false,
+            parentDecision: 'manual_override'
+        }));
     });
 });

@@ -64,13 +64,156 @@ async function conceptExists(conceptId, fetchFn) {
     throw new Error(`Concept existence check failed (HTTP ${res.status})`);
 }
 
+function normaliseConfidence(value) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+    if (value >= 0 && value <= 1) return value;
+    if (value > 1 && value <= 100) return value / 100;
+    return null;
+}
+
+function buildReadableName(value, fallbackId = '') {
+    const raw = (value || '').toString().trim();
+    if (raw) return raw;
+    const core = deriveNameFromConceptId(fallbackId).replace(/_/g, ' ').trim();
+    return core || fallbackId || '';
+}
+
+function normaliseParentSuggestion(entry) {
+    if (!entry || typeof entry !== 'object') return null;
+    const conceptId = normaliseVontologyId(entry.conceptId || entry.id || entry.parent_id || '');
+    if (!conceptId) return null;
+    return {
+        conceptId,
+        name: buildReadableName(entry.name || entry.display_name || '', conceptId),
+        confidence: normaliseConfidence(entry.confidence ?? entry.relevance_score ?? entry.score),
+        rationale: (entry.rationale || entry.reason || '').toString().trim(),
+        provenance: (entry.provenance || entry.source || '').toString().trim(),
+        exists: entry.exists !== false
+    };
+}
+
+function mergeParentSuggestions(preferred, fallback) {
+    const merged = [];
+    const seen = new Set();
+    const append = (items) => {
+        if (!Array.isArray(items)) return;
+        for (const item of items) {
+            const normalised = normaliseParentSuggestion(item);
+            if (!normalised || seen.has(normalised.conceptId)) continue;
+            seen.add(normalised.conceptId);
+            merged.push(normalised);
+        }
+    };
+    append(preferred);
+    append(fallback);
+    return merged;
+}
+
+function deriveParentSearchQuery(conceptId, detail) {
+    const contextText = (detail?.proposalContext?.text || detail?.contextText || '').toString().trim();
+    if (contextText) return contextText;
+    return deriveNameFromConceptId(conceptId).replace(/_/g, ' ').trim();
+}
+
+function deriveCreateProposal(conceptId, detail) {
+    const proposedNameRaw = (detail?.createProposal?.proposedName
+        || detail?.proposalContext?.proposed_name
+        || detail?.proposedName
+        || '').toString().trim();
+    const proposedDescription = (detail?.createProposal?.proposedDescription
+        || detail?.proposalContext?.proposed_description
+        || detail?.proposedDescription
+        || '').toString().trim();
+    return {
+        proposedName: proposedNameRaw || deriveNameFromConceptId(conceptId),
+        proposedDescription,
+        parentSuggestions: Array.isArray(detail?.createProposal?.parentSuggestions)
+            ? detail.createProposal.parentSuggestions
+            : (Array.isArray(detail?.proposalContext?.parent_suggestions)
+                ? detail.proposalContext.parent_suggestions
+                : []),
+        breadcrumbs: Array.isArray(detail?.createProposal?.breadcrumbs) ? detail.createProposal.breadcrumbs : [],
+        lowConfidence: !!detail?.createProposal?.lowConfidence
+    };
+}
+
+async function fetchParentSuggestionsBySearch(conceptId, kind, detail, fetchFn) {
+    const query = deriveParentSearchQuery(conceptId, detail);
+    if (!query) return [];
+
+    const params = new URLSearchParams();
+    params.set('q', query);
+    params.set('limit', '12');
+    params.set('fallback_substring', '1');
+    if (normaliseKind(kind) === 'predicate') {
+        params.set('filter_kind', 'predicate,type');
+    } else {
+        params.set('filter_kind', 'type');
+    }
+
+    let res;
+    try {
+        res = await fetchFn(`/vontology/api/vontology/search?${params.toString()}`, {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' }
+        });
+    } catch (_) {
+        return [];
+    }
+    if (!res.ok) return [];
+
+    let json;
+    try {
+        json = await res.json();
+    } catch (_) {
+        return [];
+    }
+
+    const rows = Array.isArray(json?.results) ? json.results : [];
+    const suggestions = [];
+    for (const row of rows) {
+        const parentId = normaliseVontologyId(row?.id || row?.concept_id || '');
+        if (!parentId || parentId === conceptId) continue;
+        suggestions.push({
+            conceptId: parentId,
+            name: buildReadableName(row?.name || row?.display_name || '', parentId),
+            confidence: normaliseConfidence(row?.relevance_score),
+            rationale: `Matched ontology search for "${query}"`,
+            provenance: 'explicit',
+            exists: true
+        });
+        if (suggestions.length >= 3) break;
+    }
+    return suggestions;
+}
+
+async function updateConceptDescription(conceptId, description, fetchFn) {
+    const id = normaliseVontologyId(conceptId);
+    const text = (description || '').toString().trim();
+    if (!id || !text) return;
+
+    try {
+        const res = await fetchFn('/vontology/api/vontology/update_description', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify({ identifier: id, description: text })
+        });
+        if (!res.ok) {
+            console.warn('[selectConceptById] update description failed', res.status);
+        }
+    } catch (err) {
+        console.warn('[selectConceptById] update description request failed', err);
+    }
+}
+
 async function createConceptForId(conceptId, options, fetchFn) {
     const id = normaliseVontologyId(conceptId);
     if (!id) throw new Error('Concept ID is required');
 
     const createAsInstance = !!options?.createAsInstance;
     const parentId = normaliseVontologyId(options?.parentId || '#V#thing');
-    const name = deriveNameFromConceptId(id);
+    const name = (options?.name || '').toString().trim() || deriveNameFromConceptId(id);
+    const description = (options?.description || '').toString().trim();
 
     const payload = {
         new_concept_name: name,
@@ -86,6 +229,7 @@ async function createConceptForId(conceptId, options, fetchFn) {
 
     // Idempotency: treat conflicts as success (another click/window created it).
     if (res.status === 409) {
+        await updateConceptDescription(id, description, fetchFn);
         return id;
     }
 
@@ -94,12 +238,15 @@ async function createConceptForId(conceptId, options, fetchFn) {
         throw new Error(`Create concept failed (HTTP ${res.status}): ${text.slice(0, 240)}`);
     }
 
+    let resolvedId = id;
     try {
         const json = JSON.parse(text);
-        return json?.concept_id || json?.concept?.concept_id || id;
+        resolvedId = json?.concept_id || json?.concept?.concept_id || id;
     } catch (_) {
-        return id;
+        resolvedId = id;
     }
+    await updateConceptDescription(resolvedId, description, fetchFn);
+    return resolvedId;
 }
 
 function defaultCreateOptionsFromKind(kind) {
@@ -246,14 +393,22 @@ function _defaultParentForCreateKind(kind) {
 }
 
 /**
- * Option B: show a small modal to choose kind (type/individual/predicate) and optional parent.
+ * Show a creation modal with editable defaults plus ranked parent suggestions.
  * Exported for testing.
  */
-export function openCreateConceptModal(conceptId, initialKind) {
+export function openCreateConceptModal(conceptId, initialKind, proposal = null) {
     const id = normaliseVontologyId(conceptId);
     const k0 = normaliseKind(initialKind) || 'type';
-
     if (!id) return Promise.resolve(null);
+
+    const proposalData = proposal && typeof proposal === 'object' ? proposal : {};
+    const mergedSuggestions = mergeParentSuggestions(proposalData.parentSuggestions, []);
+    const parentSuggestions = mergedSuggestions.slice(0, 3);
+    const proposedNameDefault = (proposalData.proposedName || '').toString().trim() || deriveNameFromConceptId(id);
+    const proposedDescriptionDefault = (proposalData.proposedDescription || '').toString().trim();
+    const breadcrumbs = Array.isArray(proposalData.breadcrumbs)
+        ? proposalData.breadcrumbs.filter((item) => !!normaliseVontologyId(item))
+        : [];
 
     return new Promise((resolve) => {
         const { modal, content } = _createModalElement();
@@ -271,6 +426,13 @@ export function openCreateConceptModal(conceptId, initialKind) {
         const form = document.createElement('div');
         form.className = 'create-concept-modal-form';
 
+        if (breadcrumbs.length) {
+            const breadcrumb = document.createElement('p');
+            breadcrumb.className = 'create-concept-modal-breadcrumb';
+            breadcrumb.textContent = `Create path: ${breadcrumbs.join(' > ')}`;
+            form.appendChild(breadcrumb);
+        }
+
         const kindRow = document.createElement('div');
         kindRow.className = 'create-concept-modal-row';
         const kindLabelEl = document.createElement('label');
@@ -287,10 +449,45 @@ export function openCreateConceptModal(conceptId, initialKind) {
         kindRow.appendChild(kindLabelEl);
         kindRow.appendChild(kindSelect);
 
+        const nameRow = document.createElement('div');
+        nameRow.className = 'create-concept-modal-row';
+        const nameLabel = document.createElement('label');
+        nameLabel.textContent = 'Name:';
+        nameLabel.htmlFor = `${titleId}_name`;
+        const nameInput = document.createElement('input');
+        nameInput.id = `${titleId}_name`;
+        nameInput.type = 'text';
+        nameInput.autocomplete = 'off';
+        nameInput.value = proposedNameDefault;
+        nameRow.appendChild(nameLabel);
+        nameRow.appendChild(nameInput);
+
+        const descriptionRow = document.createElement('div');
+        descriptionRow.className = 'create-concept-modal-row';
+        const descriptionLabel = document.createElement('label');
+        descriptionLabel.textContent = 'Description (optional):';
+        descriptionLabel.htmlFor = `${titleId}_description`;
+        const descriptionInput = document.createElement('textarea');
+        descriptionInput.id = `${titleId}_description`;
+        descriptionInput.rows = 3;
+        descriptionInput.value = proposedDescriptionDefault;
+        descriptionRow.appendChild(descriptionLabel);
+        descriptionRow.appendChild(descriptionInput);
+
+        const parentSuggestionChoiceName = `${titleId}_parent_choice`;
+        const parentSuggestionRow = document.createElement('div');
+        parentSuggestionRow.className = 'create-concept-modal-row create-concept-parent-suggestions-row';
+        const parentSuggestionLabel = document.createElement('label');
+        parentSuggestionLabel.textContent = 'Parent suggestions:';
+        parentSuggestionRow.appendChild(parentSuggestionLabel);
+        const parentSuggestionList = document.createElement('div');
+        parentSuggestionList.className = 'create-concept-parent-suggestions';
+        parentSuggestionRow.appendChild(parentSuggestionList);
+
         const parentRow = document.createElement('div');
         parentRow.className = 'create-concept-modal-row';
         const parentLabelEl = document.createElement('label');
-        parentLabelEl.textContent = 'Parent (optional):';
+        parentLabelEl.textContent = 'Manual parent ID (optional):';
         parentLabelEl.htmlFor = `${titleId}_parent`;
         const parentInput = document.createElement('input');
         parentInput.id = `${titleId}_parent`;
@@ -302,9 +499,76 @@ export function openCreateConceptModal(conceptId, initialKind) {
 
         const hint = document.createElement('p');
         hint.className = 'create-concept-modal-hint';
-        hint.textContent = 'Leave parent blank to use the default.';
+        hint.textContent = 'Choose a suggested parent or enter one manually.';
+
+        const suggestionOptionRows = [];
+        for (let idx = 0; idx < parentSuggestions.length; idx += 1) {
+            const suggestion = parentSuggestions[idx];
+            const optionLabel = document.createElement('label');
+            optionLabel.className = 'create-concept-parent-suggestion';
+
+            const optionInput = document.createElement('input');
+            optionInput.type = 'radio';
+            optionInput.name = parentSuggestionChoiceName;
+            optionInput.value = suggestion.conceptId;
+            optionInput.checked = idx === 0;
+            optionLabel.appendChild(optionInput);
+
+            const optionTextWrap = document.createElement('span');
+            optionTextWrap.className = 'create-concept-parent-suggestion-text';
+            const optionTitle = document.createElement('span');
+            optionTitle.className = 'create-concept-parent-suggestion-title';
+            optionTitle.textContent = `${suggestion.name} (${suggestion.conceptId})`;
+            optionTextWrap.appendChild(optionTitle);
+
+            const metaParts = [];
+            if (typeof suggestion.confidence === 'number') {
+                metaParts.push(`confidence ${(suggestion.confidence * 100).toFixed(0)}%`);
+            }
+            if (suggestion.provenance) {
+                metaParts.push(suggestion.provenance);
+            }
+            if (suggestion.rationale) {
+                metaParts.push(suggestion.rationale);
+            }
+            if (suggestion.exists === false) {
+                metaParts.push('missing (can be created first)');
+            }
+            if (metaParts.length) {
+                const optionMeta = document.createElement('span');
+                optionMeta.className = 'create-concept-parent-suggestion-meta';
+                optionMeta.textContent = metaParts.join(' | ');
+                optionTextWrap.appendChild(optionMeta);
+            }
+
+            optionLabel.appendChild(optionTextWrap);
+            parentSuggestionList.appendChild(optionLabel);
+            suggestionOptionRows.push({ input: optionInput, suggestion });
+        }
+
+        const manualOptionLabel = document.createElement('label');
+        manualOptionLabel.className = 'create-concept-parent-suggestion';
+        const manualOptionInput = document.createElement('input');
+        manualOptionInput.type = 'radio';
+        manualOptionInput.name = parentSuggestionChoiceName;
+        manualOptionInput.value = '__manual__';
+        manualOptionInput.checked = suggestionOptionRows.length === 0;
+        manualOptionLabel.appendChild(manualOptionInput);
+        const manualOptionText = document.createElement('span');
+        manualOptionText.className = 'create-concept-parent-suggestion-text';
+        manualOptionText.textContent = 'Manual parent';
+        manualOptionLabel.appendChild(manualOptionText);
+        parentSuggestionList.appendChild(manualOptionLabel);
+
+        if (suggestionOptionRows.length === 0) {
+            parentSuggestionLabel.textContent = 'Parent:';
+            parentSuggestionRow.style.display = 'none';
+        }
 
         form.appendChild(kindRow);
+        form.appendChild(nameRow);
+        form.appendChild(descriptionRow);
+        form.appendChild(parentSuggestionRow);
         form.appendChild(parentRow);
         form.appendChild(hint);
 
@@ -324,6 +588,25 @@ export function openCreateConceptModal(conceptId, initialKind) {
         content.appendChild(form);
         content.appendChild(actions);
 
+        function getSelectedSuggestion() {
+            for (const option of suggestionOptionRows) {
+                if (option.input.checked) return option.suggestion;
+            }
+            return null;
+        }
+
+        function isManualParentMode() {
+            return !!manualOptionInput.checked;
+        }
+
+        function updateParentModeUi() {
+            const manual = isManualParentMode();
+            parentRow.style.display = manual ? '' : 'none';
+            hint.textContent = manual
+                ? 'Leave manual parent blank to use the kind default.'
+                : 'You can switch to manual parent if none of the suggestions fit.';
+        }
+
         function cleanup(result) {
             try {
                 modal.classList.remove('open');
@@ -335,22 +618,45 @@ export function openCreateConceptModal(conceptId, initialKind) {
 
         function computeResult() {
             const k = normaliseKind(kindSelect.value) || 'type';
+            const selectedSuggestion = getSelectedSuggestion();
             const parentRaw = (parentInput.value || '').toString().trim();
-            const parentId = normaliseVontologyId(parentRaw || _defaultParentForCreateKind(k));
+            const chosenParentRaw = isManualParentMode()
+                ? (parentRaw || _defaultParentForCreateKind(k))
+                : (selectedSuggestion?.conceptId || _defaultParentForCreateKind(k));
+            const parentId = normaliseVontologyId(chosenParentRaw);
             if (!parentId) {
                 showToast('Parent concept ID is invalid.', 'error');
                 return null;
             }
+            if (parentId === id) {
+                showToast('Parent concept cannot equal concept ID.', 'error');
+                return null;
+            }
+            const name = (nameInput.value || '').toString().trim() || deriveNameFromConceptId(id);
+            const description = (descriptionInput.value || '').toString().trim();
+            const topSuggestion = parentSuggestions[0] || null;
             return {
                 createAsInstance: k === 'individual' || k === 'predicate',
                 parentId,
-                kind: k
+                kind: k,
+                name,
+                description,
+                selectedParentSuggested: !isManualParentMode() && !!selectedSuggestion,
+                selectedParentConfidence: selectedSuggestion?.confidence ?? null,
+                selectedParentRationale: selectedSuggestion?.rationale || '',
+                selectedParentProvenance: selectedSuggestion?.provenance || '',
+                selectedParentExists: selectedSuggestion?.exists !== false,
+                parentDecision: isManualParentMode()
+                    ? (topSuggestion ? 'manual_override' : 'manual_default')
+                    : (selectedSuggestion?.conceptId === topSuggestion?.conceptId ? 'accept_top_suggestion' : 'accept_suggestion'),
+                parentSuggestions: parentSuggestions.map((item) => ({ ...item }))
             };
         }
 
         kindSelect.addEventListener('change', () => {
             parentInput.placeholder = _defaultParentForCreateKind(kindSelect.value);
         });
+        parentSuggestionList.addEventListener('change', updateParentModeUi);
 
         createBtn.addEventListener('click', () => {
             const result = computeResult();
@@ -373,18 +679,16 @@ export function openCreateConceptModal(conceptId, initialKind) {
         document.body.appendChild(modal);
         modal.classList.add('open');
         modal.setAttribute('aria-hidden', 'false');
-        // Keep the header visible even if focus triggers scroll.
-        try { content.scrollTop = 0; } catch (_) { }
+        updateParentModeUi();
 
-        // Focus kind selector for quick keyboard interaction, but avoid scrolling.
+        try { content.scrollTop = 0; } catch (_) { }
         try {
-            if (typeof kindSelect.focus === 'function') {
-                kindSelect.focus({ preventScroll: true });
+            if (typeof nameInput.focus === 'function') {
+                nameInput.focus({ preventScroll: true });
             }
         } catch (_) {
-            try { kindSelect.focus(); } catch (_) { }
+            try { nameInput.focus(); } catch (_) { }
         }
-
         try { content.scrollTop = 0; } catch (_) { }
     });
 }
@@ -402,6 +706,149 @@ function deriveKindFromCreateOptions(createOpts, fallbackKind) {
     return 'type';
 }
 
+function shouldHydrateCreateProposal(detail, chooseCreateOptionsFn, deps) {
+    if (!detail || typeof detail !== 'object') return !chooseCreateOptionsFn;
+    if (detail.createProposal) return true;
+    if (detail.proposalContext) return true;
+    if (typeof deps?.fetchCreateProposalFn === 'function') return true;
+    return !chooseCreateOptionsFn;
+}
+
+async function buildCreateProposalForConcept(conceptId, kind, detail, fetchFn, fetchCreateProposalFn) {
+    const baseProposal = deriveCreateProposal(conceptId, detail);
+    const fetcher = fetchCreateProposalFn;
+    let fetchedSuggestions = [];
+    if (typeof fetcher === 'function') {
+        try {
+            const fetched = await fetcher({ conceptId, kind, detail });
+            if (fetched && Array.isArray(fetched.parentSuggestions)) {
+                fetchedSuggestions = fetched.parentSuggestions;
+                if (!baseProposal.proposedName && fetched.proposedName) {
+                    baseProposal.proposedName = fetched.proposedName;
+                }
+                if (!baseProposal.proposedDescription && fetched.proposedDescription) {
+                    baseProposal.proposedDescription = fetched.proposedDescription;
+                }
+            }
+        } catch (err) {
+            console.warn('[selectConceptById] custom proposal fetch failed', err);
+        }
+    } else {
+        fetchedSuggestions = await fetchParentSuggestionsBySearch(conceptId, kind, detail, fetchFn);
+    }
+    const mergedParentSuggestions = mergeParentSuggestions(baseProposal.parentSuggestions, fetchedSuggestions).slice(0, 3);
+    return {
+        proposedName: baseProposal.proposedName || deriveNameFromConceptId(conceptId),
+        proposedDescription: baseProposal.proposedDescription || '',
+        parentSuggestions: mergedParentSuggestions,
+        breadcrumbs: baseProposal.breadcrumbs || [],
+        lowConfidence: baseProposal.lowConfidence || mergedParentSuggestions.length === 0
+    };
+}
+
+function buildCreateDecisionTelemetryPayload({ conceptId, stage, createOpts, createProposal, error }) {
+    const normalisedConceptId = normaliseVontologyId(conceptId);
+    const parentId = normaliseVontologyId(createOpts?.parentId || '');
+    const chosenKind = deriveKindFromCreateOptions(createOpts, createOpts?.kind);
+    return {
+        conceptId: normalisedConceptId,
+        stage,
+        kind: chosenKind,
+        parentId: parentId || null,
+        parentDecision: createOpts?.parentDecision || null,
+        suggestionCount: Array.isArray(createProposal?.parentSuggestions) ? createProposal.parentSuggestions.length : 0,
+        selectedParentSuggested: !!createOpts?.selectedParentSuggested,
+        selectedParentConfidence: createOpts?.selectedParentConfidence ?? null,
+        error: error ? String(error.message || error) : null
+    };
+}
+
+async function emitCreateDecisionTelemetry(deps, payload) {
+    if (!payload) return;
+    try {
+        const trackCreateDecisionFn = deps?.trackCreateDecisionFn;
+        if (typeof trackCreateDecisionFn === 'function') {
+            await trackCreateDecisionFn(payload);
+            return;
+        }
+        console.info('[selectConceptById] create telemetry', payload);
+    } catch (err) {
+        console.warn('[selectConceptById] telemetry dispatch failed', err);
+    }
+}
+
+async function ensureParentChainExistsForCreate({
+    conceptId,
+    createOpts,
+    fallbackKind,
+    detail,
+    fetchFn,
+    chooseCreateOptionsFn,
+    fetchCreateProposalFn,
+    stack = []
+}) {
+    const id = normaliseVontologyId(conceptId);
+    const parentId = normaliseVontologyId(createOpts?.parentId || '');
+    if (!id || !parentId) return;
+    if (parentId === '#V#thing' || parentId === '#V#predicate') return;
+    if (parentId === id) {
+        throw new Error('Parent concept cannot equal concept ID.');
+    }
+    if (stack.includes(parentId)) {
+        throw new Error('Circular parent chain detected.');
+    }
+
+    const exists = await conceptExists(parentId, fetchFn);
+    if (exists) return;
+
+    const nextStack = [...stack, id];
+    const parentKind = normaliseKind(fallbackKind) === 'predicate' ? 'predicate' : 'type';
+    const breadcrumbs = [...nextStack, parentId];
+    const recursiveDetail = {
+        conceptId: parentId,
+        kind: parentKind,
+        modifierKeys: detail?.modifierKeys || {},
+        proposalContext: detail?.proposalContext || null,
+        createProposal: {
+            proposedName: deriveNameFromConceptId(parentId),
+            parentSuggestions: [],
+            breadcrumbs
+        }
+    };
+    const recursiveProposal = await buildCreateProposalForConcept(
+        parentId,
+        parentKind,
+        recursiveDetail,
+        fetchFn,
+        fetchCreateProposalFn
+    );
+    const recursiveCreateOpts = chooseCreateOptionsFn
+        ? await chooseCreateOptionsFn({
+            conceptId: parentId,
+            kind: parentKind,
+            modifierKeys: detail?.modifierKeys || {},
+            isRecursiveParentCreate: true,
+            childConceptId: id,
+            proposal: recursiveProposal
+        })
+        : await openCreateConceptModal(parentId, parentKind, recursiveProposal);
+    if (!recursiveCreateOpts) {
+        throw new Error(`Parent creation cancelled for ${parentId}`);
+    }
+
+    await ensureParentChainExistsForCreate({
+        conceptId: parentId,
+        createOpts: recursiveCreateOpts,
+        fallbackKind: parentKind,
+        detail: recursiveDetail,
+        fetchFn,
+        chooseCreateOptionsFn,
+        fetchCreateProposalFn,
+        stack: nextStack
+    });
+    await createConceptForId(parentId, recursiveCreateOpts, fetchFn);
+}
+
 /**
  * Handles the global 'von:selectConceptById' event detail payload.
  *
@@ -411,7 +858,9 @@ function deriveKindFromCreateOptions(createOpts, fallbackKind) {
  * - selectVontologyNodeByIdentifier(conceptId, createConceptTab)
  * Optional:
  * - fetchFn (default window.fetch)
- * - confirmFn/promptFn (default window.confirm/prompt)
+ * - chooseCreateOptionsFn(payload)
+ * - fetchCreateProposalFn(payload)
+ * - trackCreateDecisionFn(payload)
  */
 export async function handleSelectConceptByIdDetail(detail, deps) {
     const conceptIdRaw = detail?.conceptId;
@@ -473,10 +922,33 @@ export async function handleSelectConceptByIdDetail(detail, deps) {
     }
 
     const chooseCreateOptionsFn = deps?.chooseCreateOptionsFn;
+    const fetchCreateProposalFn = deps?.fetchCreateProposalFn;
+    let createProposal = deriveCreateProposal(id, detail);
+    if (shouldHydrateCreateProposal(detail, chooseCreateOptionsFn, deps)) {
+        try {
+            createProposal = await buildCreateProposalForConcept(
+                id,
+                kind,
+                detail,
+                fetchFn,
+                fetchCreateProposalFn
+            );
+        } catch (err) {
+            console.warn('[selectConceptById] proposal hydration failed', err);
+            createProposal = deriveCreateProposal(id, detail);
+        }
+    }
+
     const createOpts = chooseCreateOptionsFn
-        ? await chooseCreateOptionsFn({ conceptId: id, kind, modifierKeys })
-        : await openCreateConceptModal(id, kind);
+        ? await chooseCreateOptionsFn({ conceptId: id, kind, modifierKeys, proposal: createProposal })
+        : await openCreateConceptModal(id, kind, createProposal);
     if (!createOpts) {
+        await emitCreateDecisionTelemetry(deps, buildCreateDecisionTelemetryPayload({
+            conceptId: id,
+            stage: 'cancelled',
+            createOpts: null,
+            createProposal
+        }));
         try {
             deps?.closeDynamicConceptTab?.(id);
         } catch (_) {
@@ -492,16 +964,51 @@ export async function handleSelectConceptByIdDetail(detail, deps) {
         // Best-effort; keep going.
     }
 
+    await emitCreateDecisionTelemetry(deps, buildCreateDecisionTelemetryPayload({
+        conceptId: id,
+        stage: 'confirmed',
+        createOpts,
+        createProposal
+    }));
+
     try {
         const chosenKind = deriveKindFromCreateOptions(createOpts, kind);
         showToast(`Creating ${kindLabel(chosenKind)}…`, 'info');
+        await ensureParentChainExistsForCreate({
+            conceptId: id,
+            createOpts,
+            fallbackKind: kind,
+            detail,
+            fetchFn,
+            chooseCreateOptionsFn,
+            fetchCreateProposalFn,
+            stack: []
+        });
         await createConceptForId(id, createOpts, fetchFn);
         const metadata = await fetchConceptMetadata(id, fetchFn);
         updateCartouchesForConcept(id, metadata);
         deps.createOrActivateConceptTab(id, metadata?.displayName || id, shouldActivate);
         showToast('Concept created.', 'info');
+        await emitCreateDecisionTelemetry(deps, buildCreateDecisionTelemetryPayload({
+            conceptId: id,
+            stage: 'succeeded',
+            createOpts,
+            createProposal
+        }));
     } catch (err) {
+        const message = (err && err.message) ? String(err.message) : 'Unknown error';
         console.warn('[selectConceptById] create failed', err);
-        showToast(`Failed to create concept: ${(err && err.message) ? err.message : 'Unknown error'}`, 'error');
+        if (message.toLowerCase().includes('cancelled')) {
+            showToast('Creation cancelled.', 'info');
+        } else {
+            showToast(`Failed to create concept: ${message}`, 'error');
+        }
+        await emitCreateDecisionTelemetry(deps, buildCreateDecisionTelemetryPayload({
+            conceptId: id,
+            stage: 'failed',
+            createOpts,
+            createProposal,
+            error: err
+        }));
     }
 }
