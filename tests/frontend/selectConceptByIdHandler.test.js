@@ -134,8 +134,8 @@ describe('handleSelectConceptByIdDetail', () => {
         expect(chooseCreateOptionsFn).toHaveBeenCalled();
         expect(createOrActivateConceptTab).toHaveBeenCalledWith('#V#disambiguation_result', 'Loading…', false);
         expect(createOrActivateConceptTab).toHaveBeenCalledWith('#V#disambiguation_result', 'Disambiguation result', false);
-        // Existence check + create + metadata fetch.
-        expect(fetchFn).toHaveBeenCalledTimes(3);
+        // Initial existence check + re-check before create + create + metadata fetch.
+        expect(fetchFn).toHaveBeenCalledTimes(4);
 
         expect(cartouche.querySelector('.vontology-cartouche-name').textContent).toBe('Disambiguation result');
         expect(cartouche.querySelector('.vontology-cartouche-kind').textContent).toBe('Type');
@@ -401,5 +401,50 @@ describe('handleSelectConceptByIdDetail', () => {
             childConceptId: '#V#child_concept'
         }));
         expect(createOrder).toEqual(['Missing parent', 'Child concept']);
+    });
+
+    test('handles revisited concept race by opening existing concept without create call', async () => {
+        const { handleSelectConceptByIdDetail } = require(handlerPath);
+
+        const createOrActivateConceptTab = jest.fn();
+        const activateTab = jest.fn();
+        const selectVontologyNodeByIdentifier = jest.fn();
+        const chooseCreateOptionsFn = jest.fn(async () => ({
+            createAsInstance: false,
+            parentId: '#V#thing',
+            kind: 'type',
+            name: 'Race concept'
+        }));
+
+        let existenceChecks = 0;
+        const fetchFn = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/vontology/api/vontology/node_content')) {
+                if (url.includes('raw_only=1')) {
+                    return Promise.resolve({
+                        ok: true,
+                        status: 200,
+                        json: async () => ({ display_name: 'Race concept', kind: 'type', concept_id: '#V#race_concept' })
+                    });
+                }
+                existenceChecks += 1;
+                if (existenceChecks === 1) {
+                    return Promise.resolve({ ok: false, status: 404, text: async () => 'missing on first check' });
+                }
+                return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({}) });
+            }
+            if (typeof url === 'string' && url === '/vontology/api/vontology/create_concept') {
+                throw new Error('create_concept should not be called when concept appears before create');
+            }
+            return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({}) });
+        });
+
+        await handleSelectConceptByIdDetail(
+            { conceptId: '#V#race_concept', createConceptTab: true, kind: 'type', modifierKeys: {} },
+            { createOrActivateConceptTab, activateTab, selectVontologyNodeByIdentifier, fetchFn, chooseCreateOptionsFn }
+        );
+
+        expect(chooseCreateOptionsFn).toHaveBeenCalled();
+        expect(existenceChecks).toBe(2);
+        expect(createOrActivateConceptTab).toHaveBeenCalledWith('#V#race_concept', 'Race concept', false);
     });
 });

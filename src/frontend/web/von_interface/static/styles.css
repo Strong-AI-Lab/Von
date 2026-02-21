@@ -848,6 +848,16 @@ body {
     color: #475569;
 }
 
+.create-concept-parent-preview {
+    font-size: 0.78rem;
+    line-height: 1.35;
+    color: #334155;
+    border: 1px solid #dbe4f0;
+    border-radius: 6px;
+    padding: 8px 10px;
+    background: #f8fbff;
+}
+
 .create-concept-modal-breadcrumb {
     font-size: 0.78rem;
     color: #475569;

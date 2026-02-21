@@ -501,6 +501,9 @@ export function openCreateConceptModal(conceptId, initialKind, proposal = null) 
         hint.className = 'create-concept-modal-hint';
         hint.textContent = 'Choose a suggested parent or enter one manually.';
 
+        const parentPreview = document.createElement('div');
+        parentPreview.className = 'create-concept-parent-preview';
+
         const suggestionOptionRows = [];
         for (let idx = 0; idx < parentSuggestions.length; idx += 1) {
             const suggestion = parentSuggestions[idx];
@@ -569,6 +572,7 @@ export function openCreateConceptModal(conceptId, initialKind, proposal = null) 
         form.appendChild(nameRow);
         form.appendChild(descriptionRow);
         form.appendChild(parentSuggestionRow);
+        form.appendChild(parentPreview);
         form.appendChild(parentRow);
         form.appendChild(hint);
 
@@ -605,6 +609,28 @@ export function openCreateConceptModal(conceptId, initialKind, proposal = null) 
             hint.textContent = manual
                 ? 'Leave manual parent blank to use the kind default.'
                 : 'You can switch to manual parent if none of the suggestions fit.';
+            const selectedSuggestion = getSelectedSuggestion();
+            if (manual) {
+                parentPreview.textContent = 'Manual parent mode. Enter a concept ID, or leave blank for the kind default.';
+            } else if (selectedSuggestion) {
+                const previewLines = [];
+                previewLines.push(`Selected parent: ${selectedSuggestion.name} (${selectedSuggestion.conceptId})`);
+                if (typeof selectedSuggestion.confidence === 'number') {
+                    previewLines.push(`Confidence: ${(selectedSuggestion.confidence * 100).toFixed(0)}%`);
+                }
+                if (selectedSuggestion.provenance) {
+                    previewLines.push(`Provenance: ${selectedSuggestion.provenance}`);
+                }
+                if (selectedSuggestion.rationale) {
+                    previewLines.push(`Rationale: ${selectedSuggestion.rationale}`);
+                }
+                if (selectedSuggestion.exists === false) {
+                    previewLines.push('This parent does not currently exist and can be created inline.');
+                }
+                parentPreview.textContent = previewLines.join(' ');
+            } else {
+                parentPreview.textContent = '';
+            }
         }
 
         function cleanup(result) {
@@ -655,6 +681,19 @@ export function openCreateConceptModal(conceptId, initialKind, proposal = null) 
 
         kindSelect.addEventListener('change', () => {
             parentInput.placeholder = _defaultParentForCreateKind(kindSelect.value);
+        });
+        parentSuggestionList.addEventListener('keydown', (event) => {
+            const isArrow = event.key === 'ArrowDown' || event.key === 'ArrowUp';
+            if (!isArrow) return;
+            const radios = Array.from(parentSuggestionList.querySelectorAll(`input[name="${parentSuggestionChoiceName}"]`));
+            if (!radios.length) return;
+            const activeIndex = radios.findIndex((radio) => radio.checked);
+            const currentIndex = activeIndex >= 0 ? activeIndex : 0;
+            const delta = event.key === 'ArrowDown' ? 1 : -1;
+            const nextIndex = (currentIndex + delta + radios.length) % radios.length;
+            radios[nextIndex].checked = true;
+            radios[nextIndex].dispatchEvent(new Event('change', { bubbles: true }));
+            event.preventDefault();
         });
         parentSuggestionList.addEventListener('change', updateParentModeUi);
 
@@ -974,6 +1013,24 @@ export async function handleSelectConceptByIdDetail(detail, deps) {
     try {
         const chosenKind = deriveKindFromCreateOptions(createOpts, kind);
         showToast(`Creating ${kindLabel(chosenKind)}…`, 'info');
+        try {
+            const existsAfterConfirmation = await conceptExists(id, fetchFn);
+            if (existsAfterConfirmation) {
+                const existingMetadata = await fetchConceptMetadata(id, fetchFn);
+                updateCartouchesForConcept(id, existingMetadata);
+                deps.createOrActivateConceptTab(id, existingMetadata?.displayName || id, shouldActivate);
+                showToast('Concept already exists; opened existing concept.', 'info');
+                await emitCreateDecisionTelemetry(deps, buildCreateDecisionTelemetryPayload({
+                    conceptId: id,
+                    stage: 'revisited_existing',
+                    createOpts,
+                    createProposal
+                }));
+                return;
+            }
+        } catch (_) {
+            // If re-check fails, proceed with create and rely on idempotent 409 handling.
+        }
         await ensureParentChainExistsForCreate({
             conceptId: id,
             createOpts,

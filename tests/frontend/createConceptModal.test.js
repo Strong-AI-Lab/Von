@@ -123,4 +123,30 @@ describe('openCreateConceptModal', () => {
             parentDecision: 'manual_override'
         }));
     });
+
+    test('updates parent preview when suggestion selection changes', async () => {
+        const { openCreateConceptModal } = require(handlerPath);
+
+        const p = openCreateConceptModal('#V#workflow_result', 'type', {
+            parentSuggestions: [
+                { conceptId: '#V#process', name: 'Process', confidence: 0.8, rationale: 'Top', provenance: 'explicit' },
+                { conceptId: '#V#workflow', name: 'Workflow', confidence: 0.6, rationale: 'Secondary', provenance: 'implicit' }
+            ]
+        });
+
+        const modal = document.querySelector('.modal');
+        expect(modal).not.toBeNull();
+
+        const preview = modal.querySelector('.create-concept-parent-preview');
+        expect(preview.textContent).toContain('#V#process');
+
+        const secondRadio = modal.querySelector('input[type="radio"][value="#V#workflow"]');
+        secondRadio.click();
+        secondRadio.dispatchEvent(new Event('change', { bubbles: true }));
+        expect(preview.textContent).toContain('#V#workflow');
+
+        const cancelBtn = Array.from(modal.querySelectorAll('button')).find(b => b.textContent === 'Cancel');
+        cancelBtn.click();
+        await p;
+    });
 });
