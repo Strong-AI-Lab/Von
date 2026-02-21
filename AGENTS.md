@@ -27,6 +27,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 21. **Proactive hygiene**: Periodically review touched files and their neighbours for inconsistency, duplication, and drift. Fix proactively.
 22. In docs/examples for secret env vars, use explicit placeholders like `<YOUR-CLIENT-SECRET-HERE>` and avoid token-like sample strings that can trigger secret scanners.
 23. **Workflow-first behaviours**: strongly prefer Vontology workflows (definitions, instances, event bindings, schedules) to drive Von behaviour instead of adding specialised orchestration code. Add bespoke code only when workflow primitives cannot express the behaviour, and document the gap in Jira.
+24. **Policy over task wording**: if a Jira issue suggests implementation in specialised orchestration code but the behaviour can be expressed as a Vontology workflow, enforce workflow-first policy and reinterpret/revise the task accordingly. In these cases, limit code changes to missing tools/validators/telemetry needed by the workflow, and add a Jira comment documenting the reinterpretation.
 
 ## Core AI-Focused Documents
 - `docs/AINotes.md`: short-term memory and tactical log.
@@ -81,7 +82,8 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 	2. Prefer creating/updating workflow instances and definitions over adding task-specific Python orchestration (`workflow_create_instance`, `workflow_get_instance`, `workflow_list_instances`).
 	3. Prefer durable bindings/schedules for repeat behaviour (`workflow_bind_event`, `workflow_create_schedule`, `workflow_set_schedule_enabled`, `workflow_trigger_schedule`).
 	4. Use operational controls instead of ad-hoc runtime flags (`workflow_cancel_instance`, `workflow_retry_instance`, `workflow_delete_schedule`).
-	5. If workflow tools cannot express the requirement, explicitly document the constraint and create/link a Jira capability-gap issue before introducing specialised code.
+	5. If Jira wording conflicts with this policy, treat the workflow-first policy as authoritative: reinterpret the Jira task, leave a note in Jira, and proceed with workflow definitions plus supporting tool work.
+	6. If workflow tools still cannot express the requirement, explicitly document the constraint and create/link a Jira capability-gap issue before introducing specialised code.
 - For fairly complex capability improvements, run a background search for related Jira issues, Confluence design docs, and existing Vontology concepts before proposing a plan.
 - **No hard-coded ontology lists**: do not add fixed lists of predicate/type IDs or names in code. If you believe a hard-coded list is unavoidable, you must:
 	- explain why Vontology lookup is not viable,

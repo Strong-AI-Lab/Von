@@ -7585,6 +7585,104 @@ def _jira_get_auth_config_input_schema() -> Schema:
     )
 
 
+def _jira_hygiene_discover_input_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "project_key": (str, type(None)),
+            "candidate_epic_keys": (list, type(None)),
+            "max_issues": (int, str, type(None)),
+            "max_epics": (int, str, type(None)),
+            "include_cross_cutting": (bool, str, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "jira_hygiene_discover input: optional project_key/candidate_epic_keys "
+            "and paging controls (max_issues, max_epics)."
+        ),
+    )
+
+
+def _jira_hygiene_propose_input_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "epic_catalogue": (list, type(None)),
+            "orphan_candidates": (list, type(None)),
+            "cross_cutting_candidates": (list, type(None)),
+            "batch_size": (int, str, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "jira_hygiene_propose input: discovery payload fields (epic_catalogue, "
+            "orphan_candidates, cross_cutting_candidates) and optional batch_size."
+        ),
+    )
+
+
+def _jira_hygiene_check_approval_input_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "ready_to_execute": (list, type(None)),
+            "execution_mode": (str, type(None)),
+            "approved": (bool, str, type(None)),
+            "excluded_issue_keys": (list, type(None)),
+            "overrides": (dict, type(None)),
+            "batch_size": (int, str, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "jira_hygiene_check_approval input: proposal operations plus approval "
+            "controls (approved, excluded_issue_keys, overrides, batch_size)."
+        ),
+    )
+
+
+def _jira_hygiene_execute_batches_input_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "approved_operations": (list, type(None)),
+            "execution_mode": (str, type(None)),
+            "approved": (bool, str, type(None)),
+            "batch_size": (int, str, type(None)),
+            "max_retries": (int, str, type(None)),
+            "retry_backoff_seconds": (int, float, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "jira_hygiene_execute_batches input: approved operations plus execution "
+            "controls (batch_size, max_retries, retry_backoff_seconds)."
+        ),
+    )
+
+
+def _jira_hygiene_emit_audit_input_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "project_key": (str, type(None)),
+            "execution_mode": (str, type(None)),
+            "proposal_summary": (dict, type(None)),
+            "execution_summary": (dict, type(None)),
+            "approved_operations": (list, type(None)),
+            "needs_decision": (list, type(None)),
+            "emit_epic_comments": (bool, str, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "jira_hygiene_emit_audit input: proposal/execution summaries with "
+            "optional epic-level audit comment emission."
+        ),
+    )
+
+
 def _jira_get_auth_config_output_schema() -> Schema:
     return Schema(
         required={
@@ -10138,6 +10236,104 @@ def _jira_get_auth_config(**kwargs):
     return inspect_jira_auth_config()
 
 
+def _jira_hygiene_discover(**kwargs):
+    from ...services.jira_hygiene_service import discover_jira_hygiene
+
+    return discover_jira_hygiene(
+        search_issues=lambda **search_kwargs: _jira_search(**search_kwargs),
+        project_key=kwargs.get("project_key"),
+        candidate_epic_keys=kwargs.get("candidate_epic_keys"),
+        max_issues=kwargs.get("max_issues"),
+        max_epics=kwargs.get("max_epics"),
+        include_cross_cutting=_coerce_bool_input(
+            kwargs.get("include_cross_cutting"),
+            default=True,
+        ),
+    )
+
+
+def _jira_hygiene_propose(**kwargs):
+    from ...services.jira_hygiene_service import propose_jira_hygiene_plan
+
+    discovery_payload = kwargs.get("discovery_payload")
+    if not isinstance(discovery_payload, dict):
+        discovery_payload = {}
+
+    return propose_jira_hygiene_plan(
+        epic_catalogue=kwargs.get("epic_catalogue")
+        or discovery_payload.get("epic_catalogue"),
+        orphan_candidates=kwargs.get("orphan_candidates")
+        or discovery_payload.get("orphan_candidates"),
+        cross_cutting_candidates=kwargs.get("cross_cutting_candidates")
+        or discovery_payload.get("cross_cutting_candidates"),
+        batch_size=kwargs.get("batch_size"),
+    )
+
+
+def _jira_hygiene_check_approval(**kwargs):
+    from ...services.jira_hygiene_service import check_jira_hygiene_approval
+
+    proposal_payload = kwargs.get("proposal_payload")
+    if not isinstance(proposal_payload, dict):
+        proposal_payload = {}
+
+    return check_jira_hygiene_approval(
+        ready_to_execute=kwargs.get("ready_to_execute")
+        or proposal_payload.get("ready_to_execute"),
+        execution_mode=kwargs.get("execution_mode"),
+        approved=kwargs.get("approved"),
+        excluded_issue_keys=kwargs.get("excluded_issue_keys"),
+        overrides=kwargs.get("overrides"),
+        batch_size=kwargs.get("batch_size"),
+    )
+
+
+def _jira_hygiene_execute_batches(**kwargs):
+    from ...services.jira_hygiene_service import execute_jira_hygiene_batches
+
+    approval_payload = kwargs.get("approval_payload")
+    if not isinstance(approval_payload, dict):
+        approval_payload = {}
+
+    approval_decision = approval_payload.get("approval_decision")
+    approved_from_payload = (
+        approval_decision.get("approved")
+        if isinstance(approval_decision, dict)
+        else None
+    )
+
+    return execute_jira_hygiene_batches(
+        update_issue=lambda **update_kwargs: _jira_update_issue(**update_kwargs),
+        add_comment=lambda **comment_kwargs: _jira_add_comment(**comment_kwargs),
+        approved_operations=kwargs.get("approved_operations")
+        or approval_payload.get("approved_operations"),
+        execution_mode=kwargs.get("execution_mode")
+        or approval_payload.get("execution_mode"),
+        approved=kwargs.get("approved")
+        if kwargs.get("approved") is not None
+        else approved_from_payload,
+        batch_size=kwargs.get("batch_size")
+        or approval_payload.get("resolved_batch_size"),
+        max_retries=kwargs.get("max_retries"),
+        retry_backoff_seconds=kwargs.get("retry_backoff_seconds"),
+    )
+
+
+def _jira_hygiene_emit_audit(**kwargs):
+    from ...services.jira_hygiene_service import emit_jira_hygiene_audit
+
+    return emit_jira_hygiene_audit(
+        add_comment=lambda **comment_kwargs: _jira_add_comment(**comment_kwargs),
+        project_key=kwargs.get("project_key"),
+        execution_mode=kwargs.get("execution_mode"),
+        proposal_summary=kwargs.get("proposal_summary"),
+        execution_summary=kwargs.get("execution_summary"),
+        approved_operations=kwargs.get("approved_operations"),
+        needs_decision=kwargs.get("needs_decision"),
+        emit_epic_comments=kwargs.get("emit_epic_comments"),
+    )
+
+
 def _chat_get_prompt_context(
     *,
     namespace: str | None = None,
@@ -12604,6 +12800,21 @@ def build_default_catalogue() -> MethodCatalogue:
     )
     jira_get_myself_output_schema = _jira_generic_output_schema("get_myself")
     jira_get_auth_config_output_schema = _jira_get_auth_config_output_schema()
+    jira_hygiene_discover_output_schema = _jira_generic_output_schema(
+        "hygiene_discover"
+    )
+    jira_hygiene_propose_output_schema = _jira_generic_output_schema(
+        "hygiene_propose"
+    )
+    jira_hygiene_check_approval_output_schema = _jira_generic_output_schema(
+        "hygiene_check_approval"
+    )
+    jira_hygiene_execute_batches_output_schema = _jira_generic_output_schema(
+        "hygiene_execute_batches"
+    )
+    jira_hygiene_emit_audit_output_schema = _jira_generic_output_schema(
+        "hygiene_emit_audit"
+    )
     task_create_output_schema = _task_generic_output_schema("create")
     task_get_output_schema = _task_generic_output_schema("get")
     task_list_output_schema = _task_generic_output_schema("list")
@@ -13454,6 +13665,66 @@ def build_default_catalogue() -> MethodCatalogue:
             description=(
                 "Inspect Jira auth configuration (base URL, email, whether a token is present) from environment variables. "
                 "Does not contact Jira and never returns the token. Use when Jira calls return 401 and you need to confirm which account is configured."
+            ),
+        ),
+        MethodDefinition(
+            name="jira_hygiene_discover",
+            handler=_jira_hygiene_discover,
+            input_schema=_jira_hygiene_discover_input_schema(),
+            output_schema=jira_hygiene_discover_output_schema,
+            category="read",
+            timeout_sec=25.0,
+            description=(
+                "Discover Jira hygiene candidates for a project: epic catalogue, true orphans, "
+                "and optional cross-cutting candidates with bounded query sizes."
+            ),
+        ),
+        MethodDefinition(
+            name="jira_hygiene_propose",
+            handler=_jira_hygiene_propose,
+            input_schema=_jira_hygiene_propose_input_schema(),
+            output_schema=jira_hygiene_propose_output_schema,
+            category="read",
+            timeout_sec=20.0,
+            description=(
+                "Build a dry-run Jira hygiene proposal grouped by target epic, with ready-to-execute "
+                "operations, ambiguous items needing human decision, and no-action items."
+            ),
+        ),
+        MethodDefinition(
+            name="jira_hygiene_check_approval",
+            handler=_jira_hygiene_check_approval,
+            input_schema=_jira_hygiene_check_approval_input_schema(),
+            output_schema=jira_hygiene_check_approval_output_schema,
+            category="read",
+            timeout_sec=15.0,
+            description=(
+                "Apply approval-gate controls to Jira hygiene proposals (approved flag, exclusions, "
+                "overrides, batch size) and emit approved_operations plus boolean result."
+            ),
+        ),
+        MethodDefinition(
+            name="jira_hygiene_execute_batches",
+            handler=_jira_hygiene_execute_batches,
+            input_schema=_jira_hygiene_execute_batches_input_schema(),
+            output_schema=jira_hygiene_execute_batches_output_schema,
+            category="write",
+            timeout_sec=40.0,
+            description=(
+                "Execute approved Jira hygiene operations in batches with bounded retry/backoff and "
+                "checkpoint telemetry for partial-progress safety."
+            ),
+        ),
+        MethodDefinition(
+            name="jira_hygiene_emit_audit",
+            handler=_jira_hygiene_emit_audit,
+            input_schema=_jira_hygiene_emit_audit_input_schema(),
+            output_schema=jira_hygiene_emit_audit_output_schema,
+            category="write",
+            timeout_sec=20.0,
+            description=(
+                "Emit structured Jira hygiene audit output and, when enabled, post concise per-epic "
+                "audit comments after execution."
             ),
         ),
         MethodDefinition(
