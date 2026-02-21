@@ -215,6 +215,11 @@ def test_build_registry_prioritises_vontology_on_overlap(monkeypatch):
     )
     monkeypatch.setattr(
         registry_factory,
+        "get_planning_workflow_registration",
+        lambda: _build_registration("#V#planning", purpose="planning"),
+    )
+    monkeypatch.setattr(
+        registry_factory,
         "discover_workflow_ids",
         lambda: [overlap_workflow_id],
     )

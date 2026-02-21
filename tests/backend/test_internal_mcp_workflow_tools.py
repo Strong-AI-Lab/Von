@@ -290,6 +290,7 @@ def test_workflow_list_definitions_exists_and_returns_data():
     # (rag_sync_workflow is registered in build_durable_workflow_registry)
     assert "#V#rag_text_relation_sync_workflow" in def_ids
     assert "#V#generate_considerations_workflow" in def_ids
+    assert "#V#planning_workflow" in def_ids
     assert any("description_source" in d for d in result["definitions"])
     assert any("definition_identity" in d for d in result["definitions"])
     first_definition = result["definitions"][0]
