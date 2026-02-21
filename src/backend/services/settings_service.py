@@ -48,6 +48,11 @@ SHOW_TOOL_USE_DURING_THINKING_SETTING_NAME = "show_tool_use_during_thinking"
 
 # Admin: allow disabling write-tool conservatism for internal MCP write tools.
 DISABLE_WRITE_TOOL_CONSERVATISM_SETTING_NAME = "disable_write_tool_conservatism"
+# Admin: require explicit human review approval phrasing for high-impact
+# Vontology write tools (JVNAUTOSCI-925).
+REQUIRE_HUMAN_REVIEW_FOR_HIGH_IMPACT_KB_WRITES_SETTING_NAME = (
+    "require_human_review_for_high_impact_kb_writes"
+)
 
 # Prefixes for contextual (scoped) LLM settings (Phase 2 scaffold)
 _ACTIVE_LLM_USER_PREFIX = f"{ACTIVE_LLM_SETTING_NAME}:user:"
@@ -175,6 +180,7 @@ def get_all_settings_batch() -> Dict[str, Any]:
         INTERNAL_MCP_MAX_TOOL_INVOCATIONS_SETTING_NAME,
         INTERNAL_MCP_TOOL_BATCH_CAP_SETTING_NAME,
         DISABLE_WRITE_TOOL_CONSERVATISM_SETTING_NAME,
+        REQUIRE_HUMAN_REVIEW_FOR_HIGH_IMPACT_KB_WRITES_SETTING_NAME,
     ]
 
     raw = get_settings_batch(setting_names)
@@ -210,6 +216,10 @@ def get_all_settings_batch() -> Dict[str, Any]:
         ),
         "disable_write_tool_conservatism": _coerce_bool(
             raw.get(DISABLE_WRITE_TOOL_CONSERVATISM_SETTING_NAME), default=False
+        ),
+        "require_human_review_for_high_impact_kb_writes": _coerce_bool(
+            raw.get(REQUIRE_HUMAN_REVIEW_FOR_HIGH_IMPACT_KB_WRITES_SETTING_NAME),
+            default=False,
         ),
     }
 
@@ -964,6 +974,20 @@ def get_disable_write_tool_conservatism() -> bool:
 
 def set_disable_write_tool_conservatism(disabled: bool) -> bool:
     return update_setting(DISABLE_WRITE_TOOL_CONSERVATISM_SETTING_NAME, bool(disabled))
+
+
+def get_require_human_review_for_high_impact_kb_writes() -> bool:
+    """Return whether high-impact KB writes require explicit human approval."""
+
+    val = get_setting(REQUIRE_HUMAN_REVIEW_FOR_HIGH_IMPACT_KB_WRITES_SETTING_NAME)
+    return _coerce_bool(val, default=False)
+
+
+def set_require_human_review_for_high_impact_kb_writes(required: bool) -> bool:
+    return update_setting(
+        REQUIRE_HUMAN_REVIEW_FOR_HIGH_IMPACT_KB_WRITES_SETTING_NAME,
+        bool(required),
+    )
 
 
 def _coerce_int_setting(

@@ -613,6 +613,7 @@ def _upsert_text_relation(**kwargs):
     text = kwargs.get("text")
     language = kwargs.get("language", "en-NZ")
     context = kwargs.get("context")
+    provenance = kwargs.get("provenance")
     namespace = kwargs.get("namespace")
 
     if not concept_id:
@@ -645,6 +646,7 @@ def _upsert_text_relation(**kwargs):
             predicate=predicate,
             text=text,
             lang=language,
+            provenance=provenance if isinstance(provenance, dict) else None,
             context=context,
         )
 

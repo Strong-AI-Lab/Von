@@ -192,3 +192,107 @@ def test_settings_endpoint_updates_auto_proceed_minimal_imposition(monkeypatch):
 
         assert resp.status_code == 200
         assert captured["enabled"] is False
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        (None, False),
+        ("", False),
+        ("false", False),
+        ("0", False),
+        (0, False),
+        ("true", True),
+        ("1", True),
+        (1, True),
+        (True, True),
+    ],
+)
+def test_get_require_human_review_for_high_impact_kb_writes_coerces(
+    raw: Any, expected: bool, monkeypatch
+):
+    monkeypatch.setattr(settings_service, "get_setting", lambda _name: raw)
+    assert (
+        settings_service.get_require_human_review_for_high_impact_kb_writes()
+        is expected
+    )
+
+
+def test_settings_endpoint_rejects_high_impact_review_flag_for_non_admin(monkeypatch):
+    app = _make_settings_app()
+
+    called = {"hit": False}
+
+    def _setter(_required: bool) -> bool:
+        called["hit"] = True
+        return True
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.set_require_human_review_for_high_impact_kb_writes",
+        _setter,
+    )
+
+    with app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["role_in_org"] = "member"
+
+        resp = client.post(
+            "/api/settings/",
+            json={"require_human_review_for_high_impact_kb_writes": True},
+        )
+
+        assert resp.status_code == 403
+        assert called["hit"] is False
+
+
+def test_settings_endpoint_allows_high_impact_review_flag_for_admin(monkeypatch):
+    app = _make_settings_app()
+
+    captured: dict[str, Any] = {}
+
+    def _setter(required: bool) -> bool:
+        captured["required"] = required
+        return True
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.set_require_human_review_for_high_impact_kb_writes",
+        _setter,
+    )
+
+    with app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["role_in_org"] = "owner"
+
+        resp = client.post(
+            "/api/settings/",
+            json={"require_human_review_for_high_impact_kb_writes": True},
+        )
+
+        assert resp.status_code == 200
+        assert captured["required"] is True
+
+
+def test_settings_endpoint_only_returns_high_impact_review_flag_for_admin(monkeypatch):
+    app = _make_settings_app()
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.get_require_human_review_for_high_impact_kb_writes",
+        lambda: True,
+    )
+
+    with app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["role_in_org"] = "member"
+
+        resp = client.get("/api/settings/")
+        assert resp.status_code == 200
+        payload = resp.get_json() or {}
+        assert "require_human_review_for_high_impact_kb_writes" not in payload
+
+        with client.session_transaction() as sess:
+            sess["role_in_org"] = "admin"
+
+        resp2 = client.get("/api/settings/")
+        assert resp2.status_code == 200
+        payload2 = resp2.get_json() or {}
+        assert payload2.get("require_human_review_for_high_impact_kb_writes") is True

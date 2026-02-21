@@ -37,6 +37,8 @@ from ...services.settings_service import (
     set_internal_mcp_tool_batch_cap,
     get_disable_write_tool_conservatism,
     set_disable_write_tool_conservatism,
+    get_require_human_review_for_high_impact_kb_writes,
+    set_require_human_review_for_high_impact_kb_writes,
     get_buttonify_model_enabled,
     set_buttonify_model_enabled,
     set_auto_proceed_minimal_imposition_enabled,
@@ -601,9 +603,13 @@ def get_all_settings():
             settings["disable_write_tool_conservatism"] = (
                 get_disable_write_tool_conservatism()
             )
+            settings["require_human_review_for_high_impact_kb_writes"] = (
+                get_require_human_review_for_high_impact_kb_writes()
+            )
         else:
             # Remove admin-only setting if it leaked via batch query
             settings.pop("disable_write_tool_conservatism", None)
+            settings.pop("require_human_review_for_high_impact_kb_writes", None)
         # Optional resolution using query args
         user_concept_id = request.args.get("user_concept_id")
         org_concept_id = request.args.get(
@@ -652,6 +658,28 @@ def save_all_settings():
             current_app.logger.warning(
                 "disable_write_tool_conservatism updated: %s",
                 disabled,
+            )
+
+        if "require_human_review_for_high_impact_kb_writes" in data:
+            if not _is_admin_or_owner_session():
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": "Admin privileges required to update require_human_review_for_high_impact_kb_writes.",
+                        }
+                    ),
+                    403,
+                )
+
+            try:
+                required = bool(data.get("require_human_review_for_high_impact_kb_writes"))
+            except Exception:
+                required = False
+            set_require_human_review_for_high_impact_kb_writes(required)
+            current_app.logger.warning(
+                "require_human_review_for_high_impact_kb_writes updated: %s",
+                required,
             )
 
         if "active_llm" in data and data["active_llm"]:

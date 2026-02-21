@@ -107,3 +107,34 @@ def test_explicit_note_request_allows_text_relation_write():
 
     assert "upsert_text_relation" in decision.allowed_tools
     assert decision.reason == "explicit_vontology_mutation_request"
+
+
+def test_high_impact_tool_detection():
+    from src.backend.workflows.write_tool_policy import (
+        is_high_impact_vontology_write_tool,
+    )
+
+    assert is_high_impact_vontology_write_tool("create_concepts") is True
+    assert is_high_impact_vontology_write_tool("add_relationship") is True
+    assert is_high_impact_vontology_write_tool("upsert_text_relation") is False
+
+
+def test_prompt_grants_high_impact_kb_write_approval():
+    from src.backend.workflows.write_tool_policy import (
+        prompt_grants_high_impact_kb_write_approval,
+    )
+
+    assert (
+        prompt_grants_high_impact_kb_write_approval(
+            prompt="Approved. Proceed with the Vontology concept write.",
+            recent_user_prompts=[],
+        )
+        is True
+    )
+    assert (
+        prompt_grants_high_impact_kb_write_approval(
+            prompt="Please create a concept in the ontology.",
+            recent_user_prompts=[],
+        )
+        is False
+    )

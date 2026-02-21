@@ -10,12 +10,27 @@ caused by the model emitting an unrelated tool call.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 
 @dataclass(frozen=True)
 class WriteToolPolicyDecision:
     allowed_tools: frozenset[str]
     reason: str
+
+
+# High-impact KB writes mutate ontology structure and should be review-gated when
+# the admin toggle is enabled (JVNAUTOSCI-925).
+HIGH_IMPACT_VONTOLOGY_WRITE_TOOLS: frozenset[str] = frozenset(
+    {
+        "create_concepts",
+        "add_relationship",
+        "remove_relationship",
+        "merge_concepts",
+        "delete_concept",
+        "update_concept",
+    }
+)
 
 
 def compute_allowed_write_tools(
@@ -80,6 +95,55 @@ def compute_allowed_write_tools(
     )
 
 
+def is_high_impact_vontology_write_tool(tool_name: str) -> bool:
+    """Return whether a tool is considered high-impact for ontology writes."""
+
+    if not isinstance(tool_name, str):
+        return False
+    return tool_name.strip().lower() in HIGH_IMPACT_VONTOLOGY_WRITE_TOOLS
+
+
+def prompt_grants_high_impact_kb_write_approval(
+    *,
+    prompt: str,
+    recent_user_prompts: list[str] | None = None,
+) -> bool:
+    """Detect explicit human approval phrasing for high-impact KB writes.
+
+    This is intentionally strict: simple write intent ("add", "create") is not
+    treated as review approval. We require explicit approval language.
+    """
+
+    candidates: list[str] = []
+    if isinstance(prompt, str) and prompt.strip():
+        candidates.append(prompt.strip())
+    for item in recent_user_prompts or []:
+        if isinstance(item, str) and item.strip():
+            candidates.append(item.strip())
+
+    if not candidates:
+        return False
+
+    approval_pattern = re.compile(
+        r"\b("
+        r"approved|approve this|i approve|explicitly approved|"
+        r"go ahead|proceed now|proceed with write|authori[sz]e(?:d)?|"
+        r"you may write|human review complete|reviewed and approved|"
+        r"confirmed(?: for write)?|permission granted"
+        r")\b",
+        flags=re.IGNORECASE,
+    )
+    kb_context_pattern = re.compile(
+        r"\b(vontology|ontology|knowledge base|kb|concept|relationship|predicate)\b",
+        flags=re.IGNORECASE,
+    )
+
+    for text in candidates:
+        if approval_pattern.search(text) and kb_context_pattern.search(text):
+            return True
+    return False
+
+
 def prompt_explicitly_denies_write(prompt: str) -> bool:
     """Return True when the user explicitly forbids write-side effects."""
 
@@ -87,7 +151,6 @@ def prompt_explicitly_denies_write(prompt: str) -> bool:
         return False
 
     lowered = prompt.lower()
-    import re
 
     verbs = (
         "create",
@@ -154,8 +217,6 @@ def _prompt_allows_vontology_mutation(prompt: str) -> bool:
     if not mentions_vontology:
         return False
 
-    import re
-
     verbs = (
         "create",
         "add",
@@ -195,8 +256,6 @@ def _prompt_allows_artefact_download(prompt: str) -> bool:
         return False
 
     lowered = prompt.lower()
-
-    import re
 
     action_verbs = (
         "get",

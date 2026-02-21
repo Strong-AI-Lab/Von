@@ -64,6 +64,8 @@ from ...workflows.durable.registry_factory import (
 
 from src.backend.workflows.write_tool_policy import (
     compute_allowed_write_tools,
+    is_high_impact_vontology_write_tool,
+    prompt_grants_high_impact_kb_write_approval,
     prompt_explicitly_denies_write,
 )
 from ...services.turn_execution_record_service import build_turn_execution_record
@@ -509,6 +511,8 @@ class InternalMCPChatOrchestrator:
         "update_text_relation": ("concept_id",),
         "create_concepts": ("parent_id",),
     }
+    _HIGH_IMPACT_REVIEW_REASON = "high_impact_kb_write_requires_human_review"
+    _HIGH_IMPACT_NAMESPACE_REASON = "high_impact_kb_write_requires_namespace"
 
     def __init__(
         self,
@@ -1001,6 +1005,7 @@ class InternalMCPChatOrchestrator:
             user_namespace=env.user_namespace,
             selected_gmail_profile=env.default_gmail_profile,
             conversation_session_id=request.data.get("conversation_session_id"),
+            turn_id=request.data.get("turn_id"),
         )
 
         try:
@@ -3034,6 +3039,7 @@ class InternalMCPChatOrchestrator:
             user_namespace=env.user_namespace,
             selected_gmail_profile=gmail_profile,
             conversation_session_id=conversation_session_id,
+            turn_id=data.get("turn_id"),
         )
         if preflight.warnings:
             try:
@@ -3077,6 +3083,7 @@ class InternalMCPChatOrchestrator:
                     user_namespace=env.user_namespace,
                     selected_gmail_profile=gmail_profile,
                     conversation_session_id=conversation_session_id,
+                    turn_id=data.get("turn_id"),
                 )
                 if not preflight.errors:
                     tool_calls = repaired_calls
@@ -3211,6 +3218,7 @@ class InternalMCPChatOrchestrator:
                 )
 
         write_policy_reason = data.get("write_policy_reason", "")
+        turn_id = data.get("turn_id")
 
         for tool_request in tool_calls:
             iteration_count += 1
@@ -3244,6 +3252,14 @@ class InternalMCPChatOrchestrator:
 
             # Write-policy gate.
             tool_category = tool_categories.get(tool_name)
+            write_interaction_metadata: dict[str, Any] | None = None
+            if tool_category == "write":
+                write_interaction_metadata = self._build_write_interaction_metadata(
+                    tool_name=tool_name,
+                    user_namespace=env.user_namespace,
+                    conversation_session_id=conversation_session_id,
+                    turn_id=turn_id if isinstance(turn_id, str) else None,
+                )
             if tool_category == "write" and tool_name not in allowed_write_tools:
                 allowed_write_tools, write_policy_reason = (
                     self._resolve_allowed_write_tools(
@@ -3262,9 +3278,9 @@ class InternalMCPChatOrchestrator:
                 )
 
             if tool_category == "write" and tool_name not in allowed_write_tools:
-                message = (
-                    f"Blocked write tool {tool_name!r}: the user request appears read-only. "
-                    "If you intended to perform a write, restate the request explicitly."
+                message = self._build_blocked_write_message(
+                    tool_name=tool_name,
+                    reason=write_policy_reason if isinstance(write_policy_reason, str) else None,
                 )
                 tool_payload = self._format_tool_result(
                     tool_name, None, None, "error", message
@@ -3277,6 +3293,59 @@ class InternalMCPChatOrchestrator:
                 }
                 if write_policy_reason:
                     blocked_record["write_policy_reason"] = write_policy_reason
+                if write_interaction_metadata:
+                    blocked_record["knowledge_interaction"] = write_interaction_metadata
+                if call_id:
+                    blocked_record["call_id"] = call_id
+                invocations.append(blocked_record)
+                if callable(emit_progress):
+                    emit_progress(
+                        {
+                            "status": "tool_blocked",
+                            "tool": tool_name,
+                            "batch_size": current_batch_size,
+                            "tool_calls_done": iteration_count,
+                            "tool_calls_cap": int(max_tool_invocations),
+                            "tool_calls_remaining": max(
+                                0, max_tool_invocations - iteration_count
+                            ),
+                            "call_id": call_id,
+                            "error": message,
+                        }
+                    )
+                augmented_context.append({"role": "tool", "content": tool_payload})
+                tool_messages.append({"role": "tool", "content": tool_payload})
+                continue
+
+            high_impact_guard_reason: str | None = None
+            if tool_category == "write":
+                high_impact_guard_reason = self._evaluate_high_impact_write_guard(
+                    tool_name=tool_name,
+                    prompt=prompt if isinstance(prompt, str) else "",
+                    recent_user_prompts=list(recent_user_prompts or []),
+                    user_namespace=env.user_namespace,
+                )
+
+            if tool_category == "write" and high_impact_guard_reason:
+                message = self._build_blocked_write_message(
+                    tool_name=tool_name,
+                    reason=high_impact_guard_reason,
+                )
+                tool_payload = self._format_tool_result(
+                    tool_name, None, None, "error", message
+                )
+                blocked_record = {
+                    "tool": tool_name,
+                    "payload": dict(payload),
+                    "error": message,
+                    "blocked": True,
+                    "write_policy_reason": high_impact_guard_reason,
+                }
+                if write_interaction_metadata:
+                    blocked_record["knowledge_interaction"] = {
+                        **write_interaction_metadata,
+                        "guard_reason": high_impact_guard_reason,
+                    }
                 if call_id:
                     blocked_record["call_id"] = call_id
                 invocations.append(blocked_record)
@@ -3309,6 +3378,7 @@ class InternalMCPChatOrchestrator:
                     user_namespace=env.user_namespace,
                     selected_gmail_profile=gmail_profile,
                     conversation_session_id=conversation_session_id,
+                    turn_id=data.get("turn_id"),
                 )
 
                 result = self._gateway.invoke(tool_name, payload)
@@ -3364,6 +3434,8 @@ class InternalMCPChatOrchestrator:
                     invocation_record["effective_payload"] = dict(payload)
                 if auto_retry_details:
                     invocation_record["auto_retry"] = auto_retry_details
+                if write_interaction_metadata:
+                    invocation_record["knowledge_interaction"] = write_interaction_metadata
                 if call_id:
                     invocation_record["call_id"] = call_id
                 invocations.append(invocation_record)
@@ -3398,6 +3470,8 @@ class InternalMCPChatOrchestrator:
                     "payload": dict(payload),
                     "error": str(exc),
                 }
+                if write_interaction_metadata:
+                    error_record["knowledge_interaction"] = write_interaction_metadata
                 if call_id:
                     error_record["call_id"] = call_id
                 invocations.append(error_record)
@@ -7600,6 +7674,7 @@ class InternalMCPChatOrchestrator:
         user_namespace: str | None,
         selected_gmail_profile: str | None,
         conversation_session_id: str | None = None,
+        turn_id: str | None = None,
     ) -> _ToolCallPreflightResult:
         errors: list[str] = []
         warnings: list[str] = []
@@ -7639,6 +7714,7 @@ class InternalMCPChatOrchestrator:
                 user_namespace=user_namespace,
                 selected_gmail_profile=selected_gmail_profile,
                 conversation_session_id=conversation_session_id,
+                turn_id=turn_id,
             )
             # Deterministically resolve close-but-invalid concept IDs for
             # write tools before schema validation/execution.
@@ -7683,6 +7759,7 @@ class InternalMCPChatOrchestrator:
         user_namespace: str | None,
         selected_gmail_profile: str | None,
         conversation_session_id: str | None = None,
+        turn_id: str | None = None,
     ) -> None:
         if tool_name.startswith("gmail_"):
             if not payload.get("profile") and selected_gmail_profile:
@@ -7694,10 +7771,139 @@ class InternalMCPChatOrchestrator:
         if user_namespace and "namespace" not in payload:
             payload["namespace"] = user_namespace
 
+        # Preserve user-attribution for auto-created concepts so namespace
+        # isolation has a deterministic provenance trail (JVNAUTOSCI-925).
+        if (
+            tool_name == "create_concepts"
+            and "created_by_concept_id" not in payload
+            and user_namespace
+        ):
+            actor_concept_id = self._derive_actor_concept_id_from_namespace(
+                user_namespace
+            )
+            if actor_concept_id:
+                payload["created_by_concept_id"] = actor_concept_id
+
+        # Attach lightweight provenance for auto text writes so generated
+        # content remains attributable in text_value provenance fields.
+        if tool_name in {"upsert_text_relation", "upsert_singleton_text_relation"}:
+            provenance_payload = payload.get("provenance")
+            provenance: dict[str, Any] = (
+                dict(provenance_payload)
+                if isinstance(provenance_payload, Mapping)
+                else {}
+            )
+            provenance.setdefault("source", "internal_mcp_orchestrator")
+            provenance.setdefault("path", "auto_extension")
+            if isinstance(user_namespace, str) and user_namespace.strip():
+                namespace = user_namespace.strip()
+                provenance.setdefault("namespace", namespace)
+                actor_concept_id = self._derive_actor_concept_id_from_namespace(
+                    namespace
+                )
+                if actor_concept_id:
+                    provenance.setdefault("actor_concept_id", actor_concept_id)
+            if isinstance(conversation_session_id, str) and conversation_session_id:
+                provenance.setdefault("conversation_session_id", conversation_session_id)
+            if isinstance(turn_id, str) and turn_id:
+                provenance.setdefault("turn_id", turn_id)
+            if provenance:
+                payload["provenance"] = provenance
+
         # JVNAUTOSCI-1040: Inject conversation session ID for task_create
         if tool_name == "task_create" and conversation_session_id:
             if "originating_session_id" not in payload and "session_id" not in payload:
                 payload["originating_session_id"] = conversation_session_id
+
+    @staticmethod
+    def _derive_actor_concept_id_from_namespace(namespace: str | None) -> str | None:
+        if not isinstance(namespace, str):
+            return None
+        cleaned = namespace.strip()
+        if not cleaned or not cleaned.startswith("#V#"):
+            return None
+        if "@" not in cleaned:
+            return cleaned
+        user_part = cleaned.split("@", 1)[0].strip()
+        return user_part or None
+
+    @staticmethod
+    def _is_high_impact_review_mode_enabled() -> bool:
+        try:
+            from src.backend.services.settings_service import (
+                get_require_human_review_for_high_impact_kb_writes,
+            )
+
+            return bool(get_require_human_review_for_high_impact_kb_writes())
+        except Exception:
+            return False
+
+    def _evaluate_high_impact_write_guard(
+        self,
+        *,
+        tool_name: str,
+        prompt: str,
+        recent_user_prompts: list[str],
+        user_namespace: str | None,
+    ) -> str | None:
+        if not self._is_high_impact_review_mode_enabled():
+            return None
+        if not is_high_impact_vontology_write_tool(tool_name):
+            return None
+        if not (isinstance(user_namespace, str) and user_namespace.strip()):
+            return self._HIGH_IMPACT_NAMESPACE_REASON
+        approved = prompt_grants_high_impact_kb_write_approval(
+            prompt=prompt,
+            recent_user_prompts=recent_user_prompts,
+        )
+        if not approved:
+            return self._HIGH_IMPACT_REVIEW_REASON
+        return None
+
+    def _build_blocked_write_message(
+        self,
+        *,
+        tool_name: str,
+        reason: str | None,
+    ) -> str:
+        if reason == self._HIGH_IMPACT_NAMESPACE_REASON:
+            return (
+                f"Blocked high-impact Vontology write tool {tool_name!r}: "
+                "an authenticated namespace is required to preserve namespace isolation."
+            )
+        if reason == self._HIGH_IMPACT_REVIEW_REASON:
+            return (
+                f"Blocked high-impact Vontology write tool {tool_name!r}: "
+                "human review approval is required. Include explicit approval wording "
+                "for the Vontology mutation and retry."
+            )
+        return (
+            f"Blocked write tool {tool_name!r}: the user request appears read-only. "
+            "If you intended to perform a write, restate the request explicitly."
+        )
+
+    def _build_write_interaction_metadata(
+        self,
+        *,
+        tool_name: str,
+        user_namespace: str | None,
+        conversation_session_id: str | None,
+        turn_id: str | None,
+        guard_reason: str | None = None,
+    ) -> dict[str, Any]:
+        actor_concept_id = self._derive_actor_concept_id_from_namespace(user_namespace)
+        metadata: dict[str, Any] = {
+            "type": "knowledge_interaction",
+            "tool": tool_name,
+            "namespace": user_namespace,
+            "actor_concept_id": actor_concept_id,
+            "conversation_session_id": conversation_session_id,
+            "turn_id": turn_id,
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        if guard_reason:
+            metadata["guard_reason"] = guard_reason
+        return metadata
 
     def _tool_call_repair_enabled(self) -> bool:
         return os.getenv("VON_TOOL_CALL_REPAIR_ENABLE", "1").lower() in {
