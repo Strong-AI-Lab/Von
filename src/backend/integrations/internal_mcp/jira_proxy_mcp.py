@@ -129,6 +129,11 @@ class JiraMCPProxy:
     async def link_issue(self, *, payload: Dict[str, Any]) -> Dict[str, Any]:
         return await self._call("jira_link_issue", {"payload": payload})
 
+    async def delete_issue_link(self, *, issue_link_id: str) -> Dict[str, Any]:
+        return await self._call(
+            "jira_delete_issue_link", {"issue_link_id": issue_link_id}
+        )
+
     async def get_myself(self) -> Dict[str, Any]:
         return await self._call("jira_get_myself", {})
 

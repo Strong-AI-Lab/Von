@@ -95,6 +95,7 @@ from src.backend.integrations.internal_mcp.catalogue import _add_relationship
 from src.backend.integrations.internal_mcp.catalogue import _jira_add_comment
 from src.backend.integrations.internal_mcp.catalogue import _jira_add_attachment
 from src.backend.integrations.internal_mcp.catalogue import _jira_create_issue
+from src.backend.integrations.internal_mcp.catalogue import _jira_delete_issue_link
 from src.backend.integrations.internal_mcp.catalogue import _jira_get_auth_config
 from src.backend.integrations.internal_mcp.catalogue import _jira_get_issue
 from src.backend.integrations.internal_mcp.catalogue import _jira_get_transitions
@@ -2358,6 +2359,17 @@ async def _handle_jira_link_issue(arguments: dict[str, Any]) -> list[TextContent
     )
 
 
+async def _handle_jira_delete_issue_link(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _jira_delete_issue_link,
+        arguments,
+        tool_family_label="Jira",
+        suggestions=["Check Jira authentication and network connectivity"],
+    )
+
+
 async def _handle_jira_get_myself(arguments: dict[str, Any]) -> list[TextContent]:
     return _run_catalogue_proxy_handler(
         _jira_get_myself,
@@ -2776,6 +2788,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "jira_create_issue": _handle_jira_create_issue,
     "jira_update_issue": _handle_jira_update_issue,
     "jira_link_issue": _handle_jira_link_issue,
+    "jira_delete_issue_link": _handle_jira_delete_issue_link,
     "jira_get_myself": _handle_jira_get_myself,
     "jira_get_auth_config": _handle_jira_get_auth_config,
     "renderer_resolve_applicability": _handle_renderer_resolve_applicability,

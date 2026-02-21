@@ -12,6 +12,7 @@ JIRA_TOOL_NAMES = {
     "jira_create_issue",
     "jira_update_issue",
     "jira_link_issue",
+    "jira_delete_issue_link",
     "jira_get_myself",
     "jira_get_auth_config",
 }

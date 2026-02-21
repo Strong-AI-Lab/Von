@@ -15,6 +15,7 @@ from src.backend.integrations.internal_mcp.catalogue import (
     _jira_create_issue,
     _jira_update_issue,
     _jira_link_issue,
+    _jira_delete_issue_link,
     _jira_transition_issue,
     build_default_catalogue,
 )
@@ -31,6 +32,7 @@ def test_jira_methods_registered_in_catalogue():
     assert "jira_create_issue" in names
     assert "jira_update_issue" in names
     assert "jira_link_issue" in names
+    assert "jira_delete_issue_link" in names
     assert "jira_transition" in names
     assert "jira_get_myself" in names
     assert "jira_get_auth_config" in names
@@ -80,6 +82,10 @@ def test_jira_handlers_require_minimum_fields():
     err_link = _jira_link_issue(link_type="Blocks")
     assert err_link.get("success") is False
     assert "link_type" in err_link.get("error", "")
+
+    err_delete = _jira_delete_issue_link(issue_link_id=None)
+    assert err_delete.get("success") is False
+    assert "issue_link_id" in err_delete.get("error", "")
 
 
 def test_jira_write_tools_allowlist_and_dry_run_defaults():
@@ -175,6 +181,22 @@ def test_jira_write_tools_allowlist_and_dry_run_defaults():
     assert bad_link.get("success") is False
     assert bad_link.get("error_code") == "project_not_allowlisted"
 
+    ok_delete = _jira_delete_issue_link(
+        issue_link_id="12345",
+        source_issue_key="JVNAUTOSCI-1",
+    )
+    assert ok_delete.get("success") is True
+    assert ok_delete.get("dry_run") is True
+    assert ok_delete.get("executed") is False
+    assert ok_delete.get("issue_link_id") == "12345"
+
+    bad_delete = _jira_delete_issue_link(
+        issue_link_id="12345",
+        source_issue_key="OTHER-2",
+    )
+    assert bad_delete.get("success") is False
+    assert bad_delete.get("error_code") == "project_not_allowlisted"
+
 
 def test_jira_write_tools_require_approval_when_not_dry_run():
     # Should fail closed before any external call.
@@ -215,6 +237,85 @@ def test_jira_get_transitions_proxy_error_through_gateway_invoke(monkeypatch):
     payload = result.payload
     assert payload.get("success") is False
     assert payload.get("error_code") == "jira_proxy_error"
+
+
+def test_jira_delete_issue_link_success_through_gateway_invoke(monkeypatch):
+    from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
+    from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
+
+    class _FakeProxy:
+        async def delete_issue_link(self, *, issue_link_id: str):
+            assert issue_link_id == "10001"
+            return {"status_code": 204}
+
+    async def _fake_get_jira_proxy():
+        return _FakeProxy()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.jira_proxy_mcp.get_jira_proxy",
+        _fake_get_jira_proxy,
+    )
+
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+
+    result = gateway.invoke(
+        "jira_delete_issue_link",
+        {
+            "issue_link_id": "10001",
+            "source_issue_key": "JVNAUTOSCI-1152",
+            "target_issue_key": "JVNAUTOSCI-1150",
+            "dry_run": False,
+            "approved": True,
+        },
+    )
+    payload = result.payload
+    assert payload.get("success") is True
+    assert payload.get("dry_run") is False
+    assert payload.get("executed") is True
+    assert payload.get("action") == "delete_issue_link"
+    assert payload.get("issue_link_id") == "10001"
+    assert payload.get("status_code") == 204
+
+
+def test_jira_delete_issue_link_proxy_error_through_gateway_invoke(monkeypatch):
+    from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
+    from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
+    from src.backend.integrations.internal_mcp.jira_proxy_mcp import JiraProxyError
+
+    class _FailingProxy:
+        async def delete_issue_link(self, *, issue_link_id: str):  # noqa: ARG002
+            raise JiraProxyError("proxy unavailable")
+
+    async def _fake_get_jira_proxy():
+        return _FailingProxy()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.jira_proxy_mcp.get_jira_proxy",
+        _fake_get_jira_proxy,
+    )
+
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+
+    result = gateway.invoke(
+        "jira_delete_issue_link",
+        {
+            "issue_link_id": "10001",
+            "source_issue_key": "JVNAUTOSCI-1152",
+            "dry_run": False,
+            "approved": True,
+        },
+    )
+    payload = result.payload
+    assert payload.get("success") is False
+    assert payload.get("error_code") == "JIRA_ERROR"
 
 
 def test_jira_add_attachment_validation_rejects_disallowed_mime_type():

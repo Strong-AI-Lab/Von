@@ -73,6 +73,7 @@ VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES: tuple[str, ...] = (
     "jira_add_comment",
     "jira_add_attachment",
     "jira_create_issue",
+    "jira_delete_issue_link",
     "jira_get_auth_config",
     "jira_get_issue",
     "jira_get_myself",

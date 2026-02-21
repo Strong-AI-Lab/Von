@@ -181,6 +181,11 @@ def jira_put(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     return _request_json("PUT", url, payload=payload)
 
 
+def jira_delete(endpoint: str) -> Dict[str, Any]:
+    url = f"{JIRA_BASE_URL}/rest/api/3/{endpoint}"
+    return _request_json("DELETE", url)
+
+
 def jira_add_attachment(
     *,
     issue_key: str,
@@ -707,6 +712,23 @@ async def list_tools() -> List[types.Tool]:
                 "required": ["payload"],
             },
         ),
+        types.Tool(
+            name="jira_delete_issue_link",
+            description=(
+                "Delete an issue link via DELETE /rest/api/3/issueLink/{issue_link_id}. "
+                "Requires a Jira issue link ID."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_link_id": {
+                        "type": "string",
+                        "description": "Jira issue link ID",
+                    }
+                },
+                "required": ["issue_link_id"],
+            },
+        ),
     ]
 
 
@@ -900,6 +922,18 @@ async def call_tool(
             }
             return [types.TextContent(type="text", text=json.dumps(error, indent=2))]
         result = jira_post("issueLink", payload)
+        text = json.dumps(result, indent=2)
+        return [types.TextContent(type="text", text=text)]
+
+    elif name == "jira_delete_issue_link":
+        issue_link_id = str(arguments["issue_link_id"]).strip()
+        if not issue_link_id:
+            error = {
+                "success": False,
+                "error": "issue_link_id is required",
+            }
+            return [types.TextContent(type="text", text=json.dumps(error, indent=2))]
+        result = jira_delete(f"issueLink/{issue_link_id}")
         text = json.dumps(result, indent=2)
         return [types.TextContent(type="text", text=text)]
 

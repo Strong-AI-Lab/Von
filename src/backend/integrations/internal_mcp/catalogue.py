@@ -7540,6 +7540,30 @@ def _jira_link_issue_input_schema() -> Schema:
     )
 
 
+def _jira_delete_issue_link_input_schema() -> Schema:
+    return Schema(
+        required={
+            "issue_link_id": str,
+        },
+        optional={
+            # Optional issue keys allow allow-list checks to remain project-scoped.
+            "source_issue_key": (str, type(None)),
+            "target_issue_key": (str, type(None)),
+            "dry_run": (bool,),
+            "approved": (bool,),
+            "execute": (bool,),
+            "request_id": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "jira_delete_issue_link input: issue_link_id (required). "
+            "At least one of source_issue_key or target_issue_key is required for project allow-list validation. "
+            "Guardrails: dry_run (default true), approved, execute "
+            "(requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
+        ),
+    )
+
+
 def _jira_get_myself_input_schema() -> Schema:
     return Schema(
         required={},
@@ -9943,6 +9967,144 @@ def _jira_link_issue(**kwargs):
             "dry_run": False,
             "executed": True,
             "action": "link_issue",
+            "result": result,
+        }
+    except JiraProxyError as exc:
+        return make_error_response("JIRA_ERROR", str(exc))
+
+
+def _jira_delete_issue_link(**kwargs):
+    import logging
+    from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
+
+    logger = logging.getLogger(__name__)
+
+    issue_link_id_raw = kwargs.get("issue_link_id")
+    issue_link_id = (
+        str(issue_link_id_raw).strip() if issue_link_id_raw is not None else ""
+    )
+    if not issue_link_id:
+        return make_error_response(
+            "MISSING_PARAMS",
+            "Missing required parameter: issue_link_id",
+            suggestions=["Provide the Jira issue link ID to delete."],
+        )
+
+    if not issue_link_id.isdigit():
+        return make_error_response(
+            "INVALID_ISSUE_LINK_ID",
+            "Invalid issue_link_id format; expected a numeric Jira link ID",
+            suggestions=["Use a numeric link ID from Jira issue link metadata."],
+        )
+
+    def _clean_issue_key_param(name: str) -> str | None:
+        value = kwargs.get(name)
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        return cleaned or None
+
+    source_key = _clean_issue_key_param("source_issue_key")
+    target_key = _clean_issue_key_param("target_issue_key")
+
+    source_project = (
+        _jira_project_from_issue_key(source_key) if isinstance(source_key, str) else None
+    )
+    if source_key and not source_project:
+        return make_error_response(
+            "INVALID_ISSUE_KEY",
+            "Invalid source_issue_key format; expected PROJECT-123",
+            suggestions=["Use the format PROJECT-123 for source_issue_key."],
+        )
+
+    target_project = (
+        _jira_project_from_issue_key(target_key) if isinstance(target_key, str) else None
+    )
+    if target_key and not target_project:
+        return make_error_response(
+            "INVALID_ISSUE_KEY",
+            "Invalid target_issue_key format; expected PROJECT-123",
+            suggestions=["Use the format PROJECT-123 for target_issue_key."],
+        )
+
+    project_keys: list[str] = []
+    if source_project:
+        project_keys.append(source_project)
+    if target_project and target_project not in project_keys:
+        project_keys.append(target_project)
+
+    if not project_keys:
+        return make_error_response(
+            "MISSING_PARAMS",
+            "Missing allow-list context: provide source_issue_key and/or target_issue_key",
+            suggestions=[
+                "Include source_issue_key and/or target_issue_key so project allow-list guardrails can be enforced."
+            ],
+        )
+
+    dry_run = bool(kwargs.get("dry_run", True))
+    approved = bool(kwargs.get("approved", False))
+    execute = bool(kwargs.get("execute", False))
+    request_id = kwargs.get("request_id")
+
+    guardrail_error = _jira_write_guardrails(
+        action="delete_issue_link",
+        project_keys=project_keys,
+        dry_run=dry_run,
+        approved=approved,
+        execute=execute,
+    )
+    if guardrail_error is not None:
+        return guardrail_error
+
+    if isinstance(request_id, str) and request_id.strip() and not dry_run:
+        cached = _jira_cache_get("jira_delete_issue_link", request_id.strip())
+        if cached is not None:
+            cached["reused"] = True
+            return cached
+
+    if dry_run:
+        return {
+            "success": True,
+            "dry_run": True,
+            "executed": False,
+            "action": "delete_issue_link",
+            "issue_link_id": issue_link_id,
+            "source_issue_key": source_key,
+            "target_issue_key": target_key,
+            "proposed_endpoint": f"/rest/api/3/issueLink/{issue_link_id}",
+        }
+
+    async def _async_delete():
+        proxy = await get_jira_proxy()
+        return await proxy.delete_issue_link(issue_link_id=issue_link_id)
+
+    try:
+        logger.info(
+            "[jira_write] delete_issue_link link_id=%s source=%s target=%s",
+            issue_link_id,
+            source_key,
+            target_key,
+        )
+        result = _run_async_compat(_async_delete)
+        if isinstance(result, dict):
+            result = dict(result)
+            result.setdefault("success", True)
+            result["dry_run"] = False
+            result["executed"] = True
+            result["action"] = "delete_issue_link"
+            result["issue_link_id"] = issue_link_id
+            result["source_issue_key"] = source_key
+            result["target_issue_key"] = target_key
+            if isinstance(request_id, str) and request_id.strip():
+                _jira_cache_set("jira_delete_issue_link", request_id.strip(), result)
+            return result
+        return {
+            "success": True,
+            "dry_run": False,
+            "executed": True,
+            "action": "delete_issue_link",
+            "issue_link_id": issue_link_id,
             "result": result,
         }
     except JiraProxyError as exc:
@@ -12415,6 +12577,9 @@ def build_default_catalogue() -> MethodCatalogue:
     jira_create_issue_output_schema = _jira_generic_output_schema("create_issue")
     jira_update_issue_output_schema = _jira_generic_output_schema("update_issue")
     jira_link_issue_output_schema = _jira_generic_output_schema("link_issue")
+    jira_delete_issue_link_output_schema = _jira_generic_output_schema(
+        "delete_issue_link"
+    )
     jira_get_myself_output_schema = _jira_generic_output_schema("get_myself")
     jira_get_auth_config_output_schema = _jira_get_auth_config_output_schema()
     task_create_output_schema = _task_generic_output_schema("create")
@@ -13221,6 +13386,19 @@ def build_default_catalogue() -> MethodCatalogue:
             description=(
                 "Create a Jira issue link (e.g. Relates) with safety guardrails. Default dry_run=true (no mutation). "
                 "Both issue projects must be allow-listed. "
+                "To execute, pass dry_run=false and either approved=true or execute=true with VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1."
+            ),
+        ),
+        MethodDefinition(
+            name="jira_delete_issue_link",
+            handler=_jira_delete_issue_link,
+            input_schema=_jira_delete_issue_link_input_schema(),
+            output_schema=jira_delete_issue_link_output_schema,
+            category="write",
+            timeout_sec=20.0,
+            description=(
+                "Delete a Jira issue link by link ID with safety guardrails. Default dry_run=true (no mutation). "
+                "At least one of source_issue_key or target_issue_key is required so allow-listed project checks can be enforced. "
                 "To execute, pass dry_run=false and either approved=true or execute=true with VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1."
             ),
         ),
