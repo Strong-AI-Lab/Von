@@ -5601,8 +5601,15 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 screen_candidate = None
                 screen_backfill_source = None
                 response_candidate = _strip_presenter_tags(response_text)
-                if response_candidate and not _screen_looks_like_tool_dump(
+                response_candidate_duplicates_spoken = _screen_too_similar_to_spoken(
+                    response_candidate, spoken_text
+                )
+                # If the model emitted only <spoken>, response_candidate usually equals
+                # spoken text. Reusing it would keep screen/spoken identical.
+                if (
                     response_candidate
+                    and not response_candidate_duplicates_spoken
+                    and not _screen_looks_like_tool_dump(response_candidate)
                 ):
                     screen_candidate = response_candidate
                     screen_backfill_source = "response_text"

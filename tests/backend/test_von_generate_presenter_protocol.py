@@ -536,6 +536,40 @@ def test_generate_generates_spoken_when_only_screen_tag_present(monkeypatch):
     assert llm.calls[1]["prompt"] == "Generate <spoken> talk track"
 
 
+def test_generate_backfills_screen_when_only_spoken_tag_present(monkeypatch):
+    llm = _StubLLMSequence(
+        [
+            "<spoken>Short talk track.</spoken>",
+            "<screen>Expanded on-screen answer with detail.</screen>",
+        ]
+    )
+    app = _make_app(monkeypatch, llm)
+
+    client = app.test_client()
+    resp = client.post(
+        "/von/generate",
+        json={"prompt": "Hello", "presenter_mode": True},
+    )
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+
+    assert body["response"] == "Expanded on-screen answer with detail."
+    assert body["response_channels"] == {
+        "screen": "Expanded on-screen answer with detail.",
+        "spoken": "Short talk track.",
+        "format": "screen_backfill_from_tools_v1",
+    }
+
+    llm_debug = body["llm_debug"]
+    assert llm_debug.get("screen_backfill_second_pass_attempted") is True
+    assert llm_debug.get("screen_backfill_second_pass_reason") == "missing_screen"
+    assert llm_debug.get("spoken_backfill_second_pass_attempted") is False
+
+    assert len(llm.calls) == 2
+    assert llm.calls[1]["prompt"] == "Generate <screen> display content"
+
+
 def test_generate_presenter_mode_falls_back_to_second_pass_spoken(monkeypatch):
     llm = _StubLLMSequence(
         [
