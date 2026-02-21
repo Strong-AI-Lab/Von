@@ -11889,6 +11889,8 @@ def _bootstrap_coding_agent_identity_for_actor(actor_concept_id: str | None) -> 
 
 def _resolve_shared_conversation_actor_context(
     payload: Mapping[str, Any],
+    *,
+    allow_actor_bootstrap_writes: bool = False,
 ) -> tuple[str | None, str | None, str | None, str | None]:
     from ...services.workflow_event_integration_service import resolve_event_actor_context
 
@@ -11905,7 +11907,10 @@ def _resolve_shared_conversation_actor_context(
     actor_concept_id = _normalise_optional_concept_id(
         payload.get("actor_concept_id") or payload.get("agent_concept_id")
     )
-    _bootstrap_coding_agent_identity_for_actor(actor_concept_id)
+    # Keep shared-conversation read paths side-effect free: bootstrap writes are
+    # only allowed when the caller explicitly opts in on write-category paths.
+    if allow_actor_bootstrap_writes:
+        _bootstrap_coding_agent_identity_for_actor(actor_concept_id)
 
     resolved_user, resolved_org = resolve_event_actor_context(
         user_id=requested_user,
@@ -11944,7 +11949,10 @@ def _shared_conversation_create_session(**kwargs):
     from ...services.episode_logging_service import log_episode
 
     user_concept_id, organisation_concept_id, actor_concept_id, namespace = (
-        _resolve_shared_conversation_actor_context(kwargs)
+        _resolve_shared_conversation_actor_context(
+            kwargs,
+            allow_actor_bootstrap_writes=True,
+        )
     )
     session_id = _clean_optional_string(kwargs.get("session_id"))
     session_name = _clean_optional_string(kwargs.get("session_name"))
@@ -12051,7 +12059,10 @@ def _shared_conversation_join_session(**kwargs):
     )
 
     user_concept_id, organisation_concept_id, actor_concept_id, namespace = (
-        _resolve_shared_conversation_actor_context(kwargs)
+        _resolve_shared_conversation_actor_context(
+            kwargs,
+            allow_actor_bootstrap_writes=True,
+        )
     )
     session_id = _clean_optional_string(kwargs.get("session_id"))
     session_name = _clean_optional_string(kwargs.get("session_name"))
@@ -12206,7 +12217,10 @@ def _shared_conversation_invite_create(**kwargs):
     from ...services.shared_conversation_service import create_invite
 
     user_concept_id, organisation_concept_id, actor_concept_id, _namespace = (
-        _resolve_shared_conversation_actor_context(kwargs)
+        _resolve_shared_conversation_actor_context(
+            kwargs,
+            allow_actor_bootstrap_writes=True,
+        )
     )
     session_id = _clean_optional_string(kwargs.get("session_id"))
     invitee_concept_id = _normalise_optional_concept_id(
@@ -12341,7 +12355,10 @@ def _shared_conversation_list_invites(**kwargs):
     from ...services.shared_conversation_service import list_invites_for_user
 
     user_concept_id, organisation_concept_id, actor_concept_id, _namespace = (
-        _resolve_shared_conversation_actor_context(kwargs)
+        _resolve_shared_conversation_actor_context(
+            kwargs,
+            allow_actor_bootstrap_writes=False,
+        )
     )
     direction_raw = _clean_optional_string(kwargs.get("direction")) or "incoming"
     direction_value = direction_raw.lower()
@@ -12431,7 +12448,10 @@ def _shared_conversation_respond_invite(**kwargs):
     from ...services.shared_conversation_service import respond_to_invite
 
     user_concept_id, organisation_concept_id, actor_concept_id, namespace = (
-        _resolve_shared_conversation_actor_context(kwargs)
+        _resolve_shared_conversation_actor_context(
+            kwargs,
+            allow_actor_bootstrap_writes=True,
+        )
     )
     invite_id = _clean_optional_string(kwargs.get("invite_id"))
     action = (_clean_optional_string(kwargs.get("action")) or "").lower()

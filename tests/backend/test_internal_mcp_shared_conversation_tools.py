@@ -256,3 +256,59 @@ def test_shared_conversation_join_gateway_success_and_permission_error_schema(
     assert error_payload.get("success") is False
     assert error_payload.get("error_code") == "PERMISSION_DENIED"
     _assert_schema_conformance(gateway, "shared_conversation_join_session", error_payload)
+
+
+def test_shared_conversation_list_invites_read_path_does_not_bootstrap_actor_identity(
+    monkeypatch,
+):
+    gateway = _build_gateway()
+    bootstrap_calls: list[dict] = []
+
+    def _fake_resolve_event_actor_context(*, user_id=None, org_id=None, namespace=None):
+        return user_id or "#V#invitee", org_id or "#V#org"
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_event_integration_service.resolve_event_actor_context",
+        _fake_resolve_event_actor_context,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.coding_agent_identity_bootstrap_service.ensure_coding_agent_identity_concepts",
+        lambda **kwargs: bootstrap_calls.append(dict(kwargs))
+        or {"cached": False, "errors": []},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.organisation_membership_service.get_user_memberships",
+        lambda user_concept_id: {
+            "user_concept_id": user_concept_id,
+            "memberships": [{"organisation_concept_id": "#V#org", "role": "member"}],
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.shared_conversation_service.list_invites_for_user",
+        lambda **kwargs: [
+            {
+                "invite_id": "invite-read-1",
+                "session_id": kwargs.get("session_id") or "session-read-1",
+                "inviter_user_id": "#V#owner",
+                "invitee_user_id": kwargs.get("user_concept_id"),
+                "organisation_concept_id": "#V#org",
+                "status": kwargs.get("status") or "pending",
+            }
+        ],
+    )
+
+    payload = gateway.invoke(
+        "shared_conversation_list_invites",
+        {
+            "user_concept_id": "#V#invitee",
+            "organisation_concept_id": "#V#org",
+            "direction": "incoming",
+            "status": "pending",
+            "actor_concept_id": "#V#github_copilot_instance",
+        },
+    ).payload
+
+    assert payload.get("success") is True
+    assert payload.get("count") == 1
+    assert bootstrap_calls == []
+    _assert_schema_conformance(gateway, "shared_conversation_list_invites", payload)

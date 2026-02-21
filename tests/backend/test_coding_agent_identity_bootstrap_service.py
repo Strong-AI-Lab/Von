@@ -135,9 +135,13 @@ def test_ensure_coding_agent_identity_concepts_falls_back_to_thing_parent(
     assert result.get("instance_created") is True
     assert result.get("type_related_to_von_system") is False
     assert result.get("instance_related_to_von_system") is False
+    assert result.get("bootstrap_completed") is False
     assert ensure_thing_calls == []
     assert relationship_calls == []
 
     assert len(create_calls) == 2
     assert create_calls[0]["parent_concept_ids"] == [bootstrap_service.THING_PRIMARY_ID]
+
+    follow_up = bootstrap_service.ensure_coding_agent_identity_concepts(force=False)
+    assert follow_up.get("cached") is False
 

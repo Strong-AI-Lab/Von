@@ -36,6 +36,20 @@ def _ensure_related_to_von_system(*, concept_id: str) -> bool:
         return False
 
 
+def _bootstrap_requirements_satisfied(summary: dict[str, Any]) -> bool:
+    """Return True only when bootstrap outputs are fully ready for caching."""
+
+    if summary.get("errors"):
+        return False
+    if not _concept_exists(CODING_AGENT_TYPE_ID):
+        return False
+    if not _concept_exists(GITHUB_COPILOT_INSTANCE_ID):
+        return False
+    return bool(summary.get("type_related_to_von_system")) and bool(
+        summary.get("instance_related_to_von_system")
+    )
+
+
 def ensure_coding_agent_identity_concepts(*, force: bool = False) -> dict[str, Any]:
     """Best-effort bootstrap for Coding Agent identity concepts.
 
@@ -133,8 +147,9 @@ def ensure_coding_agent_identity_concepts(*, force: bool = False) -> dict[str, A
             concept_id=GITHUB_COPILOT_INSTANCE_ID
         )
 
-        if not summary["errors"]:
-            _bootstrap_completed = True
+        bootstrap_ready = _bootstrap_requirements_satisfied(summary)
+        _bootstrap_completed = bool(bootstrap_ready)
+        summary["bootstrap_completed"] = bool(bootstrap_ready)
 
         return summary
 

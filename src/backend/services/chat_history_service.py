@@ -230,7 +230,7 @@ def _ensure_turn_execution_record_for_assistant_message(
                 llm_debug_data.get("actor_concept_id")
                 if isinstance(llm_debug_data.get("actor_concept_id"), str)
                 and llm_debug_data.get("actor_concept_id", "").strip()
-                else namespace
+                else None
             ),
             user_id=user_id,
             org_id=org_id,

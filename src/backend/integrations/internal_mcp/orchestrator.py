@@ -3881,7 +3881,7 @@ class InternalMCPChatOrchestrator:
             request_id=data.get("turn_id"),
             session_id=data.get("conversation_session_id"),
             namespace=env.user_namespace,
-            actor_concept_id=data.get("actor_concept_id") or env.user_namespace,
+            actor_concept_id=data.get("actor_concept_id") or data.get("user_concept_id"),
             user_id=data.get("user_concept_id"),
             org_id=data.get("org_concept_id"),
             prompt_text=prompt_text,

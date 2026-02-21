@@ -137,6 +137,40 @@ def _safe_str(value: Any) -> str | None:
     return cleaned or None
 
 
+def _derive_actor_concept_from_namespace(namespace: Any) -> str | None:
+    namespace_value = _safe_str(namespace)
+    if not namespace_value or not namespace_value.startswith("#V#"):
+        return None
+    namespace_body = namespace_value[3:].strip()
+    if not namespace_body:
+        return None
+    user_slug = namespace_body.split("@", 1)[0].strip()
+    if not user_slug:
+        return None
+    return f"#V#{user_slug}"
+
+
+def _resolve_actor_concept_identity(
+    *,
+    actor_concept_id: Any,
+    user_id: Any,
+    namespace: Any,
+) -> tuple[str | None, str]:
+    explicit_actor = _safe_str(actor_concept_id)
+    if explicit_actor and "@" not in explicit_actor:
+        return explicit_actor, "actor_concept_id"
+
+    explicit_user = _safe_str(user_id)
+    if explicit_user and "@" not in explicit_user:
+        return explicit_user, "user_id"
+
+    namespace_actor = _derive_actor_concept_from_namespace(namespace)
+    if namespace_actor:
+        return namespace_actor, "namespace_user_component"
+
+    return None, "missing"
+
+
 def _normalise_iso_timestamp(value: Any) -> str:
     if isinstance(value, datetime):
         return _iso_utc(value)
@@ -585,7 +619,11 @@ def build_turn_execution_record(
     turn_execution_diagnostics: Mapping[str, Any] | None = None,
     aux_llm_calls: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    resolved_actor_concept_id = _safe_str(actor_concept_id) or _safe_str(namespace)
+    resolved_actor_concept_id, actor_identity_source = _resolve_actor_concept_identity(
+        actor_concept_id=actor_concept_id,
+        user_id=user_id,
+        namespace=namespace,
+    )
     workflow_discovery_normalised = _extract_workflow_discovery(workflow_discovery)
     selected_workflow_id = None
     selector_verdict = None
@@ -694,6 +732,7 @@ def build_turn_execution_record(
         "session_id": _safe_str(session_id),
         "namespace": _safe_str(namespace),
         "actor_concept_id": resolved_actor_concept_id,
+        "actor_identity_source": actor_identity_source,
         "user_id": _safe_str(user_id),
         "org_id": _safe_str(org_id),
         "created_at_utc": _normalise_iso_timestamp(interaction_timestamp_utc),
@@ -1529,10 +1568,7 @@ def backfill_turn_execution_records_from_chat_history(
                 if not run_synthesis or not debug_request_id:
                     continue
                 try:
-                    raw_actor_concept_id = llm_debug.get("actor_concept_id")
-                    actor_concept_id = (
-                        _safe_str(raw_actor_concept_id) or _safe_str(namespace_value)
-                    )
+                    actor_concept_id = _safe_str(llm_debug.get("actor_concept_id"))
                     record = build_turn_execution_record(
                         request_id=debug_request_id,
                         session_id=session_id,
