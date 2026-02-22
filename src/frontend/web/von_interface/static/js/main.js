@@ -1,4 +1,4 @@
-import { initializeDomElements, initializeInfoPopup, loadAndDisplayGlobalModelInFooter } from './domUtils.js';
+import { initializeDomElements, initializeInfoPopup, loadAndDisplayGlobalModelInFooter, setFooterServerReachability } from './domUtils.js';
 import { closeDynamicConceptTab, createOrActivateConceptTab } from './dynamicTabs.js';
 import { isExpertTabsEnabled } from './featureFlags.js';
 import { getLanguageDisplayName } from './languageConfig.js';
@@ -680,6 +680,15 @@ function startHealthPolling() {
   let startTimeIso = readCachedStartTimeIso();
   let lastIdentity = { pid: null, start: null };
   let reloadTriggered = false;
+  let serverReachable = null;
+
+  function setServerReachableState(isReachable) {
+    serverReachable = (typeof isReachable === 'boolean') ? isReachable : null;
+    setFooterServerReachability(serverReachable);
+  }
+
+  setServerReachableState(null);
+
   function autoReloadEnabled() {
     try { return localStorage.getItem('von:autoReloadOnRestart') === '1'; } catch (_) { return false; }
   }
@@ -696,17 +705,24 @@ function startHealthPolling() {
   }
   function updateUptimeLoop() {
     if (uptimeSpan) {
-      if (startTimeIso) {
+      const uptimeContainer = uptimeSpan.parentElement;
+      if (serverReachable === false) {
+        uptimeSpan.textContent = 'server down';
+        uptimeSpan.title = 'Von server is unreachable';
+        if (uptimeContainer) uptimeContainer.classList.add('pid-error');
+      } else if (startTimeIso) {
         const started = Date.parse(startTimeIso);
         if (!isNaN(started)) {
           const diff = Date.now() - started;
           uptimeSpan.textContent = formatUptime(diff);
           uptimeSpan.title = 'Process uptime';
+          if (uptimeContainer) uptimeContainer.classList.remove('pid-error');
         }
       } else {
         const estimate = Date.now() - healthLoopStartedAtMs;
         uptimeSpan.textContent = `~${formatUptime(estimate)}`;
         uptimeSpan.title = 'Awaiting server health response; showing local session age estimate';
+        if (uptimeContainer) uptimeContainer.classList.remove('pid-error');
       }
     }
     requestAnimationFrame(() => setTimeout(updateUptimeLoop, 1000));
@@ -762,6 +778,7 @@ function startHealthPolling() {
       clearTimeout(timeout);
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
+      setServerReachableState(true);
       const newPid = (typeof data.pid !== 'undefined') ? data.pid : null;
       const newStart = data.start_time || null;
       const newLocalIp = data.local_ip || null;
@@ -1845,6 +1862,7 @@ function startHealthPolling() {
       failureCount = 0; // reset on success
     } catch (e) {
       failureCount++;
+      setServerReachableState(false);
       if (pidSpan) {
         pidSpan.textContent = '-';
         pidSpan.parentElement.classList.add('pid-error');

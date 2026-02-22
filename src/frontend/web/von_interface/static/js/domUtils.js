@@ -358,10 +358,28 @@ async function getCurrentOrganisationInfo(settingsOverride = null) {
 
 let footerDbRetryTimerId = null;
 let footerDbLoadGeneration = 0;
+let footerServerReachability = null;
 const FOOTER_DB_PROBE_STATS_KEY = 'von_footer_db_probe_stats_v1';
 const FOOTER_DB_PROBE_SAMPLE_LIMIT = 32;
 const FOOTER_DB_RETRY_MIN_MS = 1500;
 const FOOTER_DB_RETRY_MAX_MS = 20000;
+
+function normaliseFooterServerReachability(value) {
+  return (typeof value === 'boolean') ? value : null;
+}
+
+// Main health polling reports whether Von itself is reachable so DB badge severity
+// can distinguish "Atlas outage" from "status unknown because server is down".
+export function setFooterServerReachability(isReachable) {
+  footerServerReachability = normaliseFooterServerReachability(isReachable);
+  try {
+    document.dispatchEvent(new CustomEvent('von:serverReachabilityChanged', {
+      detail: { isReachable: footerServerReachability }
+    }));
+  } catch (_) {
+    // Non-fatal: badge will refresh on its next probe.
+  }
+}
 
 function readFooterDbProbeStats() {
   const fallback = { successes: 0, failures: 0, samples_ms: [] };
@@ -503,24 +521,129 @@ function attachFooterDbBadge(footer, dbInfo) {
   let lastClassification = classification;
   let lastUsingFallback = usingFallback;
   let lastPingOk = !!pingOk;
+  let lastServerReachable = normaliseFooterServerReachability(footerServerReachability);
+  let lastMeasuredLatencyMs = null;
 
-  const applyBadgeState = (currentPingOk, currentClassification, currentFallback) => {
+  const status = pingOk ? 'Connected' : 'Unavailable';
+  const err = dbInfo.error ? `\nError: ${String(dbInfo.error).slice(0, 300)}` : '';
+  let baseTooltip = `Database: ${dbName}\nEffective URI: ${sanitized || 'Unknown'}\nClassification: ${classification}\nStatus: ${status}`;
+  if (usingFallback) {
+    if (primarySanitized) {
+      baseTooltip += `\nPrimary URI: ${primarySanitized}`;
+    }
+    const pubIp = serverPublicIp || '(unknown)';
+    baseTooltip += `\nFallback Reason: Primary unreachable or DNS issue.`;
+    baseTooltip += `\nWhitelist Tip: If this should connect to Atlas, ensure IP ${pubIp} is whitelisted in the correct Project.`;
+  }
+  if (serverPublicIp) {
+    baseTooltip += `\nRight-click or Alt+Click to copy server public IP (${serverPublicIp}).`;
+  }
+  baseTooltip += err;
+
+  const refreshBadgeTooltip = (state) => {
+    let dynamic = '';
+    if (state === 'server_down_unknown') {
+      dynamic = '\nCurrent status: unknown because Von server is unreachable.';
+    } else if (state === 'fatal_atlas') {
+      dynamic = '\nCurrent status: MongoDB Atlas unreachable.';
+    } else if (state === 'degraded') {
+      dynamic = '\nCurrent status: degraded/fallback connection.';
+    }
+    badge.title = `${baseTooltip}${dynamic}`;
+  };
+
+  const applyBadgeState = (currentPingOk, currentClassification, currentFallback, currentServerReachable = lastServerReachable) => {
     lastClassification = currentClassification;
     lastUsingFallback = currentFallback;
     lastPingOk = currentPingOk;
-    const fatalAtlasOutage = currentClassification === 'atlas' && !currentFallback && !currentPingOk;
+    lastServerReachable = normaliseFooterServerReachability(currentServerReachable);
+    const serverDownUnknown = lastServerReachable === false;
+    const fatalAtlasOutage = !serverDownUnknown
+      && currentClassification === 'atlas'
+      && !currentFallback
+      && !currentPingOk;
+    const degradedConnection = !serverDownUnknown
+      && (fatalAtlasOutage || currentFallback || currentClassification === 'local');
     const labelNode = labelSpan();
-    const iconFor = fatalAtlasOutage ? '🚨' : (currentClassification === 'local' ? '🏠' : (currentClassification === 'atlas' ? '🗺️' : '🌐'));
+    const iconFor = serverDownUnknown
+      ? '⚠️'
+      : (fatalAtlasOutage ? '🚨' : (currentClassification === 'local' ? '🏠' : (currentClassification === 'atlas' ? '🗺️' : '🌐')));
     const fallbackSuffix = !fatalAtlasOutage && currentFallback ? ' (fallback)' : '';
     if (labelNode) {
-      labelNode.textContent = buildLabelText(iconFor, fatalAtlasOutage ? 'MongoDB Atlas unreachable' : `Mongo: ${currentClassification}${fallbackSuffix}`);
+      if (serverDownUnknown) {
+        labelNode.textContent = buildLabelText(iconFor, 'Mongo status unknown (Von down)');
+      } else {
+        labelNode.textContent = buildLabelText(iconFor, fatalAtlasOutage ? 'MongoDB Atlas unreachable' : `Mongo: ${currentClassification}${fallbackSuffix}`);
+      }
     }
-    badge.classList.toggle('degraded', fatalAtlasOutage || currentFallback || currentClassification === 'local');
-    badge.classList.toggle('fallback', currentFallback && !fatalAtlasOutage);
-    badge.classList.toggle('fatal', fatalAtlasOutage);
+    badge.classList.toggle('warning', serverDownUnknown);
+    badge.classList.toggle('degraded', degradedConnection);
+    badge.classList.toggle('fallback', !serverDownUnknown && currentFallback && !fatalAtlasOutage);
+    badge.classList.toggle('fatal', !serverDownUnknown && fatalAtlasOutage);
+
+    if (serverDownUnknown) {
+      refreshBadgeTooltip('server_down_unknown');
+      return 'server_down_unknown';
+    }
+    if (fatalAtlasOutage) {
+      refreshBadgeTooltip('fatal_atlas');
+      return 'fatal_atlas';
+    }
+    if (degradedConnection) {
+      refreshBadgeTooltip('degraded');
+      return 'degraded';
+    }
+    refreshBadgeTooltip('normal');
+    return 'normal';
   };
 
-  applyBadgeState(lastPingOk, lastClassification, lastUsingFallback);
+  const applyLatencyState = (state, elapsedMs = null) => {
+    const span = latencySpan();
+    if (!span) return;
+
+    span.classList.remove('fatal', 'warn', 'slow');
+
+    if (state === 'fatal_atlas') {
+      span.textContent = 'offline';
+      span.classList.add('fatal');
+      span.title = 'MongoDB Atlas unreachable';
+      return;
+    }
+
+    if (state === 'server_down_unknown') {
+      span.textContent = 'unknown';
+      span.classList.add('warn');
+      span.title = 'Mongo status unknown because Von server is unreachable';
+      return;
+    }
+
+    if (!Number.isFinite(elapsedMs)) {
+      span.textContent = '...';
+      span.title = 'Waiting for DB status';
+      return;
+    }
+
+    span.textContent = `${elapsedMs}ms`;
+    span.classList.toggle('warn', elapsedMs > 250);
+    span.classList.toggle('slow', elapsedMs > 600);
+    const summary = getFooterDbProbeSummary();
+    if (summary.sampleCount > 0 && Number.isFinite(summary.p50Ms) && Number.isFinite(summary.p90Ms)) {
+      span.title = `Recent DB latency: ${elapsedMs} ms (p50 ${summary.p50Ms} ms, p90 ${summary.p90Ms} ms, n=${summary.sampleCount})`;
+    } else {
+      span.title = `Recent DB latency: ${elapsedMs} ms`;
+    }
+  };
+
+  const handleServerReachabilityChanged = (event) => {
+    const nextReachable = normaliseFooterServerReachability(event?.detail?.isReachable);
+    if (nextReachable === null) return;
+    const state = applyBadgeState(lastPingOk, lastClassification, lastUsingFallback, nextReachable);
+    applyLatencyState(state, lastMeasuredLatencyMs);
+  };
+
+  document.addEventListener('von:serverReachabilityChanged', handleServerReachabilityChanged);
+  const initialState = applyBadgeState(lastPingOk, lastClassification, lastUsingFallback, lastServerReachable);
+  applyLatencyState(initialState, null);
 
   // Latency measurement (lightweight HEAD /db/info ping timing)
   async function measureLatency() {
@@ -531,38 +654,23 @@ function attachFooterDbBadge(footer, dbInfo) {
       if (!resp.ok) throw new Error('bad status ' + resp.status);
       const payload = await resp.json().catch(() => null);
       const elapsed = Math.round(performance.now() - t0);
+      lastMeasuredLatencyMs = elapsed;
       recordFooterDbProbeSuccess(elapsed);
       const nextClassification = (payload && typeof payload.classification === 'string') ? payload.classification : lastClassification;
       const nextFallback = (payload && typeof payload.using_fallback === 'boolean') ? payload.using_fallback : lastUsingFallback;
       const nextPingOk = (payload && typeof payload.ping_ok === 'boolean') ? payload.ping_ok : lastPingOk;
-      applyBadgeState(!!nextPingOk, nextClassification, !!nextFallback);
-      if (badge.classList.contains('fatal')) {
-        span.textContent = 'offline';
-        span.classList.add('fatal');
-        span.classList.remove('warn', 'slow');
-        span.title = 'MongoDB Atlas unreachable';
-      } else {
-        span.textContent = `${elapsed}ms`;
-        span.classList.remove('fatal');
-        span.classList.toggle('warn', elapsed > 250);
-        span.classList.toggle('slow', elapsed > 600);
-        const summary = getFooterDbProbeSummary();
-        if (summary.sampleCount > 0 && Number.isFinite(summary.p50Ms) && Number.isFinite(summary.p90Ms)) {
-          span.title = `Recent DB latency: ${elapsed} ms (p50 ${summary.p50Ms} ms, p90 ${summary.p90Ms} ms, n=${summary.sampleCount})`;
-        } else {
-          span.title = `Recent DB latency: ${elapsed} ms`;
-        }
-      }
+      const state = applyBadgeState(!!nextPingOk, nextClassification, !!nextFallback, true);
+      applyLatencyState(state, elapsed);
     } catch (e) {
       recordFooterDbProbeFailure();
-      applyBadgeState(false, lastClassification, lastUsingFallback);
-      const span2 = latencySpan();
-      if (span2) {
-        span2.textContent = 'offline';
-        span2.title = 'Database unreachable';
-        span2.classList.add('fatal');
-        span2.classList.remove('warn', 'slow');
-      }
+      const inferredServerReachable = normaliseFooterServerReachability(footerServerReachability);
+      const state = applyBadgeState(
+        false,
+        lastClassification,
+        lastUsingFallback,
+        inferredServerReachable === null ? false : inferredServerReachable
+      );
+      applyLatencyState(state, null);
     }
   }
 
@@ -575,30 +683,27 @@ function attachFooterDbBadge(footer, dbInfo) {
   scheduleLatency();
 
   // Clear timer if badge removed
+  const detachBadgeListeners = () => {
+    if (latencyTimer) clearTimeout(latencyTimer);
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('von:serverReachabilityChanged', handleServerReachabilityChanged);
+    }
+    observer.disconnect();
+  };
   const observer = new MutationObserver(() => {
-    if (!document?.body) { if (latencyTimer) clearTimeout(latencyTimer); observer.disconnect(); return; }
-    if (!document.body.contains(badge)) { if (latencyTimer) clearTimeout(latencyTimer); observer.disconnect(); }
+    if (!document?.body) {
+      detachBadgeListeners();
+      return;
+    }
+    if (!document.body.contains(badge)) {
+      detachBadgeListeners();
+    }
   });
   if (document?.body) {
     observer.observe(document.body, { childList: true, subtree: true });
   }
 
-  const status = pingOk ? 'Connected' : 'Unavailable';
-  const err = dbInfo.error ? `\nError: ${String(dbInfo.error).slice(0, 300)}` : '';
-  let tooltip = `Database: ${dbName}\nEffective URI: ${sanitized || 'Unknown'}\nClassification: ${classification}\nStatus: ${status}`;
-  if (usingFallback) {
-    if (primarySanitized) {
-      tooltip += `\nPrimary URI: ${primarySanitized}`;
-    }
-    const pubIp = serverPublicIp || '(unknown)';
-    tooltip += `\nFallback Reason: Primary unreachable or DNS issue.`;
-    tooltip += `\nWhitelist Tip: If this should connect to Atlas, ensure IP ${pubIp} is whitelisted in the correct Project.`;
-  }
-  if (serverPublicIp) {
-    tooltip += `\nRight-click or Alt+Click to copy server public IP (${serverPublicIp}).`;
-  }
-  tooltip += err;
-  badge.title = tooltip;
+  refreshBadgeTooltip(initialState);
   badge.style.marginLeft = '12px';
 
   // Compact mode toggler – shrink label when width constrained

@@ -4210,6 +4210,13 @@ footer {
     background: #fecaca;
 }
 
+.db-conn-badge.warning {
+    background: #fef3c7;
+    color: #92400e;
+    border-color: #fcd34d;
+    animation: none;
+}
+
 .db-conn-badge.fatal {
     position: relative;
     background: #7f1d1d;
@@ -4278,6 +4285,10 @@ footer {
 
 .db-conn-badge.degraded .db-latency {
     background: rgba(255, 255, 255, 0.35);
+}
+
+.db-conn-badge.warning .db-latency {
+    background: rgba(255, 255, 255, 0.45);
 }
 
 .db-conn-badge .db-latency.warn {
