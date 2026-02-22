@@ -35,6 +35,7 @@ from src.backend.workflows.vontology_loader import (
     _normalise_invoked_action_target,
     _first_relationship_target,
     _all_relationship_targets,
+    resolve_workflow_background_launch_policy,
     resolve_workflow_description,
     resolve_workflow_narrative_text,
 )
@@ -260,6 +261,69 @@ class TestWorkflowDescriptionResolution:
         assert source == "text_relation:hasContent"
 
 
+class TestWorkflowBackgroundLaunchPolicyResolution:
+    def test_prefers_canonical_json_policy_relation(self):
+        with patch(
+            "src.backend.workflows.vontology_loader.get_texts_for_concept",
+            return_value=[
+                {
+                    "predicate": "#V#hasBackgroundLaunchPolicyJson",
+                    "text": (
+                        '{"enabled": true, "min_interval_seconds": 300, '
+                        '"applies_to_sources": ["event"]}'
+                    ),
+                }
+            ],
+        ):
+            policy, source = resolve_workflow_background_launch_policy(
+                "#V#enrichment_workflow"
+            )
+
+        assert policy is not None
+        assert policy["enabled"] is True
+        assert policy["min_interval_seconds"] == 300
+        assert policy["scope"] == "global_per_server"
+        assert policy["applies_to_sources"] == ["event"]
+        assert source == "text_relation:#V#hasBackgroundLaunchPolicyJson"
+
+    def test_supports_plain_numeric_interval_relation(self):
+        with patch(
+            "src.backend.workflows.vontology_loader.get_texts_for_concept",
+            return_value=[
+                {
+                    "predicate": "#V#hasMinimumBackgroundLaunchIntervalSeconds",
+                    "text": "300",
+                }
+            ],
+        ):
+            policy, source = resolve_workflow_background_launch_policy(
+                "#V#enrichment_workflow"
+            )
+
+        assert policy is not None
+        assert policy["enabled"] is True
+        assert policy["min_interval_seconds"] == 300
+        assert policy["applies_to_sources"] == ["event"]
+        assert source == "text_relation:#V#hasMinimumBackgroundLaunchIntervalSeconds"
+
+    def test_returns_none_when_policy_payload_is_invalid(self):
+        with patch(
+            "src.backend.workflows.vontology_loader.get_texts_for_concept",
+            return_value=[
+                {
+                    "predicate": "#V#hasBackgroundLaunchPolicyJson",
+                    "text": '{"enabled": true, "min_interval_seconds": "not-a-number"}',
+                }
+            ],
+        ):
+            policy, source = resolve_workflow_background_launch_policy(
+                "#V#enrichment_workflow"
+            )
+
+        assert policy is None
+        assert source == "text_relation_invalid:#V#hasBackgroundLaunchPolicyJson"
+
+
 class TestWorkflowGraphPredicateCompatibility:
     def test_build_graph_accepts_legacy_aliases_and_emits_warning(self):
         workflow_doc = {
@@ -477,6 +541,40 @@ class TestInitialStepKey:
 
         assert defn is not None
         assert defn.initial_state == "#V#fallback"
+
+    def test_load_definition_carries_background_launch_policy_metadata(self):
+        graph = _make_graph(
+            initial_step="#V#start",
+            steps=[_make_step("#V#start", invokes_action="test.action")],
+        )
+
+        with _stub_fetch_concepts(), _stub_narrative():
+            with patch(
+                "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+                return_value=(graph, []),
+            ):
+                with patch(
+                    "src.backend.workflows.vontology_loader.resolve_workflow_background_launch_policy",
+                    return_value=(
+                        {
+                            "schema_version": "workflow_background_launch_policy.v1",
+                            "enabled": True,
+                            "min_interval_seconds": 300,
+                            "scope": "global_per_server",
+                            "applies_to_sources": ["event"],
+                        },
+                        "text_relation:#V#hasBackgroundLaunchPolicyJson",
+                    ),
+                ):
+                    defn = load_workflow_definition_from_vontology("#V#test_workflow")
+
+        assert defn is not None
+        metadata = dict(defn.metadata)
+        assert metadata["background_launch_policy"]["min_interval_seconds"] == 300
+        assert (
+            metadata["background_launch_policy_source"]
+            == "text_relation:#V#hasBackgroundLaunchPolicyJson"
+        )
 
 
 # ---------------------------------------------------------------------------

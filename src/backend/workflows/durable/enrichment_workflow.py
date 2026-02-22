@@ -366,6 +366,43 @@ def _upsert_text_value_internal(concept_id: str, predicate: str, text: str) -> N
         )
 
 
+def _normalise_forced_concept_ids(
+    force_concept_ids: Any,
+    force_concept_id: Any | None = None,
+) -> List[str]:
+    """Normalise caller-supplied forced concept identifiers.
+
+    Event bindings commonly map a single ``event.concept_id`` string, while
+    direct workflow calls may pass a list. Accept both forms and return a
+    stable, deduplicated list.
+    """
+    collected: List[str] = []
+
+    def _append(value: Any) -> None:
+        if value is None:
+            return
+        text = str(value).strip()
+        if text:
+            collected.append(text)
+
+    if isinstance(force_concept_ids, (list, tuple, set)):
+        for item in force_concept_ids:
+            _append(item)
+    elif force_concept_ids is not None:
+        _append(force_concept_ids)
+
+    _append(force_concept_id)
+
+    deduped: List[str] = []
+    seen: set[str] = set()
+    for concept_id in collected:
+        if concept_id in seen:
+            continue
+        seen.add(concept_id)
+        deduped.append(concept_id)
+    return deduped
+
+
 # ---------------------------------------------------------------------------
 # Action Handlers
 # ---------------------------------------------------------------------------
@@ -385,9 +422,13 @@ def _handle_collect_candidates(request: WorkflowActionRequest) -> WorkflowAction
         limit = int(ctx.get("limit", DEFAULT_CANDIDATE_LIMIT))
         kind_filter = ctx.get("kind_filter")
 
-        # If caller provided explicit IDs, use those
-        if ctx.get("force_concept_ids"):
-            candidates = ctx["force_concept_ids"]
+        # If caller provided explicit IDs, use those.
+        forced_ids = _normalise_forced_concept_ids(
+            ctx.get("force_concept_ids"),
+            ctx.get("force_concept_id"),
+        )
+        if forced_ids:
+            candidates = forced_ids
         else:
             candidates = _find_concepts_missing_predicate(
                 predicate, limit, kind_filter=kind_filter

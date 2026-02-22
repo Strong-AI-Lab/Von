@@ -200,11 +200,6 @@ def test_build_registry_prioritises_vontology_on_overlap(monkeypatch):
     )
     monkeypatch.setattr(
         registry_factory,
-        "get_considerations_workflow_registration",
-        lambda: _build_registration("#V#considerations", purpose="considerations"),
-    )
-    monkeypatch.setattr(
-        registry_factory,
         "get_enrichment_workflow_registration",
         lambda: _build_registration("#V#enrichment", purpose="enrichment"),
     )

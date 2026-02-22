@@ -90,6 +90,7 @@ class TestEnrichmentActionHandlers:
 
         result = _handle_collect_candidates(req)
         assert result.status == "failed"
+        assert isinstance(result.error, str)
         assert "predicate_required" in result.error
 
     def test_collect_with_force_concept_ids(self) -> None:
@@ -116,6 +117,57 @@ class TestEnrichmentActionHandlers:
         assert result.ok
         assert result.outputs["candidate_ids"] == ["#V#alpha", "#V#beta"]
         assert result.outputs["total_candidates"] == 2
+
+    def test_collect_with_single_force_concept_id(self) -> None:
+        from src.backend.workflows.action_registry import (
+            WorkflowActionRequest,
+            WorkflowEnvironment,
+        )
+        from src.backend.workflows.durable.enrichment_workflow import (
+            _handle_collect_candidates,
+        )
+
+        env = WorkflowEnvironment(llm_client=None)
+        req = WorkflowActionRequest(
+            action_id="enrichment.collect_candidates",
+            inputs={},
+            environment=env,
+            data={
+                "predicate": "hasDescription",
+                "force_concept_id": "#V#alpha",
+            },
+        )
+
+        result = _handle_collect_candidates(req)
+        assert result.ok
+        assert result.outputs["candidate_ids"] == ["#V#alpha"]
+        assert result.outputs["total_candidates"] == 1
+
+    def test_collect_normalises_scalar_force_concept_ids(self) -> None:
+        from src.backend.workflows.action_registry import (
+            WorkflowActionRequest,
+            WorkflowEnvironment,
+        )
+        from src.backend.workflows.durable.enrichment_workflow import (
+            _handle_collect_candidates,
+        )
+
+        env = WorkflowEnvironment(llm_client=None)
+        req = WorkflowActionRequest(
+            action_id="enrichment.collect_candidates",
+            inputs={},
+            environment=env,
+            data={
+                "predicate": "hasDescription",
+                "force_concept_ids": " #V#alpha ",
+                "force_concept_id": "#V#alpha",
+            },
+        )
+
+        result = _handle_collect_candidates(req)
+        assert result.ok
+        assert result.outputs["candidate_ids"] == ["#V#alpha"]
+        assert result.outputs["total_candidates"] == 1
 
     def test_collect_scans_db(self) -> None:
         from src.backend.workflows.action_registry import (

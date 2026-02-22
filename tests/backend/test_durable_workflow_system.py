@@ -446,6 +446,69 @@ class TestWorkflowInstanceManager:
 
         assert instance is None
 
+    def test_get_latest_instance_for_workflow_returns_newest_created(self) -> None:
+        """Latest-instance lookup should return newest created workflow instance."""
+        manager = WorkflowInstanceManager()
+
+        first_id = manager.create_instance(
+            "#V#test_workflow_latest",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        second_id = manager.create_instance(
+            "#V#test_workflow_latest",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        coll = manager._get_instances_collection()
+        assert coll is not None
+        coll.update_one(
+            {"instance_id": first_id},
+            {"$set": {"created_at": datetime(2026, 2, 1, 10, 0, tzinfo=timezone.utc)}},
+        )
+        coll.update_one(
+            {"instance_id": second_id},
+            {"$set": {"created_at": datetime(2026, 2, 1, 10, 1, tzinfo=timezone.utc)}},
+        )
+
+        latest = manager.get_latest_instance_for_workflow("#V#test_workflow_latest")
+        assert latest is not None
+        assert latest.instance_id == second_id
+        assert latest.instance_id != first_id
+
+    def test_get_event_instance_returns_matching_event_workflow_instance(self) -> None:
+        """Event instance lookup should filter by workflow + source event tuple."""
+        manager = WorkflowInstanceManager()
+
+        manager.create_instance_for_event(
+            "#V#event_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+            event_idempotency_key="evt:task.created:abc",
+            source_event_type="task.created",
+            source_event_id="#V#task_1",
+        )
+
+        matching = manager.get_event_instance(
+            workflow_id="#V#event_workflow",
+            source_event_type="task.created",
+            source_event_id="#V#task_1",
+        )
+        missing = manager.get_event_instance(
+            workflow_id="#V#event_workflow",
+            source_event_type="task.created",
+            source_event_id="#V#task_2",
+        )
+
+        assert matching is not None
+        assert matching.workflow_id == "#V#event_workflow"
+        assert matching.source_event_type == "task.created"
+        assert matching.source_event_id == "#V#task_1"
+        assert missing is None
+
     def test_checkpoint_persists_state(self) -> None:
         """checkpoint() should persist workflow state."""
         manager = WorkflowInstanceManager()
@@ -695,7 +758,7 @@ class TestWorkflowInstanceManager:
 
         original, created, updated = manager.upsert_event_binding(
             event_type="concept.updated",
-            workflow_id="#V#generate_considerations_workflow",
+            workflow_id="#V#enrichment_workflow",
             input_mapping={"concept_id": "event.concept_id"},
             enabled=True,
             actor="test_user",
@@ -706,7 +769,7 @@ class TestWorkflowInstanceManager:
         with pytest.raises(ValueError, match="binding_conflict"):
             manager.upsert_event_binding(
                 event_type="concept.updated",
-                workflow_id="#V#generate_considerations_workflow",
+                workflow_id="#V#enrichment_workflow",
                 input_mapping={"different_key": "event.concept_id"},
                 enabled=True,
                 actor="test_user",
@@ -715,7 +778,7 @@ class TestWorkflowInstanceManager:
 
         replaced, created, updated = manager.upsert_event_binding(
             event_type="concept.updated",
-            workflow_id="#V#generate_considerations_workflow",
+            workflow_id="#V#enrichment_workflow",
             input_mapping={"different_key": "event.concept_id"},
             enabled=False,
             actor="test_user",
@@ -1170,23 +1233,36 @@ class TestScheduleManagement:
 class TestWorkflowScheduler:
     """Unit tests for scheduler polling telemetry."""
 
-    def test_process_due_schedules_updates_poll_metrics(self) -> None:
+    def test_process_due_schedules_updates_poll_metrics(self, monkeypatch) -> None:
+        from src.backend.workflows.durable.workflow_instance_submission_service import (
+            WorkflowInstanceSubmissionResult,
+        )
+
         manager = MagicMock(spec=WorkflowInstanceManager)
         now = datetime.now(timezone.utc)
         due_schedule = WorkflowSchedule.create_once(
-            "#V#generate_considerations_workflow",
+            "#V#enrichment_workflow",
             run_at=now,
             user_id="user-1",
             org_id="org-1",
             namespace="user-1/org-1",
         )
         due_schedule.schedule_id = "#V#schedule_test_due_1"
-        due_schedule.default_inputs = {"foo": "bar"}
+        due_schedule.default_inputs = {"predicate": "hasDescription"}
         due_schedule.next_run_at = now
 
         manager.find_due_schedules.return_value = [due_schedule]
-        manager.create_instance.return_value = "instance-1"
         manager.update_schedule_after_run.return_value = True
+        monkeypatch.setattr(
+            "src.backend.workflows.durable.scheduler.submit_verified_workflow_instance",
+            lambda **_kwargs: WorkflowInstanceSubmissionResult(
+                success=True,
+                workflow_id="#V#enrichment_workflow",
+                status="accepted",
+                instance_id="instance-1",
+                verification={},
+            ),
+        )
 
         scheduler = WorkflowScheduler(manager)
         scheduler._process_due_schedules()
@@ -1201,7 +1277,6 @@ class TestWorkflowScheduler:
         assert isinstance(metrics["polled_at"], str)
 
         manager.find_due_schedules.assert_called_once_with(limit=50)
-        manager.create_instance.assert_called_once()
         manager.update_schedule_after_run.assert_called_once()
 
     def test_process_due_schedules_records_empty_poll(self) -> None:
@@ -1216,3 +1291,4 @@ class TestWorkflowScheduler:
         assert metrics["due_schedules_seen_total"] == 0
         assert metrics["due_count"] == 0
         assert metrics["triggered_count"] == 0
+

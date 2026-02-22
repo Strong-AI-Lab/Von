@@ -4,10 +4,6 @@
       "type": "stdio",
       "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
       "args": [
-        "-m",
-        "pdm",
-        "run",
-        "python",
         "src/backend/mcp_server/mcp_stdio_server.py"
       ],
       "cwd": "${workspaceFolder}"
@@ -16,10 +12,6 @@
       "type": "stdio",
       "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
       "args": [
-        "-m",
-        "pdm",
-        "run",
-        "python",
         "src/backend/mcp_server/rag_mcp_stdio_server.py"
       ],
       "cwd": "${workspaceFolder}"

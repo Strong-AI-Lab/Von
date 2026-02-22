@@ -226,6 +226,7 @@ def _normalise_workflow_contract_shape_from_graph(
         "workflow_id": workflow_id,
         "initial_state": str(graph.get("initial_step") or "").strip(),
         "termination_states": sorted(set(termination_states)),
+        "metadata": {},
         "states": step_entries,
     }
 
@@ -240,6 +241,12 @@ def _normalise_workflow_contract_shape_from_definition(
 
     states_raw = getattr(definition, "states", {})
     states = states_raw if isinstance(states_raw, Mapping) else {}
+    definition_metadata_raw = getattr(definition, "metadata", {})
+    definition_metadata = _normalise_json_like(
+        dict(definition_metadata_raw)
+        if isinstance(definition_metadata_raw, Mapping)
+        else {}
+    )
 
     for state_id in sorted(str(key) for key in states.keys()):
         state_spec = states[state_id]
@@ -287,6 +294,7 @@ def _normalise_workflow_contract_shape_from_definition(
         "workflow_id": str(getattr(definition, "workflow_id", "") or "").strip(),
         "initial_state": str(getattr(definition, "initial_state", "") or "").strip(),
         "termination_states": sorted(termination_states),
+        "metadata": definition_metadata,
         "states": state_entries,
     }
 
@@ -447,11 +455,16 @@ def validate_workflow_definition_contract(
             for action in (actions_raw if _is_sequence_like(actions_raw) else ())
         ]
         actions = [item for item in actions if item]
+        is_terminal_state = bool(getattr(state_spec, "terminal", False)) or (
+            state_id in termination_states
+        )
 
         has_metadata_contract = any(
             bool(metadata.get(key)) for key in _STATE_METADATA_CONTRACT_KEYS
         )
-        if not actions and not has_metadata_contract:
+        # Terminal sink states (for example an explicit "failed" state) may
+        # intentionally omit actions/mappings while remaining structurally valid.
+        if not actions and not has_metadata_contract and not is_terminal_state:
             vacuous_state_ids.append(state_id)
 
         transitions_raw = getattr(state_spec, "transitions", ())

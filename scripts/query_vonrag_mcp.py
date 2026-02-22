@@ -19,6 +19,13 @@ TOOLS_CACHE_DIR = REPO_ROOT / "data" / "mcp_tool_cache"
 DEFAULT_TOOLS_CACHE = TOOLS_CACHE_DIR / "vonrag_tools.json"
 
 
+def _resolve_python_command() -> str:
+    venv_python = REPO_ROOT / ".venv" / "Scripts" / "python.exe"
+    if venv_python.exists():
+        return str(venv_python)
+    return sys.executable
+
+
 def _build_tool_cache_payload(
     tools: list[dict[str, Any]],
     config: MCPServerConfig,
@@ -124,8 +131,8 @@ async def _run() -> int:
         return 2
 
     config = MCPServerConfig(
-        command="pdm",
-        args=["run", "python", "src/backend/mcp_server/rag_mcp_stdio_server.py"],
+        command=_resolve_python_command(),
+        args=[str(REPO_ROOT / "src/backend/mcp_server/rag_mcp_stdio_server.py")],
         log_tag="[vonrag_mcp]",
     )
     client = MCPStdIOClient(config)

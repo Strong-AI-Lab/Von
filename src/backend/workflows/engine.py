@@ -485,6 +485,10 @@ class WorkflowDefinition:
     states: Mapping[str, WorkflowStateSpec]
     termination_states: Sequence[str] = ()
     purpose: str | None = None
+    # Workflow-level metadata resolved from Vontology representation.
+    # This complements per-state metadata and enables reusable runtime policy
+    # gates (for example background launch cadence) without bespoke code paths.
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass

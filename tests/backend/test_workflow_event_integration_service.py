@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from src.backend.workflows.durable.models import EventWorkflowBinding
@@ -347,6 +349,105 @@ def test_launch_event_workflow_uses_user_only_namespace_when_org_unknown(
     called_args = mock_manager.create_instance_for_event.call_args
     assert called_args is not None
     assert called_args.kwargs["namespace"] == "#V#user_alice"
+
+
+@patch("src.backend.services.workflow_event_integration_service.get_instance_manager")
+def test_launch_event_workflow_blocks_when_cadence_window_is_active(
+    mock_get_instance_manager: MagicMock,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", "1")
+    monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "1")
+    monkeypatch.setenv("VON_EVENT_TASK_CREATED_WORKFLOW_ID", "#V#task_event_workflow")
+
+    now = datetime.now(timezone.utc)
+    mock_manager = MagicMock()
+    mock_manager.get_event_instance.return_value = None
+    mock_manager.get_latest_instance_for_workflow.return_value = SimpleNamespace(
+        instance_id="instance-recent",
+        created_at=now - timedelta(seconds=90),
+    )
+    mock_get_instance_manager.return_value = mock_manager
+
+    with patch(
+        "src.backend.services.workflow_event_integration_service._workflow_background_launch_policy_for_id",
+        return_value=(
+            {
+                "schema_version": "workflow_background_launch_policy.v1",
+                "enabled": True,
+                "min_interval_seconds": 300,
+                "scope": "global_per_server",
+                "applies_to_sources": ["event"],
+            },
+            "text_relation:#V#hasBackgroundLaunchPolicyJson",
+        ),
+    ):
+        result = launch_event_workflow(
+            event_type=EVENT_TYPE_TASK_CREATED,
+            event_id="task-cadence-1",
+            user_id="#V#user_alice",
+            org_id="#V#org_nao",
+        )
+
+    assert result["success"] is True
+    assert result["triggered"] is False
+    assert result["outcome"] == "not_triggered"
+    assert result["reason"] == "workflow_cadence_limited"
+    retry_after_seconds = result.get("retry_after_seconds")
+    assert isinstance(retry_after_seconds, int)
+    assert retry_after_seconds > 0
+    assert result.get("cadence_policy_source") == "text_relation:#V#hasBackgroundLaunchPolicyJson"
+    mock_manager.create_instance_for_event.assert_not_called()
+
+
+@patch("src.backend.services.workflow_event_integration_service.get_instance_manager")
+def test_launch_event_workflow_idempotent_reuse_takes_precedence_over_cadence(
+    mock_get_instance_manager: MagicMock,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", "1")
+    monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "1")
+    monkeypatch.setenv("VON_EVENT_TASK_CREATED_WORKFLOW_ID", "#V#task_event_workflow")
+
+    now = datetime.now(timezone.utc)
+    mock_manager = MagicMock()
+    mock_manager.get_event_instance.return_value = SimpleNamespace(
+        instance_id="instance-existing",
+        created_at=now - timedelta(seconds=10),
+    )
+    mock_manager.get_latest_instance_for_workflow.return_value = SimpleNamespace(
+        instance_id="instance-existing",
+        created_at=now - timedelta(seconds=10),
+    )
+    mock_get_instance_manager.return_value = mock_manager
+
+    with patch(
+        "src.backend.services.workflow_event_integration_service._workflow_background_launch_policy_for_id",
+        return_value=(
+            {
+                "schema_version": "workflow_background_launch_policy.v1",
+                "enabled": True,
+                "min_interval_seconds": 300,
+                "scope": "global_per_server",
+                "applies_to_sources": ["event"],
+            },
+            "text_relation:#V#hasBackgroundLaunchPolicyJson",
+        ),
+    ):
+        result = launch_event_workflow(
+            event_type=EVENT_TYPE_TASK_CREATED,
+            event_id="task-cadence-existing",
+            user_id="#V#user_alice",
+            org_id="#V#org_nao",
+        )
+
+    assert result["success"] is True
+    assert result["triggered"] is False
+    assert result["outcome"] == "reused"
+    assert result["reason"] == "idempotent_reuse"
+    assert result["idempotent_reused"] is True
+    assert result["instance_id"] == "instance-existing"
+    mock_manager.create_instance_for_event.assert_not_called()
 
 
 @patch("src.backend.services.workflow_event_integration_service.launch_event_workflow")

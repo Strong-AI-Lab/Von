@@ -6333,7 +6333,10 @@ def _workflow_list_definitions(**kwargs):
     from ...workflows.workflow_definition_identity_service import (
         build_workflow_definition_identity,
     )
-    from ...workflows.vontology_loader import resolve_workflow_description
+    from ...workflows.vontology_loader import (
+        resolve_workflow_background_launch_policy,
+        resolve_workflow_description,
+    )
     from ...workflows.workflow_baseline_telemetry import (
         get_workflow_baseline_telemetry_snapshot,
     )
@@ -6364,6 +6367,24 @@ def _workflow_list_definitions(**kwargs):
                 ),
                 definition_purpose=(getattr(defn, "purpose", "") if defn else None),
             )
+            background_launch_policy = None
+            background_launch_policy_source = "none"
+            definition_metadata = getattr(defn, "metadata", None)
+            if isinstance(definition_metadata, Mapping):
+                policy_from_definition = definition_metadata.get(
+                    "background_launch_policy"
+                )
+                if isinstance(policy_from_definition, dict):
+                    background_launch_policy = dict(policy_from_definition)
+                    background_launch_policy_source = str(
+                        definition_metadata.get("background_launch_policy_source")
+                        or "definition.metadata"
+                    )
+            if background_launch_policy is None:
+                (
+                    background_launch_policy,
+                    background_launch_policy_source,
+                ) = resolve_workflow_background_launch_policy(wid)
             definitions.append(
                 {
                     "workflow_id": wid,
@@ -6371,6 +6392,8 @@ def _workflow_list_definitions(**kwargs):
                     "description_source": description_source,
                     "initial_state": defn.initial_state if defn else "",
                     "source": source,
+                    "background_launch_policy": background_launch_policy,
+                    "background_launch_policy_source": background_launch_policy_source,
                     "definition_identity": build_workflow_definition_identity(
                         workflow_id=wid,
                         source=source,

@@ -7,6 +7,7 @@ launch code across routes, MCP handlers, or services.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import hashlib
 import logging
 import os
@@ -486,6 +487,204 @@ def _apply_input_mapping(
     return merged_inputs, unresolved
 
 
+def _coerce_datetime_utc(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        normalised = cleaned.replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(normalised)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    return None
+
+
+def _extract_instance_field(instance: Any, field_name: str) -> Any:
+    if isinstance(instance, dict):
+        return instance.get(field_name)
+    return getattr(instance, field_name, None)
+
+
+def _extract_instance_id(instance: Any) -> str | None:
+    raw_id = _extract_instance_field(instance, "instance_id")
+    if isinstance(raw_id, str) and raw_id.strip():
+        return raw_id.strip()
+    return None
+
+
+def _extract_instance_created_at(instance: Any) -> datetime | None:
+    return _coerce_datetime_utc(_extract_instance_field(instance, "created_at"))
+
+
+def _find_existing_instance_for_event(
+    *,
+    manager: Any,
+    workflow_id: str,
+    event_type: str,
+    event_id: str,
+) -> str | None:
+    if hasattr(manager, "get_event_instance"):
+        try:
+            existing = manager.get_event_instance(
+                workflow_id=workflow_id,
+                source_event_type=event_type,
+                source_event_id=event_id,
+            )
+        except Exception:
+            existing = None
+        instance_id = _extract_instance_id(existing)
+        if instance_id:
+            return instance_id
+
+    if not hasattr(manager, "list_instances"):
+        return None
+    try:
+        existing_instances = manager.list_instances(
+            workflow_id=workflow_id,
+            source_event_type=event_type,
+            source_event_id=event_id,
+            limit=1,
+        )
+    except Exception:
+        return None
+    if not isinstance(existing_instances, list) or not existing_instances:
+        return None
+    return _extract_instance_id(existing_instances[0])
+
+
+def _workflow_background_launch_policy_for_id(
+    workflow_id: str,
+) -> tuple[dict[str, Any] | None, str]:
+    try:
+        from ..workflows.vontology_loader import (
+            resolve_workflow_background_launch_policy,
+        )
+
+        return resolve_workflow_background_launch_policy(workflow_id)
+    except Exception:
+        return None, "policy_resolution_error"
+
+
+def _workflow_policy_applies_to_event_source(policy: dict[str, Any]) -> bool:
+    applies = policy.get("applies_to_sources")
+    if not isinstance(applies, list):
+        return True
+    tokens = {
+        str(item).strip().lower()
+        for item in applies
+        if isinstance(item, str) and item.strip()
+    }
+    if not tokens:
+        return True
+    return "all" in tokens or "event" in tokens
+
+
+def _evaluate_workflow_launch_cadence(
+    *,
+    manager: Any,
+    workflow_id: str,
+) -> dict[str, Any]:
+    policy, policy_source = _workflow_background_launch_policy_for_id(workflow_id)
+    if not isinstance(policy, dict):
+        return {
+            "allowed": True,
+            "reason": "cadence_policy_not_configured",
+            "policy_source": policy_source,
+            "policy": None,
+        }
+
+    enabled = bool(policy.get("enabled"))
+    min_interval_raw = policy.get("min_interval_seconds")
+    min_interval_seconds: int | None = None
+    if isinstance(min_interval_raw, int):
+        min_interval_seconds = min_interval_raw
+    elif isinstance(min_interval_raw, float):
+        min_interval_seconds = int(min_interval_raw)
+    elif isinstance(min_interval_raw, str):
+        try:
+            min_interval_seconds = int(float(min_interval_raw.strip()))
+        except ValueError:
+            min_interval_seconds = None
+
+    if (not enabled) or min_interval_seconds is None or min_interval_seconds <= 0:
+        return {
+            "allowed": True,
+            "reason": "cadence_policy_disabled",
+            "policy_source": policy_source,
+            "policy": policy,
+        }
+
+    if not _workflow_policy_applies_to_event_source(policy):
+        return {
+            "allowed": True,
+            "reason": "cadence_policy_not_applicable",
+            "policy_source": policy_source,
+            "policy": policy,
+        }
+
+    latest_instance: Any = None
+    if hasattr(manager, "get_latest_instance_for_workflow"):
+        try:
+            latest_instance = manager.get_latest_instance_for_workflow(workflow_id)
+        except Exception:
+            latest_instance = None
+    if latest_instance is None and hasattr(manager, "list_instances"):
+        try:
+            latest_candidates = manager.list_instances(workflow_id=workflow_id, limit=1)
+        except Exception:
+            latest_candidates = None
+        if isinstance(latest_candidates, list) and latest_candidates:
+            latest_instance = latest_candidates[0]
+
+    latest_created_at = _extract_instance_created_at(latest_instance)
+    if latest_created_at is None:
+        return {
+            "allowed": True,
+            "reason": "cadence_window_clear",
+            "policy_source": policy_source,
+            "policy": policy,
+        }
+
+    next_allowed_at = latest_created_at + timedelta(seconds=min_interval_seconds)
+    now_utc = datetime.now(timezone.utc)
+    if now_utc >= next_allowed_at:
+        return {
+            "allowed": True,
+            "reason": "cadence_window_clear",
+            "policy_source": policy_source,
+            "policy": policy,
+            "latest_instance_id": _extract_instance_id(latest_instance),
+            "latest_instance_created_at": latest_created_at.isoformat(),
+            "next_allowed_at": next_allowed_at.isoformat(),
+        }
+
+    retry_after_seconds = int((next_allowed_at - now_utc).total_seconds())
+    if retry_after_seconds < 1:
+        retry_after_seconds = 1
+    return {
+        "allowed": False,
+        "reason": "workflow_cadence_limited",
+        "hint": (
+            "Workflow launch skipped because the configured background cadence "
+            "window is still active."
+        ),
+        "policy_source": policy_source,
+        "policy": policy,
+        "latest_instance_id": _extract_instance_id(latest_instance),
+        "latest_instance_created_at": latest_created_at.isoformat(),
+        "next_allowed_at": next_allowed_at.isoformat(),
+        "retry_after_seconds": retry_after_seconds,
+    }
+
+
 def _launch_single_event_binding(
     *,
     event_type: str,
@@ -520,6 +719,61 @@ def _launch_single_event_binding(
     }
 
     manager = get_instance_manager()
+    existing_instance_id = _find_existing_instance_for_event(
+        manager=manager,
+        workflow_id=resolved_workflow_id,
+        event_type=event_type,
+        event_id=safe_event_id,
+    )
+    if isinstance(existing_instance_id, str) and existing_instance_id:
+        logger.info(
+            "[workflow_event] reused event=%s workflow=%s instance=%s",
+            event_type,
+            resolved_workflow_id,
+            existing_instance_id,
+        )
+        return {
+            "success": True,
+            "triggered": False,
+            "outcome": "reused",
+            "reason": "idempotent_reuse",
+            "hint": "Reused an existing durable workflow instance for this event idempotency key.",
+            "workflow_id": resolved_workflow_id,
+            "instance_id": existing_instance_id,
+            "event_type": event_type,
+            "event_id": safe_event_id,
+            "idempotency_key": event_idempotency_key,
+            "idempotent_reused": True,
+        }
+
+    cadence_gate = _evaluate_workflow_launch_cadence(
+        manager=manager,
+        workflow_id=resolved_workflow_id,
+    )
+    if not bool(cadence_gate.get("allowed")):
+        return {
+            "success": True,
+            "triggered": False,
+            "outcome": "not_triggered",
+            "reason": str(cadence_gate.get("reason") or "workflow_cadence_limited"),
+            "hint": str(
+                cadence_gate.get("hint")
+                or "Workflow launch skipped because cadence policy blocked this trigger."
+            ),
+            "workflow_id": resolved_workflow_id,
+            "instance_id": None,
+            "event_type": event_type,
+            "event_id": safe_event_id,
+            "idempotency_key": event_idempotency_key,
+            "idempotent_reused": False,
+            "cadence_policy": cadence_gate.get("policy"),
+            "cadence_policy_source": cadence_gate.get("policy_source"),
+            "retry_after_seconds": cadence_gate.get("retry_after_seconds"),
+            "next_allowed_at": cadence_gate.get("next_allowed_at"),
+            "latest_instance_id": cadence_gate.get("latest_instance_id"),
+            "latest_instance_created_at": cadence_gate.get("latest_instance_created_at"),
+        }
+
     instance_id, created_new = manager.create_instance_for_event(
         resolved_workflow_id,
         user_id=(user_id or "anonymous"),
@@ -558,6 +812,8 @@ def _launch_single_event_binding(
         "event_id": safe_event_id,
         "idempotency_key": event_idempotency_key,
         "idempotent_reused": not created_new,
+        "cadence_policy": cadence_gate.get("policy"),
+        "cadence_policy_source": cadence_gate.get("policy_source"),
     }
 
 

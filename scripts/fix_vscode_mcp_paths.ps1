@@ -103,15 +103,15 @@ $vontology = Ensure-Server -Servers $servers -Name 'vontology'
 $vonrag = Ensure-Server -Servers $servers -Name 'vonrag'
 $arxiv = Ensure-Server -Servers $servers -Name 'arxiv'
 
-# Use venv python + -m pdm so we do not depend on global pdm.exe
+# Use venv python directly to avoid pdm wrapper hangs in stdio MCP startup.
 $vontology.type = 'stdio'
 $vontology.command = '${workspaceFolder}\.venv\Scripts\python.exe'
-$vontology.args = @('-m', 'pdm', 'run', 'python', 'src/backend/mcp_server/mcp_stdio_server.py')
+$vontology.args = @('src/backend/mcp_server/mcp_stdio_server.py')
 $vontology.cwd = '${workspaceFolder}'
 
 $vonrag.type = 'stdio'
 $vonrag.command = '${workspaceFolder}\.venv\Scripts\python.exe'
-$vonrag.args = @('-m', 'pdm', 'run', 'python', 'src/backend/mcp_server/rag_mcp_stdio_server.py')
+$vonrag.args = @('src/backend/mcp_server/rag_mcp_stdio_server.py')
 $vonrag.cwd = '${workspaceFolder}'
 
 # arxiv via uv tool run arxiv-mcp-server

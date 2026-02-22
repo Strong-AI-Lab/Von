@@ -23,10 +23,6 @@ from .rag_sync_workflow import (
     get_rag_sync_workflow_registration,
     register_rag_sync_actions,
 )
-from .considerations_workflow import (
-    get_considerations_workflow_registration,
-    register_considerations_actions,
-)
 from .enrichment_workflow import (
     get_enrichment_workflow_registration,
     register_enrichment_actions,
@@ -398,7 +394,6 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
 
     # 2. Durable-specific workflows
     registry.register(get_rag_sync_workflow_registration())
-    registry.register(get_considerations_workflow_registration())
     registry.register(get_enrichment_workflow_registration())
     registry.register(get_rumination_workflow_registration())
     registry.register(get_planning_workflow_registration())
@@ -522,7 +517,7 @@ def build_durable_action_registry() -> ActionRegistry:
     """Build an ActionRegistry containing durable workflow action handlers.
 
     This registers handlers for background/durable workflows only
-    (rag_sync, considerations, enrichment, rumination, planning).  The
+    (rag_sync, enrichment, rumination, planning).  The
     orchestrator's conversation-turn
     handlers (narration, missing-tool-call, write-policy, todo-refresh)
     are added separately via ``ActionRegistry.merge()`` in the
@@ -530,7 +525,6 @@ def build_durable_action_registry() -> ActionRegistry:
     """
     registry = ActionRegistry()
     register_rag_sync_actions(registry)
-    register_considerations_actions(registry)
     register_enrichment_actions(registry)
     register_rumination_actions(registry)
     register_planning_actions(registry)

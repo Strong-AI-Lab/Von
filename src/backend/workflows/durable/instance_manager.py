@@ -114,6 +114,13 @@ def _ensure_indexes() -> None:
                 name="schedule_created",
             )
 
+        # Cadence/rate-limit lookups: find newest instance per workflow quickly.
+        if "workflow_created" not in existing:
+            instances_coll.create_index(
+                [("workflow_id", ASCENDING), ("created_at", DESCENDING)],
+                name="workflow_created",
+            )
+
         # Event-driven observability: find workflow instances for a source event.
         if "source_event_lookup" not in existing:
             instances_coll.create_index(
@@ -443,6 +450,57 @@ class WorkflowInstanceManager:
             if existing and isinstance(existing.get("instance_id"), str):
                 return existing["instance_id"], False
             raise
+
+    def get_latest_instance_for_workflow(
+        self,
+        workflow_id: str,
+    ) -> WorkflowInstance | None:
+        """Return the most recently created instance for ``workflow_id``."""
+        workflow_id_clean = str(workflow_id or "").strip()
+        if not workflow_id_clean:
+            return None
+
+        coll = self._get_instances_collection()
+        if coll is None:
+            return None
+
+        doc = coll.find_one(
+            {"workflow_id": workflow_id_clean},
+            sort=[("created_at", DESCENDING)],
+        )
+        return WorkflowInstance.from_doc(doc) if doc else None
+
+    def get_event_instance(
+        self,
+        *,
+        workflow_id: str,
+        source_event_type: str,
+        source_event_id: str,
+    ) -> WorkflowInstance | None:
+        """Return the newest instance for an event/workflow pair, if any."""
+        workflow_id_clean = str(workflow_id or "").strip()
+        source_event_type_clean = str(source_event_type or "").strip()
+        source_event_id_clean = str(source_event_id or "").strip()
+        if (
+            not workflow_id_clean
+            or not source_event_type_clean
+            or not source_event_id_clean
+        ):
+            return None
+
+        coll = self._get_instances_collection()
+        if coll is None:
+            return None
+
+        doc = coll.find_one(
+            {
+                "workflow_id": workflow_id_clean,
+                "source_event_type": source_event_type_clean,
+                "source_event_id": source_event_id_clean,
+            },
+            sort=[("created_at", DESCENDING)],
+        )
+        return WorkflowInstance.from_doc(doc) if doc else None
 
     def get_instance(self, instance_id: str) -> WorkflowInstance | None:
         """Load a workflow instance by ID.

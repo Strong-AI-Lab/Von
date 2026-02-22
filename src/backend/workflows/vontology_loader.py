@@ -132,6 +132,64 @@ WORKFLOW_DESCRIPTION_TEXT_PREDICATE_PRECEDENCE: Tuple[Tuple[str, ...], ...] = (
 WORKFLOW_DESCRIPTION_SOURCE_NONE = "none"
 WORKFLOW_DESCRIPTION_SOURCE_REGISTRATION = "registration.purpose"
 WORKFLOW_DESCRIPTION_SOURCE_DEFINITION = "definition.purpose"
+WORKFLOW_BACKGROUND_LAUNCH_POLICY_SOURCE_NONE = "none"
+WORKFLOW_BACKGROUND_LAUNCH_POLICY_SCHEMA_VERSION = (
+    "workflow_background_launch_policy.v1"
+)
+WORKFLOW_BACKGROUND_LAUNCH_POLICY_TEXT_PREDICATE_PRECEDENCE: Tuple[
+    Tuple[str, ...], ...
+] = (
+    (
+        "#V#hasBackgroundLaunchPolicyJson",
+        "hasBackgroundLaunchPolicyJson",
+        "#V#has_background_launch_policy_json",
+        "has_background_launch_policy_json",
+    ),
+    (
+        "#V#hasWorkflowLaunchPolicyJson",
+        "hasWorkflowLaunchPolicyJson",
+        "#V#has_workflow_launch_policy_json",
+        "has_workflow_launch_policy_json",
+    ),
+    (
+        "#V#hasBackgroundRunPolicyJson",
+        "hasBackgroundRunPolicyJson",
+        "#V#has_background_run_policy_json",
+        "has_background_run_policy_json",
+    ),
+)
+WORKFLOW_BACKGROUND_LAUNCH_INTERVAL_SECONDS_TEXT_PREDICATE_PRECEDENCE: Tuple[
+    Tuple[str, ...], ...
+] = (
+    (
+        "#V#hasMinimumBackgroundLaunchIntervalSeconds",
+        "hasMinimumBackgroundLaunchIntervalSeconds",
+        "#V#has_minimum_background_launch_interval_seconds",
+        "has_minimum_background_launch_interval_seconds",
+    ),
+    (
+        "#V#hasMinimumLaunchIntervalSeconds",
+        "hasMinimumLaunchIntervalSeconds",
+        "#V#has_minimum_launch_interval_seconds",
+        "has_minimum_launch_interval_seconds",
+    ),
+)
+WORKFLOW_BACKGROUND_LAUNCH_INTERVAL_MINUTES_TEXT_PREDICATE_PRECEDENCE: Tuple[
+    Tuple[str, ...], ...
+] = (
+    (
+        "#V#hasMinimumBackgroundLaunchIntervalMinutes",
+        "hasMinimumBackgroundLaunchIntervalMinutes",
+        "#V#has_minimum_background_launch_interval_minutes",
+        "has_minimum_background_launch_interval_minutes",
+    ),
+    (
+        "#V#hasMinimumLaunchIntervalMinutes",
+        "hasMinimumLaunchIntervalMinutes",
+        "#V#has_minimum_launch_interval_minutes",
+        "has_minimum_launch_interval_minutes",
+    ),
+)
 
 _WORKFLOW_MAPPING_ID_RE = re.compile(
     r"^#V#workflow_mapping_([a-z0-9_]+)_to_([a-z0-9_]+?)(?:_param(?:eter)?)?$",
@@ -742,6 +800,241 @@ def resolve_workflow_narrative_text(workflow_id: str) -> tuple[str | None, str]:
                 return text, f"text_relation:{predicate}"
 
     return None, WORKFLOW_DESCRIPTION_SOURCE_NONE
+
+
+def _coerce_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in {"1", "true", "yes", "on"}:
+            return True
+        if token in {"0", "false", "no", "off"}:
+            return False
+    return None
+
+
+def _coerce_positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, float):
+        if value <= 0:
+            return None
+        return int(value)
+    if isinstance(value, str):
+        token = value.strip()
+        if not token:
+            return None
+        try:
+            parsed = float(token)
+        except ValueError:
+            return None
+        if parsed <= 0:
+            return None
+        return int(parsed)
+    return None
+
+
+def _normalise_background_launch_scope(value: Any) -> str:
+    token = str(value or "").strip().lower()
+    if token in {"global", "global_per_server", "server", "per_server"}:
+        return "global_per_server"
+    return "global_per_server"
+
+
+def _normalise_background_launch_sources(value: Any) -> list[str]:
+    raw_items: list[str] = []
+    if isinstance(value, str):
+        raw_items = [value]
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = [item for item in value if isinstance(item, str)]
+
+    if not raw_items:
+        return ["event"]
+
+    normalised: list[str] = []
+    for raw in raw_items:
+        token = raw.strip().lower()
+        if not token:
+            continue
+        if token in {"all", "*", "any"}:
+            return ["all"]
+        if token in {"event", "events", "event_trigger", "event_triggers"}:
+            normalised.append("event")
+            continue
+        if token in {"schedule", "schedules"}:
+            normalised.append("schedule")
+            continue
+        if token in {"manual", "manual_trigger", "manual_create"}:
+            normalised.append("manual")
+            continue
+
+    deduped = sorted(set(normalised))
+    return deduped or ["event"]
+
+
+def _normalise_background_launch_policy(
+    raw_policy: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if not isinstance(raw_policy, Mapping):
+        return None
+
+    interval_seconds: int | None = None
+    for key in (
+        "min_interval_seconds",
+        "min_launch_interval_seconds",
+        "minimum_interval_seconds",
+        "minimum_launch_interval_seconds",
+        "minimum_background_launch_interval_seconds",
+        "cadence_seconds",
+        "cooldown_seconds",
+    ):
+        interval_seconds = _coerce_positive_int(raw_policy.get(key))
+        if interval_seconds is not None:
+            break
+
+    if interval_seconds is None:
+        for key in (
+            "min_interval_minutes",
+            "min_launch_interval_minutes",
+            "minimum_interval_minutes",
+            "cadence_minutes",
+            "cooldown_minutes",
+        ):
+            interval_minutes = _coerce_positive_int(raw_policy.get(key))
+            if interval_minutes is not None:
+                interval_seconds = int(interval_minutes) * 60
+                break
+
+    enabled = _coerce_bool(raw_policy.get("enabled"))
+    if enabled is None and interval_seconds is not None:
+        enabled = interval_seconds > 0
+    if enabled is None:
+        enabled = False
+
+    if interval_seconds is None:
+        if enabled:
+            return None
+        interval_seconds = 0
+
+    if interval_seconds <= 0:
+        enabled = False
+
+    return {
+        "schema_version": WORKFLOW_BACKGROUND_LAUNCH_POLICY_SCHEMA_VERSION,
+        "enabled": bool(enabled),
+        "min_interval_seconds": int(interval_seconds),
+        "scope": _normalise_background_launch_scope(raw_policy.get("scope")),
+        "applies_to_sources": _normalise_background_launch_sources(
+            raw_policy.get("applies_to_sources")
+            if "applies_to_sources" in raw_policy
+            else raw_policy.get("applies_to")
+        ),
+    }
+
+
+def _parse_background_launch_policy_text_value(text_value: Any) -> dict[str, Any] | None:
+    text = _normalise_non_empty_text(text_value)
+    if not text:
+        return None
+
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        parsed = None
+
+    if isinstance(parsed, Mapping):
+        normalised = _normalise_background_launch_policy(parsed)
+        if normalised is not None:
+            return normalised
+
+    seconds_value = _coerce_positive_int(text)
+    if seconds_value is not None:
+        return _normalise_background_launch_policy(
+            {"min_interval_seconds": seconds_value}
+        )
+    return None
+
+
+def resolve_workflow_background_launch_policy(
+    workflow_id: str,
+) -> tuple[dict[str, Any] | None, str]:
+    """Resolve background launch cadence policy from workflow representation.
+
+    Policy is read from workflow text relations so cadence behaviour remains
+    Vontology-defined rather than hard-coded in specialised orchestration.
+    """
+
+    if not isinstance(workflow_id, str) or not workflow_id.strip():
+        return None, WORKFLOW_BACKGROUND_LAUNCH_POLICY_SOURCE_NONE
+
+    texts: list[dict[str, Any]] = []
+    try:
+        raw_texts = get_texts_for_concept(workflow_id)
+    except Exception:
+        raw_texts = []
+    if isinstance(raw_texts, list):
+        texts = [item for item in raw_texts if isinstance(item, dict)]
+
+    invalid_sources: list[str] = []
+
+    for predicate_aliases in WORKFLOW_BACKGROUND_LAUNCH_POLICY_TEXT_PREDICATE_PRECEDENCE:
+        for item in texts:
+            predicate = str(item.get("predicate") or "").strip()
+            if predicate not in predicate_aliases:
+                continue
+            policy = _parse_background_launch_policy_text_value(item.get("text"))
+            if policy is not None:
+                return policy, f"text_relation:{predicate}"
+            invalid_sources.append(f"text_relation_invalid:{predicate}")
+
+    for (
+        predicate_aliases
+    ) in WORKFLOW_BACKGROUND_LAUNCH_INTERVAL_SECONDS_TEXT_PREDICATE_PRECEDENCE:
+        for item in texts:
+            predicate = str(item.get("predicate") or "").strip()
+            if predicate not in predicate_aliases:
+                continue
+            interval_seconds = _coerce_positive_int(item.get("text"))
+            if interval_seconds is not None:
+                return (
+                    {
+                        "schema_version": WORKFLOW_BACKGROUND_LAUNCH_POLICY_SCHEMA_VERSION,
+                        "enabled": True,
+                        "min_interval_seconds": int(interval_seconds),
+                        "scope": "global_per_server",
+                        "applies_to_sources": ["event"],
+                    },
+                    f"text_relation:{predicate}",
+                )
+            invalid_sources.append(f"text_relation_invalid:{predicate}")
+
+    for (
+        predicate_aliases
+    ) in WORKFLOW_BACKGROUND_LAUNCH_INTERVAL_MINUTES_TEXT_PREDICATE_PRECEDENCE:
+        for item in texts:
+            predicate = str(item.get("predicate") or "").strip()
+            if predicate not in predicate_aliases:
+                continue
+            interval_minutes = _coerce_positive_int(item.get("text"))
+            if interval_minutes is not None:
+                return (
+                    {
+                        "schema_version": WORKFLOW_BACKGROUND_LAUNCH_POLICY_SCHEMA_VERSION,
+                        "enabled": True,
+                        "min_interval_seconds": int(interval_minutes) * 60,
+                        "scope": "global_per_server",
+                        "applies_to_sources": ["event"],
+                    },
+                    f"text_relation:{predicate}",
+                )
+            invalid_sources.append(f"text_relation_invalid:{predicate}")
+
+    if invalid_sources:
+        return None, invalid_sources[0]
+    return None, WORKFLOW_BACKGROUND_LAUNCH_POLICY_SOURCE_NONE
 
 
 def resolve_workflow_description(
@@ -1431,12 +1724,27 @@ def load_workflow_definition_from_vontology(
         )
 
     purpose = best_effort_workflow_narrative_text(workflow_id)
+    background_launch_policy, background_launch_policy_source = (
+        resolve_workflow_background_launch_policy(workflow_id)
+    )
+    workflow_metadata: Dict[str, Any] = {}
+    if background_launch_policy is not None:
+        workflow_metadata["background_launch_policy"] = background_launch_policy
+    if (
+        isinstance(background_launch_policy_source, str)
+        and background_launch_policy_source
+        and background_launch_policy_source != WORKFLOW_BACKGROUND_LAUNCH_POLICY_SOURCE_NONE
+    ):
+        workflow_metadata["background_launch_policy_source"] = (
+            background_launch_policy_source
+        )
 
     return WorkflowDefinition(
         workflow_id=workflow_id,
         initial_state=initial_state_id,
         states=states,
         purpose=purpose,
+        metadata=workflow_metadata,
     )
 
 

@@ -19,6 +19,7 @@ from src.backend.integrations.internal_mcp.tool_contract_registry import (
     SURFACE_JIRA_FAMILY_SERVER,
     get_surface_tool_payloads,
 )
+from src.backend.mcp_server.process_guard import terminate_duplicate_sibling_servers
 
 try:
     from mcp.server import Server
@@ -38,6 +39,11 @@ project_root = (
 )  # Go up from jira/ -> mcp_server/ -> backend/ -> src/ -> Von/
 dotenv_path = project_root / ".env"
 load_dotenv(dotenv_path=dotenv_path)
+
+# Best-effort hygiene: terminate stale sibling servers left by previous IDE restarts.
+terminate_duplicate_sibling_servers(
+    __file__, log_fn=lambda message: print(message, file=sys.stderr)
+)
 
 JIRA_BASE_URL = os.getenv("JIRA_MCP_BASE_URL", "https://naoinstitute.atlassian.net")
 JIRA_EMAIL = os.getenv("JIRA_MCP_EMAIL")

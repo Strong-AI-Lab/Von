@@ -473,10 +473,11 @@ def test_workflow_list_definitions_exists_and_returns_data():
     # We expect durable workflows to be registered by the factory
     # (rag_sync_workflow is registered in build_durable_workflow_registry)
     assert "#V#rag_text_relation_sync_workflow" in def_ids
-    assert "#V#generate_considerations_workflow" in def_ids
+    assert "#V#enrichment_workflow" in def_ids
     assert "#V#planning_workflow" in def_ids
     assert any("description_source" in d for d in result["definitions"])
     assert any("definition_identity" in d for d in result["definitions"])
+    assert any("background_launch_policy_source" in d for d in result["definitions"])
     first_definition = result["definitions"][0]
     identity = first_definition.get("definition_identity") or {}
     assert identity.get("schema_version") == "workflow_definition_identity.v1"
@@ -540,7 +541,7 @@ def test_workflow_list_instances_gateway_invoke_error_path():
 def test_workflow_create_list_get_instance_gateway_paths(monkeypatch):
     manager = _StubWorkflowManager()
     _patch_submit_verified_instance_success(monkeypatch)
-    workflow_id = "#V#generate_considerations_workflow"
+    workflow_id = "#V#enrichment_workflow"
     monkeypatch.setattr(
         "src.backend.workflows.durable.WorkflowInstanceManager",
         lambda: manager,
@@ -595,7 +596,7 @@ def test_workflow_list_instances_supports_turn_and_date_filters(monkeypatch):
     created_a = gateway.invoke(
         "workflow_create_instance",
         {
-            "workflow_id": "#V#generate_considerations_workflow",
+            "workflow_id": "#V#enrichment_workflow",
             "user_id": "#V#user",
             "org_id": "#V#org",
             "namespace": "#V#user/#V#org",
@@ -608,7 +609,7 @@ def test_workflow_list_instances_supports_turn_and_date_filters(monkeypatch):
     created_b = gateway.invoke(
         "workflow_create_instance",
         {
-            "workflow_id": "#V#generate_considerations_workflow",
+            "workflow_id": "#V#enrichment_workflow",
             "user_id": "#V#user",
             "org_id": "#V#org",
             "namespace": "#V#user/#V#org",
@@ -645,7 +646,7 @@ def test_workflow_list_instances_supports_turn_and_date_filters(monkeypatch):
 def test_workflow_create_instance_normalises_inputs(monkeypatch):
     manager = _StubWorkflowManager()
     _patch_submit_verified_instance_success(monkeypatch)
-    workflow_id = "#V#generate_considerations_workflow"
+    workflow_id = "#V#enrichment_workflow"
     monkeypatch.setattr(
         "src.backend.workflows.durable.WorkflowInstanceManager",
         lambda: manager,
@@ -704,7 +705,7 @@ def test_workflow_create_instance_rejects_unrunnable_workflow(monkeypatch):
 def test_workflow_cancel_instance_gateway_paths(monkeypatch):
     manager = _StubWorkflowManager()
     _patch_submit_verified_instance_success(monkeypatch)
-    workflow_id = "#V#generate_considerations_workflow"
+    workflow_id = "#V#enrichment_workflow"
     monkeypatch.setattr(
         "src.backend.workflows.durable.WorkflowInstanceManager",
         lambda: manager,
@@ -750,7 +751,7 @@ def test_workflow_cancel_instance_gateway_paths(monkeypatch):
 def test_workflow_retry_instance_restores_pending_and_keeps_checkpoint_state(monkeypatch):
     manager = _StubWorkflowManager()
     _patch_submit_verified_instance_success(monkeypatch)
-    workflow_id = "#V#generate_considerations_workflow"
+    workflow_id = "#V#enrichment_workflow"
     monkeypatch.setattr(
         "src.backend.workflows.durable.WorkflowInstanceManager",
         lambda: manager,
@@ -808,7 +809,7 @@ def test_workflow_retry_instance_restores_pending_and_keeps_checkpoint_state(mon
 def test_workflow_retry_instance_rejects_non_failed_and_retry_limit(monkeypatch):
     manager = _StubWorkflowManager()
     _patch_submit_verified_instance_success(monkeypatch)
-    workflow_id = "#V#generate_considerations_workflow"
+    workflow_id = "#V#enrichment_workflow"
     monkeypatch.setattr(
         "src.backend.workflows.durable.WorkflowInstanceManager",
         lambda: manager,
@@ -896,7 +897,7 @@ def test_workflow_bind_event_and_list_event_bindings_gateway_paths(monkeypatch):
         "workflow_bind_event",
         {
             "event_type": "concept.created",
-            "workflow_id": "#V#generate_considerations_workflow",
+            "workflow_id": "#V#enrichment_workflow",
             "input_mapping": {"concept_id": "event.concept_id"},
         },
     ).payload
@@ -904,7 +905,7 @@ def test_workflow_bind_event_and_list_event_bindings_gateway_paths(monkeypatch):
     assert bind_payload.get("created") is True
     binding = bind_payload.get("binding") or {}
     assert binding.get("event_type") == "concept.created"
-    assert binding.get("workflow_id") == "#V#generate_considerations_workflow"
+    assert binding.get("workflow_id") == "#V#enrichment_workflow"
 
     listed = gateway.invoke(
         "workflow_list_event_bindings",
@@ -912,7 +913,7 @@ def test_workflow_bind_event_and_list_event_bindings_gateway_paths(monkeypatch):
     ).payload
     assert listed.get("success") is True
     assert listed.get("count") == 1
-    assert listed.get("bindings")[0]["workflow_id"] == "#V#generate_considerations_workflow"
+    assert listed.get("bindings")[0]["workflow_id"] == "#V#enrichment_workflow"
 
 
 def test_workflow_bind_event_conflict_requires_replace(monkeypatch):
@@ -927,7 +928,7 @@ def test_workflow_bind_event_conflict_requires_replace(monkeypatch):
         "workflow_bind_event",
         {
             "event_type": "concept.updated",
-            "workflow_id": "#V#generate_considerations_workflow",
+            "workflow_id": "#V#enrichment_workflow",
             "input_mapping": {"concept_id": "event.concept_id"},
         },
     ).payload
@@ -938,7 +939,7 @@ def test_workflow_bind_event_conflict_requires_replace(monkeypatch):
         "workflow_bind_event",
         {
             "event_type": "concept.updated",
-            "workflow_id": "#V#generate_considerations_workflow",
+            "workflow_id": "#V#enrichment_workflow",
             "input_mapping": {"different": "event.concept_id"},
         },
     ).payload
@@ -949,7 +950,7 @@ def test_workflow_bind_event_conflict_requires_replace(monkeypatch):
         "workflow_bind_event",
         {
             "event_type": "concept.updated",
-            "workflow_id": "#V#generate_considerations_workflow",
+            "workflow_id": "#V#enrichment_workflow",
             "input_mapping": {"different": "event.concept_id"},
             "replace_existing": True,
         },
@@ -971,7 +972,7 @@ def test_workflow_schedule_gateway_tools_integrate_with_scheduler(monkeypatch):
     create_result = gateway.invoke(
         "workflow_create_schedule",
         {
-            "workflow_id": "#V#generate_considerations_workflow",
+            "workflow_id": "#V#enrichment_workflow",
             "schedule_type": "once",
             "user_id": "#V#user",
             "org_id": "#V#org",
@@ -1018,7 +1019,7 @@ def test_workflow_schedule_execute_checkpoint_fail_retry_resume(monkeypatch):
     created_schedule = gateway.invoke(
         "workflow_create_schedule",
         {
-            "workflow_id": "#V#generate_considerations_workflow",
+            "workflow_id": "#V#enrichment_workflow",
             "schedule_type": "once",
             "user_id": "#V#user",
             "org_id": "#V#org",
@@ -1108,3 +1109,4 @@ def test_workflow_trigger_schedule_rejects_unrunnable_workflow(monkeypatch):
     preflight = verification.get("preflight") or {}
     assert "workflow_definition_not_registered" in (preflight.get("errors") or [])
     assert len(manager.instances) == 0
+
