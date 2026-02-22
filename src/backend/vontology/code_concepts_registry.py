@@ -93,6 +93,23 @@ _WORKFLOW_PREDICATE_IDS = [
     "#V#writes_variable",
 ]
 
+_WORKFLOW_BACKGROUND_POLICY_PREDICATE_IDS = [
+    "#V#hasBackgroundLaunchPolicyJson",
+    "#V#has_background_launch_policy_json",
+    "#V#hasWorkflowLaunchPolicyJson",
+    "#V#has_workflow_launch_policy_json",
+    "#V#hasBackgroundRunPolicyJson",
+    "#V#has_background_run_policy_json",
+    "#V#hasMinimumBackgroundLaunchIntervalSeconds",
+    "#V#has_minimum_background_launch_interval_seconds",
+    "#V#hasMinimumLaunchIntervalSeconds",
+    "#V#has_minimum_launch_interval_seconds",
+    "#V#hasMinimumBackgroundLaunchIntervalMinutes",
+    "#V#has_minimum_background_launch_interval_minutes",
+    "#V#hasMinimumLaunchIntervalMinutes",
+    "#V#has_minimum_launch_interval_minutes",
+]
+
 _RELATION_META_PREDICATE_IDS = [
     "#V#salient_binary_predicate_for_type",
     "#V#suggested_relations_for_type",
@@ -159,6 +176,7 @@ _CODE_PREDICATE_IDS = _unique_ids(
         *_TEXT_PREDICATE_IDS,
         *_FILE_METADATA_PREDICATE_IDS,
         *_WORKFLOW_PREDICATE_IDS,
+        *_WORKFLOW_BACKGROUND_POLICY_PREDICATE_IDS,
         *_RELATION_META_PREDICATE_IDS,
         *_STRUCTURAL_PREDICATE_IDS,
         *_OTHER_PREDICATE_IDS,

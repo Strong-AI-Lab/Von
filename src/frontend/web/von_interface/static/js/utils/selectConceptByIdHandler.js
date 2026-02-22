@@ -6,8 +6,13 @@ export function normaliseVontologyId(value) {
     const raw = (value || '').toString().trim();
     if (!raw) return '';
 
-    // Normalise prefix.
-    let id = raw.startsWith('#V#') ? raw : `#V#${raw}`;
+    // Normalise prefix without changing slug case.
+    // Canonical predicate IDs may be mixed-case (for example #V#hasName), so
+    // downcasing here can turn existing concepts into false misses.
+    let id = raw;
+    if (/^[Vv]#/.test(id)) id = `#${id}`;
+    if (id.startsWith('#v#')) id = `#V#${id.slice(3)}`;
+    if (!id.startsWith('#V#')) id = `#V#${id}`;
 
     // Heuristic: strip common sentence-ending punctuation accidentally attached to concept IDs.
     // This fixes cases like "#V#llm_workflow." or "#V#ai_agent_workflow:".
@@ -17,9 +22,9 @@ export function normaliseVontologyId(value) {
         id = id.slice(0, -1);
     }
 
-    // Canonicalise slug: transliterate accents to ASCII, lowercase, and replace
-    // maximal spans of non-alphanumeric characters with a single underscore.
-    // This prevents hyphen/underscore variants resolving as distinct concepts.
+    // Canonicalise separators while preserving case.
+    // This keeps mixed-case canonical IDs intact while still collapsing accidental
+    // whitespace/punctuation runs to underscores.
     let slug = id.slice(3);
     try {
         slug = slug.normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
@@ -27,9 +32,8 @@ export function normaliseVontologyId(value) {
     } catch (_) {
         // Ignore normalisation errors and fall back to raw slug.
     }
-    slug = slug.toLowerCase();
     const canonicalSlug = slug
-        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/[^A-Za-z0-9]+/g, '_')
         .replace(/^_+|_+$/g, '');
     if (!canonicalSlug) return '';
     id = `#V#${canonicalSlug}`;
