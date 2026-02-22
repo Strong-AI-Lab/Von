@@ -222,12 +222,15 @@ def test_generate_preserves_fenced_code_inside_screen_block(monkeypatch):
     assert body["response_channels"]["spoken"] == "Talk track."
 
 
-def test_generate_buttonify_heuristic_preflight_skips_model_pass(monkeypatch):
+def test_generate_buttonify_uses_llm_extraction(monkeypatch):
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setenv("VON_BUTTONIFY_MODEL_ENABLE", "1")
-    monkeypatch.setenv("VON_BUTTONIFY_HEURISTIC_PREFLIGHT_ENABLE", "1")
-
-    llm = _StubLLM('Please reply with one of: "Proceed", "Hold".')
+    llm = _StubLLMSequence(
+        [
+            'Please reply with one of: "Proceed", "Hold".',
+            '["Proceed", "Hold"]',
+        ]
+    )
     app = _make_app(monkeypatch, llm)
 
     client = app.test_client()
@@ -238,22 +241,21 @@ def test_generate_buttonify_heuristic_preflight_skips_model_pass(monkeypatch):
     llm_debug = body["llm_debug"]
     buttonify = llm_debug.get("buttonify")
     assert isinstance(buttonify, dict)
-    assert buttonify.get("source") == "heuristic_preflight"
+    assert buttonify.get("source") == "llm"
     assert buttonify.get("options") == ["Proceed", "Hold"]
     buttonify_event = _find_transformation_event(llm_debug, "buttonify")
     assert buttonify_event["status"] == "success"
-    assert buttonify_event["source_path"] == "heuristic_preflight"
+    assert buttonify_event["source_path"] == "llm"
     assert buttonify_event["options_emitted_count"] == 2
     assert "timestamp_utc" in buttonify_event
 
-    # Preflight should avoid a second model pass for buttonify extraction.
-    assert len(llm.calls) == 1
+    # First call is assistant response, second call is buttonify extraction.
+    assert len(llm.calls) == 2
 
 
 def test_generate_buttonify_noops_when_vontology_prompt_unavailable(monkeypatch):
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setenv("VON_BUTTONIFY_MODEL_ENABLE", "1")
-    monkeypatch.setenv("VON_BUTTONIFY_HEURISTIC_PREFLIGHT_ENABLE", "1")
 
     llm = _StubLLM('Please reply with one of: "Proceed", "Hold".')
     app = _make_app(monkeypatch, llm)
@@ -284,15 +286,14 @@ def test_generate_buttonify_noops_when_vontology_prompt_unavailable(monkeypatch)
     assert len(llm.calls) == 1
 
 
-def test_generate_buttonify_preflight_low_confidence_runs_llm_pass(monkeypatch):
+def test_generate_buttonify_non_json_llm_output_noops(monkeypatch):
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setenv("VON_BUTTONIFY_MODEL_ENABLE", "1")
-    monkeypatch.setenv("VON_BUTTONIFY_HEURISTIC_PREFLIGHT_ENABLE", "1")
 
     llm = _StubLLMSequence(
         [
             'Use these IDs: "#V#academic_conference", "#V#research_symposium".',
-            '["Create concepts", "Show existing meetings"]',
+            'Use these labels: "Create concepts", "Show existing meetings".',
         ]
     )
     app = _make_app(monkeypatch, llm)
@@ -305,16 +306,15 @@ def test_generate_buttonify_preflight_low_confidence_runs_llm_pass(monkeypatch):
     llm_debug = body["llm_debug"]
     buttonify = llm_debug.get("buttonify")
     assert isinstance(buttonify, dict)
-    assert buttonify.get("source") == "llm"
-    assert buttonify.get("options") == ["Create concepts", "Show existing meetings"]
-    assert buttonify.get("preflight_rejection_reason") == (
-        "heuristic_preflight_rejected_code_like_candidates"
-    )
+    assert buttonify.get("source") == "none"
+    assert buttonify.get("options") == []
+    assert buttonify.get("suppression_reason") == "no_candidates"
 
     buttonify_event = _find_transformation_event(llm_debug, "buttonify")
-    assert buttonify_event["status"] == "success"
-    assert buttonify_event["source_path"] == "llm"
-    assert buttonify_event["options_emitted_count"] == 2
+    assert buttonify_event["status"] == "no_op"
+    assert buttonify_event["source_path"] == "none"
+    assert buttonify_event["suppression_reason"] == "no_candidates"
+    assert buttonify_event["options_emitted_count"] == 0
 
     # First LLM call is the assistant response, second is buttonify extraction.
     assert len(llm.calls) == 2
@@ -323,11 +323,12 @@ def test_generate_buttonify_preflight_low_confidence_runs_llm_pass(monkeypatch):
 def test_generate_coding_agent_turn_captures_narration_buttonify_and_layout(monkeypatch):
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setenv("VON_BUTTONIFY_MODEL_ENABLE", "1")
-    monkeypatch.setenv("VON_BUTTONIFY_HEURISTIC_PREFLIGHT_ENABLE", "1")
-
-    llm = _StubLLM(
-        "<spoken>Proceed with the update.</spoken>\n"
-        '<screen>Please reply with one of: "Proceed", "Hold".</screen>'
+    llm = _StubLLMSequence(
+        [
+            "<spoken>Proceed with the update.</spoken>\n"
+            '<screen>Please reply with one of: "Proceed", "Hold".</screen>',
+            '["Proceed", "Hold"]',
+        ]
     )
     app = _make_app(monkeypatch, llm)
 
@@ -359,7 +360,7 @@ def test_generate_coding_agent_turn_captures_narration_buttonify_and_layout(monk
 
     buttonify_event = _find_transformation_event(llm_debug, "buttonify")
     assert buttonify_event["status"] == "success"
-    assert buttonify_event["source_path"] == "heuristic_preflight"
+    assert buttonify_event["source_path"] == "llm"
     assert buttonify_event["options_emitted_count"] == 2
 
     display_elements = body["display_elements"]
@@ -463,7 +464,7 @@ def test_generate_buttonify_uses_workflow_when_available(monkeypatch):
     assert len(llm.calls) == 0
 
 
-def test_generate_buttonify_workflow_invalid_output_uses_heuristic_fallback(monkeypatch):
+def test_generate_buttonify_workflow_invalid_output_noops(monkeypatch):
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
 
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
@@ -482,10 +483,12 @@ def test_generate_buttonify_workflow_invalid_output_uses_heuristic_fallback(monk
             "buttonify_status": "no_op",
             "buttonify_options": [],
             "buttonify_source": "none",
+            "buttonify_prompt_available": True,
+            "buttonify_prompt_error": None,
             "buttonify_model_used": "test-model",
             "buttonify_model_attempted": True,
-            "buttonify_error_class": "ValueError",
-            "buttonify_suppression_reason": "no_candidates",
+            "buttonify_error_class": None,
+            "buttonify_suppression_reason": None,
         }
     )
     app.config["INTERNAL_MCP_ORCHESTRATOR"] = _StubOrchestrator(
@@ -501,13 +504,13 @@ def test_generate_buttonify_workflow_invalid_output_uses_heuristic_fallback(monk
     llm_debug = resp.get_json()["llm_debug"]
     buttonify = llm_debug.get("buttonify")
     assert isinstance(buttonify, dict)
-    assert buttonify.get("source") == "heuristic_fallback"
-    assert buttonify.get("options") == ["Proceed", "Hold"]
+    assert buttonify.get("source") == "none"
+    assert buttonify.get("options") == []
 
     buttonify_event = _find_transformation_event(llm_debug, "buttonify")
-    assert buttonify_event["status"] == "fallback_success"
-    assert buttonify_event["suppression_reason"] == "fallback_heuristic_used"
-    assert buttonify_event["options_emitted_count"] == 2
+    assert buttonify_event["status"] == "no_op"
+    assert buttonify_event["suppression_reason"] == "no_candidates"
+    assert buttonify_event["options_emitted_count"] == 0
     assert len(llm.calls) == 0
 
 
@@ -551,7 +554,7 @@ def test_history_debug_transformations_view_returns_lightweight_payload(monkeypa
                         "input_summary": {},
                         "output_summary": {},
                         "options_emitted_count": 1,
-                        "source_path": "heuristic_preflight",
+                        "source_path": "llm",
                         "latency_ms": 1.0,
                         "model_id": None,
                         "suppression_reason": None,

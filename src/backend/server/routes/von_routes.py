@@ -32,7 +32,6 @@ from ...services.settings_service import (
     get_internal_mcp_tool_batch_cap,
     get_show_tool_use_during_thinking,
     get_buttonify_model_enabled,
-    get_buttonify_heuristic_preflight_enabled,
 )
 from ...services.feature_flags import (
     get_display_elements_screen_fence_compat_enabled,
@@ -43,11 +42,8 @@ from ...services.chat_concept_reference_service import (
 from ...services.buttonify_service import (
     BUTTONIFY_PROMPT_IDS,
     enforce_buttonify_prompt_contract,
-    extract_buttonify_options_heuristic as _extract_buttonify_options_heuristic,
     parse_buttonify_options_json,
     sanitise_buttonify_options,
-    sanitise_buttonify_heuristic_options,
-    select_buttonify_preflight_options,
 )
 from ...services.prompt_template_service import PromptTemplateService
 from ...services.display_elements_service import (
@@ -6426,7 +6422,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             buttonify_suppression_reason = "empty_response"
         else:
             buttonify_status = "no_op"
-            buttonify_preflight_enabled = get_buttonify_heuristic_preflight_enabled()
+            # Buttonify is intentionally LLM-only: no heuristic preflight/fallback.
+            buttonify_preflight_enabled = False
             if show_tool_use_progress:
                 _set_tool_progress(
                     progress_scope_key,
@@ -6527,21 +6524,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 if isinstance(contract_payload, Mapping):
                     buttonify_workflow_contract = dict(contract_payload)
 
-                # Deterministic guardrail: if workflow output is empty/invalid,
-                # always attempt heuristic fallback before surfacing no-op.
-                if (
-                    not buttonify_options
-                    and buttonify_suppression_reason != "buttonify_prompt_unavailable"
-                ):
-                    fallback_options = sanitise_buttonify_heuristic_options(
-                        _extract_buttonify_options_heuristic(response_text)
-                    )
-                    if fallback_options:
-                        buttonify_options = fallback_options
-                        buttonify_source = "heuristic_fallback"
-                        buttonify_status = "fallback_success"
-                        buttonify_suppression_reason = "fallback_heuristic_used"
-                        buttonify_workflow_contract = None
             else:
                 # Keep deterministic behaviour when workflow execution is not available.
                 # If Vontology prompt content is unavailable, buttonify must no-op
@@ -6574,16 +6556,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         buttonify_prompt_error = "prompt_not_found_or_unavailable"
                     buttonify_suppression_reason = "buttonify_prompt_unavailable"
 
-                if buttonify_prompt_available and buttonify_preflight_enabled:
-                    preflight_options, buttonify_preflight_rejection_reason = (
-                        select_buttonify_preflight_options(
-                            _extract_buttonify_options_heuristic(response_text)
-                        )
-                    )
-                    if preflight_options:
-                        buttonify_options = preflight_options
-                        buttonify_source = "heuristic_preflight"
-
                 if buttonify_prompt_available and not buttonify_options:
                     buttonify_model_attempted = True
                     llm_start = time.perf_counter()
@@ -6608,36 +6580,15 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
                     buttonify_options = parse_buttonify_options_json(buttonify_response)
                     buttonify_source = "llm" if buttonify_options else "none"
-                    if not buttonify_options:
-                        fallback_options = sanitise_buttonify_heuristic_options(
-                            _extract_buttonify_options_heuristic(response_text)
-                        )
-                        if fallback_options:
-                            buttonify_options = fallback_options
-                            buttonify_source = "heuristic_fallback"
 
-                if (
-                    not buttonify_workflow_available
-                    and not buttonify_options
-                    and not buttonify_suppression_reason
-                ):
-                    buttonify_suppression_reason = (
-                        buttonify_suppression_reason or "workflow_unavailable"
-                    )
-
-            if buttonify_source in {"heuristic_preflight", "llm"}:
+            if buttonify_source == "llm":
                 buttonify_status = "success"
-            elif buttonify_source == "heuristic_fallback":
-                buttonify_status = "fallback_success"
-                buttonify_suppression_reason = "fallback_heuristic_used"
             else:
                 buttonify_status = "no_op"
                 if buttonify_error_class:
                     buttonify_suppression_reason = "model_error"
                 elif not buttonify_prompt_available:
                     buttonify_suppression_reason = "buttonify_prompt_unavailable"
-                elif buttonify_preflight_rejection_reason:
-                    buttonify_suppression_reason = buttonify_preflight_rejection_reason
                 elif not buttonify_suppression_reason:
                     buttonify_suppression_reason = "no_candidates"
 

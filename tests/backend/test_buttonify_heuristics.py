@@ -1,5 +1,5 @@
-from src.backend.server.routes.von_routes import _extract_buttonify_options_heuristic
 from src.backend.services.buttonify_service import (
+    extract_buttonify_options_heuristic,
     enforce_buttonify_prompt_contract,
     sanitise_buttonify_heuristic_options,
     select_buttonify_preflight_options,
@@ -8,7 +8,7 @@ from src.backend.services.buttonify_service import (
 
 def test_buttonify_heuristic_extracts_quotes():
     text = 'Please reply with one of: "Proceed", "Hold", "Stop".'
-    options = _extract_buttonify_options_heuristic(text)
+    options = extract_buttonify_options_heuristic(text)
     assert options == ["Proceed", "Hold", "Stop"]
 
 
@@ -19,19 +19,19 @@ Tell me how you want to proceed:
 - Send update
 - Pause work
 """
-    options = _extract_buttonify_options_heuristic(text)
+    options = extract_buttonify_options_heuristic(text)
     assert options == ["Draft summary", "Send update", "Pause work"]
 
 
 def test_buttonify_heuristic_extracts_implicit_or_question():
     text = "Would you like to continue or stop?"
-    options = _extract_buttonify_options_heuristic(text)
+    options = extract_buttonify_options_heuristic(text)
     assert options == ["continue", "stop"]
 
 
 def test_buttonify_heuristic_yes_no_questions():
     text = "Is that ok?"
-    options = _extract_buttonify_options_heuristic(text)
+    options = extract_buttonify_options_heuristic(text)
     assert options == ["Yes", "No"]
 
 
@@ -41,7 +41,7 @@ Please pick one:
 - `#V#academic_conference`
 - `#V#research_symposium`
 """
-    candidates = _extract_buttonify_options_heuristic(text)
+    candidates = extract_buttonify_options_heuristic(text)
     options, reason = select_buttonify_preflight_options(candidates)
     assert options == []
     assert reason == "heuristic_preflight_rejected_code_like_candidates"

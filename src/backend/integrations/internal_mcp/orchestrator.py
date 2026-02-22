@@ -71,11 +71,8 @@ from src.backend.workflows.write_tool_policy import (
 from ...services.turn_execution_record_service import build_turn_execution_record
 from src.backend.services.buttonify_service import (
     BUTTONIFY_PROMPT_IDS,
-    extract_buttonify_options_heuristic,
     parse_buttonify_options_json,
     sanitise_buttonify_options,
-    sanitise_buttonify_heuristic_options,
-    select_buttonify_preflight_options,
     enforce_buttonify_prompt_contract,
 )
 
@@ -2083,9 +2080,8 @@ class InternalMCPChatOrchestrator:
         if not isinstance(user_prompt, str):
             user_prompt = ""
 
-        buttonify_preflight_enabled = bool(
-            request.data.get("buttonify_preflight_enabled")
-        )
+        # Buttonify is intentionally LLM-only: no heuristic preflight/fallback.
+        buttonify_preflight_enabled = False
         buttonify_prompt_text = request.data.get("buttonify_prompt_text")
         if not isinstance(buttonify_prompt_text, str):
             buttonify_prompt_text = ""
@@ -2112,15 +2108,6 @@ class InternalMCPChatOrchestrator:
         if not isinstance(buttonify_suppression_reason, str):
             buttonify_suppression_reason = None
         buttonify_preflight_rejection_reason: str | None = None
-
-        if buttonify_prompt_available and buttonify_preflight_enabled:
-            preflight_candidates = extract_buttonify_options_heuristic(screen_text)
-            preflight_options, buttonify_preflight_rejection_reason = (
-                select_buttonify_preflight_options(preflight_candidates)
-            )
-            if preflight_options:
-                buttonify_options = preflight_options
-                buttonify_source = "heuristic_preflight"
 
         if buttonify_prompt_available and not buttonify_options:
             buttonify_model_attempted = True
@@ -2193,25 +2180,15 @@ class InternalMCPChatOrchestrator:
             buttonify_options = parse_buttonify_options_json(buttonify_response)
             buttonify_source = "llm" if buttonify_options else "none"
 
-            if not buttonify_options:
-                heuristic_options = sanitise_buttonify_heuristic_options(
-                    extract_buttonify_options_heuristic(screen_text)
-                )
-                if heuristic_options:
-                    buttonify_options = heuristic_options
-                    buttonify_source = "heuristic_fallback"
         elif not buttonify_prompt_available and not buttonify_suppression_reason:
             buttonify_suppression_reason = "buttonify_prompt_unavailable"
 
         # Defensively re-sanitise options to preserve deterministic UI constraints.
         buttonify_options = sanitise_buttonify_options(buttonify_options)
 
-        if buttonify_source in {"heuristic_preflight", "llm"}:
+        if buttonify_source == "llm":
             buttonify_status = "success"
             buttonify_suppression_reason = None
-        elif buttonify_source == "heuristic_fallback":
-            buttonify_status = "fallback_success"
-            buttonify_suppression_reason = "fallback_heuristic_used"
         else:
             buttonify_status = "no_op"
             if not buttonify_suppression_reason:
@@ -2219,8 +2196,6 @@ class InternalMCPChatOrchestrator:
                     buttonify_suppression_reason = "model_error"
                 elif not buttonify_prompt_available:
                     buttonify_suppression_reason = "buttonify_prompt_unavailable"
-                elif buttonify_preflight_rejection_reason:
-                    buttonify_suppression_reason = buttonify_preflight_rejection_reason
                 else:
                     buttonify_suppression_reason = "no_candidates"
 
