@@ -106,6 +106,43 @@ class _TurnExecutionCollection:
         return [{"_id": key, "count": value} for key, value in counts.items()]
 
 
+class _ChatHistoryCollection:
+    def __init__(self, docs: list[dict[str, Any]]):
+        self._docs = list(docs)
+
+    def _matches(self, doc: dict[str, Any], query: dict[str, Any]) -> bool:
+        namespace = query.get("namespace")
+        if isinstance(namespace, str) and doc.get("namespace") != namespace:
+            return False
+
+        session_id_filter = query.get("session_id")
+        session_id = doc.get("session_id")
+        if isinstance(session_id_filter, str):
+            if session_id != session_id_filter:
+                return False
+        elif isinstance(session_id_filter, dict):
+            options = session_id_filter.get("$in")
+            if isinstance(options, list) and session_id not in options:
+                return False
+
+        return True
+
+    def find(self, query: dict[str, Any], projection: dict[str, Any] | None = None):
+        docs = [doc for doc in self._docs if self._matches(doc, query)]
+        if not isinstance(projection, dict):
+            return _Cursor(docs)
+
+        include_keys = {key for key, include in projection.items() if include}
+        projected_docs: list[dict[str, Any]] = []
+        for doc in docs:
+            projected_doc: dict[str, Any] = {}
+            for key in include_keys:
+                if key in doc:
+                    projected_doc[key] = doc[key]
+            projected_docs.append(projected_doc)
+        return _Cursor(projected_docs)
+
+
 class _DB:
     def __init__(self, collections: dict[str, Any]):
         self._collections = dict(collections)
@@ -234,6 +271,168 @@ def test_rag_get_item_supports_turn_execution_records(monkeypatch):
     assert result["requires_follow_up"] is True
     assert result["item_kind"] == "turn_execution_record"
     assert result["provenance"]["item_kind"] == "turn_execution_record_item"
+
+
+def test_turn_execution_list_includes_rag_indexing_state_from_chat_history(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    turn_docs = [
+        {
+            "request_id": "req-indexed-1",
+            "session_id": "chat-indexed-1",
+            "namespace": "#V#user@org",
+            "created_at_utc": "2026-02-19T01:20:00Z",
+            "completion_gate": {"decision": "completed", "requires_follow_up": False},
+            "required_effects": [],
+            "workflow_selection": {"selected_workflow_id": "#V#chat_assistant_workflow"},
+            "prompt": {"preview": "All done"},
+            "critic": {"summary": {"not_verified_count": 0}},
+        },
+        {
+            "request_id": "req-partial-1",
+            "session_id": "chat-partial-1",
+            "namespace": "#V#user@org",
+            "created_at_utc": "2026-02-19T01:21:00Z",
+            "completion_gate": {"decision": "partial", "requires_follow_up": True},
+            "required_effects": [{"effect_id": "effect_1", "status": "satisfied"}],
+            "workflow_selection": {"selected_workflow_id": "#V#tool_calling_workflow"},
+            "prompt": {"preview": "Attempted write"},
+            "critic": {"summary": {"inconclusive_count": 1}},
+        },
+    ]
+    chat_docs = [
+        {
+            "session_id": "chat-indexed-1",
+            "namespace": "#V#user@org",
+            "history": [{"content": "A"}, {"content": "B"}],
+            "rag_indexed_success": 2,
+            "rag_indexed_failed": 0,
+        },
+        {
+            "session_id": "chat-partial-1",
+            "namespace": "#V#user@org",
+            "history": [{"content": "A"}, {"content": "B"}, {"content": "C"}],
+            "rag_indexed_success": 1,
+            "rag_indexed_failed": 1,
+        },
+    ]
+
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        lambda: _DB(
+            {
+                "turn_execution_records": _TurnExecutionCollection(turn_docs),
+                "chat_history": _ChatHistoryCollection(chat_docs),
+            }
+        ),
+    )
+
+    result = cat._turn_execution_list(namespace="#V#user@org", limit=20, offset=0)
+
+    assert result["success"] is True
+    assert result["collection"] == "turn_execution_records"
+    by_request_id = {item["request_id"]: item for item in result["items"]}
+
+    indexed_state = by_request_id["req-indexed-1"]["rag_indexing_state"]
+    assert indexed_state["status"] == "indexed"
+    assert indexed_state["sync_state"] == "synchronised"
+    assert indexed_state["fully_indexed"] is True
+    assert indexed_state["messages_pending_indexing"] == 0
+
+    partial_state = by_request_id["req-partial-1"]["rag_indexing_state"]
+    assert partial_state["status"] == "partial"
+    assert partial_state["sync_state"] == "error"
+    assert partial_state["fully_indexed"] is False
+    assert partial_state["messages_pending_indexing"] == 1
+
+    assert result["rag_indexing_state_counts"]["indexed"] == 1
+    assert result["rag_indexing_state_counts"]["partial"] == 1
+    assert "rag_indexing_lookup_warning" not in result
+
+
+def test_turn_execution_get_includes_rag_indexing_state_from_chat_history(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    turn_doc = {
+        "request_id": "req-failed-indexing",
+        "session_id": "chat-failed-indexing",
+        "namespace": "#V#user@org",
+        "created_at_utc": "2026-02-19T01:22:00Z",
+        "updated_at_utc": "2026-02-19T01:23:00Z",
+        "completion_gate": {"decision": "partial", "requires_follow_up": True},
+        "required_effects": [{"effect_id": "effect_2", "status": "satisfied"}],
+        "postcondition_checks": [{"check_id": "check_1", "status": "inconclusive"}],
+        "workflow_selection": {"selected_workflow_id": "#V#tool_calling_workflow"},
+        "prompt": {"preview": "Attempted update"},
+        "critic": {"summary": {"inconclusive_count": 1}},
+    }
+    chat_docs = [
+        {
+            "session_id": "chat-failed-indexing",
+            "namespace": "#V#user@org",
+            "history": [{"content": "A"}, {"content": "B"}],
+            "rag_indexed_success": 0,
+            "rag_indexed_failed": 2,
+        }
+    ]
+
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        lambda: _DB(
+            {
+                "turn_execution_records": _TurnExecutionCollection([turn_doc]),
+                "chat_history": _ChatHistoryCollection(chat_docs),
+            }
+        ),
+    )
+
+    result = cat._turn_execution_get(
+        namespace="#V#user@org",
+        request_id="req-failed-indexing",
+    )
+
+    assert result["success"] is True
+    state = result["rag_indexing_state"]
+    assert state["status"] == "indexing_failed"
+    assert state["sync_state"] == "error"
+    assert state["indexed"] is False
+    assert state["reason_code"] == "all_indexing_attempts_failed"
+    assert "rag_indexing_lookup_warning" not in result
+
+
+def test_turn_execution_list_reports_lookup_warning_when_chat_history_unavailable(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    turn_docs = [
+        {
+            "request_id": "req-warning-1",
+            "session_id": "chat-warning-1",
+            "namespace": "#V#user@org",
+            "created_at_utc": "2026-02-19T01:24:00Z",
+            "completion_gate": {"decision": "partial", "requires_follow_up": True},
+            "required_effects": [],
+            "workflow_selection": {"selected_workflow_id": "#V#tool_calling_workflow"},
+            "prompt": {"preview": "Attempted update"},
+            "critic": {"summary": {"inconclusive_count": 1}},
+        }
+    ]
+
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        lambda: _DB({"turn_execution_records": _TurnExecutionCollection(turn_docs)}),
+    )
+
+    result = cat._turn_execution_list(namespace="#V#user@org", limit=20, offset=0)
+
+    assert result["success"] is True
+    assert result["rag_indexing_lookup_warning"]["reason_code"] == (
+        "chat_history_lookup_unavailable"
+    )
+    state = result["items"][0]["rag_indexing_state"]
+    assert state["status"] == "unknown"
+    assert state["reason_code"] == "chat_history_lookup_unavailable"
 
 
 def test_turn_execution_list_and_get_wrappers(monkeypatch):

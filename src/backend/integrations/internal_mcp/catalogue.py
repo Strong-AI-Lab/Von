@@ -8112,7 +8112,8 @@ def _rag_list_collections(**kwargs):
             "description": (
                 "Assistant turn execution records stored in MongoDB (turn_execution_records). "
                 "Includes workflow selection, required effects, postcondition checks, and completion-gate decisions. "
-                "Use to analyse failed or incomplete action execution across conversations."
+                "Use to analyse failed or incomplete action execution across conversations. "
+                "Responses also include per-record RAG indexing-state diagnostics derived from chat_history."
             ),
             "list_tool": "rag_list_indexed",
             "get_tool": "rag_get_item",
@@ -8177,6 +8178,247 @@ def _rag_list_collections(**kwargs):
         item_kind="rag_collection_list",
         source_system="internal_mcp.catalogue",
     )
+
+
+def _normalise_non_negative_int(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed >= 0 else 0
+
+
+def _derive_turn_execution_rag_indexing_state_from_chat_doc(
+    chat_doc: Mapping[str, Any],
+) -> dict[str, Any]:
+    chat_session_id_raw = chat_doc.get("session_id")
+    chat_session_id = (
+        chat_session_id_raw.strip()
+        if isinstance(chat_session_id_raw, str) and chat_session_id_raw.strip()
+        else None
+    )
+    history_raw = chat_doc.get("history")
+    message_total = len(history_raw) if isinstance(history_raw, list) else None
+    indexed_success = _normalise_non_negative_int(chat_doc.get("rag_indexed_success"))
+    indexed_failed = _normalise_non_negative_int(chat_doc.get("rag_indexed_failed"))
+
+    pending_messages: int | None = None
+    if isinstance(message_total, int):
+        pending_messages = message_total - indexed_success - indexed_failed
+        if pending_messages < 0:
+            pending_messages = 0
+
+    status = "not_indexed"
+    sync_state = "not_indexed"
+    reason_code = "no_successful_indexing_attempts_recorded"
+    reason = "No successful RAG indexing attempts were recorded for this chat session."
+    indexed = indexed_success > 0
+    fully_indexed = False
+
+    if indexed_success > 0:
+        if indexed_failed > 0:
+            status = "partial"
+            sync_state = "error"
+            reason_code = "indexing_attempts_include_failures"
+            reason = "Some messages indexed successfully but at least one indexing attempt failed."
+            fully_indexed = False
+        elif pending_messages is not None and pending_messages > 0:
+            status = "partial"
+            sync_state = "lagging"
+            reason_code = "indexing_lag_detected"
+            reason = "Some chat messages are still pending RAG indexing."
+            fully_indexed = False
+        else:
+            status = "indexed"
+            sync_state = "synchronised"
+            reason_code = "indexed_and_synchronised"
+            reason = "Chat session appears fully indexed in RAG."
+            fully_indexed = True
+    elif indexed_failed > 0:
+        status = "indexing_failed"
+        sync_state = "error"
+        reason_code = "all_indexing_attempts_failed"
+        reason = (
+            "Indexing attempts were recorded, but none succeeded for this chat session."
+        )
+        indexed = False
+        fully_indexed = False
+    elif message_total == 0:
+        status = "not_indexed"
+        sync_state = "not_applicable"
+        reason_code = "session_has_no_messages"
+        reason = "Chat session has no messages to index."
+        indexed = False
+        fully_indexed = False
+
+    return {
+        "chat_session_id": chat_session_id,
+        "status": status,
+        "indexed": indexed,
+        "fully_indexed": fully_indexed,
+        "sync_state": sync_state,
+        "reason_code": reason_code,
+        "reason": reason,
+        "messages_total": message_total,
+        "messages_indexed_success": indexed_success,
+        "messages_indexed_failed": indexed_failed,
+        "messages_pending_indexing": pending_messages,
+        "source_system": "mongo.chat_history",
+    }
+
+
+def _build_turn_execution_rag_indexing_state(
+    *,
+    chat_session_id: Any,
+    state_by_chat_session_id: Mapping[str, Mapping[str, Any]],
+    lookup_warning: Mapping[str, str] | None,
+) -> dict[str, Any]:
+    if not isinstance(chat_session_id, str) or not chat_session_id.strip():
+        return {
+            "chat_session_id": None,
+            "status": "unknown",
+            "indexed": None,
+            "fully_indexed": None,
+            "sync_state": "unknown",
+            "reason_code": "chat_session_id_missing_on_turn_record",
+            "reason": "Turn execution record does not include a chat_session_id.",
+            "messages_total": None,
+            "messages_indexed_success": None,
+            "messages_indexed_failed": None,
+            "messages_pending_indexing": None,
+            "source_system": "mongo.chat_history",
+        }
+
+    session_id = chat_session_id.strip()
+    if lookup_warning is not None:
+        return {
+            "chat_session_id": session_id,
+            "status": "unknown",
+            "indexed": None,
+            "fully_indexed": None,
+            "sync_state": "unknown",
+            "reason_code": lookup_warning.get(
+                "reason_code", "chat_history_lookup_unavailable"
+            ),
+            "reason": lookup_warning.get(
+                "reason",
+                "Could not read chat_history to determine RAG indexing state.",
+            ),
+            "messages_total": None,
+            "messages_indexed_success": None,
+            "messages_indexed_failed": None,
+            "messages_pending_indexing": None,
+            "source_system": "mongo.chat_history",
+        }
+
+    indexed_state = state_by_chat_session_id.get(session_id)
+    if indexed_state is not None:
+        return dict(indexed_state)
+
+    return {
+        "chat_session_id": session_id,
+        "status": "not_indexed",
+        "indexed": False,
+        "fully_indexed": False,
+        "sync_state": "unknown",
+        "reason_code": "chat_history_session_not_found",
+        "reason": "No matching chat_history session was found for this turn execution record.",
+        "messages_total": None,
+        "messages_indexed_success": None,
+        "messages_indexed_failed": None,
+        "messages_pending_indexing": None,
+        "source_system": "mongo.chat_history",
+    }
+
+
+def _load_turn_execution_rag_indexing_state_map(
+    *,
+    db: Any,
+    namespace: str,
+    chat_session_ids: Sequence[str],
+) -> tuple[dict[str, dict[str, Any]], dict[str, str] | None]:
+    unique_chat_session_ids: list[str] = []
+    seen_ids: set[str] = set()
+    for raw_session_id in chat_session_ids:
+        if not isinstance(raw_session_id, str):
+            continue
+        session_id = raw_session_id.strip()
+        if not session_id:
+            continue
+        if session_id in seen_ids:
+            continue
+        seen_ids.add(session_id)
+        unique_chat_session_ids.append(session_id)
+
+    if not unique_chat_session_ids:
+        return {}, None
+
+    try:
+        chat_history_coll = db["chat_history"]
+    except Exception:
+        return {}, {
+            "reason_code": "chat_history_lookup_unavailable",
+            "reason": "chat_history collection unavailable while deriving RAG indexing state.",
+        }
+
+    query = {
+        "namespace": namespace,
+        "session_id": {"$in": unique_chat_session_ids},
+    }
+    projection = {
+        "session_id": 1,
+        "history": 1,
+        "rag_indexed_success": 1,
+        "rag_indexed_failed": 1,
+    }
+
+    try:
+        cursor = chat_history_coll.find(query, projection)
+    except Exception as exc:
+        return {}, {
+            "reason_code": "chat_history_lookup_failed",
+            "reason": (
+                "chat_history lookup failed while deriving RAG indexing state: "
+                f"{type(exc).__name__}"
+            ),
+        }
+
+    state_by_chat_session_id: dict[str, dict[str, Any]] = {}
+    try:
+        for doc in cursor:
+            if not isinstance(doc, dict):
+                continue
+            session_id_raw = doc.get("session_id")
+            if not isinstance(session_id_raw, str) or not session_id_raw.strip():
+                continue
+            session_id = session_id_raw.strip()
+            state_by_chat_session_id[session_id] = (
+                _derive_turn_execution_rag_indexing_state_from_chat_doc(doc)
+            )
+    except Exception as exc:
+        return {}, {
+            "reason_code": "chat_history_lookup_failed",
+            "reason": (
+                "chat_history cursor iteration failed while deriving RAG indexing state: "
+                f"{type(exc).__name__}"
+            ),
+        }
+
+    return state_by_chat_session_id, None
+
+
+def _summarise_turn_execution_rag_indexing_states(
+    items: Sequence[Mapping[str, Any]],
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        state = item.get("rag_indexing_state")
+        status = None
+        if isinstance(state, Mapping):
+            status = state.get("status")
+        status_key = status.strip() if isinstance(status, str) and status.strip() else "unknown"
+        counts[status_key] = counts.get(status_key, 0) + 1
+    return counts
 
 
 def _rag_list_indexed(**kwargs):
@@ -8415,14 +8657,30 @@ def _rag_list_indexed(**kwargs):
             .skip(offset)
             .limit(limit)
         )
+        docs = [doc for doc in cursor if isinstance(doc, dict)]
+
+        chat_session_ids_for_page: list[str] = []
+        for doc in docs:
+            chat_session_id = doc.get("session_id")
+            if isinstance(chat_session_id, str) and chat_session_id.strip():
+                chat_session_ids_for_page.append(chat_session_id.strip())
+        rag_indexing_state_map, rag_indexing_lookup_warning = (
+            _load_turn_execution_rag_indexing_state_map(
+                db=db,
+                namespace=ns,
+                chat_session_ids=chat_session_ids_for_page,
+            )
+        )
 
         items: list[dict[str, Any]] = []
-        for doc in cursor:
-            completion_gate = (
-                doc.get("completion_gate") if isinstance(doc.get("completion_gate"), dict) else {}
+        for doc in docs:
+            completion_gate_raw = doc.get("completion_gate")
+            completion_gate: dict[str, Any] = (
+                completion_gate_raw if isinstance(completion_gate_raw, dict) else {}
             )
-            required_effects = (
-                doc.get("required_effects") if isinstance(doc.get("required_effects"), list) else []
+            required_effects_raw = doc.get("required_effects")
+            required_effects: list[Any] = (
+                required_effects_raw if isinstance(required_effects_raw, list) else []
             )
             unresolved_effect_count = 0
             for effect in required_effects:
@@ -8432,21 +8690,28 @@ def _rag_list_indexed(**kwargs):
                 if isinstance(status, str) and status in {"not_executed", "not_satisfied"}:
                     unresolved_effect_count += 1
 
-            workflow_selection = (
-                doc.get("workflow_selection")
-                if isinstance(doc.get("workflow_selection"), dict)
+            workflow_selection_raw = doc.get("workflow_selection")
+            workflow_selection: dict[str, Any] = (
+                workflow_selection_raw
+                if isinstance(workflow_selection_raw, dict)
                 else {}
             )
-            prompt_payload = doc.get("prompt") if isinstance(doc.get("prompt"), dict) else {}
-            critic_payload = doc.get("critic") if isinstance(doc.get("critic"), dict) else {}
-            critic_summary = (
-                critic_payload.get("summary")
-                if isinstance(critic_payload.get("summary"), dict)
-                else {}
+            prompt_payload_raw = doc.get("prompt")
+            prompt_payload: dict[str, Any] = (
+                prompt_payload_raw if isinstance(prompt_payload_raw, dict) else {}
             )
-            final_response_payload = (
-                doc.get("final_response")
-                if isinstance(doc.get("final_response"), dict)
+            critic_payload_raw = doc.get("critic")
+            critic_payload: dict[str, Any] = (
+                critic_payload_raw if isinstance(critic_payload_raw, dict) else {}
+            )
+            critic_summary_raw = critic_payload.get("summary")
+            critic_summary: dict[str, Any] = (
+                critic_summary_raw if isinstance(critic_summary_raw, dict) else {}
+            )
+            final_response_payload_raw = doc.get("final_response")
+            final_response_payload: dict[str, Any] = (
+                final_response_payload_raw
+                if isinstance(final_response_payload_raw, dict)
                 else {}
             )
             blocking_effect_ids_raw = completion_gate.get("blocking_effect_ids")
@@ -8455,6 +8720,11 @@ def _rag_list_indexed(**kwargs):
                 for effect_id in blocking_effect_ids_raw:
                     if isinstance(effect_id, str) and effect_id.strip():
                         blocking_effect_ids.append(effect_id.strip())
+            rag_indexing_state = _build_turn_execution_rag_indexing_state(
+                chat_session_id=doc.get("session_id"),
+                state_by_chat_session_id=rag_indexing_state_map,
+                lookup_warning=rag_indexing_lookup_warning,
+            )
 
             items.append(
                 {
@@ -8485,6 +8755,7 @@ def _rag_list_indexed(**kwargs):
                         "completion_claim_validated"
                     ),
                     "critic_summary": critic_summary,
+                    "rag_indexing_state": rag_indexing_state,
                     "item_kind": "turn_execution_record",
                     "source_system": "mongo.turn_execution_records",
                     "namespace_source": ns_report.get("namespace_source"),
@@ -8515,11 +8786,16 @@ def _rag_list_indexed(**kwargs):
             "limit": limit,
             "offset": offset,
             "decision_counts": decision_counts,
+            "rag_indexing_state_counts": _summarise_turn_execution_rag_indexing_states(
+                items
+            ),
             "effective_namespace": ns,
             "effective_namespace_source": ns_report.get("namespace_source"),
             **ns_report,
             "success": True,
         }
+        if rag_indexing_lookup_warning is not None:
+            payload["rag_indexing_lookup_warning"] = rag_indexing_lookup_warning
 
         return _with_rag_provenance(
             payload=payload,
@@ -8791,6 +9067,20 @@ def _rag_get_item(**kwargs):
             else []
         )
         critic_payload = doc.get("critic") if isinstance(doc.get("critic"), dict) else {}
+        rag_indexing_state_map, rag_indexing_lookup_warning = (
+            _load_turn_execution_rag_indexing_state_map(
+                db=db,
+                namespace=ns,
+                chat_session_ids=[doc.get("session_id")]
+                if isinstance(doc.get("session_id"), str)
+                else [],
+            )
+        )
+        rag_indexing_state = _build_turn_execution_rag_indexing_state(
+            chat_session_id=doc.get("session_id"),
+            state_by_chat_session_id=rag_indexing_state_map,
+            lookup_warning=rag_indexing_lookup_warning,
+        )
 
         payload = {
             "collection": collection,
@@ -8814,6 +9104,7 @@ def _rag_get_item(**kwargs):
             "required_effects": required_effects,
             "postcondition_checks": postcondition_checks,
             "critic": critic_payload,
+            "rag_indexing_state": rag_indexing_state,
             "item_kind": "turn_execution_record",
             "source_system": "mongo.turn_execution_records",
             "namespace_source": ns_report.get("namespace_source"),
@@ -8822,6 +9113,8 @@ def _rag_get_item(**kwargs):
             **ns_report,
             "success": True,
         }
+        if rag_indexing_lookup_warning is not None:
+            payload["rag_indexing_lookup_warning"] = rag_indexing_lookup_warning
         return _with_rag_provenance(
             payload=payload,
             item_kind="turn_execution_record_item",
@@ -13837,7 +14130,8 @@ def build_default_catalogue() -> MethodCatalogue:
             category="read",
             description=(
                 "List assistant turn execution records (workflow selection, required effects, postcondition checks, completion gate). "
-                "Use for deterministic evidence triage across conversations."
+                "Use for deterministic evidence triage across conversations. "
+                "Includes MCP-visible rag_indexing_state diagnostics per record."
             ),
         ),
         MethodDefinition(
@@ -13858,7 +14152,8 @@ def build_default_catalogue() -> MethodCatalogue:
             output_schema=None,
             category="read",
             description=(
-                "Fetch a single turn execution record by request_id for detailed failure analysis."
+                "Fetch a single turn execution record by request_id for detailed failure analysis, "
+                "including MCP-visible rag_indexing_state diagnostics."
             ),
         ),
         MethodDefinition(
