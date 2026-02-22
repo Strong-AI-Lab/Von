@@ -75,6 +75,8 @@ from src.backend.services.buttonify_service import (
     extract_buttonify_options_heuristic,
     parse_buttonify_options_json,
     dedupe_buttonify_options,
+    sanitise_buttonify_heuristic_options,
+    select_buttonify_preflight_options,
 )
 
 # Tool metadata service for Vontology-driven tool display (JVNAUTOSCI-1073)
@@ -2051,9 +2053,13 @@ class InternalMCPChatOrchestrator:
         buttonify_suppression_reason = request.data.get("buttonify_suppression_reason")
         if not isinstance(buttonify_suppression_reason, str):
             buttonify_suppression_reason = None
+        buttonify_preflight_rejection_reason: str | None = None
 
         if buttonify_preflight_enabled:
-            preflight_options = extract_buttonify_options_heuristic(screen_text)
+            preflight_candidates = extract_buttonify_options_heuristic(screen_text)
+            preflight_options, buttonify_preflight_rejection_reason = (
+                select_buttonify_preflight_options(preflight_candidates)
+            )
             if preflight_options:
                 buttonify_options = preflight_options
                 buttonify_source = "heuristic_preflight"
@@ -2130,7 +2136,9 @@ class InternalMCPChatOrchestrator:
             buttonify_source = "llm" if buttonify_options else "none"
 
             if not buttonify_options:
-                heuristic_options = extract_buttonify_options_heuristic(screen_text)
+                heuristic_options = sanitise_buttonify_heuristic_options(
+                    extract_buttonify_options_heuristic(screen_text)
+                )
                 if heuristic_options:
                     buttonify_options = heuristic_options
                     buttonify_source = "heuristic_fallback"
@@ -2149,6 +2157,8 @@ class InternalMCPChatOrchestrator:
             if not buttonify_suppression_reason:
                 if buttonify_error_class:
                     buttonify_suppression_reason = "model_error"
+                elif buttonify_preflight_rejection_reason:
+                    buttonify_suppression_reason = buttonify_preflight_rejection_reason
                 else:
                     buttonify_suppression_reason = "no_candidates"
 
@@ -2171,6 +2181,7 @@ class InternalMCPChatOrchestrator:
             diagnostics={
                 "status": buttonify_status,
                 "suppression_reason": buttonify_suppression_reason,
+                "preflight_rejection_reason": buttonify_preflight_rejection_reason,
                 "error_class": buttonify_error_class,
                 "model": buttonify_model_used if buttonify_model_attempted else None,
             },
@@ -2187,6 +2198,9 @@ class InternalMCPChatOrchestrator:
                 "buttonify_model_attempted": buttonify_model_attempted,
                 "buttonify_error_class": buttonify_error_class,
                 "buttonify_suppression_reason": buttonify_suppression_reason,
+                "buttonify_preflight_rejection_reason": (
+                    buttonify_preflight_rejection_reason
+                ),
                 "output_transformation_contract": contract,
             }
         )

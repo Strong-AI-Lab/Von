@@ -166,3 +166,54 @@ def parse_buttonify_options_json(
         max_options=max_options,
     )
 
+
+_BUTTONIFY_CONCEPT_ID_PATTERN = re.compile(
+    r"^#V#[A-Za-z0-9_@.\-]+$",
+    re.IGNORECASE,
+)
+_BUTTONIFY_JIRA_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9]{1,24}-\d+$")
+_BUTTONIFY_CODE_PUNCTUATION_PATTERN = re.compile(r"[`_{}[\]<>]")
+
+
+def _looks_like_code_or_identifier(value: str) -> bool:
+    text = value.strip()
+    if not text:
+        return False
+    if _BUTTONIFY_CONCEPT_ID_PATTERN.fullmatch(text):
+        return True
+    if _BUTTONIFY_JIRA_KEY_PATTERN.fullmatch(text):
+        return True
+    if _BUTTONIFY_CODE_PUNCTUATION_PATTERN.search(text):
+        return True
+    if "\\" in text or "/" in text:
+        return True
+    return False
+
+
+def sanitise_buttonify_heuristic_options(
+    values: Iterable[str | None],
+    *,
+    max_options: int = 4,
+) -> list[str]:
+    """Remove code-like heuristic options so quick replies stay user-facing."""
+    candidates = dedupe_buttonify_options(values, max_options=max_options * 3)
+    return [
+        option
+        for option in candidates
+        if not _looks_like_code_or_identifier(option)
+    ][:max_options]
+
+
+def select_buttonify_preflight_options(
+    values: Iterable[str | None],
+    *,
+    max_options: int = 4,
+) -> tuple[list[str], str | None]:
+    """Return preflight options only when confidence is high enough to skip LLM."""
+    accepted = sanitise_buttonify_heuristic_options(values, max_options=max_options)
+    if len(accepted) >= 2:
+        return accepted, None
+    if not accepted:
+        return [], "heuristic_preflight_rejected_code_like_candidates"
+    return [], "heuristic_preflight_low_confidence"
+

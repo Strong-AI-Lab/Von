@@ -226,6 +226,42 @@ def test_generate_buttonify_heuristic_preflight_skips_model_pass(monkeypatch):
     assert len(llm.calls) == 1
 
 
+def test_generate_buttonify_preflight_low_confidence_runs_llm_pass(monkeypatch):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("VON_BUTTONIFY_MODEL_ENABLE", "1")
+    monkeypatch.setenv("VON_BUTTONIFY_HEURISTIC_PREFLIGHT_ENABLE", "1")
+
+    llm = _StubLLMSequence(
+        [
+            'Use these IDs: "#V#academic_conference", "#V#research_symposium".',
+            '["Create concepts", "Show existing meetings"]',
+        ]
+    )
+    app = _make_app(monkeypatch, llm)
+
+    client = app.test_client()
+    resp = client.post("/von/generate", json={"prompt": "Hello"})
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    llm_debug = body["llm_debug"]
+    buttonify = llm_debug.get("buttonify")
+    assert isinstance(buttonify, dict)
+    assert buttonify.get("source") == "llm"
+    assert buttonify.get("options") == ["Create concepts", "Show existing meetings"]
+    assert buttonify.get("preflight_rejection_reason") == (
+        "heuristic_preflight_rejected_code_like_candidates"
+    )
+
+    buttonify_event = _find_transformation_event(llm_debug, "buttonify")
+    assert buttonify_event["status"] == "success"
+    assert buttonify_event["source_path"] == "llm"
+    assert buttonify_event["options_emitted_count"] == 2
+
+    # First LLM call is the assistant response, second is buttonify extraction.
+    assert len(llm.calls) == 2
+
+
 def test_generate_coding_agent_turn_captures_narration_buttonify_and_layout(monkeypatch):
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setenv("VON_BUTTONIFY_MODEL_ENABLE", "1")

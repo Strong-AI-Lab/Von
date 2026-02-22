@@ -46,6 +46,8 @@ from ...services.buttonify_service import (
     dedupe_buttonify_options,
     extract_buttonify_options_heuristic as _extract_buttonify_options_heuristic,
     parse_buttonify_options_json,
+    sanitise_buttonify_heuristic_options,
+    select_buttonify_preflight_options,
 )
 from ...services.display_elements_service import (
     build_canonical_table_payload_from_records,
@@ -6411,6 +6413,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         buttonify_suppression_reason = None
         buttonify_model_attempted = False
         buttonify_workflow_used = False
+        buttonify_preflight_rejection_reason = None
 
         if not buttonify_enabled:
             buttonify_suppression_reason = "buttonify_disabled"
@@ -6506,6 +6509,12 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     buttonify_suppression_reason = workflow_payload.get(
                         "buttonify_suppression_reason"
                     )
+                if isinstance(
+                    workflow_payload.get("buttonify_preflight_rejection_reason"), str
+                ):
+                    buttonify_preflight_rejection_reason = workflow_payload.get(
+                        "buttonify_preflight_rejection_reason"
+                    )
                 contract_payload = workflow_payload.get("output_transformation_contract")
                 if isinstance(contract_payload, Mapping):
                     buttonify_workflow_contract = dict(contract_payload)
@@ -6513,7 +6522,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 # Deterministic guardrail: if workflow output is empty/invalid,
                 # always attempt heuristic fallback before surfacing no-op.
                 if not buttonify_options:
-                    fallback_options = _extract_buttonify_options_heuristic(response_text)
+                    fallback_options = sanitise_buttonify_heuristic_options(
+                        _extract_buttonify_options_heuristic(response_text)
+                    )
                     if fallback_options:
                         buttonify_options = fallback_options
                         buttonify_source = "heuristic_fallback"
@@ -6523,7 +6534,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             else:
                 # Keep deterministic behaviour when workflow execution is not available.
                 if buttonify_preflight_enabled:
-                    preflight_options = _extract_buttonify_options_heuristic(response_text)
+                    preflight_options, buttonify_preflight_rejection_reason = (
+                        select_buttonify_preflight_options(
+                            _extract_buttonify_options_heuristic(response_text)
+                        )
+                    )
                     if preflight_options:
                         buttonify_options = preflight_options
                         buttonify_source = "heuristic_preflight"
@@ -6561,8 +6576,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     buttonify_options = parse_buttonify_options_json(buttonify_response)
                     buttonify_source = "llm" if buttonify_options else "none"
                     if not buttonify_options:
-                        fallback_options = _extract_buttonify_options_heuristic(
-                            response_text
+                        fallback_options = sanitise_buttonify_heuristic_options(
+                            _extract_buttonify_options_heuristic(response_text)
                         )
                         if fallback_options:
                             buttonify_options = fallback_options
@@ -6582,6 +6597,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 buttonify_status = "no_op"
                 if buttonify_error_class:
                     buttonify_suppression_reason = "model_error"
+                elif buttonify_preflight_rejection_reason:
+                    buttonify_suppression_reason = buttonify_preflight_rejection_reason
                 elif not buttonify_suppression_reason:
                     buttonify_suppression_reason = "no_candidates"
 
@@ -6595,6 +6612,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 "heuristic_preflight_enabled": buttonify_preflight_enabled,
                 "workflow_used": buttonify_workflow_used,
                 "workflow_available": buttonify_workflow_available,
+                "preflight_rejection_reason": buttonify_preflight_rejection_reason,
             }
             if buttonify_workflow_contract is not None:
                 buttonify_meta["workflow_contract"] = buttonify_workflow_contract
