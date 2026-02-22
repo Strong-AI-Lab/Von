@@ -12349,7 +12349,45 @@ async function fetchWorkflowEpisodesSnapshot(workflowId, { limit = 60 } = {}) {
             { method: 'GET', headers: buildChatFetchHeaders() }
         );
         if (!resp.ok) {
-            throw new Error(`HTTP ${resp.status}`);
+            let errorPayload = null;
+            try {
+                errorPayload = await resp.json();
+            } catch (_) {
+                errorPayload = null;
+            }
+
+            const backendReason = String(
+                errorPayload?.diagnostics?.backend_reason
+                || errorPayload?.detail
+                || `HTTP ${resp.status}`
+            );
+            const namespaceValue = String(
+                errorPayload?.diagnostics?.namespace
+                || errorPayload?.filters?.namespace
+                || ''
+            ).trim();
+
+            return {
+                ok: false,
+                requestQuery,
+                fetchedAt: Date.now(),
+                payload: {
+                    error: String(errorPayload?.error || 'workflow_episodes_fetch_failed'),
+                    detail: backendReason,
+                    request_query: requestQuery,
+                    diagnostics: {
+                        backend_reason: backendReason,
+                        namespace: namespaceValue || null
+                    },
+                    backend_payload: errorPayload
+                },
+                items: [],
+                total: 0,
+                hasMore: false,
+                error: namespaceValue
+                    ? `Could not load workflow episodes (${namespaceValue}): ${backendReason}`
+                    : `Could not load workflow episodes: ${backendReason}`
+            };
         }
         const payload = await resp.json();
         const items = Array.isArray(payload?.items) ? payload.items : [];

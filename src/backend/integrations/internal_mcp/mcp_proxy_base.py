@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
@@ -66,6 +67,9 @@ class MCPServerConfig:
     args: list[str]
     env: Optional[Dict[str, str]] = None
     timeout_sec: float = 30.0
+    # Bounded transport recovery for transient stdio/session drops.
+    transport_retry_attempts: int = 1
+    transport_retry_backoff_sec: float = 0.2
     log_tag: str = "[mcp_proxy]"
 
 
@@ -116,6 +120,57 @@ class MCPStdIOClient:
         if len(self._telemetry_history) > self._MAX_TELEMETRY_HISTORY:
             self._telemetry_history.pop(0)
 
+    @staticmethod
+    def _collect_exception_text(exc: BaseException) -> str:
+        """Flatten exception and chained causes into a searchable message blob."""
+        segments: list[str] = []
+        seen: set[int] = set()
+
+        def _walk(err: BaseException | None) -> None:
+            if err is None:
+                return
+            err_id = id(err)
+            if err_id in seen:
+                return
+            seen.add(err_id)
+
+            message = str(err).strip()
+            if message:
+                segments.append(message)
+
+            nested = getattr(err, "exceptions", None)
+            if isinstance(nested, (list, tuple)):
+                for sub_err in nested:
+                    if isinstance(sub_err, BaseException):
+                        _walk(sub_err)
+
+            cause = getattr(err, "__cause__", None)
+            if isinstance(cause, BaseException):
+                _walk(cause)
+            context = getattr(err, "__context__", None)
+            if isinstance(context, BaseException):
+                _walk(context)
+
+        _walk(exc)
+        return " | ".join(segments)
+
+    @classmethod
+    def _is_transport_closed_error(cls, exc: BaseException) -> bool:
+        """Return True when error text indicates a dropped MCP transport/session."""
+        flattened = cls._collect_exception_text(exc).lower()
+        if not flattened:
+            return False
+        transport_tokens = (
+            "transport closed",
+            "connection closed",
+            "stream closed",
+            "broken pipe",
+            "connection reset by peer",
+            "eof",
+            "closed resource",
+        )
+        return any(token in flattened for token in transport_tokens)
+
     async def call_tool(
         self,
         tool_name: str,
@@ -162,54 +217,76 @@ class MCPStdIOClient:
             success=False,
         )
 
+        max_retries = max(0, int(self._config.transport_retry_attempts))
+        attempt = 0
         try:
-            async with stdio_client(params) as (read_stream, write_stream):
-                async with ClientSession(read_stream, write_stream) as session:
-                    await session.initialize()
-                    result = await session.call_tool(tool_name, arguments)
-                    duration_ms = (time.perf_counter() - start_time) * 1000
-                    self._call_count += 1
-                    self._total_duration_ms += duration_ms
+            while True:
+                try:
+                    async with stdio_client(params) as (read_stream, write_stream):
+                        async with ClientSession(read_stream, write_stream) as session:
+                            await session.initialize()
+                            result = await session.call_tool(tool_name, arguments)
+                            duration_ms = (time.perf_counter() - start_time) * 1000
+                            self._call_count += 1
+                            self._total_duration_ms += duration_ms
 
-                    # Extract content types for telemetry
-                    content_types = []
-                    char_count = 0
-                    if result and getattr(result, "content", None):
-                        for item in result.content:
-                            if isinstance(item, mcp_types.TextContent):
-                                content_types.append("text")
-                                char_count += len(item.text or "")
-                            elif isinstance(item, mcp_types.ImageContent):
-                                content_types.append("image")
-                            elif isinstance(item, mcp_types.EmbeddedResource):
-                                content_types.append("resource")
-                            else:
-                                content_types.append(type(item).__name__)
+                            # Extract content types for telemetry
+                            content_types = []
+                            char_count = 0
+                            if result and getattr(result, "content", None):
+                                for item in result.content:
+                                    if isinstance(item, mcp_types.TextContent):
+                                        content_types.append("text")
+                                        char_count += len(item.text or "")
+                                    elif isinstance(item, mcp_types.ImageContent):
+                                        content_types.append("image")
+                                    elif isinstance(item, mcp_types.EmbeddedResource):
+                                        content_types.append("resource")
+                                    else:
+                                        content_types.append(type(item).__name__)
 
-                    parsed, parsed_as = self._parse_result_with_telemetry(
-                        result, text_parser=text_parser
-                    )
+                            parsed, parsed_as = self._parse_result_with_telemetry(
+                                result, text_parser=text_parser
+                            )
 
-                    telemetry.duration_ms = duration_ms
-                    telemetry.success = True
-                    telemetry.response_content_types = content_types
-                    telemetry.response_char_count = char_count
-                    telemetry.parsed_as = parsed_as
-                    self._record_telemetry(telemetry)
+                            telemetry.duration_ms = duration_ms
+                            telemetry.success = True
+                            telemetry.response_content_types = content_types
+                            telemetry.response_char_count = char_count
+                            telemetry.parsed_as = parsed_as
+                            self._record_telemetry(telemetry)
 
-                    logger.info(
-                        "%s Tool %s completed in %.1fms (chars=%d, parsed_as=%s)",
-                        self._config.log_tag,
-                        tool_name,
-                        duration_ms,
-                        char_count,
-                        parsed_as,
-                    )
+                            logger.info(
+                                "%s Tool %s completed in %.1fms (chars=%d, parsed_as=%s)",
+                                self._config.log_tag,
+                                tool_name,
+                                duration_ms,
+                                char_count,
+                                parsed_as,
+                            )
 
-                    return parsed
-        except (
-            Exception
-        ) as exc:  # pragma: no cover - MCP failures are environment dependent
+                            return parsed
+                except Exception as exc:
+                    should_retry = self._is_transport_closed_error(exc) and attempt < max_retries
+                    if should_retry:
+                        attempt += 1
+                        backoff = max(
+                            0.0, float(self._config.transport_retry_backoff_sec)
+                        ) * attempt
+                        logger.warning(
+                            "%s Tool %s transport drop detected (%s); retry %d/%d in %.2fs",
+                            self._config.log_tag,
+                            tool_name,
+                            type(exc).__name__,
+                            attempt,
+                            max_retries,
+                            backoff,
+                        )
+                        if backoff > 0:
+                            await asyncio.sleep(backoff)
+                        continue
+                    raise
+        except Exception as exc:  # pragma: no cover - MCP failures are environment dependent
             duration_ms = (time.perf_counter() - start_time) * 1000
             self._error_count += 1
             self._total_duration_ms += duration_ms
@@ -240,14 +317,37 @@ class MCPStdIOClient:
 
         logger.info("%s Listing tools", self._config.log_tag)
 
+        max_retries = max(0, int(self._config.transport_retry_attempts))
+        attempt = 0
         try:
-            async with stdio_client(params) as (read_stream, write_stream):
-                async with ClientSession(read_stream, write_stream) as session:
-                    await session.initialize()
-                    result = await session.list_tools()
-                    self._call_count += 1
-                    tools = self._extract_tools(result)
-                    return [self._serialise_tool(tool) for tool in tools]
+            while True:
+                try:
+                    async with stdio_client(params) as (read_stream, write_stream):
+                        async with ClientSession(read_stream, write_stream) as session:
+                            await session.initialize()
+                            result = await session.list_tools()
+                            self._call_count += 1
+                            tools = self._extract_tools(result)
+                            return [self._serialise_tool(tool) for tool in tools]
+                except Exception as exc:
+                    should_retry = self._is_transport_closed_error(exc) and attempt < max_retries
+                    if should_retry:
+                        attempt += 1
+                        backoff = max(
+                            0.0, float(self._config.transport_retry_backoff_sec)
+                        ) * attempt
+                        logger.warning(
+                            "%s list_tools transport drop detected (%s); retry %d/%d in %.2fs",
+                            self._config.log_tag,
+                            type(exc).__name__,
+                            attempt,
+                            max_retries,
+                            backoff,
+                        )
+                        if backoff > 0:
+                            await asyncio.sleep(backoff)
+                        continue
+                    raise exc
         except Exception as exc:  # pragma: no cover - environment dependent
             self._error_count += 1
             logger.error("%s Tool list failed: %s", self._config.log_tag, exc)

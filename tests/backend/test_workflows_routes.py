@@ -545,6 +545,40 @@ def test_workflow_episodes_list_endpoint(monkeypatch, app_client):
     assert payload["filters"]["turn_id"] == "turn-123"
 
 
+def test_workflow_episodes_list_endpoint_returns_structured_diagnostics_on_failure(
+    monkeypatch, app_client
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    def _boom(**_kwargs):
+        raise RuntimeError("mongodb timeout while reading workflow episodes")
+
+    monkeypatch.setattr(
+        workflows_routes,
+        "list_workflow_use_episodes",
+        _boom,
+    )
+
+    response = app_client.get(
+        (
+            "/api/workflows/episodes?"
+            "workflow_id=%23V%23alpha_workflow&namespace=%23V%23user/%23V%23org"
+            "&session_id=session-1&turn_id=turn-123&limit=25"
+        )
+    )
+
+    assert response.status_code == 500
+    payload = response.get_json()
+    assert payload["error"] == "workflow_episodes_fetch_failed"
+    assert payload["error_type"] == "RuntimeError"
+    assert payload["filters"]["workflow_id"] == "#V#alpha_workflow"
+    assert payload["filters"]["namespace"] == "#V#user/#V#org"
+    assert payload["filters"]["session_id"] == "session-1"
+    assert payload["filters"]["turn_id"] == "turn-123"
+    assert payload["diagnostics"]["namespace"] == "#V#user/#V#org"
+    assert "mongodb timeout" in payload["diagnostics"]["backend_reason"]
+
+
 def test_create_workflow_instance_route_rejects_unrunnable_workflow(
     monkeypatch, app_client
 ):

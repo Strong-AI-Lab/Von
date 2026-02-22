@@ -283,33 +283,57 @@ def api_list_workflow_use_episodes():
         limit = 50
     limit = max(1, min(limit, 200))
 
-    items = list_workflow_use_episodes(
-        workflow_id=workflow_id or None,
-        namespace=namespace or None,
-        session_id=session_id or None,
-        turn_id=turn_id or None,
-        limit=limit,
-    )
-    total = count_workflow_use_episodes(
-        workflow_id=workflow_id or None,
-        namespace=namespace or None,
-        session_id=session_id or None,
-        turn_id=turn_id or None,
-    )
-    return jsonify(
-        {
-            "items": items,
-            "count": len(items),
-            "total": int(total),
-            "has_more": bool(total > len(items)),
-            "filters": {
-                "workflow_id": workflow_id or None,
-                "namespace": namespace or None,
-                "session_id": session_id or None,
-                "turn_id": turn_id or None,
-            },
-        }
-    )
+    filters = {
+        "workflow_id": workflow_id or None,
+        "namespace": namespace or None,
+        "session_id": session_id or None,
+        "turn_id": turn_id or None,
+    }
+
+    try:
+        items = list_workflow_use_episodes(
+            workflow_id=workflow_id or None,
+            namespace=namespace or None,
+            session_id=session_id or None,
+            turn_id=turn_id or None,
+            limit=limit,
+        )
+        total = count_workflow_use_episodes(
+            workflow_id=workflow_id or None,
+            namespace=namespace or None,
+            session_id=session_id or None,
+            turn_id=turn_id or None,
+        )
+        return jsonify(
+            {
+                "items": items,
+                "count": len(items),
+                "total": int(total),
+                "has_more": bool(total > len(items)),
+                "filters": filters,
+            }
+        )
+    except Exception as exc:
+        logger.exception(
+            "Failed to list workflow episodes",
+            extra={"filters": filters},
+        )
+        detail = str(exc).strip() or type(exc).__name__
+        return (
+            jsonify(
+                {
+                    "error": "workflow_episodes_fetch_failed",
+                    "detail": detail,
+                    "error_type": type(exc).__name__,
+                    "filters": filters,
+                    "diagnostics": {
+                        "backend_reason": detail,
+                        "namespace": filters.get("namespace"),
+                    },
+                }
+            ),
+            500,
+        )
 
 
 # =============================================================================
