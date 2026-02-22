@@ -88,6 +88,30 @@ def _make_app(monkeypatch, llm: _LLMProtocol) -> Flask:
         lambda: None,
     )
 
+    def _render_prompt_stub(self, _concept_ids, *, variables=None, **_kwargs):
+        vars_map = variables or {}
+        user_message = str(vars_map.get("user_message") or "")
+        assistant_response = str(vars_map.get("assistant_response") or "")
+        rendered_text = (
+            "Return ONLY a JSON array with up to 4 quick-reply strings.\n\n"
+            f"User message:\n{user_message}\n\n"
+            f"Assistant response:\n{assistant_response}"
+        )
+        return type(
+            "RenderedPromptStub",
+            (),
+            {
+                "prompt_id": "#V#buttonify_prompt_v1",
+                "text": rendered_text,
+                "truncated": False,
+            },
+        )()
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.PromptTemplateService.render_prompt",
+        _render_prompt_stub,
+    )
+
     flask_app = Flask(__name__)
     flask_app.secret_key = "test-secret"
     flask_app.register_blueprint(von_bp, url_prefix="/von")
@@ -223,6 +247,40 @@ def test_generate_buttonify_heuristic_preflight_skips_model_pass(monkeypatch):
     assert "timestamp_utc" in buttonify_event
 
     # Preflight should avoid a second model pass for buttonify extraction.
+    assert len(llm.calls) == 1
+
+
+def test_generate_buttonify_noops_when_vontology_prompt_unavailable(monkeypatch):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("VON_BUTTONIFY_MODEL_ENABLE", "1")
+    monkeypatch.setenv("VON_BUTTONIFY_HEURISTIC_PREFLIGHT_ENABLE", "1")
+
+    llm = _StubLLM('Please reply with one of: "Proceed", "Hold".')
+    app = _make_app(monkeypatch, llm)
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.PromptTemplateService.render_prompt",
+        lambda self, *_args, **_kwargs: None,
+    )
+
+    client = app.test_client()
+    resp = client.post("/von/generate", json={"prompt": "Hello"})
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    llm_debug = body["llm_debug"]
+    buttonify = llm_debug.get("buttonify")
+    assert isinstance(buttonify, dict)
+    assert buttonify.get("source") == "none"
+    assert buttonify.get("options") == []
+    assert buttonify.get("prompt_available") is False
+    assert buttonify.get("suppression_reason") == "buttonify_prompt_unavailable"
+
+    buttonify_event = _find_transformation_event(llm_debug, "buttonify")
+    assert buttonify_event["status"] == "no_op"
+    assert buttonify_event["suppression_reason"] == "buttonify_prompt_unavailable"
+    assert buttonify_event["options_emitted_count"] == 0
+
+    # Prompt unavailable must suppress the extra buttonify model pass.
     assert len(llm.calls) == 1
 
 

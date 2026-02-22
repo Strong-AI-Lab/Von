@@ -42,13 +42,14 @@ from ...services.chat_concept_reference_service import (
 )
 from ...services.buttonify_service import (
     BUTTONIFY_PROMPT_IDS,
-    BUTTONIFY_PROMPT_TEMPLATE,
-    dedupe_buttonify_options,
+    enforce_buttonify_prompt_contract,
     extract_buttonify_options_heuristic as _extract_buttonify_options_heuristic,
     parse_buttonify_options_json,
+    sanitise_buttonify_options,
     sanitise_buttonify_heuristic_options,
     select_buttonify_preflight_options,
 )
+from ...services.prompt_template_service import PromptTemplateService
 from ...services.display_elements_service import (
     build_canonical_table_payload_from_records,
     build_turn_display_elements,
@@ -6408,6 +6409,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         buttonify_source = "none"
         buttonify_prompt_id = None
         buttonify_prompt_truncated = False
+        buttonify_prompt_available = False
+        buttonify_prompt_error = None
         buttonify_status = "skipped"
         buttonify_error_class = None
         buttonify_suppression_reason = None
@@ -6456,7 +6459,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             "buttonify_allowed": buttonify_allowed,
                             "buttonify_preflight_enabled": buttonify_preflight_enabled,
                             "buttonify_prompt_ids": list(BUTTONIFY_PROMPT_IDS),
-                            "buttonify_prompt_template": BUTTONIFY_PROMPT_TEMPLATE,
                             "default_model": model_name,
                             "policy_state": policy_state,
                             "record_llm_call": _record_stage_llm_call,
@@ -6487,7 +6489,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
                 raw_options = workflow_payload.get("buttonify_options")
                 if isinstance(raw_options, list):
-                    buttonify_options = dedupe_buttonify_options(raw_options)
+                    buttonify_options = sanitise_buttonify_options(raw_options)
 
                 if isinstance(workflow_payload.get("buttonify_source"), str):
                     buttonify_source = workflow_payload.get("buttonify_source", "none")
@@ -6496,6 +6498,12 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 buttonify_prompt_truncated = bool(
                     workflow_payload.get("buttonify_prompt_truncated")
                 )
+                if isinstance(workflow_payload.get("buttonify_prompt_available"), bool):
+                    buttonify_prompt_available = bool(
+                        workflow_payload.get("buttonify_prompt_available")
+                    )
+                if isinstance(workflow_payload.get("buttonify_prompt_error"), str):
+                    buttonify_prompt_error = workflow_payload.get("buttonify_prompt_error")
                 if isinstance(workflow_payload.get("buttonify_status"), str):
                     buttonify_status = workflow_payload.get("buttonify_status", "no_op")
                 if isinstance(workflow_payload.get("buttonify_error_class"), str):
@@ -6521,7 +6529,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
                 # Deterministic guardrail: if workflow output is empty/invalid,
                 # always attempt heuristic fallback before surfacing no-op.
-                if not buttonify_options:
+                if (
+                    not buttonify_options
+                    and buttonify_suppression_reason != "buttonify_prompt_unavailable"
+                ):
                     fallback_options = sanitise_buttonify_heuristic_options(
                         _extract_buttonify_options_heuristic(response_text)
                     )
@@ -6533,7 +6544,37 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         buttonify_workflow_contract = None
             else:
                 # Keep deterministic behaviour when workflow execution is not available.
-                if buttonify_preflight_enabled:
+                # If Vontology prompt content is unavailable, buttonify must no-op
+                # rather than silently falling back to code prompt text.
+                buttonify_prompt = ""
+                try:
+                    rendered_prompt = PromptTemplateService().render_prompt(
+                        BUTTONIFY_PROMPT_IDS,
+                        variables={
+                            "user_message": prompt_text,
+                            "assistant_response": response_text,
+                        },
+                        fallback=None,
+                        max_chars=6000,
+                    )
+                except Exception as exc:
+                    rendered_prompt = None
+                    buttonify_prompt_error = type(exc).__name__
+
+                if rendered_prompt is not None:
+                    buttonify_prompt = enforce_buttonify_prompt_contract(
+                        rendered_prompt.text
+                    )
+                    buttonify_prompt_id = rendered_prompt.prompt_id
+                    buttonify_prompt_truncated = rendered_prompt.truncated
+                    buttonify_prompt_available = True
+                else:
+                    buttonify_prompt_available = False
+                    if not buttonify_prompt_error:
+                        buttonify_prompt_error = "prompt_not_found_or_unavailable"
+                    buttonify_suppression_reason = "buttonify_prompt_unavailable"
+
+                if buttonify_prompt_available and buttonify_preflight_enabled:
                     preflight_options, buttonify_preflight_rejection_reason = (
                         select_buttonify_preflight_options(
                             _extract_buttonify_options_heuristic(response_text)
@@ -6543,16 +6584,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         buttonify_options = preflight_options
                         buttonify_source = "heuristic_preflight"
 
-                if not buttonify_options:
+                if buttonify_prompt_available and not buttonify_options:
                     buttonify_model_attempted = True
-                    try:
-                        buttonify_prompt = BUTTONIFY_PROMPT_TEMPLATE.format(
-                            user_message=prompt_text,
-                            assistant_response=response_text,
-                        )
-                    except Exception:
-                        buttonify_prompt = str(BUTTONIFY_PROMPT_TEMPLATE)
-
                     llm_start = time.perf_counter()
                     buttonify_response = None
                     try:
@@ -6583,7 +6616,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             buttonify_options = fallback_options
                             buttonify_source = "heuristic_fallback"
 
-                if not buttonify_workflow_available and not buttonify_options:
+                if (
+                    not buttonify_workflow_available
+                    and not buttonify_options
+                    and not buttonify_suppression_reason
+                ):
                     buttonify_suppression_reason = (
                         buttonify_suppression_reason or "workflow_unavailable"
                     )
@@ -6597,6 +6634,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 buttonify_status = "no_op"
                 if buttonify_error_class:
                     buttonify_suppression_reason = "model_error"
+                elif not buttonify_prompt_available:
+                    buttonify_suppression_reason = "buttonify_prompt_unavailable"
                 elif buttonify_preflight_rejection_reason:
                     buttonify_suppression_reason = buttonify_preflight_rejection_reason
                 elif not buttonify_suppression_reason:
@@ -6605,10 +6644,14 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             buttonify_meta = {
                 "enabled": True,
                 "model": buttonify_model_used,
+                "status": buttonify_status,
+                "suppression_reason": buttonify_suppression_reason,
                 "options": buttonify_options,
                 "source": buttonify_source,
                 "prompt_id": buttonify_prompt_id,
                 "prompt_truncated": buttonify_prompt_truncated,
+                "prompt_available": buttonify_prompt_available,
+                "prompt_error": buttonify_prompt_error,
                 "heuristic_preflight_enabled": buttonify_preflight_enabled,
                 "workflow_used": buttonify_workflow_used,
                 "workflow_available": buttonify_workflow_available,
@@ -6637,6 +6680,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     "source": buttonify_source,
                     "prompt_id": buttonify_prompt_id,
                     "prompt_truncated": buttonify_prompt_truncated,
+                    "prompt_available": buttonify_prompt_available,
+                    "prompt_error": buttonify_prompt_error,
                 },
                 options_emitted_count=len(buttonify_options),
                 source_path=buttonify_source,

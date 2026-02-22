@@ -1,5 +1,6 @@
 from src.backend.server.routes.von_routes import _extract_buttonify_options_heuristic
 from src.backend.services.buttonify_service import (
+    enforce_buttonify_prompt_contract,
     sanitise_buttonify_heuristic_options,
     select_buttonify_preflight_options,
 )
@@ -57,3 +58,11 @@ def test_buttonify_sanitise_filters_code_like_values():
         ]
     )
     assert options == ["Proceed", "Show options"]
+
+
+def test_buttonify_prompt_contract_suffix_is_applied_once():
+    prompt = "Return only JSON."
+    once = enforce_buttonify_prompt_contract(prompt)
+    twice = enforce_buttonify_prompt_contract(once)
+    assert "Mandatory quality gate" in once
+    assert once == twice

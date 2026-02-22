@@ -71,12 +71,12 @@ from src.backend.workflows.write_tool_policy import (
 from ...services.turn_execution_record_service import build_turn_execution_record
 from src.backend.services.buttonify_service import (
     BUTTONIFY_PROMPT_IDS,
-    BUTTONIFY_PROMPT_TEMPLATE,
     extract_buttonify_options_heuristic,
     parse_buttonify_options_json,
-    dedupe_buttonify_options,
+    sanitise_buttonify_options,
     sanitise_buttonify_heuristic_options,
     select_buttonify_preflight_options,
+    enforce_buttonify_prompt_contract,
 )
 
 # Tool metadata service for Vontology-driven tool display (JVNAUTOSCI-1073)
@@ -852,14 +852,14 @@ class InternalMCPChatOrchestrator:
             ActionSpec(
                 action_id="buttonify.select_prompt",
                 handler=self._action_buttonify_select_prompt,
-                description="Resolve buttonify prompt from Vontology with fallback template.",
+                description="Resolve buttonify prompt from Vontology.",
             )
         )
         registry.register(
             ActionSpec(
                 action_id="buttonify.extract_options",
                 handler=self._action_buttonify_extract_options,
-                description="Extract quick-reply options via heuristic/model/fallback chain.",
+                description="Extract quick-reply options via heuristic/model pipeline.",
             )
         )
         # Todo-refresh workflow actions (JVNAUTOSCI-922 Phase 2.3).
@@ -1072,6 +1072,39 @@ class InternalMCPChatOrchestrator:
             default=self._max_missing_tool_call_retries_per_turn,
             max_value=20,
         )
+        missing_prompt_tools_raw = data.get("missing_prompt_tools")
+        missing_prompt_tools = (
+            [
+                str(item).strip()
+                for item in missing_prompt_tools_raw
+                if isinstance(item, str) and str(item).strip()
+            ]
+            if isinstance(missing_prompt_tools_raw, list)
+            else []
+        )
+        missing_prompt_fetch_concept_ids_raw = data.get(
+            "missing_prompt_fetch_concept_ids"
+        )
+        missing_prompt_fetch_concept_ids = (
+            [
+                str(item).strip()
+                for item in missing_prompt_fetch_concept_ids_raw
+                if isinstance(item, str) and str(item).strip()
+            ]
+            if isinstance(missing_prompt_fetch_concept_ids_raw, list)
+            else []
+        )
+        required_prompt_create_type_name_raw = data.get("required_prompt_create_type_name")
+        required_prompt_create_type_name = (
+            str(required_prompt_create_type_name_raw).strip()
+            if isinstance(required_prompt_create_type_name_raw, str)
+            else ""
+        )
+        allow_semantic_retry = bool(
+            missing_prompt_tools
+            or missing_prompt_fetch_concept_ids
+            or required_prompt_create_type_name
+        )
         retries_remaining_before = max(0, retry_budget - retry_attempts)
         data["missing_tool_call_retry_attempts"] = retry_attempts
         data["missing_tool_call_retry_budget"] = retry_budget
@@ -1129,6 +1162,7 @@ class InternalMCPChatOrchestrator:
                     classifier_model=data.get("classifier_model"),
                     aux_log=aux_log,
                     tool_call_parse_error=data.get("tool_call_parse_error"),
+                    allow_semantic_retry=allow_semantic_retry,
                 ),
             )
 
@@ -1161,6 +1195,7 @@ class InternalMCPChatOrchestrator:
                     "retry_attempts": retry_attempts,
                     "retry_budget": retry_budget,
                     "retries_remaining": retries_remaining_before,
+                    "allow_semantic_retry": allow_semantic_retry,
                 }
             )
         except Exception:
@@ -1391,6 +1426,18 @@ class InternalMCPChatOrchestrator:
                 }
             )
 
+        retry_context: list[Mapping[str, Any]] = []
+        user_prompt_text = data.get("user_prompt")
+        if isinstance(user_prompt_text, str) and user_prompt_text.strip():
+            retry_context.append({"role": "user", "content": user_prompt_text.strip()})
+        prior_response_text = data.get("response_text")
+        if isinstance(prior_response_text, str) and prior_response_text.strip():
+            retry_context.append(
+                {"role": "assistant", "content": prior_response_text.strip()}
+            )
+        if not retry_context:
+            retry_context = list(augmented_context)
+
         forced = self._infer_missing_tool_call_retry_tool_calls(
             augmented_context,
             user_prompt=data.get("user_prompt"),
@@ -1504,7 +1551,7 @@ class InternalMCPChatOrchestrator:
             retry_response, _, _ = self._run_llm_with_fallbacks(
                 stage="tool_recovery",
                 prompt=prompt_text,
-                context=augmented_context,
+                context=retry_context,
                 default_client=request.environment.llm_client,
                 default_model=default_model or request.environment.model,
                 policy_state=policy_state,
@@ -1534,7 +1581,7 @@ class InternalMCPChatOrchestrator:
         else:
             llm_start = time.perf_counter()
             retry_response = request.environment.llm_client.generate(
-                prompt_text, context=augmented_context, model=request.environment.model
+                prompt_text, context=retry_context, model=request.environment.model
             )
             duration_ms = (time.perf_counter() - llm_start) * 1000.0
 
@@ -1979,36 +2026,37 @@ class InternalMCPChatOrchestrator:
         if not prompt_ids:
             prompt_ids = BUTTONIFY_PROMPT_IDS
 
-        fallback_template = request.data.get("buttonify_prompt_template")
-        if not isinstance(fallback_template, str) or not fallback_template.strip():
-            fallback_template = BUTTONIFY_PROMPT_TEMPLATE
-
         variables = {
             "user_message": request.data.get("user_prompt") or "",
             "assistant_response": request.data.get("screen_text") or "",
         }
         rendered = None
+        prompt_error: str | None = None
         try:
             rendered = self._prompt_templates.render_prompt(
                 prompt_ids,
-                fallback=fallback_template,
                 variables=variables,
                 max_chars=6000,
             )
-        except Exception:
+        except Exception as exc:
             rendered = None
+            prompt_error = type(exc).__name__
 
         if rendered:
             prompt_text = rendered.text
             prompt_id = rendered.prompt_id
             prompt_truncated = rendered.truncated
+            prompt_available = True
         else:
-            try:
-                prompt_text = fallback_template.format(**variables)
-            except Exception:
-                prompt_text = str(fallback_template)
+            prompt_text = ""
             prompt_id = None
             prompt_truncated = False
+            prompt_available = False
+            if not prompt_error:
+                prompt_error = "prompt_not_found_or_unavailable"
+
+        if prompt_available:
+            prompt_text = enforce_buttonify_prompt_contract(prompt_text)
 
         if request.trace is not None and prompt_text:
             request.trace.record_prompt(
@@ -2022,6 +2070,8 @@ class InternalMCPChatOrchestrator:
                 "buttonify_prompt_text": prompt_text,
                 "buttonify_prompt_id": prompt_id,
                 "buttonify_prompt_truncated": prompt_truncated,
+                "buttonify_prompt_available": prompt_available,
+                "buttonify_prompt_error": prompt_error,
             }
         )
 
@@ -2044,6 +2094,14 @@ class InternalMCPChatOrchestrator:
         if not isinstance(buttonify_prompt_id, str):
             buttonify_prompt_id = None
         buttonify_prompt_truncated = bool(request.data.get("buttonify_prompt_truncated"))
+        buttonify_prompt_available_raw = request.data.get("buttonify_prompt_available")
+        if isinstance(buttonify_prompt_available_raw, bool):
+            buttonify_prompt_available = buttonify_prompt_available_raw
+        else:
+            buttonify_prompt_available = bool(buttonify_prompt_text.strip())
+        buttonify_prompt_error = request.data.get("buttonify_prompt_error")
+        if not isinstance(buttonify_prompt_error, str):
+            buttonify_prompt_error = None
 
         buttonify_model_used = request.data.get("default_model") or request.environment.model
         buttonify_options: list[str] = []
@@ -2055,7 +2113,7 @@ class InternalMCPChatOrchestrator:
             buttonify_suppression_reason = None
         buttonify_preflight_rejection_reason: str | None = None
 
-        if buttonify_preflight_enabled:
+        if buttonify_prompt_available and buttonify_preflight_enabled:
             preflight_candidates = extract_buttonify_options_heuristic(screen_text)
             preflight_options, buttonify_preflight_rejection_reason = (
                 select_buttonify_preflight_options(preflight_candidates)
@@ -2064,7 +2122,7 @@ class InternalMCPChatOrchestrator:
                 buttonify_options = preflight_options
                 buttonify_source = "heuristic_preflight"
 
-        if not buttonify_options:
+        if buttonify_prompt_available and not buttonify_options:
             buttonify_model_attempted = True
             buttonify_response = None
 
@@ -2142,9 +2200,11 @@ class InternalMCPChatOrchestrator:
                 if heuristic_options:
                     buttonify_options = heuristic_options
                     buttonify_source = "heuristic_fallback"
+        elif not buttonify_prompt_available and not buttonify_suppression_reason:
+            buttonify_suppression_reason = "buttonify_prompt_unavailable"
 
-        # Defensively re-normalise options to preserve deterministic UI constraints.
-        buttonify_options = dedupe_buttonify_options(buttonify_options)
+        # Defensively re-sanitise options to preserve deterministic UI constraints.
+        buttonify_options = sanitise_buttonify_options(buttonify_options)
 
         if buttonify_source in {"heuristic_preflight", "llm"}:
             buttonify_status = "success"
@@ -2157,6 +2217,8 @@ class InternalMCPChatOrchestrator:
             if not buttonify_suppression_reason:
                 if buttonify_error_class:
                     buttonify_suppression_reason = "model_error"
+                elif not buttonify_prompt_available:
+                    buttonify_suppression_reason = "buttonify_prompt_unavailable"
                 elif buttonify_preflight_rejection_reason:
                     buttonify_suppression_reason = buttonify_preflight_rejection_reason
                 else:
@@ -2181,6 +2243,8 @@ class InternalMCPChatOrchestrator:
             diagnostics={
                 "status": buttonify_status,
                 "suppression_reason": buttonify_suppression_reason,
+                "prompt_available": buttonify_prompt_available,
+                "prompt_error": buttonify_prompt_error,
                 "preflight_rejection_reason": buttonify_preflight_rejection_reason,
                 "error_class": buttonify_error_class,
                 "model": buttonify_model_used if buttonify_model_attempted else None,
@@ -2194,6 +2258,8 @@ class InternalMCPChatOrchestrator:
                 "buttonify_source": buttonify_source,
                 "buttonify_prompt_id": buttonify_prompt_id,
                 "buttonify_prompt_truncated": buttonify_prompt_truncated,
+                "buttonify_prompt_available": buttonify_prompt_available,
+                "buttonify_prompt_error": buttonify_prompt_error,
                 "buttonify_model_used": buttonify_model_used,
                 "buttonify_model_attempted": buttonify_model_attempted,
                 "buttonify_error_class": buttonify_error_class,
@@ -5140,12 +5206,25 @@ class InternalMCPChatOrchestrator:
         )
         if not _tool_available("create_concepts"):
             required_create_type_name = None
+        has_prompt_url = (
+            isinstance(user_prompt, str)
+            and bool(re.search(r"https?://\S+", user_prompt, re.IGNORECASE))
+        )
 
         seen_required = {
             str(tool_name).strip().lower()
             for tool_name in required_tools
             if isinstance(tool_name, str) and tool_name.strip()
         }
+        if has_prompt_url:
+            url_tool_name: str | None = None
+            if _tool_available("resilient_extract_url"):
+                url_tool_name = "resilient_extract_url"
+            elif _tool_available("extract_url"):
+                url_tool_name = "extract_url"
+            if url_tool_name and url_tool_name not in seen_required:
+                required_tools.append(url_tool_name)
+                seen_required.add(url_tool_name)
         if required_create_type_name and "create_concepts" not in seen_required:
             required_tools.append("create_concepts")
             seen_required.add("create_concepts")
@@ -9942,6 +10021,7 @@ class InternalMCPChatOrchestrator:
         classifier_model: str | None,
         aux_log: list[Mapping[str, Any]],
         tool_call_parse_error: ToolCallParsingError | None,
+        allow_semantic_retry: bool = True,
     ) -> _MissingToolCallAssessment:
         """Decide whether to attempt a single retry for a missing tool call."""
 
@@ -9982,7 +10062,7 @@ class InternalMCPChatOrchestrator:
         if retry_reason is None and is_json_action:
             retry_reason = "JSON tool-call output detected"
 
-        if retry_reason is None:
+        if retry_reason is None and allow_semantic_retry:
             lowered = response_text.lower() if isinstance(response_text, str) else ""
             mentions_tools = any(
                 token in lowered

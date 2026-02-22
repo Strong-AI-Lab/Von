@@ -1,7 +1,7 @@
 """Shared helpers for buttonify output transformation.
 
-Keep heuristics, prompt fallback text, and JSON option parsing centralised so
-route-level and workflow-level callers stay behaviourally aligned.
+Keep heuristics and JSON option parsing centralised so route-level and
+workflow-level callers stay behaviourally aligned.
 """
 
 from __future__ import annotations
@@ -11,19 +11,11 @@ import re
 from typing import Any, Iterable
 
 BUTTONIFY_PROMPT_IDS: tuple[str, ...] = ("#V#buttonify_prompt_v1",)
-BUTTONIFY_PROMPT_TEMPLATE = (
-    "You generate quick-reply button options for a chat UI.\n\n"
-    "Use the user message and assistant response. Extract up to 4 options that the user could tap next.\n\n"
-    "Rules:\n"
-    "- Return ONLY a JSON array of strings. No prose, no Markdown.\n"
-    "- Each option must be 1-4 words and safe to send verbatim.\n"
-    "- Prefer exact wording from the response when explicit (lists, quoted replies, template choices).\n"
-    '- If the response presents implicit alternatives (e.g. "Would you like to continue or stop?"), convert them into concise options (e.g. ["Continue", "Stop"]).\n'
-    '- If the response is a yes/no question without explicit options, return ["Yes", "No"].\n'
-    "- If there are no clear options or it is open-ended, return [].\n"
-    "- Do not invent options beyond what is stated or clearly implied.\n"
-    "- Avoid punctuation, emojis, or more than 4 words.\n\n"
-    "User message:\n{user_message}\n\nAssistant response:\n{assistant_response}"
+_BUTTONIFY_PROMPT_CONTRACT_SUFFIX = (
+    "\n\nMandatory quality gate:\n"
+    "- Options MUST be actionable next user messages (imperative actions or direct confirmations).\n"
+    "- Do NOT output noun/topic fragments.\n"
+    '- If uncertain, output [].'
 )
 
 
@@ -161,7 +153,7 @@ def parse_buttonify_options_json(
         return []
     if not isinstance(parsed, list):
         return []
-    return dedupe_buttonify_options(
+    return sanitise_buttonify_options(
         (item for item in parsed if isinstance(item, str)),
         max_options=max_options,
     )
@@ -190,18 +182,27 @@ def _looks_like_code_or_identifier(value: str) -> bool:
     return False
 
 
-def sanitise_buttonify_heuristic_options(
+def sanitise_buttonify_options(
     values: Iterable[str | None],
     *,
     max_options: int = 4,
 ) -> list[str]:
-    """Remove code-like heuristic options so quick replies stay user-facing."""
+    """Remove code-like options so quick replies stay user-facing."""
     candidates = dedupe_buttonify_options(values, max_options=max_options * 3)
     return [
         option
         for option in candidates
         if not _looks_like_code_or_identifier(option)
     ][:max_options]
+
+
+def sanitise_buttonify_heuristic_options(
+    values: Iterable[str | None],
+    *,
+    max_options: int = 4,
+) -> list[str]:
+    """Compatibility wrapper for heuristic call sites."""
+    return sanitise_buttonify_options(values, max_options=max_options)
 
 
 def select_buttonify_preflight_options(
@@ -216,4 +217,16 @@ def select_buttonify_preflight_options(
     if not accepted:
         return [], "heuristic_preflight_rejected_code_like_candidates"
     return [], "heuristic_preflight_low_confidence"
+
+
+def enforce_buttonify_prompt_contract(prompt_text: str | None) -> str:
+    """Append hard constraints so prompt concepts and fallback text share quality rules."""
+    base = str(prompt_text or "").strip()
+    suffix = _BUTTONIFY_PROMPT_CONTRACT_SUFFIX.strip()
+    if not base:
+        return suffix
+    if suffix in base:
+        return base
+    return f"{base}\n\n{suffix}"
+
 

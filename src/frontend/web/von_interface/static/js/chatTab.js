@@ -5184,16 +5184,32 @@ function insertTextIntoChatPrompt(text) {
     }
 }
 
-function appendQuickReplyButtons(container, options) {
-    if (!container || !Array.isArray(options) || options.length === 0) {
+function appendQuickReplyButtons(container, buttonifyMetaOrOptions) {
+    if (!container) {
         return;
     }
 
-    const cleaned = options
+    const buttonifyMeta =
+        buttonifyMetaOrOptions && typeof buttonifyMetaOrOptions === 'object' && !Array.isArray(buttonifyMetaOrOptions)
+            ? buttonifyMetaOrOptions
+            : null;
+    const rawOptions = Array.isArray(buttonifyMetaOrOptions)
+        ? buttonifyMetaOrOptions
+        : (Array.isArray(buttonifyMeta?.options) ? buttonifyMeta.options : []);
+
+    const cleaned = rawOptions
         .map((opt) => String(opt ?? '').trim())
         .filter((opt) => opt && opt.length <= 60);
 
     if (!cleaned.length) {
+        const suppressionReason = String(buttonifyMeta?.suppression_reason ?? '').trim();
+        if (suppressionReason === 'buttonify_prompt_unavailable') {
+            const warning = document.createElement('div');
+            warning.className = 'chat-quick-replies-warning';
+            warning.style.cssText = 'margin-top: 8px; font-size: 0.85em; color: #8a6d3b;';
+            warning.textContent = 'Quick replies unavailable: buttonify prompt could not be loaded from Vontology.';
+            container.appendChild(warning);
+        }
         return;
     }
 
@@ -14786,7 +14802,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                     buttonifyExists: debugData?.buttonify !== undefined,
                     buttonifyOptions: debugData?.buttonify?.options
                 });
-                appendQuickReplyButtons(messageContent, debugData?.buttonify?.options);
+                appendQuickReplyButtons(messageContent, debugData?.buttonify);
             } catch (err) {
                 console.warn('[chatTab] Quick reply rendering failed:', err);
             }

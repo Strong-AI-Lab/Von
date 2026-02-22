@@ -354,6 +354,31 @@ def test_assess_missing_tool_call_backstops_classifier_no_with_heuristic_yes():
     assert assessment.retry_reason == "heuristic missing tool call (classifier said no)"
 
 
+def test_assess_missing_tool_call_skips_semantic_retry_when_not_required():
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    llm = _RecorderLLM(["YES"])  # Would be consumed if classifier were called.
+    aux_log: list[Mapping[str, Any]] = []
+
+    response_text = "I'll now execute the tools."
+    interpretation = orchestrator._interpret_model_turn(response_text)
+    assert interpretation.heuristic_missing_tool_call
+
+    assessment = orchestrator._assess_missing_tool_call(
+        response_text=interpretation.response_text,
+        use_structured=False,
+        interpretation=interpretation,
+        llm_client=llm,
+        model="primary-model",
+        classifier_model="classifier-model",
+        aux_log=aux_log,
+        tool_call_parse_error=None,
+        allow_semantic_retry=False,
+    )
+
+    assert assessment.retry_reason is None
+    assert not llm.calls
+
+
 def test_extract_tool_calls_accepts_fenced_json_array_batch():
     text = (
         "Here is the tool batch:\n"
@@ -994,6 +1019,22 @@ def test_derive_prompt_tool_requirements_adds_checklist_create_and_fetch_tools()
         "#V#workflow_mapping_tool_field_concept_id_to_validated_type_id",
         "#V#workflow_mapping_tool_field_name_to_validated_type_name",
     ]
+
+
+def test_derive_prompt_tool_requirements_adds_url_extraction_tool_for_current_prompt():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=_DummyGateway()  # type: ignore[arg-type]
+    )
+    requirements = orchestrator._derive_prompt_tool_requirements(
+        "Please read this: https://example.com/report",
+        method_catalogue={
+            "resilient_extract_url": {"description": "resilient URL extraction"},
+            "extract_url": {"description": "URL extraction"},
+        },
+    )
+
+    required_tools = requirements.get("required_tools") or []
+    assert "resilient_extract_url" in required_tools
 
 
 def test_derive_missing_prompt_requirements_tracks_missing_fetch_targets():
