@@ -29,6 +29,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 23. **Workflow-first behaviours**: strongly prefer Vontology workflows (definitions, instances, event bindings, schedules) to drive Von behaviour instead of adding specialised orchestration code. Add bespoke code only when workflow primitives cannot express the behaviour, and document the gap in Jira.
 24. **Policy over task wording**: if a Jira issue suggests implementation in specialised orchestration code but the behaviour can be expressed as a Vontology workflow, enforce workflow-first policy and reinterpret/revise the task accordingly. In these cases, limit code changes to missing tools/validators/telemetry needed by the workflow, and add a Jira comment documenting the reinterpretation.
 25. If you are reasonably confident task implementation is complete, proactively merge and close the task (commit/push, merge to `main`, and transition Jira) unless the user explicitly asks to hold.
+26. **Fail closed when Vontology is unavailable for Vontology-governed behaviour**: do not silently fall back to in-code prompts, stale context reuse, or heuristic hacks. If required Vontology prompts/workflow data cannot be resolved, no-op that transformation and emit a clear user-visible and telemetry-visible reason.
 
 ## Core AI-Focused Documents
 - `docs/AINotes.md`: short-term memory and tactical log.
@@ -59,7 +60,8 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 		- Vontology operations: use existing service classes, never raw DB calls
 	8. **If you catch yourself copy-pasting**: You are doing it wrong. Stop and refactor.
 - Changes must be **modification-tolerant**: switching underlying models should not silently remove or change capabilities; differences must be explicit and detectable (telemetry, validation, or policy).
-- **Vontology-first prompt pattern**: any new or modified LLM prompt should be stored as Vontology text relations (hasContent/hasDescription, primary en-NZ), with a code fallback only when the concept is missing or tools are unavailable. Include prompt IDs in diagnostics for introspection and multilingual support.
+- **Vontology-first prompt pattern (strict)**: any new or modified LLM prompt should be stored as Vontology text relations (`hasContent`/`hasDescription`, primary `en-NZ`). Do not add silent code-prompt fallbacks for Vontology-governed features. If prompt resolution fails, fail closed for that feature and emit explicit diagnostics (including prompt IDs/reasons) so the failure is obvious and actionable.
+- **No hack-around reliability policy**: when an ontology/workflow/prompt dependency fails, fix the dependency path (tools, retrieval, workflow config, validation) rather than patching symptoms with ad-hoc heuristics. Temporary mitigations must be explicit, bounded, and tracked in Jira with a removal plan.
 - For high-risk state changes (auth/org handling, DB writes, Vontology mutations), use a single authoritative pathway and reuse it consistently.
 - Strong rule: treat canonical predicate concepts (e.g. #V#is_a_type_of) as the authoritative ontology relations. Do not introduce or rely on structural relationship fields when predicate concepts exist; kind/classification should be derived from canonical predicate usage.
 - **Predicate concepts must be instances of `#V#predicate` (or a specialisation such as `#V#binary_predicate`) and must not keep `is_a_type_of` links that would force kind=`type`.** This ensures `is_predicate()` and the computed kind behave correctly.
