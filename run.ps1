@@ -41,6 +41,7 @@ param(
     [switch]$DisableLogReady,
     [switch]$HealthDebug,
     [switch]$ShowRelationCoverage,
+    [switch]$StatusRunMaintenance,
     # On-demand backups
     [switch]$BackupDryRun,
     [string]$BackupTag = 'manual',
@@ -427,8 +428,23 @@ function Get-ExistingProcess {
 function Get-ListeningProcessByPort {
     param([int]$Port)
     try {
-        $owning = (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop | Select-Object -First 1 -ExpandProperty OwningProcess)
-        if ($owning) { return (Get-Process -Id $owning -ErrorAction Stop) }
+        # Get-NetTCPConnection can hang on some hosts; parse netstat output instead.
+        $lines = netstat -ano -p tcp 2>$null
+        foreach ($line in $lines) {
+            if ($line -notmatch '^\s*TCP\s+') { continue }
+            $parts = (($line -replace '\s+', ' ').Trim() -split ' ')
+            if ($parts.Count -lt 5) { continue }
+
+            $localAddress = $parts[1]
+            $state = $parts[3]
+            $pidToken = $parts[4]
+            if ($state -ne 'LISTENING') { continue }
+            if ($localAddress -notmatch ':(\d+)$') { continue }
+            if ([int]$Matches[1] -ne $Port) { continue }
+            if ($pidToken -notmatch '^\d+$') { continue }
+
+            return (Get-Process -Id ([int]$pidToken) -ErrorAction Stop)
+        }
     }
     catch { }
     return $null
@@ -442,6 +458,110 @@ function Get-ProcessCommandLine {
     catch {
         return ''
     }
+}
+
+function Get-ProjectPythonExecutable {
+    $venvPython = Join-Path $Root '.venv\Scripts\python.exe'
+    if (Test-Path $venvPython) {
+        return $venvPython
+    }
+    return 'python'
+}
+
+function Stop-ProcessTreeWithEscalation {
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [int]$WaitMs = 10000
+    )
+
+    if ($ProcessId -le 0) { return $true }
+    try { & taskkill /PID $ProcessId /T /F 1>$null 2>$null } catch { }
+
+    $elapsedMs = 0
+    while ($elapsedMs -lt $WaitMs) {
+        Start-Sleep -Milliseconds 500
+        if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) { return $true }
+        $elapsedMs += 500
+    }
+
+    try { Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue } catch { }
+    Start-Sleep -Milliseconds 250
+    return (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue))
+}
+
+function Stop-PythonProcessesByScript {
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptRelativePath,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [int]$ExcludePid = 0
+    )
+
+    $pythonExe = Get-ProjectPythonExecutable
+    $scriptPath = Join-Path $Root $ScriptRelativePath
+    $code = @'
+import json
+import os
+import sys
+
+try:
+    import psutil
+except Exception:
+    print("[]")
+    raise SystemExit(0)
+
+target = os.path.normcase(os.path.normpath(sys.argv[1]))
+exclude_pid = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+current_pid = os.getpid()
+target_fragment = target.lower().replace("\\", "/")
+target_name = os.path.basename(target).lower()
+killed = []
+
+for proc in psutil.process_iter(["pid", "cmdline"]):
+    try:
+        pid = int(proc.info.get("pid") or 0)
+        if pid <= 0 or pid == current_pid or pid == exclude_pid:
+            continue
+        cmdline = [str(part) for part in (proc.info.get("cmdline") or [])]
+        if not cmdline:
+            continue
+        cmd_joined = " ".join(cmdline)
+        cmd_norm = cmd_joined.lower().replace("\\", "/")
+        if target_fragment not in cmd_norm and target_name not in cmd_norm:
+            continue
+        try:
+            proc.terminate()
+            proc.wait(timeout=1.0)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        killed.append(pid)
+    except Exception:
+        continue
+
+print(json.dumps(killed))
+'@
+
+    $raw = @()
+    try {
+        $raw = & $pythonExe -c $code -- $scriptPath $ExcludePid 2>$null
+    }
+    catch {
+        Write-LauncherLog ("WARN: Failed stale-process cleanup for {0}: {1}" -f $Label, $_.Exception.Message)
+        return
+    }
+
+    if (-not $raw) { return }
+    $lastLine = ($raw | Select-Object -Last 1)
+    if (-not $lastLine) { return }
+    try {
+        $killed = ConvertFrom-Json $lastLine
+        if ($killed -and $killed.Count -gt 0) {
+            Write-LauncherLog ("Stopped stale {0} process(es): {1}" -f $Label, ($killed -join ', '))
+        }
+    }
+    catch { }
 }
 
 function Test-IsVonMainProcess {
@@ -1011,8 +1131,16 @@ function Invoke-TestDbRefreshIfDue {
 
 function Test-VonHealthEndpoint($Port) {
     # was Health-Check
-    $hosts = @('127.0.0.1', 'localhost')
-    $httpTimeout = 5
+    $hosts = @('127.0.0.1')
+    if ($env:VON_HEALTH_HOSTS -and $env:VON_HEALTH_HOSTS.ToString().Trim()) {
+        $configuredHosts = $env:VON_HEALTH_HOSTS.ToString().Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+        if ($configuredHosts -and $configuredHosts.Count -gt 0) { $hosts = $configuredHosts }
+    }
+    elseif (Test-TruthySetting $env:VON_HEALTH_INCLUDE_LOCALHOST) {
+        $hosts += 'localhost'
+    }
+
+    $httpTimeout = 2
     try {
         $envTimeout = [int]$env:VON_HEALTH_HTTP_TIMEOUT
         if ($envTimeout -gt 0 -and $envTimeout -lt 61) { $httpTimeout = $envTimeout }
@@ -1035,7 +1163,7 @@ function Test-VonHealthEndpoint($Port) {
 function Test-VonPortListening($Port) {
     # was Test-PortListening
     try {
-        $own = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop | Select-Object -First 1
+        $own = Get-ListeningProcessByPort -Port $Port
         return $null -ne $own
     }
     catch { return $false }
@@ -1097,28 +1225,31 @@ function Start-RagWorker {
         }
         Remove-Item $RagPidFile -Force -ErrorAction SilentlyContinue
     }
+    # Remove stale worker processes left by old wrapper-based launches.
+    Stop-PythonProcessesByScript -ScriptRelativePath 'src/backend/utilities/rag_indexing_worker.py' -Label 'RAG Worker'
 
     Write-LauncherLog "Starting RAG Indexing Worker..."
-    $pdm = if (Test-Path (Join-Path $Root '.venv\Scripts\pdm.exe')) { Join-Path $Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
-
-    $commandToRun = "& `"$pdm`" run python -u src/backend/utilities/rag_indexing_worker.py"
-    $psExe = if (Get-Command 'pwsh' -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell.exe' }
-
-    $proc = Start-Process -FilePath $psExe -ArgumentList @('-NoLogo', '-NoProfile', '-Command', "$commandToRun *>> `"$RagLogFile`"") -WorkingDirectory $Root -PassThru -WindowStyle Hidden
+    $pythonExe = Get-ProjectPythonExecutable
+    $ragErrLogFile = "$RagLogFile.err"
+    $proc = Start-Process -FilePath $pythonExe -ArgumentList @('-u', 'src/backend/utilities/rag_indexing_worker.py') -WorkingDirectory $Root -PassThru -WindowStyle Hidden -RedirectStandardOutput $RagLogFile -RedirectStandardError $ragErrLogFile
 
     $startIso = (Get-Date).ToString('o')
     Set-Content $RagPidFile "PID=$($proc.Id)`nSTART=$startIso"
-    Write-LauncherLog "RAG Worker started (PID=$($proc.Id)). Log: $RagLogFile"
+    Write-LauncherLog "RAG Worker started (PID=$($proc.Id)). Logs: $RagLogFile, $ragErrLogFile"
 }
 
 function Stop-RagWorker {
-    if (-not (Test-Path $RagPidFile)) { return }
+    $pidToKill = 0
     $content = Get-Content $RagPidFile -Raw -ErrorAction SilentlyContinue
     if ($content -match 'PID=([0-9]+)') {
         $pidToKill = [int]$Matches[1]
         Write-LauncherLog "Stopping RAG Worker (PID=$pidToKill)..."
-        try { Stop-Process -Id $pidToKill -Force -ErrorAction SilentlyContinue } catch { }
+        $stopped = Stop-ProcessTreeWithEscalation -ProcessId $pidToKill
+        if (-not $stopped) {
+            Write-LauncherLog "WARN: RAG Worker PID=$pidToKill may still be running."
+        }
     }
+    Stop-PythonProcessesByScript -ScriptRelativePath 'src/backend/utilities/rag_indexing_worker.py' -Label 'RAG Worker' -ExcludePid $pidToKill
     Remove-Item $RagPidFile -Force -ErrorAction SilentlyContinue
 }
 
@@ -1134,28 +1265,31 @@ function Start-ConceptIndexWorker {
         }
         Remove-Item $ConceptIndexPidFile -Force -ErrorAction SilentlyContinue
     }
+    # Remove stale worker processes left by old wrapper-based launches.
+    Stop-PythonProcessesByScript -ScriptRelativePath 'src/backend/utilities/concept_index_worker.py' -Label 'Concept Index Worker'
 
     Write-LauncherLog "Starting Concept Index Worker..."
-    $pdm = if (Test-Path (Join-Path $Root '.venv\Scripts\pdm.exe')) { Join-Path $Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
-
-    $commandToRun = "& `"$pdm`" run python -u src/backend/utilities/concept_index_worker.py"
-    $psExe = if (Get-Command 'pwsh' -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell.exe' }
-
-    $proc = Start-Process -FilePath $psExe -ArgumentList @('-NoLogo', '-NoProfile', '-Command', "$commandToRun *>> `"$ConceptIndexLogFile`"") -WorkingDirectory $Root -PassThru -WindowStyle Hidden
+    $pythonExe = Get-ProjectPythonExecutable
+    $conceptErrLogFile = "$ConceptIndexLogFile.err"
+    $proc = Start-Process -FilePath $pythonExe -ArgumentList @('-u', 'src/backend/utilities/concept_index_worker.py') -WorkingDirectory $Root -PassThru -WindowStyle Hidden -RedirectStandardOutput $ConceptIndexLogFile -RedirectStandardError $conceptErrLogFile
 
     $startIso = (Get-Date).ToString('o')
     Set-Content $ConceptIndexPidFile "PID=$($proc.Id)`nSTART=$startIso"
-    Write-LauncherLog "Concept Index Worker started (PID=$($proc.Id)). Log: $ConceptIndexLogFile"
+    Write-LauncherLog "Concept Index Worker started (PID=$($proc.Id)). Logs: $ConceptIndexLogFile, $conceptErrLogFile"
 }
 
 function Stop-ConceptIndexWorker {
-    if (-not (Test-Path $ConceptIndexPidFile)) { return }
+    $pidToKill = 0
     $content = Get-Content $ConceptIndexPidFile -Raw -ErrorAction SilentlyContinue
     if ($content -match 'PID=([0-9]+)') {
         $pidToKill = [int]$Matches[1]
         Write-LauncherLog "Stopping Concept Index Worker (PID=$pidToKill)..."
-        try { Stop-Process -Id $pidToKill -Force -ErrorAction SilentlyContinue } catch { }
+        $stopped = Stop-ProcessTreeWithEscalation -ProcessId $pidToKill
+        if (-not $stopped) {
+            Write-LauncherLog "WARN: Concept Index Worker PID=$pidToKill may still be running."
+        }
     }
+    Stop-PythonProcessesByScript -ScriptRelativePath 'src/backend/utilities/concept_index_worker.py' -Label 'Concept Index Worker' -ExcludePid $pidToKill
     Remove-Item $ConceptIndexPidFile -Force -ErrorAction SilentlyContinue
 }
 
@@ -1234,18 +1368,38 @@ function Start-VonServer {
     $env:PYTHONIOENCODING = 'utf-8'
     # Prevent Python main process from attempting to open an additional browser tab; launcher manages this.
     $env:VON_SKIP_BROWSER_LAUNCH = '1'
+    # Clear stale server script processes so restart/start cannot accumulate orphaned wrappers.
+    Stop-PythonProcessesByScript -ScriptRelativePath 'src/workflows/von/main.py' -Label 'Von Server'
+
     $pdm = if (Test-Path (Join-Path $Root '.venv\Scripts\pdm.exe')) { Join-Path $Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
-    # Launch background (no wrapper file; redirect all streams in child shell)
-    Write-LauncherLog "Starting Von server on port $Port ..."
+    $venvPython = Join-Path $Root '.venv\Scripts\python.exe'
+    $serverExe = $null
+    $serverArgs = @()
+    $launchMode = 'direct-python'
+    if (Test-Path $venvPython) {
+        $serverExe = $venvPython
+        $serverArgs = @('-u', 'src/workflows/von/main.py', '--port', "$Port")
+    }
+    else {
+        $serverExe = $pdm
+        $serverArgs = @('run', 'python', '-u', 'src/workflows/von/main.py', '--port', "$Port")
+        $launchMode = 'pdm-fallback'
+    }
+
+    # Launch background with explicit stdout/stderr redirection.
+    Write-LauncherLog "Starting Von server on port $Port (mode=$launchMode)..."
+    $serverErrLog = "$NewLog.err"
+    if (Test-Path $NewLog) { Remove-Item $NewLog -Force -ErrorAction SilentlyContinue }
+    if (Test-Path $serverErrLog) { Remove-Item $serverErrLog -Force -ErrorAction SilentlyContinue }
+    try {
+        $proc = Start-Process -FilePath $serverExe -ArgumentList $serverArgs -WorkingDirectory $Root -PassThru -WindowStyle Hidden -RedirectStandardOutput $NewLog -RedirectStandardError $serverErrLog
+    }
+    catch {
+        Write-LauncherLog "ERROR: Failed to launch server process ($launchMode): $($_.Exception.Message)"
+        return
+    }
     if (-not (Test-Path $NewLog)) { New-Item -ItemType File -Path $NewLog -Force | Out-Null }
-    # Build command string for child PowerShell; use double quotes outside and escape internal quotes minimally
-    # Obtain python path via pdm (pdm run python ...) is slower; prefer invoking 'pdm run' once to resolve environment then run program.
-    # Simpler: use pdm to run python directly with arguments; we still get a wrapper process (pdm) so we attempt to resolve actual python child later.
-    $commandToRun = "& `"$pdm`" run python -u src/workflows/von/main.py --port $Port"
-    # Detect available PowerShell executable (prefer pwsh/Core but fallback to Windows PowerShell)
-    $psExe = if (Get-Command 'pwsh' -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell.exe' }
-    $proc = Start-Process -FilePath $psExe -ArgumentList @('-NoLogo', '-NoProfile', '-Command', "$commandToRun *>> `"$NewLog`"") -WorkingDirectory $Root -PassThru -WindowStyle Hidden
-    # Initial write uses launcher (pdm shell) PID; we'll refine after short delay by finding child python process if present.
+    Write-LauncherLog "Launched PID=$($proc.Id). Logs: $NewLog ; stderr: $serverErrLog"
     Write-PidFile $proc.Id
 
     # Update current log pointer: prefer a hard link so the "current" file
@@ -1295,6 +1449,7 @@ function Start-VonServer {
                 if (-not $procCheck) {
                     Write-LauncherLog "ERROR: Server process exited early before listening on port $Port. Showing last 40 log lines:"
                     $logTail = @()
+                    $errTail = @()
                     if (Test-Path $CurrentLog) {
                         try {
                             $logTail = Get-Content $CurrentLog -Tail 40
@@ -1302,10 +1457,18 @@ function Start-VonServer {
                         }
                         catch { Write-LauncherLog "(Log tail unavailable: $($_.Exception.Message))" }
                     }
+                    if (Test-Path $serverErrLog) {
+                        try {
+                            Write-LauncherLog "Last 40 stderr log lines:"
+                            $errTail = Get-Content $serverErrLog -Tail 40
+                            $errTail | ForEach-Object { Write-Host $_ }
+                        }
+                        catch { Write-LauncherLog "(stderr tail unavailable: $($_.Exception.Message))" }
+                    }
 
                     # Auto-repair logic for missing dependencies
                     if (-not $script:RepairAttempted) {
-                        $logText = $logTail -join "`n"
+                        $logText = ($logTail + $errTail) -join "`n"
                         if ($logText -match "ModuleNotFoundError" -or $logText -match "ImportError") {
                             Write-LauncherLog "Detected missing dependencies. Attempting auto-repair..."
                             $script:RepairAttempted = $true
@@ -1418,19 +1581,21 @@ function Start-VonServer {
             Write-LauncherLog (Get-MongoConnectionSummary -Port $Port)
         }
         else {
-            Write-LauncherLog "WARNING: Server not healthy after initial ${HealthTimeoutSec}s (port not listening); check logs: $CurrentLog"
+            Write-LauncherLog "WARNING: Server not healthy after initial ${HealthTimeoutSec}s (port not listening); check logs: $CurrentLog and $serverErrLog"
         }
     }
-    # Attempt to refine PID to the actual python process (child of wrapper) after startup
+    # Attempt to refine PID to child python only when launch mode used a wrapper.
     try {
-        Start-Sleep -Milliseconds 400
-        $wrapperPid = $proc.Id
-        $children = Get-CimInstance Win32_Process -Filter "ParentProcessId=$wrapperPid" | Where-Object { $_.CommandLine -like '*src/workflows/von/main.py*' }
-        if ($children -and $children.ProcessId) {
-            $pythonPid = ($children | Select-Object -First 1 -ExpandProperty ProcessId)
-            if ($pythonPid -and $pythonPid -ne $wrapperPid) {
-                Write-PidFile $pythonPid
-                Write-LauncherLog "Updated PID file to python process PID=$pythonPid (was wrapper PID=$wrapperPid)."
+        if ($launchMode -eq 'pdm-fallback') {
+            Start-Sleep -Milliseconds 400
+            $wrapperPid = $proc.Id
+            $children = Get-CimInstance Win32_Process -Filter "ParentProcessId=$wrapperPid" | Where-Object { $_.CommandLine -like '*src/workflows/von/main.py*' }
+            if ($children -and $children.ProcessId) {
+                $pythonPid = ($children | Select-Object -First 1 -ExpandProperty ProcessId)
+                if ($pythonPid -and $pythonPid -ne $wrapperPid) {
+                    Write-PidFile $pythonPid
+                    Write-LauncherLog "Updated PID file to python process PID=$pythonPid (was wrapper PID=$wrapperPid)."
+                }
             }
         }
     }
@@ -1491,7 +1656,11 @@ function Stop-VonServer {
     $stillAfter = (Get-Process -Id $targetPid -ErrorAction SilentlyContinue)
     if ($stillAfter) {
         Write-LauncherLog "Process PID=$targetPid still running; issuing force kill..."
-        try { Stop-Process -Id $targetPid -Force -ErrorAction Stop } catch { Write-LauncherLog "Force kill failed: $($_.Exception.Message)" }
+        try {
+            $stopped = Stop-ProcessTreeWithEscalation -ProcessId $targetPid
+            if (-not $stopped) { Write-LauncherLog "Force kill failed: PID=$targetPid remained alive after escalation." }
+        }
+        catch { Write-LauncherLog "Force kill failed: $($_.Exception.Message)" }
     }
     else {
         if ($graceful) { Write-LauncherLog "Graceful shutdown completed." } else { Write-LauncherLog "Process exited." }
@@ -1530,10 +1699,16 @@ function Get-VonStatus {
     Write-LauncherLog ("RUNNING PID={0} Uptime={1} Healthy={2}" -f $proc.Id, [int]$uptime.TotalMinutes, $healthy)
     Write-LauncherLog (Get-MongoConnectionSummary -Port $Port)
     Write-LauncherLog "Log: $CurrentLog"
-    try { Invoke-DailyGovernanceScan -Port $Port -StartupHealthy $healthy } catch { Write-LauncherLog "[governance-scan] ERROR: $($_.Exception.Message)" }
-    try { Invoke-ConceptDataAbsenceCheck } catch { Write-LauncherLog "[concept-data-check] ERROR: $($_.Exception.Message)" }
-    try { Invoke-ResidualLegacyTextAudit } catch { Write-LauncherLog "[residual-text-audit] ERROR: $($_.Exception.Message)" }
-    try { Invoke-CleanupPreservedFields } catch { Write-LauncherLog "[cleanup-preserved-fields] ERROR: $($_.Exception.Message)" }
+    $runMaintenance = $StatusRunMaintenance -or (Test-TruthySetting $env:VON_STATUS_RUN_MAINTENANCE)
+    if ($runMaintenance) {
+        try { Invoke-DailyGovernanceScan -Port $Port -StartupHealthy $healthy } catch { Write-LauncherLog "[governance-scan] ERROR: $($_.Exception.Message)" }
+        try { Invoke-ConceptDataAbsenceCheck } catch { Write-LauncherLog "[concept-data-check] ERROR: $($_.Exception.Message)" }
+        try { Invoke-ResidualLegacyTextAudit } catch { Write-LauncherLog "[residual-text-audit] ERROR: $($_.Exception.Message)" }
+        try { Invoke-CleanupPreservedFields } catch { Write-LauncherLog "[cleanup-preserved-fields] ERROR: $($_.Exception.Message)" }
+    }
+    elseif ($HealthDebug) {
+        Write-LauncherLog "Status maintenance checks skipped (set -StatusRunMaintenance or VON_STATUS_RUN_MAINTENANCE=1 to enable)."
+    }
     if ($ShowRelationCoverage) {
         try { Invoke-RelationCoverageSummary } catch { Write-LauncherLog "[relation-coverage] ERROR: $($_.Exception.Message)" }
     }
@@ -2331,6 +2506,7 @@ Von Launcher Help
         -ReadyLogPatterns <p>  One or more substrings that indicate readiness (log shortcut)
         -DisableLogReady       Disable log pattern readiness shortcut
         -HealthDebug           Verbose health polling diagnostics
+        -StatusRunMaintenance  Include maintenance scans in status output (default: off)
         -BackupDryRun           For backup action: do not run mongodump (prints what would happen)
         -BackupTag <tag>        For backup action: tag suffix for backup dir (default manual)
         -BackupOutDir <path>    For backup action: output root dir (default resolved backup root)
@@ -2601,8 +2777,8 @@ switch ($Action) {
         Write-LauncherLog "Starting RAG Indexing Worker..."
         $env:PYTHONUNBUFFERED = '1'
         $env:PYTHONPATH = $Root
-        $pdm = if (Test-Path (Join-Path $Root '.venv\Scripts\pdm.exe')) { Join-Path $Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
-        & $pdm run python -u src/backend/utilities/rag_indexing_worker.py
+        $pythonExe = Get-ProjectPythonExecutable
+        & $pythonExe -u src/backend/utilities/rag_indexing_worker.py
     }
     'help' { Show-Help }
     default { Write-LauncherLog "Unknown action '$Action'"; Show-Help }
