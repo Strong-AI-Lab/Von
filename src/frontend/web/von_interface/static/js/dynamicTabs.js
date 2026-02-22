@@ -13,6 +13,8 @@ import { destroyPredicateView, initializePredicateView } from './predicateView.j
 import { getConceptTypeDisplayNames, setCurrentConceptType, setCurrentlySelectedConceptId, setSelectedConceptOriginalName } from './state.js';
 import { activateTab } from './tabNavigation.js';
 import { createVontologyCartouche, normalisePotentialConceptId } from './utils/textDecorator.js';
+import { copyJsonTextWithButtonFeedback, resetCopyJsonButtonPreCopyState } from './utils/copyJsonButtonState.js';
+import { mountJsonInspector } from './utils/jsonInspector.js';
 import { getSessionScopedOrgId } from './utils/sessionScopedStorage.js';
 import { getKeyConceptIds, updateTabHeaderStarButtons, updateTreeKeyConceptBadge } from './vontology.js';
 
@@ -3066,7 +3068,7 @@ function openRawJsonModal(containerEl, conceptId, jsonText, isRaw = false, meta 
                 </div>
                 <div class="raw-json-body">
                     ${subNote}
-                    <pre class="raw-json-pre"><code class="raw-json-code"></code></pre>
+                    <div class="raw-json-inspector"></div>
                 </div>
                 <div class="raw-json-footer">
                     <div class="raw-json-stats"></div>
@@ -3077,8 +3079,10 @@ function openRawJsonModal(containerEl, conceptId, jsonText, isRaw = false, meta 
                 </div>
             </div>`;
 
-    const codeEl = overlay.querySelector('.raw-json-code');
-    if (codeEl) codeEl.textContent = jsonText;
+    const inspectorHost = overlay.querySelector('.raw-json-inspector');
+    if (inspectorHost) {
+        mountJsonInspector(inspectorHost, jsonText);
+    }
 
     const close = () => overlay.remove();
     overlay.addEventListener('click', (e) => {
@@ -3104,15 +3108,9 @@ function openRawJsonModal(containerEl, conceptId, jsonText, isRaw = false, meta 
 
     const copyBtn = overlay.querySelector('.raw-json-copy');
     if (copyBtn) {
+        resetCopyJsonButtonPreCopyState(copyBtn);
         copyBtn.addEventListener('click', async () => {
-            try {
-                await navigator.clipboard.writeText(jsonText);
-                copyBtn.textContent = 'Copied!';
-                setTimeout(() => { copyBtn.textContent = 'Copy JSON'; }, 1500);
-            } catch (e) {
-                copyBtn.textContent = 'Copy failed';
-                setTimeout(() => { copyBtn.textContent = 'Copy JSON'; }, 1500);
-            }
+            await copyJsonTextWithButtonFeedback(copyBtn, jsonText);
         });
     }
 
@@ -3172,7 +3170,7 @@ function openTextRelationsModal(containerEl, conceptId, jsonText, meta = null) {
                 </div>
                 <div class="raw-json-body">
                     <small style="color:#6b7280">All text relations for this concept (read-only)</small>
-                    <pre class="raw-json-pre"><code class="text-relations-code"></code></pre>
+                    <div class="text-relations-inspector"></div>
                 </div>
                 <div class="raw-json-footer">
                     <div class="raw-json-stats"></div>
@@ -3182,8 +3180,10 @@ function openTextRelationsModal(containerEl, conceptId, jsonText, meta = null) {
                     </div>
                 </div>
             </div>`;
-    const codeEl = overlay.querySelector('.text-relations-code');
-    if (codeEl) codeEl.textContent = jsonText;
+    const inspectorHost = overlay.querySelector('.text-relations-inspector');
+    if (inspectorHost) {
+        mountJsonInspector(inspectorHost, jsonText);
+    }
     const close = () => overlay.remove();
     overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
     const c1 = overlay.querySelector('.text-relations-close');
@@ -3191,8 +3191,9 @@ function openTextRelationsModal(containerEl, conceptId, jsonText, meta = null) {
     if (c1) c1.addEventListener('click', close); if (c2) c2.addEventListener('click', close);
     const copyBtn = overlay.querySelector('.text-relations-copy');
     if (copyBtn) {
+        resetCopyJsonButtonPreCopyState(copyBtn);
         copyBtn.addEventListener('click', async () => {
-            try { await navigator.clipboard.writeText(jsonText); copyBtn.textContent = 'Copied!'; setTimeout(() => copyBtn.textContent = 'Copy JSON', 1500); } catch (_) { copyBtn.textContent = 'Copy failed'; setTimeout(() => copyBtn.textContent = 'Copy JSON', 1500); }
+            await copyJsonTextWithButtonFeedback(copyBtn, jsonText);
         });
     }
     containerEl.appendChild(overlay);

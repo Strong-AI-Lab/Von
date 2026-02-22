@@ -1,7 +1,9 @@
 import {
     __testOnly_buildThinkingProgressPresentation,
     __testOnly_buildWorkflowMonitorExportPayload,
+    __testOnly_formatAbsoluteTimestamp,
     __testOnly_renderWorkflowDefinitionsBody,
+    __testOnly_setUnambiguousTimestampTooltip,
     __testOnly_setWorkflowShowDesigns,
     __testOnly_buildWorkflowStatusQuery,
     __testOnly_buildLlmDebugMetadata,
@@ -115,6 +117,25 @@ describe('formatChatTimestamp', () => {
         expect(result).not.toContain('Yesterday');
         const month = tenDaysAgo.toLocaleString([], { month: 'short' });
         expect(result).toContain(month);
+    });
+});
+
+describe('timestamp tooltip formatting', () => {
+    test('formats absolute timestamp with explicit timezone', () => {
+        const formatted = __testOnly_formatAbsoluteTimestamp('2026-02-22T10:15:30Z');
+        expect(typeof formatted).toBe('string');
+        expect(formatted.length).toBeGreaterThan(0);
+        expect(formatted).toMatch(/GMT|UTC|[+-]\d{1,2}/i);
+    });
+
+    test('applies keep-title tooltip attributes for absolute timestamp hints', () => {
+        const el = document.createElement('span');
+        __testOnly_setUnambiguousTimestampTooltip(el, '2026-02-22T10:15:30Z', 'Timestamp: ');
+
+        const title = el.getAttribute('title');
+        expect(title).toBeTruthy();
+        expect(title).toContain('Timestamp: ');
+        expect(el.getAttribute('data-keep-title')).toBe('true');
     });
 });
 

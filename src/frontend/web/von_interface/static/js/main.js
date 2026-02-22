@@ -6,7 +6,11 @@ import { escapeHtml } from './markdownUtils.js';
 import './suppressTooltips.js';
 import { activateTab, loadTabData, setupTabNavigation } from './tabNavigation.js';
 import { handleSelectConceptByIdDetail } from './utils/selectConceptByIdHandler.js';
-import { initialiseCopyJsonButtonPreCopyState, resetCopyJsonButtonPreCopyState } from './utils/copyJsonButtonState.js';
+import {
+  copyJsonTextWithButtonFeedback,
+  initialiseCopyJsonButtonPreCopyState,
+  resetCopyJsonButtonPreCopyState
+} from './utils/copyJsonButtonState.js';
 import { getSessionScopedNamespace, hasSessionOrgContext, syncNamespaceFromLocalStorage, syncOrgContextFromLocalStorage } from './utils/sessionScopedStorage.js';
 import { isVontologyBusy, loadKeyConceptsForUser, preloadVontologyData, selectVontologyNodeByIdentifier, setupVontologySearchUI } from './vontology.js';
 
@@ -1285,6 +1289,7 @@ function startHealthPolling() {
               copyBtn.className = 'btn-mini';
               copyBtn.textContent = 'Copy JSON';
               copyBtn.title = 'Copy the raw RAG status JSON payload (and last reindex/backfill action, if any)';
+              resetCopyJsonButtonPreCopyState(copyBtn);
               copyBtn.addEventListener('click', async () => {
                 try {
                   const payload = {
@@ -1297,8 +1302,12 @@ function startHealthPolling() {
                     ragModalBody.innerHTML = ragModalBody.innerHTML + '<hr/><p><em>No JSON payload available yet. Open the modal again after it loads.</em></p>';
                     return;
                   }
-                  await navigator.clipboard.writeText(txt);
-                  ragModalBody.innerHTML = ragModalBody.innerHTML + '<hr/><p><em>Copied JSON to clipboard.</em></p>';
+                  const copied = await copyJsonTextWithButtonFeedback(copyBtn, txt);
+                  if (copied) {
+                    ragModalBody.innerHTML = ragModalBody.innerHTML + '<hr/><p><em>Copied JSON to clipboard.</em></p>';
+                  } else {
+                    ragModalBody.innerHTML = ragModalBody.innerHTML + '<hr/><p><em>Copy failed.</em></p>';
+                  }
                 } catch (e) {
                   ragModalBody.innerHTML = ragModalBody.innerHTML + '<hr/><p><em>Copy failed.</em></p>';
                 }

@@ -3350,6 +3350,28 @@ button:hover {
     border-color: #4ade80;
 }
 
+.btn-mini.copy-json-copied {
+    background: #dbeafe;
+    border-color: #93c5fd;
+    color: #1e3a8a;
+}
+
+.btn-mini.copy-json-copied:hover {
+    background: #bfdbfe;
+    border-color: #60a5fa;
+}
+
+.btn-mini.copy-json-copy-failed {
+    background: #fee2e2;
+    border-color: #fca5a5;
+    color: #991b1b;
+}
+
+.btn-mini.copy-json-copy-failed:hover {
+    background: #fecaca;
+    border-color: #f87171;
+}
+
 .btn-mini:hover {
     background: #f1f5f9;
 }
@@ -8431,6 +8453,14 @@ html body .names-list-container .name-cartouche .name-delete-button:disabled:hov
     background: transparent;
 }
 
+.raw-json-inspector,
+.text-relations-inspector,
+.annotation-json-inspector {
+    display: flex;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
 .raw-json-pre {
     margin: 0;
     background: #111827;
@@ -8505,9 +8535,10 @@ html body .names-list-container .name-cartouche .name-delete-button:disabled:hov
 
 .annotation-json-body {
     padding: 8px 10px;
-    overflow: auto;
+    overflow: hidden;
     flex: 1 1 auto;
     background: #111827;
+    display: flex;
 }
 
 .annotation-json-content {
@@ -8537,6 +8568,135 @@ html body .names-list-container .name-cartouche .name-delete-button:disabled:hov
 .annotation-json-close,
 .annotation-json-close-2 {
     cursor: pointer;
+}
+
+.json-inspector {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 100%;
+    min-height: 0;
+}
+
+.json-inspector-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+}
+
+.json-inspector-search {
+    flex: 1 1 220px;
+    min-width: 170px;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 0.78rem;
+    background: #ffffff;
+    color: #111827;
+}
+
+.json-inspector-search:focus {
+    outline: none;
+    border-color: #60a5fa;
+    box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.2);
+}
+
+.json-inspector-match-count {
+    font-size: 0.74rem;
+    color: #6b7280;
+    min-width: 84px;
+}
+
+.json-inspector-step:disabled {
+    opacity: 0.55;
+    cursor: default;
+}
+
+.json-inspector-viewport {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    margin: 0;
+    background: #111827;
+    color: #e7e7e7;
+    border-radius: 4px;
+    padding: 10px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size: 0.78rem;
+    line-height: 1.45;
+    box-sizing: border-box;
+}
+
+.json-inspector-node {
+    margin: 0;
+}
+
+.json-inspector-summary {
+    cursor: pointer;
+    user-select: none;
+}
+
+.json-inspector-summary::-webkit-details-marker {
+    color: #9ca3af;
+}
+
+.json-inspector-type {
+    color: #93c5fd;
+    font-weight: 600;
+    margin-right: 8px;
+}
+
+.json-inspector-preview {
+    color: #9ca3af;
+}
+
+.json-inspector-children {
+    margin-left: 16px;
+    padding-left: 10px;
+    border-left: 1px solid #374151;
+}
+
+.json-inspector-row {
+    margin: 2px 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.json-inspector-key {
+    color: #a7f3d0;
+}
+
+.json-inspector-separator {
+    color: #9ca3af;
+}
+
+.json-inspector-value {
+    color: #e7e7e7;
+}
+
+.json-inspector-empty {
+    color: #9ca3af;
+    font-style: italic;
+    margin: 2px 0;
+}
+
+.json-inspector-fallback {
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+mark.json-inspector-match {
+    background: #facc15;
+    color: #111827;
+    padding: 0 1px;
+    border-radius: 2px;
+}
+
+mark.json-inspector-match-current {
+    background: #f59e0b;
+    outline: 1px solid #f97316;
 }
 
 /* Settings Page Styles (scoped) */

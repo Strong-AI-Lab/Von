@@ -17,7 +17,11 @@ import {
     stopSpeaking
 } from './speech.js';
 import { getPreferredLanguage, selectBestNameForContext, selectShortestNameForContext } from './utils/nameSelection.js';
-import { resetCopyJsonButtonPreCopyState } from './utils/copyJsonButtonState.js';
+import {
+    copyJsonTextWithButtonFeedback,
+    copyTextWithClipboardFallback,
+    resetCopyJsonButtonPreCopyState
+} from './utils/copyJsonButtonState.js';
 import {
     CHAT_HISTORY_RECENT_LIMIT_STORAGE_KEY,
     CHAT_HISTORY_RECENT_WINDOW_DAYS_STORAGE_KEY,
@@ -701,28 +705,81 @@ function thinkingLivenessLabel(state) {
     return 'Active';
 }
 
-function formatLastActivityText(progress) {
+function formatAbsoluteTimestamp(value) {
+    if (!value) {
+        return '';
+    }
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) {
+        return '';
+    }
+    try {
+        return new Intl.DateTimeFormat('en-NZ', {
+            year: 'numeric',
+            month: 'short',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false,
+            timeZoneName: 'shortOffset'
+        }).format(parsed);
+    } catch (_) {
+        return parsed.toISOString();
+    }
+}
+
+function setUnambiguousTimestampTooltip(element, value, prefix = '') {
+    if (!(element instanceof Element)) {
+        return;
+    }
+    const absoluteLabel = formatAbsoluteTimestamp(value);
+    if (!absoluteLabel) {
+        element.removeAttribute('title');
+        element.removeAttribute('aria-label');
+        element.removeAttribute('data-original-title');
+        return;
+    }
+    const tooltip = prefix ? `${prefix}${absoluteLabel}` : absoluteLabel;
+    element.setAttribute('data-keep-title', 'true');
+    element.setAttribute('title', tooltip);
+    element.setAttribute('aria-label', tooltip);
+    element.setAttribute('data-original-title', tooltip);
+}
+
+function resolveLastActivityTimestampMs(progress) {
     if (!progress || typeof progress !== 'object') {
         return null;
     }
-
+    if (typeof progress.last_activity_at_utc === 'string' && progress.last_activity_at_utc.trim()) {
+        const parsed = Date.parse(progress.last_activity_at_utc);
+        if (Number.isFinite(parsed)) {
+            return parsed;
+        }
+    }
     let idleMs = null;
     if (Number.isFinite(progress.activity_idle_ms)) {
         idleMs = Number(progress.activity_idle_ms);
     } else if (Number.isFinite(progress.idle_ms)) {
         idleMs = Number(progress.idle_ms);
-    } else if (typeof progress.last_activity_at_utc === 'string' && progress.last_activity_at_utc.trim()) {
-        const parsed = Date.parse(progress.last_activity_at_utc);
-        if (Number.isFinite(parsed)) {
-            idleMs = Date.now() - parsed;
-        }
     }
-
     if (!Number.isFinite(idleMs)) {
         return null;
     }
+    return Date.now() - Math.max(0, Number(idleMs));
+}
 
-    const safeIdleMs = Math.max(0, Number(idleMs));
+function formatLastActivityText(progress) {
+    if (!progress || typeof progress !== 'object') {
+        return null;
+    }
+
+    const lastActivityMs = resolveLastActivityTimestampMs(progress);
+    if (!Number.isFinite(lastActivityMs)) {
+        return null;
+    }
+
+    const safeIdleMs = Math.max(0, Date.now() - Number(lastActivityMs));
     return `Last activity ${formatThinkingDuration(safeIdleMs)} ago`;
 }
 
@@ -778,6 +835,14 @@ function buildThinkingProgressPresentation(progress, request = null) {
 
 export function __testOnly_buildThinkingProgressPresentation(progress, request = null) {
     return buildThinkingProgressPresentation(progress, request);
+}
+
+export function __testOnly_formatAbsoluteTimestamp(value) {
+    return formatAbsoluteTimestamp(value);
+}
+
+export function __testOnly_setUnambiguousTimestampTooltip(element, value, prefix = '') {
+    setUnambiguousTimestampTooltip(element, value, prefix);
 }
 
 function updateThinkingCardStatusBadge(progress) {
@@ -840,6 +905,14 @@ function updateThinkingCardMeta(request, progress) {
     }
 
     metaEl.textContent = bits.length > 0 ? bits.join(' \u00b7 ') : '';
+    const lastActivityMs = resolveLastActivityTimestampMs(effectiveProgress);
+    if (Number.isFinite(lastActivityMs)) {
+        setUnambiguousTimestampTooltip(metaEl, new Date(lastActivityMs).toISOString(), 'Last activity: ');
+    } else {
+        metaEl.removeAttribute('title');
+        metaEl.removeAttribute('aria-label');
+        metaEl.removeAttribute('data-original-title');
+    }
 }
 
 function recordToolUseHistory(request, progress) {
@@ -9828,6 +9901,7 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         const meta = document.createElement('span');
         meta.className = 'chat-session-tab-meta';
         meta.textContent = timestampLabel;
+        setUnambiguousTimestampTooltip(meta, timestampSource);
 
         const previewText = formatChatSessionPreview(session?.preview);
         const preview = document.createElement('span');
@@ -10497,21 +10571,7 @@ function copyTextFallback(text) {
 }
 
 async function copyTextToClipboard(text) {
-    const value = String(text ?? '');
-    if (!value) {
-        return false;
-    }
-
-    if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-        try {
-            await navigator.clipboard.writeText(value);
-            return true;
-        } catch (_) {
-            return copyTextFallback(value);
-        }
-    }
-
-    return copyTextFallback(value);
+    return copyTextWithClipboardFallback(text);
 }
 
 async function copyJsonPayloadToClipboard(payload, button = null, fallbackLabel = 'Copy JSON') {
@@ -10525,13 +10585,10 @@ async function copyJsonPayloadToClipboard(payload, button = null, fallbackLabel 
         return false;
     }
 
-    const copied = await copyTextToClipboard(jsonString);
-    if (button) {
-        const original = button.dataset.originalText || button.textContent || fallbackLabel;
-        button.dataset.originalText = original;
-        indicateClipboardResult(button, original, copied);
+    if (button instanceof HTMLButtonElement) {
+        return copyJsonTextWithButtonFeedback(button, jsonString, { fallbackLabel });
     }
-    return copied;
+    return copyTextToClipboard(jsonString);
 }
 
 // Delete exchange (top-level so event handlers can access it)
@@ -11779,8 +11836,10 @@ function updateChatSessionTabTimestamp(sessionId, timestampValue) {
     if (!tab) return;
     const meta = tab.querySelector('.chat-session-tab-meta');
     if (!meta) return;
-    const label = formatSessionTimestamp(timestampValue || '') || '-';
+    const rawTimestamp = String(timestampValue || '').trim();
+    const label = formatSessionTimestamp(rawTimestamp) || '-';
     meta.textContent = label;
+    setUnambiguousTimestampTooltip(meta, rawTimestamp);
 }
 
 function formatChatSessionPreview(text) {
@@ -12529,39 +12588,15 @@ function buildWorkflowDefinitionExportPayload({
 async function handleCopyWorkflowEpisodesJson() {
     const { copyJsonButton } = getWorkflowEpisodesElements();
     if (!copyJsonButton) return;
-    const originalContent = copyJsonButton.textContent || 'Copy JSON';
     const payload = buildWorkflowEpisodesExportPayload();
     const jsonString = JSON.stringify(payload, null, 2);
 
-    const markSuccess = () => {
-        indicateClipboardResult(copyJsonButton, originalContent, true);
+    const copied = await copyJsonTextWithButtonFeedback(copyJsonButton, jsonString);
+    if (copied) {
         showToast('Workflow episodes JSON copied', 'success');
-    };
-    const markFailure = (err) => {
-        console.error('[workflowStatus] Failed to copy workflow episodes JSON:', err);
-        indicateClipboardResult(copyJsonButton, originalContent, false);
-        showToast('Failed to copy workflow episodes JSON', 'error');
-    };
-
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-        try {
-            await navigator.clipboard.writeText(jsonString);
-            markSuccess();
-            return;
-        } catch (err) {
-            if (copyTextFallback(jsonString)) {
-                markSuccess();
-                return;
-            }
-            markFailure(err);
-            return;
-        }
-    }
-
-    if (copyTextFallback(jsonString)) {
-        markSuccess();
     } else {
-        markFailure(new Error('Clipboard unsupported'));
+        console.error('[workflowStatus] Failed to copy workflow episodes JSON');
+        showToast('Failed to copy workflow episodes JSON', 'error');
     }
 }
 
@@ -12587,39 +12622,12 @@ async function handleCopyWorkflowDefinitionJson(workflowId, workflowName) {
     });
     const jsonString = JSON.stringify(payload, null, 2);
 
-    const markSuccess = () => {
-        if (copyButton) {
-            indicateClipboardResult(copyButton, originalContent, true);
-        }
+    const copied = await copyJsonTextWithButtonFeedback(copyButton, jsonString, { fallbackLabel: originalContent });
+    if (copied) {
         showToast(`Workflow JSON copied: ${resolvedWorkflowName}`, 'success');
-    };
-    const markFailure = (err) => {
-        console.error('[workflowStatus] Failed to copy workflow JSON:', err);
-        if (copyButton) {
-            indicateClipboardResult(copyButton, originalContent, false);
-        }
-        showToast('Failed to copy workflow JSON', 'error');
-    };
-
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-        try {
-            await navigator.clipboard.writeText(jsonString);
-            markSuccess();
-            return;
-        } catch (err) {
-            if (copyTextFallback(jsonString)) {
-                markSuccess();
-                return;
-            }
-            markFailure(err);
-            return;
-        }
-    }
-
-    if (copyTextFallback(jsonString)) {
-        markSuccess();
     } else {
-        markFailure(new Error('Clipboard unsupported'));
+        console.error('[workflowStatus] Failed to copy workflow JSON');
+        showToast('Failed to copy workflow JSON', 'error');
     }
 }
 
@@ -12889,40 +12897,16 @@ function buildWorkflowMonitorExportPayload() {
 async function handleCopyWorkflowMonitorJson() {
     const { copyJsonButton } = getWorkflowStatusElements();
     if (!copyJsonButton) return;
-    const originalContent = copyJsonButton.textContent || 'Copy JSON';
 
     const payload = buildWorkflowMonitorExportPayload();
     const jsonString = JSON.stringify(payload, null, 2);
 
-    const markSuccess = () => {
-        indicateClipboardResult(copyJsonButton, originalContent, true);
+    const copied = await copyJsonTextWithButtonFeedback(copyJsonButton, jsonString);
+    if (copied) {
         showToast('Workflow monitor JSON copied', 'success');
-    };
-    const markFailure = (err) => {
-        console.error('[workflowStatus] Failed to copy monitor JSON:', err);
-        indicateClipboardResult(copyJsonButton, originalContent, false);
-        showToast('Failed to copy workflow monitor JSON', 'error');
-    };
-
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-        try {
-            await navigator.clipboard.writeText(jsonString);
-            markSuccess();
-            return;
-        } catch (err) {
-            if (copyTextFallback(jsonString)) {
-                markSuccess();
-                return;
-            }
-            markFailure(err);
-            return;
-        }
-    }
-
-    if (copyTextFallback(jsonString)) {
-        markSuccess();
     } else {
-        markFailure(new Error('Clipboard unsupported'));
+        console.error('[workflowStatus] Failed to copy monitor JSON');
+        showToast('Failed to copy workflow monitor JSON', 'error');
     }
 }
 
@@ -14519,6 +14503,11 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             const headerText = document.createElement('span');
             headerText.textContent = `Von • ${displayTimestamp}${historySuffix}`;
             headerText.style.minWidth = '0';
+            setUnambiguousTimestampTooltip(
+                headerText,
+                timestampStr || new Date().toISOString(),
+                'Timestamp: '
+            );
             messageHeader.appendChild(headerText);
 
             // Add fast-path indicator if the server bypassed the LLM.
@@ -14866,6 +14855,11 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
 
             const headerText = document.createElement('span');
             headerText.textContent = `${sender} • ${displayTimestamp}${historySuffix}`;
+            setUnambiguousTimestampTooltip(
+                headerText,
+                timestampStr || new Date().toISOString(),
+                'Timestamp: '
+            );
             messageHeader.appendChild(headerText);
 
             // Add LLM debug button for errors if debug data available
@@ -14989,9 +14983,7 @@ function initializeLlmDebugPopup() {
     copyBtn.addEventListener('click', async () => {
         const currentDebugData = popup.dataset.currentDebugData;
         if (currentDebugData) {
-            const originalText = copyBtn.textContent || 'Copy JSON';
-            const copied = await copyTextToClipboard(currentDebugData);
-            indicateClipboardResult(copyBtn, originalText, copied);
+            await copyJsonTextWithButtonFeedback(copyBtn, currentDebugData);
         }
     });
 

@@ -1,5 +1,10 @@
 import { acceptAnnotation, annotateTurn, createInstance, createType, revokeAnnotation, searchTypes } from './apiService.js';
-import { resetCopyJsonButtonPreCopyState } from './utils/copyJsonButtonState.js';
+import {
+  copyJsonTextWithButtonFeedback,
+  copyTextWithClipboardFallback,
+  resetCopyJsonButtonPreCopyState
+} from './utils/copyJsonButtonState.js';
+import { mountJsonInspector } from './utils/jsonInspector.js';
 
 // Sample preset text for quick demo usage
 const SAMPLE_TEXT = `The hippocampus plays a crucial role in spatial memory consolidation. Recent work by O'Keefe and colleagues suggests place cells form a cognitive map. Disruption of NMDA receptor signaling impairs LTP and downstream memory encoding pathways.`;
@@ -181,6 +186,7 @@ export function openAnnotationJsonModal(record, rect) {
   if (!record) return;
   const existing = document.querySelector('.annotation-json-modal');
   if (existing) existing.remove();
+  const jsonText = JSON.stringify(record, null, 2);
   const modal = document.createElement('div');
   modal.className = 'annotation-json-modal';
   // Use fixed positioning so panel stays anchored to viewport even if page scrolls
@@ -208,15 +214,17 @@ export function openAnnotationJsonModal(record, rect) {
       <button class="annotation-json-close btn-mini" title="Close" aria-label="Close dialog">×</button>
     </div>
     <div class="annotation-json-body">
-      <pre class="annotation-json-content"></pre>
+      <div class="annotation-json-inspector"></div>
     </div>
     <div class="annotation-json-footer">
       <div class="annotation-json-actions">
         <button class="annotation-json-copy btn-mini" title="Copy JSON">Copy JSON</button>
       </div>
     </div>`;
-  const pre = modal.querySelector('.annotation-json-content');
-  if (pre) pre.textContent = JSON.stringify(record, null, 2);
+  const inspectorHost = modal.querySelector('.annotation-json-inspector');
+  if (inspectorHost) {
+    mountJsonInspector(inspectorHost, jsonText);
+  }
   // Close handlers
   const doClose = () => modal.remove();
   const c1 = modal.querySelector('.annotation-json-close');
@@ -224,15 +232,9 @@ export function openAnnotationJsonModal(record, rect) {
   // Copy handler
   const copyBtn = modal.querySelector('.annotation-json-copy');
   if (copyBtn) {
-    copyBtn.addEventListener('click', () => {
-      try {
-        navigator.clipboard.writeText(pre.textContent || '');
-        copyBtn.textContent = 'Copied!';
-        setTimeout(() => { copyBtn.textContent = 'Copy JSON'; }, 1500);
-      } catch (e) {
-        copyBtn.textContent = 'Copy failed';
-        setTimeout(() => { copyBtn.textContent = 'Copy JSON'; }, 1500);
-      }
+    resetCopyJsonButtonPreCopyState(copyBtn);
+    copyBtn.addEventListener('click', async () => {
+      await copyJsonTextWithButtonFeedback(copyBtn, jsonText);
     });
   }
   document.body.appendChild(modal);
@@ -289,16 +291,10 @@ export function openLlmIoModal(io, rect) {
   if (c1) c1.addEventListener('click', doClose);
   const copyBtn = modal.querySelector('.annotation-llmio-copy');
   if (copyBtn) {
-    copyBtn.addEventListener('click', () => {
-      try {
-        const data = { prompt: io.prompt || '', output: io.output || '', truncated: !!io.truncated };
-        navigator.clipboard.writeText(JSON.stringify(data, null, 2));
-        copyBtn.textContent = 'Copied!';
-        setTimeout(() => { copyBtn.textContent = 'Copy JSON'; }, 1500);
-      } catch (e) {
-        copyBtn.textContent = 'Copy failed';
-        setTimeout(() => { copyBtn.textContent = 'Copy JSON'; }, 1500);
-      }
+    resetCopyJsonButtonPreCopyState(copyBtn);
+    copyBtn.addEventListener('click', async () => {
+      const data = { prompt: io.prompt || '', output: io.output || '', truncated: !!io.truncated };
+      await copyJsonTextWithButtonFeedback(copyBtn, JSON.stringify(data, null, 2));
     });
   }
   document.body.appendChild(modal);
@@ -534,7 +530,9 @@ function updateCounts(countsEl, suggestions) {
 }
 
 function copyJson(suggestions) {
-  try { navigator.clipboard.writeText(JSON.stringify(suggestions, null, 2)); } catch (e) { console.warn('Clipboard copy failed', e); }
+  copyTextWithClipboardFallback(JSON.stringify(suggestions, null, 2)).catch((e) => {
+    console.warn('Clipboard copy failed', e);
+  });
 }
 
 export function initializeAnnotationTab(suffix = '') {
@@ -736,7 +734,11 @@ export function initializeAnnotationTab(suffix = '') {
     attachOnce(llmCopyBtn, 'click', 'llmCopyJson', () => {
       const promptConceptId = (promptConceptBtn && (promptConceptBtn.dataset.conceptId || promptConceptBtn.textContent)) || '#V#find_concepts_in_text_prompt';
       const record = { prompt: lastLlmInteraction.prompt || '', output: lastLlmInteraction.output || '', prompt_concept: promptConceptId, aux_llm_calls: Array.isArray(lastAuxLlmCalls) ? lastAuxLlmCalls : [] };
-      try { navigator.clipboard.writeText(JSON.stringify(record, null, 2)); llmCopyBtn.textContent = 'Copied'; setTimeout(() => { llmCopyBtn.textContent = 'Copy JSON'; }, 1500); } catch (e) { console.warn('Clipboard write failed', e); }
+      void copyJsonTextWithButtonFeedback(
+        llmCopyBtn,
+        JSON.stringify(record, null, 2),
+        { successLabel: '✓ Copied' }
+      );
     });
   }
 
