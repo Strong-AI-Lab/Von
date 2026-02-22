@@ -42,6 +42,7 @@ NO_BACKUP_MIGRATE=0
 DISABLE_LOG_READY=0
 HEALTH_DEBUG=0
 SHOW_RELATION_COVERAGE=0
+STATUS_RUN_MAINTENANCE=0
 BACKUP_FLAGS_SET=0
 READY_LOG_PATTERNS=("Running with Waitress" "Press CTRL+C to quit" "Flask app running")
 
@@ -81,6 +82,7 @@ while [ $# -gt 0 ]; do
         -DisableLogReady) DISABLE_LOG_READY=1; shift ;;
         -HealthDebug) HEALTH_DEBUG=1; shift ;;
         -ShowRelationCoverage) SHOW_RELATION_COVERAGE=1; shift ;;
+        -StatusRunMaintenance) STATUS_RUN_MAINTENANCE=1; shift ;;
         -BackupDryRun) BACKUP_DRY_RUN=1; BACKUP_FLAGS_SET=1; shift ;;
         -BackupTag) BACKUP_TAG="$2"; BACKUP_FLAGS_SET=1; shift 2 ;;
         -BackupOutDir) BACKUP_OUT_DIR="$2"; BACKUP_FLAGS_SET=1; shift 2 ;;
@@ -100,8 +102,10 @@ PID_FILE="${RUN_DIR}/von_${PORT}.pid"
 CURRENT_LOG="${LOGS_DIR}/von_${PORT}_current.log"
 TS="$(date +%Y%m%d_%H%M%S 2>/dev/null || date +%Y%m%d_%H%M%S)"
 NEW_LOG="${LOGS_DIR}/von_${PORT}_${TS}.log"
+SERVER_ERR_LOG="${NEW_LOG}.err"
 RAG_PID_FILE="${RUN_DIR}/rag_worker.pid"
 RAG_LOG_FILE="${LOGS_DIR}/rag_worker_${TS}.log"
+RAG_ERR_LOG_FILE="${RAG_LOG_FILE}.err"
 TOKEN_FILE="${RUN_DIR}/admin_token.txt"
 SENTINEL_BROWSER="${RUN_DIR}/browser_opened_once"
 LOCAL_BACKUPS="${ROOT}/backups"
@@ -470,7 +474,11 @@ pdm_cmd() {
 }
 
 python_cmd() {
-    if command -v python3 >/dev/null 2>&1; then
+    if [ -x "${ROOT}/.venv/bin/python" ]; then
+        echo "${ROOT}/.venv/bin/python"
+    elif [ -x "${ROOT}/.venv/Scripts/python.exe" ]; then
+        echo "${ROOT}/.venv/Scripts/python.exe"
+    elif command -v python3 >/dev/null 2>&1; then
         echo "python3"
     elif command -v python >/dev/null 2>&1; then
         echo "python"
@@ -580,15 +588,28 @@ should_run_interval() {
 }
 
 health_ok() {
-    local timeout=5
+    local timeout=2
     if printf '%s' "${VON_HEALTH_HTTP_TIMEOUT:-}" | grep -qE '^[0-9]+$'; then
         if [ "$VON_HEALTH_HTTP_TIMEOUT" -gt 0 ] && [ "$VON_HEALTH_HTTP_TIMEOUT" -lt 61 ]; then
             timeout="$VON_HEALTH_HTTP_TIMEOUT"
         fi
     fi
-    local hosts=("127.0.0.1" "localhost")
+    local hosts=("127.0.0.1")
+    if [ -n "${VON_HEALTH_HOSTS:-}" ]; then
+        IFS=',' read -r -a hosts <<<"${VON_HEALTH_HOSTS}"
+        local i
+        for i in "${!hosts[@]}"; do
+            hosts[$i]="${hosts[$i]#"${hosts[$i]%%[![:space:]]*}"}"
+            hosts[$i]="${hosts[$i]%"${hosts[$i]##*[![:space:]]}"}"
+        done
+    elif is_truthy "${VON_HEALTH_INCLUDE_LOCALHOST:-}"; then
+        hosts+=("localhost")
+    fi
     local host
     for host in "${hosts[@]}"; do
+        if [ -z "$host" ]; then
+            continue
+        fi
         local url="http://${host}:${PORT}/health"
         if command -v curl >/dev/null 2>&1; then
             local code
@@ -641,15 +662,19 @@ open_browser() {
 }
 
 get_listening_pid_by_port() {
-    # Best-effort listener PID detection across Linux/macOS.
+    # Best-effort listener PID detection across Windows/Linux/macOS.
     local port="$1"
-    if command -v lsof >/dev/null 2>&1; then
-        lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -n 1
+    if command -v netstat.exe >/dev/null 2>&1; then
+        netstat.exe -ano -p tcp 2>/dev/null | awk -v p="$port" 'BEGIN { IGNORECASE=1 } $1 == "TCP" { local=$2; state=$4; pid=$5; if (state == "LISTENING" && local ~ ":" p "$" && pid ~ /^[0-9]+$/) { print pid; exit } }'
         return 0
     fi
     if command -v ss >/dev/null 2>&1; then
         # Linux (iproute2)
         ss -lptn "sport = :$port" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -n 1
+        return 0
+    fi
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -n 1
         return 0
     fi
     if command -v netstat >/dev/null 2>&1; then
@@ -665,9 +690,36 @@ get_process_commandline() {
     if [ -z "$pid" ]; then
         return 0
     fi
-    if command -v ps >/dev/null 2>&1; then
-        ps -p "$pid" -o args= 2>/dev/null || true
+    local py
+    py="$(python_cmd)"
+    if [ -z "$py" ]; then
+        return 0
     fi
+    "$py" -c 'import psutil,sys
+pid=int(sys.argv[1])
+try:
+    cmd=psutil.Process(pid).cmdline()
+except Exception:
+    raise SystemExit(1)
+print(" ".join(str(p) for p in cmd))' "$pid" 2>/dev/null || true
+}
+
+process_exists() {
+    local pid="${1:-}"
+    if ! printf '%s' "$pid" | grep -qE '^[0-9]+$'; then
+        return 1
+    fi
+    if kill -0 "$pid" >/dev/null 2>&1; then
+        return 0
+    fi
+    local py
+    py="$(python_cmd)"
+    if [ -z "$py" ]; then
+        return 1
+    fi
+    "$py" -c 'import psutil,sys
+pid=int(sys.argv[1])
+raise SystemExit(0 if psutil.pid_exists(pid) else 1)' "$pid" >/dev/null 2>&1
 }
 
 is_von_main_process() {
@@ -677,13 +729,29 @@ is_von_main_process() {
     if [ -z "$cmdline" ]; then
         return 1
     fi
-    if ! printf '%s' "$cmdline" | grep -F -q "src/workflows/von/main.py"; then
+    local cmd_norm=""
+    cmd_norm="$(printf '%s' "$cmdline" | tr '[:upper:]' '[:lower:]' | sed 's#\\#/#g')"
+    if ! printf '%s' "$cmd_norm" | grep -F -q "src/workflows/von/main.py"; then
         return 1
     fi
-    if ! printf '%s' "$cmdline" | grep -F -q "$ROOT"; then
-        return 1
+
+    local root_norm=""
+    root_norm="$(printf '%s' "$ROOT" | tr '[:upper:]' '[:lower:]' | sed 's#\\#/#g')"
+    local root_drive_norm="$root_norm"
+    if printf '%s' "$root_norm" | grep -qE '^/[a-z]/'; then
+        root_drive_norm="$(printf '%s' "$root_norm" | sed -E 's#^/([a-z])/#\1:/#')"
     fi
-    return 0
+
+    if printf '%s' "$cmd_norm" | grep -F -q "$root_norm"; then
+        return 0
+    fi
+    if printf '%s' "$cmd_norm" | grep -F -q "$root_drive_norm"; then
+        return 0
+    fi
+    if printf '%s' "$cmd_norm" | grep -F -q "/strong-ai-lab/von/"; then
+        return 0
+    fi
+    return 1
 }
 
 stop_process_with_escalation() {
@@ -696,7 +764,7 @@ stop_process_with_escalation() {
 
     local waited=0
     while [ "$waited" -lt 20 ]; do
-        if ! kill -0 "$pid" >/dev/null 2>&1; then
+        if ! process_exists "$pid"; then
             return 0
         fi
         sleep 0.5
@@ -705,10 +773,88 @@ stop_process_with_escalation() {
 
     kill -9 "$pid" >/dev/null 2>&1 || true
     sleep 0.2
-    if kill -0 "$pid" >/dev/null 2>&1; then
+    if process_exists "$pid"; then
         return 1
     fi
     return 0
+}
+
+stop_process_tree_with_escalation() {
+    local pid="${1:-}"
+    if [ -z "$pid" ]; then
+        return 1
+    fi
+
+    if command -v taskkill.exe >/dev/null 2>&1; then
+        taskkill.exe //PID "$pid" //T >/dev/null 2>&1 || true
+        sleep 0.5
+        taskkill.exe //PID "$pid" //T //F >/dev/null 2>&1 || true
+    else
+        stop_process_with_escalation "$pid" || true
+    fi
+
+    # Verify via psutil for consistent cross-platform existence checks.
+    local py
+    py="$(python_cmd)"
+    if [ -z "$py" ]; then
+        return 0
+    fi
+    if "$py" -c 'import psutil,sys
+pid=int(sys.argv[1])
+raise SystemExit(0 if psutil.pid_exists(pid) else 1)' "$pid" 2>/dev/null; then
+        return 1
+    fi
+    return 0
+}
+
+stop_python_processes_by_script() {
+    local script_relative_path="${1:-}"
+    local label="${2:-python-script}"
+    local exclude_pid="${3:-0}"
+    if [ -z "$script_relative_path" ]; then
+        return 0
+    fi
+    local py
+    py="$(python_cmd)"
+    if [ -z "$py" ]; then
+        return 0
+    fi
+    local script_path="${ROOT}/${script_relative_path}"
+    local killed
+    killed="$("$py" -c 'import os,sys,psutil
+target=os.path.normcase(os.path.normpath(sys.argv[1]))
+exclude=int(sys.argv[2]) if len(sys.argv) > 2 else 0
+current=os.getpid()
+fragment=target.lower().replace("\\\\","/")
+name=os.path.basename(target).lower()
+killed=[]
+for proc in psutil.process_iter(["pid","cmdline"]):
+    try:
+        pid=int(proc.info.get("pid") or 0)
+        if pid <= 0 or pid == current or pid == exclude:
+            continue
+        cmdline=[str(part) for part in (proc.info.get("cmdline") or [])]
+        if not cmdline:
+            continue
+        joined=" ".join(cmdline)
+        norm=joined.lower().replace("\\\\","/")
+        if fragment not in norm and name not in norm:
+            continue
+        try:
+            proc.terminate()
+            proc.wait(timeout=1.0)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        killed.append(str(pid))
+    except Exception:
+        continue
+print(" ".join(killed))' "$script_path" "$exclude_pid" 2>/dev/null || true)"
+    if [ -n "$killed" ]; then
+        log "Stopped stale ${label} process(es): ${killed}"
+    fi
 }
 
 restart_port_takeover() {
@@ -745,6 +891,50 @@ port_listening() {
     [ -n "$pid" ]
 }
 
+get_von_main_pid_by_port() {
+    local py
+    py="$(python_cmd)"
+    if [ -z "$py" ]; then
+        return 0
+    fi
+    local script_path="${ROOT}/src/workflows/von/main.py"
+    "$py" -c 'import os,sys,psutil
+target=os.path.normcase(os.path.normpath(sys.argv[1]))
+port=str(sys.argv[2])
+target_norm=target.lower().replace("\\\\","/")
+target_name=os.path.basename(target).lower()
+matches=[]
+for proc in psutil.process_iter(["pid","cmdline","create_time"]):
+    try:
+        cmdline=[str(part) for part in (proc.info.get("cmdline") or [])]
+        if not cmdline:
+            continue
+        exe_name=os.path.basename(cmdline[0]).lower()
+        if "python" not in exe_name:
+            continue
+        norm=[part.lower().replace("\\\\","/") for part in cmdline]
+        joined=" ".join(norm)
+        if target_norm not in joined and not any(arg.endswith(target_name) for arg in norm):
+            continue
+        port_match=False
+        for i,arg in enumerate(norm):
+            if arg == "--port" and i + 1 < len(norm) and norm[i + 1] == port:
+                port_match=True
+                break
+            if arg.startswith("--port=") and arg.split("=", 1)[1] == port:
+                port_match=True
+                break
+        if not port_match:
+            continue
+        matches.append((float(proc.info.get("create_time") or 0.0), int(proc.info.get("pid") or 0)))
+    except Exception:
+        continue
+if not matches:
+    raise SystemExit(1)
+matches.sort(reverse=True)
+print(matches[0][1])' "$script_path" "$PORT" 2>/dev/null || true
+}
+
 log_ready() {
     if [ "$DISABLE_LOG_READY" -eq 1 ]; then
         return 1
@@ -768,6 +958,9 @@ sync_pidfile_to_listener() {
     local listener
     listener="$(get_listening_pid_by_port "$PORT" || true)"
     if [ -z "$listener" ]; then
+        listener="$(get_von_main_pid_by_port || true)"
+    fi
+    if [ -z "$listener" ]; then
         return 0
     fi
     if ! is_von_main_process "$listener"; then
@@ -786,14 +979,31 @@ refine_pid_to_child() {
     if [ -z "$parent_pid" ]; then
         return 0
     fi
-    if command -v pgrep >/dev/null 2>&1; then
-        local child
-        child="$(pgrep -P "$parent_pid" -f "src/workflows/von/main.py" 2>/dev/null | head -n 1 || true)"
-        if [ -n "$child" ] && [ "$child" != "$parent_pid" ]; then
-            write_pidfile "$child"
-            log "Updated PID file to python process PID=$child (was wrapper PID=$parent_pid)."
-            return 0
-        fi
+    local py
+    py="$(python_cmd)"
+    if [ -z "$py" ]; then
+        return 0
+    fi
+    local child
+    child="$("$py" -c 'import psutil,sys
+parent=int(sys.argv[1])
+target="src/workflows/von/main.py"
+try:
+    proc=psutil.Process(parent)
+except Exception:
+    raise SystemExit(1)
+for child in proc.children(recursive=True):
+    try:
+        cmd=" ".join(str(p) for p in (child.cmdline() or []))
+    except Exception:
+        continue
+    if target in cmd.replace("\\\\","/"):
+        print(child.pid)
+        raise SystemExit(0)
+raise SystemExit(1)' "$parent_pid" 2>/dev/null || true)"
+    if [ -n "$child" ] && [ "$child" != "$parent_pid" ]; then
+        write_pidfile "$child"
+        log "Updated PID file to python process PID=$child (was wrapper PID=$parent_pid)."
     fi
     return 0
 }
@@ -803,31 +1013,45 @@ start_rag_worker_bg() {
     if [ -f "$RAG_PID_FILE" ]; then
         local old
         old="$(sed -n 's/^PID=//p' "$RAG_PID_FILE" 2>/dev/null | head -n 1 || true)"
-        if [ -n "$old" ] && kill -0 "$old" >/dev/null 2>&1; then
+        if [ -n "$old" ] && process_exists "$old"; then
             log "RAG Worker already running (PID=$old)."
             return 0
         fi
         rm -f "$RAG_PID_FILE" 2>/dev/null || true
     fi
+    stop_python_processes_by_script "src/backend/utilities/rag_indexing_worker.py" "RAG Worker"
+
+    local py
+    py="$(python_cmd)"
+    if [ -z "$py" ]; then
+        log "ERROR: No python executable found for RAG Worker launch."
+        return 1
+    fi
+
     log "Starting RAG Indexing Worker..."
-    local pdm
-    pdm="$(pdm_cmd)"
-    nohup "$pdm" run python -u "${ROOT}/src/backend/utilities/rag_indexing_worker.py" >> "$RAG_LOG_FILE" 2>&1 &
+    rm -f "$RAG_LOG_FILE" "$RAG_ERR_LOG_FILE" 2>/dev/null || true
+    nohup "$py" -u "${ROOT}/src/backend/utilities/rag_indexing_worker.py" >> "$RAG_LOG_FILE" 2>> "$RAG_ERR_LOG_FILE" &
     local pid=$!
     printf 'PID=%s\nSTART=%s\n' "$pid" "$(date -Iseconds 2>/dev/null || date)" > "$RAG_PID_FILE"
-    log "RAG Worker started (PID=$pid). Log: $RAG_LOG_FILE"
+    log "RAG Worker started (PID=$pid). Logs: $RAG_LOG_FILE, $RAG_ERR_LOG_FILE"
 }
 
 stop_rag_worker() {
-    if [ ! -f "$RAG_PID_FILE" ]; then
-        return 0
+    local pid_to_kill=0
+    if [ -f "$RAG_PID_FILE" ]; then
+        local content
+        content="$(cat "$RAG_PID_FILE" 2>/dev/null || true)"
+        if printf '%s' "$content" | grep -qE 'PID=[0-9]+'; then
+            pid_to_kill="$(printf '%s' "$content" | sed -n 's/^PID=//p' | head -n 1 || true)"
+        fi
+        if [ "$pid_to_kill" -gt 0 ] 2>/dev/null; then
+            log "Stopping RAG Worker (PID=$pid_to_kill)..."
+            if ! stop_process_tree_with_escalation "$pid_to_kill"; then
+                log "WARN: RAG Worker PID=$pid_to_kill may still be running."
+            fi
+        fi
     fi
-    local pid
-    pid="$(sed -n 's/^PID=//p' "$RAG_PID_FILE" 2>/dev/null | head -n 1 || true)"
-    if [ -n "$pid" ]; then
-        log "Stopping RAG Worker (PID=$pid)..."
-        kill "$pid" >/dev/null 2>&1 || true
-    fi
+    stop_python_processes_by_script "src/backend/utilities/rag_indexing_worker.py" "RAG Worker" "$pid_to_kill"
     rm -f "$RAG_PID_FILE" 2>/dev/null || true
 }
 
@@ -846,8 +1070,12 @@ start_server() {
 
     local existing
     existing="$(get_pid || true)"
-    if [ -n "$existing" ] && kill -0 "$existing" >/dev/null 2>&1; then
+    if [ -z "$existing" ]; then
+        existing="$(get_von_main_pid_by_port || true)"
+    fi
+    if [ -n "$existing" ] && process_exists "$existing"; then
         log "Already running (PID=$existing). Use ./run.sh stop or restart."
+        write_pidfile "$existing"
         return 0
     fi
 
@@ -869,13 +1097,27 @@ start_server() {
     fi
 
     set_admin_token_env
+    stop_python_processes_by_script "src/workflows/von/main.py" "Von Server"
 
-    local pdm
-    pdm="$(pdm_cmd)"
-    log "Starting Von server on port $PORT ..."
-    : > "$NEW_LOG" || true
-    nohup "$pdm" run python -u "${ROOT}/src/workflows/von/main.py" --port "$PORT" >> "$NEW_LOG" 2>&1 &
+    local py
+    py="$(python_cmd)"
+    local launch_mode="direct-python"
+    if [ -z "$py" ]; then
+        py="$(pdm_cmd)"
+        launch_mode="pdm-fallback"
+    fi
+
+    log "Starting Von server on port $PORT (mode=$launch_mode)..."
+    rm -f "$NEW_LOG" "$SERVER_ERR_LOG" 2>/dev/null || true
+    : > "$NEW_LOG" 2>/dev/null || true
+    : > "$SERVER_ERR_LOG" 2>/dev/null || true
+    if [ "$launch_mode" = "pdm-fallback" ]; then
+        nohup "$py" run python -u "${ROOT}/src/workflows/von/main.py" --port "$PORT" >> "$NEW_LOG" 2>> "$SERVER_ERR_LOG" &
+    else
+        nohup "$py" -u "${ROOT}/src/workflows/von/main.py" --port "$PORT" >> "$NEW_LOG" 2>> "$SERVER_ERR_LOG" &
+    fi
     local pid=$!
+    log "Launched PID=$pid. Logs: $NEW_LOG ; stderr: $SERVER_ERR_LOG"
     write_pidfile "$pid"
 
     # Current log pointer (symlink preferred; copy fallback)
@@ -894,17 +1136,25 @@ start_server() {
         while [ "$attempt" -lt "$max_attempts" ]; do
             sleep 0.5
 
-            if [ "$listening_logged" -eq 0 ] && ! kill -0 "$pid" >/dev/null 2>&1; then
+            if [ "$listening_logged" -eq 0 ] && ! process_exists "$pid"; then
                 log "ERROR: Server process exited early before listening on port $PORT. Showing last 40 log lines:"
                 local log_tail=""
+                local err_tail=""
                 if [ -f "$CURRENT_LOG" ]; then
                     log_tail="$(tail -n 40 "$CURRENT_LOG" 2>/dev/null || true)"
                     if [ -n "$log_tail" ]; then
                         printf '%s\n' "$log_tail"
                     fi
                 fi
+                if [ -f "$SERVER_ERR_LOG" ]; then
+                    log "Last 40 stderr log lines:"
+                    err_tail="$(tail -n 40 "$SERVER_ERR_LOG" 2>/dev/null || true)"
+                    if [ -n "$err_tail" ]; then
+                        printf '%s\n' "$err_tail"
+                    fi
+                fi
 
-                if [ "$REPAIR_ATTEMPTED" -eq 0 ] && printf '%s' "$log_tail" | grep -qE "ModuleNotFoundError|ImportError"; then
+                if [ "$REPAIR_ATTEMPTED" -eq 0 ] && printf '%s\n%s' "$log_tail" "$err_tail" | grep -qE "ModuleNotFoundError|ImportError"; then
                     local repair_script="${ROOT}/setup_py.sh"
                     if [ -f "$repair_script" ]; then
                         log "Detected missing dependencies. Attempting auto-repair..."
@@ -996,13 +1246,15 @@ start_server() {
             log "WARNING: Port is listening but /health did not respond in $((HEALTH_TIMEOUT_SEC + HEALTH_GRACE_SEC))s; continuing (service may still be initialising)."
             log_mongo_status
         else
-            log "WARNING: Server not healthy after initial ${HEALTH_TIMEOUT_SEC}s (port not listening); check logs: $CURRENT_LOG"
+            log "WARNING: Server not healthy after initial ${HEALTH_TIMEOUT_SEC}s (port not listening); check logs: $CURRENT_LOG and $SERVER_ERR_LOG"
         fi
     fi
 
-    # Best-effort PID refinement to the python child (if available).
-    sleep 0.4
-    refine_pid_to_child "$pid"
+    # Best-effort PID refinement to the python child only when using a wrapper launch.
+    if [ "$launch_mode" = "pdm-fallback" ]; then
+        sleep 0.4
+        refine_pid_to_child "$pid"
+    fi
     sync_pidfile_to_listener
 
     log "Admin token file: $TOKEN_FILE"
@@ -1018,6 +1270,7 @@ start_server() {
 
 stop_server() {
     local pid=""
+    local graceful=0
     # Match run.ps1: stop supports extra args like: stop <pid> | stop force | stop force-any
     if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
         local arg="${EXTRA_ARGS[0]}"
@@ -1048,16 +1301,33 @@ stop_server() {
         pid="$(get_pid || true)"
     fi
     if [ -z "$pid" ]; then
+        pid="$(get_von_main_pid_by_port || true)"
+    fi
+    if [ -z "$pid" ]; then
         log "Not running"
         remove_pidfile
         stop_rag_worker || true
         return 0
     fi
-    if ! kill -0 "$pid" >/dev/null 2>&1; then
+    if ! process_exists "$pid"; then
         log "STALE: PID file exists but process missing."
         remove_pidfile
         stop_rag_worker || true
         return 0
+    fi
+    if ! is_von_main_process "$pid"; then
+        local listener=""
+        listener="$(get_listening_pid_by_port "$PORT" || true)"
+        if [ -n "$listener" ] && is_von_main_process "$listener"; then
+            log "PID file pointed to non-Von PID=$pid; switching to listener PID=$listener."
+            pid="$listener"
+            write_pidfile "$pid"
+        else
+            log "STALE: PID file PID=$pid does not match this Von server."
+            remove_pidfile
+            stop_rag_worker || true
+            return 0
+        fi
     fi
 
     local token=""
@@ -1066,27 +1336,36 @@ stop_server() {
     fi
     if [ -n "$token" ] && command -v curl >/dev/null 2>&1; then
         log "Attempting graceful shutdown (PID=$pid)..."
-        curl -sS -X POST "http://localhost:${PORT}/admin/shutdown" -H "X-Admin-Token: ${token}" --max-time 5 >/dev/null 2>&1 || true
+        if curl -sS -X POST "http://localhost:${PORT}/admin/shutdown" -H "X-Admin-Token: ${token}" --max-time 5 >/dev/null 2>&1; then
+            graceful=1
+        fi
     else
         log "No admin token available or curl missing; skipping graceful attempt."
     fi
 
     local waited=0
-    while [ $waited -lt 10 ]; do
-        if ! kill -0 "$pid" >/dev/null 2>&1; then
+    while [ "$waited" -lt 20 ]; do
+        if ! process_exists "$pid"; then
             break
         fi
         sleep 0.5
-        waited=$((waited+1))
+        waited=$((waited + 1))
     done
-    if kill -0 "$pid" >/dev/null 2>&1; then
+    if process_exists "$pid"; then
         log "Process PID=$pid still running; issuing force kill..."
-        kill -9 "$pid" >/dev/null 2>&1 || true
+        if ! stop_process_tree_with_escalation "$pid"; then
+            log "Force kill failed: PID=$pid remained alive after escalation."
+        fi
     else
-        log "Process exited."
+        if [ "$graceful" -eq 1 ]; then
+            log "Graceful shutdown completed."
+        else
+            log "Process exited."
+        fi
     fi
 
     remove_pidfile
+    stop_python_processes_by_script "src/workflows/von/main.py" "Von Server" "$pid"
     stop_rag_worker || true
 }
 
@@ -1367,7 +1646,7 @@ run_daily_backup_if_due() {
     if [ -f "$pid_file" ]; then
         local pid
         pid="$(tr -d '\r\n' < "$pid_file" 2>/dev/null || true)"
-        if [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1; then
+        if [ -n "$pid" ] && process_exists "$pid"; then
             return 0
         fi
         rm -f "$pid_file" 2>/dev/null || true
@@ -1415,7 +1694,7 @@ trigger_test_db_refresh() {
     if [ -f "$pid_file" ]; then
         local pid
         pid="$(tr -d '\r\n' < "$pid_file" 2>/dev/null || true)"
-        if [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1; then
+        if [ -n "$pid" ] && process_exists "$pid"; then
             return 0
         fi
         rm -f "$pid_file" 2>/dev/null || true
@@ -1884,9 +2163,24 @@ run_relation_alias_cleanup() {
 status_server() {
     # Match run.ps1: if PID file stale, try to sync from current listener.
     sync_pidfile_to_listener
+    local run_maintenance=0
+    if [ "$STATUS_RUN_MAINTENANCE" -eq 1 ] || is_truthy "${VON_STATUS_RUN_MAINTENANCE:-}"; then
+        run_maintenance=1
+    fi
     local pid
     pid="$(get_pid || true)"
-    if [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1; then
+    if [ -n "$pid" ] && process_exists "$pid" && ! is_von_main_process "$pid"; then
+        local listener=""
+        listener="$(get_listening_pid_by_port "$PORT" || true)"
+        if [ -n "$listener" ] && is_von_main_process "$listener"; then
+            write_pidfile "$listener"
+            pid="$listener"
+            log "Synchronized PID file to listener PID=${listener}"
+        else
+            pid=""
+        fi
+    fi
+    if [ -n "$pid" ] && process_exists "$pid"; then
         local uptime=""
         uptime="$(pidfile_uptime_minutes || true)"
         if health_ok; then
@@ -1904,15 +2198,19 @@ status_server() {
         fi
         log_mongo_status
         log "Log: $CURRENT_LOG"
-        run_governance_scan || true
-        run_predicate_verify || true
-        run_residual_legacy_text_audit || true
-        run_cleanup_preserved_fields || true
+        if [ "$run_maintenance" -eq 1 ]; then
+            run_governance_scan || true
+            run_predicate_verify || true
+            run_residual_legacy_text_audit || true
+            run_cleanup_preserved_fields || true
+            run_relation_alias_audit || true
+            run_relation_alias_cleanup || true
+        elif [ "$HEALTH_DEBUG" -eq 1 ]; then
+            log "Status maintenance checks skipped (set -StatusRunMaintenance or VON_STATUS_RUN_MAINTENANCE=1 to enable)."
+        fi
         if [ "$SHOW_RELATION_COVERAGE" -eq 1 ]; then
             run_relation_coverage_summary || true
         fi
-        run_relation_alias_audit || true
-        run_relation_alias_cleanup || true
     else
         if [ -f "$PID_FILE" ]; then
             log "STALE: PID file exists but process missing."
@@ -1937,7 +2235,7 @@ show_logs() {
 check_health() {
     sync_pidfile_to_listener
     local pid="$(get_pid || true)"
-    if [ -z "$pid" ] || ! kill -0 "$pid" >/dev/null 2>&1; then
+    if [ -z "$pid" ] || ! process_exists "$pid"; then
         # Mirror run.ps1: if PID missing but port has a listener, treat as running (untracked)
         local listener
         listener="$(get_listening_pid_by_port "$PORT" || true)"
@@ -2016,7 +2314,7 @@ run_autoupdate() {
         (cd "$ROOT" || exit 1
             local running_pid
             running_pid="$(get_pid || true)"
-            if [ -z "$running_pid" ] || ! kill -0 "$running_pid" >/dev/null 2>&1; then
+            if [ -z "$running_pid" ] || ! process_exists "$running_pid"; then
                 start_server || true
             fi
 
@@ -2084,6 +2382,7 @@ Von Launcher Help
         -ReadyLogPatterns <p>
         -DisableLogReady
         -HealthDebug
+        -StatusRunMaintenance
         -ShowRelationCoverage
         -NoBackupMigrate
 
