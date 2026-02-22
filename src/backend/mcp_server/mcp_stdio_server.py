@@ -1266,8 +1266,12 @@ async def _handle_fetch_concept(arguments: dict[str, Any]) -> list[TextContent]:
 
         concept = enrich_concept_with_text_relations(concept)
 
-        # Detect vacuous typing (soft warning for agents to repair)
-        from ..services.relationship_write_service import detect_vacuous_typing
+        # NOTE: mcp_stdio_server runs as a top-level script in stdio mode.
+        # Relative imports fail in that runtime ("no known parent package"),
+        # so this import must remain absolute.
+        from src.backend.services.relationship_write_service import (
+            detect_vacuous_typing,
+        )
 
         vacuous_warning = detect_vacuous_typing(concept)
         if vacuous_warning:
