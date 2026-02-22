@@ -400,6 +400,40 @@ def test_generate_buttonify_telemetry_reports_skipped_when_disabled(monkeypatch)
     assert buttonify_event["options_emitted_count"] == 0
 
 
+def test_generate_legacy_buttonify_preflight_symbol_lookup_does_not_crash(monkeypatch):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+
+    llm = _StubLLM("No options here.")
+    app = _make_app(monkeypatch, llm)
+
+    import src.backend.server.routes.von_routes as von_routes_module
+
+    def _legacy_get_buttonify_model_enabled() -> bool:
+        # Simulate a stale runtime path that still resolves the retired symbol
+        # name at module scope.
+        return bool(
+            eval(
+                "get_buttonify_heuristic_preflight_enabled()",
+                dict(vars(von_routes_module)),
+            )
+        )
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_buttonify_model_enabled",
+        _legacy_get_buttonify_model_enabled,
+    )
+
+    client = app.test_client()
+    resp = client.post("/von/generate", json={"prompt": "Hello"})
+
+    assert resp.status_code == 200
+    llm_debug = resp.get_json()["llm_debug"]
+    buttonify_event = _find_transformation_event(llm_debug, "buttonify")
+    assert buttonify_event["status"] == "skipped"
+    assert buttonify_event["suppression_reason"] == "buttonify_disabled"
+    assert buttonify_event["options_emitted_count"] == 0
+
+
 def test_generate_buttonify_uses_workflow_when_available(monkeypatch):
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
     from src.backend.workflows import CHAT_BUTTONIFY_WORKFLOW_ID

@@ -90,6 +90,17 @@ _TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT = 40
 _TURN_EXECUTION_DIAGNOSTICS_PROMPT_PREVIEW_LIMIT = 1000
 
 
+def get_buttonify_heuristic_preflight_enabled() -> bool:
+    """Legacy compatibility shim for removed buttonify heuristic preflight.
+
+    Buttonify is intentionally LLM-only now, so this always returns ``False``.
+    Keeping the symbol defined prevents late-turn ``NameError`` failures from
+    stale runtime/eval paths that still reference the historic function name.
+    """
+
+    return False
+
+
 def _env_int(name: str, default: int, *, min_value: int) -> int:
     try:
         value = int(os.getenv(name, str(default)))
