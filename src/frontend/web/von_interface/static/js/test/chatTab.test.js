@@ -6,6 +6,7 @@ import {
     __testOnly_setUnambiguousTimestampTooltip,
     __testOnly_setWorkflowShowDesigns,
     __testOnly_buildWorkflowStatusQuery,
+    __testOnly_buildWorkflowStatusStreamQuery,
     __testOnly_buildLlmDebugMetadata,
     __testOnly_convertInlineQuotedStrongSegmentsToButtons,
     __testOnly_convertQuotedInstructionBlockquotesToButtons,
@@ -196,6 +197,26 @@ describe('workflow status query scoping', () => {
         expect(params.has('namespace')).toBe(false);
         expect(params.get('org_id')).toBe('#V#university_of_auckland_strong_ai_lab');
         expect(params.get('user_id')).toBe('#V#michael_witbrock');
+    });
+
+    test('workflow status stream query does not filter out terminal statuses', () => {
+        const { getCurrentUserConceptId } = require('../domUtils.js');
+        const {
+            getSessionScopedNamespace,
+            getSessionScopedOrgContext
+        } = require('../utils/sessionScopedStorage.js');
+
+        getSessionScopedNamespace.mockReturnValue('#V#michael_witbrock');
+        getSessionScopedOrgContext.mockReturnValue({
+            concept_id: '#V#university_of_auckland_strong_ai_lab'
+        });
+        getCurrentUserConceptId.mockReturnValue('#V#michael_witbrock');
+
+        const query = __testOnly_buildWorkflowStatusStreamQuery();
+        const params = new URLSearchParams(query);
+
+        expect(params.get('namespace')).toBe('#V#michael_witbrock');
+        expect(params.has('status')).toBe(false);
     });
 });
 
