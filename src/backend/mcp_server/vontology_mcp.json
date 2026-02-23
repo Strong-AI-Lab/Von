@@ -1651,7 +1651,7 @@
         },
         {
             "name": "turn_execution_get",
-            "description": "Fetch a single turn execution record by request_id for detailed failure analysis.",
+            "description": "Fetch a single turn execution record by request_id for detailed failure analysis, including MCP-visible rag_indexing_state diagnostics.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1681,7 +1681,7 @@
         },
         {
             "name": "turn_execution_list",
-            "description": "List assistant turn execution records (workflow selection, required effects, postcondition checks, completion gate). Use for deterministic evidence triage across conversations.",
+            "description": "List assistant turn execution records (workflow selection, required effects, postcondition checks, completion gate). Use for deterministic evidence triage across conversations. Includes MCP-visible rag_indexing_state diagnostics per record.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

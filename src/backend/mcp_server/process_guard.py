@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 
 def _normalise_path(value: str) -> str:
@@ -67,26 +67,53 @@ def terminate_duplicate_sibling_servers(
     killed = 0
     failed = 0
 
+    def _collect_sibling_processes() -> list[Any]:
+        """Collect direct sibling processes (same parent) efficiently.
+
+        On Windows, iterating every process and reading cmdline metadata can
+        take several seconds. Querying the parent process for its direct
+        children is substantially cheaper and avoids MCP startup timeouts.
+        """
+        try:
+            parent_proc = psutil.Process(parent_pid)
+            return list(parent_proc.children(recursive=False))
+        except Exception:
+            # Conservative fallback when parent lookup fails.
+            siblings: list[Any] = []
+            try:
+                proc_iter = psutil.process_iter(["pid", "ppid", "cmdline"])
+            except Exception:
+                return siblings
+
+            for proc in proc_iter:
+                try:
+                    pid_value = int(proc.info.get("pid") or 0)
+                    if pid_value <= 0 or pid_value == current_pid:
+                        continue
+                    ppid_value = proc.info.get("ppid")
+                    if int(ppid_value or 0) != parent_pid:
+                        continue
+                    siblings.append(proc)
+                except Exception:
+                    continue
+            return siblings
+
     try:
-        proc_iter = psutil.process_iter(["pid", "cmdline"])
+        sibling_processes = _collect_sibling_processes()
     except Exception:
         return {"matched": 0, "terminated": 0, "killed": 0, "failed": 0}
 
-    for proc in proc_iter:
+    for proc in sibling_processes:
         try:
             pid = int(proc.info.get("pid") or 0)
             if pid <= 0 or pid == current_pid:
                 continue
-            try:
-                ppid = int(proc.ppid())
-            except Exception:
+            cmdline = proc.info.get("cmdline")
+            if not cmdline:
                 try:
-                    ppid = int(proc.info.get("ppid") or 0)
+                    cmdline = proc.cmdline()
                 except Exception:
-                    continue
-            if ppid != parent_pid:
-                continue
-            cmdline = proc.info.get("cmdline") or []
+                    cmdline = []
             if not isinstance(cmdline, Iterable):
                 continue
             cmdline_list = [str(part) for part in cmdline]

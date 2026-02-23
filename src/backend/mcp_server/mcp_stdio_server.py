@@ -185,6 +185,9 @@ _TOOL_LIST_CACHE: list[Tool] | None = None
 _TOOL_LIST_CACHE_PATH = (
     Path(project_root) / "data" / "mcp_tool_cache" / "vontology_tools_runtime.json"
 )
+_TOOL_MANIFEST_PATH = (
+    Path(project_root) / "src" / "backend" / "mcp_server" / "vontology_mcp.json"
+)
 _TOOL_CACHE_DEPENDENCY_PATHS: tuple[Path, ...] = (
     Path(__file__).resolve(),
     Path(tool_contract_registry_module.__file__).resolve(),
@@ -237,6 +240,30 @@ def _tool_from_surface_payload(tool_payload: dict[str, Any]) -> Tool:
     )
 
 
+def _parse_tool_payload_list(raw_tools: Any) -> list[Tool]:
+    if not isinstance(raw_tools, list):
+        return []
+    tools: list[Tool] = []
+    for raw in raw_tools:
+        if not isinstance(raw, dict):
+            continue
+        name = raw.get("name")
+        description = raw.get("description")
+        input_schema = raw.get("inputSchema")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if not isinstance(input_schema, dict):
+            input_schema = {}
+        tools.append(
+            Tool(
+                name=name.strip(),
+                description=str(description or ""),
+                inputSchema=input_schema,
+            )
+        )
+    return tools
+
+
 def _load_tool_list_cache() -> list[Tool] | None:
     if not _tool_cache_enabled():
         return None
@@ -270,32 +297,32 @@ def _load_tool_list_cache() -> list[Tool] | None:
             ):
                 return None
 
-        raw_tools = payload.get("tools")
-        if not isinstance(raw_tools, list):
-            return None
-
-        tools: list[Tool] = []
-        for raw in raw_tools:
-            if not isinstance(raw, dict):
-                continue
-            name = raw.get("name")
-            description = raw.get("description")
-            input_schema = raw.get("inputSchema")
-            if not isinstance(name, str) or not name.strip():
-                continue
-            if not isinstance(input_schema, dict):
-                input_schema = {}
-            tools.append(
-                Tool(
-                    name=name.strip(),
-                    description=str(description or ""),
-                    inputSchema=input_schema,
-                )
-            )
+        tools = _parse_tool_payload_list(payload.get("tools"))
         if tools:
             return tools
     except Exception as exc:  # pragma: no cover - best-effort diagnostics cache
         _LOG.debug("Could not load MCP tool cache: %s", exc)
+    return None
+
+
+def _load_tool_list_manifest() -> list[Tool] | None:
+    """Load tool contracts from the static manifest as a fast startup fallback.
+
+    This avoids heavy canonical-registry construction on cold starts, which can
+    otherwise cause MCP clients to time out and report transport drops before
+    list_tools returns.
+    """
+    try:
+        if not _TOOL_MANIFEST_PATH.exists():
+            return None
+        payload = json.loads(_TOOL_MANIFEST_PATH.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return None
+        tools = _parse_tool_payload_list(payload.get("tools"))
+        if tools:
+            return tools
+    except Exception as exc:  # pragma: no cover - startup reliability fallback
+        _LOG.debug("Could not load MCP tool manifest fallback: %s", exc)
     return None
 
 
@@ -460,6 +487,12 @@ async def list_tools() -> list[Tool]:
     disk_cached_tools = _load_tool_list_cache()
     if disk_cached_tools is not None:
         _TOOL_LIST_CACHE = list(disk_cached_tools)
+        return list(_TOOL_LIST_CACHE)
+
+    manifest_tools = _load_tool_list_manifest()
+    if manifest_tools is not None:
+        _TOOL_LIST_CACHE = list(manifest_tools)
+        _persist_tool_list_cache(_TOOL_LIST_CACHE)
         return list(_TOOL_LIST_CACHE)
 
     tools = [

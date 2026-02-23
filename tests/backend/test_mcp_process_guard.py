@@ -23,6 +23,7 @@ class _DummyProcess:
         cmdline: list[str],
         timeout_on_wait: bool = False,
     ) -> None:
+        self.pid = pid
         self.info = {"pid": pid, "ppid": ppid, "cmdline": cmdline}
         self.terminated = False
         self.killed = False
@@ -38,10 +39,25 @@ class _DummyProcess:
     def kill(self) -> None:
         self.killed = True
 
+    def cmdline(self) -> list[str]:
+        return list(self.info.get("cmdline") or [])
+
+
+class _DummyParentProcess:
+    def __init__(self, pid: int, processes: list[_DummyProcess]) -> None:
+        self.pid = pid
+        self._processes = processes
+
+    def children(self, recursive: bool = False):  # noqa: ARG002 - psutil signature
+        return [
+            proc for proc in self._processes if int(proc.info.get("ppid") or 0) == self.pid
+        ]
+
 
 def _install_fake_psutil(monkeypatch, processes: list[_DummyProcess]) -> None:
     fake_psutil = types.SimpleNamespace(
         process_iter=lambda _attrs: processes,
+        Process=lambda pid: _DummyParentProcess(int(pid), processes),
         TimeoutExpired=_DummyTimeout,
         NoSuchProcess=_DummyPsutilError,
         AccessDenied=_DummyPsutilError,
