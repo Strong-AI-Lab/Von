@@ -12961,6 +12961,14 @@ function buildWorkflowStatusQuery({ includeStatusFilter } = {}) {
     return params;
 }
 
+function buildWorkflowStatusStreamQuery() {
+    const params = buildWorkflowStatusQuery();
+    // Subscribe to all status transitions for the scoped namespace/user/org so
+    // terminal updates (completed/failed/cancelled) can remove active cards.
+    // Filtering to active-only statuses here causes stale "running" rows.
+    return params;
+}
+
 function buildWorkflowMonitorExportPayload() {
     const namespace = getSessionScopedNamespace();
     const orgContext = getSessionScopedOrgContext();
@@ -13398,7 +13406,7 @@ function startWorkflowStatusStream() {
 
     stopWorkflowStatusStream();
 
-    const params = buildWorkflowStatusQuery({ includeStatusFilter: true });
+    const params = buildWorkflowStatusStreamQuery();
     const url = `/api/workflows/instances/stream?${params.toString()}`;
     const eventSource = new EventSource(url);
     workflowStatusStreamState.eventSource = eventSource;
@@ -16012,6 +16020,9 @@ export const __test_only__rehydrateHistory = rehydrateHistory;
 export const __test_only__renderChatSessionMetadataPanel = _renderChatSessionMetadataPanel;
 export function __testOnly_buildWorkflowStatusQuery(opts = {}) {
     return buildWorkflowStatusQuery(opts).toString();
+}
+export function __testOnly_buildWorkflowStatusStreamQuery() {
+    return buildWorkflowStatusStreamQuery().toString();
 }
 export function __testOnly_renderWorkflowDefinitionsBody(items = []) {
     workflowDefinitionsState.visible = true;
