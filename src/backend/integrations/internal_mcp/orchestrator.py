@@ -419,6 +419,12 @@ class InternalMCPChatOrchestrator:
     _ANNOTATION_PREFLIGHT_MAX_REGION_TYPES = 12
     _ANNOTATION_PREFLIGHT_MAX_REGION_PREDICATES = 12
     _ANNOTATION_PREFLIGHT_MAX_REGION_RELATED_CONCEPTS = 20
+    _SALIENT_PREDICATE_FOR_TYPE_RELATION_ID = "#V#salient_binary_predicate_for_type"
+    _SALIENT_PREFLIGHT_MAX_TYPES = 5
+    _SALIENT_PREFLIGHT_MAX_PREDICATES_PER_TYPE = 6
+    _SALIENT_PREFLIGHT_MAX_TOTAL_PREDICATES = 24
+    _SALIENT_PREFLIGHT_MAX_ANCESTOR_DEPTH = 2
+    _SALIENT_PREFLIGHT_MAX_TYPE_EXPANSIONS = 24
     _TOOL_CALL_REPAIR_PROMPT = (
         "You are a strict tool-call repairer for an MCP agent.\n"
         "Return ONLY a JSON object or JSON array of tool-call objects.\n"
@@ -10629,6 +10635,406 @@ class InternalMCPChatOrchestrator:
 
         return "\n".join(lines)
 
+    def _normalise_salient_preflight_groups(
+        self, raw_groups: Any
+    ) -> list[dict[str, Any]]:
+        if not isinstance(raw_groups, Sequence) or isinstance(
+            raw_groups, (str, bytes, bytearray)
+        ):
+            return []
+
+        groups: list[dict[str, Any]] = []
+        seen_types: set[str] = set()
+        for item in raw_groups:
+            if not isinstance(item, Mapping):
+                continue
+            type_concept_id = item.get("type_concept_id")
+            if not isinstance(type_concept_id, str):
+                continue
+            type_concept_id = type_concept_id.strip()
+            if not self._looks_like_concept_id(type_concept_id):
+                continue
+            lowered_type_id = type_concept_id.lower()
+            if lowered_type_id in seen_types:
+                continue
+            seen_types.add(lowered_type_id)
+
+            group_payload: dict[str, Any] = {"type_concept_id": type_concept_id}
+            type_name = item.get("type_name")
+            if isinstance(type_name, str) and type_name.strip():
+                group_payload["type_name"] = type_name.strip()
+
+            predicates: list[dict[str, Any]] = []
+            seen_predicates: set[str] = set()
+            raw_predicates = item.get("predicates")
+            if isinstance(raw_predicates, Sequence) and not isinstance(
+                raw_predicates, (str, bytes, bytearray)
+            ):
+                for predicate_entry in raw_predicates:
+                    if not isinstance(predicate_entry, Mapping):
+                        continue
+                    predicate_id = predicate_entry.get("concept_id")
+                    if not isinstance(predicate_id, str):
+                        continue
+                    predicate_id = predicate_id.strip()
+                    if not self._looks_like_concept_id(predicate_id):
+                        continue
+                    lowered_predicate_id = predicate_id.lower()
+                    if lowered_predicate_id in seen_predicates:
+                        continue
+                    seen_predicates.add(lowered_predicate_id)
+
+                    payload: dict[str, Any] = {"concept_id": predicate_id}
+                    predicate_name = predicate_entry.get("name")
+                    if isinstance(predicate_name, str) and predicate_name.strip():
+                        payload["name"] = predicate_name.strip()
+                    rank = predicate_entry.get("rank")
+                    if isinstance(rank, int):
+                        payload["rank"] = rank
+                    source_path = predicate_entry.get("source_path")
+                    if isinstance(source_path, str) and source_path.strip():
+                        payload["source_path"] = source_path.strip()
+                    predicates.append(payload)
+                    if (
+                        len(predicates)
+                        >= self._SALIENT_PREFLIGHT_MAX_PREDICATES_PER_TYPE
+                    ):
+                        break
+
+            if predicates:
+                group_payload["predicates"] = predicates
+            groups.append(group_payload)
+            if len(groups) >= self._SALIENT_PREFLIGHT_MAX_TYPES:
+                break
+
+        return groups
+
+    def _collect_salient_predicates_for_types(
+        self,
+        *,
+        type_candidates: Sequence[Mapping[str, Any]],
+        preferred_language: str | None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "type_candidate_ids": [],
+            "predicates_by_type": [],
+            "predicate_suggestions": [],
+            "predicate_ids": [],
+            "errors": [],
+        }
+        if not type_candidates:
+            return payload
+
+        try:
+            from src.backend.services.concept_service import get_concept_by_concept_id
+            from src.backend.services.text_value_service import get_texts_for_concept
+        except Exception:
+            payload["errors"].append("salient_services_unavailable")
+            return payload
+
+        try:
+            from src.backend.vontology.utils_vontology import extract_salient_scope_lists
+        except Exception:
+            extract_salient_scope_lists = None
+
+        type_doc_cache: dict[str, Mapping[str, Any] | None] = {}
+        predicate_name_cache: dict[str, str | None] = {}
+
+        def _get_type_doc(concept_id: str) -> Mapping[str, Any] | None:
+            lowered = concept_id.lower()
+            if lowered in type_doc_cache:
+                return type_doc_cache[lowered]
+            try:
+                doc = get_concept_by_concept_id(concept_id)
+            except Exception:
+                doc = None
+            normalised_doc = dict(doc) if isinstance(doc, Mapping) else None
+            type_doc_cache[lowered] = normalised_doc
+            return normalised_doc
+
+        def _append_unique_concept_id(
+            collection: list[str],
+            seen: set[str],
+            value: Any,
+            *,
+            max_items: int,
+        ) -> None:
+            if len(collection) >= max_items:
+                return
+            if not isinstance(value, str):
+                return
+            candidate = value.strip()
+            if not self._looks_like_concept_id(candidate):
+                return
+            lowered = candidate.lower()
+            if lowered in seen:
+                return
+            seen.add(lowered)
+            collection.append(candidate)
+
+        def _resolve_predicate_name(predicate_id: str) -> str | None:
+            lowered = predicate_id.lower()
+            if lowered in predicate_name_cache:
+                return predicate_name_cache[lowered]
+            try:
+                name_rows = get_texts_for_concept(
+                    predicate_id, predicate="hasName", limit=80
+                )
+            except Exception:
+                name_rows = []
+            display_name, _name_lang = self._select_preferred_name(
+                name_rows, preferred_language
+            )
+            display_name = self._normalise_preflight_display_name(display_name)
+            predicate_name_cache[lowered] = display_name
+            return display_name
+
+        normalised_type_candidates: list[dict[str, Any]] = []
+        seen_type_candidates: set[str] = set()
+        for item in type_candidates:
+            if not isinstance(item, Mapping):
+                continue
+            concept_id = item.get("concept_id")
+            if not isinstance(concept_id, str):
+                continue
+            concept_id = concept_id.strip()
+            if not self._looks_like_concept_id(concept_id):
+                continue
+            lowered = concept_id.lower()
+            if lowered in seen_type_candidates:
+                continue
+            seen_type_candidates.add(lowered)
+            candidate_payload: dict[str, Any] = {"concept_id": concept_id}
+            candidate_name = item.get("name")
+            if isinstance(candidate_name, str) and candidate_name.strip():
+                candidate_payload["name"] = self._normalise_preflight_display_name(
+                    candidate_name
+                )
+            normalised_type_candidates.append(candidate_payload)
+            if len(normalised_type_candidates) >= self._SALIENT_PREFLIGHT_MAX_TYPES:
+                break
+
+        if not normalised_type_candidates:
+            return payload
+
+        predicates_by_type: list[dict[str, Any]] = []
+        predicate_suggestions: list[dict[str, Any]] = []
+        predicate_ids: list[str] = []
+        seen_predicate_ids: set[str] = set()
+
+        for type_candidate in normalised_type_candidates:
+            type_concept_id = str(type_candidate.get("concept_id", "")).strip()
+            if not type_concept_id:
+                continue
+            type_doc = _get_type_doc(type_concept_id)
+            relationships = (
+                type_doc.get("relationships")
+                if isinstance(type_doc, Mapping)
+                and isinstance(type_doc.get("relationships"), Mapping)
+                else {}
+            )
+
+            inherited_predicates = self._normalise_preflight_relationship_targets(
+                type_doc.get("inherited_salient_binary_predicates")
+                if isinstance(type_doc, Mapping)
+                else None
+            )
+
+            type_predicates: list[str] = []
+            seen_type_predicates: set[str] = set()
+            if inherited_predicates:
+                for predicate_id in inherited_predicates:
+                    _append_unique_concept_id(
+                        type_predicates,
+                        seen_type_predicates,
+                        predicate_id,
+                        max_items=self._SALIENT_PREFLIGHT_MAX_PREDICATES_PER_TYPE,
+                    )
+            else:
+                queue: list[tuple[str, int]] = [(type_concept_id, 0)]
+                visited_types: set[str] = set()
+                expansions = 0
+                while (
+                    queue
+                    and expansions < self._SALIENT_PREFLIGHT_MAX_TYPE_EXPANSIONS
+                    and len(type_predicates)
+                    < self._SALIENT_PREFLIGHT_MAX_PREDICATES_PER_TYPE
+                ):
+                    current_type_id, depth = queue.pop(0)
+                    lowered_current = current_type_id.lower()
+                    if lowered_current in visited_types:
+                        continue
+                    visited_types.add(lowered_current)
+                    expansions += 1
+
+                    current_doc = _get_type_doc(current_type_id)
+                    raw_current_relationships = (
+                        current_doc.get("relationships")
+                        if isinstance(current_doc, Mapping)
+                        else None
+                    )
+                    current_relationships: Mapping[str, Any]
+                    if isinstance(raw_current_relationships, Mapping):
+                        current_relationships = raw_current_relationships
+                    else:
+                        current_relationships = {}
+
+                    direct_predicates = self._normalise_preflight_relationship_targets(
+                        current_relationships.get(
+                            self._SALIENT_PREDICATE_FOR_TYPE_RELATION_ID
+                        )
+                    )
+                    for predicate_id in direct_predicates:
+                        _append_unique_concept_id(
+                            type_predicates,
+                            seen_type_predicates,
+                            predicate_id,
+                            max_items=self._SALIENT_PREFLIGHT_MAX_PREDICATES_PER_TYPE,
+                        )
+
+                    if callable(extract_salient_scope_lists):
+                        try:
+                            scope_map = extract_salient_scope_lists(
+                                dict(current_doc) if isinstance(current_doc, Mapping) else {}
+                            )
+                        except Exception:
+                            scope_map = {}
+                        if isinstance(scope_map, Mapping):
+                            for scope_name in ("type", "instance"):
+                                raw_scope_values = scope_map.get(scope_name)
+                                scope_values = (
+                                    raw_scope_values
+                                    if isinstance(raw_scope_values, Sequence)
+                                    and not isinstance(
+                                        raw_scope_values, (str, bytes, bytearray)
+                                    )
+                                    else []
+                                )
+                                for predicate_id in scope_values:
+                                    _append_unique_concept_id(
+                                        type_predicates,
+                                        seen_type_predicates,
+                                        predicate_id,
+                                        max_items=self._SALIENT_PREFLIGHT_MAX_PREDICATES_PER_TYPE,
+                                    )
+
+                    if depth >= self._SALIENT_PREFLIGHT_MAX_ANCESTOR_DEPTH:
+                        continue
+                    for parent_type_id in self._normalise_preflight_relationship_targets(
+                        current_relationships.get("is_a_type_of")
+                    ):
+                        if parent_type_id.lower() in visited_types:
+                            continue
+                        queue.append((parent_type_id, depth + 1))
+
+            if not type_predicates:
+                continue
+
+            type_display_name = type_candidate.get("name")
+            if not isinstance(type_display_name, str) or not type_display_name.strip():
+                if isinstance(type_doc, Mapping):
+                    raw_type_name = type_doc.get("name")
+                    if isinstance(raw_type_name, str) and raw_type_name.strip():
+                        type_display_name = self._normalise_preflight_display_name(
+                            raw_type_name
+                        )
+                    else:
+                        type_display_name = None
+                else:
+                    type_display_name = None
+
+            per_type_predicates: list[dict[str, Any]] = []
+            for index, predicate_id in enumerate(type_predicates, start=1):
+                predicate_name = _resolve_predicate_name(predicate_id)
+                predicate_payload: dict[str, Any] = {
+                    "concept_id": predicate_id,
+                    "rank": index,
+                    "source_path": "salient_predicate_for_type",
+                }
+                if isinstance(predicate_name, str) and predicate_name.strip():
+                    predicate_payload["name"] = predicate_name.strip()
+                per_type_predicates.append(predicate_payload)
+
+                lowered_predicate_id = predicate_id.lower()
+                if lowered_predicate_id in seen_predicate_ids:
+                    continue
+                if len(predicate_suggestions) >= self._SALIENT_PREFLIGHT_MAX_TOTAL_PREDICATES:
+                    continue
+                seen_predicate_ids.add(lowered_predicate_id)
+                flat_payload: dict[str, Any] = {
+                    "concept_id": predicate_id,
+                    "source_path": "salient_predicate_for_type",
+                    "salient_for_type": type_concept_id,
+                    "salient_rank": index,
+                }
+                if isinstance(predicate_name, str) and predicate_name.strip():
+                    flat_payload["name"] = predicate_name.strip()
+                predicate_suggestions.append(flat_payload)
+                predicate_ids.append(predicate_id)
+
+            group_payload: dict[str, Any] = {
+                "type_concept_id": type_concept_id,
+                "predicates": per_type_predicates,
+            }
+            if isinstance(type_display_name, str) and type_display_name.strip():
+                group_payload["type_name"] = type_display_name.strip()
+            predicates_by_type.append(group_payload)
+
+        payload["type_candidate_ids"] = [
+            item.get("concept_id")
+            for item in normalised_type_candidates
+            if isinstance(item.get("concept_id"), str)
+        ]
+        payload["predicates_by_type"] = predicates_by_type
+        payload["predicate_suggestions"] = predicate_suggestions
+        payload["predicate_ids"] = predicate_ids
+        return payload
+
+    def _build_salient_predicates_section(
+        self,
+        salient_predicates_by_type: Sequence[Mapping[str, Any]],
+        *,
+        title: str = "Salient predicates by relevant type:",
+    ) -> str | None:
+        if not salient_predicates_by_type:
+            return None
+
+        lines: list[str] = [title]
+        for group in salient_predicates_by_type[: self._SALIENT_PREFLIGHT_MAX_TYPES]:
+            if not isinstance(group, Mapping):
+                continue
+            type_concept_id = group.get("type_concept_id")
+            if not isinstance(type_concept_id, str) or not type_concept_id.strip():
+                continue
+            type_name = group.get("type_name")
+            if isinstance(type_name, str) and type_name.strip():
+                lines.append(f'- {type_concept_id} (name="{type_name.strip()}")')
+            else:
+                lines.append(f"- {type_concept_id}")
+
+            predicates = group.get("predicates")
+            if not isinstance(predicates, Sequence) or isinstance(
+                predicates, (str, bytes, bytearray)
+            ):
+                continue
+            for predicate in predicates[: self._SALIENT_PREFLIGHT_MAX_PREDICATES_PER_TYPE]:
+                if not isinstance(predicate, Mapping):
+                    continue
+                predicate_id = predicate.get("concept_id")
+                if not isinstance(predicate_id, str) or not predicate_id.strip():
+                    continue
+                predicate_name = predicate.get("name")
+                rank = predicate.get("rank")
+                rank_prefix = f"{rank}. " if isinstance(rank, int) else "- "
+                if isinstance(predicate_name, str) and predicate_name.strip():
+                    lines.append(
+                        f'  {rank_prefix}{predicate_id} (name="{predicate_name.strip()}")'
+                    )
+                else:
+                    lines.append(f"  {rank_prefix}{predicate_id}")
+
+        return "\n".join(lines)
+
     def _build_ontology_preflight(
         self,
         prompt: str,
@@ -10642,6 +11048,8 @@ class InternalMCPChatOrchestrator:
         Extended (JVNAUTOSCI-1052): includes context-based topic vocabulary discovery.
         Extended (JVNAUTOSCI-991): includes annotation-derived candidate concept IDs
         and bounded neighbourhood expansion (types/predicates/related nodes).
+        Extended (JVNAUTOSCI-992): adds type-linked salient predicate suggestions
+        using #V#salient_binary_predicate_for_type.
         Extended (JVNAUTOSCI-987): adds explicit discovery-path provenance and
         bounded session follow-up carry-over for under-specified follow-up turns.
         """
@@ -10858,12 +11266,89 @@ class InternalMCPChatOrchestrator:
             else []
         )
 
+        # --- Salient predicates for relevant types (JVNAUTOSCI-992) ---
+        salient_type_candidates: list[dict[str, Any]] = []
+        seen_salient_type_candidates: set[str] = set()
+
+        def _append_salient_type_candidate(
+            concept_id: Any,
+            *,
+            name: Any = None,
+        ) -> None:
+            if not isinstance(concept_id, str):
+                return
+            cleaned = concept_id.strip()
+            if not self._looks_like_concept_id(cleaned):
+                return
+            lowered = cleaned.lower()
+            if lowered in seen_salient_type_candidates:
+                return
+            seen_salient_type_candidates.add(lowered)
+            payload: dict[str, Any] = {"concept_id": cleaned}
+            if isinstance(name, str) and name.strip():
+                payload["name"] = self._normalise_preflight_display_name(name)
+            salient_type_candidates.append(payload)
+            if len(salient_type_candidates) >= self._SALIENT_PREFLIGHT_MAX_TYPES:
+                return
+
+        for item in topic_types:
+            if not isinstance(item, Mapping):
+                continue
+            _append_salient_type_candidate(
+                item.get("concept_id"),
+                name=item.get("name"),
+            )
+            if len(salient_type_candidates) >= self._SALIENT_PREFLIGHT_MAX_TYPES:
+                break
+
+        if len(salient_type_candidates) < self._SALIENT_PREFLIGHT_MAX_TYPES:
+            for concept_id in annotation_suggested_type_ids:
+                _append_salient_type_candidate(concept_id)
+                if len(salient_type_candidates) >= self._SALIENT_PREFLIGHT_MAX_TYPES:
+                    break
+
+        if len(salient_type_candidates) < self._SALIENT_PREFLIGHT_MAX_TYPES:
+            for concept_id in annotation_region_type_ids:
+                _append_salient_type_candidate(concept_id)
+                if len(salient_type_candidates) >= self._SALIENT_PREFLIGHT_MAX_TYPES:
+                    break
+
+        salient_context = self._collect_salient_predicates_for_types(
+            type_candidates=salient_type_candidates,
+            preferred_language=preferred_language,
+        )
+        salient_type_candidate_ids = (
+            list(salient_context.get("type_candidate_ids", []))
+            if isinstance(salient_context.get("type_candidate_ids"), list)
+            else []
+        )
+        salient_predicates_by_type = self._normalise_salient_preflight_groups(
+            salient_context.get("predicates_by_type")
+        )
+        salient_predicate_suggestions = (
+            list(salient_context.get("predicate_suggestions", []))
+            if isinstance(salient_context.get("predicate_suggestions"), list)
+            else []
+        )
+        salient_predicate_ids = (
+            list(salient_context.get("predicate_ids", []))
+            if isinstance(salient_context.get("predicate_ids"), list)
+            else []
+        )
+        salient_preflight_errors = (
+            list(salient_context.get("errors", []))
+            if isinstance(salient_context.get("errors"), Sequence)
+            and not isinstance(salient_context.get("errors"), str)
+            else []
+        )
+
         # --- Session follow-up carry-over (JVNAUTOSCI-987) ---
         session_memory_entry = (
             self._preflight_session_memory.get(session_key) if session_key else None
         )
         session_memory_types: list[dict[str, Any]] = []
         session_memory_predicates: list[dict[str, Any]] = []
+        session_memory_salient_predicates_by_type: list[dict[str, Any]] = []
         session_memory_annotation_candidates: list[dict[str, Any]] = []
         session_memory_related_concept_ids: list[str] = []
         session_memory_reused = False
@@ -10941,6 +11426,26 @@ class InternalMCPChatOrchestrator:
                     "source_path": "annotation_region_search",
                 }
             )
+        for item in salient_predicate_suggestions:
+            if not isinstance(item, Mapping):
+                continue
+            concept_id = item.get("concept_id")
+            if not isinstance(concept_id, str) or not concept_id:
+                continue
+            contextual_predicates_for_memory.append(
+                {
+                    "concept_id": concept_id,
+                    "name": item.get("name"),
+                    "score": item.get("score"),
+                    "source_path": "salient_predicate_for_type",
+                    "salient_for_type": item.get("salient_for_type"),
+                    "salient_rank": item.get("salient_rank"),
+                }
+            )
+
+        contextual_salient_predicates_by_type = self._normalise_salient_preflight_groups(
+            salient_predicates_by_type
+        )
 
         contextual_annotation_candidates_for_memory: list[dict[str, Any]] = []
         for item in annotation_seed_candidates:
@@ -10977,6 +11482,7 @@ class InternalMCPChatOrchestrator:
         if (
             contextual_types_for_memory
             or contextual_predicates_for_memory
+            or contextual_salient_predicates_by_type
             or contextual_annotation_candidates_for_memory
             or contextual_related_concepts_for_memory
         ):
@@ -10985,6 +11491,7 @@ class InternalMCPChatOrchestrator:
                     "timestamp": now,
                     "types": contextual_types_for_memory,
                     "predicates": contextual_predicates_for_memory,
+                    "salient_predicates_by_type": contextual_salient_predicates_by_type,
                     "annotation_candidates": contextual_annotation_candidates_for_memory,
                     "related_concept_ids": contextual_related_concepts_for_memory,
                     "follow_up_turns_remaining": int(
@@ -11003,6 +11510,9 @@ class InternalMCPChatOrchestrator:
             if remaining > 0:
                 maybe_types = session_memory_entry.get("types")
                 maybe_predicates = session_memory_entry.get("predicates")
+                maybe_salient_predicates_by_type = session_memory_entry.get(
+                    "salient_predicates_by_type"
+                )
                 maybe_annotation_candidates = session_memory_entry.get(
                     "annotation_candidates"
                 )
@@ -11015,6 +11525,11 @@ class InternalMCPChatOrchestrator:
                     session_memory_predicates = [
                         dict(item) for item in maybe_predicates if isinstance(item, Mapping)
                     ]
+                session_memory_salient_predicates_by_type = (
+                    self._normalise_salient_preflight_groups(
+                        maybe_salient_predicates_by_type
+                    )
+                )
                 session_memory_annotation_candidates = _normalise_annotation_candidates(
                     maybe_annotation_candidates
                 )
@@ -11026,6 +11541,7 @@ class InternalMCPChatOrchestrator:
                 session_memory_reused = bool(
                     session_memory_types
                     or session_memory_predicates
+                    or session_memory_salient_predicates_by_type
                     or session_memory_annotation_candidates
                     or session_memory_related_concept_ids
                 )
@@ -11035,6 +11551,7 @@ class InternalMCPChatOrchestrator:
                         "timestamp": now,
                         "types": session_memory_types,
                         "predicates": session_memory_predicates,
+                        "salient_predicates_by_type": session_memory_salient_predicates_by_type,
                         "annotation_candidates": session_memory_annotation_candidates,
                         "related_concept_ids": session_memory_related_concept_ids,
                         "follow_up_turns_remaining": session_memory_remaining_turns,
@@ -11144,6 +11661,18 @@ class InternalMCPChatOrchestrator:
                 source_path="annotation_region_search",
             )
 
+        for item in salient_predicate_suggestions:
+            if not isinstance(item, Mapping):
+                continue
+            _append_suggestion(
+                bucket=final_predicate_suggestions,
+                seen=seen_predicates,
+                concept_id=item.get("concept_id"),
+                name=item.get("name"),
+                source_path="salient_predicate_for_type",
+                score=item.get("score"),
+            )
+
         for item in session_memory_predicates:
             if not isinstance(item, Mapping):
                 continue
@@ -11179,8 +11708,11 @@ class InternalMCPChatOrchestrator:
             or annotation_region_type_ids
             or annotation_region_predicate_ids
             or annotation_region_related_concept_ids
+            or salient_predicates_by_type
+            or salient_predicate_ids
             or session_memory_types
             or session_memory_predicates
+            or session_memory_salient_predicates_by_type
             or session_memory_annotation_candidates
             or session_memory_related_concept_ids
         )
@@ -11188,7 +11720,7 @@ class InternalMCPChatOrchestrator:
             return _OntologyPreflightResult(message=None, telemetry=None)
 
         lines: list[str] = [
-            "ONTOLOGY PRE-FLIGHT (deterministic, read-only; stage=1+topic+annotation+follow-up):",
+            "ONTOLOGY PRE-FLIGHT (deterministic, read-only; stage=1+topic+annotation+salient+follow-up):",
             "Source: instances of #V#conversation_preflight_predicate + context-based discovery.",
             "Use these existing concept IDs for tool planning. Do not invent new concepts here.",
         ]
@@ -11229,6 +11761,13 @@ class InternalMCPChatOrchestrator:
             lines.append("")
             lines.append(topic_vocabulary_section)
 
+        salient_predicates_section = self._build_salient_predicates_section(
+            salient_predicates_by_type
+        )
+        if salient_predicates_section:
+            lines.append("")
+            lines.append(salient_predicates_section)
+
         annotation_region_section = self._build_annotation_region_section(
             seed_candidates=annotation_seed_candidates,
             region_type_ids=annotation_region_type_ids,
@@ -11242,6 +11781,7 @@ class InternalMCPChatOrchestrator:
         if session_memory_reused and (
             session_memory_types
             or session_memory_predicates
+            or session_memory_salient_predicates_by_type
             or session_memory_annotation_candidates
             or session_memory_related_concept_ids
         ):
@@ -11285,6 +11825,45 @@ class InternalMCPChatOrchestrator:
                     : self._ANNOTATION_PREFLIGHT_MAX_REGION_RELATED_CONCEPTS
                 ]:
                     lines.append(f"    - {concept_id}")
+            if session_memory_salient_predicates_by_type:
+                lines.append("  Salient predicates by type:")
+                for group in session_memory_salient_predicates_by_type[
+                    : self._SALIENT_PREFLIGHT_MAX_TYPES
+                ]:
+                    if not isinstance(group, Mapping):
+                        continue
+                    type_concept_id = group.get("type_concept_id")
+                    if not isinstance(type_concept_id, str) or not type_concept_id:
+                        continue
+                    type_name = group.get("type_name")
+                    if isinstance(type_name, str) and type_name.strip():
+                        lines.append(
+                            f'    - {type_concept_id} (name="{type_name.strip()}")'
+                        )
+                    else:
+                        lines.append(f"    - {type_concept_id}")
+                    raw_predicates = group.get("predicates")
+                    if not isinstance(raw_predicates, Sequence) or isinstance(
+                        raw_predicates, (str, bytes, bytearray)
+                    ):
+                        continue
+                    for predicate in raw_predicates[
+                        : self._SALIENT_PREFLIGHT_MAX_PREDICATES_PER_TYPE
+                    ]:
+                        if not isinstance(predicate, Mapping):
+                            continue
+                        predicate_id = predicate.get("concept_id")
+                        if not isinstance(predicate_id, str) or not predicate_id:
+                            continue
+                        predicate_name = predicate.get("name")
+                        rank = predicate.get("rank")
+                        rank_prefix = f"{rank}. " if isinstance(rank, int) else "- "
+                        if isinstance(predicate_name, str) and predicate_name.strip():
+                            lines.append(
+                                f'      {rank_prefix}{predicate_id} (name="{predicate_name.strip()}")'
+                            )
+                        else:
+                            lines.append(f"      {rank_prefix}{predicate_id}")
             if session_memory_predicates:
                 lines.append("  Predicates:")
                 for item in session_memory_predicates[
@@ -11342,11 +11921,17 @@ class InternalMCPChatOrchestrator:
             "annotation_region_predicate_ids": annotation_region_predicate_ids,
             "annotation_region_related_concept_ids": annotation_region_related_concept_ids,
             "annotation_preflight_errors": annotation_preflight_errors,
+            # JVNAUTOSCI-992: salient predicate suggestions by relevant type.
+            "salient_type_candidate_ids": salient_type_candidate_ids,
+            "salient_predicates_by_type": salient_predicates_by_type,
+            "salient_predicate_ids": salient_predicate_ids,
+            "salient_preflight_errors": salient_preflight_errors,
             # JVNAUTOSCI-987: explicit discovery-path provenance + follow-up continuity.
             "preflight_session_id_present": bool(session_key),
             "session_memory_reused": session_memory_reused,
             "session_memory_refreshed": session_memory_refreshed,
             "session_memory_follow_up_turns_remaining": session_memory_remaining_turns,
+            "session_memory_salient_predicates_by_type": session_memory_salient_predicates_by_type,
             "session_memory_annotation_candidates": session_memory_annotation_candidates,
             "session_memory_related_concept_ids": session_memory_related_concept_ids,
             "final_type_suggestions": final_type_suggestions,
