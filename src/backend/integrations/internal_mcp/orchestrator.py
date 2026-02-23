@@ -209,6 +209,25 @@ class _ModelCandidate:
     host: str | None = None
 
 
+@dataclass(frozen=True)
+class _StructuredToolCandidateResolution:
+    """Resolved structured-tool candidate set for one LLM planning call."""
+
+    tool_definitions: tuple[ToolDefinition, ...]
+    candidate_tool_names: tuple[str, ...]
+    excluded_tools: tuple[Mapping[str, Any], ...]
+    required_tools: tuple[str, ...]
+    hinted_families: tuple[str, ...]
+    workflow_step_id: str
+    workflow_step_profile: str
+    effective_cap: int
+    provider_limit: int
+    cap_applied: bool
+    truncation_applied: bool
+    write_policy_reason: str
+    warnings: tuple[str, ...]
+
+
 class ProgressTracker:
     """Request-scoped progress tracking for the orchestrator.
 
@@ -492,6 +511,140 @@ class InternalMCPChatOrchestrator:
         r"\bcall\s+`?([a-z_][a-z0-9_]*)`?\b",
         flags=re.IGNORECASE,
     )
+    # Structured tool-call candidate baseline and provider constraints.
+    #
+    # Keep this baseline minimal: it should preserve core recovery and lookup
+    # pathways without reintroducing the full uncapped catalogue when filtering
+    # yields no candidates.
+    _STRUCTURED_TOOL_SAFE_BASELINE: tuple[str, ...] = (
+        "search_concepts",
+        "fetch_concept",
+        "concept_exists",
+        "search_knowledge_base",
+        "search_web",
+        "qna_search",
+        "extract_url",
+        "resilient_extract_url",
+    )
+    _STRUCTURED_TOOL_PROVIDER_LIMITS: Mapping[str, int] = {
+        # OpenAI enforces a hard tool-list ceiling; keep this authoritative.
+        "openai": 128,
+        # Gemini limits may vary by model. We keep a conservative default.
+        "gemini": 128,
+    }
+    _STRUCTURED_TOOL_FAMILY_PREFIXES: tuple[tuple[str, str], ...] = (
+        ("jira_", "jira"),
+        ("github_", "github"),
+        ("workflow_", "workflow"),
+        ("turn_execution_", "workflow"),
+        ("gmail_", "gmail"),
+        ("rag_", "rag"),
+        ("search_", "search"),
+        ("qna_search", "search"),
+        ("context_search", "search"),
+        ("extract_url", "search"),
+        ("resilient_extract_url", "search"),
+        ("search_arxiv", "arxiv"),
+        ("download_paper", "arxiv"),
+        ("finalise_cached_paper", "arxiv"),
+        ("read_paper", "arxiv"),
+        ("list_papers", "arxiv"),
+        ("task_", "task"),
+        ("create_task", "task"),
+        ("list_my_tasks", "task"),
+        ("assign_task", "task"),
+        ("update_task_status", "task"),
+        ("shared_conversation_", "conversation"),
+        ("renderer_", "renderer"),
+        ("linkedin_", "linkedin"),
+        ("mongodb_", "database"),
+    )
+    _STRUCTURED_TOOL_FAMILY_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+        (
+            "jira",
+            (
+                "jira",
+                "atlassian",
+                "ticket",
+                "issue",
+                "epic",
+                "sprint",
+                "backlog",
+            ),
+        ),
+        (
+            "github",
+            (
+                "github",
+                "pull request",
+                "pr ",
+                "commit",
+                "branch",
+                "repo",
+                "review",
+            ),
+        ),
+        (
+            "workflow",
+            (
+                "workflow",
+                "scheduler",
+                "schedule",
+                "event binding",
+                "durable",
+                "instance",
+                "orchestration",
+            ),
+        ),
+        ("gmail", ("gmail", "email", "inbox", "mail")),
+        (
+            "rag",
+            (
+                "rag",
+                "knowledge base",
+                "indexed",
+                "vector",
+                "semantic search",
+                "session",
+            ),
+        ),
+        (
+            "search",
+            (
+                "search",
+                "latest",
+                "recent",
+                "current",
+                "look up",
+                "web",
+                "url",
+                "website",
+                "news",
+            ),
+        ),
+        ("arxiv", ("arxiv", "paper", "pdf", "doi", "preprint")),
+        ("task", ("task", "to-do", "todo", "assignment", "assignee", "due date")),
+        ("conversation", ("shared conversation", "invite", "chat session")),
+        (
+            "renderer",
+            ("renderer", "render plan", "visualisation", "diagram", "graph"),
+        ),
+        ("linkedin", ("linkedin", "profile export", "linkedin export")),
+        ("database", ("mongodb", "atlas", "collection", "database")),
+        (
+            "vontology",
+            (
+                "#v#",
+                "vontology",
+                "ontology",
+                "concept",
+                "predicate",
+                "relationship",
+                "text relation",
+                "namespace",
+            ),
+        ),
+    )
     # Deterministic concept-id fields for write-category tools.
     #
     # We normalise these before execution so writable operations are robust to
@@ -594,6 +747,29 @@ class InternalMCPChatOrchestrator:
             default=8_000,
             min_value=1_000,
             max_value=200_000,
+        )
+        # Structured tool-calling candidate caps.
+        self._structured_tool_provider_default_limit = self._coerce_int(
+            None,
+            env_var="VON_MCP_STRUCTURED_TOOL_PROVIDER_LIMIT_DEFAULT",
+            default=128,
+            min_value=16,
+            max_value=512,
+        )
+        self._structured_tool_cap_headroom = self._coerce_int(
+            None,
+            env_var="VON_MCP_STRUCTURED_TOOL_CAP_HEADROOM",
+            default=8,
+            min_value=0,
+            max_value=64,
+        )
+        # Optional hard override. 0 disables override and uses provider-limit headroom.
+        self._structured_tool_candidate_cap_override = self._coerce_int(
+            None,
+            env_var="VON_MCP_STRUCTURED_TOOL_CANDIDATE_CAP",
+            default=0,
+            min_value=0,
+            max_value=512,
         )
 
         self._prompt_templates = PromptTemplateService()
@@ -2783,6 +2959,45 @@ class InternalMCPChatOrchestrator:
         missing_tool_call_retry_suppressed = bool(
             data.get("missing_tool_call_retry_suppressed")
         )
+        method_catalogue_for_requirements = data.get("method_catalogue")
+        if not isinstance(method_catalogue_for_requirements, Mapping):
+            try:
+                method_catalogue_for_requirements = self._gateway.describe_methods()
+            except Exception:
+                method_catalogue_for_requirements = None
+        if isinstance(method_catalogue_for_requirements, Mapping):
+            data["method_catalogue"] = method_catalogue_for_requirements
+
+        prompt_requirement_state = self._derive_prompt_tool_requirements(
+            prompt,
+            method_catalogue=(
+                method_catalogue_for_requirements
+                if isinstance(method_catalogue_for_requirements, Mapping)
+                else None
+            ),
+        )
+        required_prompt_tools = list(
+            cast(list[str], prompt_requirement_state.get("required_tools") or [])
+        )
+        required_prompt_fetch_concept_ids = list(
+            cast(
+                list[str],
+                prompt_requirement_state.get("required_fetch_concept_ids") or [],
+            )
+        )
+        required_prompt_create_type_name_raw = prompt_requirement_state.get(
+            "required_create_type_name"
+        )
+        required_prompt_create_type_name = (
+            str(required_prompt_create_type_name_raw).strip()
+            if isinstance(required_prompt_create_type_name_raw, str)
+            else None
+        )
+        data["required_prompt_tools"] = list(required_prompt_tools)
+        data["required_prompt_fetch_concept_ids"] = list(
+            required_prompt_fetch_concept_ids
+        )
+        data["required_prompt_create_type_name"] = required_prompt_create_type_name
 
         # Emit planning phase.
         if callable(emit_phase_transition):
@@ -2809,7 +3024,13 @@ class InternalMCPChatOrchestrator:
             self._logger.debug("[mcp_orchestrator] Using structured tool calling path")
             try:
                 tool_call_model = model_for_stage("tool_call")
-                tool_definitions = self._convert_mcp_tools_to_structured_definitions()
+                tool_definitions = self._convert_mcp_tools_to_structured_definitions(
+                    method_catalogue=(
+                        method_catalogue_for_requirements
+                        if isinstance(method_catalogue_for_requirements, Mapping)
+                        else None
+                    )
+                )
                 llm_response, tool_call_model, _ = self._run_llm_with_tools_fallbacks(
                     stage="tool_call",
                     prompt=prompt,
@@ -2825,6 +3046,13 @@ class InternalMCPChatOrchestrator:
                     aux_log=aux_llm_calls,
                     record_llm_call=record_llm_call,
                     emit_progress=emit_progress_cb,
+                    workflow_action_id=request.action_id,
+                    method_catalogue=(
+                        method_catalogue_for_requirements
+                        if isinstance(method_catalogue_for_requirements, Mapping)
+                        else None
+                    ),
+                    required_prompt_tools=required_prompt_tools,
                 )
                 if llm_response.tool_calls:
                     response = llm_response.text_response or ""
@@ -2876,44 +3104,6 @@ class InternalMCPChatOrchestrator:
             tool_calls = interpretation.tool_calls
             tool_call_parse_error = interpretation.tool_call_parse_error
             has_valid_tool_call = bool(tool_calls)
-
-        method_catalogue_for_requirements = data.get("method_catalogue")
-        if not isinstance(method_catalogue_for_requirements, Mapping):
-            try:
-                method_catalogue_for_requirements = self._gateway.describe_methods()
-            except Exception:
-                method_catalogue_for_requirements = None
-
-        prompt_requirement_state = self._derive_prompt_tool_requirements(
-            prompt,
-            method_catalogue=(
-                method_catalogue_for_requirements
-                if isinstance(method_catalogue_for_requirements, Mapping)
-                else None
-            ),
-        )
-        required_prompt_tools = list(
-            cast(list[str], prompt_requirement_state.get("required_tools") or [])
-        )
-        required_prompt_fetch_concept_ids = list(
-            cast(
-                list[str],
-                prompt_requirement_state.get("required_fetch_concept_ids") or [],
-            )
-        )
-        required_prompt_create_type_name_raw = prompt_requirement_state.get(
-            "required_create_type_name"
-        )
-        required_prompt_create_type_name = (
-            str(required_prompt_create_type_name_raw).strip()
-            if isinstance(required_prompt_create_type_name_raw, str)
-            else None
-        )
-        data["required_prompt_tools"] = list(required_prompt_tools)
-        data["required_prompt_fetch_concept_ids"] = list(
-            required_prompt_fetch_concept_ids
-        )
-        data["required_prompt_create_type_name"] = required_prompt_create_type_name
 
         # Missing-tool-call recovery.
         if not has_valid_tool_call:
@@ -4182,13 +4372,19 @@ class InternalMCPChatOrchestrator:
 
     def _convert_mcp_tools_to_structured_definitions(
         self,
+        *,
+        method_catalogue: Mapping[str, Any] | None = None,
     ) -> List[ToolDefinition]:
         """Convert MCP tool catalog to structured ToolDefinition list (JVNAUTOSCI-799).
 
         Returns:
             List of ToolDefinition objects describing available MCP tools
         """
-        catalogue = self._gateway.describe_methods()
+        catalogue: Mapping[str, Any] = {}
+        if isinstance(method_catalogue, Mapping):
+            catalogue = method_catalogue
+        else:
+            catalogue = self._gateway.describe_methods()
         tool_definitions: List[ToolDefinition] = []
 
         for tool_name, metadata in catalogue.items():
@@ -4218,6 +4414,434 @@ class InternalMCPChatOrchestrator:
             len(tool_definitions),
         )
         return tool_definitions
+
+    @staticmethod
+    def _structured_tool_step_profile(
+        *,
+        stage: str | None,
+        workflow_action_id: str | None,
+    ) -> str:
+        action = str(workflow_action_id or "").strip().lower()
+        stage_name = str(stage or "").strip().lower()
+
+        if action == "tool_calling.plan" or stage_name in {"tool_call", "planner"}:
+            return "planner"
+        if action == "tool_calling.validate" or stage_name in {"validate", "validator"}:
+            return "validator"
+        if action == "tool_calling.execute" or stage_name in {"execute", "executor"}:
+            return "executor"
+        if action == "tool_calling.backfill" or stage_name in {"summariser", "summarizer"}:
+            return "summariser"
+        return "planner"
+
+    @classmethod
+    def _structured_tool_family_for_name(cls, tool_name: str) -> str:
+        lowered = str(tool_name or "").strip().lower()
+        if not lowered:
+            return "unknown"
+
+        for prefix, family in cls._STRUCTURED_TOOL_FAMILY_PREFIXES:
+            if lowered.startswith(prefix):
+                return family
+
+        if "workflow" in lowered:
+            return "workflow"
+        if "jira" in lowered:
+            return "jira"
+        if "github" in lowered:
+            return "github"
+        if "gmail" in lowered:
+            return "gmail"
+        if "rag" in lowered or "knowledge_base" in lowered:
+            return "rag"
+        if "search" in lowered or "extract_url" in lowered:
+            return "search"
+        if "task" in lowered:
+            return "task"
+        return "vontology"
+
+    @staticmethod
+    def _recent_tool_names_from_context(
+        context: Sequence[Mapping[str, Any]] | None,
+    ) -> list[str]:
+        if not isinstance(context, Sequence):
+            return []
+
+        tool_names: list[str] = []
+        seen: set[str] = set()
+        for message in reversed(list(context)[-24:]):
+            if not isinstance(message, Mapping):
+                continue
+            role = str(message.get("role") or "").strip().lower()
+            if role != "tool":
+                continue
+            raw_name = (
+                message.get("name")
+                or message.get("tool")
+                or message.get("tool_name")
+                or ""
+            )
+            if not isinstance(raw_name, str):
+                continue
+            tool_name = raw_name.strip()
+            if not tool_name:
+                continue
+            lowered = tool_name.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            tool_names.append(tool_name)
+        return tool_names
+
+    @staticmethod
+    def _recent_user_prompts_from_context(
+        context: Sequence[Mapping[str, Any]] | None,
+    ) -> list[str]:
+        if not isinstance(context, Sequence):
+            return []
+
+        prompts: list[str] = []
+        for message in reversed(list(context)[-24:]):
+            if not isinstance(message, Mapping):
+                continue
+            role = str(message.get("role") or "").strip().lower()
+            if role != "user":
+                continue
+            raw_content = message.get("content")
+            if not isinstance(raw_content, str):
+                continue
+            text = raw_content.strip()
+            if text:
+                prompts.append(text)
+        return prompts
+
+    @classmethod
+    def _collect_structured_tool_family_hints(
+        cls,
+        *,
+        prompt: str,
+        context: Sequence[Mapping[str, Any]] | None,
+        required_tools: Sequence[str],
+    ) -> tuple[str, ...]:
+        hints: list[str] = []
+        seen: set[str] = set()
+
+        def _add_hint(family: str) -> None:
+            value = str(family or "").strip().lower()
+            if not value or value in seen:
+                return
+            seen.add(value)
+            hints.append(value)
+
+        for tool_name in required_tools:
+            _add_hint(cls._structured_tool_family_for_name(tool_name))
+
+        for tool_name in cls._recent_tool_names_from_context(context):
+            _add_hint(cls._structured_tool_family_for_name(tool_name))
+
+        prompt_text = str(prompt or "").strip().lower()
+        if prompt_text:
+            for family, tokens in cls._STRUCTURED_TOOL_FAMILY_HINTS:
+                if any(token in prompt_text for token in tokens):
+                    _add_hint(family)
+            if re.search(r"https?://\S+", prompt_text):
+                _add_hint("search")
+
+        return tuple(hints)
+
+    def _effective_structured_tool_cap(self, provider: str | None) -> tuple[int, int]:
+        provider_name = str(provider or "").strip().lower()
+        provider_limit = int(
+            self._STRUCTURED_TOOL_PROVIDER_LIMITS.get(
+                provider_name,
+                self._structured_tool_provider_default_limit,
+            )
+        )
+        provider_limit = max(1, provider_limit)
+        safe_cap = max(1, provider_limit - int(self._structured_tool_cap_headroom))
+        override = int(self._structured_tool_candidate_cap_override)
+        if override > 0:
+            safe_cap = min(safe_cap, override)
+        safe_cap = max(1, min(provider_limit, safe_cap))
+        return safe_cap, provider_limit
+
+    def _resolve_structured_tool_candidates(
+        self,
+        *,
+        prompt: str,
+        context: Sequence[Mapping[str, Any]] | None,
+        stage: str,
+        workflow_action_id: str | None,
+        provider: str | None,
+        tool_definitions: Sequence[ToolDefinition],
+        method_catalogue: Mapping[str, Any] | None,
+        required_prompt_tools: Sequence[str],
+    ) -> _StructuredToolCandidateResolution:
+        """Resolve deterministic tool candidates with provider-aware capping."""
+
+        definitions_by_name: dict[str, ToolDefinition] = {}
+        ordered_tool_names: list[str] = []
+        for definition in tool_definitions:
+            tool_name = str(getattr(definition, "name", "") or "").strip()
+            if not tool_name:
+                continue
+            key = tool_name.lower()
+            if key in definitions_by_name:
+                continue
+            definitions_by_name[key] = definition
+            ordered_tool_names.append(tool_name)
+
+        effective_cap, provider_limit = self._effective_structured_tool_cap(provider)
+        workflow_step_id = str(workflow_action_id or stage or "").strip() or stage
+        profile = self._structured_tool_step_profile(
+            stage=stage,
+            workflow_action_id=workflow_action_id,
+        )
+
+        if not ordered_tool_names:
+            return _StructuredToolCandidateResolution(
+                tool_definitions=(),
+                candidate_tool_names=(),
+                excluded_tools=(),
+                required_tools=(),
+                hinted_families=(),
+                workflow_step_id=workflow_step_id,
+                workflow_step_profile=profile,
+                effective_cap=effective_cap,
+                provider_limit=provider_limit,
+                cap_applied=False,
+                truncation_applied=False,
+                write_policy_reason="no_tools_available",
+                warnings=("no_structured_tool_definitions_available",),
+            )
+
+        catalogue_lookup: dict[str, Mapping[str, Any]] = {}
+        if isinstance(method_catalogue, Mapping):
+            for tool_name, metadata in method_catalogue.items():
+                if (
+                    isinstance(tool_name, str)
+                    and tool_name.strip()
+                    and isinstance(metadata, Mapping)
+                ):
+                    catalogue_lookup[tool_name.strip().lower()] = metadata
+
+        def _tool_metadata(tool_name: str) -> Mapping[str, Any]:
+            return catalogue_lookup.get(tool_name.lower(), {})
+
+        def _tool_category(tool_name: str) -> str:
+            metadata = _tool_metadata(tool_name)
+            raw = metadata.get("category")
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip().lower()
+            return "read"
+
+        def _is_write_tool(tool_name: str) -> bool:
+            return _tool_category(tool_name) == "write"
+
+        required_tools: list[str] = []
+        seen_required: set[str] = set()
+        for raw_tool_name in required_prompt_tools:
+            if not isinstance(raw_tool_name, str) or not raw_tool_name.strip():
+                continue
+            candidate = raw_tool_name.strip()
+            key = candidate.lower()
+            if key not in definitions_by_name or key in seen_required:
+                continue
+            seen_required.add(key)
+            required_tools.append(candidate)
+
+        baseline_tools: list[str] = []
+        seen_baseline: set[str] = set()
+        for baseline_name in self._STRUCTURED_TOOL_SAFE_BASELINE:
+            key = baseline_name.lower()
+            if key in definitions_by_name and key not in seen_baseline:
+                seen_baseline.add(key)
+                baseline_tools.append(definitions_by_name[key].name)
+
+        recent_user_prompts = self._recent_user_prompts_from_context(context)
+        write_tool_names = sorted(
+            [name for name in ordered_tool_names if _is_write_tool(name)],
+            key=lambda value: value.lower(),
+        )
+        write_policy_decision = compute_allowed_write_tools(
+            prompt=prompt,
+            requested_tools=write_tool_names,
+            recent_user_prompts=recent_user_prompts or None,
+        )
+        write_policy_reason = str(write_policy_decision.reason or "").strip()
+        allowed_write_tools = {
+            str(tool_name).strip().lower()
+            for tool_name in write_policy_decision.allowed_tools
+            if isinstance(tool_name, str) and str(tool_name).strip()
+        }
+        write_explicitly_denied = prompt_explicitly_denies_write(prompt)
+        if write_explicitly_denied:
+            allowed_write_tools = set()
+            write_policy_reason = "explicit_write_denial_detected"
+
+        hinted_families = self._collect_structured_tool_family_hints(
+            prompt=prompt,
+            context=context,
+            required_tools=required_tools,
+        )
+        hinted_family_lookup = {family.lower() for family in hinted_families}
+
+        candidate_names: list[str] = []
+        included_lookup: set[str] = set()
+        excluded_reasons: dict[str, str] = {}
+
+        def _mark_excluded(tool_name: str, reason: str) -> None:
+            key = tool_name.lower()
+            if key in included_lookup:
+                return
+            excluded_reasons.setdefault(tool_name, reason)
+
+        def _append_candidate(tool_name: str) -> None:
+            key = tool_name.lower()
+            if key in included_lookup:
+                return
+            if key not in definitions_by_name:
+                return
+            if _is_write_tool(tool_name):
+                if write_explicitly_denied:
+                    _mark_excluded(tool_name, "write_tool_explicitly_denied")
+                    return
+                if key not in allowed_write_tools:
+                    _mark_excluded(tool_name, "write_tool_not_allowed_for_prompt")
+                    return
+            included_lookup.add(key)
+            candidate_names.append(definitions_by_name[key].name)
+
+        def _append_bucket(names: Sequence[str]) -> None:
+            for tool_name in names:
+                if not isinstance(tool_name, str) or not tool_name.strip():
+                    continue
+                _append_candidate(tool_name.strip())
+
+        sorted_tool_names = sorted(ordered_tool_names, key=lambda value: value.lower())
+        family_matched_tools = [
+            name
+            for name in sorted_tool_names
+            if self._structured_tool_family_for_name(name).lower() in hinted_family_lookup
+        ]
+        read_tools = [name for name in sorted_tool_names if not _is_write_tool(name)]
+
+        _append_bucket(required_tools)
+        _append_bucket(baseline_tools)
+        _append_bucket(family_matched_tools)
+
+        if profile == "planner":
+            _append_bucket(read_tools)
+            _append_bucket(write_tool_names)
+        elif profile == "validator":
+            validation_helpers = [
+                name
+                for name in read_tools
+                if any(
+                    token in name.lower()
+                    for token in (
+                        "validate",
+                        "repair",
+                        "check",
+                        "exists",
+                        "fetch",
+                        "search",
+                        "resolve",
+                    )
+                )
+            ]
+            _append_bucket(validation_helpers)
+        elif profile == "executor":
+            # Executor profile stays narrow by default: required + safety baseline
+            # are already included above.
+            pass
+        else:
+            _append_bucket(read_tools)
+            _append_bucket(write_tool_names)
+
+        warnings: list[str] = []
+        if not candidate_names:
+            warnings.append("empty_candidate_set_fallback_to_safe_baseline")
+            _append_bucket(baseline_tools)
+            if not candidate_names:
+                # Last-resort deterministic fallback: first read tool if any.
+                fallback_read = [name for name in sorted_tool_names if not _is_write_tool(name)]
+                if fallback_read:
+                    _append_candidate(fallback_read[0])
+                elif sorted_tool_names:
+                    _append_candidate(sorted_tool_names[0])
+
+        pre_cap_count = len(candidate_names)
+        truncation_applied = False
+        if len(candidate_names) > effective_cap:
+            truncation_applied = True
+            for truncated_tool in candidate_names[effective_cap:]:
+                _mark_excluded(truncated_tool, "cap_truncation")
+            candidate_names = list(candidate_names[:effective_cap])
+            included_lookup = {name.lower() for name in candidate_names}
+
+        required_lookup = {tool_name.lower() for tool_name in required_tools}
+        for required_tool in required_tools:
+            key = required_tool.lower()
+            if key in included_lookup or key not in definitions_by_name:
+                continue
+            warnings.append(f"required_tool_readded:{required_tool}")
+            if len(candidate_names) < effective_cap:
+                candidate_names.append(definitions_by_name[key].name)
+                included_lookup.add(key)
+                continue
+
+            replace_index: int | None = None
+            for index in range(len(candidate_names) - 1, -1, -1):
+                candidate_key = candidate_names[index].lower()
+                if candidate_key not in required_lookup:
+                    replace_index = index
+                    break
+
+            if replace_index is None:
+                warnings.append(f"required_tool_not_added_due_cap:{required_tool}")
+                continue
+
+            displaced = candidate_names[replace_index]
+            candidate_names[replace_index] = definitions_by_name[key].name
+            included_lookup.discard(displaced.lower())
+            included_lookup.add(key)
+            _mark_excluded(displaced, "cap_replaced_for_required_tool")
+
+        resolved_definitions = tuple(
+            definitions_by_name[name.lower()]
+            for name in candidate_names
+            if name.lower() in definitions_by_name
+        )
+        excluded_tools = tuple(
+            {
+                "tool": tool_name,
+                "reason": reason,
+                "category": _tool_category(tool_name),
+                "family": self._structured_tool_family_for_name(tool_name),
+            }
+            for tool_name, reason in sorted(
+                excluded_reasons.items(),
+                key=lambda item: item[0].lower(),
+            )
+        )
+
+        cap_applied = truncation_applied or pre_cap_count > effective_cap
+        return _StructuredToolCandidateResolution(
+            tool_definitions=resolved_definitions,
+            candidate_tool_names=tuple(candidate_names),
+            excluded_tools=excluded_tools,
+            required_tools=tuple(required_tools),
+            hinted_families=hinted_families,
+            workflow_step_id=workflow_step_id,
+            workflow_step_profile=profile,
+            effective_cap=effective_cap,
+            provider_limit=provider_limit,
+            cap_applied=cap_applied,
+            truncation_applied=truncation_applied,
+            write_policy_reason=write_policy_reason,
+            warnings=tuple(warnings),
+        )
 
     def _mcp_schema_to_json_schema(
         self, mcp_schema: Mapping[str, Any]
@@ -6628,6 +7252,9 @@ class InternalMCPChatOrchestrator:
         aux_log: list[Mapping[str, Any]],
         record_llm_call: Callable[..., Any],
         emit_progress: Callable[[Mapping[str, Any]], None] | None = None,
+        workflow_action_id: str | None = None,
+        method_catalogue: Mapping[str, Any] | None = None,
+        required_prompt_tools: Sequence[str] = (),
     ) -> tuple[LLMResponse, Optional[str], Mapping[str, Any]]:
         candidates = self._stage_model_candidates(
             stage=stage,
@@ -6663,6 +7290,79 @@ class InternalMCPChatOrchestrator:
                 )
                 continue
 
+            provider_hint = (
+                telemetry.get("provider") if isinstance(telemetry, Mapping) else None
+            )
+            tool_candidates = self._resolve_structured_tool_candidates(
+                prompt=prompt,
+                context=context,
+                stage=stage,
+                workflow_action_id=workflow_action_id,
+                provider=provider_hint if isinstance(provider_hint, str) else None,
+                tool_definitions=tool_definitions,
+                method_catalogue=method_catalogue,
+                required_prompt_tools=required_prompt_tools,
+            )
+            available_tool_definitions = list(tool_candidates.tool_definitions)
+
+            exclusion_reason_counts: dict[str, int] = {}
+            for item in tool_candidates.excluded_tools:
+                if not isinstance(item, Mapping):
+                    continue
+                reason = item.get("reason")
+                if not isinstance(reason, str) or not reason.strip():
+                    continue
+                key = reason.strip()
+                exclusion_reason_counts[key] = exclusion_reason_counts.get(key, 0) + 1
+            top_exclusion_reasons = [
+                {"reason": reason, "count": count}
+                for reason, count in sorted(
+                    exclusion_reason_counts.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )[:5]
+            ]
+
+            candidate_preview = list(tool_candidates.candidate_tool_names[:20])
+            candidate_preview_truncated = (
+                len(tool_candidates.candidate_tool_names) > len(candidate_preview)
+            )
+            aux_log.append(
+                {
+                    "type": "structured_tool_candidates",
+                    "stage": stage,
+                    "workflow_step_id": tool_candidates.workflow_step_id,
+                    "workflow_step_profile": tool_candidates.workflow_step_profile,
+                    "provider": provider_hint if isinstance(provider_hint, str) else None,
+                    "provider_limit": int(tool_candidates.provider_limit),
+                    "effective_cap": int(tool_candidates.effective_cap),
+                    "cap_applied": bool(tool_candidates.cap_applied),
+                    "truncation_applied": bool(tool_candidates.truncation_applied),
+                    "candidate_tool_count": len(tool_candidates.candidate_tool_names),
+                    "candidate_tool_preview": candidate_preview,
+                    "candidate_tool_preview_truncated": candidate_preview_truncated,
+                    "excluded_tool_count": len(tool_candidates.excluded_tools),
+                    "top_exclusion_reasons": top_exclusion_reasons,
+                    "required_tools": list(tool_candidates.required_tools),
+                    "hinted_families": list(tool_candidates.hinted_families),
+                    "write_policy_reason": tool_candidates.write_policy_reason,
+                    "warnings": list(tool_candidates.warnings),
+                }
+            )
+            if tool_candidates.truncation_applied or tool_candidates.warnings:
+                self._logger.warning(
+                    "[mcp_orchestrator] Structured tool candidates: stage=%s step=%s profile=%s cap=%d provider_limit=%d selected=%d excluded=%d warnings=%s",
+                    stage,
+                    tool_candidates.workflow_step_id,
+                    tool_candidates.workflow_step_profile,
+                    int(tool_candidates.effective_cap),
+                    int(tool_candidates.provider_limit),
+                    len(tool_candidates.candidate_tool_names),
+                    len(tool_candidates.excluded_tools),
+                    ", ".join(tool_candidates.warnings)
+                    if tool_candidates.warnings
+                    else "none",
+                )
+
             if callable(emit_progress):
                 emit_progress(
                     {
@@ -6678,7 +7378,7 @@ class InternalMCPChatOrchestrator:
             try:
                 llm_response = client.generate_with_tools(
                     prompt=prompt,
-                    available_tools=list(tool_definitions),
+                    available_tools=available_tool_definitions,
                     context=cast(Optional[List[Dict[str, Any]]], context),
                     model=model_name,
                     system_message=None,

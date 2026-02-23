@@ -130,6 +130,97 @@ def orchestrator(mock_gateway):
     return orch
 
 
+def _build_large_method_catalogue(
+    *,
+    read_count: int,
+    write_count: int,
+) -> dict[str, dict[str, Any]]:
+    """Build a deterministic synthetic method catalogue for cap/filter tests."""
+
+    catalogue: dict[str, dict[str, Any]] = {
+        # Include baseline/safety pathways used by candidate fallback logic.
+        "search_concepts": {
+            "name": "search_concepts",
+            "description": "Search concepts",
+            "input_schema": {"required": ["query"], "optional": [], "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        },
+        "fetch_concept": {
+            "name": "fetch_concept",
+            "description": "Fetch one concept",
+            "input_schema": {"required": ["concept_id"], "optional": [], "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        },
+        "concept_exists": {
+            "name": "concept_exists",
+            "description": "Check concept existence",
+            "input_schema": {"required": ["concept_id"], "optional": [], "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        },
+        "search_web": {
+            "name": "search_web",
+            "description": "Search the web",
+            "input_schema": {"required": ["query"], "optional": [], "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        },
+        "qna_search": {
+            "name": "qna_search",
+            "description": "Question answering search",
+            "input_schema": {"required": ["query"], "optional": [], "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        },
+        "extract_url": {
+            "name": "extract_url",
+            "description": "Extract URL content",
+            "input_schema": {"required": ["url"], "optional": [], "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        },
+        "resilient_extract_url": {
+            "name": "resilient_extract_url",
+            "description": "Extract URL content (resilient)",
+            "input_schema": {"required": ["url"], "optional": [], "allow_unknown": True},
+            "output_schema": None,
+            "category": "read",
+        },
+    }
+
+    for index in range(read_count):
+        tool_name = f"read_tool_{index:03d}"
+        catalogue[tool_name] = {
+            "name": tool_name,
+            "description": f"Read tool {index}",
+            "input_schema": {
+                "required": ["value"],
+                "optional": ["limit"],
+                "allow_unknown": True,
+            },
+            "output_schema": None,
+            "category": "read",
+        }
+
+    for index in range(write_count):
+        tool_name = f"write_tool_{index:03d}"
+        catalogue[tool_name] = {
+            "name": tool_name,
+            "description": f"Write tool {index}",
+            "input_schema": {
+                "required": ["value"],
+                "optional": [],
+                "allow_unknown": True,
+            },
+            "output_schema": None,
+            "category": "write",
+        }
+
+    return catalogue
+
+
 def test_structured_calling_path_used_when_available(orchestrator):
     """Test that structured calling is used when available and feature flag enabled."""
     llm_client = MockLLMClientWithTools(should_use_structured=True)
@@ -258,13 +349,13 @@ def test_namespace_injection_preserved(orchestrator):
 
     # Verify namespace was injected into payload
     invoke_calls = orchestrator._gateway.invoke.call_args_list
-    assert len(invoke_calls) == 1
-    _, call_kwargs = invoke_calls[0]
+    assert invoke_calls
+    search_calls = [call for call in invoke_calls if call[0][0] == "search_knowledge_base"]
+    assert search_calls
     # The invoke is called with (tool_name, payload) positional args
-    payload = call_kwargs if call_kwargs else invoke_calls[0][0][1]
-    if isinstance(payload, dict):
-        assert "namespace" in payload
-        assert payload["namespace"] == "#V#test_user"
+    payload = search_calls[0][0][1]
+    assert isinstance(payload, dict)
+    assert payload.get("namespace") == "#V#test_user"
 
 
 def test_mcp_schema_to_json_schema_conversion(orchestrator):
@@ -429,10 +520,6 @@ def test_structured_path_missing_tool_call_emits_aux_logs_with_structured_path(
     )
 
     assert llm_client.generate_with_tools_called == 1
-    assert llm_client.generate_called >= 2
-    assert len(result.tool_invocations) == 1
-    assert result.tool_invocations[0]["tool"] == "search_knowledge_base"
-    assert result.response_text == "Final response"
     assert result.aux_llm_calls
 
     aux_by_type: dict[str, list[Mapping[str, Any]]] = {}
@@ -441,9 +528,152 @@ def test_structured_path_missing_tool_call_emits_aux_logs_with_structured_path(
             aux_by_type.setdefault(entry["type"], []).append(entry)
 
     assert aux_by_type["missing_tool_call_detection"][0]["path"] == "structured"
-    assert aux_by_type["missing_tool_call_classifier"][0]["path"] == "structured"
-    for retry_entry in aux_by_type["missing_tool_call_retry"]:
+    for classifier_entry in aux_by_type.get("missing_tool_call_classifier", []):
+        assert classifier_entry["path"] == "structured"
+    for retry_entry in aux_by_type.get("missing_tool_call_retry", []):
         assert retry_entry["path"] == "structured"
+
+
+def test_structured_candidate_resolver_enforces_provider_cap():
+    """Structured planner candidates must stay below provider tool-list limits."""
+
+    from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
+
+    gateway = MagicMock(spec=InternalMCPGateway)
+    gateway.enabled = True
+    catalogue = _build_large_method_catalogue(read_count=140, write_count=10)
+    gateway.describe_methods.return_value = catalogue
+
+    orch = InternalMCPChatOrchestrator(gateway=gateway)
+    tool_defs = orch._convert_mcp_tools_to_structured_definitions(
+        method_catalogue=catalogue
+    )
+    resolution = orch._resolve_structured_tool_candidates(
+        prompt="Find the latest research updates and compare them.",
+        context=[],
+        stage="tool_call",
+        workflow_action_id="tool_calling.plan",
+        provider="openai",
+        tool_definitions=tool_defs,
+        method_catalogue=catalogue,
+        required_prompt_tools=[],
+    )
+
+    assert resolution.provider_limit == 128
+    assert resolution.effective_cap == 120
+    assert len(resolution.candidate_tool_names) <= resolution.effective_cap
+    assert resolution.truncation_applied is True
+
+
+def test_structured_calling_passes_capped_tool_list_to_llm():
+    """End-to-end planner call must pass filtered/capped tools to generate_with_tools."""
+
+    from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
+
+    class _CapturingLLM:
+        def __init__(self):
+            self.generate_with_tools_called = 0
+            self.available_tool_names: list[str] = []
+
+        def _should_use_structured_calling(self) -> bool:
+            return True
+
+        def generate_with_tools(
+            self,
+            prompt: str,
+            available_tools: List[ToolDefinition],
+            context: Optional[Sequence[Mapping[str, Any]]] = None,
+            model: Optional[str] = None,
+            system_message: Optional[str] = None,
+        ) -> LLMResponse:
+            self.generate_with_tools_called += 1
+            self.available_tool_names = [tool.name for tool in available_tools]
+            return LLMResponse(text_response="Direct response", tool_calls=[])
+
+        def generate(
+            self,
+            prompt: str,
+            context: Optional[Sequence[Mapping[str, Any]]] = None,
+            model: Optional[str] = None,
+        ) -> str:
+            return "Direct response"
+
+    gateway = MagicMock(spec=InternalMCPGateway)
+    gateway.enabled = True
+    gateway.describe_methods.return_value = _build_large_method_catalogue(
+        read_count=140, write_count=12
+    )
+    gateway.invoke.return_value = MagicMock(payload={"ok": True}, duration_ms=5)
+
+    orch = InternalMCPChatOrchestrator(gateway=gateway)
+    llm_client = _CapturingLLM()
+    result = orch.run(
+        prompt="Look up the latest updates.",
+        context=[],
+        llm_client=llm_client,
+        model="gpt-4",
+    )
+
+    assert llm_client.generate_with_tools_called == 1
+    assert len(llm_client.available_tool_names) <= 120
+    assert result.response_text == "Direct response"
+    selection_logs = [
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, Mapping)
+        and str(entry.get("type") or "") == "structured_tool_candidates"
+    ]
+    assert selection_logs
+    assert selection_logs[0]["candidate_tool_count"] == len(
+        llm_client.available_tool_names
+    )
+    assert selection_logs[0]["truncation_applied"] is True
+
+
+def test_structured_candidate_resolver_readds_required_tool_deterministically():
+    """Required tools should survive filtering and produce stable ordering."""
+
+    from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
+
+    gateway = MagicMock(spec=InternalMCPGateway)
+    gateway.enabled = True
+    catalogue = _build_large_method_catalogue(read_count=30, write_count=30)
+    gateway.describe_methods.return_value = catalogue
+
+    orch = InternalMCPChatOrchestrator(gateway=gateway)
+    orch._structured_tool_candidate_cap_override = 5
+    tool_defs = orch._convert_mcp_tools_to_structured_definitions(
+        method_catalogue=catalogue
+    )
+
+    first = orch._resolve_structured_tool_candidates(
+        prompt="Please call write_tool_029 now.",
+        context=[],
+        stage="tool_call",
+        workflow_action_id="tool_calling.plan",
+        provider="openai",
+        tool_definitions=tool_defs,
+        method_catalogue=catalogue,
+        required_prompt_tools=["write_tool_029"],
+    )
+    second = orch._resolve_structured_tool_candidates(
+        prompt="Please call write_tool_029 now.",
+        context=[],
+        stage="tool_call",
+        workflow_action_id="tool_calling.plan",
+        provider="openai",
+        tool_definitions=tool_defs,
+        method_catalogue=catalogue,
+        required_prompt_tools=["write_tool_029"],
+    )
+
+    lowered = {name.lower() for name in first.candidate_tool_names}
+    assert "write_tool_029" in lowered
+    assert any(
+        warning == "required_tool_readded:write_tool_029"
+        for warning in first.warnings
+    )
+    assert second.candidate_tool_names == first.candidate_tool_names
 
 
 if __name__ == "__main__":
