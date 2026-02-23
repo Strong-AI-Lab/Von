@@ -16,8 +16,11 @@ import {
     __testOnly_hydrateChatConceptCartouches,
     __testOnly_jumpToLatestUnreadBoundary,
     __testOnly_renderDisplayElementsIntoContainer,
+    __testOnly_ensureScrollToEndButton,
+    __testOnly_scrollConversationToEnd,
     __testOnly_setLatestUnreadBoundary,
     __testOnly_showNewSharedMessagesIndicator,
+    __testOnly_updateScrollToEndButtonVisibility,
     __testOnly_resetChatConceptMetaCaches,
     formatChatTimestamp,
     sendMessage
@@ -1707,5 +1710,63 @@ describe('latest unread jump affordance', () => {
         expect(__testOnly_jumpToLatestUnreadBoundary()).toBe(true);
         expect(boundary.scrollIntoView).toHaveBeenCalled();
         expect(boundary.focus).toHaveBeenCalled();
+    });
+});
+
+describe('scroll to latest message affordance', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <div id="chatTab">
+                <div class="content-wrapper">
+                    <div id="scrollableField"></div>
+                </div>
+            </div>
+        `;
+    });
+
+    test('shows floating control only when conversation is away from the end', () => {
+        const scrollableField = document.getElementById('scrollableField');
+        Object.defineProperty(scrollableField, 'clientHeight', { value: 200, configurable: true });
+        Object.defineProperty(scrollableField, 'scrollHeight', { value: 600, configurable: true });
+
+        scrollableField.scrollTop = 20;
+        __testOnly_updateScrollToEndButtonVisibility(scrollableField);
+        const button = __testOnly_ensureScrollToEndButton(scrollableField);
+        expect(button).toBeTruthy();
+        expect(button.classList.contains('visible')).toBe(true);
+        expect(button.getAttribute('aria-hidden')).toBe('false');
+
+        scrollableField.scrollTop = 410;
+        __testOnly_updateScrollToEndButtonVisibility(scrollableField);
+        expect(button.classList.contains('visible')).toBe(false);
+        expect(button.getAttribute('aria-hidden')).toBe('true');
+    });
+
+    test('clicking floating control scrolls to the latest message', () => {
+        jest.useFakeTimers();
+
+        const scrollableField = document.getElementById('scrollableField');
+        Object.defineProperty(scrollableField, 'clientHeight', { value: 180, configurable: true });
+        Object.defineProperty(scrollableField, 'scrollHeight', { value: 500, configurable: true });
+        scrollableField.scrollTop = 0;
+        scrollableField.scrollTo = jest.fn(({ top }) => {
+            scrollableField.scrollTop = top;
+        });
+
+        const button = __testOnly_ensureScrollToEndButton(scrollableField);
+        __testOnly_updateScrollToEndButtonVisibility(scrollableField);
+        expect(button.classList.contains('visible')).toBe(true);
+
+        button.click();
+
+        expect(scrollableField.scrollTo).toHaveBeenCalledWith({
+            top: 500,
+            behavior: 'smooth'
+        });
+
+        jest.runOnlyPendingTimers();
+        expect(__testOnly_scrollConversationToEnd(scrollableField, { smooth: false })).toBe(true);
+
+        jest.useRealTimers();
     });
 });

@@ -120,6 +120,8 @@ const sharedConversationUnreadSessions = new Set();
 const sharedConversationLastHistoryIndex = new Map();
 const sharedConversationResyncInFlight = new Set();
 let latestUnreadBoundaryElement = null;
+const CHAT_SCROLL_BOTTOM_THRESHOLD_PX = 56;
+const CHAT_SCROLL_TO_END_BUTTON_ID = 'chatScrollToEndButton';
 const SSE_RECONNECT_BASE_DELAY_MS = 1000;
 const SSE_RECONNECT_MAX_DELAY_MS = 30000;
 
@@ -11131,6 +11133,7 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
         }
         // Update history display to reflect new context count
         updateHistoryLength();
+        updateScrollToEndButtonVisibility(scrollableField);
     });
 }
 
@@ -12221,6 +12224,137 @@ function appendSharedTurnToTranscript(message) {
         // Show "new messages" indicator
         showNewSharedMessagesIndicator();
     }
+
+    updateScrollToEndButtonVisibility(scrollableField);
+}
+
+function ensureScrollableFieldShell(scrollableField) {
+    if (!(scrollableField instanceof HTMLElement)) {
+        return null;
+    }
+
+    const parent = scrollableField.parentElement;
+    if (parent && parent.classList.contains('scrollable-field-shell')) {
+        return parent;
+    }
+
+    if (!parent) {
+        return null;
+    }
+
+    const shell = document.createElement('div');
+    shell.className = 'scrollable-field-shell';
+    parent.insertBefore(shell, scrollableField);
+    shell.appendChild(scrollableField);
+    return shell;
+}
+
+function ensureScrollToEndButton(scrollableField = null) {
+    const targetField = scrollableField || document.getElementById('scrollableField');
+    if (!(targetField instanceof HTMLElement)) {
+        return null;
+    }
+
+    const shell = ensureScrollableFieldShell(targetField);
+    if (!(shell instanceof HTMLElement)) {
+        return null;
+    }
+
+    let button = document.getElementById(CHAT_SCROLL_TO_END_BUTTON_ID);
+    if (button instanceof HTMLButtonElement && button.parentElement !== shell) {
+        button.remove();
+        button = null;
+    }
+
+    if (!(button instanceof HTMLButtonElement)) {
+        button = document.createElement('button');
+        button.type = 'button';
+        button.id = CHAT_SCROLL_TO_END_BUTTON_ID;
+        button.className = 'chat-scroll-to-end-btn';
+        button.setAttribute('aria-label', 'Scroll to latest message');
+        button.title = 'Scroll to latest message';
+        button.innerHTML = '<span aria-hidden="true">↓</span><span class="sr-only">Scroll to latest message</span>';
+        button.setAttribute('aria-hidden', 'true');
+        button.tabIndex = -1;
+        button.addEventListener('click', () => {
+            void scrollConversationToEnd(targetField, { smooth: true });
+        });
+        shell.appendChild(button);
+    }
+
+    return button;
+}
+
+function isScrollableFieldNearBottom(scrollableField, thresholdPx = CHAT_SCROLL_BOTTOM_THRESHOLD_PX) {
+    if (!(scrollableField instanceof HTMLElement)) {
+        return true;
+    }
+    const clientHeight = Number(scrollableField.clientHeight) || 0;
+    const scrollHeight = Number(scrollableField.scrollHeight) || 0;
+    const scrollTop = Number(scrollableField.scrollTop) || 0;
+    const distanceToBottom = scrollHeight - (scrollTop + clientHeight);
+    return distanceToBottom <= Math.max(0, Number(thresholdPx) || 0);
+}
+
+function scrollConversationToEnd(scrollableField, options = {}) {
+    if (!(scrollableField instanceof HTMLElement)) {
+        return false;
+    }
+
+    const smooth = options?.smooth !== false;
+    const top = scrollableField.scrollHeight;
+    try {
+        scrollableField.scrollTo({ top, behavior: smooth ? 'smooth' : 'auto' });
+    } catch (_err) {
+        scrollableField.scrollTop = top;
+    }
+
+    const schedule = (typeof window !== 'undefined' && typeof window.setTimeout === 'function')
+        ? window.setTimeout.bind(window)
+        : setTimeout;
+
+    schedule(() => {
+        if (isScrollableFieldNearBottom(scrollableField)) {
+            clearLatestUnreadBoundary();
+            hideNewSharedMessagesIndicator();
+        }
+        updateScrollToEndButtonVisibility(scrollableField);
+    }, smooth ? 220 : 0);
+
+    return true;
+}
+
+function updateScrollToEndButtonVisibility(scrollableField = null) {
+    const targetField = scrollableField || document.getElementById('scrollableField');
+    if (!(targetField instanceof HTMLElement)) {
+        return;
+    }
+
+    const button = ensureScrollToEndButton(targetField);
+    if (!(button instanceof HTMLButtonElement)) {
+        return;
+    }
+
+    const hasOverflow = (targetField.scrollHeight - targetField.clientHeight) > 1;
+    const nearBottom = isScrollableFieldNearBottom(targetField);
+    const shouldShow = hasOverflow && !nearBottom;
+
+    button.classList.toggle('visible', shouldShow);
+    button.setAttribute('aria-hidden', shouldShow ? 'false' : 'true');
+    button.tabIndex = shouldShow ? 0 : -1;
+}
+
+function handleConversationScrollPositionChange(scrollableField) {
+    if (!(scrollableField instanceof HTMLElement)) {
+        return;
+    }
+
+    if (isScrollableFieldNearBottom(scrollableField)) {
+        clearLatestUnreadBoundary();
+        hideNewSharedMessagesIndicator();
+    }
+
+    updateScrollToEndButtonVisibility(scrollableField);
 }
 
 function setLatestUnreadBoundary(messageElement) {
@@ -13594,15 +13728,12 @@ export function initializeChatTab() {
     }
 
     if (chatTab && scrollableField) {
+        ensureScrollToEndButton(scrollableField);
+
         if (!scrollableField._sharedIndicatorWired) {
             scrollableField._sharedIndicatorWired = true;
             scrollableField.addEventListener('scroll', () => {
-                const isAtBottom = scrollableField.scrollHeight - scrollableField.scrollTop
-                    <= scrollableField.clientHeight + 50;
-                if (isAtBottom) {
-                    clearLatestUnreadBoundary();
-                    hideNewSharedMessagesIndicator();
-                }
+                handleConversationScrollPositionChange(scrollableField);
             });
         }
 
@@ -13886,7 +14017,9 @@ export function initializeChatTab() {
         scrollToBottom: false,
         preserveScroll: true,
         showResetNotice: false
-    })).catch(() => { });
+    })).then(() => {
+        updateScrollToEndButtonVisibility();
+    }).catch(() => { });
     void refreshChatSessionTabs();
     void refreshToolUseDuringThinkingSetting();
     console.log("Chat tab initialized successfully");
@@ -15177,6 +15310,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
         if (!isHistory) {
             scrollableField.scrollTop = scrollableField.scrollHeight;
         }
+        updateScrollToEndButtonVisibility(scrollableField);
     } catch (err) {
         console.error('[chatTab] appendMessage crashed:', err);
     }
@@ -15907,6 +16041,15 @@ export function __testOnly_jumpToLatestUnreadBoundary() {
 export function __testOnly_clearLatestUnreadJumpState() {
     clearLatestUnreadBoundary();
     hideNewSharedMessagesIndicator();
+}
+export function __testOnly_ensureScrollToEndButton(scrollableField = null) {
+    return ensureScrollToEndButton(scrollableField);
+}
+export function __testOnly_updateScrollToEndButtonVisibility(scrollableField = null) {
+    updateScrollToEndButtonVisibility(scrollableField);
+}
+export function __testOnly_scrollConversationToEnd(scrollableField, options = {}) {
+    return scrollConversationToEnd(scrollableField, options);
 }
 
 // Export for testing.

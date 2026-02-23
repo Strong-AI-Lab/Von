@@ -3132,6 +3132,57 @@ h1 {
     opacity: 0.6;
 }
 
+.scrollable-field-shell {
+    position: relative;
+    width: 100%;
+}
+
+.chat-scroll-to-end-btn {
+    position: absolute;
+    right: 14px;
+    bottom: 14px;
+    z-index: 12;
+    width: 40px;
+    height: 40px;
+    border: none;
+    border-radius: 999px;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #2563eb, #1d4ed8);
+    color: #ffffff;
+    font-size: 1.2rem;
+    line-height: 1;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(15, 23, 42, 0.24);
+    transition: transform 0.15s ease, box-shadow 0.2s ease;
+}
+
+.chat-scroll-to-end-btn.visible {
+    display: inline-flex;
+}
+
+.chat-scroll-to-end-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 14px rgba(15, 23, 42, 0.3);
+}
+
+.chat-scroll-to-end-btn:focus-visible {
+    outline: 2px solid #ffffff;
+    outline-offset: 2px;
+    box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.35);
+}
+
+@media (max-width: 768px) {
+    .chat-scroll-to-end-btn {
+        right: 10px;
+        bottom: 10px;
+        width: 44px;
+        height: 44px;
+        font-size: 1.3rem;
+    }
+}
+
 /* Dropdown */
 select {
     background-color: #fff;
