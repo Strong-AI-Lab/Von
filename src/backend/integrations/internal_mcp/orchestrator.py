@@ -410,6 +410,9 @@ class InternalMCPChatOrchestrator:
     _TOPIC_VOCABULARY_CACHE_TTL_SECONDS = 180
     _TOPIC_VOCABULARY_MAX_TYPES = 15
     _TOPIC_VOCABULARY_MAX_PREDICATES = 12
+    _PREFLIGHT_SESSION_MEMORY_TTL_SECONDS = 900
+    _PREFLIGHT_SESSION_MEMORY_MAX_SESSIONS = 256
+    _PREFLIGHT_SESSION_MEMORY_FOLLOW_UP_TURNS = 2
     _TOOL_CALL_REPAIR_PROMPT = (
         "You are a strict tool-call repairer for an MCP agent.\n"
         "Return ONLY a JSON object or JSON array of tool-call objects.\n"
@@ -714,6 +717,11 @@ class InternalMCPChatOrchestrator:
         # Topic vocabulary cache for context-based discovery (JVNAUTOSCI-1052).
         # Key: hash of extracted topic keywords; Value: {timestamp, types, predicates}.
         self._topic_vocabulary_cache: dict[str, dict[str, Any]] = {}
+
+        # Session-scoped carry-over for ontology preflight vocabulary.
+        # This keeps topic/predicate context available for short follow-up turns
+        # even when prompts become underspecified ("continue", "now do affiliations").
+        self._preflight_session_memory: dict[str, dict[str, Any]] = {}
 
         # Workflow model policy cache (single policy instance).
         self._workflow_model_policy_cache: dict[str, Any] = {}
@@ -10058,6 +10066,65 @@ class InternalMCPChatOrchestrator:
         # Limit to most frequent/significant keywords (first 10)
         return keywords[:10]
 
+    @staticmethod
+    def _normalise_preflight_session_key(
+        conversation_session_id: str | None,
+    ) -> str | None:
+        if not isinstance(conversation_session_id, str):
+            return None
+        cleaned = conversation_session_id.strip()
+        if not cleaned:
+            return None
+        # Guard against pathological key sizes from caller payloads.
+        return cleaned[:200]
+
+    def _prune_preflight_session_memory(self, now: float) -> None:
+        if not self._preflight_session_memory:
+            return
+
+        def _coerce_timestamp(value: Any) -> float | None:
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                stripped = value.strip()
+                if not stripped:
+                    return None
+                try:
+                    return float(stripped)
+                except Exception:
+                    return None
+            return None
+
+        expired_keys: list[str] = []
+        for key, entry in self._preflight_session_memory.items():
+            if not isinstance(entry, Mapping):
+                expired_keys.append(key)
+                continue
+            timestamp = _coerce_timestamp(entry.get("timestamp"))
+            if timestamp is None:
+                age_seconds = self._PREFLIGHT_SESSION_MEMORY_TTL_SECONDS + 1
+            else:
+                age_seconds = now - timestamp
+            if age_seconds > self._PREFLIGHT_SESSION_MEMORY_TTL_SECONDS:
+                expired_keys.append(key)
+
+        for key in expired_keys:
+            self._preflight_session_memory.pop(key, None)
+
+        excess = (
+            len(self._preflight_session_memory)
+            - self._PREFLIGHT_SESSION_MEMORY_MAX_SESSIONS
+        )
+        if excess <= 0:
+            return
+
+        oldest_first = sorted(
+            self._preflight_session_memory.items(),
+            key=lambda item: _coerce_timestamp((item[1] or {}).get("timestamp")) or 0.0,
+        )
+        for key, _entry in oldest_first[:excess]:
+            self._preflight_session_memory.pop(key, None)
+
     def _get_topic_vocabulary_cache_key(self, keywords: list[str]) -> str:
         """Generate a cache key from topic keywords."""
         if not keywords:
@@ -10227,11 +10294,14 @@ class InternalMCPChatOrchestrator:
         prompt: str,
         preferred_language: str | None,
         context: Optional[Sequence[Mapping[str, Any]]] = None,
+        conversation_session_id: str | None = None,
     ) -> _OntologyPreflightResult:
         """Deterministically surface preflight predicates and types from the Vontology.
 
         Stage 1 (JVNAUTOSCI-988): read-only, cheap, and scoped to the current turn.
         Extended (JVNAUTOSCI-1052): includes context-based topic vocabulary discovery.
+        Extended (JVNAUTOSCI-987): adds explicit discovery-path provenance and
+        bounded session follow-up carry-over for under-specified follow-up turns.
         """
 
         if not isinstance(prompt, str):
@@ -10255,6 +10325,8 @@ class InternalMCPChatOrchestrator:
         cache_key = self._get_preflight_cache_key(preferred_language)
         cached = self._preflight_cache.get(cache_key)
         now = time.time()
+        session_key = self._normalise_preflight_session_key(conversation_session_id)
+        self._prune_preflight_session_memory(now)
         if (
             cached
             and (now - cached.get("timestamp", 0)) < self._PREFLIGHT_CACHE_TTL_SECONDS
@@ -10359,6 +10431,206 @@ class InternalMCPChatOrchestrator:
                 topic_types, topic_predicates, topic_keywords
             )
 
+        # --- Session follow-up carry-over (JVNAUTOSCI-987) ---
+        session_memory_entry = (
+            self._preflight_session_memory.get(session_key) if session_key else None
+        )
+        session_memory_types: list[dict[str, Any]] = []
+        session_memory_predicates: list[dict[str, Any]] = []
+        session_memory_reused = False
+        session_memory_refreshed = False
+        session_memory_remaining_turns = 0
+
+        contextual_types_for_memory: list[dict[str, Any]] = []
+        for item in topic_types:
+            if not isinstance(item, Mapping):
+                continue
+            concept_id = item.get("concept_id")
+            if not isinstance(concept_id, str) or not concept_id:
+                continue
+            contextual_types_for_memory.append(
+                {
+                    "concept_id": concept_id,
+                    "name": item.get("name"),
+                    "score": item.get("score"),
+                    "source_path": "topic_keyword_similarity_search",
+                }
+            )
+
+        contextual_predicates_for_memory: list[dict[str, Any]] = []
+        for item in targeted_predicates:
+            if not isinstance(item, Mapping):
+                continue
+            concept_id = item.get("concept_id")
+            if not isinstance(concept_id, str) or not concept_id:
+                continue
+            contextual_predicates_for_memory.append(
+                {
+                    "concept_id": concept_id,
+                    "name": item.get("display_name"),
+                    "source_path": "prompt_targeted_predicate_search",
+                }
+            )
+        for item in topic_predicates:
+            if not isinstance(item, Mapping):
+                continue
+            concept_id = item.get("concept_id")
+            if not isinstance(concept_id, str) or not concept_id:
+                continue
+            contextual_predicates_for_memory.append(
+                {
+                    "concept_id": concept_id,
+                    "name": item.get("name"),
+                    "score": item.get("score"),
+                    "source_path": "topic_keyword_similarity_search",
+                }
+            )
+
+        if contextual_types_for_memory or contextual_predicates_for_memory:
+            if session_key:
+                self._preflight_session_memory[session_key] = {
+                    "timestamp": now,
+                    "types": contextual_types_for_memory,
+                    "predicates": contextual_predicates_for_memory,
+                    "follow_up_turns_remaining": int(
+                        self._PREFLIGHT_SESSION_MEMORY_FOLLOW_UP_TURNS
+                    ),
+                }
+                session_memory_refreshed = True
+                session_memory_remaining_turns = int(
+                    self._PREFLIGHT_SESSION_MEMORY_FOLLOW_UP_TURNS
+                )
+        elif isinstance(session_memory_entry, Mapping):
+            try:
+                remaining = int(session_memory_entry.get("follow_up_turns_remaining") or 0)
+            except Exception:
+                remaining = 0
+            if remaining > 0:
+                maybe_types = session_memory_entry.get("types")
+                maybe_predicates = session_memory_entry.get("predicates")
+                if isinstance(maybe_types, list):
+                    session_memory_types = [
+                        dict(item) for item in maybe_types if isinstance(item, Mapping)
+                    ]
+                if isinstance(maybe_predicates, list):
+                    session_memory_predicates = [
+                        dict(item) for item in maybe_predicates if isinstance(item, Mapping)
+                    ]
+                session_memory_reused = bool(
+                    session_memory_types or session_memory_predicates
+                )
+                session_memory_remaining_turns = max(0, remaining - 1)
+                if session_key:
+                    self._preflight_session_memory[session_key] = {
+                        "timestamp": now,
+                        "types": session_memory_types,
+                        "predicates": session_memory_predicates,
+                        "follow_up_turns_remaining": session_memory_remaining_turns,
+                        "last_used_at": now,
+                    }
+            elif session_key:
+                self._preflight_session_memory.pop(session_key, None)
+
+        final_type_suggestions: list[dict[str, Any]] = []
+        final_predicate_suggestions: list[dict[str, Any]] = []
+        seen_types: set[str] = set()
+        seen_predicates: set[str] = set()
+
+        def _append_suggestion(
+            *,
+            bucket: list[dict[str, Any]],
+            seen: set[str],
+            concept_id: Any,
+            source_path: str,
+            name: Any = None,
+            score: Any = None,
+        ) -> None:
+            if not isinstance(concept_id, str):
+                return
+            cleaned = concept_id.strip()
+            if not cleaned or cleaned in seen:
+                return
+            seen.add(cleaned)
+            payload: dict[str, Any] = {
+                "concept_id": cleaned,
+                "source_path": source_path,
+            }
+            if isinstance(name, str) and name.strip():
+                payload["name"] = name.strip()
+            if score is not None:
+                payload["score"] = score
+            bucket.append(payload)
+
+        for item in topic_types:
+            if not isinstance(item, Mapping):
+                continue
+            _append_suggestion(
+                bucket=final_type_suggestions,
+                seen=seen_types,
+                concept_id=item.get("concept_id"),
+                name=item.get("name"),
+                score=item.get("score"),
+                source_path="topic_keyword_similarity_search",
+            )
+
+        for item in session_memory_types:
+            if not isinstance(item, Mapping):
+                continue
+            _append_suggestion(
+                bucket=final_type_suggestions,
+                seen=seen_types,
+                concept_id=item.get("concept_id"),
+                name=item.get("name"),
+                score=item.get("score"),
+                source_path="conversation_follow_up_memory",
+            )
+
+        for item in targeted_predicates:
+            if not isinstance(item, Mapping):
+                continue
+            _append_suggestion(
+                bucket=final_predicate_suggestions,
+                seen=seen_predicates,
+                concept_id=item.get("concept_id"),
+                name=item.get("display_name"),
+                source_path="prompt_targeted_predicate_search",
+            )
+
+        for item in topic_predicates:
+            if not isinstance(item, Mapping):
+                continue
+            _append_suggestion(
+                bucket=final_predicate_suggestions,
+                seen=seen_predicates,
+                concept_id=item.get("concept_id"),
+                name=item.get("name"),
+                score=item.get("score"),
+                source_path="topic_keyword_similarity_search",
+            )
+
+        for item in session_memory_predicates:
+            if not isinstance(item, Mapping):
+                continue
+            _append_suggestion(
+                bucket=final_predicate_suggestions,
+                seen=seen_predicates,
+                concept_id=item.get("concept_id"),
+                name=item.get("name"),
+                score=item.get("score"),
+                source_path="conversation_follow_up_memory",
+            )
+
+        for item in predicates:
+            if not isinstance(item, Mapping):
+                continue
+            _append_suggestion(
+                bucket=final_predicate_suggestions,
+                seen=seen_predicates,
+                concept_id=item.get("concept_id"),
+                name=item.get("display_name"),
+                source_path="preflight_predicate_registry",
+            )
+
         # Check if we have any vocabulary to surface
         has_vocabulary = (
             predicates
@@ -10366,12 +10638,14 @@ class InternalMCPChatOrchestrator:
             or targeted_predicates
             or topic_types
             or topic_predicates
+            or session_memory_types
+            or session_memory_predicates
         )
         if not has_vocabulary:
             return _OntologyPreflightResult(message=None, telemetry=None)
 
         lines: list[str] = [
-            "ONTOLOGY PRE-FLIGHT (deterministic, read-only; stage=1+topic):",
+            "ONTOLOGY PRE-FLIGHT (deterministic, read-only; stage=1+topic+follow-up):",
             "Source: instances of #V#conversation_preflight_predicate + context-based discovery.",
             "Use these existing concept IDs for tool planning. Do not invent new concepts here.",
         ]
@@ -10412,6 +10686,56 @@ class InternalMCPChatOrchestrator:
             lines.append("")
             lines.append(topic_vocabulary_section)
 
+        if session_memory_reused and (session_memory_types or session_memory_predicates):
+            lines.append("")
+            lines.append(
+                "Carry-over vocabulary from recent turns (session continuity):"
+            )
+            if session_memory_types:
+                lines.append("  Types:")
+                for item in session_memory_types[: self._TOPIC_VOCABULARY_MAX_TYPES]:
+                    concept_id = item.get("concept_id")
+                    name = item.get("name")
+                    if not concept_id:
+                        continue
+                    if name:
+                        lines.append(f'    - {concept_id} (name="{name}")')
+                    else:
+                        lines.append(f"    - {concept_id}")
+            if session_memory_predicates:
+                lines.append("  Predicates:")
+                for item in session_memory_predicates[
+                    : self._TOPIC_VOCABULARY_MAX_PREDICATES
+                ]:
+                    concept_id = item.get("concept_id")
+                    name = item.get("name")
+                    if not concept_id:
+                        continue
+                    if name:
+                        lines.append(f'    - {concept_id} (name="{name}")')
+                    else:
+                        lines.append(f"    - {concept_id}")
+
+        final_suggestion_paths = sorted(
+            {
+                str(item.get("source_path"))
+                for item in [*final_type_suggestions, *final_predicate_suggestions]
+                if isinstance(item, Mapping)
+                and isinstance(item.get("source_path"), str)
+                and str(item.get("source_path")).strip()
+            }
+        )
+        discovery_path_counts: dict[str, int] = {}
+        for item in [*final_type_suggestions, *final_predicate_suggestions]:
+            if not isinstance(item, Mapping):
+                continue
+            source_path = item.get("source_path")
+            if not isinstance(source_path, str) or not source_path.strip():
+                continue
+            discovery_path_counts[source_path] = (
+                discovery_path_counts.get(source_path, 0) + 1
+            )
+
         telemetry: dict[str, Any] = {
             "type": "ontology_preflight",
             "stage": "deterministic_preflight",
@@ -10426,6 +10750,15 @@ class InternalMCPChatOrchestrator:
             "topic_types": topic_types,
             "topic_predicates": topic_predicates,
             "topic_vocabulary_cached": topic_vocabulary_cached,
+            # JVNAUTOSCI-987: explicit discovery-path provenance + follow-up continuity.
+            "preflight_session_id_present": bool(session_key),
+            "session_memory_reused": session_memory_reused,
+            "session_memory_refreshed": session_memory_refreshed,
+            "session_memory_follow_up_turns_remaining": session_memory_remaining_turns,
+            "final_type_suggestions": final_type_suggestions,
+            "final_predicate_suggestions": final_predicate_suggestions,
+            "final_suggestion_paths": final_suggestion_paths,
+            "discovery_path_counts": discovery_path_counts,
         }
 
         return _OntologyPreflightResult(message="\n".join(lines), telemetry=telemetry)
@@ -13122,7 +13455,10 @@ class InternalMCPChatOrchestrator:
             return result
 
         preflight = self._build_ontology_preflight(
-            prompt, preferred_language, context=context
+            prompt,
+            preferred_language,
+            context=context,
+            conversation_session_id=conversation_session_id,
         )
         if preflight.telemetry:
             aux_llm_calls.append(preflight.telemetry)

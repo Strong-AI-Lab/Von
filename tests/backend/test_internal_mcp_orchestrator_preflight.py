@@ -465,3 +465,202 @@ def test_topic_vocabulary_in_system_prompt(monkeypatch):
     assert "#V#authored_by" in preflight_content
     assert "Types:" in preflight_content
     assert "Predicates:" in preflight_content
+
+
+def test_preflight_telemetry_exposes_discovery_path_provenance(monkeypatch):
+    """JVNAUTOSCI-987: final suggestions should include explicit source paths."""
+
+    def _fake_search_concepts(
+        *, query="", instance_of=None, filter_kind=None, **_kwargs
+    ):
+        if instance_of == "#V#conversation_preflight_predicate":
+            return {
+                "results": [
+                    {"concept_id": "#V#preflight_has_author"},
+                ]
+            }
+        if filter_kind == ["type"]:
+            return {
+                "results": [
+                    {
+                        "concept_id": "#V#scientific_paper",
+                        "name": "Scientific Paper",
+                        "similarity_score": 0.88,
+                    },
+                ]
+            }
+        if filter_kind == ["predicate"]:
+            return {
+                "results": [
+                    {
+                        "concept_id": "#V#authored_by",
+                        "name": "authored by",
+                        "similarity_score": 0.82,
+                    },
+                ]
+            }
+        return {"results": []}
+
+    def _fake_get_texts_for_concept(concept_id, predicate=None, limit=50):
+        if predicate != "hasName":
+            return []
+        if concept_id == "#V#preflight_has_author":
+            return [
+                {
+                    "text": "has author",
+                    "lang": "en",
+                    "context": {"name_type": "NL"},
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(
+        "src.backend.services.concept_search_service.search_concepts",
+        _fake_search_concepts,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.get_texts_for_concept",
+        _fake_get_texts_for_concept,
+    )
+
+    gateway = cast(Any, _CapturingGateway())
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway, max_tool_invocations=1, max_context_chars=80_000
+    )
+
+    llm = _CapturingLLM(["ok"])
+    result = orchestrator.run(
+        prompt="Find predicate suggestions for this scientific paper.",
+        context=[],
+        llm_client=llm,
+        model=None,
+        preferred_language="en",
+        conversation_session_id="session-987-telemetry",
+    )
+
+    preflight_entries = [
+        entry
+        for entry in (result.aux_llm_calls or [])
+        if entry.get("type") == "ontology_preflight"
+    ]
+    assert preflight_entries, "expected ontology preflight telemetry"
+    telemetry = preflight_entries[0]
+
+    assert telemetry.get("final_type_suggestions"), "expected final type suggestions"
+    assert telemetry.get("final_predicate_suggestions"), "expected final predicates"
+    assert telemetry.get("final_suggestion_paths"), "expected source path summary"
+    assert "topic_keyword_similarity_search" in telemetry.get(
+        "final_suggestion_paths", []
+    )
+    assert "preflight_predicate_registry" in telemetry.get("final_suggestion_paths", [])
+
+    predicate_suggestions = telemetry.get("final_predicate_suggestions") or []
+    assert any(
+        item.get("source_path") == "preflight_predicate_registry"
+        for item in predicate_suggestions
+        if isinstance(item, dict)
+    )
+
+
+def test_preflight_session_memory_keeps_context_for_two_follow_up_turns(monkeypatch):
+    """JVNAUTOSCI-987: keep relevant concept context across two follow-up turns."""
+
+    def _fake_search_concepts(
+        *, query="", instance_of=None, filter_kind=None, **_kwargs
+    ):
+        if instance_of == "#V#conversation_preflight_predicate":
+            return {"results": []}
+        query_lower = str(query or "").lower()
+        if filter_kind == ["type"] and "scientific" in query_lower:
+            return {
+                "results": [
+                    {
+                        "concept_id": "#V#scientific_paper",
+                        "name": "Scientific Paper",
+                        "similarity_score": 0.9,
+                    },
+                ]
+            }
+        if filter_kind == ["predicate"] and "scientific" in query_lower:
+            return {
+                "results": [
+                    {
+                        "concept_id": "#V#authored_by",
+                        "name": "authored by",
+                        "similarity_score": 0.86,
+                    },
+                ]
+            }
+        return {"results": []}
+
+    monkeypatch.setattr(
+        "src.backend.services.concept_search_service.search_concepts",
+        _fake_search_concepts,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.get_texts_for_concept",
+        lambda concept_id, predicate=None, limit=50: [],
+    )
+
+    gateway = cast(Any, _CapturingGateway())
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway, max_tool_invocations=1, max_context_chars=80_000
+    )
+    llm = _CapturingLLM(["ok", "ok", "ok"])
+    session_id = "session-987-followups"
+
+    orchestrator.run(
+        prompt="Analyse this scientific paper and extract author affiliations.",
+        context=[],
+        llm_client=llm,
+        model=None,
+        preferred_language="en",
+        conversation_session_id=session_id,
+    )
+    second = orchestrator.run(
+        prompt="Continue with affiliations.",
+        context=[],
+        llm_client=llm,
+        model=None,
+        preferred_language="en",
+        conversation_session_id=session_id,
+    )
+    third = orchestrator.run(
+        prompt="Continue and verify institutions.",
+        context=[],
+        llm_client=llm,
+        model=None,
+        preferred_language="en",
+        conversation_session_id=session_id,
+    )
+
+    def _extract_preflight_text(call_index: int) -> str | None:
+        context_messages = llm.calls[call_index].get("context") or []
+        for msg in context_messages:
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if isinstance(content, str) and "ONTOLOGY PRE-FLIGHT" in content:
+                return content
+        return None
+
+    second_preflight = _extract_preflight_text(1)
+    third_preflight = _extract_preflight_text(2)
+
+    assert second_preflight is not None, "expected preflight on first follow-up turn"
+    assert third_preflight is not None, "expected preflight on second follow-up turn"
+    assert "#V#scientific_paper" in second_preflight
+    assert "#V#authored_by" in second_preflight
+    assert "#V#scientific_paper" in third_preflight
+    assert "#V#authored_by" in third_preflight
+
+    second_telemetry = [
+        entry
+        for entry in (second.aux_llm_calls or [])
+        if entry.get("type") == "ontology_preflight"
+    ][0]
+    third_telemetry = [
+        entry
+        for entry in (third.aux_llm_calls or [])
+        if entry.get("type") == "ontology_preflight"
+    ][0]
+    assert second_telemetry.get("session_memory_reused") is True
+    assert third_telemetry.get("session_memory_reused") is True
