@@ -419,6 +419,10 @@ class InternalMCPChatOrchestrator:
     _ANNOTATION_PREFLIGHT_MAX_REGION_TYPES = 12
     _ANNOTATION_PREFLIGHT_MAX_REGION_PREDICATES = 12
     _ANNOTATION_PREFLIGHT_MAX_REGION_RELATED_CONCEPTS = 20
+    _RAG_PREFLIGHT_SOURCE_PATH = "rag_concept_text_search"
+    _RAG_PREFLIGHT_TOP_K = 12
+    _RAG_PREFLIGHT_MAX_CANDIDATES = 8
+    _RAG_PREFLIGHT_EVIDENCE_MAX_CHARS = 220
     _SALIENT_PREDICATE_FOR_TYPE_RELATION_ID = "#V#salient_binary_predicate_for_type"
     _SALIENT_PREFLIGHT_MAX_TYPES = 5
     _SALIENT_PREFLIGHT_MAX_PREDICATES_PER_TYPE = 6
@@ -10635,6 +10639,328 @@ class InternalMCPChatOrchestrator:
 
         return "\n".join(lines)
 
+    @staticmethod
+    def _extract_rag_preflight_evidence_snippet(
+        text: Any, *, max_chars: int
+    ) -> str | None:
+        if not isinstance(text, str):
+            return None
+
+        import re
+
+        raw = text.strip()
+        if not raw:
+            return None
+
+        body_lines: list[str] = []
+        for line in raw.splitlines():
+            cleaned_line = line.strip()
+            if not cleaned_line:
+                continue
+            if re.match(r"^(Concept|Predicate|Language)\s*:", cleaned_line):
+                continue
+            body_lines.append(cleaned_line)
+
+        source = " ".join(body_lines) if body_lines else raw
+        source = re.sub(r"\s+", " ", source).strip()
+        if not source:
+            return None
+
+        if len(source) <= max_chars:
+            return source
+        return f"{source[: max_chars - 3].rstrip()}..."
+
+    def _collect_rag_preflight_context(
+        self,
+        *,
+        prompt: str,
+        topic_keywords: Sequence[str],
+        preferred_language: str | None,
+        user_namespace: str | None,
+    ) -> dict[str, Any]:
+        """Collect bounded concept candidates from RAG text relations.
+
+        JVNAUTOSCI-989: provenance-first concept discovery over hasDescription/hasNote
+        text relations with short evidence snippets for each candidate concept.
+        """
+
+        payload: dict[str, Any] = {
+            "query": None,
+            "namespace_present": False,
+            "invoked": False,
+            "used": False,
+            "result_count": 0,
+            "candidates": [],
+            "candidate_concept_ids": [],
+            "type_candidates": [],
+            "predicate_candidates": [],
+            "selected_concept_ids": [],
+            "selected_concept_id": None,
+            "errors": [],
+        }
+        if not isinstance(prompt, str) or not prompt.strip():
+            return payload
+
+        query_terms = [
+            str(item).strip()
+            for item in topic_keywords
+            if isinstance(item, str) and item.strip()
+        ]
+        query = " ".join(query_terms[:8]) if query_terms else prompt.strip()
+        query = query[:320].strip()
+        if not query:
+            return payload
+        payload["query"] = query
+
+        namespace = (
+            user_namespace.strip()
+            if isinstance(user_namespace, str) and user_namespace.strip()
+            else None
+        )
+        payload["namespace_present"] = bool(namespace)
+        if not namespace:
+            payload["errors"].append("rag_namespace_missing")
+            return payload
+
+        rag_payload = {
+            "query": query,
+            "namespace": namespace,
+            "top_k": int(self._RAG_PREFLIGHT_TOP_K),
+            "mode": "concepts",
+            "predicates": ["hasDescription", "hasNote"],
+        }
+
+        try:
+            rag_result = self._gateway.invoke("search_knowledge_base", rag_payload)
+        except Exception:
+            payload["errors"].append("rag_search_failed")
+            return payload
+
+        payload["invoked"] = True
+        raw_payload = rag_result.payload if isinstance(rag_result.payload, Mapping) else {}
+        if not isinstance(raw_payload, Mapping):
+            payload["errors"].append("rag_search_non_mapping_payload")
+            return payload
+        if raw_payload.get("success") is False:
+            raw_error = raw_payload.get("error")
+            if isinstance(raw_error, str) and raw_error.strip():
+                payload["errors"].append(f"rag_search_error:{raw_error.strip()}")
+            else:
+                payload["errors"].append("rag_search_error")
+            return payload
+
+        raw_results = raw_payload.get("results")
+        if not isinstance(raw_results, list):
+            payload["errors"].append("rag_search_results_non_list")
+            return payload
+        payload["result_count"] = len(raw_results)
+
+        try:
+            from src.backend.services.concept_service import get_concept_by_concept_id
+        except Exception:
+            get_concept_by_concept_id = None
+            payload["errors"].append("rag_concept_service_unavailable")
+
+        try:
+            from src.backend.services.text_value_service import get_texts_for_concept
+        except Exception:
+            get_texts_for_concept = None
+            payload["errors"].append("rag_text_value_service_unavailable")
+
+        try:
+            from src.backend.vontology.utils_vontology import (
+                is_predicate as _raw_is_predicate,
+                is_type as _raw_is_type,
+            )
+        except Exception:
+            _raw_is_predicate = None
+            _raw_is_type = None
+            payload["errors"].append("rag_kind_classifier_unavailable")
+
+        def _classify_kind(doc: Mapping[str, Any] | None) -> str | None:
+            if not isinstance(doc, Mapping):
+                return None
+            try:
+                if callable(_raw_is_predicate) and _raw_is_predicate(dict(doc)):
+                    return "predicate"
+            except Exception:
+                pass
+            try:
+                if callable(_raw_is_type) and _raw_is_type(dict(doc)):
+                    return "type"
+            except Exception:
+                pass
+            return "individual"
+
+        concept_doc_cache: dict[str, Mapping[str, Any] | None] = {}
+        concept_name_cache: dict[str, str | None] = {}
+
+        def _get_concept_doc(concept_id: str) -> Mapping[str, Any] | None:
+            lowered = concept_id.lower()
+            if lowered in concept_doc_cache:
+                return concept_doc_cache[lowered]
+            if not callable(get_concept_by_concept_id):
+                concept_doc_cache[lowered] = None
+                return None
+            try:
+                doc = get_concept_by_concept_id(concept_id)
+            except Exception:
+                doc = None
+            normalised_doc = dict(doc) if isinstance(doc, Mapping) else None
+            concept_doc_cache[lowered] = normalised_doc
+            return normalised_doc
+
+        def _get_display_name(concept_id: str) -> str | None:
+            lowered = concept_id.lower()
+            if lowered in concept_name_cache:
+                return concept_name_cache[lowered]
+
+            display_name: str | None = None
+            if callable(get_texts_for_concept):
+                try:
+                    name_rows = get_texts_for_concept(
+                        concept_id, predicate="hasName", limit=60
+                    )
+                except Exception:
+                    name_rows = []
+                selected_name, _selected_lang = self._select_preferred_name(
+                    name_rows if isinstance(name_rows, list) else [],
+                    preferred_language,
+                )
+                display_name = self._normalise_preflight_display_name(selected_name)
+
+            if not display_name:
+                doc = _get_concept_doc(concept_id)
+                if isinstance(doc, Mapping):
+                    raw_name = doc.get("name")
+                    if isinstance(raw_name, str) and raw_name.strip():
+                        display_name = self._normalise_preflight_display_name(
+                            raw_name.strip()
+                        )
+
+            concept_name_cache[lowered] = display_name
+            return display_name
+
+        candidates: list[dict[str, Any]] = []
+        type_candidates: list[dict[str, Any]] = []
+        predicate_candidates: list[dict[str, Any]] = []
+        selected_concept_ids: list[str] = []
+        seen: set[str] = set()
+        for item in raw_results[: int(self._RAG_PREFLIGHT_TOP_K)]:
+            if not isinstance(item, Mapping):
+                continue
+
+            raw_metadata = item.get("metadata")
+            metadata: Mapping[str, Any]
+            if isinstance(raw_metadata, Mapping):
+                metadata = raw_metadata
+            else:
+                metadata = {}
+            concept_id = metadata.get("concept_id") or metadata.get("subject_concept_id")
+            if not isinstance(concept_id, str):
+                text_value = item.get("text")
+                if isinstance(text_value, str):
+                    match = re.search(r"#V#[A-Za-z0-9][A-Za-z0-9._-]*", text_value)
+                    if match:
+                        concept_id = match.group(0)
+            if not isinstance(concept_id, str):
+                continue
+            concept_id = concept_id.strip()
+            if not self._looks_like_concept_id(concept_id):
+                continue
+
+            lowered = concept_id.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+
+            doc = _get_concept_doc(concept_id)
+            kind = _classify_kind(doc)
+            score = item.get("score")
+            predicate = metadata.get("predicate")
+            evidence_snippet = self._extract_rag_preflight_evidence_snippet(
+                item.get("text"), max_chars=self._RAG_PREFLIGHT_EVIDENCE_MAX_CHARS
+            )
+            candidate_payload: dict[str, Any] = {
+                "concept_id": concept_id,
+                "source_path": self._RAG_PREFLIGHT_SOURCE_PATH,
+            }
+            if isinstance(kind, str) and kind:
+                candidate_payload["kind"] = kind
+            name = _get_display_name(concept_id)
+            if isinstance(name, str) and name.strip():
+                candidate_payload["name"] = name.strip()
+            if isinstance(score, (int, float)):
+                candidate_payload["score"] = round(float(score), 6)
+            if isinstance(predicate, str) and predicate.strip():
+                candidate_payload["predicate"] = predicate.strip()
+            if isinstance(evidence_snippet, str) and evidence_snippet.strip():
+                candidate_payload["evidence_snippet"] = evidence_snippet.strip()
+
+            candidates.append(candidate_payload)
+            selected_concept_ids.append(concept_id)
+            if kind == "type":
+                type_candidates.append(dict(candidate_payload))
+            elif kind == "predicate":
+                predicate_candidates.append(dict(candidate_payload))
+
+            if len(candidates) >= self._RAG_PREFLIGHT_MAX_CANDIDATES:
+                break
+
+        payload["used"] = bool(candidates)
+        payload["candidates"] = candidates
+        payload["candidate_concept_ids"] = [
+            item.get("concept_id")
+            for item in candidates
+            if isinstance(item.get("concept_id"), str)
+        ]
+        payload["type_candidates"] = type_candidates
+        payload["predicate_candidates"] = predicate_candidates
+        payload["selected_concept_ids"] = selected_concept_ids
+        payload["selected_concept_id"] = (
+            selected_concept_ids[0] if selected_concept_ids else None
+        )
+        return payload
+
+    def _build_rag_concept_discovery_section(
+        self, rag_candidates: Sequence[Mapping[str, Any]]
+    ) -> str | None:
+        if not rag_candidates:
+            return None
+
+        lines: list[str] = ["RAG-assisted concept candidates (descriptions/notes):"]
+        for item in rag_candidates[: self._RAG_PREFLIGHT_MAX_CANDIDATES]:
+            if not isinstance(item, Mapping):
+                continue
+            concept_id = item.get("concept_id")
+            if not isinstance(concept_id, str) or not concept_id.strip():
+                continue
+
+            suffix_parts: list[str] = []
+            kind = item.get("kind")
+            if isinstance(kind, str) and kind.strip():
+                suffix_parts.append(f"kind={kind.strip()}")
+            name = item.get("name")
+            if isinstance(name, str) and name.strip():
+                suffix_parts.append(f'name="{name.strip()}"')
+            score = item.get("score")
+            if isinstance(score, (int, float)):
+                suffix_parts.append(f"score={float(score):.3f}")
+            predicate = item.get("predicate")
+            if isinstance(predicate, str) and predicate.strip():
+                suffix_parts.append(f"via={predicate.strip()}")
+
+            if suffix_parts:
+                lines.append(f"- {concept_id.strip()} ({', '.join(suffix_parts)})")
+            else:
+                lines.append(f"- {concept_id.strip()}")
+
+            evidence = item.get("evidence_snippet")
+            if isinstance(evidence, str) and evidence.strip():
+                lines.append(f'  evidence: "{evidence.strip()}"')
+
+        return "\n".join(lines)
+
     def _normalise_salient_preflight_groups(
         self, raw_groups: Any
     ) -> list[dict[str, Any]]:
@@ -11041,6 +11367,7 @@ class InternalMCPChatOrchestrator:
         preferred_language: str | None,
         context: Optional[Sequence[Mapping[str, Any]]] = None,
         conversation_session_id: str | None = None,
+        user_namespace: str | None = None,
     ) -> _OntologyPreflightResult:
         """Deterministically surface preflight predicates and types from the Vontology.
 
@@ -11050,6 +11377,8 @@ class InternalMCPChatOrchestrator:
         and bounded neighbourhood expansion (types/predicates/related nodes).
         Extended (JVNAUTOSCI-992): adds type-linked salient predicate suggestions
         using #V#salient_binary_predicate_for_type.
+        Extended (JVNAUTOSCI-989): adds bounded RAG-backed concept discovery over
+        descriptions/notes with per-candidate evidence snippets and provenance.
         Extended (JVNAUTOSCI-987): adds explicit discovery-path provenance and
         bounded session follow-up carry-over for under-specified follow-up turns.
         """
@@ -11266,6 +11595,65 @@ class InternalMCPChatOrchestrator:
             else []
         )
 
+        # --- RAG-assisted concept discovery (JVNAUTOSCI-989) ---
+        rag_context = self._collect_rag_preflight_context(
+            prompt=raw,
+            topic_keywords=topic_keywords,
+            preferred_language=preferred_language,
+            user_namespace=user_namespace,
+        )
+        rag_query = rag_context.get("query")
+        if not isinstance(rag_query, str) or not rag_query.strip():
+            rag_query = None
+        rag_namespace_present = bool(rag_context.get("namespace_present"))
+        rag_invoked = bool(rag_context.get("invoked"))
+        rag_used = bool(rag_context.get("used"))
+        rag_result_count_raw = rag_context.get("result_count")
+        if isinstance(rag_result_count_raw, (int, float, str)):
+            try:
+                rag_result_count = int(rag_result_count_raw)
+            except Exception:
+                rag_result_count = 0
+        else:
+            rag_result_count = 0
+        rag_candidates = (
+            [dict(item) for item in rag_context.get("candidates", []) if isinstance(item, Mapping)]
+            if isinstance(rag_context.get("candidates"), Sequence)
+            and not isinstance(rag_context.get("candidates"), (str, bytes, bytearray))
+            else []
+        )
+        rag_candidate_concept_ids = (
+            list(rag_context.get("candidate_concept_ids", []))
+            if isinstance(rag_context.get("candidate_concept_ids"), list)
+            else []
+        )
+        rag_type_candidates = (
+            [dict(item) for item in rag_context.get("type_candidates", []) if isinstance(item, Mapping)]
+            if isinstance(rag_context.get("type_candidates"), Sequence)
+            and not isinstance(rag_context.get("type_candidates"), (str, bytes, bytearray))
+            else []
+        )
+        rag_predicate_candidates = (
+            [dict(item) for item in rag_context.get("predicate_candidates", []) if isinstance(item, Mapping)]
+            if isinstance(rag_context.get("predicate_candidates"), Sequence)
+            and not isinstance(rag_context.get("predicate_candidates"), (str, bytes, bytearray))
+            else []
+        )
+        rag_selected_concept_ids = (
+            list(rag_context.get("selected_concept_ids", []))
+            if isinstance(rag_context.get("selected_concept_ids"), list)
+            else []
+        )
+        rag_selected_concept_id = rag_context.get("selected_concept_id")
+        if not isinstance(rag_selected_concept_id, str) or not rag_selected_concept_id:
+            rag_selected_concept_id = None
+        rag_preflight_errors = (
+            list(rag_context.get("errors", []))
+            if isinstance(rag_context.get("errors"), Sequence)
+            and not isinstance(rag_context.get("errors"), (str, bytes, bytearray))
+            else []
+        )
+
         # --- Salient predicates for relevant types (JVNAUTOSCI-992) ---
         salient_type_candidates: list[dict[str, Any]] = []
         seen_salient_type_candidates: set[str] = set()
@@ -11300,6 +11688,17 @@ class InternalMCPChatOrchestrator:
             )
             if len(salient_type_candidates) >= self._SALIENT_PREFLIGHT_MAX_TYPES:
                 break
+
+        if len(salient_type_candidates) < self._SALIENT_PREFLIGHT_MAX_TYPES:
+            for item in rag_type_candidates:
+                if not isinstance(item, Mapping):
+                    continue
+                _append_salient_type_candidate(
+                    item.get("concept_id"),
+                    name=item.get("name"),
+                )
+                if len(salient_type_candidates) >= self._SALIENT_PREFLIGHT_MAX_TYPES:
+                    break
 
         if len(salient_type_candidates) < self._SALIENT_PREFLIGHT_MAX_TYPES:
             for concept_id in annotation_suggested_type_ids:
@@ -11370,6 +11769,22 @@ class InternalMCPChatOrchestrator:
                     "source_path": "topic_keyword_similarity_search",
                 }
             )
+        for item in rag_type_candidates:
+            if not isinstance(item, Mapping):
+                continue
+            concept_id = item.get("concept_id")
+            if not isinstance(concept_id, str) or not concept_id:
+                continue
+            contextual_types_for_memory.append(
+                {
+                    "concept_id": concept_id,
+                    "name": item.get("name"),
+                    "score": item.get("score"),
+                    "source_path": self._RAG_PREFLIGHT_SOURCE_PATH,
+                    "evidence_snippet": item.get("evidence_snippet"),
+                    "predicate": item.get("predicate"),
+                }
+            )
         for concept_id in annotation_suggested_type_ids:
             if not isinstance(concept_id, str) or not concept_id:
                 continue
@@ -11415,6 +11830,22 @@ class InternalMCPChatOrchestrator:
                     "name": item.get("name"),
                     "score": item.get("score"),
                     "source_path": "topic_keyword_similarity_search",
+                }
+            )
+        for item in rag_predicate_candidates:
+            if not isinstance(item, Mapping):
+                continue
+            concept_id = item.get("concept_id")
+            if not isinstance(concept_id, str) or not concept_id:
+                continue
+            contextual_predicates_for_memory.append(
+                {
+                    "concept_id": concept_id,
+                    "name": item.get("name"),
+                    "score": item.get("score"),
+                    "source_path": self._RAG_PREFLIGHT_SOURCE_PATH,
+                    "evidence_snippet": item.get("evidence_snippet"),
+                    "predicate": item.get("predicate"),
                 }
             )
         for concept_id in annotation_region_predicate_ids:
@@ -11573,6 +12004,8 @@ class InternalMCPChatOrchestrator:
             source_path: str,
             name: Any = None,
             score: Any = None,
+            evidence_snippet: Any = None,
+            predicate: Any = None,
         ) -> None:
             if not isinstance(concept_id, str):
                 return
@@ -11588,6 +12021,10 @@ class InternalMCPChatOrchestrator:
                 payload["name"] = name.strip()
             if score is not None:
                 payload["score"] = score
+            if isinstance(evidence_snippet, str) and evidence_snippet.strip():
+                payload["evidence_snippet"] = evidence_snippet.strip()
+            if isinstance(predicate, str) and predicate.strip():
+                payload["predicate"] = predicate.strip()
             bucket.append(payload)
 
         for item in topic_types:
@@ -11616,6 +12053,20 @@ class InternalMCPChatOrchestrator:
                 seen=seen_types,
                 concept_id=concept_id,
                 source_path="annotation_region_search",
+            )
+
+        for item in rag_type_candidates:
+            if not isinstance(item, Mapping):
+                continue
+            _append_suggestion(
+                bucket=final_type_suggestions,
+                seen=seen_types,
+                concept_id=item.get("concept_id"),
+                name=item.get("name"),
+                score=item.get("score"),
+                evidence_snippet=item.get("evidence_snippet"),
+                predicate=item.get("predicate"),
+                source_path=self._RAG_PREFLIGHT_SOURCE_PATH,
             )
 
         for item in session_memory_types:
@@ -11659,6 +12110,20 @@ class InternalMCPChatOrchestrator:
                 seen=seen_predicates,
                 concept_id=concept_id,
                 source_path="annotation_region_search",
+            )
+
+        for item in rag_predicate_candidates:
+            if not isinstance(item, Mapping):
+                continue
+            _append_suggestion(
+                bucket=final_predicate_suggestions,
+                seen=seen_predicates,
+                concept_id=item.get("concept_id"),
+                name=item.get("name"),
+                score=item.get("score"),
+                evidence_snippet=item.get("evidence_snippet"),
+                predicate=item.get("predicate"),
+                source_path=self._RAG_PREFLIGHT_SOURCE_PATH,
             )
 
         for item in salient_predicate_suggestions:
@@ -11708,6 +12173,9 @@ class InternalMCPChatOrchestrator:
             or annotation_region_type_ids
             or annotation_region_predicate_ids
             or annotation_region_related_concept_ids
+            or rag_candidates
+            or rag_type_candidates
+            or rag_predicate_candidates
             or salient_predicates_by_type
             or salient_predicate_ids
             or session_memory_types
@@ -11720,8 +12188,8 @@ class InternalMCPChatOrchestrator:
             return _OntologyPreflightResult(message=None, telemetry=None)
 
         lines: list[str] = [
-            "ONTOLOGY PRE-FLIGHT (deterministic, read-only; stage=1+topic+annotation+salient+follow-up):",
-            "Source: instances of #V#conversation_preflight_predicate + context-based discovery.",
+            "ONTOLOGY PRE-FLIGHT (deterministic, read-only; stage=1+topic+annotation+salient+rag+follow-up):",
+            "Source: instances of #V#conversation_preflight_predicate + context-based discovery + RAG concept text search.",
             "Use these existing concept IDs for tool planning. Do not invent new concepts here.",
         ]
 
@@ -11777,6 +12245,11 @@ class InternalMCPChatOrchestrator:
         if annotation_region_section:
             lines.append("")
             lines.append(annotation_region_section)
+
+        rag_section = self._build_rag_concept_discovery_section(rag_candidates)
+        if rag_section:
+            lines.append("")
+            lines.append(rag_section)
 
         if session_memory_reused and (
             session_memory_types
@@ -11921,6 +12394,19 @@ class InternalMCPChatOrchestrator:
             "annotation_region_predicate_ids": annotation_region_predicate_ids,
             "annotation_region_related_concept_ids": annotation_region_related_concept_ids,
             "annotation_preflight_errors": annotation_preflight_errors,
+            # JVNAUTOSCI-989: bounded RAG-backed concept discovery.
+            "rag_query": rag_query,
+            "rag_namespace_present": rag_namespace_present,
+            "rag_invoked": rag_invoked,
+            "rag_used": rag_used,
+            "rag_result_count": rag_result_count,
+            "rag_candidates": rag_candidates,
+            "rag_candidate_concept_ids": rag_candidate_concept_ids,
+            "rag_type_candidates": rag_type_candidates,
+            "rag_predicate_candidates": rag_predicate_candidates,
+            "rag_selected_concept_ids": rag_selected_concept_ids,
+            "rag_selected_concept_id": rag_selected_concept_id,
+            "rag_preflight_errors": rag_preflight_errors,
             # JVNAUTOSCI-992: salient predicate suggestions by relevant type.
             "salient_type_candidate_ids": salient_type_candidate_ids,
             "salient_predicates_by_type": salient_predicates_by_type,
@@ -14638,6 +15124,7 @@ class InternalMCPChatOrchestrator:
             preferred_language,
             context=context,
             conversation_session_id=conversation_session_id,
+            user_namespace=user_namespace,
         )
         if preflight.telemetry:
             aux_llm_calls.append(preflight.telemetry)
