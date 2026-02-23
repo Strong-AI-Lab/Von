@@ -13,6 +13,8 @@ import time
 import threading
 import secrets
 import uuid
+import json
+from pathlib import Path
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping, cast
@@ -88,6 +90,51 @@ _TOOL_PROGRESS_TERMINAL_STATUSES = {"completed", "error", "cancelled"}
 _TOOL_PROGRESS_DIAGNOSTIC_EVENT_LIMIT = 80
 _TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT = 40
 _TURN_EXECUTION_DIAGNOSTICS_PROMPT_PREVIEW_LIMIT = 1000
+_DIAGNOSTIC_EXPORT_STRING_LIMIT = 2000
+_DIAGNOSTIC_EXPORT_COLLECTION_LIMIT = 80
+_DIAGNOSTIC_EXPORT_MAX_DEPTH = 8
+_DIAGNOSTIC_EXPORT_REDACTED_VALUE = "[redacted]"
+_DIAGNOSTIC_EXPORT_SUMMARISED_VALUE = "[summarised]"
+_DIAGNOSTIC_EXPORT_REPO_ROOT = Path(__file__).resolve().parents[4]
+_DIAGNOSTIC_EXPORT_RELATIVE_PATH = Path("data") / "diagnostic_latest.json"
+_DIAGNOSTIC_EXPORT_FILE_PATH = (
+    _DIAGNOSTIC_EXPORT_REPO_ROOT / _DIAGNOSTIC_EXPORT_RELATIVE_PATH
+)
+_DIAGNOSTIC_EXPORT_EXACT_SENSITIVE_KEYS = {
+    "message",
+    "messages",
+    "content",
+    "raw_content",
+    "prompt",
+    "prompt_raw",
+    "prompt_preview",
+    "user_prompt",
+    "response",
+    "screen",
+    "spoken",
+    "screen_text",
+    "spoken_text",
+    "authorization",
+    "api_key",
+    "apikey",
+    "secret",
+    "password",
+    "cookie",
+    "cookies",
+    "set_cookie",
+    "id_token",
+    "access_token",
+    "refresh_token",
+}
+_DIAGNOSTIC_EXPORT_STRUCTURAL_ONLY_KEYS = {
+    "arguments",
+    "args",
+    "payload",
+    "request_payload",
+    "response_payload",
+    "raw_payload",
+    "tool_payload",
+}
 
 
 def get_buttonify_heuristic_preflight_enabled() -> bool:
@@ -759,6 +806,110 @@ def _build_turn_execution_diagnostics(
         "workflow_stage_path": workflow_stage_path,
         "timing_breakdown": timing_breakdown,
     }
+
+
+def _truncate_diagnostic_export_string(value: str) -> str:
+    if len(value) <= _DIAGNOSTIC_EXPORT_STRING_LIMIT:
+        return value
+    truncated_chars = len(value) - _DIAGNOSTIC_EXPORT_STRING_LIMIT
+    return (
+        f"{value[:_DIAGNOSTIC_EXPORT_STRING_LIMIT]}"
+        f"... [truncated {truncated_chars} chars]"
+    )
+
+
+def _is_sensitive_diagnostic_export_key(key: str) -> bool:
+    lowered = key.strip().lower()
+    if not lowered:
+        return False
+    if lowered in _DIAGNOSTIC_EXPORT_EXACT_SENSITIVE_KEYS:
+        return True
+    if "token" in lowered and "count" not in lowered and "tokens_" not in lowered:
+        return True
+    for marker in ("secret", "password", "authorization", "cookie"):
+        if marker in lowered:
+            return True
+    return False
+
+
+def _summarise_diagnostic_export_collection_shape(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        keys = [str(item) for item in value.keys()][: _DIAGNOSTIC_EXPORT_COLLECTION_LIMIT]
+        return {
+            "summary": _DIAGNOSTIC_EXPORT_SUMMARISED_VALUE,
+            "type": "object",
+            "key_count": len(value),
+            "keys": keys,
+        }
+    if isinstance(value, list):
+        return {
+            "summary": _DIAGNOSTIC_EXPORT_SUMMARISED_VALUE,
+            "type": "array",
+            "item_count": len(value),
+        }
+    return {"summary": _DIAGNOSTIC_EXPORT_SUMMARISED_VALUE, "type": type(value).__name__}
+
+
+def _sanitise_diagnostic_export_payload(
+    value: Any,
+    *,
+    depth: int = 0,
+    parent_key: str | None = None,
+) -> Any:
+    if depth >= _DIAGNOSTIC_EXPORT_MAX_DEPTH:
+        return {"summary": _DIAGNOSTIC_EXPORT_SUMMARISED_VALUE, "depth_limited": True}
+
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+
+    if isinstance(value, str):
+        return _truncate_diagnostic_export_string(value)
+
+    if isinstance(value, Mapping):
+        sanitised: dict[str, Any] = {}
+        for index, (raw_key, raw_item) in enumerate(value.items()):
+            if index >= _DIAGNOSTIC_EXPORT_COLLECTION_LIMIT:
+                sanitised["truncated_keys"] = len(value) - _DIAGNOSTIC_EXPORT_COLLECTION_LIMIT
+                break
+
+            key = str(raw_key)
+            if _is_sensitive_diagnostic_export_key(key):
+                sanitised[key] = _DIAGNOSTIC_EXPORT_REDACTED_VALUE
+                continue
+
+            lowered_key = key.strip().lower()
+            if lowered_key in _DIAGNOSTIC_EXPORT_STRUCTURAL_ONLY_KEYS:
+                sanitised[key] = _summarise_diagnostic_export_collection_shape(raw_item)
+                continue
+
+            sanitised[key] = _sanitise_diagnostic_export_payload(
+                raw_item,
+                depth=depth + 1,
+                parent_key=key,
+            )
+        return sanitised
+
+    if isinstance(value, list):
+        sanitised_items = []
+        for index, raw_item in enumerate(value):
+            if index >= _DIAGNOSTIC_EXPORT_COLLECTION_LIMIT:
+                sanitised_items.append(
+                    {"summary": _DIAGNOSTIC_EXPORT_SUMMARISED_VALUE, "truncated_items": len(value) - _DIAGNOSTIC_EXPORT_COLLECTION_LIMIT}
+                )
+                break
+            sanitised_items.append(
+                _sanitise_diagnostic_export_payload(
+                    raw_item,
+                    depth=depth + 1,
+                    parent_key=parent_key,
+                )
+            )
+        return sanitised_items
+
+    try:
+        return _truncate_diagnostic_export_string(str(value))
+    except Exception:
+        return f"<{type(value).__name__}>"
 
 
 def _start_tool_progress_heartbeat(
@@ -7336,6 +7487,67 @@ def history_debug():
     except Exception as e:
         print(f"Error retrieving history debug data: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+@von_bp.route("/diagnostics/export", methods=["POST"])
+def export_diagnostics_snapshot():
+    """Write a sanitised diagnostics snapshot to data/diagnostic_latest.json.
+
+    This route is intentionally opt-in and user-triggered (keyboard shortcut in
+    the chat UI). It keeps troubleshooting friction low for external coding
+    agents while removing message bodies, prompts, and token-like fields.
+    """
+
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "invalid_payload",
+                    "message": "Expected a JSON object payload.",
+                }
+            ),
+            400,
+        )
+
+    sanitised_payload = _sanitise_diagnostic_export_payload(payload)
+    exported_at_utc = _now_utc_iso()
+    file_payload = {
+        "schema_version": "von_diagnostic_export.v1",
+        "exported_at_utc": exported_at_utc,
+        "source": "chat_shortcut",
+        "sanitised": True,
+        "diagnostics": sanitised_payload,
+    }
+
+    try:
+        _DIAGNOSTIC_EXPORT_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _DIAGNOSTIC_EXPORT_FILE_PATH.write_text(
+            json.dumps(file_payload, indent=2, ensure_ascii=True, default=str) + "\n",
+            encoding="utf-8",
+        )
+        return jsonify(
+            {
+                "success": True,
+                "path": str(_DIAGNOSTIC_EXPORT_RELATIVE_PATH).replace("\\", "/"),
+                "written_at_utc": exported_at_utc,
+            }
+        )
+    except Exception as exc:
+        current_app.logger.error(
+            "Failed to write diagnostic snapshot export: %s", exc, exc_info=True
+        )
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "write_failed",
+                    "message": "Could not write diagnostic export file.",
+                }
+            ),
+            500,
+        )
 
 
 @von_bp.route("/history/backfill_spoken", methods=["POST"])
