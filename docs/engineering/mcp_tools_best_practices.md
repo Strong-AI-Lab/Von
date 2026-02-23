@@ -225,6 +225,52 @@ result = create_vontology_concept(
 
 ---
 
+### 1.6 Dynamic MCP Tool Registration from Vontology (Runtime-Safe Path)
+
+Use this when you need a Vontology concept to expose a new MCP tool **without**
+adding a bespoke Python `MethodDefinition`.
+
+Current runtime behaviour (JVNAUTOSCI-1250):
+- Only `#V#mcp_tool` instances are considered.
+- Dynamic registration is **fail-closed** and requires explicit activation markers.
+- Dynamic tools can proxy **existing built-in internal MCP tools only**.
+- Dynamic tool names cannot override protected built-in names.
+- Load outcomes are inspectable via gateway diagnostics (`dynamic_tool_registration`).
+
+Required concept attributes for activation:
+- `mcp_tool_name` (string): dynamic method name to expose.
+- `dynamic_target_tool_name` (string): existing built-in method name to proxy.
+- `dynamic_registration_enabled` (bool): must be `true`.
+- `dynamic_registration_approved` (bool): must be `true`.
+
+Optional attributes:
+- `dynamic_fixed_payload` (object): fixed arguments enforced at runtime.
+- `dynamic_timeout_sec` (number > 0): override timeout for this proxy.
+- `dynamic_description` (string): human-readable description.
+
+Example attributes payload:
+```json
+{
+  "mcp_tool_name": "jira_get_issue_safe",
+  "dynamic_target_tool_name": "jira_get_issue",
+  "dynamic_registration_enabled": true,
+  "dynamic_registration_approved": true,
+  "dynamic_fixed_payload": {
+    "fields": ["summary", "status", "assignee"]
+  },
+  "dynamic_timeout_sec": 20,
+  "dynamic_description": "Safe Jira issue lookup with constrained fields."
+}
+```
+
+Guardrails to preserve:
+- Do not point `dynamic_target_tool_name` at non-existent methods.
+- Do not reuse built-in method names in `mcp_tool_name`.
+- Keep fixed payload keys schema-compatible with the target tool.
+- Keep approval explicit; avoid implicit activation from metadata-only concepts.
+
+---
+
 ## Category 2: When to Write Custom Python Scripts
 
 ### 2.1 Bulk Operations with Conditional Logic

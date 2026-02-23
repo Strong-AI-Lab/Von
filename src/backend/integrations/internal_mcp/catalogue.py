@@ -25,17 +25,21 @@ See JVNAUTOSCI-1044 for an example of namespace rejection breaking tool calls.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from datetime import datetime
 from typing import Any, List, Mapping, Sequence
 
+from .dynamic_tool_loader import load_dynamic_method_definitions
 from .gateway import MethodCatalogue, MethodDefinition
 from .schemas import Schema, make_error_response
 from .workflow_surface_capabilities import (
     build_workflow_surface_capability_matrix,
 )
 from src.backend.services.prompt_template_service import PromptTemplateService
+
+logger = logging.getLogger(__name__)
 
 _JIRA_ISSUE_KEY_PATTERN = re.compile(
     r"\b([A-Z][A-Z0-9]{1,24})-(\d+)\b",
@@ -15823,5 +15827,19 @@ def build_default_catalogue() -> MethodCatalogue:
 
     for definition in definitions:
         catalogue.register(definition)
+
+    try:
+        built_in_definitions = {definition.name: definition for definition in definitions}
+        dynamic_result = load_dynamic_method_definitions(
+            base_definitions=built_in_definitions,
+            protected_method_names=built_in_definitions.keys(),
+        )
+        for dynamic_definition in dynamic_result.definitions:
+            catalogue.register(dynamic_definition)
+    except Exception as exc:
+        # Fail closed: keep baseline built-ins available even if dynamic loading fails.
+        logger.warning(
+            "[internal_mcp_catalogue] Dynamic MCP tool registration failed: %s", exc
+        )
 
     return catalogue

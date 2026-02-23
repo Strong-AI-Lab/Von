@@ -209,7 +209,7 @@ class InternalMCPGateway:
         metrics.last_error = error_message
 
     def get_diagnostics(self) -> Dict[str, Any]:
-        return {
+        diagnostics = {
             "enabled": self._enabled,
             "registered_methods": self._catalogue.list_methods(),
             "total_calls": self._total_calls,
@@ -219,6 +219,19 @@ class InternalMCPGateway:
                 for name, metrics in self._method_metrics.items()
             },
         }
+        try:
+            from .dynamic_tool_loader import get_dynamic_tool_registration_status
+
+            diagnostics["dynamic_tool_registration"] = (
+                get_dynamic_tool_registration_status()
+            )
+        except Exception as exc:
+            diagnostics["dynamic_tool_registration"] = {
+                "loaded_at_utc": None,
+                "source": "vontology:#V#mcp_tool",
+                "error": str(exc),
+            }
+        return diagnostics
 
     def describe_methods(self) -> Dict[str, Dict[str, Any]]:
         """Return descriptive metadata for registered methods."""
