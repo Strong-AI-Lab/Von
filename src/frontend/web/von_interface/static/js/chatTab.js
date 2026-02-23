@@ -461,6 +461,7 @@ async function deleteConversation(sessionId) {
 
 let orgSwitchListenerBound = false;
 let authStatusListenerBound = false;
+let diagnosticsExportShortcutBound = false;
 
 // JVNAUTOSCI-942: Tool-use progress while "Thinking..."
 const DEFAULT_THINKING_TEXT = 'Thinking...';
@@ -470,6 +471,8 @@ const TOOL_USE_SETTING_REFRESH_COOLDOWN_MS = 30_000;
 const THINKING_STATUS_ACTIVE = 'active';
 const THINKING_STATUS_WAITING = 'waiting';
 const THINKING_STATUS_STALLED = 'stalled';
+const DIAGNOSTICS_EXPORT_ENDPOINT = '/von/diagnostics/export';
+const DIAGNOSTICS_EXPORT_SHORTCUT_HINT = 'Ctrl+Shift+D';
 
 function getLoadingIndicatorTextEl() {
     const loadingIndicator = document.getElementById('loadingIndicator');
@@ -13676,6 +13679,7 @@ export function initializeChatTab() {
 
     // Initialize LLM debug popup handlers
     initializeLlmDebugPopup();
+    bindDiagnosticsExportShortcut();
     initializeHistoryControls();
     updateHistoryBanner();
     setupChatTabContextMenu();
@@ -14045,6 +14049,233 @@ function buildThinkingDiagnosticsPayload(request) {
         tool_history: Array.isArray(request.toolUseProgressHistory) ? request.toolUseProgressHistory.slice(-40) : [],
         workflow_discovery: request.workflowDiscovery || null
     };
+}
+
+function getLatestLlmDebugEntryForExport() {
+    if (llmDebugData.size === 0) {
+        return null;
+    }
+
+    const getTurnTimestamp = (turnId) => {
+        if (typeof turnId !== 'string') {
+            return 0;
+        }
+        const parts = turnId.split('-');
+        const tail = parts.length > 1 ? Number.parseInt(parts[parts.length - 1], 10) : 0;
+        return Number.isFinite(tail) ? tail : 0;
+    };
+
+    let latest = null;
+    for (const [turnId, debugData] of llmDebugData.entries()) {
+        if (!latest) {
+            latest = { turnId, debugData, timestamp: getTurnTimestamp(turnId) };
+            continue;
+        }
+        const nextTimestamp = getTurnTimestamp(turnId);
+        if (nextTimestamp >= latest.timestamp) {
+            latest = { turnId, debugData, timestamp: nextTimestamp };
+        }
+    }
+    return latest;
+}
+
+function summariseDiagnosticToolInvocation(entry) {
+    if (!entry || typeof entry !== 'object') {
+        return null;
+    }
+
+    const method = entry.method || entry.tool || entry.name || null;
+    const argumentsPayload = (entry.arguments && typeof entry.arguments === 'object') ? entry.arguments : null;
+    return {
+        method,
+        status: entry.status || null,
+        success: (typeof entry.success === 'boolean') ? entry.success : null,
+        duration_ms: (typeof entry.duration_ms === 'number' && Number.isFinite(entry.duration_ms))
+            ? Math.max(0, Math.round(entry.duration_ms))
+            : null,
+        error: entry.error || null,
+        error_type: entry.error_type || null,
+        argument_keys: argumentsPayload ? Object.keys(argumentsPayload).slice(0, 50) : []
+    };
+}
+
+function summariseAuxLlmCallForExport(entry) {
+    if (!entry || typeof entry !== 'object') {
+        return null;
+    }
+    return {
+        type: entry.type || null,
+        model: entry.model || null,
+        provider: entry.provider || null,
+        status: entry.status || null,
+        duration_ms: (typeof entry.duration_ms === 'number' && Number.isFinite(entry.duration_ms))
+            ? Math.max(0, Math.round(entry.duration_ms))
+            : null,
+        error: entry.error || null
+    };
+}
+
+function summariseTurnDiagnosticsForExport(rawTurnDiagnostics) {
+    const turnDiagnostics = (rawTurnDiagnostics && typeof rawTurnDiagnostics === 'object')
+        ? rawTurnDiagnostics
+        : null;
+    if (!turnDiagnostics) {
+        return null;
+    }
+    const events = Array.isArray(turnDiagnostics.events)
+        ? turnDiagnostics.events.filter(event => event && typeof event === 'object')
+        : [];
+    const categories = Array.from(new Set(events
+        .map(event => (typeof (event.type || event.category) === 'string') ? String(event.type || event.category) : '')
+        .filter(Boolean)));
+
+    return {
+        event_count: events.length,
+        categories,
+        latest_event_type: categories.length ? categories[categories.length - 1] : null
+    };
+}
+
+function buildSanitisedLlmDebugExportPayload(debugData) {
+    if (!debugData || typeof debugData !== 'object') {
+        return null;
+    }
+
+    if (debugData.turn_execution_diagnostics && typeof debugData.turn_execution_diagnostics === 'object') {
+        return {
+            type: 'turn_execution_diagnostics',
+            ...debugData.turn_execution_diagnostics,
+            prompt_preview: undefined
+        };
+    }
+
+    const toolInvocations = Array.isArray(debugData.tool_invocations)
+        ? debugData.tool_invocations
+            .map(summariseDiagnosticToolInvocation)
+            .filter(Boolean)
+            .slice(0, 80)
+        : [];
+
+    const auxLlmCalls = Array.isArray(debugData.aux_llm_calls)
+        ? debugData.aux_llm_calls
+            .map(summariseAuxLlmCallForExport)
+            .filter(Boolean)
+            .slice(0, 80)
+        : [];
+
+    return {
+        type: 'llm_debug_summary',
+        request_id: debugData.request_id || null,
+        model: debugData.model || null,
+        error: debugData.error || null,
+        warnings: Array.isArray(debugData.warnings) ? debugData.warnings.slice(0, 40) : [],
+        llm_interaction: (debugData.llm_interaction && typeof debugData.llm_interaction === 'object') ? {
+            requested_model: debugData.llm_interaction.requested_model || null,
+            orchestrator_used: debugData.llm_interaction.orchestrator_used || null,
+            duration_ms: debugData.llm_interaction.duration_ms || null,
+            server_elapsed_ms: debugData.llm_interaction.server_elapsed_ms || null,
+            call_count: Array.isArray(debugData.llm_interaction.calls) ? debugData.llm_interaction.calls.length : 0
+        } : null,
+        tool_invocations: toolInvocations,
+        aux_llm_calls: auxLlmCalls,
+        turn_diagnostics: summariseTurnDiagnosticsForExport(debugData.turn_diagnostics),
+        workflow_discovery: (debugData.workflow_discovery && typeof debugData.workflow_discovery === 'object')
+            ? debugData.workflow_discovery
+            : null,
+        internal_mcp: (debugData.internal_mcp && typeof debugData.internal_mcp === 'object')
+            ? debugData.internal_mcp
+            : null
+    };
+}
+
+function buildDiagnosticsExportRequestPayload() {
+    const activeThinkingRaw = buildThinkingDiagnosticsPayload(activeChatRequest);
+    const activeThinking = activeThinkingRaw ? {
+        ...activeThinkingRaw,
+        prompt_preview: undefined
+    } : null;
+
+    const latestEntry = getLatestLlmDebugEntryForExport();
+    const latestDebug = latestEntry ? buildSanitisedLlmDebugExportPayload(latestEntry.debugData) : null;
+
+    return {
+        schema_version: 'diagnostic_export_request.v1',
+        generated_at_utc: new Date().toISOString(),
+        trigger: 'keyboard_shortcut',
+        shortcut: DIAGNOSTICS_EXPORT_SHORTCUT_HINT,
+        session_id: activeChatSessionId || null,
+        diagnostics: {
+            active_thinking: activeThinking,
+            latest_turn_id: latestEntry ? latestEntry.turnId : null,
+            latest_turn_debug: latestDebug
+        },
+        telemetry: {
+            llm_debug_turn_count: llmDebugData.size,
+            transcript_turn_count: Array.isArray(transcriptTurns) ? transcriptTurns.length : 0
+        }
+    };
+}
+
+function shouldHandleDiagnosticsExportShortcut(event) {
+    if (!event || event.defaultPrevented) {
+        return false;
+    }
+    if (!(event.ctrlKey || event.metaKey) || !event.shiftKey || event.altKey) {
+        return false;
+    }
+    return String(event.key || '').toLowerCase() === 'd';
+}
+
+async function exportDiagnosticsSnapshotFromShortcut() {
+    const payload = buildDiagnosticsExportRequestPayload();
+    const hasDiagnostics = !!(
+        payload.diagnostics.active_thinking
+        || payload.diagnostics.latest_turn_debug
+    );
+    if (!hasDiagnostics) {
+        showToast('No diagnostics available to export.', 'info');
+        return false;
+    }
+
+    try {
+        const response = await fetch(DIAGNOSTICS_EXPORT_ENDPOINT, {
+            method: 'POST',
+            headers: buildChatFetchHeaders({
+                'Content-Type': 'application/json',
+            }),
+            body: JSON.stringify(payload),
+        });
+        const body = await response.json();
+        if (!response.ok || !body?.success) {
+            throw new Error(body?.error || `HTTP ${response.status}`);
+        }
+        const savedPath = body.path || 'data/diagnostic_latest.json';
+        showToast(`Diagnostics exported to ${savedPath}`, 'success');
+        return true;
+    } catch (error) {
+        console.error('[chatTab] Failed to export diagnostics snapshot:', error);
+        showToast('Failed to export diagnostics snapshot.', 'error');
+        return false;
+    }
+}
+
+function bindDiagnosticsExportShortcut() {
+    if (diagnosticsExportShortcutBound) {
+        return;
+    }
+
+    diagnosticsExportShortcutBound = true;
+    document.addEventListener('keydown', (event) => {
+        if (!shouldHandleDiagnosticsExportShortcut(event)) {
+            return;
+        }
+        const chatTab = document.getElementById('chatTab');
+        if (!chatTab || !chatTab.classList.contains('active')) {
+            return;
+        }
+        event.preventDefault();
+        void exportDiagnosticsSnapshotFromShortcut();
+    });
 }
 
 function retryActiveChatRequest() {
@@ -15700,6 +15931,15 @@ export function __testOnly_resetChatTtsState() {
     } catch (_) {
         // Ignore.
     }
+}
+export function __testOnly_shouldHandleDiagnosticsExportShortcut(event) {
+    return shouldHandleDiagnosticsExportShortcut(event);
+}
+export function __testOnly_buildDiagnosticsExportRequestPayload() {
+    return buildDiagnosticsExportRequestPayload();
+}
+export function __testOnly_buildSanitisedLlmDebugExportPayload(debugData) {
+    return buildSanitisedLlmDebugExportPayload(debugData);
 }
 export { formatChatTimestamp, showLlmDebugPopup, switchToChatSession, updateHistoryLength };
 
