@@ -754,7 +754,26 @@ def create_flask_app(
                 "yes",
                 "on",
             }
-            cache_key = (ns or "", bool(include_detail))
+            include_namespace_events = request.args.get(
+                "include_namespace_events", ""
+            ).lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            try:
+                namespace_event_limit = int(
+                    request.args.get("namespace_event_limit", 20) or 20
+                )
+            except Exception:
+                namespace_event_limit = 20
+            cache_key = (
+                ns or "",
+                bool(include_detail),
+                bool(include_namespace_events),
+                int(namespace_event_limit),
+            )
             cache = app.config.setdefault("_RAG_STATUS_CACHE", {})
             lock = app.config.setdefault("_RAG_STATUS_CACHE_LOCK", threading.Lock())
 
@@ -1284,6 +1303,28 @@ def create_flask_app(
                     except Exception:
                         chat_summary["chat_history_backfill_available"] = False
                         chat_summary["chat_history_backfill_reason"] = "unavailable"
+
+            namespace_isolation_diagnostics = {"available": False}
+            try:
+                from ..services.namespace_isolation_diagnostics_service import (
+                    get_namespace_isolation_diagnostics_snapshot,
+                )
+
+                namespace_isolation_diagnostics = (
+                    get_namespace_isolation_diagnostics_snapshot(
+                        include_recent_events=include_namespace_events,
+                        recent_limit=namespace_event_limit,
+                    )
+                )
+                namespace_isolation_diagnostics["available"] = True
+                namespace_isolation_diagnostics["include_recent_events"] = bool(
+                    include_namespace_events
+                )
+            except Exception as exc:
+                namespace_isolation_diagnostics = {
+                    "available": False,
+                    "error": type(exc).__name__,
+                }
             base_payload = {
                 "total": total_sessions,
                 "scoped_sessions": scoped_sessions,
@@ -1303,6 +1344,7 @@ def create_flask_app(
                     session_ns_values[0] if session_ns_values else None
                 ),
                 "session_namespaces": session_ns_values,
+                "namespace_isolation_diagnostics": namespace_isolation_diagnostics,
                 **chat_summary,
             }
 
@@ -1794,8 +1836,14 @@ def create_flask_app(
 
         payload = request.get_json(silent=True) or {}
         namespace = payload.get("namespace")
+        user_concept_id = payload.get("user_concept_id")
+        organisation_concept_id = payload.get("organisation_concept_id")
         try:
-            result = sync_to_chat_store(namespace=namespace)
+            result = sync_to_chat_store(
+                namespace=namespace,
+                user_concept_id=user_concept_id,
+                organisation_concept_id=organisation_concept_id,
+            )
             return jsonify(result)
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 500
@@ -2127,6 +2175,21 @@ def create_flask_app(
             "python_version": sys.version.split()[0],
         }
         diag["mongo"] = mongo_diag
+        try:
+            from ..services.namespace_isolation_diagnostics_service import (
+                get_namespace_isolation_diagnostics_snapshot,
+            )
+
+            diag["namespace_isolation_diagnostics"] = (
+                get_namespace_isolation_diagnostics_snapshot(
+                    include_recent_events=False
+                )
+            )
+        except Exception as exc:
+            diag["namespace_isolation_diagnostics"] = {
+                "available": False,
+                "error": type(exc).__name__,
+            }
         # Durable workflow system status (best-effort)
         try:
             from ..workflows.durable.startup import get_system_status

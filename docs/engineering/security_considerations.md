@@ -76,6 +76,7 @@ Authoritative contract:
 - Preserve org scope when present; do not silently degrade `#V#user@org` flows to user-only scope in downstream tool calls or persistence.
 - Carry component context alongside namespace where practical (`namespace`, `user_concept_id`, `organisation_concept_id`, `namespace_source`) for traceability and future policy enforcement.
 - Keep fail-closed behaviour for missing namespace on user-scoped operations (especially RAG).
+- Monitor compact namespace-isolation counters via `/admin/rag_status` (and `/diag`) to detect mismatch/missing-component regressions before enabling stricter rejection modes.
 
 **Tightening path (later)**:
 - During the current experimental phase, prefer visibility and diagnostics for non-critical mismatches over aggressive hard failures.

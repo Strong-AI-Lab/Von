@@ -96,10 +96,14 @@ def test_rag_list_indexed_includes_provenance(monkeypatch):
 
     assert result["namespace"] == "#V#user@org"
     assert result["namespace_source"] == "request.namespace"
+    assert result["user_concept_id"] == "#V#user"
+    assert result["organisation_concept_id"] == "#V#org"
 
     assert "provenance" in result
     assert result["provenance"]["item_kind"] == "rag_indexed_session_list"
     assert result["provenance"]["source_system"] == "mongo.interaction_sessions"
+    assert result["provenance"]["user_concept_id"] == "#V#user"
+    assert result["provenance"]["organisation_concept_id"] == "#V#org"
 
     assert result["items"], "expected at least one item"
     item = result["items"][0]
@@ -134,6 +138,8 @@ def test_search_knowledge_base_stamps_result_metadata(monkeypatch):
     assert result["success"] is True
     assert result["namespace"] == "#V#user@org"
     assert result["namespace_source"] == "request.namespace"
+    assert result["user_concept_id"] == "#V#user"
+    assert result["organisation_concept_id"] == "#V#org"
 
     assert isinstance(result.get("elapsed_ms"), int)
     assert result["elapsed_ms"] >= 0
@@ -187,8 +193,12 @@ def test_rag_list_collections_includes_expected_collections():
     assert result["success"] is True
     assert result["namespace"] == "#V#user@org"
     assert result["namespace_source"] == "request.namespace"
+    assert result["user_concept_id"] == "#V#user"
+    assert result["organisation_concept_id"] == "#V#org"
 
     assert result["provenance"]["item_kind"] == "rag_collection_list"
+    assert result["provenance"]["user_concept_id"] == "#V#user"
+    assert result["provenance"]["organisation_concept_id"] == "#V#org"
     assert result["collections"]
     collections = {c["collection"] for c in result["collections"]}
     assert "ka_sessions" in collections
@@ -265,6 +275,8 @@ def test_rag_namespace_resolver_supports_user_only_path():
     assert report["namespace_source"] == "derived.user_org"
     assert report["namespace_resolution_note"] == "derived_from_user_org"
     assert report["namespace_mismatch"] is False
+    assert report["user_concept_id"] == "#V#user"
+    assert report["organisation_concept_id"] is None
 
 
 def test_rag_namespace_resolver_supports_user_org_path():
@@ -281,6 +293,20 @@ def test_rag_namespace_resolver_supports_user_org_path():
     assert report["namespace_source"] == "derived.user_org"
     assert report["namespace_resolution_note"] == "derived_from_user_org"
     assert report["namespace_mismatch"] is False
+    assert report["user_concept_id"] == "#V#user"
+    assert report["organisation_concept_id"] == "#V#org"
+
+
+def test_rag_namespace_resolver_derives_components_from_explicit_namespace():
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    report = cat._resolve_rag_namespace_from_kwargs({"namespace": "#V#user@org"})
+
+    assert report["namespace"] == "#V#user@org"
+    assert report["namespace_source"] == "request.namespace"
+    assert report["namespace_mismatch"] is False
+    assert report["user_concept_id"] == "#V#user"
+    assert report["organisation_concept_id"] == "#V#org"
 
 
 def test_rag_list_indexed_fails_closed_on_namespace_mismatch(monkeypatch):
@@ -302,3 +328,5 @@ def test_rag_list_indexed_fails_closed_on_namespace_mismatch(monkeypatch):
     assert result["namespace"] is None
     assert result["provided_namespace"] == "#V#user"
     assert result["derived_namespace"] == "#V#user@org"
+    assert result["user_concept_id"] == "#V#user"
+    assert result["organisation_concept_id"] == "#V#org"

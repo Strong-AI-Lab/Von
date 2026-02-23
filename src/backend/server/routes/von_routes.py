@@ -3591,6 +3591,36 @@ def _namespace_is_org_scoped(namespace: str | None) -> bool:
     )
 
 
+def _record_namespace_isolation_observation(
+    *,
+    flow: str,
+    namespace: str | None,
+    namespace_source: str | None,
+    user_concept_id: str | None,
+    organisation_concept_id: str | None,
+    mismatch_detected: bool,
+    details: dict[str, Any] | None = None,
+) -> None:
+    """Best-effort namespace isolation telemetry for runtime diagnostics."""
+    try:
+        from ...services.namespace_isolation_diagnostics_service import (
+            record_namespace_context_observation,
+        )
+
+        record_namespace_context_observation(
+            flow=flow,
+            namespace=namespace,
+            namespace_source=namespace_source,
+            user_concept_id=user_concept_id,
+            organisation_concept_id=organisation_concept_id,
+            mismatch_detected=bool(mismatch_detected),
+            details=details,
+        )
+    except Exception:
+        # Diagnostics must never break request handling.
+        pass
+
+
 def _resolve_generate_namespace_context(
     *,
     user_concept_id: str | None,
@@ -4433,6 +4463,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
     namespace_report: dict[str, object] = {
         "authenticated": bool(user_concept_id),
         "user_concept_id": user_concept_id,
+        "organisation_concept_id": org_concept_id,
         "namespace": user_namespace,
         "namespace_source": namespace_source,
         "effective_context_source": namespace_resolution.get("effective_context_source"),
@@ -4454,6 +4485,25 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         and user_namespace != namespace_resolution.get("effective_context_namespace")
     ):
         namespace_report["selected_namespace_differs_from_effective_context"] = True
+    _record_namespace_isolation_observation(
+        flow="/von/generate",
+        namespace=user_namespace if isinstance(user_namespace, str) else None,
+        namespace_source=(
+            namespace_source if isinstance(namespace_source, str) else "missing"
+        ),
+        user_concept_id=user_concept_id if isinstance(user_concept_id, str) else None,
+        organisation_concept_id=(
+            org_concept_id if isinstance(org_concept_id, str) else None
+        ),
+        mismatch_detected=bool(namespace_report.get("mismatch_detected")),
+        details={
+            "effective_context_source": namespace_report.get("effective_context_source"),
+            "effective_context_namespace": namespace_report.get(
+                "effective_context_namespace"
+            ),
+            "session_namespace": namespace_report.get("session_namespace"),
+        },
+    )
     if not user_namespace:
         current_app.logger.warning(
             "[NAMESPACE] No effective namespace resolved for user_concept_id=%s",
@@ -4904,10 +4954,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
         if isinstance(user_namespace, str) and user_namespace.strip():
             current_app.logger.info(
-                "[NAMESPACE] Resolved generate namespace=%s source=%s user_concept_id=%s",
+                "[NAMESPACE] Resolved generate namespace=%s source=%s user_concept_id=%s organisation_concept_id=%s",
                 user_namespace,
                 namespace_source,
                 user_concept_id,
+                org_concept_id,
             )
             if namespace_report.get("mismatch_detected"):
                 current_app.logger.warning(
@@ -4928,6 +4979,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             "authenticated": bool(user_concept_id),
             "namespace": user_namespace,
             "namespace_source": namespace_source,
+            "user_concept_id": user_concept_id,
+            "organisation_concept_id": org_concept_id,
             "retrieval_attempted": False,
             "retrieval_attempt_reason": (
                 None if user_concept_id else "not_authenticated"

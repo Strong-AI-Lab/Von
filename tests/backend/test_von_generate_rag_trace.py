@@ -106,12 +106,16 @@ def test_generate_includes_rag_trace_when_authenticated(app):
     assert rag_trace["authenticated"] is True
     assert rag_trace["namespace"] == "#V#user@org"
     assert rag_trace["namespace_source"] == "effective_context.namespace"
+    assert rag_trace["user_concept_id"] == "#V#user"
+    assert rag_trace["organisation_concept_id"] is None
     assert rag_trace["retrieval_attempted"] is True
     assert "search_knowledge_base" in rag_trace["tools_invoked"]
     assert rag_trace["tool_results_included_in_prompt"] is True
 
     assert "llm_debug" in body
     assert body["llm_debug"]["namespace_report"]["namespace"] == "#V#user@org"
+    assert body["llm_debug"]["namespace_report"]["user_concept_id"] == "#V#user"
+    assert body["llm_debug"]["namespace_report"]["organisation_concept_id"] is None
     assert (
         body["llm_debug"]["namespace_report"]["namespace_source"]
         == "effective_context.namespace"
@@ -163,6 +167,8 @@ def test_generate_prefers_window_effective_namespace_and_reports_mismatch(
     rag_trace = body["rag_trace"]
     assert rag_trace["namespace"] == "#V#user@window_org"
     assert rag_trace["namespace_source"] == "effective_context.namespace"
+    assert rag_trace["user_concept_id"] == "#V#user"
+    assert rag_trace["organisation_concept_id"] == "#V#window_org"
 
     namespace_report = body["llm_debug"]["namespace_report"]
     assert namespace_report["mismatch_detected"] is True
@@ -190,5 +196,7 @@ def test_generate_rag_trace_marks_unauthenticated(app):
     rag_trace = body["rag_trace"]
     assert rag_trace["authenticated"] is False
     assert rag_trace["namespace"] is None
+    assert rag_trace["user_concept_id"] is None
+    assert rag_trace["organisation_concept_id"] is None
     assert rag_trace["retrieval_attempted"] is False
     assert rag_trace["retrieval_attempt_reason"] == "not_authenticated"

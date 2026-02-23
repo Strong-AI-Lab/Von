@@ -5200,81 +5200,146 @@ def _resolve_rag_namespace_from_kwargs(kwargs: dict) -> dict:
     if org_candidate is None:
         org_candidate = _normalise_concept_id(kwargs.get("org_id"))
 
-    derived_namespace: str | None = None
-    if user_candidate is not None:
-        user_slug = _namespace_slug_from_concept(user_candidate)
-        org_slug = _namespace_slug_from_concept(org_candidate)
-        if user_slug:
-            try:
-                from ...services.namespace_service import derive_namespace
+    def _derive_namespace_from_components(
+        user_component: str | None, organisation_component: str | None
+    ) -> str | None:
+        if user_component is None:
+            return None
+        user_slug = _namespace_slug_from_concept(user_component)
+        org_slug = _namespace_slug_from_concept(organisation_component)
+        if not user_slug:
+            return None
+        try:
+            from ...services.namespace_service import derive_namespace
 
-                derived_namespace = (
-                    derive_namespace(user_slug, org_slug)
-                    if org_slug
-                    else derive_namespace(user_slug)
-                )
-            except Exception:
-                derived_namespace = None
+            return (
+                derive_namespace(user_slug, org_slug)
+                if org_slug
+                else derive_namespace(user_slug)
+            )
+        except Exception:
+            return None
+
+    # If caller provides only namespace, derive component IDs for consistent
+    # provenance and cross-flow telemetry fields.
+    if explicit_namespace and (user_candidate is None or org_candidate is None):
+        try:
+            from ...services.namespace_service import parse_namespace
+
+            parsed = parse_namespace(explicit_namespace)
+            parsed_user = parsed.get("user_id")
+            parsed_org = parsed.get("org_id")
+            if user_candidate is None and isinstance(parsed_user, str):
+                user_candidate = _normalise_concept_id(parsed_user)
+            if org_candidate is None and isinstance(parsed_org, str):
+                org_candidate = _normalise_concept_id(parsed_org)
+        except Exception:
+            pass
+
+    derived_namespace: str | None = _derive_namespace_from_components(
+        user_candidate, org_candidate
+    )
+
+    def _finalise_report(report: dict[str, Any]) -> dict[str, Any]:
+        enriched = dict(report)
+        enriched["derived_user_concept_id"] = user_candidate
+        enriched["derived_organisation_concept_id"] = org_candidate
+        # Canonical aliases used by cross-flow telemetry/reporting.
+        enriched["user_concept_id"] = user_candidate
+        enriched["organisation_concept_id"] = org_candidate
+
+        try:
+            from ...services.namespace_isolation_diagnostics_service import (
+                record_namespace_context_observation,
+            )
+
+            record_namespace_context_observation(
+                flow="internal_mcp.rag.namespace_resolver",
+                namespace=enriched.get("namespace"),
+                namespace_source=enriched.get("namespace_source"),
+                user_concept_id=user_candidate,
+                organisation_concept_id=org_candidate,
+                mismatch_detected=bool(enriched.get("namespace_mismatch")),
+                details={
+                    "namespace_resolution_note": enriched.get(
+                        "namespace_resolution_note"
+                    ),
+                    "provided_namespace": enriched.get("provided_namespace"),
+                    "derived_namespace": enriched.get("derived_namespace"),
+                },
+            )
+        except Exception:
+            pass
+
+        if bool(enriched.get("namespace_mismatch")):
+            logger.warning(
+                "[NAMESPACE] RAG resolver mismatch provided=%s derived=%s user=%s org=%s",
+                enriched.get("provided_namespace"),
+                enriched.get("derived_namespace"),
+                user_candidate,
+                org_candidate,
+            )
+        return enriched
 
     if explicit_namespace and derived_namespace and explicit_namespace != derived_namespace:
-        return {
-            "namespace": None,
-            "namespace_source": "conflict",
-            "namespace_resolution_note": "namespace_mismatch",
-            "namespace_mismatch": True,
-            "provided_namespace": explicit_namespace,
-            "derived_namespace": derived_namespace,
-            "derived_user_concept_id": user_candidate,
-            "derived_organisation_concept_id": org_candidate,
-        }
+        return _finalise_report(
+            {
+                "namespace": None,
+                "namespace_source": "conflict",
+                "namespace_resolution_note": "namespace_mismatch",
+                "namespace_mismatch": True,
+                "provided_namespace": explicit_namespace,
+                "derived_namespace": derived_namespace,
+            }
+        )
 
     if explicit_namespace:
-        return {
-            "namespace": explicit_namespace,
-            "namespace_source": "request.namespace",
-            "namespace_resolution_note": None,
-            "namespace_mismatch": False,
-            "provided_namespace": explicit_namespace,
-            "derived_namespace": derived_namespace,
-            "derived_user_concept_id": user_candidate,
-            "derived_organisation_concept_id": org_candidate,
-        }
+        return _finalise_report(
+            {
+                "namespace": explicit_namespace,
+                "namespace_source": "request.namespace",
+                "namespace_resolution_note": None,
+                "namespace_mismatch": False,
+                "provided_namespace": explicit_namespace,
+                "derived_namespace": derived_namespace,
+            }
+        )
 
     if derived_namespace:
-        return {
-            "namespace": derived_namespace,
-            "namespace_source": "derived.user_org",
-            "namespace_resolution_note": "derived_from_user_org",
-            "namespace_mismatch": False,
-            "provided_namespace": None,
-            "derived_namespace": derived_namespace,
-            "derived_user_concept_id": user_candidate,
-            "derived_organisation_concept_id": org_candidate,
-        }
+        return _finalise_report(
+            {
+                "namespace": derived_namespace,
+                "namespace_source": "derived.user_org",
+                "namespace_resolution_note": "derived_from_user_org",
+                "namespace_mismatch": False,
+                "provided_namespace": None,
+                "derived_namespace": derived_namespace,
+            }
+        )
 
     env_ns = os.environ.get("VON_DEFAULT_NAMESPACE")
     if isinstance(env_ns, str) and env_ns.strip():
-        return {
-            "namespace": env_ns.strip(),
-            "namespace_source": "env.VON_DEFAULT_NAMESPACE",
-            "namespace_resolution_note": "fallback",
+        return _finalise_report(
+            {
+                "namespace": env_ns.strip(),
+                "namespace_source": "env.VON_DEFAULT_NAMESPACE",
+                "namespace_resolution_note": "fallback",
+                "namespace_mismatch": False,
+                "provided_namespace": None,
+                "derived_namespace": derived_namespace,
+            }
+        )
+
+    return _finalise_report(
+        {
+            "namespace": None,
+            "namespace_source": "missing",
+            "namespace_resolution_note": "namespace_required",
             "namespace_mismatch": False,
             "provided_namespace": None,
             "derived_namespace": derived_namespace,
-            "derived_user_concept_id": user_candidate,
-            "derived_organisation_concept_id": org_candidate,
         }
-
-    return {
-        "namespace": None,
-        "namespace_source": "missing",
-        "namespace_resolution_note": "namespace_required",
-        "namespace_mismatch": False,
-        "provided_namespace": None,
-        "derived_namespace": derived_namespace,
-        "derived_user_concept_id": user_candidate,
-        "derived_organisation_concept_id": org_candidate,
-    }
+    )
 
 
 def _rag_namespace_resolution_error(ns_report: dict[str, Any]) -> dict[str, Any] | None:
@@ -5303,11 +5368,20 @@ def _rag_namespace_resolution_error(ns_report: dict[str, Any]) -> dict[str, Any]
 
 def _with_rag_provenance(*, payload: dict, item_kind: str, source_system: str) -> dict:
     result = dict(payload)
+    user_concept_id = payload.get("user_concept_id")
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        user_concept_id = payload.get("derived_user_concept_id")
+    organisation_concept_id = payload.get("organisation_concept_id")
+    if not isinstance(organisation_concept_id, str) or not organisation_concept_id.strip():
+        organisation_concept_id = payload.get("derived_organisation_concept_id")
+
     provenance = {
         "item_kind": item_kind,
         "source_system": source_system,
         "namespace": payload.get("namespace"),
         "namespace_source": payload.get("namespace_source"),
+        "user_concept_id": user_concept_id,
+        "organisation_concept_id": organisation_concept_id,
     }
     existing = result.get("provenance")
     if isinstance(existing, dict):
