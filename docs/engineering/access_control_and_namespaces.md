@@ -1,6 +1,6 @@
 # Access Control and Namespaces (Vontology + RAG)
 
-This document describes **how access control and namespace isolation currently work in Von**, based on code paths in the repository. It is written for engineering clarity ("what actually happens") and highlights a few known mismatches between intended and implemented behaviour.
+This document describes **how access control and namespace isolation currently work in Von**, based on code paths in the repository. It is written for engineering clarity ("what actually happens").
 
 Von is a **research prototype**. The mechanisms here are primarily about preventing accidental cross-user data access in trusted-user scenarios, not hard multi-tenant security.
 
@@ -8,6 +8,11 @@ Related work items:
 - JVNAUTOSCI-144 (Epic): parent epic for doc representation + RAG work.
 - JVNAUTOSCI-760 (Task): namespaces and access control groundwork (includes multiple subtasks).
 - JVNAUTOSCI-836 (Task): refine/clarify the model (effective namespace, document representation, etc.).
+- JVNAUTOSCI-1168 (Task): authoritative effective namespace contract + phased enforcement guidance.
+- JVNAUTOSCI-1169 (Task): implementation alignment across generate, persistence, and RAG retrieval.
+
+Authoritative namespace contract:
+- `docs/engineering/effective_namespace_contract.md`
 
 ## Key terms
 
@@ -22,7 +27,7 @@ Related work items:
 - User identity comes from the **server session** (fallback: validated `X-User-Concept-ID` header), not from client JSON.
 - RAG tools are **fail-closed** without a namespace.
 - RAG query backends (e.g., LlamaIndex) can additionally filter by metadata keys like `user_id` and `organisation_concept_id`, but only if those keys are provided via `permissions_context`.
-- There are currently **multiple namespace sources** (user-only namespace vs user@org namespace) that are not yet fully unified.
+- Effective namespace resolution is now centralised for `/von/generate` and propagated into persistence and RAG paths, with mismatch diagnostics available for migration hardening.
 
 ## 1) Identity: where user context comes from
 
@@ -106,11 +111,11 @@ Organisation selection routes derive and store a composite namespace in session.
 
 ### How namespaces are passed into tool execution
 
-The `/generate` route currently derives a namespace from the authenticated user concept ID and passes that into the orchestrator as `user_namespace`.
+The `/generate` route resolves one effective namespace per request and passes it into orchestrator/tool paths as `user_namespace`.
 
-- Key behavioural point: **this is currently user-only**, and may not incorporate `session["namespace"]` (user@org) even when an organisation is selected.
-
-This is one of the main “model mismatch” items tracked by JVNAUTOSCI-836.
+- Resolution combines effective window/flask context plus derived fallbacks.
+- Org-scoped namespaces are preferred when org context is available.
+- Resolver diagnostics (`namespace_report`) capture candidate sources and mismatch signals.
 
 ## 5) RAG tools: namespace isolation and metadata filtering
 
@@ -134,14 +139,15 @@ Example: LlamaIndex backend
 Important implication:
 - Namespace filtering alone partitions content, but **metadata filtering is an additional guard** when it is correctly populated.
 
-### Permissions context wiring (known mismatch)
+### Permissions context wiring
 
-Some internal tool handlers build a `permissions_context` from Flask session values. There is at least one known inconsistency where the code checks `org_id` rather than `organisation_concept_id`.
+Internal tool handlers build `permissions_context` from effective request/session values.
 
 Practical consequence:
-- The LlamaIndex metadata filter may be applied for user_id but not for organisation, even when an organisation is selected.
+- Metadata filtering can include both `user_id` and `organisation_concept_id` when those fields are propagated consistently.
 
-(Recommendation is in the “Alignment tasks” section below.)
+Residual risk:
+- Any path that bypasses effective-context propagation can still reduce organisation-level filtering quality; keep namespace provenance visible for triage.
 
 ## 6) RAG indexing / sync: what gets stored
 
@@ -161,32 +167,30 @@ It helps to distinguish:
 
 - **Requested namespace**: what the UI or request body might imply (e.g., org selected in local storage).
 - **Session namespace**: what backend session endpoints have stored (e.g., `#V#user@org`).
-- **Effective namespace**: what the backend actually passes into tool calls (currently often derived from user concept ID only).
+- **Effective namespace**: what the backend resolves and uses for the current request.
 - **Storage namespace**: what is persisted on `interaction_sessions.namespace` and used for listing/getting.
 
-Today, these can diverge. JVNAUTOSCI-836’s “effective namespace resolver” work is the right direction: compute one authoritative effective namespace per request and use it consistently for:
+These can still diverge in legacy and edge-case flows. The contract direction is: compute one authoritative effective namespace per request and use it consistently for:
 - RAG tool invocations
 - interaction session writes
 - RAG sync
 
-## 8) Recommended alignment tasks (engineering)
+Canonical details are defined in:
+- `docs/engineering/effective_namespace_contract.md`
 
-These are concrete changes that would reduce confusion and tighten isolation:
+## 8) Alignment status and remaining work (engineering)
 
-1. Make `/generate` use the same effective namespace source as `/api/session/context`.
-   - If `session["namespace"]` is present, prefer it over user-only derivation.
+Completed:
+1. `/generate` effective namespace alignment with session/window context, plus mismatch diagnostics (JVNAUTOSCI-1169).
+2. Propagation into chat history persistence and RAG retrieval/indexing paths for consistent namespace use (JVNAUTOSCI-1169).
+3. Authoritative contract publication and migration plan (JVNAUTOSCI-1168).
 
-2. Standardise session keys for organisation.
-   - Ensure internal tool `permissions_context` uses `organisation_concept_id` consistently (not `org_id`).
+Remaining:
+1. Continue removing legacy namespace defaults where user-scoped context is required.
+2. Expand strict mismatch enforcement to additional high-risk entry points once diagnostics indicate safe rollout.
+3. Keep provenance stamping comprehensive for persisted artefacts and tool outputs.
 
-3. Ensure RAG sync defaults match the effective namespace model.
-   - Avoid “chat_history” as a silent default unless it is explicitly the intended global namespace.
-
-4. Document the invariants.
-   - “No namespace → no RAG access.”
-   - “Namespace used for list/get must match namespace used for indexing/sync.”
-
-5. Prefer provenance stamping for persisted artefacts (where practical).
+Preferred provenance fields:
   - When Von persists objects that may later be surfaced to an agent or UI (e.g., indexed sessions, RAG chunks, summaries, tool outputs, sync markers), include lightweight provenance fields.
   - Suggested minimum set:
     - `item_kind` (what type of thing this is)

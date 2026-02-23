@@ -61,6 +61,9 @@ The agent receives authentication status in system prompt:
 
 **Intent**: Namespace is not only a storage partition key. It is intended to become a primary access-safety primitive and will interact with future microtheory/theory-inclusion work.
 
+Authoritative contract:
+- See `docs/engineering/effective_namespace_contract.md` for canonical resolution order, propagation fields, policy modes, invariants, and migration phases.
+
 **Current model (research phase)**:
 - Support both user-only namespaces (`#V#<user>`) and user@org namespaces (`#V#<user>@<org>`).
 - Treat namespace as a structured identity scope with two components:
@@ -210,6 +213,7 @@ See `docs/engineering/backup_tooling_security.md` for detailed threat model and 
 - [x] **Remove client-provided user_id fallback** in `von_routes.py` ✅ (Dec 2024)
 - [x] **Require authentication** for all user-scoped endpoints ✅ (Dec 2024)
 - [x] **Inform agent about authentication status** ✅ (Dec 2024)
+- [x] **Publish authoritative effective namespace contract** (`docs/engineering/effective_namespace_contract.md`) ✅ (Feb 2026)
 - [ ] **Use one authoritative effective namespace resolver** (namespace + user/org components) across generate, MCP, persistence, and sync paths
 - [ ] **Emit namespace-component provenance consistently** (`namespace_source`, user component, org component) for auditing and migration to stricter policy
 - [ ] **Add admin authentication** to `/admin/*` endpoints
@@ -285,3 +289,6 @@ For security issues, contact: [Add security contact information]
 - **2026-02-14**: Clarified namespace component security intent
   - Added guidance to treat namespace as structured user+organisation scope
   - Documented phased tightening approach (diagnose now, enforce later)
+- **2026-02-23**: Published effective namespace contract (JVNAUTOSCI-1168)
+  - Added canonical contract document for requested/session/effective/storage namespaces
+  - Linked contract from security guidance for phased enforcement
