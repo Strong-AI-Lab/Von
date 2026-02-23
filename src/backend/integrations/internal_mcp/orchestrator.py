@@ -413,6 +413,12 @@ class InternalMCPChatOrchestrator:
     _PREFLIGHT_SESSION_MEMORY_TTL_SECONDS = 900
     _PREFLIGHT_SESSION_MEMORY_MAX_SESSIONS = 256
     _PREFLIGHT_SESSION_MEMORY_FOLLOW_UP_TURNS = 2
+    _ANNOTATION_PREFLIGHT_MAX_SPANS = 8
+    _ANNOTATION_PREFLIGHT_MAX_CANDIDATES_PER_SPAN = 3
+    _ANNOTATION_PREFLIGHT_MAX_SEED_CONCEPTS = 10
+    _ANNOTATION_PREFLIGHT_MAX_REGION_TYPES = 12
+    _ANNOTATION_PREFLIGHT_MAX_REGION_PREDICATES = 12
+    _ANNOTATION_PREFLIGHT_MAX_REGION_RELATED_CONCEPTS = 20
     _TOOL_CALL_REPAIR_PROMPT = (
         "You are a strict tool-call repairer for an MCP agent.\n"
         "Return ONLY a JSON object or JSON array of tool-call objects.\n"
@@ -10289,6 +10295,340 @@ class InternalMCPChatOrchestrator:
 
         return "\n".join(lines)
 
+    @staticmethod
+    def _normalise_preflight_relationship_targets(raw_value: Any) -> list[str]:
+        if isinstance(raw_value, str):
+            candidate = raw_value.strip()
+            if candidate:
+                return [candidate]
+            return []
+        if isinstance(raw_value, Sequence) and not isinstance(
+            raw_value, (str, bytes, bytearray)
+        ):
+            results: list[str] = []
+            for item in raw_value:
+                if not isinstance(item, str):
+                    continue
+                cleaned = item.strip()
+                if cleaned:
+                    results.append(cleaned)
+            return results
+        return []
+
+    def _collect_annotation_preflight_context(self, prompt: str) -> dict[str, Any]:
+        """Collect deterministic annotation-derived candidate context.
+
+        Stage 2 (JVNAUTOSCI-991): annotate user input spans, collect bounded
+        candidate concept IDs, then perform a small relationship-region lookup
+        around those seed concepts to surface nearby types/predicates/nodes.
+        """
+
+        payload: dict[str, Any] = {
+            "span_count": 0,
+            "seed_candidates": [],
+            "seed_candidate_ids": [],
+            "suggested_type_ids": [],
+            "region_type_ids": [],
+            "region_predicate_ids": [],
+            "region_related_concept_ids": [],
+            "errors": [],
+        }
+        if not isinstance(prompt, str) or not prompt.strip():
+            return payload
+
+        try:
+            from src.backend.services.annotation_extraction_service import (
+                extract_annotations,
+            )
+        except Exception:
+            payload["errors"].append("annotation_service_unavailable")
+            return payload
+
+        try:
+            extracted = extract_annotations(
+                prompt,
+                use_llm=False,
+                use_match=True,
+                return_timings=False,
+            )
+        except Exception:
+            payload["errors"].append("annotation_extraction_failed")
+            return payload
+
+        if not isinstance(extracted, list):
+            payload["errors"].append("annotation_extraction_non_list")
+            return payload
+
+        seed_candidates: list[dict[str, Any]] = []
+        seed_candidate_ids: list[str] = []
+        seen_seed_ids: set[str] = set()
+        suggested_type_ids: list[str] = []
+        seen_suggested_types: set[str] = set()
+
+        for item in extracted[: self._ANNOTATION_PREFLIGHT_MAX_SPANS]:
+            if not isinstance(item, Mapping):
+                continue
+            span = item.get("span")
+            span_text = None
+            span_type = None
+            if isinstance(span, Mapping):
+                span_text_value = span.get("text")
+                if isinstance(span_text_value, str) and span_text_value.strip():
+                    span_text = span_text_value.strip()
+                span_type_value = span.get("type")
+                if isinstance(span_type_value, str) and span_type_value.strip():
+                    span_type = span_type_value.strip()
+
+            for candidate_type in (item.get("suggested_type_id"), span_type):
+                if not isinstance(candidate_type, str):
+                    continue
+                cleaned_type = candidate_type.strip()
+                if not self._looks_like_concept_id(cleaned_type):
+                    continue
+                key = cleaned_type.lower()
+                if key in seen_suggested_types:
+                    continue
+                seen_suggested_types.add(key)
+                suggested_type_ids.append(cleaned_type)
+
+            candidates = item.get("candidates")
+            if not isinstance(candidates, Sequence):
+                continue
+            per_span_seen: set[str] = set()
+            per_span_count = 0
+            for candidate in candidates:
+                if not isinstance(candidate, Mapping):
+                    continue
+                concept_id = candidate.get("concept_id")
+                if not isinstance(concept_id, str):
+                    continue
+                concept_id = concept_id.strip()
+                if not self._looks_like_concept_id(concept_id):
+                    continue
+                lowered = concept_id.lower()
+                if lowered in per_span_seen:
+                    continue
+                per_span_seen.add(lowered)
+                per_span_count += 1
+                if per_span_count > self._ANNOTATION_PREFLIGHT_MAX_CANDIDATES_PER_SPAN:
+                    break
+
+                if lowered not in seen_seed_ids:
+                    seen_seed_ids.add(lowered)
+                    seed_candidate_ids.append(concept_id)
+                if len(seed_candidate_ids) >= self._ANNOTATION_PREFLIGHT_MAX_SEED_CONCEPTS:
+                    break
+
+                candidate_name = candidate.get("name")
+                if isinstance(candidate_name, str) and candidate_name.strip():
+                    candidate_name = self._normalise_preflight_display_name(
+                        candidate_name
+                    )
+                else:
+                    candidate_name = None
+
+                seed_candidates.append(
+                    {
+                        "concept_id": concept_id,
+                        "name": candidate_name,
+                        "span_text": span_text,
+                        "source_path": "annotation_span_candidate",
+                    }
+                )
+            if len(seed_candidate_ids) >= self._ANNOTATION_PREFLIGHT_MAX_SEED_CONCEPTS:
+                break
+
+        payload["span_count"] = min(
+            len(extracted),
+            self._ANNOTATION_PREFLIGHT_MAX_SPANS,
+        )
+        payload["seed_candidates"] = seed_candidates
+        payload["seed_candidate_ids"] = seed_candidate_ids[
+            : self._ANNOTATION_PREFLIGHT_MAX_SEED_CONCEPTS
+        ]
+        payload["suggested_type_ids"] = suggested_type_ids[
+            : self._ANNOTATION_PREFLIGHT_MAX_REGION_TYPES
+        ]
+
+        if not seed_candidate_ids:
+            return payload
+
+        try:
+            from src.backend.services.concept_service import get_concept_by_concept_id
+        except Exception:
+            payload["errors"].append("concept_service_unavailable")
+            return payload
+
+        try:
+            from src.backend.vontology.utils_vontology import (
+                is_predicate as _raw_is_predicate,
+            )
+        except Exception:
+            _raw_is_predicate = None
+
+        def _is_predicate_concept(doc: Mapping[str, Any]) -> bool:
+            if not callable(_raw_is_predicate):
+                return False
+            try:
+                return bool(_raw_is_predicate(dict(doc)))
+            except Exception:
+                return False
+
+        seed_docs: list[dict[str, Any]] = []
+        for seed_concept_id in seed_candidate_ids[
+            : self._ANNOTATION_PREFLIGHT_MAX_SEED_CONCEPTS
+        ]:
+            try:
+                doc = get_concept_by_concept_id(seed_concept_id)
+            except Exception:
+                payload["errors"].append("annotation_region_lookup_failed")
+                return payload
+            if isinstance(doc, Mapping):
+                seed_docs.append(dict(doc))
+
+        region_type_ids: list[str] = []
+        region_predicate_ids: list[str] = []
+        region_related_concept_ids: list[str] = []
+        seen_region_types: set[str] = {
+            str(item).lower()
+            for item in payload["suggested_type_ids"]
+            if isinstance(item, str)
+        }
+        seen_region_predicates: set[str] = set()
+        seen_region_related: set[str] = set()
+
+        def _append_unique(
+            collection: list[str],
+            seen: set[str],
+            value: Any,
+            *,
+            max_items: int,
+        ) -> None:
+            if len(collection) >= max_items:
+                return
+            if not isinstance(value, str):
+                return
+            candidate = value.strip()
+            if not self._looks_like_concept_id(candidate):
+                return
+            key = candidate.lower()
+            if key in seen:
+                return
+            seen.add(key)
+            collection.append(candidate)
+
+        for doc in seed_docs:
+            if not isinstance(doc, Mapping):
+                continue
+            concept_id = doc.get("concept_id")
+            relationships = doc.get("relationships")
+            if not isinstance(relationships, Mapping):
+                continue
+
+            instance_types = self._normalise_preflight_relationship_targets(
+                relationships.get("is_an_instance_of")
+            )
+            super_types = self._normalise_preflight_relationship_targets(
+                relationships.get("is_a_type_of")
+            )
+            for type_id in [*instance_types, *super_types]:
+                _append_unique(
+                    region_type_ids,
+                    seen_region_types,
+                    type_id,
+                    max_items=self._ANNOTATION_PREFLIGHT_MAX_REGION_TYPES,
+                )
+
+            if isinstance(concept_id, str) and _is_predicate_concept(doc):
+                _append_unique(
+                    region_predicate_ids,
+                    seen_region_predicates,
+                    concept_id,
+                    max_items=self._ANNOTATION_PREFLIGHT_MAX_REGION_PREDICATES,
+                )
+
+            for predicate_id, raw_targets in relationships.items():
+                if predicate_id in {"is_an_instance_of", "is_a_type_of"}:
+                    continue
+                _append_unique(
+                    region_predicate_ids,
+                    seen_region_predicates,
+                    predicate_id,
+                    max_items=self._ANNOTATION_PREFLIGHT_MAX_REGION_PREDICATES,
+                )
+                for target_id in self._normalise_preflight_relationship_targets(
+                    raw_targets
+                ):
+                    _append_unique(
+                        region_related_concept_ids,
+                        seen_region_related,
+                        target_id,
+                        max_items=self._ANNOTATION_PREFLIGHT_MAX_REGION_RELATED_CONCEPTS,
+                    )
+
+        payload["region_type_ids"] = region_type_ids
+        payload["region_predicate_ids"] = region_predicate_ids
+        payload["region_related_concept_ids"] = region_related_concept_ids
+        return payload
+
+    def _build_annotation_region_section(
+        self,
+        *,
+        seed_candidates: Sequence[Mapping[str, Any]],
+        region_type_ids: Sequence[str],
+        region_predicate_ids: Sequence[str],
+        related_concept_ids: Sequence[str],
+    ) -> str | None:
+        if (
+            not seed_candidates
+            and not region_type_ids
+            and not region_predicate_ids
+            and not related_concept_ids
+        ):
+            return None
+
+        lines: list[str] = []
+        if seed_candidates:
+            lines.append("Annotation-derived candidate concepts:")
+            for candidate in seed_candidates[: self._ANNOTATION_PREFLIGHT_MAX_SEED_CONCEPTS]:
+                concept_id = candidate.get("concept_id")
+                if not isinstance(concept_id, str) or not concept_id.strip():
+                    continue
+                name = candidate.get("name")
+                span_text = candidate.get("span_text")
+                suffix_parts: list[str] = []
+                if isinstance(name, str) and name.strip():
+                    suffix_parts.append(f'name=\"{name.strip()}\"')
+                if isinstance(span_text, str) and span_text.strip():
+                    suffix_parts.append(f'span=\"{span_text.strip()}\"')
+                if suffix_parts:
+                    lines.append(f"- {concept_id} ({', '.join(suffix_parts)})")
+                else:
+                    lines.append(f"- {concept_id}")
+
+        if region_type_ids or region_predicate_ids or related_concept_ids:
+            lines.append("Annotation region expansion (nearby concepts):")
+            if region_type_ids:
+                lines.append("  Types:")
+                for concept_id in region_type_ids[
+                    : self._ANNOTATION_PREFLIGHT_MAX_REGION_TYPES
+                ]:
+                    lines.append(f"    - {concept_id}")
+            if region_predicate_ids:
+                lines.append("  Predicates:")
+                for concept_id in region_predicate_ids[
+                    : self._ANNOTATION_PREFLIGHT_MAX_REGION_PREDICATES
+                ]:
+                    lines.append(f"    - {concept_id}")
+            if related_concept_ids:
+                lines.append("  Related nodes:")
+                for concept_id in related_concept_ids[
+                    : self._ANNOTATION_PREFLIGHT_MAX_REGION_RELATED_CONCEPTS
+                ]:
+                    lines.append(f"    - {concept_id}")
+
+        return "\n".join(lines)
+
     def _build_ontology_preflight(
         self,
         prompt: str,
@@ -10300,6 +10640,8 @@ class InternalMCPChatOrchestrator:
 
         Stage 1 (JVNAUTOSCI-988): read-only, cheap, and scoped to the current turn.
         Extended (JVNAUTOSCI-1052): includes context-based topic vocabulary discovery.
+        Extended (JVNAUTOSCI-991): includes annotation-derived candidate concept IDs
+        and bounded neighbourhood expansion (types/predicates/related nodes).
         Extended (JVNAUTOSCI-987): adds explicit discovery-path provenance and
         bounded session follow-up carry-over for under-specified follow-up turns.
         """
@@ -10431,12 +10773,99 @@ class InternalMCPChatOrchestrator:
                 topic_types, topic_predicates, topic_keywords
             )
 
+        # --- Annotation-derived concept candidates (JVNAUTOSCI-991) ---
+        annotation_context = self._collect_annotation_preflight_context(raw)
+        annotation_span_count = (
+            int(annotation_context.get("span_count") or 0)
+            if isinstance(annotation_context, Mapping)
+            else 0
+        )
+
+        def _normalise_annotation_candidates(
+            raw_candidates: Any,
+        ) -> list[dict[str, Any]]:
+            if not isinstance(raw_candidates, Sequence) or isinstance(
+                raw_candidates, (str, bytes, bytearray)
+            ):
+                return []
+            normalised: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for item in raw_candidates:
+                if not isinstance(item, Mapping):
+                    continue
+                concept_id = item.get("concept_id")
+                if not isinstance(concept_id, str):
+                    continue
+                cleaned_id = concept_id.strip()
+                if not self._looks_like_concept_id(cleaned_id):
+                    continue
+                lowered = cleaned_id.lower()
+                if lowered in seen:
+                    continue
+                seen.add(lowered)
+                candidate_payload: dict[str, Any] = {"concept_id": cleaned_id}
+                name = item.get("name")
+                if isinstance(name, str) and name.strip():
+                    candidate_payload["name"] = name.strip()
+                span_text = item.get("span_text")
+                if isinstance(span_text, str) and span_text.strip():
+                    candidate_payload["span_text"] = span_text.strip()
+                source_path = item.get("source_path")
+                if isinstance(source_path, str) and source_path.strip():
+                    candidate_payload["source_path"] = source_path.strip()
+                normalised.append(candidate_payload)
+                if len(normalised) >= self._ANNOTATION_PREFLIGHT_MAX_SEED_CONCEPTS:
+                    break
+            return normalised
+
+        annotation_seed_candidates = _normalise_annotation_candidates(
+            annotation_context.get("seed_candidates")
+            if isinstance(annotation_context, Mapping)
+            else None
+        )
+        annotation_seed_candidate_ids = [
+            item.get("concept_id")
+            for item in annotation_seed_candidates
+            if isinstance(item.get("concept_id"), str)
+        ]
+        annotation_suggested_type_ids = self._normalise_preflight_relationship_targets(
+            annotation_context.get("suggested_type_ids")
+            if isinstance(annotation_context, Mapping)
+            else None
+        )[: self._ANNOTATION_PREFLIGHT_MAX_REGION_TYPES]
+        annotation_region_type_ids = self._normalise_preflight_relationship_targets(
+            annotation_context.get("region_type_ids")
+            if isinstance(annotation_context, Mapping)
+            else None
+        )[: self._ANNOTATION_PREFLIGHT_MAX_REGION_TYPES]
+        annotation_region_predicate_ids = self._normalise_preflight_relationship_targets(
+            annotation_context.get("region_predicate_ids")
+            if isinstance(annotation_context, Mapping)
+            else None
+        )[: self._ANNOTATION_PREFLIGHT_MAX_REGION_PREDICATES]
+        annotation_region_related_concept_ids = (
+            self._normalise_preflight_relationship_targets(
+                annotation_context.get("region_related_concept_ids")
+                if isinstance(annotation_context, Mapping)
+                else None
+            )[: self._ANNOTATION_PREFLIGHT_MAX_REGION_RELATED_CONCEPTS]
+        )
+        annotation_preflight_errors = (
+            list(annotation_context.get("errors", []))
+            if isinstance(annotation_context, Mapping)
+            and isinstance(annotation_context.get("errors"), Sequence)
+            and not isinstance(annotation_context.get("errors"), str)
+            else []
+        )
+
         # --- Session follow-up carry-over (JVNAUTOSCI-987) ---
         session_memory_entry = (
             self._preflight_session_memory.get(session_key) if session_key else None
         )
         session_memory_types: list[dict[str, Any]] = []
         session_memory_predicates: list[dict[str, Any]] = []
+        session_memory_annotation_candidates: list[dict[str, Any]] = []
+        session_memory_related_concept_ids: list[str] = []
         session_memory_reused = False
         session_memory_refreshed = False
         session_memory_remaining_turns = 0
@@ -10454,6 +10883,24 @@ class InternalMCPChatOrchestrator:
                     "name": item.get("name"),
                     "score": item.get("score"),
                     "source_path": "topic_keyword_similarity_search",
+                }
+            )
+        for concept_id in annotation_suggested_type_ids:
+            if not isinstance(concept_id, str) or not concept_id:
+                continue
+            contextual_types_for_memory.append(
+                {
+                    "concept_id": concept_id,
+                    "source_path": "annotation_span_type_hint",
+                }
+            )
+        for concept_id in annotation_region_type_ids:
+            if not isinstance(concept_id, str) or not concept_id:
+                continue
+            contextual_types_for_memory.append(
+                {
+                    "concept_id": concept_id,
+                    "source_path": "annotation_region_search",
                 }
             )
 
@@ -10485,13 +10932,61 @@ class InternalMCPChatOrchestrator:
                     "source_path": "topic_keyword_similarity_search",
                 }
             )
+        for concept_id in annotation_region_predicate_ids:
+            if not isinstance(concept_id, str) or not concept_id:
+                continue
+            contextual_predicates_for_memory.append(
+                {
+                    "concept_id": concept_id,
+                    "source_path": "annotation_region_search",
+                }
+            )
 
-        if contextual_types_for_memory or contextual_predicates_for_memory:
+        contextual_annotation_candidates_for_memory: list[dict[str, Any]] = []
+        for item in annotation_seed_candidates:
+            if not isinstance(item, Mapping):
+                continue
+            concept_id = item.get("concept_id")
+            if not isinstance(concept_id, str) or not concept_id:
+                continue
+            contextual_annotation_candidates_for_memory.append(
+                {
+                    "concept_id": concept_id,
+                    "name": item.get("name"),
+                    "span_text": item.get("span_text"),
+                    "source_path": "annotation_span_candidate",
+                }
+            )
+
+        contextual_related_concepts_for_memory: list[str] = []
+        seen_related_for_memory: set[str] = set()
+        for concept_id in annotation_region_related_concept_ids:
+            if not isinstance(concept_id, str) or not concept_id:
+                continue
+            lowered = concept_id.lower()
+            if lowered in seen_related_for_memory:
+                continue
+            seen_related_for_memory.add(lowered)
+            contextual_related_concepts_for_memory.append(concept_id)
+            if (
+                len(contextual_related_concepts_for_memory)
+                >= self._ANNOTATION_PREFLIGHT_MAX_REGION_RELATED_CONCEPTS
+            ):
+                break
+
+        if (
+            contextual_types_for_memory
+            or contextual_predicates_for_memory
+            or contextual_annotation_candidates_for_memory
+            or contextual_related_concepts_for_memory
+        ):
             if session_key:
                 self._preflight_session_memory[session_key] = {
                     "timestamp": now,
                     "types": contextual_types_for_memory,
                     "predicates": contextual_predicates_for_memory,
+                    "annotation_candidates": contextual_annotation_candidates_for_memory,
+                    "related_concept_ids": contextual_related_concepts_for_memory,
                     "follow_up_turns_remaining": int(
                         self._PREFLIGHT_SESSION_MEMORY_FOLLOW_UP_TURNS
                     ),
@@ -10508,6 +11003,10 @@ class InternalMCPChatOrchestrator:
             if remaining > 0:
                 maybe_types = session_memory_entry.get("types")
                 maybe_predicates = session_memory_entry.get("predicates")
+                maybe_annotation_candidates = session_memory_entry.get(
+                    "annotation_candidates"
+                )
+                maybe_related_concept_ids = session_memory_entry.get("related_concept_ids")
                 if isinstance(maybe_types, list):
                     session_memory_types = [
                         dict(item) for item in maybe_types if isinstance(item, Mapping)
@@ -10516,8 +11015,19 @@ class InternalMCPChatOrchestrator:
                     session_memory_predicates = [
                         dict(item) for item in maybe_predicates if isinstance(item, Mapping)
                     ]
+                session_memory_annotation_candidates = _normalise_annotation_candidates(
+                    maybe_annotation_candidates
+                )
+                session_memory_related_concept_ids = (
+                    self._normalise_preflight_relationship_targets(
+                        maybe_related_concept_ids
+                    )[: self._ANNOTATION_PREFLIGHT_MAX_REGION_RELATED_CONCEPTS]
+                )
                 session_memory_reused = bool(
-                    session_memory_types or session_memory_predicates
+                    session_memory_types
+                    or session_memory_predicates
+                    or session_memory_annotation_candidates
+                    or session_memory_related_concept_ids
                 )
                 session_memory_remaining_turns = max(0, remaining - 1)
                 if session_key:
@@ -10525,6 +11035,8 @@ class InternalMCPChatOrchestrator:
                         "timestamp": now,
                         "types": session_memory_types,
                         "predicates": session_memory_predicates,
+                        "annotation_candidates": session_memory_annotation_candidates,
+                        "related_concept_ids": session_memory_related_concept_ids,
                         "follow_up_turns_remaining": session_memory_remaining_turns,
                         "last_used_at": now,
                     }
@@ -10573,6 +11085,22 @@ class InternalMCPChatOrchestrator:
                 source_path="topic_keyword_similarity_search",
             )
 
+        for concept_id in annotation_suggested_type_ids:
+            _append_suggestion(
+                bucket=final_type_suggestions,
+                seen=seen_types,
+                concept_id=concept_id,
+                source_path="annotation_span_type_hint",
+            )
+
+        for concept_id in annotation_region_type_ids:
+            _append_suggestion(
+                bucket=final_type_suggestions,
+                seen=seen_types,
+                concept_id=concept_id,
+                source_path="annotation_region_search",
+            )
+
         for item in session_memory_types:
             if not isinstance(item, Mapping):
                 continue
@@ -10608,6 +11136,14 @@ class InternalMCPChatOrchestrator:
                 source_path="topic_keyword_similarity_search",
             )
 
+        for concept_id in annotation_region_predicate_ids:
+            _append_suggestion(
+                bucket=final_predicate_suggestions,
+                seen=seen_predicates,
+                concept_id=concept_id,
+                source_path="annotation_region_search",
+            )
+
         for item in session_memory_predicates:
             if not isinstance(item, Mapping):
                 continue
@@ -10638,14 +11174,21 @@ class InternalMCPChatOrchestrator:
             or targeted_predicates
             or topic_types
             or topic_predicates
+            or annotation_seed_candidates
+            or annotation_suggested_type_ids
+            or annotation_region_type_ids
+            or annotation_region_predicate_ids
+            or annotation_region_related_concept_ids
             or session_memory_types
             or session_memory_predicates
+            or session_memory_annotation_candidates
+            or session_memory_related_concept_ids
         )
         if not has_vocabulary:
             return _OntologyPreflightResult(message=None, telemetry=None)
 
         lines: list[str] = [
-            "ONTOLOGY PRE-FLIGHT (deterministic, read-only; stage=1+topic+follow-up):",
+            "ONTOLOGY PRE-FLIGHT (deterministic, read-only; stage=1+topic+annotation+follow-up):",
             "Source: instances of #V#conversation_preflight_predicate + context-based discovery.",
             "Use these existing concept IDs for tool planning. Do not invent new concepts here.",
         ]
@@ -10686,7 +11229,22 @@ class InternalMCPChatOrchestrator:
             lines.append("")
             lines.append(topic_vocabulary_section)
 
-        if session_memory_reused and (session_memory_types or session_memory_predicates):
+        annotation_region_section = self._build_annotation_region_section(
+            seed_candidates=annotation_seed_candidates,
+            region_type_ids=annotation_region_type_ids,
+            region_predicate_ids=annotation_region_predicate_ids,
+            related_concept_ids=annotation_region_related_concept_ids,
+        )
+        if annotation_region_section:
+            lines.append("")
+            lines.append(annotation_region_section)
+
+        if session_memory_reused and (
+            session_memory_types
+            or session_memory_predicates
+            or session_memory_annotation_candidates
+            or session_memory_related_concept_ids
+        ):
             lines.append("")
             lines.append(
                 "Carry-over vocabulary from recent turns (session continuity):"
@@ -10702,6 +11260,31 @@ class InternalMCPChatOrchestrator:
                         lines.append(f'    - {concept_id} (name="{name}")')
                     else:
                         lines.append(f"    - {concept_id}")
+            if session_memory_annotation_candidates:
+                lines.append("  Annotation candidates:")
+                for item in session_memory_annotation_candidates[
+                    : self._ANNOTATION_PREFLIGHT_MAX_SEED_CONCEPTS
+                ]:
+                    concept_id = item.get("concept_id")
+                    if not isinstance(concept_id, str) or not concept_id:
+                        continue
+                    name = item.get("name")
+                    span_text = item.get("span_text")
+                    suffix_parts: list[str] = []
+                    if isinstance(name, str) and name.strip():
+                        suffix_parts.append(f'name="{name.strip()}"')
+                    if isinstance(span_text, str) and span_text.strip():
+                        suffix_parts.append(f'span="{span_text.strip()}"')
+                    if suffix_parts:
+                        lines.append(f"    - {concept_id} ({', '.join(suffix_parts)})")
+                    else:
+                        lines.append(f"    - {concept_id}")
+            if session_memory_related_concept_ids:
+                lines.append("  Related nodes:")
+                for concept_id in session_memory_related_concept_ids[
+                    : self._ANNOTATION_PREFLIGHT_MAX_REGION_RELATED_CONCEPTS
+                ]:
+                    lines.append(f"    - {concept_id}")
             if session_memory_predicates:
                 lines.append("  Predicates:")
                 for item in session_memory_predicates[
@@ -10750,11 +11333,22 @@ class InternalMCPChatOrchestrator:
             "topic_types": topic_types,
             "topic_predicates": topic_predicates,
             "topic_vocabulary_cached": topic_vocabulary_cached,
+            # JVNAUTOSCI-991: annotation-derived candidates + bounded region expansion.
+            "annotation_span_count": annotation_span_count,
+            "annotation_seed_candidates": annotation_seed_candidates,
+            "annotation_seed_candidate_ids": annotation_seed_candidate_ids,
+            "annotation_suggested_type_ids": annotation_suggested_type_ids,
+            "annotation_region_type_ids": annotation_region_type_ids,
+            "annotation_region_predicate_ids": annotation_region_predicate_ids,
+            "annotation_region_related_concept_ids": annotation_region_related_concept_ids,
+            "annotation_preflight_errors": annotation_preflight_errors,
             # JVNAUTOSCI-987: explicit discovery-path provenance + follow-up continuity.
             "preflight_session_id_present": bool(session_key),
             "session_memory_reused": session_memory_reused,
             "session_memory_refreshed": session_memory_refreshed,
             "session_memory_follow_up_turns_remaining": session_memory_remaining_turns,
+            "session_memory_annotation_candidates": session_memory_annotation_candidates,
+            "session_memory_related_concept_ids": session_memory_related_concept_ids,
             "final_type_suggestions": final_type_suggestions,
             "final_predicate_suggestions": final_predicate_suggestions,
             "final_suggestion_paths": final_suggestion_paths,

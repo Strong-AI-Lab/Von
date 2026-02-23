@@ -664,3 +664,241 @@ def test_preflight_session_memory_keeps_context_for_two_follow_up_turns(monkeypa
     ][0]
     assert second_telemetry.get("session_memory_reused") is True
     assert third_telemetry.get("session_memory_reused") is True
+
+
+def test_annotation_candidates_surface_in_preflight_telemetry_and_prompt(monkeypatch):
+    """JVNAUTOSCI-991: annotation candidates should be visible in planning context."""
+
+    def _fake_search_concepts(*, query="", instance_of=None, filter_kind=None, **_kwargs):
+        if instance_of == "#V#conversation_preflight_predicate":
+            return {"results": []}
+        return {"results": []}
+
+    monkeypatch.setattr(
+        "src.backend.services.concept_search_service.search_concepts",
+        _fake_search_concepts,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.get_texts_for_concept",
+        lambda concept_id, predicate=None, limit=50: [],
+    )
+
+    def _fake_extract_annotations(
+        text, use_llm=None, use_match=True, return_timings=False
+    ):
+        return [
+            {
+                "span": {"start": 0, "end": 10, "text": "John Smith", "type": "#V#person"},
+                "suggested_type_id": "#V#person",
+                "candidates": [
+                    {"concept_id": "#V#john_smith", "name": "John Smith"},
+                ],
+            }
+        ]
+
+    monkeypatch.setattr(
+        "src.backend.services.annotation_extraction_service.extract_annotations",
+        _fake_extract_annotations,
+    )
+
+    def _fake_get_concept_by_concept_id(concept_id):
+        if concept_id == "#V#john_smith":
+            return {
+                "concept_id": "#V#john_smith",
+                "relationships": {
+                    "is_an_instance_of": ["#V#person"],
+                    "#V#has_affiliation": ["#V#auckland_university_of_technology"],
+                },
+            }
+        return None
+
+    monkeypatch.setattr(
+        "src.backend.services.concept_service.get_concept_by_concept_id",
+        _fake_get_concept_by_concept_id,
+    )
+
+    gateway = cast(Any, _CapturingGateway())
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway, max_tool_invocations=1, max_context_chars=80_000
+    )
+    llm = _CapturingLLM(["ok"])
+
+    result = orchestrator.run(
+        prompt="John Smith authored this paper from AUT.",
+        context=[],
+        llm_client=llm,
+        model=None,
+        preferred_language="en",
+        conversation_session_id="session-991-annotation",
+    )
+
+    preflight_entries = [
+        entry
+        for entry in (result.aux_llm_calls or [])
+        if entry.get("type") == "ontology_preflight"
+    ]
+    assert preflight_entries, "expected ontology preflight telemetry"
+    telemetry = preflight_entries[0]
+
+    assert telemetry.get("annotation_span_count") == 1
+    assert "#V#john_smith" in (telemetry.get("annotation_seed_candidate_ids") or [])
+    assert "#V#person" in (telemetry.get("annotation_suggested_type_ids") or [])
+    assert "#V#has_affiliation" in (
+        telemetry.get("annotation_region_predicate_ids") or []
+    )
+    assert "#V#auckland_university_of_technology" in (
+        telemetry.get("annotation_region_related_concept_ids") or []
+    )
+
+    type_suggestions = telemetry.get("final_type_suggestions") or []
+    predicate_suggestions = telemetry.get("final_predicate_suggestions") or []
+    assert any(
+        isinstance(item, dict)
+        and item.get("concept_id") == "#V#person"
+        and item.get("source_path") == "annotation_span_type_hint"
+        for item in type_suggestions
+    )
+    assert any(
+        isinstance(item, dict)
+        and item.get("concept_id") == "#V#has_affiliation"
+        and item.get("source_path") == "annotation_region_search"
+        for item in predicate_suggestions
+    )
+
+    context_messages = llm.calls[0]["context"] or []
+    preflight_text = next(
+        (
+            msg.get("content")
+            for msg in context_messages
+            if isinstance(msg, dict)
+            and isinstance(msg.get("content"), str)
+            and "ONTOLOGY PRE-FLIGHT" in msg["content"]
+        ),
+        None,
+    )
+    assert isinstance(preflight_text, str)
+    assert "Annotation-derived candidate concepts" in preflight_text
+    assert "#V#john_smith" in preflight_text
+
+
+def test_annotation_candidates_reused_across_two_follow_up_turns(monkeypatch):
+    """JVNAUTOSCI-991: session memory should retain annotation candidates."""
+
+    def _fake_search_concepts(*, query="", instance_of=None, filter_kind=None, **_kwargs):
+        if instance_of == "#V#conversation_preflight_predicate":
+            return {"results": []}
+        return {"results": []}
+
+    monkeypatch.setattr(
+        "src.backend.services.concept_search_service.search_concepts",
+        _fake_search_concepts,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.get_texts_for_concept",
+        lambda concept_id, predicate=None, limit=50: [],
+    )
+
+    def _fake_extract_annotations(
+        text, use_llm=None, use_match=True, return_timings=False
+    ):
+        text_lower = str(text or "").lower()
+        if "continue" in text_lower:
+            return []
+        return [
+            {
+                "span": {"start": 0, "end": 10, "text": "John Smith", "type": "#V#person"},
+                "suggested_type_id": "#V#person",
+                "candidates": [
+                    {"concept_id": "#V#john_smith", "name": "John Smith"},
+                ],
+            }
+        ]
+
+    monkeypatch.setattr(
+        "src.backend.services.annotation_extraction_service.extract_annotations",
+        _fake_extract_annotations,
+    )
+
+    def _fake_get_concept_by_concept_id(concept_id):
+        if concept_id == "#V#john_smith":
+            return {
+                "concept_id": "#V#john_smith",
+                "relationships": {
+                    "is_an_instance_of": ["#V#person"],
+                    "#V#has_affiliation": ["#V#auckland_university_of_technology"],
+                },
+            }
+        return None
+
+    monkeypatch.setattr(
+        "src.backend.services.concept_service.get_concept_by_concept_id",
+        _fake_get_concept_by_concept_id,
+    )
+
+    gateway = cast(Any, _CapturingGateway())
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway, max_tool_invocations=1, max_context_chars=80_000
+    )
+    llm = _CapturingLLM(["ok", "ok", "ok"])
+    session_id = "session-991-followups"
+
+    orchestrator.run(
+        prompt="John Smith authored this paper from AUT.",
+        context=[],
+        llm_client=llm,
+        model=None,
+        preferred_language="en",
+        conversation_session_id=session_id,
+    )
+    second = orchestrator.run(
+        prompt="Continue with affiliations.",
+        context=[],
+        llm_client=llm,
+        model=None,
+        preferred_language="en",
+        conversation_session_id=session_id,
+    )
+    third = orchestrator.run(
+        prompt="Continue and verify institutions.",
+        context=[],
+        llm_client=llm,
+        model=None,
+        preferred_language="en",
+        conversation_session_id=session_id,
+    )
+
+    def _extract_preflight_text(call_index: int) -> str | None:
+        context_messages = llm.calls[call_index].get("context") or []
+        for msg in context_messages:
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if isinstance(content, str) and "ONTOLOGY PRE-FLIGHT" in content:
+                return content
+        return None
+
+    second_preflight = _extract_preflight_text(1)
+    third_preflight = _extract_preflight_text(2)
+    assert second_preflight is not None, "expected preflight on first follow-up turn"
+    assert third_preflight is not None, "expected preflight on second follow-up turn"
+    assert "#V#john_smith" in second_preflight
+    assert "#V#john_smith" in third_preflight
+
+    second_telemetry = [
+        entry
+        for entry in (second.aux_llm_calls or [])
+        if entry.get("type") == "ontology_preflight"
+    ][0]
+    third_telemetry = [
+        entry
+        for entry in (third.aux_llm_calls or [])
+        if entry.get("type") == "ontology_preflight"
+    ][0]
+
+    assert second_telemetry.get("session_memory_reused") is True
+    assert third_telemetry.get("session_memory_reused") is True
+    assert any(
+        isinstance(item, dict) and item.get("concept_id") == "#V#john_smith"
+        for item in (second_telemetry.get("session_memory_annotation_candidates") or [])
+    )
+    assert "#V#auckland_university_of_technology" in (
+        second_telemetry.get("session_memory_related_concept_ids") or []
+    )
