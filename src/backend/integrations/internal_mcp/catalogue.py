@@ -3321,6 +3321,194 @@ def _search_proxy_diagnostics(**kwargs):
     return _run_async_compat(_async_diagnostics)
 
 
+def _linkedin_proxy_error_response(exc: Exception) -> dict[str, Any]:
+    return make_error_response(
+        "linkedin_proxy_error",
+        str(exc),
+        details={"exception_type": type(exc).__name__},
+        suggestions=[
+            "Check LinkedIn MCP command/path configuration",
+            "Check LinkedIn MCP Python dependencies and data-root access",
+        ],
+    )
+
+
+def _linkedin_list_exports(**kwargs):
+    from .linkedin_proxy_mcp import get_linkedin_proxy, LinkedInProxyError
+
+    refresh = bool(kwargs.get("refresh", False))
+
+    async def _async_list_exports():
+        proxy = await get_linkedin_proxy()
+        return await proxy.list_exports(refresh=refresh)
+
+    try:
+        return _run_async_compat(_async_list_exports)
+    except LinkedInProxyError as exc:
+        return _linkedin_proxy_error_response(exc)
+    except Exception as exc:
+        return _linkedin_proxy_error_response(exc)
+
+
+def _linkedin_list_files(**kwargs):
+    from .linkedin_proxy_mcp import get_linkedin_proxy, LinkedInProxyError
+
+    export_name = kwargs.get("export_name")
+    if not export_name:
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: export_name",
+            details={"missing": ["export_name"]},
+            suggestions=["Call linkedin_list_exports first to discover export names"],
+        )
+
+    async def _async_list_files():
+        proxy = await get_linkedin_proxy()
+        return await proxy.list_files(export_name=str(export_name))
+
+    try:
+        return _run_async_compat(_async_list_files)
+    except LinkedInProxyError as exc:
+        return _linkedin_proxy_error_response(exc)
+    except Exception as exc:
+        return _linkedin_proxy_error_response(exc)
+
+
+def _linkedin_get_profile(**kwargs):
+    from .linkedin_proxy_mcp import get_linkedin_proxy, LinkedInProxyError
+
+    export_name = kwargs.get("export_name")
+    if not export_name:
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: export_name",
+            details={"missing": ["export_name"]},
+            suggestions=["Call linkedin_list_exports first to discover export names"],
+        )
+
+    async def _async_get_profile():
+        proxy = await get_linkedin_proxy()
+        return await proxy.get_profile(export_name=str(export_name))
+
+    try:
+        return _run_async_compat(_async_get_profile)
+    except LinkedInProxyError as exc:
+        return _linkedin_proxy_error_response(exc)
+    except Exception as exc:
+        return _linkedin_proxy_error_response(exc)
+
+
+def _linkedin_get_csv_data(**kwargs):
+    from .linkedin_proxy_mcp import get_linkedin_proxy, LinkedInProxyError
+
+    export_name = kwargs.get("export_name")
+    file_name = kwargs.get("file_name")
+    if not export_name or not file_name:
+        missing = []
+        if not export_name:
+            missing.append("export_name")
+        if not file_name:
+            missing.append("file_name")
+        return make_error_response(
+            "missing_parameter",
+            f"Missing required parameter(s): {', '.join(missing)}",
+            details={"missing": missing},
+            suggestions=[
+                "Provide export_name and file_name",
+                "Call linkedin_list_files to discover available CSV files",
+            ],
+        )
+
+    try:
+        limit = int(kwargs.get("limit", 10))
+    except Exception:
+        return make_error_response(
+            "invalid_parameter",
+            "limit must be an integer",
+            details={"parameter": "limit"},
+        )
+    limit = max(1, min(200, limit))
+
+    async def _async_get_csv_data():
+        proxy = await get_linkedin_proxy()
+        return await proxy.get_csv_data(
+            export_name=str(export_name),
+            file_name=str(file_name),
+            limit=limit,
+        )
+
+    try:
+        return _run_async_compat(_async_get_csv_data)
+    except LinkedInProxyError as exc:
+        return _linkedin_proxy_error_response(exc)
+    except Exception as exc:
+        return _linkedin_proxy_error_response(exc)
+
+
+def _linkedin_get_company_stats(**kwargs):
+    from .linkedin_proxy_mcp import get_linkedin_proxy, LinkedInProxyError
+
+    export_name = kwargs.get("export_name")
+    if not export_name:
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: export_name",
+            details={"missing": ["export_name"]},
+            suggestions=["Call linkedin_list_exports first to discover export names"],
+        )
+
+    try:
+        top_n = int(kwargs.get("top_n", 10))
+    except Exception:
+        return make_error_response(
+            "invalid_parameter",
+            "top_n must be an integer",
+            details={"parameter": "top_n"},
+        )
+    top_n = max(1, min(200, top_n))
+
+    async def _async_get_company_stats():
+        proxy = await get_linkedin_proxy()
+        return await proxy.get_company_stats(export_name=str(export_name), top_n=top_n)
+
+    try:
+        return _run_async_compat(_async_get_company_stats)
+    except LinkedInProxyError as exc:
+        return _linkedin_proxy_error_response(exc)
+    except Exception as exc:
+        return _linkedin_proxy_error_response(exc)
+
+
+def _linkedin_get_messages(**kwargs):
+    from .linkedin_proxy_mcp import get_linkedin_proxy, LinkedInProxyError
+
+    export_name = kwargs.get("export_name")
+    if not export_name:
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: export_name",
+            details={"missing": ["export_name"]},
+            suggestions=["Call linkedin_list_exports first to discover export names"],
+        )
+
+    query = kwargs.get("query")
+    query_text = str(query) if query is not None else ""
+
+    async def _async_get_messages():
+        proxy = await get_linkedin_proxy()
+        return await proxy.get_messages(
+            export_name=str(export_name),
+            query=query_text,
+        )
+
+    try:
+        return _run_async_compat(_async_get_messages)
+    except LinkedInProxyError as exc:
+        return _linkedin_proxy_error_response(exc)
+    except Exception as exc:
+        return _linkedin_proxy_error_response(exc)
+
+
 def _resilient_extract_url(**kwargs):
     """Extract content from a URL with deterministic fallbacks.
 
@@ -4645,6 +4833,158 @@ def _search_proxy_diagnostics_output_schema() -> Schema:
             "last_call (telemetry for most recent call), recent_calls (list of recent call telemetry), "
             "config (proxy configuration), health_check (if requested: healthy, latency_ms, etc.)"
         ),
+    )
+
+
+def _linkedin_list_exports_input_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "refresh": (bool, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description="linkedin_list_exports input: optional refresh (bool) and namespace (accepted for orchestrator consistency).",
+    )
+
+
+def _linkedin_list_files_input_schema() -> Schema:
+    return Schema(
+        required={"export_name": str},
+        optional={"namespace": (str, type(None))},
+        allow_unknown=True,
+        description="linkedin_list_files input: export_name (str, required), namespace (optional, ignored).",
+    )
+
+
+def _linkedin_get_profile_input_schema() -> Schema:
+    return Schema(
+        required={"export_name": str},
+        optional={"namespace": (str, type(None))},
+        allow_unknown=True,
+        description="linkedin_get_profile input: export_name (str, required), namespace (optional, ignored).",
+    )
+
+
+def _linkedin_get_csv_data_input_schema() -> Schema:
+    return Schema(
+        required={"export_name": str, "file_name": str},
+        optional={
+            "limit": (int, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description="linkedin_get_csv_data input: export_name (str), file_name (str), optional limit (int, default 10), namespace (optional, ignored).",
+    )
+
+
+def _linkedin_get_company_stats_input_schema() -> Schema:
+    return Schema(
+        required={"export_name": str},
+        optional={
+            "top_n": (int, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description="linkedin_get_company_stats input: export_name (str), optional top_n (int, default 10), namespace (optional, ignored).",
+    )
+
+
+def _linkedin_get_messages_input_schema() -> Schema:
+    return Schema(
+        required={"export_name": str},
+        optional={
+            "query": (str, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description="linkedin_get_messages input: export_name (str), optional query (str), namespace (optional, ignored).",
+    )
+
+
+def _linkedin_generic_output_schema(
+    *,
+    description: str,
+    optional_fields: Mapping[str, Any] | None = None,
+) -> Schema:
+    optional: dict[str, Any] = {
+        "success": (bool, type(None)),
+        "error": (str, type(None)),
+        "error_code": (str, type(None)),
+    }
+    if isinstance(optional_fields, Mapping):
+        optional.update(dict(optional_fields))
+    return Schema(
+        required={},
+        optional=optional,
+        allow_unknown=True,
+        description=description,
+    )
+
+
+def _linkedin_list_exports_output_schema() -> Schema:
+    return _linkedin_generic_output_schema(
+        description="linkedin_list_exports output: exports list, data_root metadata, or error details.",
+        optional_fields={
+            "exports": (list, type(None)),
+            "total_exports": (int, type(None)),
+            "data_root": (str, type(None)),
+            "data_root_exists": (bool, type(None)),
+        },
+    )
+
+
+def _linkedin_list_files_output_schema() -> Schema:
+    return _linkedin_generic_output_schema(
+        description="linkedin_list_files output: files list for a chosen export, or error details.",
+        optional_fields={
+            "export_name": (str, type(None)),
+            "files": (list, type(None)),
+        },
+    )
+
+
+def _linkedin_get_profile_output_schema() -> Schema:
+    return _linkedin_generic_output_schema(
+        description="linkedin_get_profile output: profile text for an export, or error details.",
+        optional_fields={
+            "export_name": (str, type(None)),
+            "profile": (str, type(None)),
+        },
+    )
+
+
+def _linkedin_get_csv_data_output_schema() -> Schema:
+    return _linkedin_generic_output_schema(
+        description="linkedin_get_csv_data output: sampled CSV text content, or error details.",
+        optional_fields={
+            "export_name": (str, type(None)),
+            "file_name": (str, type(None)),
+            "limit": (int, type(None)),
+            "data": (str, type(None)),
+        },
+    )
+
+
+def _linkedin_get_company_stats_output_schema() -> Schema:
+    return _linkedin_generic_output_schema(
+        description="linkedin_get_company_stats output: company frequency mapping, or error details.",
+        optional_fields={
+            "export_name": (str, type(None)),
+            "top_n": (int, type(None)),
+            "company_stats": (dict, type(None)),
+        },
+    )
+
+
+def _linkedin_get_messages_output_schema() -> Schema:
+    return _linkedin_generic_output_schema(
+        description="linkedin_get_messages output: message sample text (optionally filtered), or error details.",
+        optional_fields={
+            "export_name": (str, type(None)),
+            "query": (str, type(None)),
+            "messages": (str, type(None)),
+        },
     )
 
 
@@ -13668,6 +14008,76 @@ def build_default_catalogue() -> MethodCatalogue:
                 "Use when the user asks to read, summarise, analyse, or extract information from "
                 "a file they uploaded or an artefact stored as a #V#computer_file_copy. "
                 "Requires authenticated user context and the file-copy concept_id."
+            ),
+        ),
+        # LinkedIn Data Dump MCP tools (local external server)
+        MethodDefinition(
+            name="linkedin_list_exports",
+            handler=_linkedin_list_exports,
+            input_schema=_linkedin_list_exports_input_schema(),
+            output_schema=_linkedin_list_exports_output_schema(),
+            category="read",
+            timeout_sec=20.0,
+            description=(
+                "List available LinkedIn data exports from the configured local data root. "
+                "Use this first to discover valid export_name values for subsequent LinkedIn tools."
+            ),
+        ),
+        MethodDefinition(
+            name="linkedin_list_files",
+            handler=_linkedin_list_files,
+            input_schema=_linkedin_list_files_input_schema(),
+            output_schema=_linkedin_list_files_output_schema(),
+            category="read",
+            timeout_sec=20.0,
+            description=(
+                "List files within one LinkedIn export. "
+                "Use after linkedin_list_exports to discover available CSV/file names."
+            ),
+        ),
+        MethodDefinition(
+            name="linkedin_get_profile",
+            handler=_linkedin_get_profile,
+            input_schema=_linkedin_get_profile_input_schema(),
+            output_schema=_linkedin_get_profile_output_schema(),
+            category="read",
+            timeout_sec=20.0,
+            description=(
+                "Get profile information from Profile.csv for a selected LinkedIn export."
+            ),
+        ),
+        MethodDefinition(
+            name="linkedin_get_csv_data",
+            handler=_linkedin_get_csv_data,
+            input_schema=_linkedin_get_csv_data_input_schema(),
+            output_schema=_linkedin_get_csv_data_output_schema(),
+            category="read",
+            timeout_sec=25.0,
+            description=(
+                "Read sampled rows from any CSV file in a LinkedIn export "
+                "(for example Education.csv, Languages.csv, Publications.csv)."
+            ),
+        ),
+        MethodDefinition(
+            name="linkedin_get_company_stats",
+            handler=_linkedin_get_company_stats,
+            input_schema=_linkedin_get_company_stats_input_schema(),
+            output_schema=_linkedin_get_company_stats_output_schema(),
+            category="read",
+            timeout_sec=25.0,
+            description=(
+                "Get top company counts from Connections.csv for a LinkedIn export."
+            ),
+        ),
+        MethodDefinition(
+            name="linkedin_get_messages",
+            handler=_linkedin_get_messages,
+            input_schema=_linkedin_get_messages_input_schema(),
+            output_schema=_linkedin_get_messages_output_schema(),
+            category="read",
+            timeout_sec=25.0,
+            description=(
+                "Retrieve message rows from a LinkedIn export (optionally filtered by query text)."
             ),
         ),
         # Search MCP tools (Tavily)

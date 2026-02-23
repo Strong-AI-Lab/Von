@@ -287,6 +287,8 @@ def _infer_tool_family(tool_name: str) -> str:
         "read_file_copy",
     }:
         return "arxiv"
+    if tool_name.startswith("linkedin_"):
+        return "linkedin"
     if tool_name.startswith("task_") or tool_name in {
         "create_task",
         "get_task",

@@ -5,6 +5,7 @@ import { getLanguageDisplayName } from './languageConfig.js';
 import { escapeHtml } from './markdownUtils.js';
 import './suppressTooltips.js';
 import { activateTab, loadTabData, setupTabNavigation } from './tabNavigation.js';
+import { shouldMarkServerDown } from './utils/serverHealthState.js';
 import { handleSelectConceptByIdDetail } from './utils/selectConceptByIdHandler.js';
 import {
   copyJsonTextWithButtonFeedback,
@@ -685,6 +686,7 @@ function startHealthPolling() {
   let lastIdentity = { pid: null, start: null };
   let reloadTriggered = false;
   let serverReachable = null;
+  let hasSeenSuccessfulHealthPoll = false;
 
   function setServerReachableState(isReachable) {
     serverReachable = (typeof isReachable === 'boolean') ? isReachable : null;
@@ -714,6 +716,10 @@ function startHealthPolling() {
         uptimeSpan.textContent = 'server down';
         uptimeSpan.title = 'Von server is unreachable';
         if (uptimeContainer) uptimeContainer.classList.add('pid-error');
+      } else if (serverReachable === null) {
+        uptimeSpan.textContent = 'waiting for server';
+        uptimeSpan.title = 'Waiting for initial server health response';
+        if (uptimeContainer) uptimeContainer.classList.remove('pid-error');
       } else if (startTimeIso) {
         const started = Date.parse(startTimeIso);
         if (!isNaN(started)) {
@@ -782,6 +788,7 @@ function startHealthPolling() {
       clearTimeout(timeout);
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
+      hasSeenSuccessfulHealthPoll = true;
       setServerReachableState(true);
       const newPid = (typeof data.pid !== 'undefined') ? data.pid : null;
       const newStart = data.start_time || null;
@@ -1871,10 +1878,19 @@ function startHealthPolling() {
       failureCount = 0; // reset on success
     } catch (e) {
       failureCount++;
-      setServerReachableState(false);
+      const markDown = shouldMarkServerDown({
+        hasSeenSuccessfulHealthPoll,
+        failureCount
+      });
+      setServerReachableState(markDown ? false : null);
       if (pidSpan) {
-        pidSpan.textContent = '-';
-        pidSpan.parentElement.classList.add('pid-error');
+        if (markDown) {
+          pidSpan.textContent = '-';
+          pidSpan.parentElement.classList.add('pid-error');
+        } else {
+          pidSpan.textContent = '?';
+          pidSpan.parentElement.classList.remove('pid-error');
+        }
       }
       // Exponential backoff on failures (5s,10s,20s,30s cap)
       nextDelay = Math.min(30000, 5000 * Math.pow(2, Math.min(failureCount - 1, 3)));

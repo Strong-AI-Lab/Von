@@ -190,6 +190,37 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "category": "arxiv",
         "display_template": "Finalised: {arxiv_id}",
     },
+    # LinkedIn Data Dump tools
+    "linkedin_list_exports": {
+        "salience": "high",
+        "category": "linkedin",
+        "display_template": "{total_exports} exports",
+    },
+    "linkedin_list_files": {
+        "salience": "high",
+        "category": "linkedin",
+        "display_template": "Files: {export_name}",
+    },
+    "linkedin_get_profile": {
+        "salience": "medium",
+        "category": "linkedin",
+        "display_template": "Profile: {export_name}",
+    },
+    "linkedin_get_csv_data": {
+        "salience": "medium",
+        "category": "linkedin",
+        "display_template": "CSV: {file_name}",
+    },
+    "linkedin_get_company_stats": {
+        "salience": "medium",
+        "category": "linkedin",
+        "display_template": "Company stats: {export_name}",
+    },
+    "linkedin_get_messages": {
+        "salience": "medium",
+        "category": "linkedin",
+        "display_template": "Messages: {export_name}",
+    },
     # Web/search tools (HIGH salience)
     "search_web": {
         "salience": "high",
