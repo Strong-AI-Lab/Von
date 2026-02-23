@@ -19,6 +19,9 @@ CHAT_BUTTONIFY_WORKFLOW_ID = "#V#chat_buttonify_workflow"
 CHAT_ASSISTANT_WORKFLOW_ID = "#V#chat_assistant_workflow"
 TODO_REFRESH_WORKFLOW_ID = "#V#todo_refresh_workflow"
 WRITE_TOOL_POLICY_WORKFLOW_ID = "#V#write_tool_policy_workflow"
+CONCEPT_SUGGESTION_PREFLIGHT_WORKFLOW_ID = (
+    "#V#concept_suggestion_preflight_workflow"
+)
 TOOL_CALLING_WORKFLOW_ID = "#V#tool_calling_workflow"
 KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID = (
     "#V#kb_mutation_postcondition_critic_workflow"
@@ -354,6 +357,51 @@ def build_write_tool_policy_workflow() -> WorkflowDefinition:
         },
         termination_states=("completed",),
         purpose="Determine which write tools are allowed for a chat prompt.",
+    )
+
+
+def build_concept_suggestion_preflight_workflow() -> WorkflowDefinition:
+    """Workflow for Stage-5 specialised concept suggestion fallback.
+
+    This stage is intentionally lightweight and deterministic. The action
+    applies guardrailed fallback concept suggestion only when earlier
+    preflight discovery stages are sparse.
+    """
+
+    suggest = WorkflowStateSpec(
+        state_id="suggest",
+        actions=(
+            WorkflowActionInvocation(
+                action_id="preflight.specialised_suggest",
+                description=(
+                    "Generate specialised fallback type/predicate suggestions "
+                    "when baseline ontology preflight is sparse."
+                ),
+            ),
+        ),
+        transitions=(
+            WorkflowTransitionSpec(
+                to_state="completed",
+                condition=lambda ctx: True,
+                reason="evaluated",
+            ),
+        ),
+    )
+
+    completed = WorkflowStateSpec(state_id="completed", terminal=True)
+
+    return WorkflowDefinition(
+        workflow_id=CONCEPT_SUGGESTION_PREFLIGHT_WORKFLOW_ID,
+        initial_state="suggest",
+        states={
+            "suggest": suggest,
+            "completed": completed,
+        },
+        termination_states=("completed",),
+        purpose=(
+            "Evaluate specialised fallback concept suggestions for ontology "
+            "preflight when baseline discovery is sparse."
+        ),
     )
 
 
@@ -693,6 +741,12 @@ def register_default_workflows(registry: WorkflowRegistry) -> None:
             workflow_id=WRITE_TOOL_POLICY_WORKFLOW_ID,
             definition=build_write_tool_policy_workflow(),
             purpose="Write-tool policy decision pipeline.",
+            source="built_in",
+        ),
+        WorkflowRegistration(
+            workflow_id=CONCEPT_SUGGESTION_PREFLIGHT_WORKFLOW_ID,
+            definition=build_concept_suggestion_preflight_workflow(),
+            purpose="Specialised concept-suggestion preflight fallback pipeline.",
             source="built_in",
         ),
         WorkflowRegistration(

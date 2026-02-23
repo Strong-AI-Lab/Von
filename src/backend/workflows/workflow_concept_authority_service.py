@@ -19,6 +19,7 @@ from ..services.concept_service import ConceptNotFoundError
 from ..services.effort_unit_ontology_service import ensure_effort_unit_ontology
 from .definitions import (
     CHAT_NARRATION_WORKFLOW_ID,
+    CONCEPT_SUGGESTION_PREFLIGHT_WORKFLOW_ID,
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
     MISSING_TOOL_CALL_WORKFLOW_ID,
     TODO_REFRESH_WORKFLOW_ID,
@@ -55,6 +56,7 @@ CANONICAL_CHAT_WORKFLOW_IDS: tuple[str, ...] = (
     CHAT_NARRATION_WORKFLOW_ID,
     TODO_REFRESH_WORKFLOW_ID,
     WRITE_TOOL_POLICY_WORKFLOW_ID,
+    CONCEPT_SUGGESTION_PREFLIGHT_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
 )
@@ -194,6 +196,17 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
             _CanonicalStepPublicationSpec(
                 state_id="decide",
                 action_id="write_policy.decide",
+                next_state="completed",
+            ),
+            _CanonicalStepPublicationSpec(state_id="completed"),
+        ),
+    ),
+    CONCEPT_SUGGESTION_PREFLIGHT_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state="suggest",
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id="suggest",
+                action_id="preflight.specialised_suggest",
                 next_state="completed",
             ),
             _CanonicalStepPublicationSpec(state_id="completed"),

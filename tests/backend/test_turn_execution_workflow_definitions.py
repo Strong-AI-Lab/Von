@@ -1,9 +1,11 @@
 from src.backend.workflows.definitions import (
     CHAT_BUTTONIFY_WORKFLOW_ID,
+    CONCEPT_SUGGESTION_PREFLIGHT_WORKFLOW_ID,
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
     KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
     TURN_COMPLETION_GATE_WORKFLOW_ID,
     build_chat_buttonify_workflow,
+    build_concept_suggestion_preflight_workflow,
     build_tool_calling_workflow,
     register_default_workflows,
 )
@@ -45,9 +47,22 @@ def test_register_default_workflows_includes_turn_execution_workflows() -> None:
     register_default_workflows(registry)
 
     assert registry.get(CHAT_BUTTONIFY_WORKFLOW_ID) is not None
+    assert registry.get(CONCEPT_SUGGESTION_PREFLIGHT_WORKFLOW_ID) is not None
     assert registry.get(KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID) is not None
     assert registry.get(TURN_COMPLETION_GATE_WORKFLOW_ID) is not None
     assert registry.get(CONVERSATION_TURN_EXECUTION_WORKFLOW_ID) is not None
+
+
+def test_concept_suggestion_preflight_workflow_has_single_guardrailed_step() -> None:
+    workflow = build_concept_suggestion_preflight_workflow()
+
+    assert workflow.initial_state == "suggest"
+    assert "suggest" in workflow.states
+    assert "completed" in workflow.states
+
+    suggest = workflow.states["suggest"]
+    assert suggest.actions[0].action_id == "preflight.specialised_suggest"
+    assert any(t.to_state == "completed" for t in suggest.transitions)
 
 
 def test_buttonify_workflow_exposes_transformation_states() -> None:

@@ -45,11 +45,13 @@ from ...workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
     CHAT_BUTTONIFY_WORKFLOW_ID,
     CHAT_NARRATION_WORKFLOW_ID,
+    CONCEPT_SUGGESTION_PREFLIGHT_WORKFLOW_ID,
     KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
     MISSING_TOOL_CALL_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
     TURN_COMPLETION_GATE_WORKFLOW_ID,
     WRITE_TOOL_POLICY_WORKFLOW_ID,
+    build_concept_suggestion_preflight_workflow,
 )
 from ...workflows.conversation_turn_stage_model import (
     build_conversation_turn_stage_model_snapshot,
@@ -423,6 +425,8 @@ class InternalMCPChatOrchestrator:
     _RAG_PREFLIGHT_TOP_K = 12
     _RAG_PREFLIGHT_MAX_CANDIDATES = 8
     _RAG_PREFLIGHT_EVIDENCE_MAX_CHARS = 220
+    _SPECIALISED_PREFLIGHT_SOURCE_PATH = "specialised_preflight_workflow"
+    _SPECIALISED_PREFLIGHT_MAX_SUGGESTIONS = 6
     _SALIENT_PREDICATE_FOR_TYPE_RELATION_ID = "#V#salient_binary_predicate_for_type"
     _SALIENT_PREFLIGHT_MAX_TYPES = 5
     _SALIENT_PREFLIGHT_MAX_PREDICATES_PER_TYPE = 6
@@ -1103,6 +1107,16 @@ class InternalMCPChatOrchestrator:
                 description="Decide which write-category tools are allowed for this prompt.",
             )
         )
+        registry.register(
+            ActionSpec(
+                action_id="preflight.specialised_suggest",
+                handler=self._action_preflight_specialised_suggest,
+                description=(
+                    "Specialised fallback concept suggestion stage for sparse "
+                    "ontology preflight contexts."
+                ),
+            )
+        )
         # Tool-calling workflow actions (JVNAUTOSCI-922 Phase 2).
         # Real handlers that wrap the procedural tool-calling logic;
         # driven by #V#tool_calling_workflow state machine.
@@ -1507,6 +1521,209 @@ class InternalMCPChatOrchestrator:
             outputs={
                 "allowed_write_tools": sorted(decision.allowed_tools),
                 "write_policy_reason": decision.reason,
+            }
+        )
+
+    def _action_preflight_specialised_suggest(
+        self, request: Any
+    ) -> WorkflowActionResult:
+        """Stage-5 specialised fallback for sparse ontology preflight suggestions."""
+
+        data = request.data if isinstance(request.data, Mapping) else {}
+        prompt_raw = data.get("prompt")
+        prompt = str(prompt_raw).strip() if isinstance(prompt_raw, str) else ""
+        if not prompt:
+            return WorkflowActionResult(
+                outputs={
+                    "specialised_suggestions_available": False,
+                    "specialised_type_suggestions": [],
+                    "specialised_predicate_suggestions": [],
+                    "specialised_workflow_skip_reason": "missing_prompt",
+                }
+            )
+
+        max_suggestions = self._coerce_non_negative_int(
+            data.get("max_suggestions"),
+            default=self._SPECIALISED_PREFLIGHT_MAX_SUGGESTIONS,
+            max_value=16,
+        )
+        if max_suggestions <= 0:
+            max_suggestions = self._SPECIALISED_PREFLIGHT_MAX_SUGGESTIONS
+
+        baseline_type_suggestions = self._normalise_specialised_preflight_suggestions(
+            data.get("baseline_type_suggestions"),
+            fallback_source_path="baseline_preflight",
+            max_items=max_suggestions,
+        )
+        baseline_predicate_suggestions = (
+            self._normalise_specialised_preflight_suggestions(
+                data.get("baseline_predicate_suggestions"),
+                fallback_source_path="baseline_preflight",
+                max_items=max_suggestions,
+            )
+        )
+        need_types = not baseline_type_suggestions
+        need_predicates = not baseline_predicate_suggestions
+
+        if not need_types and not need_predicates:
+            return WorkflowActionResult(
+                outputs={
+                    "specialised_suggestions_available": False,
+                    "specialised_type_suggestions": [],
+                    "specialised_predicate_suggestions": [],
+                    "specialised_workflow_skip_reason": "baseline_already_sufficient",
+                }
+            )
+
+        candidate_type_pool = self._normalise_specialised_preflight_suggestions(
+            data.get("candidate_type_pool"),
+            fallback_source_path="specialised_candidate_pool",
+            max_items=max_suggestions * 3,
+        )
+        candidate_predicate_pool = self._normalise_specialised_preflight_suggestions(
+            data.get("candidate_predicate_pool"),
+            fallback_source_path="specialised_candidate_pool",
+            max_items=max_suggestions * 3,
+        )
+
+        def _seed_from_pool(
+            pool: Sequence[Mapping[str, Any]],
+            *,
+            limit: int,
+        ) -> list[dict[str, Any]]:
+            selected: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for item in pool:
+                if not isinstance(item, Mapping):
+                    continue
+                concept_id = item.get("concept_id")
+                if not isinstance(concept_id, str):
+                    continue
+                cleaned = concept_id.strip()
+                if not self._looks_like_concept_id(cleaned):
+                    continue
+                lowered = cleaned.lower()
+                if lowered in seen:
+                    continue
+                seen.add(lowered)
+                selected.append(dict(item))
+                if len(selected) >= limit:
+                    break
+            return selected
+
+        specialised_type_suggestions = (
+            _seed_from_pool(candidate_type_pool, limit=max_suggestions)
+            if need_types
+            else []
+        )
+        specialised_predicate_suggestions = (
+            _seed_from_pool(candidate_predicate_pool, limit=max_suggestions)
+            if need_predicates
+            else []
+        )
+
+        search_invoked = False
+        search_errors: list[str] = []
+
+        try:
+            from src.backend.services.concept_search_service import search_concepts
+        except Exception:
+            search_concepts = None
+
+        def _append_similarity_results(
+            *,
+            bucket: list[dict[str, Any]],
+            filter_kind: str,
+        ) -> None:
+            nonlocal search_invoked
+            if len(bucket) >= max_suggestions:
+                return
+            if not callable(search_concepts):
+                search_errors.append("specialised_similarity_search_unavailable")
+                return
+            try:
+                search_invoked = True
+                result = search_concepts(
+                    query=prompt,
+                    filter_kind=[filter_kind],
+                    match_type="similarity",
+                    min_similarity=0.45,
+                    limit=max(max_suggestions * 3, 8),
+                )
+            except Exception as exc:
+                search_errors.append(f"specialised_similarity_search_failed:{exc}")
+                return
+
+            entries = result.get("results") if isinstance(result, Mapping) else None
+            if not isinstance(entries, Sequence) or isinstance(
+                entries, (str, bytes, bytearray)
+            ):
+                return
+
+            normalised_inputs: list[dict[str, Any]] = []
+            for entry in entries:
+                if not isinstance(entry, Mapping):
+                    continue
+                candidate = entry.get("concept_id")
+                if not isinstance(candidate, str):
+                    continue
+                payload: dict[str, Any] = {
+                    "concept_id": candidate,
+                    "source_path": self._SPECIALISED_PREFLIGHT_SOURCE_PATH,
+                }
+                candidate_name = entry.get("name")
+                if isinstance(candidate_name, str) and candidate_name.strip():
+                    payload["name"] = candidate_name.strip()
+                similarity = entry.get("similarity_score")
+                if isinstance(similarity, (int, float)):
+                    payload["score"] = round(float(similarity), 6)
+                normalised_inputs.append(payload)
+
+            normalised_entries = self._normalise_specialised_preflight_suggestions(
+                normalised_inputs,
+                fallback_source_path=self._SPECIALISED_PREFLIGHT_SOURCE_PATH,
+                max_items=max_suggestions,
+            )
+
+            seen_bucket_ids = {
+                str(item.get("concept_id", "")).strip().lower()
+                for item in bucket
+                if isinstance(item, Mapping)
+            }
+            for item in normalised_entries:
+                concept_id = str(item.get("concept_id", "")).strip()
+                lowered = concept_id.lower()
+                if not concept_id or lowered in seen_bucket_ids:
+                    continue
+                seen_bucket_ids.add(lowered)
+                bucket.append(dict(item))
+                if len(bucket) >= max_suggestions:
+                    break
+
+        if need_types and len(specialised_type_suggestions) < max_suggestions:
+            _append_similarity_results(
+                bucket=specialised_type_suggestions, filter_kind="type"
+            )
+
+        if need_predicates and len(specialised_predicate_suggestions) < max_suggestions:
+            _append_similarity_results(
+                bucket=specialised_predicate_suggestions, filter_kind="predicate"
+            )
+
+        return WorkflowActionResult(
+            outputs={
+                "specialised_suggestions_available": bool(
+                    specialised_type_suggestions or specialised_predicate_suggestions
+                ),
+                "specialised_type_suggestions": specialised_type_suggestions[
+                    :max_suggestions
+                ],
+                "specialised_predicate_suggestions": specialised_predicate_suggestions[
+                    :max_suggestions
+                ],
+                "specialised_search_invoked": search_invoked,
+                "specialised_search_errors": search_errors,
+                "specialised_workflow_skip_reason": None,
             }
         )
 
@@ -10961,6 +11178,272 @@ class InternalMCPChatOrchestrator:
 
         return "\n".join(lines)
 
+    @staticmethod
+    def _specialised_preflight_mode() -> str:
+        raw = os.getenv("VON_MCP_SPECIALISED_PREFLIGHT_MODE", "off")
+        cleaned = str(raw or "").strip().lower()
+        if cleaned in {"1", "true", "yes", "on", "enabled"}:
+            return "active"
+        if cleaned in {"off", "shadow", "active"}:
+            return cleaned
+        return "off"
+
+    def _normalise_specialised_preflight_suggestions(
+        self,
+        raw_suggestions: Any,
+        *,
+        fallback_source_path: str,
+        max_items: int,
+    ) -> list[dict[str, Any]]:
+        if max_items <= 0:
+            return []
+        if not isinstance(raw_suggestions, Sequence) or isinstance(
+            raw_suggestions, (str, bytes, bytearray)
+        ):
+            return []
+
+        normalised: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in raw_suggestions:
+            if not isinstance(item, Mapping):
+                continue
+            concept_id_raw = item.get("concept_id")
+            if not isinstance(concept_id_raw, str):
+                continue
+            concept_id = concept_id_raw.strip()
+            if not self._looks_like_concept_id(concept_id):
+                continue
+            lowered = concept_id.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            payload: dict[str, Any] = {
+                "concept_id": concept_id,
+                "source_path": fallback_source_path,
+            }
+            source_path = item.get("source_path")
+            if isinstance(source_path, str) and source_path.strip():
+                payload["source_path"] = source_path.strip()
+            name = item.get("name")
+            if isinstance(name, str) and name.strip():
+                payload["name"] = self._normalise_preflight_display_name(name.strip())
+            score = item.get("score")
+            if isinstance(score, (int, float)):
+                payload["score"] = round(float(score), 6)
+            evidence = item.get("evidence_snippet")
+            if isinstance(evidence, str) and evidence.strip():
+                payload["evidence_snippet"] = evidence.strip()
+            predicate = item.get("predicate")
+            if isinstance(predicate, str) and predicate.strip():
+                payload["predicate"] = predicate.strip()
+            normalised.append(payload)
+            if len(normalised) >= max_items:
+                break
+        return normalised
+
+    def _run_specialised_preflight_workflow(
+        self,
+        *,
+        prompt: str,
+        preferred_language: str | None,
+        user_namespace: str | None,
+        baseline_type_suggestions: Sequence[Mapping[str, Any]],
+        baseline_predicate_suggestions: Sequence[Mapping[str, Any]],
+        candidate_type_pool: Sequence[Mapping[str, Any]],
+        candidate_predicate_pool: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        workflow_def = self._workflow_registry.get(
+            CONCEPT_SUGGESTION_PREFLIGHT_WORKFLOW_ID
+        )
+        if workflow_def is None:
+            return {
+                "available": False,
+                "invoked": False,
+                "type_suggestions": [],
+                "predicate_suggestions": [],
+                "search_invoked": False,
+                "search_errors": ["specialised_workflow_not_registered"],
+                "workflow_error": "specialised_workflow_not_registered",
+            }
+
+        data: dict[str, Any] = {
+            "prompt": prompt,
+            "preferred_language": preferred_language,
+            "baseline_type_suggestions": [
+                dict(item) for item in baseline_type_suggestions if isinstance(item, Mapping)
+            ],
+            "baseline_predicate_suggestions": [
+                dict(item)
+                for item in baseline_predicate_suggestions
+                if isinstance(item, Mapping)
+            ],
+            "candidate_type_pool": [
+                dict(item) for item in candidate_type_pool if isinstance(item, Mapping)
+            ],
+            "candidate_predicate_pool": [
+                dict(item)
+                for item in candidate_predicate_pool
+                if isinstance(item, Mapping)
+            ],
+            "max_suggestions": int(self._SPECIALISED_PREFLIGHT_MAX_SUGGESTIONS),
+        }
+
+        environment = WorkflowEnvironment(
+            llm_client=None,
+            gateway=self._gateway,
+            model=None,
+            user_namespace=user_namespace,
+            auxiliary_system_prompt=None,
+            max_tool_invocations=None,
+            default_gmail_profile=self._default_gmail_profile,
+        )
+
+        def _execute_workflow(definition: Any) -> tuple[Any | None, str | None]:
+            try:
+                workflow_result = self._workflow_executor.run(
+                    definition,
+                    environment=environment,
+                    data=dict(data),
+                )
+                return workflow_result, None
+            except Exception as exc:
+                return None, f"specialised_workflow_execution_failed:{exc}"
+
+        metadata_validation_fallback_applied = False
+        result, execute_error = _execute_workflow(workflow_def)
+        workflow_error = execute_error
+        if (
+            workflow_error is None
+            and result is not None
+            and isinstance(result.error, str)
+            and result.error.startswith("metadata_validation_failed:")
+        ):
+            fallback_definition = build_concept_suggestion_preflight_workflow()
+            fallback_result, fallback_error = _execute_workflow(fallback_definition)
+            if fallback_result is not None and fallback_error is None:
+                metadata_validation_fallback_applied = True
+                result = fallback_result
+            else:
+                if fallback_error is not None:
+                    workflow_error = fallback_error
+                metadata_validation_fallback_applied = True
+
+        if result is None:
+            return {
+                "available": True,
+                "invoked": False,
+                "type_suggestions": [],
+                "predicate_suggestions": [],
+                "search_invoked": False,
+                "search_errors": [workflow_error or "specialised_workflow_execution_failed"],
+                "workflow_error": workflow_error or "specialised_workflow_execution_failed",
+                "metadata_validation_fallback_applied": metadata_validation_fallback_applied,
+            }
+
+        result_data = result.data if isinstance(result.data, Mapping) else {}
+        type_suggestions = self._normalise_specialised_preflight_suggestions(
+            result_data.get("specialised_type_suggestions"),
+            fallback_source_path=self._SPECIALISED_PREFLIGHT_SOURCE_PATH,
+            max_items=self._SPECIALISED_PREFLIGHT_MAX_SUGGESTIONS,
+        )
+        predicate_suggestions = self._normalise_specialised_preflight_suggestions(
+            result_data.get("specialised_predicate_suggestions"),
+            fallback_source_path=self._SPECIALISED_PREFLIGHT_SOURCE_PATH,
+            max_items=self._SPECIALISED_PREFLIGHT_MAX_SUGGESTIONS,
+        )
+        search_errors = (
+            [str(item) for item in result_data.get("specialised_search_errors", [])]
+            if isinstance(result_data.get("specialised_search_errors"), list)
+            else []
+        )
+        workflow_error = (
+            result.error if isinstance(result.error, str) and result.error.strip() else None
+        )
+        if workflow_error:
+            search_errors.append(workflow_error)
+        if metadata_validation_fallback_applied and not workflow_error:
+            search_errors.append("metadata_validation_fallback_applied")
+
+        return {
+            "available": True,
+            "invoked": True,
+            "type_suggestions": type_suggestions,
+            "predicate_suggestions": predicate_suggestions,
+            "search_invoked": bool(result_data.get("specialised_search_invoked")),
+            "search_errors": search_errors,
+            "workflow_error": workflow_error,
+            "workflow_completed": bool(result.completed),
+            "metadata_validation_fallback_applied": metadata_validation_fallback_applied,
+        }
+
+    def _build_specialised_preflight_section(
+        self,
+        *,
+        type_suggestions: Sequence[Mapping[str, Any]],
+        predicate_suggestions: Sequence[Mapping[str, Any]],
+        title: str = "Specialised workflow fallback candidates:",
+    ) -> str | None:
+        if not type_suggestions and not predicate_suggestions:
+            return None
+
+        lines: list[str] = [title]
+        if type_suggestions:
+            lines.append("Types:")
+            for item in type_suggestions[: self._SPECIALISED_PREFLIGHT_MAX_SUGGESTIONS]:
+                if not isinstance(item, Mapping):
+                    continue
+                concept_id = item.get("concept_id")
+                if not isinstance(concept_id, str) or not concept_id.strip():
+                    continue
+                name = item.get("name")
+                if isinstance(name, str) and name.strip():
+                    lines.append(f'- {concept_id.strip()} (name="{name.strip()}")')
+                else:
+                    lines.append(f"- {concept_id.strip()}")
+
+        if predicate_suggestions:
+            lines.append("Predicates:")
+            for item in predicate_suggestions[
+                : self._SPECIALISED_PREFLIGHT_MAX_SUGGESTIONS
+            ]:
+                if not isinstance(item, Mapping):
+                    continue
+                concept_id = item.get("concept_id")
+                if not isinstance(concept_id, str) or not concept_id.strip():
+                    continue
+                name = item.get("name")
+                if isinstance(name, str) and name.strip():
+                    lines.append(f'- {concept_id.strip()} (name="{name.strip()}")')
+                else:
+                    lines.append(f"- {concept_id.strip()}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _derive_specialised_preflight_recommendation(
+        *,
+        mode: str,
+        invoked: bool,
+        workflow_error: str | None,
+        baseline_type_count: int,
+        baseline_predicate_count: int,
+        specialised_type_count: int,
+        specialised_predicate_count: int,
+    ) -> str:
+        if mode == "off":
+            return "no_go_mode_off"
+        if workflow_error:
+            return "no_go_workflow_error"
+        if not invoked:
+            return "no_go_not_needed"
+
+        type_gain = max(0, specialised_type_count - baseline_type_count)
+        predicate_gain = max(0, specialised_predicate_count - baseline_predicate_count)
+        if type_gain > 0 or predicate_gain > 0:
+            if mode == "shadow":
+                return "go_active_trial"
+            return "go_adopted"
+        return "no_go_no_improvement"
+
     def _normalise_salient_preflight_groups(
         self, raw_groups: Any
     ) -> list[dict[str, Any]]:
@@ -11379,6 +11862,8 @@ class InternalMCPChatOrchestrator:
         using #V#salient_binary_predicate_for_type.
         Extended (JVNAUTOSCI-989): adds bounded RAG-backed concept discovery over
         descriptions/notes with per-candidate evidence snippets and provenance.
+        Extended (JVNAUTOSCI-990): evaluates specialised workflow-based fallback
+        concept suggestions when earlier stages are sparse.
         Extended (JVNAUTOSCI-987): adds explicit discovery-path provenance and
         bounded session follow-up carry-over for under-specified follow-up turns.
         """
@@ -12161,6 +12646,237 @@ class InternalMCPChatOrchestrator:
                 source_path="preflight_predicate_registry",
             )
 
+        # --- Specialised concept-suggestion workflow fallback (JVNAUTOSCI-990) ---
+        specialised_mode = self._specialised_preflight_mode()
+        specialised_workflow_available = False
+        specialised_workflow_invoked = False
+        specialised_workflow_completed = False
+        specialised_workflow_error: str | None = None
+        specialised_metadata_validation_fallback_applied = False
+        specialised_search_invoked = False
+        specialised_search_errors: list[str] = []
+        specialised_raw_type_suggestions: list[dict[str, Any]] = []
+        specialised_raw_predicate_suggestions: list[dict[str, Any]] = []
+        specialised_applied_type_suggestions: list[dict[str, Any]] = []
+        specialised_applied_predicate_suggestions: list[dict[str, Any]] = []
+
+        baseline_type_suggestion_count = len(final_type_suggestions)
+        baseline_predicate_suggestion_count = len(final_predicate_suggestions)
+
+        specialised_needed = (
+            baseline_type_suggestion_count == 0
+            or baseline_predicate_suggestion_count == 0
+        )
+        if specialised_mode != "off" and specialised_needed:
+            candidate_type_pool: list[dict[str, Any]] = []
+            for item in [*topic_types, *rag_type_candidates, *session_memory_types]:
+                if not isinstance(item, Mapping):
+                    continue
+                concept_id = item.get("concept_id")
+                if not isinstance(concept_id, str):
+                    continue
+                payload: dict[str, Any] = {"concept_id": concept_id}
+                name = item.get("name")
+                if isinstance(name, str) and name.strip():
+                    payload["name"] = name.strip()
+                score = item.get("score")
+                if isinstance(score, (int, float)):
+                    payload["score"] = score
+                source_path = item.get("source_path")
+                if isinstance(source_path, str) and source_path.strip():
+                    payload["source_path"] = source_path.strip()
+                candidate_type_pool.append(payload)
+            for concept_id in [*annotation_suggested_type_ids, *annotation_region_type_ids]:
+                if not isinstance(concept_id, str) or not concept_id.strip():
+                    continue
+                candidate_type_pool.append(
+                    {
+                        "concept_id": concept_id.strip(),
+                        "source_path": "annotation_region_search",
+                    }
+                )
+
+            candidate_predicate_pool: list[dict[str, Any]] = []
+            for item in [
+                *targeted_predicates,
+                *topic_predicates,
+                *rag_predicate_candidates,
+                *salient_predicate_suggestions,
+                *session_memory_predicates,
+                *predicates,
+            ]:
+                if not isinstance(item, Mapping):
+                    continue
+                concept_id = item.get("concept_id")
+                if not isinstance(concept_id, str):
+                    continue
+                payload: dict[str, Any] = {"concept_id": concept_id}
+                name = item.get("name")
+                if not isinstance(name, str):
+                    name = item.get("display_name")
+                if isinstance(name, str) and name.strip():
+                    payload["name"] = name.strip()
+                score = item.get("score")
+                if isinstance(score, (int, float)):
+                    payload["score"] = score
+                source_path = item.get("source_path")
+                if isinstance(source_path, str) and source_path.strip():
+                    payload["source_path"] = source_path.strip()
+                candidate_predicate_pool.append(payload)
+            for concept_id in annotation_region_predicate_ids:
+                if not isinstance(concept_id, str) or not concept_id.strip():
+                    continue
+                candidate_predicate_pool.append(
+                    {
+                        "concept_id": concept_id.strip(),
+                        "source_path": "annotation_region_search",
+                    }
+                )
+
+            specialised_result = self._run_specialised_preflight_workflow(
+                prompt=raw,
+                preferred_language=preferred_language,
+                user_namespace=user_namespace,
+                baseline_type_suggestions=final_type_suggestions,
+                baseline_predicate_suggestions=final_predicate_suggestions,
+                candidate_type_pool=candidate_type_pool,
+                candidate_predicate_pool=candidate_predicate_pool,
+            )
+            specialised_workflow_available = bool(specialised_result.get("available"))
+            specialised_workflow_invoked = bool(specialised_result.get("invoked"))
+            specialised_workflow_completed = bool(
+                specialised_result.get("workflow_completed")
+            )
+            workflow_error_raw = specialised_result.get("workflow_error")
+            if isinstance(workflow_error_raw, str) and workflow_error_raw.strip():
+                specialised_workflow_error = workflow_error_raw.strip()
+            specialised_search_invoked = bool(specialised_result.get("search_invoked"))
+            specialised_metadata_validation_fallback_applied = bool(
+                specialised_result.get("metadata_validation_fallback_applied")
+            )
+            specialised_search_errors = [
+                str(item)
+                for item in specialised_result.get("search_errors", [])
+                if isinstance(item, str) and item.strip()
+            ]
+            specialised_raw_type_suggestions = (
+                self._normalise_specialised_preflight_suggestions(
+                    specialised_result.get("type_suggestions"),
+                    fallback_source_path=self._SPECIALISED_PREFLIGHT_SOURCE_PATH,
+                    max_items=self._SPECIALISED_PREFLIGHT_MAX_SUGGESTIONS,
+                )
+            )
+            specialised_raw_predicate_suggestions = (
+                self._normalise_specialised_preflight_suggestions(
+                    specialised_result.get("predicate_suggestions"),
+                    fallback_source_path=self._SPECIALISED_PREFLIGHT_SOURCE_PATH,
+                    max_items=self._SPECIALISED_PREFLIGHT_MAX_SUGGESTIONS,
+                )
+            )
+
+            if specialised_mode == "active":
+                for item in specialised_raw_type_suggestions:
+                    if not isinstance(item, Mapping):
+                        continue
+                    _append_suggestion(
+                        bucket=final_type_suggestions,
+                        seen=seen_types,
+                        concept_id=item.get("concept_id"),
+                        name=item.get("name"),
+                        score=item.get("score"),
+                        evidence_snippet=item.get("evidence_snippet"),
+                        predicate=item.get("predicate"),
+                        source_path=self._SPECIALISED_PREFLIGHT_SOURCE_PATH,
+                    )
+                for item in specialised_raw_predicate_suggestions:
+                    if not isinstance(item, Mapping):
+                        continue
+                    _append_suggestion(
+                        bucket=final_predicate_suggestions,
+                        seen=seen_predicates,
+                        concept_id=item.get("concept_id"),
+                        name=item.get("name"),
+                        score=item.get("score"),
+                        evidence_snippet=item.get("evidence_snippet"),
+                        predicate=item.get("predicate"),
+                        source_path=self._SPECIALISED_PREFLIGHT_SOURCE_PATH,
+                    )
+                specialised_applied_type_suggestions = [
+                    dict(item)
+                    for item in final_type_suggestions
+                    if isinstance(item, Mapping)
+                    and item.get("source_path") == self._SPECIALISED_PREFLIGHT_SOURCE_PATH
+                ]
+                specialised_applied_predicate_suggestions = [
+                    dict(item)
+                    for item in final_predicate_suggestions
+                    if isinstance(item, Mapping)
+                    and item.get("source_path") == self._SPECIALISED_PREFLIGHT_SOURCE_PATH
+                ]
+
+        baseline_type_ids: set[str] = set()
+        for item in final_type_suggestions[:baseline_type_suggestion_count]:
+            if not isinstance(item, Mapping):
+                continue
+            concept_id = item.get("concept_id")
+            if not isinstance(concept_id, str):
+                continue
+            cleaned = concept_id.strip().lower()
+            if cleaned:
+                baseline_type_ids.add(cleaned)
+
+        projected_type_gain = 0
+        for item in specialised_raw_type_suggestions:
+            if not isinstance(item, Mapping):
+                continue
+            concept_id = item.get("concept_id")
+            if not isinstance(concept_id, str):
+                continue
+            cleaned = concept_id.strip().lower()
+            if not cleaned or cleaned in baseline_type_ids:
+                continue
+            baseline_type_ids.add(cleaned)
+            projected_type_gain += 1
+        projected_type_suggestion_count = (
+            baseline_type_suggestion_count + projected_type_gain
+        )
+
+        baseline_predicate_ids: set[str] = set()
+        for item in final_predicate_suggestions[:baseline_predicate_suggestion_count]:
+            if not isinstance(item, Mapping):
+                continue
+            concept_id = item.get("concept_id")
+            if not isinstance(concept_id, str):
+                continue
+            cleaned = concept_id.strip().lower()
+            if cleaned:
+                baseline_predicate_ids.add(cleaned)
+
+        projected_predicate_gain = 0
+        for item in specialised_raw_predicate_suggestions:
+            if not isinstance(item, Mapping):
+                continue
+            concept_id = item.get("concept_id")
+            if not isinstance(concept_id, str):
+                continue
+            cleaned = concept_id.strip().lower()
+            if not cleaned or cleaned in baseline_predicate_ids:
+                continue
+            baseline_predicate_ids.add(cleaned)
+            projected_predicate_gain += 1
+        projected_predicate_suggestion_count = (
+            baseline_predicate_suggestion_count + projected_predicate_gain
+        )
+        specialised_recommendation = self._derive_specialised_preflight_recommendation(
+            mode=specialised_mode,
+            invoked=specialised_workflow_invoked,
+            workflow_error=specialised_workflow_error,
+            baseline_type_count=baseline_type_suggestion_count,
+            baseline_predicate_count=baseline_predicate_suggestion_count,
+            specialised_type_count=projected_type_suggestion_count,
+            specialised_predicate_count=projected_predicate_suggestion_count,
+        )
+
         # Check if we have any vocabulary to surface
         has_vocabulary = (
             predicates
@@ -12183,14 +12899,31 @@ class InternalMCPChatOrchestrator:
             or session_memory_salient_predicates_by_type
             or session_memory_annotation_candidates
             or session_memory_related_concept_ids
+            or specialised_applied_type_suggestions
+            or specialised_applied_predicate_suggestions
+            or (
+                specialised_mode == "shadow"
+                and (
+                    specialised_raw_type_suggestions
+                    or specialised_raw_predicate_suggestions
+                )
+            )
         )
         if not has_vocabulary:
             return _OntologyPreflightResult(message=None, telemetry=None)
 
+        stage_suffix = (
+            "+specialised_workflow" if specialised_mode in {"shadow", "active"} else ""
+        )
         lines: list[str] = [
-            "ONTOLOGY PRE-FLIGHT (deterministic, read-only; stage=1+topic+annotation+salient+rag+follow-up):",
-            "Source: instances of #V#conversation_preflight_predicate + context-based discovery + RAG concept text search.",
-            "Use these existing concept IDs for tool planning. Do not invent new concepts here.",
+            "ONTOLOGY PRE-FLIGHT "
+            "(deterministic, read-only; "
+            f"stage=1+topic+annotation+salient+rag+follow-up{stage_suffix}):",
+            "Source: instances of #V#conversation_preflight_predicate + "
+            "context-based discovery + RAG concept text search + optional "
+            "specialised workflow fallback.",
+            "Use these existing concept IDs for tool planning. "
+            "Do not invent new concepts here.",
         ]
 
         if explicit_ids:
@@ -12250,6 +12983,25 @@ class InternalMCPChatOrchestrator:
         if rag_section:
             lines.append("")
             lines.append(rag_section)
+
+        specialised_section: str | None = None
+        if specialised_mode == "active":
+            specialised_section = self._build_specialised_preflight_section(
+                type_suggestions=specialised_applied_type_suggestions,
+                predicate_suggestions=specialised_applied_predicate_suggestions,
+            )
+        elif specialised_mode == "shadow":
+            specialised_section = self._build_specialised_preflight_section(
+                type_suggestions=specialised_raw_type_suggestions,
+                predicate_suggestions=specialised_raw_predicate_suggestions,
+                title=(
+                    "Specialised workflow fallback candidates "
+                    "(shadow-only; not applied):"
+                ),
+            )
+        if specialised_section:
+            lines.append("")
+            lines.append(specialised_section)
 
         if session_memory_reused and (
             session_memory_types
@@ -12412,6 +13164,25 @@ class InternalMCPChatOrchestrator:
             "salient_predicates_by_type": salient_predicates_by_type,
             "salient_predicate_ids": salient_predicate_ids,
             "salient_preflight_errors": salient_preflight_errors,
+            # JVNAUTOSCI-990: specialised workflow fallback evaluation signals.
+            "specialised_preflight_mode": specialised_mode,
+            "specialised_preflight_needed": specialised_needed,
+            "specialised_preflight_workflow_available": specialised_workflow_available,
+            "specialised_preflight_workflow_invoked": specialised_workflow_invoked,
+            "specialised_preflight_workflow_completed": specialised_workflow_completed,
+            "specialised_preflight_workflow_error": specialised_workflow_error,
+            "specialised_preflight_metadata_validation_fallback_applied": specialised_metadata_validation_fallback_applied,
+            "specialised_preflight_search_invoked": specialised_search_invoked,
+            "specialised_preflight_search_errors": specialised_search_errors,
+            "specialised_preflight_baseline_type_suggestion_count": baseline_type_suggestion_count,
+            "specialised_preflight_baseline_predicate_suggestion_count": baseline_predicate_suggestion_count,
+            "specialised_preflight_projected_type_suggestion_count": projected_type_suggestion_count,
+            "specialised_preflight_projected_predicate_suggestion_count": projected_predicate_suggestion_count,
+            "specialised_preflight_raw_type_suggestions": specialised_raw_type_suggestions,
+            "specialised_preflight_raw_predicate_suggestions": specialised_raw_predicate_suggestions,
+            "specialised_preflight_applied_type_suggestions": specialised_applied_type_suggestions,
+            "specialised_preflight_applied_predicate_suggestions": specialised_applied_predicate_suggestions,
+            "specialised_preflight_recommendation": specialised_recommendation,
             # JVNAUTOSCI-987: explicit discovery-path provenance + follow-up continuity.
             "preflight_session_id_present": bool(session_key),
             "session_memory_reused": session_memory_reused,

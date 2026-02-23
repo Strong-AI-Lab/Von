@@ -1391,3 +1391,232 @@ def test_rag_preflight_skips_search_without_namespace(monkeypatch):
     assert telemetry.get("rag_invoked") is False
     assert telemetry.get("rag_used") is False
     assert "rag_namespace_missing" in (telemetry.get("rag_preflight_errors") or [])
+
+
+def test_specialised_preflight_shadow_mode_reports_evaluation_without_applying(
+    monkeypatch,
+):
+    """JVNAUTOSCI-990: shadow mode should evaluate but not apply suggestions."""
+
+    monkeypatch.setenv("VON_MCP_SPECIALISED_PREFLIGHT_MODE", "shadow")
+    monkeypatch.setattr(
+        InternalMCPChatOrchestrator,
+        "_extract_topic_keywords_from_context",
+        lambda self, prompt, context, max_recent_messages=5: [],
+    )
+    monkeypatch.setattr(
+        InternalMCPChatOrchestrator,
+        "_should_trigger_predicate_search",
+        staticmethod(lambda _text: False),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.annotation_extraction_service.extract_annotations",
+        lambda text, use_llm=None, use_match=True, return_timings=False: [],
+    )
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.get_texts_for_concept",
+        lambda concept_id, predicate=None, limit=50: [],
+    )
+
+    def _fake_search_concepts(
+        *,
+        query="",
+        instance_of=None,
+        filter_kind=None,
+        match_type=None,
+        min_similarity=None,
+        limit=None,
+        **_kwargs,
+    ):
+        if instance_of == "#V#conversation_preflight_predicate":
+            return {"results": []}
+        if filter_kind == ["type"]:
+            return {
+                "results": [
+                    {
+                        "concept_id": "#V#scientific_paper",
+                        "name": "Scientific Paper",
+                        "similarity_score": 0.84,
+                    }
+                ]
+            }
+        if filter_kind == ["predicate"]:
+            return {
+                "results": [
+                    {
+                        "concept_id": "#V#authored_by",
+                        "name": "authored by",
+                        "similarity_score": 0.82,
+                    }
+                ]
+            }
+        return {"results": []}
+
+    monkeypatch.setattr(
+        "src.backend.services.concept_search_service.search_concepts",
+        _fake_search_concepts,
+    )
+
+    gateway = cast(Any, _CapturingGateway())
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway, max_tool_invocations=1, max_context_chars=80_000
+    )
+    llm = _CapturingLLM(["ok"])
+
+    result = orchestrator.run(
+        prompt="Use #V#person as context for this relation mapping.",
+        context=[],
+        llm_client=llm,
+        model=None,
+        preferred_language="en",
+    )
+
+    preflight_entries = [
+        entry
+        for entry in (result.aux_llm_calls or [])
+        if entry.get("type") == "ontology_preflight"
+    ]
+    assert preflight_entries, "expected ontology preflight telemetry"
+    telemetry = preflight_entries[0]
+
+    assert telemetry.get("specialised_preflight_mode") == "shadow"
+    assert telemetry.get("specialised_preflight_workflow_invoked") is True
+    assert telemetry.get("specialised_preflight_workflow_available") is True
+    assert telemetry.get("specialised_preflight_recommendation") == "go_active_trial"
+    assert telemetry.get("specialised_preflight_applied_type_suggestions") == []
+    assert telemetry.get("specialised_preflight_applied_predicate_suggestions") == []
+
+    raw_types = telemetry.get("specialised_preflight_raw_type_suggestions") or []
+    raw_predicates = (
+        telemetry.get("specialised_preflight_raw_predicate_suggestions") or []
+    )
+    assert any(
+        isinstance(item, dict) and item.get("concept_id") == "#V#scientific_paper"
+        for item in raw_types
+    )
+    assert any(
+        isinstance(item, dict) and item.get("concept_id") == "#V#authored_by"
+        for item in raw_predicates
+    )
+    assert "specialised_preflight_workflow" not in (
+        telemetry.get("final_suggestion_paths") or []
+    )
+
+
+def test_specialised_preflight_active_mode_applies_fallback_suggestions(monkeypatch):
+    """JVNAUTOSCI-990: active mode should merge specialised fallback suggestions."""
+
+    monkeypatch.setenv("VON_MCP_SPECIALISED_PREFLIGHT_MODE", "active")
+    monkeypatch.setattr(
+        InternalMCPChatOrchestrator,
+        "_extract_topic_keywords_from_context",
+        lambda self, prompt, context, max_recent_messages=5: [],
+    )
+    monkeypatch.setattr(
+        InternalMCPChatOrchestrator,
+        "_should_trigger_predicate_search",
+        staticmethod(lambda _text: False),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.annotation_extraction_service.extract_annotations",
+        lambda text, use_llm=None, use_match=True, return_timings=False: [],
+    )
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.get_texts_for_concept",
+        lambda concept_id, predicate=None, limit=50: [],
+    )
+
+    def _fake_search_concepts(
+        *,
+        query="",
+        instance_of=None,
+        filter_kind=None,
+        match_type=None,
+        min_similarity=None,
+        limit=None,
+        **_kwargs,
+    ):
+        if instance_of == "#V#conversation_preflight_predicate":
+            return {"results": []}
+        if filter_kind == ["type"]:
+            return {
+                "results": [
+                    {
+                        "concept_id": "#V#scientific_paper",
+                        "name": "Scientific Paper",
+                        "similarity_score": 0.85,
+                    }
+                ]
+            }
+        if filter_kind == ["predicate"]:
+            return {
+                "results": [
+                    {
+                        "concept_id": "#V#authored_by",
+                        "name": "authored by",
+                        "similarity_score": 0.83,
+                    }
+                ]
+            }
+        return {"results": []}
+
+    monkeypatch.setattr(
+        "src.backend.services.concept_search_service.search_concepts",
+        _fake_search_concepts,
+    )
+
+    gateway = cast(Any, _CapturingGateway())
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway, max_tool_invocations=1, max_context_chars=80_000
+    )
+    llm = _CapturingLLM(["ok"])
+
+    result = orchestrator.run(
+        prompt="Use #V#person as context for this relation mapping.",
+        context=[],
+        llm_client=llm,
+        model=None,
+        preferred_language="en",
+    )
+
+    preflight_entries = [
+        entry
+        for entry in (result.aux_llm_calls or [])
+        if entry.get("type") == "ontology_preflight"
+    ]
+    assert preflight_entries, "expected ontology preflight telemetry"
+    telemetry = preflight_entries[0]
+
+    assert telemetry.get("specialised_preflight_mode") == "active"
+    assert telemetry.get("specialised_preflight_workflow_invoked") is True
+    assert telemetry.get("specialised_preflight_recommendation") == "go_adopted"
+
+    applied_types = telemetry.get("specialised_preflight_applied_type_suggestions") or []
+    applied_predicates = (
+        telemetry.get("specialised_preflight_applied_predicate_suggestions") or []
+    )
+    assert any(
+        isinstance(item, dict) and item.get("concept_id") == "#V#scientific_paper"
+        for item in applied_types
+    )
+    assert any(
+        isinstance(item, dict) and item.get("concept_id") == "#V#authored_by"
+        for item in applied_predicates
+    )
+    assert "specialised_preflight_workflow" in (
+        telemetry.get("final_suggestion_paths") or []
+    )
+
+    context_messages = llm.calls[0]["context"] or []
+    preflight_text = next(
+        (
+            msg.get("content")
+            for msg in context_messages
+            if isinstance(msg, dict)
+            and isinstance(msg.get("content"), str)
+            and "ONTOLOGY PRE-FLIGHT" in msg["content"]
+        ),
+        None,
+    )
+    assert isinstance(preflight_text, str)
+    assert "Specialised workflow fallback candidates" in preflight_text
