@@ -1148,3 +1148,246 @@ def test_salient_predicates_persist_for_two_follow_up_turns(monkeypatch):
             second_telemetry.get("session_memory_salient_predicates_by_type") or []
         )
     )
+
+
+def test_rag_candidates_surface_in_preflight_telemetry_and_prompt(monkeypatch):
+    """JVNAUTOSCI-989: preflight should surface bounded RAG concept evidence."""
+
+    def _fake_search_concepts(
+        *, query="", instance_of=None, filter_kind=None, **_kwargs
+    ):
+        if instance_of == "#V#conversation_preflight_predicate":
+            return {"results": []}
+        return {"results": []}
+
+    monkeypatch.setattr(
+        "src.backend.services.concept_search_service.search_concepts",
+        _fake_search_concepts,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.annotation_extraction_service.extract_annotations",
+        lambda text, use_llm=None, use_match=True, return_timings=False: [],
+    )
+
+    def _fake_get_texts_for_concept(concept_id, predicate=None, limit=50):
+        if predicate != "hasName":
+            return []
+        if concept_id == "#V#scientific_paper":
+            return [{"text": "Scientific Paper", "lang": "en", "context": {"name_type": "NL"}}]
+        if concept_id == "#V#authored_by":
+            return [{"text": "authored by", "lang": "en", "context": {"name_type": "NL"}}]
+        return []
+
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.get_texts_for_concept",
+        _fake_get_texts_for_concept,
+    )
+
+    def _fake_get_concept_by_concept_id(concept_id):
+        if concept_id == "#V#scientific_paper":
+            return {
+                "concept_id": "#V#scientific_paper",
+                "name": "Scientific Paper",
+                "relationships": {
+                    "is_a_type_of": ["#V#document"],
+                },
+            }
+        if concept_id == "#V#authored_by":
+            return {
+                "concept_id": "#V#authored_by",
+                "name": "authored by",
+                "relationships": {
+                    "is_an_instance_of": ["#V#predicate"],
+                },
+            }
+        return None
+
+    monkeypatch.setattr(
+        "src.backend.services.concept_service.get_concept_by_concept_id",
+        _fake_get_concept_by_concept_id,
+    )
+
+    rag_results = [
+        {
+            "id": "text_relation:rag-1",
+            "score": 0.98,
+            "text": (
+                "Concept: #V#scientific_paper\n"
+                "Predicate: hasDescription\n"
+                "Language: en\n\n"
+                "Peer-reviewed article structure used for scientific communication."
+            ),
+            "metadata": {
+                "concept_id": "#V#scientific_paper",
+                "predicate": "hasDescription",
+            },
+        },
+        {
+            "id": "text_relation:rag-2",
+            "score": 0.96,
+            "text": (
+                "Concept: #V#authored_by\n"
+                "Predicate: hasNote\n"
+                "Language: en\n\n"
+                "Relates a paper to its author identity."
+            ),
+            "metadata": {
+                "concept_id": "#V#authored_by",
+                "predicate": "hasNote",
+            },
+        },
+    ]
+    for idx in range(20):
+        rag_results.append(
+            {
+                "id": f"text_relation:extra-{idx}",
+                "score": max(0.0, 0.70 - (idx * 0.01)),
+                "text": (
+                    f"Concept: #V#candidate_{idx}\n"
+                    "Predicate: hasDescription\n"
+                    "Language: en\n\n"
+                    f"Auxiliary concept evidence {idx}."
+                ),
+                "metadata": {
+                    "concept_id": f"#V#candidate_{idx}",
+                    "predicate": "hasDescription",
+                },
+            }
+        )
+
+    class _RagGateway(_CapturingGateway):
+        def invoke(self, tool_name, payload=None):
+            self.invocations.append({"tool": tool_name, "payload": payload})
+            if tool_name == "search_knowledge_base":
+                return _StubResult(
+                    {
+                        "success": True,
+                        "results": rag_results,
+                        "count": len(rag_results),
+                    }
+                )
+            return _StubResult({"ok": True})
+
+    gateway = cast(Any, _RagGateway())
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway, max_tool_invocations=1, max_context_chars=80_000
+    )
+    llm = _CapturingLLM(["ok"])
+
+    result = orchestrator.run(
+        prompt="Find author-affiliation concepts for this scientific paper.",
+        context=[],
+        llm_client=llm,
+        model=None,
+        preferred_language="en",
+        user_namespace="#V#michael_witbrock",
+        conversation_session_id="session-989-rag",
+    )
+
+    rag_calls = [call for call in gateway.invocations if call.get("tool") == "search_knowledge_base"]
+    assert rag_calls, "expected preflight to invoke RAG search"
+    rag_payload = rag_calls[0].get("payload") or {}
+    assert rag_payload.get("top_k") == orchestrator._RAG_PREFLIGHT_TOP_K
+    assert rag_payload.get("mode") == "concepts"
+    assert rag_payload.get("predicates") == ["hasDescription", "hasNote"]
+
+    preflight_entries = [
+        entry
+        for entry in (result.aux_llm_calls or [])
+        if entry.get("type") == "ontology_preflight"
+    ]
+    assert preflight_entries, "expected ontology preflight telemetry"
+    telemetry = preflight_entries[0]
+
+    assert telemetry.get("rag_invoked") is True
+    assert telemetry.get("rag_used") is True
+    assert telemetry.get("rag_namespace_present") is True
+    assert isinstance(telemetry.get("rag_query"), str)
+    assert telemetry.get("rag_selected_concept_id") == "#V#scientific_paper"
+    assert "#V#scientific_paper" in (telemetry.get("rag_selected_concept_ids") or [])
+    assert len(telemetry.get("rag_candidates") or []) == orchestrator._RAG_PREFLIGHT_MAX_CANDIDATES
+    assert "rag_concept_text_search" in (telemetry.get("final_suggestion_paths") or [])
+
+    rag_candidates = telemetry.get("rag_candidates") or []
+    assert any(
+        isinstance(item, dict)
+        and item.get("concept_id") == "#V#scientific_paper"
+        and "Peer-reviewed article" in str(item.get("evidence_snippet") or "")
+        for item in rag_candidates
+    )
+
+    type_suggestions = telemetry.get("final_type_suggestions") or []
+    predicate_suggestions = telemetry.get("final_predicate_suggestions") or []
+    assert any(
+        isinstance(item, dict)
+        and item.get("concept_id") == "#V#scientific_paper"
+        and item.get("source_path") == "rag_concept_text_search"
+        for item in type_suggestions
+    )
+    assert any(
+        isinstance(item, dict)
+        and item.get("concept_id") == "#V#authored_by"
+        and item.get("source_path") == "rag_concept_text_search"
+        for item in predicate_suggestions
+    )
+
+    context_messages = llm.calls[0]["context"] or []
+    preflight_text = next(
+        (
+            msg.get("content")
+            for msg in context_messages
+            if isinstance(msg, dict)
+            and isinstance(msg.get("content"), str)
+            and "ONTOLOGY PRE-FLIGHT" in msg["content"]
+        ),
+        None,
+    )
+    assert isinstance(preflight_text, str)
+    assert "RAG-assisted concept candidates" in preflight_text
+    assert "Peer-reviewed article structure" in preflight_text
+
+
+def test_rag_preflight_skips_search_without_namespace(monkeypatch):
+    """JVNAUTOSCI-989: RAG discovery should fail closed without a namespace."""
+
+    monkeypatch.setattr(
+        "src.backend.services.concept_search_service.search_concepts",
+        lambda **_kwargs: {"results": []},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.annotation_extraction_service.extract_annotations",
+        lambda text, use_llm=None, use_match=True, return_timings=False: [],
+    )
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.get_texts_for_concept",
+        lambda concept_id, predicate=None, limit=50: [],
+    )
+
+    gateway = cast(Any, _CapturingGateway())
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway, max_tool_invocations=1, max_context_chars=80_000
+    )
+    llm = _CapturingLLM(["ok"])
+
+    result = orchestrator.run(
+        prompt="Find concept IDs related to this paper topic and #V#person.",
+        context=[],
+        llm_client=llm,
+        model=None,
+        preferred_language="en",
+    )
+
+    assert not any(
+        call.get("tool") == "search_knowledge_base" for call in gateway.invocations
+    )
+
+    preflight_entries = [
+        entry
+        for entry in (result.aux_llm_calls or [])
+        if entry.get("type") == "ontology_preflight"
+    ]
+    assert preflight_entries, "expected ontology preflight telemetry"
+    telemetry = preflight_entries[0]
+    assert telemetry.get("rag_invoked") is False
+    assert telemetry.get("rag_used") is False
+    assert "rag_namespace_missing" in (telemetry.get("rag_preflight_errors") or [])
