@@ -105,13 +105,73 @@ def test_generate_includes_rag_trace_when_authenticated(app):
     rag_trace = body["rag_trace"]
     assert rag_trace["authenticated"] is True
     assert rag_trace["namespace"] == "#V#user@org"
-    assert rag_trace["namespace_source"] == "session.namespace"
+    assert rag_trace["namespace_source"] == "effective_context.namespace"
     assert rag_trace["retrieval_attempted"] is True
     assert "search_knowledge_base" in rag_trace["tools_invoked"]
     assert rag_trace["tool_results_included_in_prompt"] is True
 
     assert "llm_debug" in body
     assert body["llm_debug"]["namespace_report"]["namespace"] == "#V#user@org"
+    assert (
+        body["llm_debug"]["namespace_report"]["namespace_source"]
+        == "effective_context.namespace"
+    )
+    assert body["llm_debug"]["namespace_report"]["mismatch_detected"] is False
+
+
+def test_generate_prefers_window_effective_namespace_and_reports_mismatch(
+    app, monkeypatch
+):
+    client = app.test_client()
+
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#user"
+        sess["namespace"] = "#V#user@flask_org"
+        sess["session_id"] = "test-session"
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_effective_context",
+        lambda *_args, **_kwargs: {
+            "user_id": "#V#user",
+            "organisation_id": "#V#window_org",
+            "role": "member",
+            "namespace": "#V#user@window_org",
+            "chat_session_id": "test-session",
+            "source": "window_session",
+        },
+    )
+
+    captured_namespaces = []
+
+    def _capture_add_message(_user_id, _session_id, _message, llm_debug_data=None, **kwargs):
+        captured_namespaces.append(kwargs.get("namespace"))
+        return None
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.add_message_to_history",
+        _capture_add_message,
+    )
+
+    resp = client.post(
+        "/von/generate",
+        json={"prompt": "What is in my RAG store?"},
+        headers={"X-Von-Window-Session": "ws-test"},
+    )
+    assert resp.status_code == 200
+
+    body = resp.get_json()
+    rag_trace = body["rag_trace"]
+    assert rag_trace["namespace"] == "#V#user@window_org"
+    assert rag_trace["namespace_source"] == "effective_context.namespace"
+
+    namespace_report = body["llm_debug"]["namespace_report"]
+    assert namespace_report["mismatch_detected"] is True
+    assert namespace_report["effective_context_source"] == "window_session"
+    assert namespace_report["session_namespace"] == "#V#user@flask_org"
+    assert namespace_report["namespace"] == "#V#user@window_org"
+
+    assert captured_namespaces
+    assert all(ns == "#V#user@window_org" for ns in captured_namespaces if ns is not None)
 
 
 def test_generate_rag_trace_marks_unauthenticated(app):

@@ -1051,6 +1051,9 @@ def add_message_to_history(
     *,
     broadcast_to_shared: Optional[bool] = None,
     exclude_user_from_broadcast: Optional[str] = None,
+    namespace: Optional[str] = None,
+    organisation_concept_id: Optional[str] = None,
+    role_in_org: Optional[str] = None,
 ) -> None:
     """
     Adds a message to the chat history for a specific user and session.
@@ -1075,13 +1078,30 @@ def add_message_to_history(
         raise ChatHistoryServiceError("Could not connect to chat history collection.")
 
     try:
-        # Get session context for organisation/role/namespace (best effort).
+        # Get session context for organisation/role/namespace (best effort), then
+        # apply any explicit call-site overrides so write and index paths stay aligned
+        # with the request's effective namespace resolution.
         session_context = get_session_context()
+        effective_session_context = dict(session_context)
+
+        if isinstance(namespace, str) and namespace.strip():
+            effective_session_context["namespace"] = namespace.strip()
+        if (
+            isinstance(organisation_concept_id, str)
+            and organisation_concept_id.strip()
+        ):
+            org_value = organisation_concept_id.strip()
+            effective_session_context["organisation_concept_id"] = org_value
+            effective_session_context["org_id"] = org_value
+        if isinstance(role_in_org, str) and role_in_org.strip():
+            effective_session_context["role_in_org"] = role_in_org.strip()
 
         # Determine namespace used for both persistence and RAG indexing.
-        ns = _derive_rag_namespace(session_context=session_context, user_id=user_id)
+        ns = _derive_rag_namespace(
+            session_context=effective_session_context, user_id=user_id
+        )
 
-        org_concept_id = session_context.get("organisation_concept_id")
+        org_concept_id = effective_session_context.get("organisation_concept_id")
         org_id_value = (
             org_concept_id.strip()
             if isinstance(org_concept_id, str) and org_concept_id.strip()
@@ -1127,9 +1147,9 @@ def add_message_to_history(
             set_on_insert["session_name"] = session_name
         if isinstance(org_concept_id, str) and org_concept_id.strip():
             set_on_insert["organisation_concept_id"] = org_concept_id.strip()
-        role_in_org = session_context.get("role_in_org")
-        if isinstance(role_in_org, str) and role_in_org.strip():
-            set_on_insert["role_in_org"] = role_in_org.strip()
+        role_value = effective_session_context.get("role_in_org")
+        if isinstance(role_value, str) and role_value.strip():
+            set_on_insert["role_in_org"] = role_value.strip()
 
         # Update or insert the session document
         result = chat_history_coll.update_one(
@@ -1171,7 +1191,7 @@ def add_message_to_history(
                         "id": str(uuid.uuid4()),
                         "text": content,
                         "metadata": _build_rag_metadata(
-                            session_context=session_context,
+                            session_context=effective_session_context,
                             user_id=user_id,
                             session_id=session_id,
                             role=role,
@@ -1194,7 +1214,7 @@ def add_message_to_history(
                                         "id": str(uuid.uuid4()),
                                         "text": _truncate_for_rag(spoken_txt),
                                         "metadata": _build_rag_metadata(
-                                            session_context=session_context,
+                                            session_context=effective_session_context,
                                             user_id=user_id,
                                             session_id=session_id,
                                             role=role,

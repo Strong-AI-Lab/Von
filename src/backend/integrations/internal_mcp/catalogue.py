@@ -5146,13 +5146,110 @@ def _resolve_rag_namespace_from_kwargs(kwargs: dict) -> dict:
     """
 
     import os
+    import re
 
-    raw = kwargs.get("namespace")
-    if isinstance(raw, str) and raw.strip():
+    def _normalise_concept_id(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        if cleaned.startswith("#v#"):
+            return "#V#" + cleaned[3:]
+        if cleaned.startswith("#V#"):
+            return cleaned
+        return f"#V#{cleaned.lstrip('#')}"
+
+    def _namespace_slug_from_concept(value: str | None) -> str | None:
+        if not isinstance(value, str):
+            return None
+        slug = value.strip()
+        if not slug:
+            return None
+        if slug.startswith("#V#"):
+            slug = slug[3:]
+        if "@" in slug:
+            slug = slug.split("@", 1)[0]
+        if "+" in slug:
+            slug = slug.split("+", 1)[0]
+        slug = re.sub(r"[^a-z0-9]+", "_", slug.strip().lower()).strip("_")
+        return slug or None
+
+    raw_namespace = kwargs.get("namespace")
+    explicit_namespace: str | None = None
+    if isinstance(raw_namespace, str) and raw_namespace.strip():
+        explicit_namespace = raw_namespace.strip()
+        if explicit_namespace.startswith("#v#"):
+            explicit_namespace = "#V#" + explicit_namespace[3:]
+        elif not explicit_namespace.startswith("#V#"):
+            explicit_namespace = f"#V#{explicit_namespace.lstrip('#')}"
+
+    user_candidate = _normalise_concept_id(kwargs.get("user_concept_id"))
+    if user_candidate is None:
+        user_candidate = _normalise_concept_id(kwargs.get("user_id"))
+    if user_candidate is None:
+        user_candidate = _normalise_concept_id(kwargs.get("actor_concept_id"))
+    if user_candidate is None:
+        user_candidate = _normalise_concept_id(kwargs.get("created_by_concept_id"))
+    if user_candidate is None:
+        user_payload = kwargs.get("user")
+        if isinstance(user_payload, dict):
+            user_candidate = _normalise_concept_id(user_payload.get("id"))
+
+    org_candidate = _normalise_concept_id(kwargs.get("organisation_concept_id"))
+    if org_candidate is None:
+        org_candidate = _normalise_concept_id(kwargs.get("org_id"))
+
+    derived_namespace: str | None = None
+    if user_candidate is not None:
+        user_slug = _namespace_slug_from_concept(user_candidate)
+        org_slug = _namespace_slug_from_concept(org_candidate)
+        if user_slug:
+            try:
+                from ...services.namespace_service import derive_namespace
+
+                derived_namespace = (
+                    derive_namespace(user_slug, org_slug)
+                    if org_slug
+                    else derive_namespace(user_slug)
+                )
+            except Exception:
+                derived_namespace = None
+
+    if explicit_namespace and derived_namespace and explicit_namespace != derived_namespace:
         return {
-            "namespace": raw.strip(),
+            "namespace": None,
+            "namespace_source": "conflict",
+            "namespace_resolution_note": "namespace_mismatch",
+            "namespace_mismatch": True,
+            "provided_namespace": explicit_namespace,
+            "derived_namespace": derived_namespace,
+            "derived_user_concept_id": user_candidate,
+            "derived_organisation_concept_id": org_candidate,
+        }
+
+    if explicit_namespace:
+        return {
+            "namespace": explicit_namespace,
             "namespace_source": "request.namespace",
             "namespace_resolution_note": None,
+            "namespace_mismatch": False,
+            "provided_namespace": explicit_namespace,
+            "derived_namespace": derived_namespace,
+            "derived_user_concept_id": user_candidate,
+            "derived_organisation_concept_id": org_candidate,
+        }
+
+    if derived_namespace:
+        return {
+            "namespace": derived_namespace,
+            "namespace_source": "derived.user_org",
+            "namespace_resolution_note": "derived_from_user_org",
+            "namespace_mismatch": False,
+            "provided_namespace": None,
+            "derived_namespace": derived_namespace,
+            "derived_user_concept_id": user_candidate,
+            "derived_organisation_concept_id": org_candidate,
         }
 
     env_ns = os.environ.get("VON_DEFAULT_NAMESPACE")
@@ -5161,12 +5258,46 @@ def _resolve_rag_namespace_from_kwargs(kwargs: dict) -> dict:
             "namespace": env_ns.strip(),
             "namespace_source": "env.VON_DEFAULT_NAMESPACE",
             "namespace_resolution_note": "fallback",
+            "namespace_mismatch": False,
+            "provided_namespace": None,
+            "derived_namespace": derived_namespace,
+            "derived_user_concept_id": user_candidate,
+            "derived_organisation_concept_id": org_candidate,
         }
 
     return {
         "namespace": None,
         "namespace_source": "missing",
         "namespace_resolution_note": "namespace_required",
+        "namespace_mismatch": False,
+        "provided_namespace": None,
+        "derived_namespace": derived_namespace,
+        "derived_user_concept_id": user_candidate,
+        "derived_organisation_concept_id": org_candidate,
+    }
+
+
+def _rag_namespace_resolution_error(ns_report: dict[str, Any]) -> dict[str, Any] | None:
+    namespace = ns_report.get("namespace")
+    if isinstance(namespace, str) and namespace.strip():
+        return None
+
+    if ns_report.get("namespace_resolution_note") == "namespace_mismatch":
+        return {
+            "error": "namespace_mismatch",
+            "message": (
+                "Explicit namespace conflicts with derived user/org namespace; "
+                "request was not executed."
+            ),
+            **ns_report,
+            "success": False,
+        }
+
+    return {
+        "error": "namespace_required",
+        "message": "RAG access requires authenticated user context (namespace)",
+        **ns_report,
+        "success": False,
     }
 
 
@@ -6121,13 +6252,13 @@ def _search_knowledge_base(**kwargs):
         ns = ns_report.get("namespace")
 
         # SECURITY: Require namespace for RAG search - prevents cross-user data leakage
-        if not ns:
-            return {
-                "error": "namespace_required",
-                "message": "RAG search requires authenticated user context (namespace)",
-                **ns_report,
-                "success": False,
-            }
+        ns_error = _rag_namespace_resolution_error(ns_report)
+        if ns_error is not None:
+            if ns_error.get("error") == "namespace_required":
+                ns_error["message"] = (
+                    "RAG search requires authenticated user context (namespace)"
+                )
+            return ns_error
 
         # Build permissions context from Flask session for org-scoped RAG filtering.
         # IMPORTANT: Use concept IDs (e.g. #V#user) rather than email/usernames.
@@ -6331,13 +6462,20 @@ def _index_concept_text(**kwargs):
 
     ns_report = _resolve_rag_namespace_from_kwargs(kwargs)
     ns = ns_report.get("namespace")
-    if not ns:
-        return {
-            "error": "namespace_required",
-            "message": "RAG indexing requires authenticated user context (namespace)",
-            **ns_report,
-            "success": False,
-        }
+    ns_error = _rag_namespace_resolution_error(ns_report)
+    if ns_error is not None:
+        if ns_error.get("error") == "namespace_required":
+            ns_error["message"] = (
+                "RAG indexing requires authenticated user context (namespace)"
+            )
+        return ns_error
+    if not isinstance(ns, str) or not ns.strip():
+        return make_error_response(
+            "namespace_required",
+            "RAG indexing requires authenticated user context (namespace)",
+            details={"namespace_report": ns_report},
+        )
+    ns = ns.strip()
 
     from ...services.rag_text_relation_sync_service import sync_text_relations_to_rag
 
@@ -7529,13 +7667,13 @@ def _get_related_concepts(**kwargs):
 
     ns_report = _resolve_rag_namespace_from_kwargs(kwargs)
     ns = ns_report.get("namespace")
-    if not ns:
-        return {
-            "error": "namespace_required",
-            "message": "RAG search requires authenticated user context (namespace)",
-            **ns_report,
-            "success": False,
-        }
+    ns_error = _rag_namespace_resolution_error(ns_report)
+    if ns_error is not None:
+        if ns_error.get("error") == "namespace_required":
+            ns_error["message"] = (
+                "RAG search requires authenticated user context (namespace)"
+            )
+        return ns_error
 
     # Attempt to seed the similarity query from the concept description text.
     # We scope access by (user, org) implied by the namespace to avoid cross-namespace reads.
@@ -8291,6 +8429,10 @@ def _rag_get_status(**kwargs):
 
     try:
         ns_report = _resolve_rag_namespace_from_kwargs(kwargs)
+        ns_error = _rag_namespace_resolution_error(ns_report)
+        if ns_error is not None and ns_error.get("error") == "namespace_mismatch":
+            return ns_error
+
         ns = ns_report.get("namespace") or os.environ.get("VON_DEFAULT_NAMESPACE")
         detail = kwargs.get("detail")
         base_url = (
@@ -8405,13 +8547,9 @@ def _rag_list_collections(**kwargs):
     ns = ns_report.get("namespace")
 
     # SECURITY: Require namespace for RAG access - prevents cross-user data leakage
-    if not ns:
-        return {
-            "error": "namespace_required",
-            "message": "RAG access requires authenticated user context (namespace)",
-            **ns_report,
-            "success": False,
-        }
+    ns_error = _rag_namespace_resolution_error(ns_report)
+    if ns_error is not None:
+        return ns_error
 
     collections = [
         {
@@ -8784,13 +8922,16 @@ def _rag_list_indexed(**kwargs):
     ns = ns_report.get("namespace")
 
     # SECURITY: Require namespace for RAG access - prevents cross-user data leakage
-    if not ns:
-        return {
-            "error": "namespace_required",
-            "message": "RAG access requires authenticated user context (namespace)",
-            **ns_report,
-            "success": False,
-        }
+    ns_error = _rag_namespace_resolution_error(ns_report)
+    if ns_error is not None:
+        return ns_error
+    if not isinstance(ns, str) or not ns.strip():
+        return make_error_response(
+            "namespace_required",
+            "RAG access requires authenticated user context (namespace)",
+            details={"namespace_report": ns_report},
+        )
+    ns = ns.strip()
 
     if not isinstance(collection, str) or not collection:
         collection = "ka_sessions"
@@ -9272,13 +9413,16 @@ def _rag_get_item(**kwargs):
     ns = ns_report.get("namespace")
 
     # SECURITY: Require namespace for RAG access - prevents cross-user data leakage
-    if not ns:
-        return {
-            "error": "namespace_required",
-            "message": "RAG access requires authenticated user context (namespace)",
-            **ns_report,
-            "success": False,
-        }
+    ns_error = _rag_namespace_resolution_error(ns_report)
+    if ns_error is not None:
+        return ns_error
+    if not isinstance(ns, str) or not ns.strip():
+        return make_error_response(
+            "namespace_required",
+            "RAG access requires authenticated user context (namespace)",
+            details={"namespace_report": ns_report},
+        )
+    ns = ns.strip()
 
     if not isinstance(collection, str) or not collection:
         collection = "ka_sessions"
@@ -9523,13 +9667,20 @@ def _rag_sync_text_relations(**kwargs):
     ns = ns_report.get("namespace")
 
     # SECURITY: Require namespace for RAG access - prevents cross-user data leakage
-    if not ns:
-        return {
-            "error": "namespace_required",
-            "message": "RAG sync requires an explicit namespace (e.g. #V#user@org)",
-            **ns_report,
-            "success": False,
-        }
+    ns_error = _rag_namespace_resolution_error(ns_report)
+    if ns_error is not None:
+        if ns_error.get("error") == "namespace_required":
+            ns_error["message"] = (
+                "RAG sync requires an explicit namespace (e.g. #V#user@org)"
+            )
+        return ns_error
+    if not isinstance(ns, str) or not ns.strip():
+        return make_error_response(
+            "namespace_required",
+            "RAG sync requires an explicit namespace (e.g. #V#user@org)",
+            details={"namespace_report": ns_report},
+        )
+    ns = ns.strip()
 
     predicates = kwargs.get("predicates")
     if predicates is not None and not isinstance(predicates, list):

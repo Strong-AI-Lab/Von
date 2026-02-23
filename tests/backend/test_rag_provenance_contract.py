@@ -254,3 +254,51 @@ def test_rag_list_indexed_supports_chat_history_sessions(monkeypatch):
     item = result["items"][0]
     assert item["item_kind"] == "chat_history_session"
     assert item["source_system"] == "mongo.chat_history"
+
+
+def test_rag_namespace_resolver_supports_user_only_path():
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    report = cat._resolve_rag_namespace_from_kwargs({"user": {"id": "#V#user"}})
+
+    assert report["namespace"] == "#V#user"
+    assert report["namespace_source"] == "derived.user_org"
+    assert report["namespace_resolution_note"] == "derived_from_user_org"
+    assert report["namespace_mismatch"] is False
+
+
+def test_rag_namespace_resolver_supports_user_org_path():
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    report = cat._resolve_rag_namespace_from_kwargs(
+        {
+            "user": {"id": "#V#user"},
+            "organisation_concept_id": "#V#org",
+        }
+    )
+
+    assert report["namespace"] == "#V#user@org"
+    assert report["namespace_source"] == "derived.user_org"
+    assert report["namespace_resolution_note"] == "derived_from_user_org"
+    assert report["namespace_mismatch"] is False
+
+
+def test_rag_list_indexed_fails_closed_on_namespace_mismatch(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        lambda: _DB({"interaction_sessions": _Collection([])}),
+    )
+
+    result = cat._rag_list_indexed(
+        namespace="#V#user",
+        user={"id": "#V#user"},
+        organisation_concept_id="#V#org",
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "namespace_mismatch"
+    assert result["namespace"] is None
+    assert result["provided_namespace"] == "#V#user"
+    assert result["derived_namespace"] == "#V#user@org"

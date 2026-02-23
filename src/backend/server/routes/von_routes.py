@@ -3542,10 +3542,166 @@ def _deterministic_introspection_enabled() -> bool:
         return False
 
 
+def _build_chat_history_context_kwargs(
+    *,
+    namespace: str | None,
+    organisation_concept_id: str | None,
+    role_in_org: str | None,
+) -> dict[str, Any]:
+    context_kwargs: dict[str, Any] = {}
+    if isinstance(namespace, str) and namespace.strip():
+        context_kwargs["namespace"] = namespace.strip()
+    if (
+        isinstance(organisation_concept_id, str)
+        and organisation_concept_id.strip()
+    ):
+        context_kwargs["organisation_concept_id"] = organisation_concept_id.strip()
+    if isinstance(role_in_org, str) and role_in_org.strip():
+        context_kwargs["role_in_org"] = role_in_org.strip()
+    return context_kwargs
+
+
+def _add_chat_history_message(
+    *,
+    user_id: str,
+    session_id: str,
+    message: dict[str, Any],
+    llm_debug_data: dict[str, Any] | None = None,
+    namespace: str | None = None,
+    organisation_concept_id: str | None = None,
+    role_in_org: str | None = None,
+) -> None:
+    context_kwargs = _build_chat_history_context_kwargs(
+        namespace=namespace,
+        organisation_concept_id=organisation_concept_id,
+        role_in_org=role_in_org,
+    )
+    chat_history_service.add_message_to_history(
+        user_id,
+        session_id,
+        message,
+        llm_debug_data=llm_debug_data,
+        **context_kwargs,
+    )
+
+
+def _namespace_is_org_scoped(namespace: str | None) -> bool:
+    return isinstance(namespace, str) and namespace.strip().startswith("#V#") and (
+        "@" in namespace.strip()
+    )
+
+
+def _resolve_generate_namespace_context(
+    *,
+    user_concept_id: str | None,
+    effective_context: dict[str, Any] | None,
+    flask_session_snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve generate-time namespace with provenance and mismatch diagnostics.
+
+    Ordering strategy:
+    1. Preserve effective window/flask context namespace.
+    2. Prefer an org-scoped namespace when any org context is present.
+    3. Fall back to user-only namespace derivation.
+    """
+
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def _add_candidate(source: str, namespace_value: Any) -> None:
+        if not isinstance(namespace_value, str):
+            return
+        cleaned = namespace_value.strip()
+        if not cleaned:
+            return
+        if cleaned.startswith("#v#"):
+            cleaned = "#V#" + cleaned[3:]
+        elif not cleaned.startswith("#V#"):
+            cleaned = f"#V#{cleaned.lstrip('#')}"
+        if cleaned in seen:
+            return
+        seen.add(cleaned)
+        candidates.append(
+            {
+                "namespace": cleaned,
+                "source": source,
+                "org_scoped": _namespace_is_org_scoped(cleaned),
+            }
+        )
+
+    effective = effective_context if isinstance(effective_context, dict) else {}
+    effective_namespace = effective.get("namespace")
+    effective_org = effective.get("organisation_id")
+    effective_source = effective.get("source")
+
+    _add_candidate("effective_context.namespace", effective_namespace)
+    if isinstance(effective_org, str) and effective_org.strip():
+        _add_candidate(
+            "derived_from_effective_context.org",
+            _derive_namespace_for_user_org(user_concept_id, effective_org),
+        )
+
+    session_namespace = flask_session_snapshot.get("namespace")
+    session_org = flask_session_snapshot.get("organisation_concept_id") or (
+        flask_session_snapshot.get("org_id")
+    )
+
+    _add_candidate("flask_session.namespace", session_namespace)
+    if isinstance(session_org, str) and session_org.strip():
+        _add_candidate(
+            "derived_from_flask_session.org",
+            _derive_namespace_for_user_org(user_concept_id, session_org),
+        )
+    _add_candidate(
+        "derived_from_user_concept_id",
+        _derive_namespace_for_user_org(user_concept_id, None),
+    )
+
+    org_candidates = [c for c in candidates if c.get("org_scoped")]
+    selected = org_candidates[0] if org_candidates else (candidates[0] if candidates else None)
+
+    comparable_candidates = [
+        c
+        for c in candidates
+        if c.get("source") != "derived_from_user_concept_id"
+    ]
+    distinct_namespaces = {
+        c.get("namespace")
+        for c in (comparable_candidates or candidates)
+        if c.get("namespace")
+    }
+    mismatch_detected = len(distinct_namespaces) > 1
+
+    report = {
+        "namespace": selected.get("namespace") if isinstance(selected, dict) else None,
+        "namespace_source": selected.get("source") if isinstance(selected, dict) else "missing",
+        "effective_context_source": effective_source if isinstance(effective_source, str) else None,
+        "effective_context_namespace": (
+            effective_namespace.strip()
+            if isinstance(effective_namespace, str) and effective_namespace.strip()
+            else None
+        ),
+        "session_namespace": (
+            session_namespace.strip()
+            if isinstance(session_namespace, str) and session_namespace.strip()
+            else None
+        ),
+        "candidates": candidates,
+        "mismatch_detected": mismatch_detected,
+        "org_scope_preferred": bool(org_candidates),
+    }
+    if mismatch_detected:
+        report["mismatch_reason"] = "multiple_namespace_candidates"
+    return report
+
+
 def _maybe_handle_prompt_introspection_fastpath(
     *,
     prompt_text: str,
     user_concept_id: str,
+    user_namespace: str | None,
+    org_concept_id: str | None,
+    role_in_org: str | None,
     history_user_id: str | None,
     session_id: str,
     auxiliary_system_prompt: str | None,
@@ -3559,6 +3715,7 @@ def _maybe_handle_prompt_introspection_fastpath(
 ):
     gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
     import json as _json
+    prompt_namespace = user_namespace or user_concept_id
 
     tool_messages: list[dict] = []
     tool_invocations: list[dict] = []
@@ -3571,7 +3728,7 @@ def _maybe_handle_prompt_introspection_fastpath(
             tool_result = gateway.invoke(
                 "chat_get_prompt_context",
                 {
-                    "namespace": user_concept_id,
+                    "namespace": prompt_namespace,
                     "include_content": True,
                     "max_chars": 5000,
                 },
@@ -3597,7 +3754,7 @@ def _maybe_handle_prompt_introspection_fastpath(
                 {
                     "tool": "chat_get_prompt_context",
                     "payload": {
-                        "namespace": user_concept_id,
+                        "namespace": prompt_namespace,
                         "include_content": True,
                         "max_chars": 5000,
                     },
@@ -3659,21 +3816,29 @@ def _maybe_handle_prompt_introspection_fastpath(
 
     # Store messages in history/context, matching the direct-tool-call pattern.
     if history_user_id:
-        chat_history_service.add_message_to_history(
-            history_user_id,
-            session_id,
-            {
+        _add_chat_history_message(
+            user_id=history_user_id,
+            session_id=session_id,
+            message={
                 "role": "user",
                 "content": prompt_text,
                 "author_user_id": user_concept_id,
             },
+            namespace=prompt_namespace,
+            organisation_concept_id=org_concept_id,
+            role_in_org=role_in_org,
         )
     for tool_msg in _truncate_large_tool_results(
         tool_messages, max_tool_content_chars=5000
     ):
         if history_user_id:
-            chat_history_service.add_message_to_history(
-                history_user_id, session_id, tool_msg
+            _add_chat_history_message(
+                user_id=history_user_id,
+                session_id=session_id,
+                message=tool_msg,
+                namespace=prompt_namespace,
+                organisation_concept_id=org_concept_id,
+                role_in_org=role_in_org,
             )
 
     current_app.config["CONTEXT"] = _limit_context_size(
@@ -3729,17 +3894,20 @@ def _maybe_handle_prompt_introspection_fastpath(
         prompt_text=prompt_text,
         response_text=response_text,
         session_id=session_id,
-        namespace=user_concept_id,
+        namespace=prompt_namespace,
         user_id=history_user_id or user_concept_id,
-        org_id=None,
+        org_id=org_concept_id,
     )
 
     if history_user_id:
-        chat_history_service.add_message_to_history(
-            history_user_id,
-            session_id,
-            {"role": "assistant", "content": response_text},
+        _add_chat_history_message(
+            user_id=history_user_id,
+            session_id=session_id,
+            message={"role": "assistant", "content": response_text},
             llm_debug_data=llm_debug_info,
+            namespace=prompt_namespace,
+            organisation_concept_id=org_concept_id,
+            role_in_org=role_in_org,
         )
 
     return jsonify(
@@ -3759,6 +3927,9 @@ def _maybe_handle_tool_inventory_fastpath(
     *,
     prompt_text: str,
     user_concept_id: str | None,
+    user_namespace: str | None,
+    org_concept_id: str | None,
+    role_in_org: str | None,
     history_user_id: str | None,
     session_id: str,
     context: list[dict],
@@ -3770,6 +3941,7 @@ def _maybe_handle_tool_inventory_fastpath(
     progress_scope_key: str | None = None,
 ):
     gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
+    prompt_namespace = user_namespace or user_concept_id
 
     response_text = None
     used_tool = False
@@ -3850,26 +4022,32 @@ def _maybe_handle_tool_inventory_fastpath(
             response_text if isinstance(response_text, str) else str(response_text)
         ),
         session_id=session_id,
-        namespace=user_concept_id,
+        namespace=prompt_namespace,
         user_id=history_user_id or user_concept_id,
-        org_id=None,
+        org_id=org_concept_id,
     )
 
     if history_user_id:
-        chat_history_service.add_message_to_history(
-            history_user_id,
-            session_id,
-            {
+        _add_chat_history_message(
+            user_id=history_user_id,
+            session_id=session_id,
+            message={
                 "role": "user",
                 "content": prompt_text,
                 "author_user_id": user_concept_id,
             },
+            namespace=prompt_namespace,
+            organisation_concept_id=org_concept_id,
+            role_in_org=role_in_org,
         )
-        chat_history_service.add_message_to_history(
-            history_user_id,
-            session_id,
-            {"role": "assistant", "content": response_text},
+        _add_chat_history_message(
+            user_id=history_user_id,
+            session_id=session_id,
+            message={"role": "assistant", "content": response_text},
             llm_debug_data=llm_debug_info,
+            namespace=prompt_namespace,
+            organisation_concept_id=org_concept_id,
+            role_in_org=role_in_org,
         )
     else:
         stored_context = current_app.config.get("CONTEXT", [])
@@ -3900,6 +4078,9 @@ def _maybe_handle_rag_status_fastpath(
     *,
     prompt_text: str,
     user_concept_id: str,
+    user_namespace: str | None,
+    org_concept_id: str | None,
+    role_in_org: str | None,
     history_user_id: str | None,
     session_id: str,
     context: list[dict],
@@ -3912,6 +4093,7 @@ def _maybe_handle_rag_status_fastpath(
 ):
     gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
     import json as _json
+    rag_namespace = user_namespace or user_concept_id
 
     tool_messages: list[dict] = []
     tool_invocations: list[dict] = []
@@ -3922,7 +4104,7 @@ def _maybe_handle_rag_status_fastpath(
         try:
             tool_result = gateway.invoke(
                 "rag_get_status",
-                {"namespace": user_concept_id},
+                {"namespace": rag_namespace},
             )
             payload = tool_result.payload
             duration_ms = getattr(tool_result, "duration_ms", None)
@@ -3945,7 +4127,7 @@ def _maybe_handle_rag_status_fastpath(
             tool_invocations = [
                 {
                     "tool": "rag_get_status",
-                    "payload": {"namespace": user_concept_id},
+                    "payload": {"namespace": rag_namespace},
                     "duration_ms": duration_ms,
                     "direct_user_call": False,
                 }
@@ -3962,21 +4144,29 @@ def _maybe_handle_rag_status_fastpath(
 
     # Persist messages in history/context.
     if history_user_id:
-        chat_history_service.add_message_to_history(
-            history_user_id,
-            session_id,
-            {
+        _add_chat_history_message(
+            user_id=history_user_id,
+            session_id=session_id,
+            message={
                 "role": "user",
                 "content": prompt_text,
                 "author_user_id": user_concept_id,
             },
+            namespace=rag_namespace,
+            organisation_concept_id=org_concept_id,
+            role_in_org=role_in_org,
         )
     for tool_msg in _truncate_large_tool_results(
         tool_messages, max_tool_content_chars=5000
     ):
         if history_user_id:
-            chat_history_service.add_message_to_history(
-                history_user_id, session_id, tool_msg
+            _add_chat_history_message(
+                user_id=history_user_id,
+                session_id=session_id,
+                message=tool_msg,
+                namespace=rag_namespace,
+                organisation_concept_id=org_concept_id,
+                role_in_org=role_in_org,
             )
 
     current_app.config["CONTEXT"] = _limit_context_size(
@@ -4031,17 +4221,20 @@ def _maybe_handle_rag_status_fastpath(
         prompt_text=prompt_text,
         response_text=response_text,
         session_id=session_id,
-        namespace=user_concept_id,
+        namespace=rag_namespace,
         user_id=history_user_id or user_concept_id,
-        org_id=None,
+        org_id=org_concept_id,
     )
 
     if history_user_id:
-        chat_history_service.add_message_to_history(
-            history_user_id,
-            session_id,
-            {"role": "assistant", "content": response_text},
+        _add_chat_history_message(
+            user_id=history_user_id,
+            session_id=session_id,
+            message={"role": "assistant", "content": response_text},
             llm_debug_data=llm_debug_info,
+            namespace=rag_namespace,
+            organisation_concept_id=org_concept_id,
+            role_in_org=role_in_org,
         )
 
     return jsonify(
@@ -4228,6 +4421,44 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         user_concept_id=user_concept_id, session_id=session_id
     )
     history_user_id = history_owner_user_id or user_concept_id
+    role_in_org = effective.get("role") if isinstance(effective, dict) else None
+
+    namespace_resolution = _resolve_generate_namespace_context(
+        user_concept_id=user_concept_id,
+        effective_context=effective if isinstance(effective, dict) else {},
+        flask_session_snapshot=dict(session),
+    )
+    user_namespace = namespace_resolution.get("namespace")
+    namespace_source = namespace_resolution.get("namespace_source") or "missing"
+    namespace_report: dict[str, object] = {
+        "authenticated": bool(user_concept_id),
+        "user_concept_id": user_concept_id,
+        "namespace": user_namespace,
+        "namespace_source": namespace_source,
+        "effective_context_source": namespace_resolution.get("effective_context_source"),
+        "effective_context_namespace": namespace_resolution.get(
+            "effective_context_namespace"
+        ),
+        "session_namespace": namespace_resolution.get("session_namespace"),
+        "candidates": namespace_resolution.get("candidates") or [],
+        "mismatch_detected": bool(namespace_resolution.get("mismatch_detected")),
+        "org_scope_preferred": bool(namespace_resolution.get("org_scope_preferred")),
+    }
+    if isinstance(namespace_resolution.get("mismatch_reason"), str):
+        namespace_report["mismatch_reason"] = namespace_resolution.get(
+            "mismatch_reason"
+        )
+    if (
+        isinstance(user_namespace, str)
+        and user_namespace.strip()
+        and user_namespace != namespace_resolution.get("effective_context_namespace")
+    ):
+        namespace_report["selected_namespace_differs_from_effective_context"] = True
+    if not user_namespace:
+        current_app.logger.warning(
+            "[NAMESPACE] No effective namespace resolved for user_concept_id=%s",
+            user_concept_id,
+        )
 
     if history_user_id:
         if (
@@ -4439,6 +4670,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 return _maybe_handle_prompt_introspection_fastpath(
                     prompt_text=prompt_text,
                     user_concept_id=user_concept_id,
+                    user_namespace=user_namespace,
+                    org_concept_id=org_concept_id,
+                    role_in_org=role_in_org,
                     history_user_id=history_user_id,
                     session_id=session_id,
                     auxiliary_system_prompt=auxiliary_system_prompt,
@@ -4455,6 +4689,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 return _maybe_handle_rag_status_fastpath(
                     prompt_text=prompt_text,
                     user_concept_id=user_concept_id,
+                    user_namespace=user_namespace,
+                    org_concept_id=org_concept_id,
+                    role_in_org=role_in_org,
                     history_user_id=history_user_id,
                     session_id=session_id,
                     context=context,
@@ -4472,6 +4709,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             return _maybe_handle_tool_inventory_fastpath(
                 prompt_text=prompt_text,
                 user_concept_id=user_concept_id,
+                user_namespace=user_namespace,
+                org_concept_id=org_concept_id,
+                role_in_org=role_in_org,
                 history_user_id=history_user_id,
                 session_id=session_id,
                 context=context,
@@ -4662,58 +4902,27 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
         tool_messages: list[dict[str, str]] = []
 
-        # Derive user namespace for MCP tool isolation (JVNAUTOSCI-760)
-        user_namespace = None
-        namespace_source = "missing"
-        namespace_report: dict[str, object] = {
-            "authenticated": bool(user_concept_id),
-            "user_concept_id": user_concept_id,
-            "session_namespace": session.get("namespace"),
-            "namespace": None,
-            "namespace_source": None,
-        }
-        if user_concept_id:
-            session_namespace = session.get("namespace")
-            if (
-                isinstance(session_namespace, str)
-                and session_namespace.strip()
-                and session_namespace.startswith("#V#")
-            ):
-                user_namespace = session_namespace.strip()
-                namespace_source = "session.namespace"
-                current_app.logger.info(
-                    "[NAMESPACE] Using session namespace=%s for user_concept_id=%s",
-                    user_namespace,
-                    user_concept_id,
+        if isinstance(user_namespace, str) and user_namespace.strip():
+            current_app.logger.info(
+                "[NAMESPACE] Resolved generate namespace=%s source=%s user_concept_id=%s",
+                user_namespace,
+                namespace_source,
+                user_concept_id,
+            )
+            if namespace_report.get("mismatch_detected"):
+                current_app.logger.warning(
+                    "[NAMESPACE] Mismatch detected during resolution candidates=%s",
+                    namespace_report.get("candidates"),
                 )
-            else:
-                # Convert concept ID to namespace format (#V#michael_witbrock)
-                # Handle both full concept ID and person ID formats
-                if user_concept_id.startswith("#V#"):
-                    user_namespace = user_concept_id
-                    namespace_source = "user_concept_id"
-                else:
-                    # Normalize to namespace format
-                    user_id_normalized = (
-                        user_concept_id.lower()
-                        .replace(" ", "_")
-                        .replace("#v#", "")
-                        .replace("#", "")
-                    )
-                    user_namespace = f"#V#{user_id_normalized}"
-                    namespace_source = "derived_from_user_concept_id"
-                current_app.logger.info(
-                    "[NAMESPACE] Derived user_namespace=%s from user_concept_id=%s",
-                    user_namespace,
-                    user_concept_id,
-                )
-        else:
+        elif not user_concept_id:
             current_app.logger.warning(
                 "[NAMESPACE] No user_concept_id - user_namespace=None (RAG unavailable)"
             )
-
-        namespace_report["namespace"] = user_namespace
-        namespace_report["namespace_source"] = namespace_source
+        else:
+            current_app.logger.warning(
+                "[NAMESPACE] No effective namespace resolved for user_concept_id=%s",
+                user_concept_id,
+            )
 
         rag_trace: dict[str, object] = {
             "authenticated": bool(user_concept_id),
@@ -4929,21 +5138,29 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
             # Persist messages in history/context.
             if user_id_for_history:
-                chat_history_service.add_message_to_history(
-                    user_id_for_history,
-                    session_id,
-                    {
+                _add_chat_history_message(
+                    user_id=user_id_for_history,
+                    session_id=session_id,
+                    message={
                         "role": "user",
                         "content": prompt_text,
                         "author_user_id": user_concept_id,
                     },
+                    namespace=user_namespace,
+                    organisation_concept_id=org_concept_id,
+                    role_in_org=role_in_org,
                 )
             for tool_msg in _truncate_large_tool_results(
                 tool_messages, max_tool_content_chars=5000
             ):
                 if user_id_for_history:
-                    chat_history_service.add_message_to_history(
-                        user_id_for_history, session_id, tool_msg
+                    _add_chat_history_message(
+                        user_id=user_id_for_history,
+                        session_id=session_id,
+                        message=tool_msg,
+                        namespace=user_namespace,
+                        organisation_concept_id=org_concept_id,
+                        role_in_org=role_in_org,
                     )
             current_app.config["CONTEXT"] = _limit_context_size(
                 current_app.config["CONTEXT"], max_messages=20
@@ -5007,11 +5224,14 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             )
 
             if user_id_for_history:
-                chat_history_service.add_message_to_history(
-                    user_id_for_history,
-                    session_id,
-                    {"role": "assistant", "content": response_text},
+                _add_chat_history_message(
+                    user_id=user_id_for_history,
+                    session_id=session_id,
+                    message={"role": "assistant", "content": response_text},
                     llm_debug_data=llm_debug_info,
+                    namespace=user_namespace,
+                    organisation_concept_id=org_concept_id,
+                    role_in_org=role_in_org,
                 )
 
             return jsonify(
@@ -5100,20 +5320,28 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
                     # Skip LLM generation for direct tool calls
                     if history_user_id:
-                        chat_history_service.add_message_to_history(
-                            history_user_id,
-                            session_id,
-                            {
+                        _add_chat_history_message(
+                            user_id=history_user_id,
+                            session_id=session_id,
+                            message={
                                 "role": "user",
                                 "content": prompt_text,
                                 "author_user_id": user_concept_id,
                             },
+                            namespace=user_namespace,
+                            organisation_concept_id=org_concept_id,
+                            role_in_org=role_in_org,
                         )
                         for tool_msg in _truncate_large_tool_results(
                             tool_messages, max_tool_content_chars=5000
                         ):
-                            chat_history_service.add_message_to_history(
-                                history_user_id, session_id, tool_msg
+                            _add_chat_history_message(
+                                user_id=history_user_id,
+                                session_id=session_id,
+                                message=tool_msg,
+                                namespace=user_namespace,
+                                organisation_concept_id=org_concept_id,
+                                role_in_org=role_in_org,
                             )
                     else:
                         current_app.config["CONTEXT"].append(
@@ -5196,11 +5424,14 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     )
 
                     if history_user_id:
-                        chat_history_service.add_message_to_history(
-                            history_user_id,
-                            session_id,
-                            {"role": "assistant", "content": response_text},
+                        _add_chat_history_message(
+                            user_id=history_user_id,
+                            session_id=session_id,
+                            message={"role": "assistant", "content": response_text},
                             llm_debug_data=llm_debug_info,
+                            namespace=user_namespace,
+                            organisation_concept_id=org_concept_id,
+                            role_in_org=role_in_org,
                         )
 
                     rag_trace["tools_invoked"] = [
@@ -5348,6 +5579,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     bg_history_user_id = history_user_id
                     bg_session_id = session_id
                     bg_user_concept_id = user_concept_id
+                    bg_user_namespace = user_namespace
+                    bg_org_concept_id = org_concept_id
+                    bg_role_in_org = role_in_org
 
                     def _run_in_background() -> Any:
                         """Execute orchestrator.run() in background with app context.
@@ -5374,15 +5608,18 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             if bg_history_user_id:
                                 try:
                                     # Store user message
-                                    chat_history_service.add_message_to_history(
-                                        bg_history_user_id,
-                                        bg_session_id,
-                                        {
+                                    _add_chat_history_message(
+                                        user_id=bg_history_user_id,
+                                        session_id=bg_session_id,
+                                        message={
                                             "role": "user",
                                             "content": prompt_text,
                                             "author_user_id": bg_user_concept_id,
                                             "background_task_id": request_id,
                                         },
+                                        namespace=bg_user_namespace,
+                                        organisation_concept_id=bg_org_concept_id,
+                                        role_in_org=bg_role_in_org,
                                     )
                                     # Store tool messages
                                     tool_messages = [
@@ -5391,20 +5628,26 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                     for tool_msg in _truncate_large_tool_results(
                                         tool_messages, max_tool_content_chars=5000
                                     ):
-                                        chat_history_service.add_message_to_history(
-                                            bg_history_user_id,
-                                            bg_session_id,
-                                            tool_msg,
+                                        _add_chat_history_message(
+                                            user_id=bg_history_user_id,
+                                            session_id=bg_session_id,
+                                            message=tool_msg,
+                                            namespace=bg_user_namespace,
+                                            organisation_concept_id=bg_org_concept_id,
+                                            role_in_org=bg_role_in_org,
                                         )
                                     # Store assistant response
-                                    chat_history_service.add_message_to_history(
-                                        bg_history_user_id,
-                                        bg_session_id,
-                                        {
+                                    _add_chat_history_message(
+                                        user_id=bg_history_user_id,
+                                        session_id=bg_session_id,
+                                        message={
                                             "role": "assistant",
                                             "content": result.response_text,
                                             "background_task_id": request_id,
                                         },
+                                        namespace=bg_user_namespace,
+                                        organisation_concept_id=bg_org_concept_id,
+                                        role_in_org=bg_role_in_org,
                                     )
                                 except Exception as hist_exc:
                                     _logger.warning(
@@ -7026,25 +7269,36 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         )
 
         if history_user_id:
-            chat_history_service.add_message_to_history(
-                history_user_id,
-                session_id,
-                {
+            _add_chat_history_message(
+                user_id=history_user_id,
+                session_id=session_id,
+                message={
                     "role": "user",
                     "content": prompt_text,
                     "author_user_id": user_concept_id,
                 },
+                namespace=user_namespace,
+                organisation_concept_id=org_concept_id,
+                role_in_org=role_in_org,
             )
             for tool_msg in truncated_tool_messages:
-                chat_history_service.add_message_to_history(
-                    history_user_id, session_id, tool_msg
+                _add_chat_history_message(
+                    user_id=history_user_id,
+                    session_id=session_id,
+                    message=tool_msg,
+                    namespace=user_namespace,
+                    organisation_concept_id=org_concept_id,
+                    role_in_org=role_in_org,
                 )
             # Save assistant message WITH debug data
-            chat_history_service.add_message_to_history(
-                history_user_id,
-                session_id,
-                {"role": "assistant", "content": response_text},
+            _add_chat_history_message(
+                user_id=history_user_id,
+                session_id=session_id,
+                message={"role": "assistant", "content": response_text},
                 llm_debug_data=llm_debug_info,
+                namespace=user_namespace,
+                organisation_concept_id=org_concept_id,
+                role_in_org=role_in_org,
             )
         else:
             current_app.config["CONTEXT"].append(
