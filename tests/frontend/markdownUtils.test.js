@@ -51,4 +51,46 @@ describe('markdownUtils', () => {
         expect(html).toContain('<pre><code>');
         expect(html).toContain('{&quot;a&quot;: 1}');
     });
+
+    test('renders horizontal rules from --- markers', () => {
+        const input = [
+            'Before',
+            '',
+            '---',
+            '',
+            'After'
+        ].join('\n');
+
+        const html = simpleMarkdownToHtml(input);
+        expect(html).toContain('<hr>');
+        expect(html).toContain('<p>Before</p>');
+        expect(html).toContain('<p>After</p>');
+    });
+
+    test('renders markdown tables into table html', () => {
+        const input = [
+            '| Term | Description |',
+            '|---|---|',
+            '| SGS | School of Graduate Studies |',
+            '| BoGS | Board of Graduate Studies |'
+        ].join('\n');
+
+        const html = simpleMarkdownToHtml(input);
+        expect(html).toContain('<table>');
+        expect(html).toContain('<thead>');
+        expect(html).toContain('<tbody>');
+        expect(html).toContain('<th>Term</th>');
+        expect(html).toContain('<td>School of Graduate Studies</td>');
+    });
+
+    test('does not inject line-break tags between list items', () => {
+        const input = [
+            '- Item one',
+            '- Item two'
+        ].join('\n');
+
+        const html = simpleMarkdownToHtml(input);
+        expect(html).toContain('<ul><li>Item one</li><li>Item two</li></ul>');
+        expect(html).not.toContain('</li><br><li>');
+    });
 });

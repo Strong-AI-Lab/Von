@@ -9535,6 +9535,19 @@ body.settings-body {
     text-align: left;
 }
 
+/* Python-Markdown often wraps list item text in <p>; tighten those margins to avoid large gaps. */
+.markdown-rendered li > p {
+    margin: 0.2em 0;
+}
+
+.markdown-rendered li > p:first-child {
+    margin-top: 0;
+}
+
+.markdown-rendered li > p:last-child {
+    margin-bottom: 0;
+}
+
 .markdown-rendered ul {
     list-style-type: disc;
 }
@@ -9562,6 +9575,38 @@ body.settings-body {
 .markdown-rendered a:hover {
     color: #1d4ed8;
     text-decoration: none;
+}
+
+/* Table styling */
+.markdown-rendered table {
+    width: 100%;
+    max-width: 100%;
+    border-collapse: collapse;
+    margin: 1em 0;
+    font-size: 0.95em;
+    display: block;
+    overflow-x: auto;
+    white-space: nowrap;
+}
+
+.markdown-rendered thead th {
+    background: #f3f4f6;
+    color: #1f2937;
+    font-weight: 600;
+}
+
+.markdown-rendered th,
+.markdown-rendered td {
+    border: 1px solid #d1d5db;
+    padding: 0.45em 0.6em;
+    text-align: left;
+    vertical-align: top;
+}
+
+.note-item .markdown-rendered table,
+.content-item .markdown-rendered table {
+    margin: 0.6em 0;
+    font-size: 0.85em;
 }
 
 /* Horizontal rule */

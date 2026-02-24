@@ -82,65 +82,184 @@ export function simpleMarkdownToHtml(markdown) {
         /^(?:\s*(?:[-*+]|\d+\.)\s*|\s*[•◦▪▫]\s*)$(?=\n(?:\s*\n)*```[A-Za-z0-9_-]*\s*\n)/gm,
         ''
     );
+    const lines = preprocessed.split('\n');
+    const blocks = [];
 
-    // Treat markdown as untrusted input: escape raw HTML first so tags cannot execute.
-    let html = escapeHtml(preprocessed);
+    const hrRule = /^ {0,3}(?:-{3,}|_{3,}|\*{3,})\s*$/;
+    const headingRule = /^(#{1,6})\s+(.+)$/;
+    const unorderedListRule = /^ {0,3}[-*+]\s+(.+)$/;
+    const orderedListRule = /^ {0,3}\d+\.\s+(.+)$/;
+    const blockquoteRule = /^>\s?(.*)$/;
+    const tableSeparatorRule = /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/;
 
-    // Process fenced code blocks first (to avoid interference with other patterns)
-    html = html.replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>');
+    const renderInlineMarkdown = (text) => {
+        let html = escapeHtml(text ?? '');
 
-    // Headers
-    html = html.replace(/^### (.*$)/gim, '<h3>$1</h3>');
-    html = html.replace(/^## (.*$)/gim, '<h2>$1</h2>');
-    html = html.replace(/^# (.*$)/gim, '<h1>$1</h1>');
+        // Inline code first so markdown markers inside code spans are not re-processed.
+        html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
 
-    // Bold (non-greedy)
-    html = html.replace(/\*\*([^*\n][\s\S]*?)\*\*/gim, '<strong>$1</strong>');
+        // Links (sanitise href; never allow javascript: etc.)
+        html = html.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (match, linkText, href) => {
+            const safeHref = sanitiseHref(href);
+            if (!safeHref) {
+                return String(linkText);
+            }
+            const targetAttr = isExternalHttpLink(safeHref) ? ' target="_blank"' : '';
+            return `<a href="${escapeHtml(safeHref)}"${targetAttr} rel="noopener noreferrer">${String(linkText)}</a>`;
+        });
 
-    // Italic (conservative: avoid matching bold markers)
-    html = html.replace(/(^|[^*])\*([^*\n][\s\S]*?)\*([^*]|$)/gim, '$1<em>$2</em>$3');
+        // Bold and italic (conservative ordering).
+        html = html.replace(/\*\*([^*\n][\s\S]*?)\*\*/g, '<strong>$1</strong>');
+        html = html.replace(/(^|[^*])\*([^*\n][\s\S]*?)\*([^*]|$)/g, '$1<em>$2</em>$3');
 
-    // Inline code
-    html = html.replace(/`([^`]+)`/gim, '<code>$1</code>');
+        return html;
+    };
 
-    // Links (sanitise href; never allow javascript: etc.)
-    html = html.replace(/\[([^\]]+)\]\(([^)\s]+)\)/gim, (match, text, href) => {
-        const safeHref = sanitiseHref(href);
-        const safeText = String(text);
-        if (!safeHref) {
-            return safeText;
+    const splitTableRow = (line) => {
+        if (typeof line !== 'string') return [];
+        let row = line.trim();
+        if (row.startsWith('|')) row = row.slice(1);
+        if (row.endsWith('|')) row = row.slice(0, -1);
+        return row.split('|').map(cell => renderInlineMarkdown(String(cell).trim()));
+    };
+
+    const looksLikeTableHeader = (line) => {
+        return typeof line === 'string' && line.includes('|');
+    };
+
+    let i = 0;
+    while (i < lines.length) {
+        const line = lines[i];
+        const trimmed = line.trim();
+
+        if (!trimmed) {
+            i += 1;
+            continue;
         }
 
-        const targetAttr = isExternalHttpLink(safeHref) ? ' target="_blank"' : '';
-        return `<a href="${escapeHtml(safeHref)}"${targetAttr} rel="noopener noreferrer">${safeText}</a>`;
-    });
+        // Fenced code blocks
+        if (/^```/.test(trimmed)) {
+            i += 1;
+            const codeLines = [];
+            while (i < lines.length && !/^```/.test(lines[i].trim())) {
+                codeLines.push(lines[i]);
+                i += 1;
+            }
+            if (i < lines.length && /^```/.test(lines[i].trim())) {
+                i += 1;
+            }
+            blocks.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+            continue;
+        }
 
-    // Process lists before line breaks
-    // Unordered lists
-    html = html.replace(/^[-*+] (.+)$/gm, '<listitem>$1</listitem>');
-    // Ordered lists
-    html = html.replace(/^\d+\. (.+)$/gm, '<listitem>$1</listitem>');
+        // Horizontal rule
+        if (hrRule.test(line)) {
+            blocks.push('<hr>');
+            i += 1;
+            continue;
+        }
 
-    // Group consecutive list items
-    html = html.replace(/(<listitem>.*?<\/listitem>(?:\n<listitem>.*?<\/listitem>)*)/gs, function (match) {
-        const items = match.replace(/<listitem>/g, '<li>').replace(/<\/listitem>/g, '</li>');
-        return '<ul>' + items + '</ul>';
-    });
+        // Tables (header + separator + rows)
+        if (
+            i + 1 < lines.length &&
+            looksLikeTableHeader(line) &&
+            tableSeparatorRule.test(lines[i + 1] || '')
+        ) {
+            const headerCells = splitTableRow(line);
+            i += 2; // skip header and separator
+            const bodyRows = [];
+            while (i < lines.length) {
+                const rowLine = lines[i];
+                if (!rowLine.trim()) break;
+                if (!rowLine.includes('|')) break;
+                bodyRows.push(splitTableRow(rowLine));
+                i += 1;
+            }
 
-    // Blockquotes
-    html = html.replace(/^> (.+)$/gim, '<blockquote>$1</blockquote>');
+            const thead = `<thead><tr>${headerCells.map(cell => `<th>${cell}</th>`).join('')}</tr></thead>`;
+            const tbodyRows = bodyRows.map((row) => `<tr>${row.map(cell => `<td>${cell}</td>`).join('')}</tr>`).join('');
+            const tbody = `<tbody>${tbodyRows}</tbody>`;
+            blocks.push(`<table>${thead}${tbody}</table>`);
+            continue;
+        }
 
-    // Line breaks and paragraphs
-    html = html.replace(/\n\n/g, '</p><p>');
-    html = html.replace(/\n/g, '<br>');
-    html = '<p>' + html + '</p>';
+        // Headings
+        const headingMatch = line.match(headingRule);
+        if (headingMatch) {
+            const level = headingMatch[1].length;
+            blocks.push(`<h${level}>${renderInlineMarkdown(headingMatch[2])}</h${level}>`);
+            i += 1;
+            continue;
+        }
 
-    // Clean up empty paragraphs and fix nested elements
-    html = html.replace(/<p><\/p>/g, '');
-    html = html.replace(/<p>(<(?:h[1-6]|ul|ol|blockquote|pre))/g, '$1');
-    html = html.replace(/(<\/(?:h[1-6]|ul|ol|blockquote|pre)>)<\/p>/g, '$1');
+        // Blockquotes (contiguous lines)
+        if (blockquoteRule.test(line)) {
+            const quoteLines = [];
+            while (i < lines.length && blockquoteRule.test(lines[i])) {
+                const match = lines[i].match(blockquoteRule);
+                quoteLines.push(renderInlineMarkdown(match ? match[1] : ''));
+                i += 1;
+            }
+            blocks.push(`<blockquote>${quoteLines.join('<br>')}</blockquote>`);
+            continue;
+        }
 
-    return html;
+        // Unordered list (contiguous top-level items)
+        if (unorderedListRule.test(line)) {
+            const items = [];
+            while (i < lines.length && unorderedListRule.test(lines[i])) {
+                const match = lines[i].match(unorderedListRule);
+                items.push(`<li>${renderInlineMarkdown(match ? match[1] : '')}</li>`);
+                i += 1;
+            }
+            blocks.push(`<ul>${items.join('')}</ul>`);
+            continue;
+        }
+
+        // Ordered list (contiguous top-level items)
+        if (orderedListRule.test(line)) {
+            const items = [];
+            while (i < lines.length && orderedListRule.test(lines[i])) {
+                const match = lines[i].match(orderedListRule);
+                items.push(`<li>${renderInlineMarkdown(match ? match[1] : '')}</li>`);
+                i += 1;
+            }
+            blocks.push(`<ol>${items.join('')}</ol>`);
+            continue;
+        }
+
+        // Paragraphs (contiguous non-block lines)
+        const paragraphLines = [];
+        while (i < lines.length) {
+            const candidate = lines[i];
+            const candidateTrimmed = candidate.trim();
+            if (!candidateTrimmed) break;
+            if (/^```/.test(candidateTrimmed)) break;
+            if (hrRule.test(candidate)) break;
+            if (headingRule.test(candidate)) break;
+            if (blockquoteRule.test(candidate)) break;
+            if (unorderedListRule.test(candidate)) break;
+            if (orderedListRule.test(candidate)) break;
+            if (
+                i + 1 < lines.length &&
+                looksLikeTableHeader(candidate) &&
+                tableSeparatorRule.test(lines[i + 1] || '')
+            ) {
+                break;
+            }
+            paragraphLines.push(renderInlineMarkdown(candidate));
+            i += 1;
+        }
+        if (paragraphLines.length) {
+            blocks.push(`<p>${paragraphLines.join('<br>')}</p>`);
+            continue;
+        }
+
+        // Safety progress in case a line misses all branches.
+        i += 1;
+    }
+
+    return blocks.join('\n');
 }
 
 export function renderSmartText(text, escapeHtmlOutput = true) {
