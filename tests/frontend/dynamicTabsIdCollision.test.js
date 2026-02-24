@@ -94,3 +94,43 @@ describe('dynamic concept tab IDs', () => {
         expect(new Set(contentIds).size).toBe(2);
     });
 });
+
+describe('relationship dropdown enter selection precedence', () => {
+    afterEach(() => {
+        jest.resetModules();
+    });
+
+    test('uses active keyboard selection before exact/text-first fallback', () => {
+        const { chooseDropdownEnterSelection } = require(dynamicTabsModulePath);
+        const items = [
+            { id: '#V#person', name: 'person' },
+            { id: '#V#programme', name: 'programme' },
+            { id: '#V#project', name: 'project' }
+        ];
+
+        const selected = chooseDropdownEnterSelection(items, 1, 'pro');
+        expect(selected).toEqual(items[1]);
+    });
+
+    test('falls back to exact typed match when there is no active selection', () => {
+        const { chooseDropdownEnterSelection } = require(dynamicTabsModulePath);
+        const items = [
+            { id: '#V#person', name: 'person' },
+            { id: '#V#programme', name: 'programme' }
+        ];
+
+        const selected = chooseDropdownEnterSelection(items, -1, '#V#programme');
+        expect(selected).toEqual(items[1]);
+    });
+
+    test('falls back to top-ranked item when no active or exact match exists', () => {
+        const { chooseDropdownEnterSelection } = require(dynamicTabsModulePath);
+        const items = [
+            { id: '#V#person', name: 'person' },
+            { id: '#V#programme', name: 'programme' }
+        ];
+
+        const selected = chooseDropdownEnterSelection(items, -1, 'unknown');
+        expect(selected).toEqual(items[0]);
+    });
+});

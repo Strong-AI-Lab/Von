@@ -4466,6 +4466,40 @@ export async function waitForDescriptionPopulated(conceptId, suffix, timeoutMs =
     });
 }
 
+/**
+ * Resolve which autocomplete item Enter should commit.
+ *
+ * Selection precedence is intentionally stable across dropdowns:
+ * 1. exactly one result
+ * 2. highlighted keyboard selection (activeIndex)
+ * 3. exact typed match (name/id)
+ * 4. top-ranked result
+ *
+ * This keeps ArrowDown/ArrowUp + Enter behaviour predictable (JVNAUTOSCI-562)
+ * while preserving the existing "press Enter to accept first hit" flow.
+ */
+export function chooseDropdownEnterSelection(items, activeIndex, rawQuery) {
+    const candidates = Array.isArray(items) ? items : [];
+    if (!candidates.length) return null;
+    if (candidates.length === 1) return candidates[0];
+
+    if (Number.isInteger(activeIndex) && activeIndex >= 0 && activeIndex < candidates.length) {
+        return candidates[activeIndex];
+    }
+
+    const query = String(rawQuery ?? '').trim().toLowerCase();
+    if (query) {
+        const exact = candidates.find((item) => {
+            const name = String(item?.name ?? '').toLowerCase();
+            const id = String(item?.id ?? '').toLowerCase();
+            return name === query || id === query;
+        });
+        if (exact) return exact;
+    }
+
+    return candidates[0];
+}
+
 // Helper: tailor a Type concept tab presentation
 async function adaptTypeConceptTabUI(conceptId, suffix) {
     try {
@@ -5439,14 +5473,11 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
                 else if (e.key === 'ArrowUp') { e.preventDefault(); setActive(Math.max(state.activeIndex - 1, 0)); }
                 else if (e.key === 'Enter') {
                     e.preventDefault();
-                    const q = (targetInput.value || '').trim().toLowerCase();
-                    if (q && state.items && state.items.length) {
-                        const exact = state.items.find(it => ((it.name || it.id || '').toLowerCase() === q));
-                        if (exact) { targetInput.value = exact.id; clearResults(); return; }
-                    }
-                    // No exact match: pick the top-ranked result (state.items[0])
-                    if (state.items && state.items.length) {
-                        targetInput.value = state.items[0].id; clearResults(); return;
+                    const selected = chooseDropdownEnterSelection(state.items, state.activeIndex, targetInput.value);
+                    if (selected?.id) {
+                        targetInput.value = selected.id;
+                        clearResults();
+                        return;
                     }
                 }
                 else if (e.key === 'Escape') { e.preventDefault(); clearResults(); targetInput.blur(); }
@@ -5457,23 +5488,15 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
                 else if (e.key === 'ArrowUp') { e.preventDefault(); setPredicateActive(Math.max(predicateState.activeIndex - 1, 0)); }
                 else if (e.key === 'Enter') {
                     e.preventDefault();
-                    const q = (predicateInput.value || '').trim().toLowerCase();
-                    if (q && predicateState.items && predicateState.items.length) {
-                        const exact = predicateState.items.find(it => ((it.name || it.id || '').toLowerCase() === q));
-                        if (exact) {
-                            predicateInput.value = exact.id;
-                            predicateSelection.id = exact.id;
-                            predicateSelection.is_text_predicate = !!exact.is_text_predicate;
-                            clearPredicateResults();
-                            updateInputForPredicateType();
-                            return;
-                        }
-                    }
-                    if (predicateState.items && predicateState.items.length) {
-                        const top = predicateState.items[0];
-                        predicateInput.value = top.id;
-                        predicateSelection.id = top.id;
-                        predicateSelection.is_text_predicate = !!top.is_text_predicate;
+                    const selected = chooseDropdownEnterSelection(
+                        predicateState.items,
+                        predicateState.activeIndex,
+                        predicateInput.value
+                    );
+                    if (selected?.id) {
+                        predicateInput.value = selected.id;
+                        predicateSelection.id = selected.id;
+                        predicateSelection.is_text_predicate = !!selected.is_text_predicate;
                         clearPredicateResults();
                         updateInputForPredicateType();
                         return;
