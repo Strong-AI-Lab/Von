@@ -110,6 +110,14 @@ def create_message(
     if org_id:
         relationships["specific_to_org"] = [org_id.strip()]
 
+    metadata_payload = metadata if isinstance(metadata, dict) else {}
+    metadata_payload = {str(k): v for k, v in metadata_payload.items() if isinstance(k, str)}
+    attribution = metadata_payload.get("attribution")
+    if not isinstance(attribution, str) or not attribution.strip():
+        attribution = f"Sent by Von on behalf of {sender_id}"
+    else:
+        attribution = attribution.strip()
+
     # Build concept document
     concept_doc: Dict[str, Any] = {
         "concept_id": concept_id,
@@ -119,6 +127,9 @@ def create_message(
             "message_status": MESSAGE_STATUS_SENT,
             "sent_at": timestamp.isoformat(),
             "read_by": [],  # Track which recipients have read it
+            # Keep a canonical copy for UI/search paths that do not resolve text relations.
+            "content_fallback": content,
+            "attribution": attribution,
         },
         "created_at": timestamp,
         "updated_at": timestamp,
@@ -129,8 +140,8 @@ def create_message(
         concept_doc["concept_data"]["subject"] = subject.strip()
 
     # Add custom metadata
-    if metadata:
-        concept_doc["concept_data"]["metadata"] = metadata
+    if metadata_payload:
+        concept_doc["concept_data"]["metadata"] = metadata_payload
 
     # Insert into MongoDB
     coll = get_concepts_collection()
@@ -149,8 +160,6 @@ def create_message(
         )
     except Exception as e:
         _log.warning(f"Failed to store message content as text relation: {e}")
-        # Fall back to storing in concept_data
-        concept_doc["concept_data"]["content_fallback"] = content
 
     # Event-driven workflow launch is best-effort and must not block messaging.
     try:
