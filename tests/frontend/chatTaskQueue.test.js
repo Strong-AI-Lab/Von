@@ -1,0 +1,222 @@
+/** @jest-environment jsdom */
+
+const chatTabModulePath = '../../src/frontend/web/von_interface/static/js/chatTab.js';
+
+jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => ({
+    annotateTurn: jest.fn(),
+    getUserContext: jest.fn(),
+    getWindowSessionId: jest.fn(() => 'mock-window-session-id')
+}));
+
+jest.mock('../../src/frontend/web/von_interface/static/js/domUtils.js', () => ({
+    elements: {},
+    renderSpanSuggestions: jest.fn()
+}));
+
+jest.mock('../../src/frontend/web/von_interface/static/js/utils/textDecorator.js', () => ({
+    applyCartoucheAppearance: jest.fn(),
+    cartouchifyElementText: jest.fn(),
+    cartouchifyVontologyTokensInElement: jest.fn(),
+    createVontologyCartouche: jest.fn(),
+    getCartoucheAppearanceSettings: jest.fn(() => ({})),
+    linkifyVontologyTokensInElement: jest.fn(),
+    normalisePotentialConceptId: jest.fn((value) => value)
+}));
+
+function flushMicrotasks() {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+describe('chat task queue', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <div id="scrollableField"></div>
+            <div class="thinking-card-wrapper" id="thinkingCardWrapper" aria-hidden="true">
+                <div class="thinking-card">
+                    <div class="thinking-card-header" id="loadingIndicator">
+                        <span class="thinking-card-phase loading-indicator-text">Thinking...</span>
+                        <span class="thinking-card-meta" id="thinkingCardMeta"></span>
+                        <button id="abortButton" aria-hidden="true"></button>
+                    </div>
+                    <div class="thinking-card-body" id="loadingIndicatorDetail"></div>
+                </div>
+            </div>
+            <button id="sendButton"></button>
+            <textarea id="promptInput"></textarea>
+            <input type="checkbox" id="annotationToggle" />
+        `;
+    });
+
+    afterEach(() => {
+        jest.restoreAllMocks();
+        delete global.fetch;
+    });
+
+    test('queues while thinking and executes edited queued prompt after current turn', async () => {
+        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        const { sendMessage } = require(chatTabModulePath);
+
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        const generateBodies = [];
+        let resolveFirstGenerate = null;
+
+        global.fetch = jest.fn((url, options = {}) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                const body = JSON.parse(options.body || '{}');
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ html: String(body.text || '') })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                const parsed = JSON.parse(options.body || '{}');
+                generateBodies.push(parsed);
+
+                if (generateBodies.length === 1) {
+                    return new Promise((resolve) => {
+                        resolveFirstGenerate = () => resolve({
+                            ok: true,
+                            json: async () => ({
+                                response: 'First response',
+                                llm_debug: { model: 'gpt-5.2' }
+                            })
+                        });
+                    });
+                }
+
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        response: 'Second response',
+                        llm_debug: { model: 'gpt-5.2' }
+                    })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        const promptInput = document.getElementById('promptInput');
+        promptInput.value = 'First request';
+        const firstRequestPromise = sendMessage();
+
+        await flushMicrotasks();
+        expect(generateBodies).toHaveLength(1);
+        expect(document.getElementById('sendButton').textContent).toBe('Queue Prompt');
+
+        promptInput.value = 'Second draft';
+        await sendMessage();
+
+        const queuedEditor = document.querySelector('.chat-task-queue-edit');
+        expect(queuedEditor).toBeTruthy();
+        queuedEditor.value = 'Second edited';
+        queuedEditor.dispatchEvent(new Event('input', { bubbles: true }));
+
+        expect(resolveFirstGenerate).toBeTruthy();
+        resolveFirstGenerate();
+
+        await firstRequestPromise;
+        await flushMicrotasks();
+        await flushMicrotasks();
+
+        expect(generateBodies).toHaveLength(2);
+        expect(generateBodies[1].prompt).toBe('Second edited');
+        expect(document.querySelector('.chat-task-queue-item')).toBeNull();
+    }, 15000);
+
+    test('deleting a queued prompt prevents queued execution', async () => {
+        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        const { sendMessage } = require(chatTabModulePath);
+
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        const generateBodies = [];
+        let resolveFirstGenerate = null;
+
+        global.fetch = jest.fn((url, options = {}) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                const body = JSON.parse(options.body || '{}');
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ html: String(body.text || '') })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                const parsed = JSON.parse(options.body || '{}');
+                generateBodies.push(parsed);
+
+                if (generateBodies.length === 1) {
+                    return new Promise((resolve) => {
+                        resolveFirstGenerate = () => resolve({
+                            ok: true,
+                            json: async () => ({
+                                response: 'First response',
+                                llm_debug: { model: 'gpt-5.2' }
+                            })
+                        });
+                    });
+                }
+
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        response: 'Second response',
+                        llm_debug: { model: 'gpt-5.2' }
+                    })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        const promptInput = document.getElementById('promptInput');
+        promptInput.value = 'First request';
+        const firstRequestPromise = sendMessage();
+        await flushMicrotasks();
+
+        promptInput.value = 'Second queued';
+        await sendMessage();
+
+        const deleteButton = document.querySelector('.chat-task-queue-delete');
+        expect(deleteButton).toBeTruthy();
+        deleteButton.click();
+
+        expect(resolveFirstGenerate).toBeTruthy();
+        resolveFirstGenerate();
+
+        await firstRequestPromise;
+        await flushMicrotasks();
+        await flushMicrotasks();
+
+        expect(generateBodies).toHaveLength(1);
+        expect(document.querySelector('.chat-task-queue-item')).toBeNull();
+        expect(document.getElementById('chatTaskQueuePanel')?.classList.contains('hidden')).toBe(true);
+    }, 15000);
+});
