@@ -4949,10 +4949,10 @@ footer {
 
 .chat-session-tabs {
     display: flex;
-    align-items: center;
+    align-items: flex-end;
     gap: 6px;
     margin-bottom: 0;
-    padding: 6px 0 10px;
+    padding: 18px 0 10px;
     border-bottom: 1px solid #e5e7eb;
     overflow-x: auto;
 }
@@ -4964,18 +4964,38 @@ footer {
     margin-bottom: 12px;
 }
 
-.chat-session-tabs-group-label {
-    flex: 0 0 auto;
+.chat-session-tab-group-start {
+    overflow: visible;
+}
+
+.chat-session-tab-group-badge {
+    position: absolute;
+    top: -16px;
+    left: 8px;
+    display: inline-flex;
+    align-items: center;
     font-size: 10px;
     font-weight: 700;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.04em;
     text-transform: uppercase;
-    color: #64748b;
-    background: #f8fafc;
-    border: 1px dashed #cbd5e1;
     border-radius: 999px;
-    padding: 3px 8px;
+    padding: 2px 7px;
+    line-height: 1.1;
     user-select: none;
+    pointer-events: none;
+    white-space: nowrap;
+}
+
+.chat-session-tab-group-badge-pinned {
+    color: #92400e;
+    border: 1px dashed #fbbf24;
+    background: #fff7ed;
+}
+
+.chat-session-tab-group-badge-recent {
+    color: #475569;
+    border: 1px dashed #cbd5e1;
+    background: #f8fafc;
 }
 
 .chat-session-count {

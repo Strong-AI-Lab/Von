@@ -92,15 +92,22 @@ describe('chat session pinning', () => {
         const storedPins = JSON.parse(localStorage.getItem(storageKey) || '[]');
         expect(storedPins).toContain('s2');
 
-        const groupLabels = Array.from(
-            document.querySelectorAll('#chatSessionTabs .chat-session-tabs-group-label')
-        ).map((el) => el.textContent || '');
-        expect(groupLabels.some((label) => label.includes('Pinned'))).toBe(true);
-
         const reordered = Array.from(
             document.querySelectorAll('#chatSessionTabs .chat-session-tab[data-session-id]')
         ).map((el) => el.dataset.sessionId);
         expect(reordered[0]).toBe('s2');
+
+        const pinnedTab = document.querySelector(
+            '#chatSessionTabs .chat-session-tab[data-session-id="s2"]'
+        );
+        const pinnedBadge = pinnedTab?.querySelector('.chat-session-tab-group-badge-pinned');
+        expect(pinnedBadge?.textContent || '').toContain('Pinned (1)');
+
+        const recentTab = document.querySelector(
+            '#chatSessionTabs .chat-session-tab[data-session-id="s1"]'
+        );
+        const recentBadge = recentTab?.querySelector('.chat-session-tab-group-badge-recent');
+        expect(recentBadge?.textContent || '').toBe('Recent');
 
         const pinnedButton = document.querySelector(
             '#chatSessionTabs .chat-session-tab[data-session-id="s2"] .chat-session-tab-pin-toggle'
@@ -126,9 +133,6 @@ describe('chat session pinning', () => {
         const storedPins = JSON.parse(localStorage.getItem(storageKey) || '[]');
         expect(storedPins).toEqual([]);
 
-        const groupLabels = Array.from(
-            document.querySelectorAll('#chatSessionTabs .chat-session-tabs-group-label')
-        ).map((el) => el.textContent || '');
-        expect(groupLabels.some((label) => label.includes('Pinned'))).toBe(false);
+        expect(document.querySelector('#chatSessionTabs .chat-session-tab-group-badge')).toBeNull();
     });
 });
