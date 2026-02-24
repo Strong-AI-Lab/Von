@@ -1472,6 +1472,28 @@ body {
     max-width: 100%;
 }
 
+.task-title-link.task-concept-link {
+    appearance: none;
+    background: none;
+    border: 0;
+    padding: 0;
+    margin: 0;
+    text-align: left;
+    cursor: pointer;
+}
+
+.task-title-link.task-concept-link:hover {
+    color: #1d4ed8;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.task-title-link.task-concept-link:focus-visible {
+    outline: 2px solid #2563eb;
+    outline-offset: 2px;
+    border-radius: 3px;
+}
+
 .task-status-badge {
     margin-left: auto;
     font-size: 0.72rem;
@@ -1534,6 +1556,22 @@ body {
     background: #f8fafc;
     border: 1px solid #cbd5e1;
     color: #334155;
+}
+
+.task-hierarchy-chip.task-concept-link {
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s, background-color 0.15s;
+}
+
+.task-hierarchy-chip.task-concept-link:hover {
+    border-color: #93c5fd;
+    color: #1d4ed8;
+    background: #eff6ff;
+}
+
+.task-hierarchy-chip.task-concept-link:focus-visible {
+    outline: 2px solid #2563eb;
+    outline-offset: 1px;
 }
 
 .task-conversation-link {

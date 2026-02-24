@@ -625,6 +625,70 @@ function getTaskId(task) {
     return task.task_concept_id || task.concept_id || '';
 }
 
+function normaliseTaskConceptId(value) {
+    if (typeof value !== 'string') return '';
+    const trimmed = value.trim();
+    if (!trimmed.startsWith('#V#') || trimmed.length <= 3) return '';
+    return trimmed;
+}
+
+function deriveConceptNameFromId(conceptId, fallbackName = '') {
+    const fallback = typeof fallbackName === 'string' ? fallbackName.trim() : '';
+    if (fallback) return fallback;
+    const normalised = normaliseTaskConceptId(conceptId);
+    if (!normalised) return '';
+    const raw = normalised.slice(3);
+    const pretty = raw
+        .split(/[_-]+/)
+        .map((part) => part.trim())
+        .filter(Boolean)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(' ');
+    return pretty || normalised;
+}
+
+function renderTaskConceptLink({
+    conceptId,
+    conceptName = '',
+    text,
+    className,
+    title,
+    ariaLabel,
+}) {
+    const safeText = escapeHtml(text);
+    const safeClass = escapeHtml(className || '');
+    const normalisedId = normaliseTaskConceptId(conceptId);
+    if (!normalisedId) {
+        return `<span class="${safeClass}">${safeText}</span>`;
+    }
+    const resolvedName = deriveConceptNameFromId(normalisedId, conceptName) || normalisedId;
+    const tooltip = title || 'Open concept';
+    const label = ariaLabel || tooltip;
+    return `
+        <button type="button"
+            class="${safeClass} task-concept-link"
+            data-concept-id="${escapeHtml(normalisedId)}"
+            data-concept-name="${escapeHtml(resolvedName)}"
+            title="${escapeHtml(tooltip)}"
+            aria-label="${escapeHtml(label)}">
+            ${safeText}
+        </button>
+    `;
+}
+
+function openTaskPanelConcept(conceptId, conceptName = '') {
+    const normalisedId = normaliseTaskConceptId(conceptId);
+    if (!normalisedId) return;
+    const resolvedName = deriveConceptNameFromId(normalisedId, conceptName) || normalisedId;
+    document.dispatchEvent(new CustomEvent('open-concept-tab', {
+        detail: {
+            conceptId: normalisedId,
+            conceptName: resolvedName,
+            activate: true,
+        },
+    }));
+}
+
 function renderTaskMetaChips(chips, cssClass) {
     if (!Array.isArray(chips) || chips.length === 0) return '';
     const display = chips.slice(0, 4).map((value) => `
@@ -853,11 +917,19 @@ function renderTaskItem(task) {
     const detailState = getTaskDetailState(taskId);
 
     // Escape HTML in title/description
-    const title = escapeHtml(task.title || 'Untitled Task');
+    const titleText = task.title || 'Untitled Task';
     const description = escapeHtml(task.description || '');
     const truncatedDescription = description.length > 120
         ? description.substring(0, 120) + '...'
         : description;
+    const titleHtml = renderTaskConceptLink({
+        conceptId: taskId,
+        conceptName: titleText,
+        text: titleText,
+        className: 'task-title task-title-link',
+        title: 'Open task concept',
+        ariaLabel: `Open task concept ${titleText}`,
+    });
 
     // Format dates if present
     let startDateHtml = '';
@@ -896,9 +968,18 @@ function renderTaskItem(task) {
 
     const labelsHtml = renderTaskMetaChips(task.labels, 'task-label-chip');
     const componentsHtml = renderTaskMetaChips(task.components, 'task-component-chip');
+    const parentChipHtml = task.parent_task_concept_id
+        ? renderTaskConceptLink({
+            conceptId: task.parent_task_concept_id,
+            text: `Parent: ${task.parent_task_concept_id}`,
+            className: 'task-hierarchy-chip',
+            title: 'Open parent concept',
+            ariaLabel: `Open parent concept ${task.parent_task_concept_id}`,
+        })
+        : '';
     const hierarchyHtml = `
         <div class="task-hierarchy-row">
-            ${task.parent_task_concept_id ? `<span class="task-hierarchy-chip">Parent: ${escapeHtml(task.parent_task_concept_id)}</span>` : ''}
+            ${parentChipHtml}
             ${task.epic_task_concept_id ? `<span class="task-hierarchy-chip">Epic: ${escapeHtml(task.epic_task_concept_id)}</span>` : ''}
         </div>
     `;
@@ -908,7 +989,7 @@ function renderTaskItem(task) {
         <div class="task-item" data-task-id="${taskId}">
             <div class="task-item-header">
                 <span class="task-priority" title="Priority: ${priorityInfo.label}">${priorityInfo.icon}</span>
-                <span class="task-title">${title}</span>
+                ${titleHtml}
                 <span class="task-status-badge" title="Status">${statusInfo.icon} ${escapeHtml(statusInfo.label)}</span>
             </div>
             <div class="task-item-body">
@@ -1108,6 +1189,22 @@ async function addTaskAttachment(taskId, panelEl) {
  */
 function attachTaskEventListeners() {
     if (!_taskListEl) return;
+
+    _taskListEl.querySelectorAll('.task-concept-link').forEach((btn) => {
+        btn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const conceptId = e.currentTarget.dataset.conceptId;
+            const conceptName = e.currentTarget.dataset.conceptName || '';
+            openTaskPanelConcept(conceptId, conceptName);
+        });
+        btn.addEventListener('keydown', (e) => {
+            if (e.key !== 'Enter' && e.key !== ' ') return;
+            e.preventDefault();
+            e.stopPropagation();
+            e.currentTarget.click();
+        });
+    });
 
     // Status change dropdowns
     _taskListEl.querySelectorAll('.task-status-select').forEach(select => {
