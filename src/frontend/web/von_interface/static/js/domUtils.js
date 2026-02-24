@@ -1,3 +1,5 @@
+import { openSettingsTabAndFocus } from './utils/settingsNavigation.js';
+
 export const elements = {};
 
 export function initializeDomElements() {
@@ -748,6 +750,11 @@ function attachFooterDbBadge(footer, dbInfo) {
   footer.appendChild(badge);
 }
 
+// Export for testing.
+export function openSettingsForModelControls() {
+  return openSettingsTabAndFocus('von:focus-model-settings');
+}
+
 export async function setModelInfoFooterText() {
   const footer = document.getElementById('modelInfoFooter');
   if (!footer) return;
@@ -851,6 +858,7 @@ export async function setModelInfoFooterText() {
   // Determine LLM status styles
   const status = llmInfo?.status || 'unknown';
   const errorMsg = llmInfo?.error || '';
+  const llmHost = typeof llmInfo?.details?.host === 'string' ? llmInfo.details.host : '';
   let llmClass = '';
   let llmTooltipSuffix = '';
 
@@ -962,6 +970,50 @@ export async function setModelInfoFooterText() {
     }
     span.appendChild(btn);
     return span;
+  }
+
+  function makeActionButton(labelPrefix, displayName, onClick, options = {}) {
+    const span = document.createElement('span');
+    span.className = 'footer-segment';
+    const prefix = document.createElement('span');
+    prefix.className = 'footer-label-inline';
+    prefix.textContent = labelPrefix + ': ';
+    span.appendChild(prefix);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'concept-footer-button';
+    btn.textContent = displayName;
+    if (options.title) btn.title = options.title;
+    if (options.ariaLabel) btn.setAttribute('aria-label', options.ariaLabel);
+    if (typeof onClick === 'function') {
+      btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        onClick();
+      });
+    }
+    span.appendChild(btn);
+    return span;
+  }
+
+  // LLM settings link button: keep it parallel to footer concept controls.
+  {
+    const titleParts = ['Open language model settings'];
+    titleParts.push(`Status: ${status}`);
+    if (activeLlm?.provider) titleParts.push(`Provider: ${activeLlm.provider}`);
+    if (activeLlm?.model) titleParts.push(`Model: ${activeLlm.model}`);
+    if (llmHost) titleParts.push(`Host: ${llmHost}`);
+    if (errorMsg) titleParts.push(`Error: ${errorMsg}`);
+    const llmSettingsSegment = makeActionButton(
+      'LLM',
+      llmHost ? 'Server' : 'Settings',
+      () => { openSettingsForModelControls(); },
+      {
+        ariaLabel: 'Open language model settings',
+        title: titleParts.join('\n')
+      }
+    );
+    if (llmClass) llmSettingsSegment.classList.add('llm-status-badge', llmClass);
+    segments.push(llmSettingsSegment);
   }
 
   // User segment
