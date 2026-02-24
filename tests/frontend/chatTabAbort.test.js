@@ -134,7 +134,7 @@ describe('chat abort behaviour', () => {
 
         const sendPromise = sendMessage();
 
-        expect(document.getElementById('sendButton').disabled).toBe(true);
+        expect(document.getElementById('sendButton').disabled).toBe(false);
         expect(document.getElementById('abortButton').getAttribute('aria-hidden')).toBe('false');
 
         document.getElementById('abortButton').click();

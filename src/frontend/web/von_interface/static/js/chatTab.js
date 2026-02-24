@@ -7479,6 +7479,13 @@ function createChatDebugWarningIndicator(warnings) {
 }
 
 let activeChatRequest = null;
+let queuedChatPrompts = [];
+let queuedChatPromptCounter = 0;
+let queuedChatPromptDrainTimer = null;
+
+const CHAT_TASK_QUEUE_PANEL_ID = 'chatTaskQueuePanel';
+const CHAT_TASK_QUEUE_LIST_ID = 'chatTaskQueueList';
+const CHAT_TASK_QUEUE_COUNT_ID = 'chatTaskQueueCount';
 
 const CHAT_TTS_STORAGE_KEY = 'chatTtsEnabled';
 
@@ -13981,6 +13988,7 @@ export function initializeChatTab() {
     resetButton.addEventListener('click', handleResetContext);
 
     ensureAbortButtonBound();
+    renderChatTaskQueuePanel();
 
     // Add Enter key support for prompt input
     promptInput.addEventListener('keypress', function (event) {
@@ -14065,7 +14073,8 @@ function setThinkingState(isThinking) {
     }
 
     if (sendButton) {
-        sendButton.disabled = !!isThinking;
+        sendButton.disabled = false;
+        sendButton.textContent = isThinking ? 'Queue Prompt' : 'Send Prompt';
     }
 
     if (abortButton) {
@@ -14469,23 +14478,215 @@ function ensureAbortButtonBound() {
     }
 }
 
-async function handleSendPrompt() {
+function createQueuedChatPromptId() {
+    queuedChatPromptCounter += 1;
+    return `queued-${Date.now()}-${queuedChatPromptCounter}`;
+}
+
+function ensureChatTaskQueuePanel() {
     const promptInput = document.getElementById('promptInput');
+    if (!promptInput || !promptInput.parentElement) {
+        return null;
+    }
+
+    let panel = document.getElementById(CHAT_TASK_QUEUE_PANEL_ID);
+    if (!panel) {
+        panel = document.createElement('section');
+        panel.id = CHAT_TASK_QUEUE_PANEL_ID;
+        panel.className = 'chat-task-queue-panel hidden';
+        panel.setAttribute('aria-live', 'polite');
+        panel.setAttribute('aria-label', 'Queued tasks');
+        panel.innerHTML = `
+            <div class="chat-task-queue-header">
+                <span class="chat-task-queue-title">Queued tasks</span>
+                <span id="${CHAT_TASK_QUEUE_COUNT_ID}" class="chat-task-queue-count">0 queued</span>
+            </div>
+            <div id="${CHAT_TASK_QUEUE_LIST_ID}" class="chat-task-queue-list"></div>
+        `;
+        promptInput.insertAdjacentElement('afterend', panel);
+    }
+
+    if (panel.dataset.bound !== '1') {
+        panel.dataset.bound = '1';
+
+        panel.addEventListener('input', (event) => {
+            const target = event.target;
+            if (!(target instanceof HTMLTextAreaElement)) {
+                return;
+            }
+            if (!target.classList.contains('chat-task-queue-edit')) {
+                return;
+            }
+            const queueId = String(target.dataset.queueId || '').trim();
+            if (!queueId) {
+                return;
+            }
+            const queued = queuedChatPrompts.find((entry) => entry.id === queueId);
+            if (!queued) {
+                return;
+            }
+            queued.promptRaw = target.value;
+        });
+
+        panel.addEventListener('click', (event) => {
+            const target = event.target;
+            if (!(target instanceof HTMLElement)) {
+                return;
+            }
+            const deleteButton = target.closest('.chat-task-queue-delete');
+            if (!deleteButton) {
+                return;
+            }
+            const queueId = String(deleteButton.getAttribute('data-queue-id') || '').trim();
+            if (!queueId) {
+                return;
+            }
+            queuedChatPrompts = queuedChatPrompts.filter((entry) => entry.id !== queueId);
+            renderChatTaskQueuePanel();
+        });
+    }
+
+    const list = panel.querySelector(`#${CHAT_TASK_QUEUE_LIST_ID}`);
+    const count = panel.querySelector(`#${CHAT_TASK_QUEUE_COUNT_ID}`);
+    if (!(list instanceof HTMLElement) || !(count instanceof HTMLElement)) {
+        return null;
+    }
+
+    return { panel, list, count };
+}
+
+function renderChatTaskQueuePanel() {
+    const elements = ensureChatTaskQueuePanel();
+    if (!elements) {
+        return;
+    }
+
+    const { panel, list, count } = elements;
+    const queueSize = queuedChatPrompts.length;
+
+    count.textContent = queueSize === 1 ? '1 queued' : `${queueSize} queued`;
+    list.innerHTML = '';
+
+    if (queueSize === 0) {
+        panel.classList.add('hidden');
+        return;
+    }
+
+    panel.classList.remove('hidden');
+
+    queuedChatPrompts.forEach((entry, index) => {
+        const item = document.createElement('div');
+        item.className = 'chat-task-queue-item';
+        item.setAttribute('data-queue-id', entry.id);
+
+        const label = document.createElement('div');
+        label.className = 'chat-task-queue-item-label';
+        label.textContent = index === 0 ? 'Next up' : `Queue #${index + 1}`;
+
+        const editor = document.createElement('textarea');
+        editor.className = 'chat-task-queue-edit';
+        editor.rows = 2;
+        editor.value = entry.promptRaw;
+        editor.setAttribute('data-queue-id', entry.id);
+        editor.setAttribute('aria-label', `Queued task ${index + 1}`);
+
+        const actions = document.createElement('div');
+        actions.className = 'chat-task-queue-actions';
+
+        const deleteButton = document.createElement('button');
+        deleteButton.type = 'button';
+        deleteButton.className = 'btn-mini chat-task-queue-delete';
+        deleteButton.textContent = 'Delete';
+        deleteButton.setAttribute('data-queue-id', entry.id);
+        deleteButton.setAttribute('aria-label', `Delete queued task ${index + 1}`);
+
+        actions.appendChild(deleteButton);
+        item.appendChild(label);
+        item.appendChild(editor);
+        item.appendChild(actions);
+        list.appendChild(item);
+    });
+}
+
+function queuePromptForLater(promptRaw) {
+    const value = String(promptRaw ?? '');
+    queuedChatPrompts.push({
+        id: createQueuedChatPromptId(),
+        promptRaw: value,
+    });
+    renderChatTaskQueuePanel();
+}
+
+function drainQueuedChatPromptIfIdle() {
+    if (activeChatRequest || queuedChatPrompts.length === 0) {
+        return;
+    }
+
+    const nextEntry = queuedChatPrompts[0];
+    if (!nextEntry || typeof nextEntry.promptRaw !== 'string' || !nextEntry.promptRaw.trim()) {
+        queuedChatPrompts = queuedChatPrompts.slice(1);
+        renderChatTaskQueuePanel();
+        scheduleQueuedChatPromptDrain();
+        return;
+    }
+
+    queuedChatPrompts = queuedChatPrompts.slice(1);
+    renderChatTaskQueuePanel();
+
+    void handleSendPrompt({
+        promptOverride: nextEntry.promptRaw,
+        fromQueue: true,
+    });
+}
+
+function scheduleQueuedChatPromptDrain() {
+    if (queuedChatPromptDrainTimer !== null) {
+        return;
+    }
+    queuedChatPromptDrainTimer = setTimeout(() => {
+        queuedChatPromptDrainTimer = null;
+        drainQueuedChatPromptIfIdle();
+    }, 0);
+}
+
+async function handleSendPrompt(options = {}) {
+    const promptInput = document.getElementById('promptInput');
+    if (!promptInput) {
+        return;
+    }
+
+    const fromQueue = options && options.fromQueue === true;
+    const hasPromptOverride = options && typeof options.promptOverride === 'string';
+    const promptRaw = hasPromptOverride ? options.promptOverride : promptInput.value;
+    const selectionStart = hasPromptOverride
+        ? null
+        : (typeof promptInput.selectionStart === 'number' ? promptInput.selectionStart : null);
+    const selectionEnd = hasPromptOverride
+        ? null
+        : (typeof promptInput.selectionEnd === 'number' ? promptInput.selectionEnd : null);
+    const promptForSend = normaliseVontologyIdsForBackend(promptRaw);
+    const promptText = promptForSend.trim();
 
     if (activeChatRequest) {
+        if (fromQueue) {
+            scheduleQueuedChatPromptDrain();
+            return;
+        }
+        if (!promptText) {
+            return;
+        }
+        queuePromptForLater(promptRaw);
+        promptInput.value = '';
+        promptInput.dispatchEvent(new Event('input', { bubbles: true }));
         return;
     }
 
     ensureAbortButtonBound();
 
-    const promptRaw = promptInput.value;
-    const selectionStart = typeof promptInput.selectionStart === 'number' ? promptInput.selectionStart : null;
-    const selectionEnd = typeof promptInput.selectionEnd === 'number' ? promptInput.selectionEnd : null;
-    const promptForSend = normaliseVontologyIdsForBackend(promptRaw);
-    const promptText = promptForSend.trim();
-
     if (!promptText) {
-        alert('Please enter a prompt.');
+        if (!fromQueue) {
+            alert('Please enter a prompt.');
+        }
         return;
     }
 
@@ -14516,9 +14717,11 @@ async function handleSendPrompt() {
         } catch (e) { console.info('[annotations] annotate user failed', e); }
     }
 
-    // Clear input
-    promptInput.value = '';
-    promptInput.dispatchEvent(new Event('input', { bubbles: true }));
+    if (!fromQueue) {
+        // Clear input only for direct sends; queued execution should preserve current draft text.
+        promptInput.value = '';
+        promptInput.dispatchEvent(new Event('input', { bubbles: true }));
+    }
     let request = null;
     try {
         request = {
@@ -14656,6 +14859,7 @@ async function handleSendPrompt() {
             setThinkingState(false);
         }
         updateHistoryLength();
+        scheduleQueuedChatPromptDrain();
     }
 }
 
