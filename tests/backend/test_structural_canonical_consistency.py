@@ -98,6 +98,20 @@ class TestStructuralFieldNormalisation:
         assert normalise_structural_predicate("#V#has_author") == "#V#has_author"
         assert normalise_structural_predicate("custom_relation") == "custom_relation"
 
+    def test_visibility_aliases_normalise_to_predicate_concepts(self):
+        """Legacy visibility keys should map to canonical predicate concept IDs."""
+        from src.backend.services.relationship_write_service import (
+            normalise_structural_predicate,
+        )
+
+        assert normalise_structural_predicate("specific_to_user") == "#V#specific_to_user"
+        assert normalise_structural_predicate("specific_to_org") == "#V#specific_to_organisation"
+        assert (
+            normalise_structural_predicate("specific_to_organisation")
+            == "#V#specific_to_organisation"
+        )
+        assert normalise_structural_predicate("#V#specific_to_org") == "#V#specific_to_organisation"
+
 
 class TestDriftDetection:
     """Test that drift between structural and canonical representations is detected."""

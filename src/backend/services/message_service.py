@@ -23,6 +23,10 @@ from ..security.access_control import (
     get_effective_user_concept_id,
     bypass_access_control,
 )
+from ..security.visibility_predicates import (
+    set_specific_to_org_values,
+    set_specific_to_user_values,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -96,9 +100,12 @@ def create_message(
         "is_an_instance_of": [MESSAGE_TYPE_CONCEPT_ID],
         PREDICATE_SENDER: [sender_id],
         PREDICATE_RECIPIENT: recipient_ids,
-        # Visibility: both sender and all recipients can see the message
-        "specific_to_user": [sender_id] + recipient_ids,
     }
+    # Visibility: both sender and all recipients can see the message.
+    relationships = set_specific_to_user_values(
+        relationships,
+        [sender_id] + recipient_ids,
+    )
 
     # Optional thread/reply relationships
     if thread_id:
@@ -108,7 +115,7 @@ def create_message(
 
     # Organisation scoping if provided
     if org_id:
-        relationships["specific_to_org"] = [org_id.strip()]
+        relationships = set_specific_to_org_values(relationships, [org_id.strip()])
 
     metadata_payload = metadata if isinstance(metadata, dict) else {}
     metadata_payload = {str(k): v for k, v in metadata_payload.items() if isinstance(k, str)}

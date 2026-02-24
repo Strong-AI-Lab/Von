@@ -4740,17 +4740,17 @@ def toggle_organization_relation():
             force = raw_force.strip().lower() in ("1", "true", "yes", "y", "force")
 
         from ...db.repositories.concepts_repository import ConceptsRepository
+        from ...security.visibility_predicates import (
+            get_specific_to_org_values,
+            set_specific_to_org_values,
+        )
 
         concept = ConceptsRepository.find_one({"concept_id": concept_id})
         if not concept:
             return jsonify({"success": False, "error": "Concept not found"}), 404
 
         relationships = concept.get("relationships") or {}
-        org_relations = relationships.get("specific_to_organisation") or []
-        if isinstance(org_relations, str):
-            org_relations = [org_relations]
-        elif not isinstance(org_relations, list):
-            org_relations = []
+        org_relations = get_specific_to_org_values(relationships)
 
         changed = False
         if action == "add":
@@ -4778,7 +4778,7 @@ def toggle_organization_relation():
                     org_relations.remove(organisation_concept_id)
                     changed = True
 
-        relationships["specific_to_organisation"] = org_relations
+        relationships = set_specific_to_org_values(relationships, org_relations)
         ConceptsRepository.update_one(
             {"concept_id": concept_id}, {"$set": {"relationships": relationships}}
         )

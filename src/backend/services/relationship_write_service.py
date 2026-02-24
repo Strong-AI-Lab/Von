@@ -62,6 +62,14 @@ PREDICATE_NAME_ALIASES: Dict[str, str] = {
     "typeOf": "is_a_type_of",
     "subtype": "has_subtype",
     "instance": "has_instance",
+    # Visibility predicate aliases:
+    # Route legacy field-style predicates to canonical predicate concept IDs so
+    # agents can write relationships using historic terms without creating
+    # orphan predicate references.
+    "specific_to_user": "#V#specific_to_user",
+    "specific_to_org": "#V#specific_to_organisation",
+    "specific_to_organisation": "#V#specific_to_organisation",
+    "#V#specific_to_org": "#V#specific_to_organisation",
 }
 
 # Blocked parent types that defeat the purpose of the ontology (JVNAUTOSCI-1072).

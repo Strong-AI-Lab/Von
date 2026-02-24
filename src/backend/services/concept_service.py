@@ -164,6 +164,10 @@ def _resolve_creation_visibility_scope(
     """Resolve concept visibility restrictions and diagnostics for create_concept."""
 
     from .workflow_event_integration_service import resolve_event_actor_context
+    from ..security.visibility_predicates import (
+        set_specific_to_org_values,
+        set_specific_to_user_values,
+    )
 
     warnings: List[str] = []
     requested_scope_mode = _normalise_creation_scope_mode(visibility_scope_mode)
@@ -199,7 +203,10 @@ def _resolve_creation_visibility_scope(
 
         if mode_for_resolution == CONCEPT_SCOPE_ORGANISATION_GENERAL:
             if actor_org_id:
-                relationships["specific_to_org"] = [actor_org_id]
+                relationships = set_specific_to_org_values(
+                    relationships,
+                    [actor_org_id],
+                )
                 effective_scope_mode = CONCEPT_SCOPE_ORGANISATION_GENERAL
                 scope_source = "request.scope_mode"
             else:
@@ -207,9 +214,15 @@ def _resolve_creation_visibility_scope(
                 effective_scope_mode = CONCEPT_SCOPE_GLOBAL_GENERAL
                 scope_source = "missing_authenticated_context"
         elif actor_user_id:
-            relationships["specific_to_user"] = [actor_user_id]
+            relationships = set_specific_to_user_values(
+                relationships,
+                [actor_user_id],
+            )
             if actor_org_id:
-                relationships["specific_to_org"] = [actor_org_id]
+                relationships = set_specific_to_org_values(
+                    relationships,
+                    [actor_org_id],
+                )
                 effective_scope_mode = CONCEPT_SCOPE_USER_ORG_DEFAULT
             else:
                 effective_scope_mode = CONCEPT_SCOPE_USER_ONLY_DEFAULT
@@ -805,6 +818,35 @@ def get_concept_by_concept_id(concept_id: str) -> Optional[Dict[str, Any]]:
                 return get_concept_by_concept_id(resolved_id)
         except Exception as alias_err:
             logger.debug("Alias resolution for '%s' failed: %s", concept_id, alias_err)
+
+        # Fallback: deterministic name/code resolution for known legacy variants.
+        # This keeps fetch_concept robust when callers use legacy IDs that are now
+        # preserved as hasName aliases instead of first-class concept_ids.
+        try:
+            from .concept_resolution_service import resolve_concept_by_name
+
+            resolution = resolve_concept_by_name(
+                name=concept_id,
+                match_code_strings=True,
+                max_results=3,
+            )
+            resolved_id = (
+                resolution.get("resolved_concept_id")
+                if isinstance(resolution, dict)
+                else None
+            )
+            if (
+                isinstance(resolved_id, str)
+                and resolved_id.startswith("#V#")
+                and resolved_id != concept_id
+            ):
+                return get_concept_by_concept_id(resolved_id)
+        except Exception as resolve_err:
+            logger.debug(
+                "Name-based resolution for '%s' failed: %s",
+                concept_id,
+                resolve_err,
+            )
 
         # Virtual fallback for code-handled concepts (read-only).
         try:

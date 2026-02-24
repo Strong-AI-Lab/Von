@@ -21,6 +21,12 @@ from ..services.text_value_service import (
 from ..utils.concept_id_utils import (
     ensure_v_concept_prefix,
 )
+from ..security.visibility_predicates import (
+    SPECIFIC_TO_ORG_PREDICATES_WRITE,
+    SPECIFIC_TO_USER_PREDICATES,
+    set_specific_to_org_values,
+    set_specific_to_user_values,
+)
 from .effort_unit_ontology_service import (
     ensure_effort_unit_ontology,
     extract_effort_unit_type_ids,
@@ -732,11 +738,14 @@ def create_task(
     if assignee_concept_id and assignee_concept_id not in visible_to_users:
         visible_to_users.append(assignee_concept_id)
     if visible_to_users:
-        relationships["specific_to_user"] = visible_to_users
+        relationships = set_specific_to_user_values(relationships, visible_to_users)
 
     # Organisation scoping
     if organisation_concept_id:
-        relationships["specific_to_org"] = [organisation_concept_id]
+        relationships = set_specific_to_org_values(
+            relationships,
+            [organisation_concept_id],
+        )
 
     # Handle conversation linkage (lazy creation)
     conversation_concept_id = None
@@ -1279,13 +1288,14 @@ def assign_task(task_concept_id: str, assignee_concept_id: str) -> Dict[str, Any
         action="add",
     )
 
-    # Also add new assignee to specific_to_user for visibility
-    ConceptsRepository.mutate_relationship_edge(
-        source_id=task_concept_id,
-        kind="specific_to_user",
-        target_id=assignee_concept_id,
-        action="add",
-    )
+    # Also add new assignee to all specific_to_user predicate variants for visibility.
+    for predicate in SPECIFIC_TO_USER_PREDICATES:
+        ConceptsRepository.mutate_relationship_edge(
+            source_id=task_concept_id,
+            kind=predicate,
+            target_id=assignee_concept_id,
+            action="add",
+        )
 
     # Update timestamp
     now = _now()
@@ -2744,15 +2754,13 @@ def update_task_fields(
             metadata_key=TASK_METADATA_KEY_ORGANISATION,
             value=organisation_concept_id,
         )
+        relationship_updates: Dict[str, Any] = {}
+        org_targets = [organisation_concept_id] if organisation_concept_id else []
+        for predicate in SPECIFIC_TO_ORG_PREDICATES_WRITE:
+            relationship_updates[f"relationships.{predicate}"] = list(org_targets)
         ConceptsRepository.update_one(
             {"concept_id": task_concept_id},
-            {
-                "$set": {
-                    "relationships.specific_to_org": (
-                        [organisation_concept_id] if organisation_concept_id else []
-                    )
-                }
-            },
+            {"$set": relationship_updates},
         )
         changed_fields.append("organisation_concept_id")
 

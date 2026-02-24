@@ -12,6 +12,11 @@ import logging
 _log = logging.getLogger(__name__)
 
 from ..db.mongo_client import get_concepts_collection
+from .visibility_predicates import (
+    SPECIFIC_TO_ORG_PREDICATES_READ,
+    SPECIFIC_TO_USER_PREDICATES,
+    get_specific_to_user_values,
+)
 
 # ---------------------------------------------------------------------------
 # Context state
@@ -24,9 +29,6 @@ _EVALUATOR: ContextVar["AccessEvaluator | None"] = ContextVar(
 )
 
 _REMOVE = object()
-
-# Both legacy and predicate-style specific_to_user fields should be checked
-_SPECIFIC_TO_USER_PREDICATES = ("specific_to_user", "#V#specific_to_user")
 
 
 def _normalise_concept_id(value: Any) -> Optional[str]:
@@ -58,17 +60,8 @@ def _specific_allows_user(spec: Any, user_id: Optional[str]) -> bool:
 
 
 def _get_specific_to_user_values(relationships: Dict[str, Any]) -> List[Any]:
-    """Collect specific_to_user values from all predicate variants."""
-    values: List[Any] = []
-    for predicate in _SPECIFIC_TO_USER_PREDICATES:
-        val = relationships.get(predicate)
-        if val is None:
-            continue
-        if isinstance(val, list):
-            values.extend(val)
-        else:
-            values.append(val)
-    return values
+    """Compatibility wrapper used by routes/services importing this private helper."""
+    return list(get_specific_to_user_values(relationships))
 
 
 def _document_visible_to_user(doc: Dict[str, Any], user_id: Optional[str]) -> bool:
@@ -129,7 +122,7 @@ class AccessEvaluator:
         else:
             doc = coll.find_one(
                 {"concept_id": normalised},
-                {f"relationships.{p}": 1 for p in _SPECIFIC_TO_USER_PREDICATES},
+                {f"relationships.{p}": 1 for p in SPECIFIC_TO_USER_PREDICATES},
             )
             if doc:
                 rels = doc.get("relationships", {})
@@ -302,7 +295,7 @@ def build_visibility_filter() -> Optional[Dict[str, Any]]:
     # OR if any of them includes the current user.
     # Build "no restriction" clauses for ALL predicate variants
     no_restriction_clauses: List[Dict[str, Any]] = []
-    for predicate in _SPECIFIC_TO_USER_PREDICATES:
+    for predicate in SPECIFIC_TO_USER_PREDICATES:
         field = f"relationships.{predicate}"
         no_restriction_clauses.extend(
             [
@@ -319,7 +312,7 @@ def build_visibility_filter() -> Optional[Dict[str, Any]]:
 
     # User-specific visibility: user appears in ANY of the predicate variants
     if user_id:
-        for predicate in _SPECIFIC_TO_USER_PREDICATES:
+        for predicate in SPECIFIC_TO_USER_PREDICATES:
             clauses.append({f"relationships.{predicate}": {"$in": [user_id]}})
         _log.info(
             f"[access_filter] Including user-specific concepts for user={user_id}"
@@ -340,7 +333,8 @@ def build_visibility_filter() -> Optional[Dict[str, Any]]:
 
     # Organisation-specific visibility (Phase 1)
     if user_org_id:
-        clauses.append({"relationships.specific_to_org": {"$in": [user_org_id]}})
+        for predicate in SPECIFIC_TO_ORG_PREDICATES_READ:
+            clauses.append({f"relationships.{predicate}": {"$in": [user_org_id]}})
         _log.info(
             f"[access_filter] Including org-specific concepts for org={user_org_id}"
         )

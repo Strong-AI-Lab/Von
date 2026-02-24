@@ -1344,6 +1344,9 @@ def _remove_relationship(**kwargs):
     try:
         repo = ConceptsRepository
 
+        from ...services.relationship_write_service import (
+            normalise_structural_predicate,
+        )
         from ...vontology.code_concepts_registry import (
             build_virtual_concept_doc,
             is_code_concept_id,
@@ -1384,16 +1387,8 @@ def _remove_relationship(**kwargs):
                 suggestions=["Use delete_text_relation to remove text relations"],
             )
 
-        # Map common predicate aliases to stored field names
-        predicate_map = {
-            "instance_of": "is_an_instance_of",
-            "instanceOf": "is_an_instance_of",
-            "type_of": "is_a_type_of",
-            "typeOf": "is_a_type_of",
-            "subtype": "has_subtype",
-            "instance": "has_instance",
-        }
-        rel_kind = predicate_map.get(predicate, predicate)
+        # Canonical predicate normalisation is shared with add_relationship.
+        rel_kind = normalise_structural_predicate(predicate_str)
 
         # Determine if this is a text predicate (binary_text_predicate instance)
         if isinstance(rel_kind, str) and rel_kind.startswith("#V#"):
