@@ -28,8 +28,9 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 22. In docs/examples for secret env vars, use explicit placeholders like `<YOUR-CLIENT-SECRET-HERE>` and avoid token-like sample strings that can trigger secret scanners.
 23. **Workflow-first behaviours**: strongly prefer Vontology workflows (definitions, instances, event bindings, schedules) to drive Von behaviour instead of adding specialised orchestration code. Add bespoke code only when workflow primitives cannot express the behaviour, and document the gap in Jira.
 24. **Policy over task wording**: if a Jira issue suggests implementation in specialised orchestration code but the behaviour can be expressed as a Vontology workflow, enforce workflow-first policy and reinterpret/revise the task accordingly. In these cases, limit code changes to missing tools/validators/telemetry needed by the workflow, and add a Jira comment documenting the reinterpretation.
-25. If you are reasonably confident task implementation is complete, proactively merge and close the task (commit/push, merge to `main`, and transition Jira) unless the user explicitly asks to hold.
-26. **Fail closed when Vontology is unavailable for Vontology-governed behaviour**: do not silently fall back to in-code prompts, stale context reuse, or heuristic hacks. If required Vontology prompts/workflow data cannot be resolved, no-op that transformation and emit a clear user-visible and telemetry-visible reason.
+25. If you are reasonably confident task implementation is complete, proactively merge and close the task (commit/push, create PR, merge to `main`, and transition Jira) unless the user explicitly asks to hold.
+26. **Definition of fully complete Jira task**: implementation committed and pushed, PR created, PR merged to `main`, and Jira transitioned/commented accordingly.
+27. **Fail closed when Vontology is unavailable for Vontology-governed behaviour**: do not silently fall back to in-code prompts, stale context reuse, or heuristic hacks. If required Vontology prompts/workflow data cannot be resolved, no-op that transformation and emit a clear user-visible and telemetry-visible reason.
 
 ## Core AI-Focused Documents
 - `docs/AINotes.md`: short-term memory and tactical log.
