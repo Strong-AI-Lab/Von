@@ -8595,6 +8595,15 @@ def _resolve_rag_collection_from_kwargs(kwargs: dict) -> dict[str, object]:
         "chat_history": "chat_history_sessions",
         "chat_history_session": "chat_history_sessions",
         "chat_history_sessions": "chat_history_sessions",
+        "file_copy": "file_copy_concepts",
+        "file_copies": "file_copy_concepts",
+        "file_copy_concept": "file_copy_concepts",
+        "file_copy_concepts": "file_copy_concepts",
+        "blob_store": "file_copy_concepts",
+        "blob_store_file": "file_copy_concepts",
+        "blob_store_files": "file_copy_concepts",
+        "uploaded_file": "file_copy_concepts",
+        "uploaded_files": "file_copy_concepts",
         "text_relations": "vontology_text_relations",
         "text_relation": "vontology_text_relations",
         "text": "vontology_text_relations",
@@ -8665,6 +8674,24 @@ def _rag_list_collections(**kwargs):
             "get_supported_reason": None,
             "item_kind": "chat_history_session",
             "source_system": "mongo.chat_history",
+        },
+        {
+            "collection": "file_copy_concepts",
+            "label": "Blob-store file-copy concepts",
+            "description": (
+                "User-visible file-copy concepts stored in MongoDB (concepts collection) with blob metadata. "
+                "Use this to inspect uploaded/object-store files discoverable by namespace-scoped retrieval."
+            ),
+            "list_tool": "rag_list_indexed",
+            "get_tool": "rag_get_item",
+            "search_tool": "search_knowledge_base",
+            "list_supported": True,
+            "get_supported": True,
+            "search_supported": True,
+            "list_supported_reason": None,
+            "get_supported_reason": None,
+            "item_kind": "file_copy_concept",
+            "source_system": "mongo.concepts",
         },
         {
             "collection": "turn_execution_records",
@@ -8981,6 +9008,156 @@ def _summarise_turn_execution_rag_indexing_states(
     return counts
 
 
+def _resolve_rag_actor_scope_ids(
+    ns_report: Mapping[str, Any],
+) -> tuple[str | None, str | None]:
+    """Extract user/org scope IDs from a namespace resolution report."""
+
+    user_concept_id = ns_report.get("user_concept_id")
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        user_concept_id = ns_report.get("derived_user_concept_id")
+    if isinstance(user_concept_id, str):
+        user_concept_id = user_concept_id.strip() or None
+    else:
+        user_concept_id = None
+
+    organisation_concept_id = ns_report.get("organisation_concept_id")
+    if not isinstance(organisation_concept_id, str) or not organisation_concept_id.strip():
+        organisation_concept_id = ns_report.get("derived_organisation_concept_id")
+    if isinstance(organisation_concept_id, str):
+        organisation_concept_id = organisation_concept_id.strip() or None
+    else:
+        organisation_concept_id = None
+
+    return user_concept_id, organisation_concept_id
+
+
+def _build_rag_file_copy_visibility_query(
+    *,
+    ns_report: Mapping[str, Any],
+    extra_filters: Sequence[Mapping[str, Any]] | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    user_concept_id, organisation_concept_id = _resolve_rag_actor_scope_ids(ns_report)
+    visibility_filters: list[dict[str, Any]] = []
+
+    if user_concept_id:
+        visibility_filters.append(
+            {"relationships.specific_to_user": {"$in": [user_concept_id]}}
+        )
+        visibility_filters.append(
+            {"relationships.#V#specific_to_user": {"$in": [user_concept_id]}}
+        )
+    if organisation_concept_id:
+        visibility_filters.append(
+            {"relationships.specific_to_org": {"$in": [organisation_concept_id]}}
+        )
+
+    if not visibility_filters:
+        return None, "namespace_user_required"
+
+    and_filters: list[dict[str, Any]] = [
+        {"attributes.blob_key": {"$exists": True, "$nin": [None, ""]}},
+        {"$or": visibility_filters},
+    ]
+    if extra_filters:
+        for row in extra_filters:
+            if isinstance(row, Mapping):
+                and_filters.append(dict(row))
+
+    return {"$and": and_filters}, None
+
+
+def _coerce_int_or_none(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _build_rag_file_copy_item(
+    *,
+    collection: str,
+    doc: Mapping[str, Any],
+    namespace: str,
+    namespace_source: Any,
+) -> dict[str, Any]:
+    attributes = doc.get("attributes")
+    attrs = attributes if isinstance(attributes, Mapping) else {}
+    relationships = doc.get("relationships")
+    rels = relationships if isinstance(relationships, Mapping) else {}
+
+    instance_types_raw = rels.get("is_an_instance_of")
+    if isinstance(instance_types_raw, list):
+        instance_types = [str(v) for v in instance_types_raw if isinstance(v, str)]
+    elif isinstance(instance_types_raw, str):
+        instance_types = [instance_types_raw]
+    else:
+        instance_types = []
+
+    concept_id_raw = doc.get("concept_id")
+    concept_id = (
+        concept_id_raw
+        if isinstance(concept_id_raw, str) and concept_id_raw.strip()
+        else str(doc.get("_id"))
+    )
+    concept_id = concept_id.strip()
+
+    original_filename = attrs.get("original_filename")
+    if not isinstance(original_filename, str) or not original_filename.strip():
+        fallback_name = doc.get("name")
+        original_filename = (
+            fallback_name.strip()
+            if isinstance(fallback_name, str) and fallback_name.strip()
+            else None
+        )
+    else:
+        original_filename = original_filename.strip()
+
+    size_bytes = _coerce_int_or_none(attrs.get("size_bytes"))
+    content_type = attrs.get("content_type")
+    content_type = (
+        content_type.strip()
+        if isinstance(content_type, str) and content_type.strip()
+        else None
+    )
+
+    preview_parts: list[str] = []
+    if original_filename:
+        preview_parts.append(original_filename)
+    if isinstance(size_bytes, int):
+        preview_parts.append(f"{size_bytes} bytes")
+    if content_type:
+        preview_parts.append(content_type)
+    preview = " | ".join(preview_parts)
+
+    return {
+        "collection": collection,
+        "session_id": concept_id,
+        "concept_id": concept_id,
+        "name": original_filename,
+        "content_type": content_type,
+        "size_bytes": size_bytes,
+        "blob": {
+            "backend": attrs.get("blob_backend"),
+            "key": attrs.get("blob_key"),
+            "uri": attrs.get("blob_uri"),
+        },
+        "instance_types": instance_types,
+        "updated_at": doc.get("updated_at"),
+        "created_at": doc.get("created_at"),
+        "namespace": namespace,
+        "preview": preview[:4000],
+        "preview_length": len(preview),
+        "item_kind": "file_copy_concept",
+        "source_system": "mongo.concepts",
+        "namespace_source": namespace_source,
+    }
+
+
 def _rag_list_indexed(**kwargs):
     from ...db.connection_manager import get_db
 
@@ -9146,6 +9323,72 @@ def _rag_list_indexed(**kwargs):
             payload=payload,
             item_kind="rag_chat_session_list",
             source_system="mongo.chat_history",
+        )
+
+    if collection == "file_copy_concepts":
+        coll = db["concepts"]
+        file_copy_query, query_error = _build_rag_file_copy_visibility_query(
+            ns_report=ns_report
+        )
+        if file_copy_query is None:
+            return {
+                "error": str(query_error or "namespace_user_required"),
+                "message": (
+                    "File-copy retrieval requires namespace-derived user or organisation context."
+                ),
+                "collection": collection,
+                **collection_report,
+                "effective_namespace": ns,
+                "effective_namespace_source": ns_report.get("namespace_source"),
+                **ns_report,
+                "success": False,
+            }
+        assert file_copy_query is not None
+
+        cursor = (
+            coll.find(
+                file_copy_query,
+                {
+                    "concept_id": 1,
+                    "name": 1,
+                    "attributes": 1,
+                    "relationships.is_an_instance_of": 1,
+                    "created_at": 1,
+                    "updated_at": 1,
+                },
+            )
+            .skip(offset)
+            .limit(limit)
+        )
+        items: list[dict[str, Any]] = []
+        for doc in cursor:
+            if not isinstance(doc, dict):
+                continue
+            items.append(
+                _build_rag_file_copy_item(
+                    collection=collection,
+                    doc=doc,
+                    namespace=ns,
+                    namespace_source=ns_report.get("namespace_source"),
+                )
+            )
+
+        payload = {
+            "collection": collection,
+            **collection_report,
+            "items": items,
+            "total": coll.count_documents(file_copy_query),
+            "limit": limit,
+            "offset": offset,
+            "effective_namespace": ns,
+            "effective_namespace_source": ns_report.get("namespace_source"),
+            **ns_report,
+            "success": True,
+        }
+        return _with_rag_provenance(
+            payload=payload,
+            item_kind="rag_file_copy_list",
+            source_system="mongo.concepts",
         )
 
     if collection == "turn_execution_records":
@@ -9600,6 +9843,67 @@ def _rag_get_item(**kwargs):
             payload=payload,
             item_kind="rag_chat_session_item",
             source_system="mongo.chat_history",
+        )
+
+    if collection == "file_copy_concepts":
+        coll = db["concepts"]
+        file_copy_query, query_error = _build_rag_file_copy_visibility_query(
+            ns_report=ns_report,
+            extra_filters=[{"concept_id": str(session_id).strip()}],
+        )
+        if file_copy_query is None:
+            return {
+                "error": str(query_error or "namespace_user_required"),
+                "message": (
+                    "File-copy retrieval requires namespace-derived user or organisation context."
+                ),
+                "collection": collection,
+                **collection_report,
+                "effective_namespace": ns,
+                "effective_namespace_source": ns_report.get("namespace_source"),
+                **ns_report,
+                "success": False,
+            }
+        assert file_copy_query is not None
+
+        doc = coll.find_one(
+            file_copy_query,
+            {
+                "concept_id": 1,
+                "name": 1,
+                "attributes": 1,
+                "relationships.is_an_instance_of": 1,
+                "created_at": 1,
+                "updated_at": 1,
+            },
+        )
+        if not isinstance(doc, dict):
+            return make_error_response(
+                "not_found",
+                f"File-copy concept {session_id} not found",
+                details={"session_id": session_id, "namespace": ns},
+                suggestions=["Check the concept_id and namespace"],
+            )
+
+        item = _build_rag_file_copy_item(
+            collection=collection,
+            doc=doc,
+            namespace=ns,
+            namespace_source=ns_report.get("namespace_source"),
+        )
+        payload = {
+            "collection": collection,
+            **collection_report,
+            **item,
+            "effective_namespace": ns,
+            "effective_namespace_source": ns_report.get("namespace_source"),
+            **ns_report,
+            "success": True,
+        }
+        return _with_rag_provenance(
+            payload=payload,
+            item_kind="rag_file_copy_item",
+            source_system="mongo.concepts",
         )
 
     if collection == "turn_execution_records":
@@ -14972,7 +15276,8 @@ def build_default_catalogue() -> MethodCatalogue:
             category="read",
             description=(
                 "List available RAG collections/sources for the current user/namespace. "
-                "Use when user asks 'what is in my RAG store?' or needs to disambiguate KA sessions vs chat sessions vs vector chunks."
+                "Use when user asks 'what is in my RAG store?' or needs to disambiguate KA sessions, "
+                "chat sessions, blob-store file copies, and vector chunks."
             ),
         ),
         MethodDefinition(
@@ -14987,11 +15292,11 @@ def build_default_catalogue() -> MethodCatalogue:
                     "namespace": (str, type(None)),
                 },
                 allow_unknown=True,
-                description="List indexed sessions with optional namespace filter",
+                description="List namespace-scoped RAG collections (sessions, text relations, file copies)",
             ),
             output_schema=None,
             category="read",
-            description="List all RAG-indexed interaction sessions (KA sessions) for the current user. Returns total count and session metadata. Use this to answer 'how many KA sessions are indexed'. Namespace filtered automatically.",
+            description="List namespace-scoped RAG items for the selected collection (KA sessions, chat sessions, file-copy concepts, turn execution records, text relations).",
         ),
         MethodDefinition(
             name="rag_get_item",
@@ -15003,11 +15308,11 @@ def build_default_catalogue() -> MethodCatalogue:
                     "collection": (str, type(None)),
                 },
                 allow_unknown=True,
-                description="Fetch one indexed session with optional namespace filter",
+                description="Fetch one namespace-scoped RAG item with optional collection selector",
             ),
             output_schema=None,
             category="read",
-            description="Get one indexed item (session) with a safe text preview. Respects namespace isolation.",
+            description="Get one namespace-scoped RAG item (session/relation/file copy/turn record) with a safe preview. Respects namespace isolation.",
         ),
         MethodDefinition(
             name="turn_execution_list",
