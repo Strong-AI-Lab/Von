@@ -582,6 +582,20 @@ async def list_tools() -> List[types.Tool]:
             },
         ),
         types.Tool(
+            name="jira_get_watchers",
+            description="List watcher identities for a Jira issue.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_key": {
+                        "type": "string",
+                        "description": "Issue key, e.g. JVNAUTOSCI-371",
+                    }
+                },
+                "required": ["issue_key"],
+            },
+        ),
+        types.Tool(
             name="jira_get_transitions",
             description="List available workflow transitions for a Jira issue.",
             inputSchema={
@@ -777,6 +791,12 @@ async def call_tool(
         if isinstance(fields, list) and fields:
             issue_params = {"fields": ",".join(str(f) for f in fields)}
         result = jira_get(f"issue/{issue_key}", params=issue_params)
+        text = json.dumps(result, indent=2)
+        return [types.TextContent(type="text", text=text)]
+
+    elif name == "jira_get_watchers":
+        issue_key = arguments["issue_key"]
+        result = jira_get(f"issue/{issue_key}/watchers")
         text = json.dumps(result, indent=2)
         return [types.TextContent(type="text", text=text)]
 

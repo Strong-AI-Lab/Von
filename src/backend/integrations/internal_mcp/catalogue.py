@@ -12868,17 +12868,29 @@ def _normalise_jira_labels(raw_labels: Any) -> list[str]:
 def _task_import_jira_issues(**kwargs):
     """Import Jira issues into Von tasks with dry-run and idempotent reruns."""
     from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
-    from ...services.jira_task_import_service import import_jira_issues_to_tasks
+    from ...services.jira_task_import_service import (
+        import_jira_issues_to_tasks,
+        list_imported_jira_issue_keys,
+    )
 
     issue_keys = _normalise_issue_keys_input(kwargs.get("issue_keys"))
     jql = kwargs.get("jql")
-    if not issue_keys and (not isinstance(jql, str) or not jql.strip()):
+    backfill_existing_imports = _coerce_bool_input(
+        kwargs.get("backfill_existing_imports"),
+        default=False,
+    )
+    if (
+        not issue_keys
+        and (not isinstance(jql, str) or not jql.strip())
+        and not backfill_existing_imports
+    ):
         return make_error_response(
             "MISSING_PARAM",
-            "Provide either issue_keys (list) or jql (string).",
+            "Provide issue_keys, jql, or set backfill_existing_imports=true.",
             suggestions=[
                 "Pass issue_keys=['JVNAUTOSCI-123', ...] for explicit import",
                 "Or pass a JQL query via jql",
+                "Or set backfill_existing_imports=true to reprocess already-imported Jira tasks",
             ],
         )
 
@@ -12896,15 +12908,70 @@ def _task_import_jira_issues(**kwargs):
         kwargs.get("source_migrated_label"),
         default="migrated",
     )
+    include_watchers = _coerce_bool_input(kwargs.get("include_watchers"), default=True)
+    auto_map_namespace_to_jira_user = _coerce_bool_input(
+        kwargs.get("auto_map_namespace_to_jira_user"),
+        default=True,
+    )
+    auto_resolve_participants = _coerce_bool_input(
+        kwargs.get("auto_resolve_participants"),
+        default=True,
+    )
+    create_missing_participant_concepts = _coerce_bool_input(
+        kwargs.get("create_missing_participant_concepts"),
+        default=True,
+    )
+    try:
+        backfill_limit = int(kwargs.get("backfill_limit", 2000))
+    except (TypeError, ValueError):
+        backfill_limit = 2000
+    backfill_limit = max(1, min(backfill_limit, 2000))
 
     assignee_map_raw = kwargs.get("assignee_account_id_to_concept_id")
     assignee_map = assignee_map_raw if isinstance(assignee_map_raw, dict) else {}
+    jira_map_raw = kwargs.get("jira_account_id_to_concept_id")
+    jira_map = jira_map_raw if isinstance(jira_map_raw, dict) else {}
+    participant_map: dict[str, str] = {}
+    participant_map.update(assignee_map)
+    participant_map.update(jira_map)
 
     async def _fetch_jira_issues() -> dict[str, Any]:
         proxy = await get_jira_proxy()
         discovered_keys = list(issue_keys)
         fetch_errors: list[dict[str, str]] = []
         search_count = 0
+        backfill_discovered_count = 0
+        namespace_account_id: str | None = None
+
+        if backfill_existing_imports:
+            backfill_keys = list_imported_jira_issue_keys(
+                organisation_concept_id=kwargs.get("organisation_concept_id"),
+                limit=backfill_limit,
+            )
+            for issue_key in backfill_keys:
+                if issue_key not in discovered_keys:
+                    discovered_keys.append(issue_key)
+                    backfill_discovered_count += 1
+
+        namespace_value = kwargs.get("namespace")
+        if (
+            auto_map_namespace_to_jira_user
+            and isinstance(namespace_value, str)
+            and namespace_value.strip()
+            and hasattr(proxy, "get_myself")
+        ):
+            try:
+                myself_payload = await proxy.get_myself()
+                account_id_value = (
+                    myself_payload.get("accountId")
+                    if isinstance(myself_payload, Mapping)
+                    else None
+                )
+                if isinstance(account_id_value, str) and account_id_value.strip():
+                    namespace_account_id = account_id_value.strip()
+            except Exception:
+                # Best-effort identity mapping should not block import.
+                namespace_account_id = None
 
         if isinstance(jql, str) and jql.strip():
             search_result = await proxy.search(
@@ -12958,12 +13025,28 @@ def _task_import_jira_issues(**kwargs):
                     }
                 )
                 continue
+
+            if include_watchers and hasattr(proxy, "get_watchers"):
+                try:
+                    watchers_payload = await proxy.get_watchers(issue_key=resolved_key.strip())
+                    if isinstance(watchers_payload, Mapping):
+                        issue_doc = dict(issue_doc)
+                        issue_doc["watchers"] = watchers_payload
+                except Exception as exc:
+                    fetch_errors.append(
+                        {
+                            "issue_key": resolved_key.strip(),
+                            "error": f"jira_get_watchers_failed:{type(exc).__name__}:{exc}",
+                        }
+                    )
             issue_docs.append(issue_doc)
 
         return {
             "issues": issue_docs,
             "requested_issue_keys": discovered_keys,
             "search_result_count": search_count,
+            "backfill_discovered_count": backfill_discovered_count,
+            "namespace_account_id": namespace_account_id,
             "fetch_errors": fetch_errors,
         }
 
@@ -12982,16 +13065,33 @@ def _task_import_jira_issues(**kwargs):
     issue_docs = fetch_payload.get("issues") if isinstance(fetch_payload, dict) else None
     if not isinstance(issue_docs, list):
         issue_docs = []
+    namespace_value = kwargs.get("namespace")
+    namespace_account_id = (
+        fetch_payload.get("namespace_account_id")
+        if isinstance(fetch_payload, Mapping)
+        else None
+    )
+    if (
+        isinstance(namespace_account_id, str)
+        and namespace_account_id.strip()
+        and isinstance(namespace_value, str)
+        and namespace_value.strip()
+    ):
+        participant_map.setdefault(namespace_account_id.strip(), namespace_value.strip())
+
     report = import_jira_issues_to_tasks(
         issues=[item for item in issue_docs if isinstance(item, dict)],
         dry_run=dry_run,
-        actor_concept_id=kwargs.get("namespace"),
+        actor_concept_id=namespace_value,
         organisation_concept_id=kwargs.get("organisation_concept_id"),
         assignee_account_id_to_concept_id=assignee_map,
+        jira_account_id_to_concept_id=participant_map,
         update_existing=_coerce_bool_input(
             kwargs.get("update_existing"),
             default=True,
         ),
+        auto_resolve_participants=auto_resolve_participants,
+        create_missing_participant_concepts=create_missing_participant_concepts,
     )
     if not isinstance(report, dict):
         return make_error_response("UNEXPECTED_ERROR", "Importer returned invalid payload")
@@ -13233,6 +13333,17 @@ def _task_import_jira_issues(**kwargs):
             fetch_payload.get("fetch_errors", [])
             if isinstance(fetch_payload, dict)
             else []
+        ),
+        "backfill_existing_imports": bool(backfill_existing_imports),
+        "backfill_discovered_issue_count": (
+            int(fetch_payload.get("backfill_discovered_count", 0))
+            if isinstance(fetch_payload, dict)
+            else 0
+        ),
+        "namespace_account_id": (
+            fetch_payload.get("namespace_account_id")
+            if isinstance(fetch_payload, dict)
+            else None
         ),
     }
     return report
@@ -16024,15 +16135,23 @@ def build_default_catalogue() -> MethodCatalogue:
                     "max_results": (int, type(None)),
                     "dry_run": (bool, type(None)),
                     "update_existing": (bool, type(None)),
+                    "backfill_existing_imports": (bool, type(None)),
+                    "backfill_limit": (int, type(None)),
                     "sync_source_labels": (bool, type(None)),
                     "source_migrated_label": (str, type(None)),
+                    "include_watchers": (bool, type(None)),
+                    "auto_map_namespace_to_jira_user": (bool, type(None)),
+                    "auto_resolve_participants": (bool, type(None)),
+                    "create_missing_participant_concepts": (bool, type(None)),
                     "assignee_account_id_to_concept_id": (dict, type(None)),
+                    "jira_account_id_to_concept_id": (dict, type(None)),
                     "organisation_concept_id": (str, type(None)),
                     "namespace": (str, type(None)),
                 },
                 allow_unknown=True,
                 description=(
                     "Import Jira issues into Von tasks using issue_keys and/or jql. "
+                    "Set backfill_existing_imports=true to reprocess previously imported Jira-linked tasks. "
                     "Dry-run is enabled by default for preview-safe execution. "
                     "When dry_run=false, source Jira labels are synchronised with "
                     "'migrated' by default (configurable)."
@@ -16043,7 +16162,8 @@ def build_default_catalogue() -> MethodCatalogue:
             description=(
                 "Migrate Jira issues to Von tasks with idempotent reruns keyed by Jira issue key. "
                 "Produces a mapping report listing mapped/dropped fields, relation outcomes, "
-                "source-label sync outcomes, and pilot validation recommendations."
+                "participant concept preservation outcomes, source-label sync outcomes, "
+                "and pilot validation recommendations."
             ),
         ),
         MethodDefinition(
@@ -16061,9 +16181,10 @@ def build_default_catalogue() -> MethodCatalogue:
                 allow_unknown=True,
                 description=(
                     "Update multiple task fields in one operation. "
-                    "Supported fields: status, assignee_concept_id, title, description, "
-                    "priority, start_date, due_date, labels, components, fix_versions, "
-                    "sprint_values, backlog_rank, parent_task_concept_id, epic_task_concept_id."
+                    "Supported fields: status, assignee_concept_id, created_by_concept_id, "
+                    "title, description, priority, start_date, due_date, labels, components, "
+                    "fix_versions, sprint_values, backlog_rank, reporter_concept_id, "
+                    "watcher_concept_ids, parent_task_concept_id, epic_task_concept_id."
                 ),
             ),
             output_schema=task_update_fields_output_schema,

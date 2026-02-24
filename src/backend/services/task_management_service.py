@@ -86,6 +86,8 @@ TASK_METADATA_KEY_COMPONENTS = "components"
 TASK_METADATA_KEY_FIX_VERSIONS = "fix_versions"
 TASK_METADATA_KEY_SPRINT_VALUES = "sprint_values"
 TASK_METADATA_KEY_BACKLOG_RANK = "backlog_rank"
+TASK_METADATA_KEY_JIRA_REPORTER_CONCEPT_ID = "jira_reporter_concept_id"
+TASK_METADATA_KEY_JIRA_WATCHER_CONCEPT_IDS = "jira_watcher_concept_ids"
 TASK_METADATA_KEY_COMMENTS = "comments"
 TASK_METADATA_KEY_ATTACHMENTS = "attachments"
 TASK_METADATA_KEY_WORKLOG = "worklog"
@@ -991,6 +993,18 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(backlog_rank_raw, str) and backlog_rank_raw.strip()
         else None
     )
+    reporter_raw = metadata.get(TASK_METADATA_KEY_JIRA_REPORTER_CONCEPT_ID)
+    reporter_concept_id = (
+        _normalise_optional_concept_id(reporter_raw) if reporter_raw is not None else None
+    )
+    watcher_concept_ids_raw = metadata.get(TASK_METADATA_KEY_JIRA_WATCHER_CONCEPT_IDS)
+    watcher_concept_ids: list[str] = []
+    if isinstance(watcher_concept_ids_raw, list):
+        for item in watcher_concept_ids_raw:
+            normalised = _normalise_optional_concept_id(item)
+            if normalised and normalised not in watcher_concept_ids:
+                watcher_concept_ids.append(normalised)
+
     comments = _list_metadata_items(doc, TASK_METADATA_KEY_COMMENTS)
     attachments = _list_metadata_items(doc, TASK_METADATA_KEY_ATTACHMENTS)
     worklog = _list_metadata_items(doc, TASK_METADATA_KEY_WORKLOG)
@@ -1061,6 +1075,8 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
         "fix_versions": fix_versions,
         "sprint_values": sprint_values,
         "backlog_rank": backlog_rank,
+        "reporter_concept_id": reporter_concept_id,
+        "watcher_concept_ids": watcher_concept_ids,
         "parent_task_concept_id": parent_task_id,
         "epic_task_concept_id": epic_task_id,
         "subtask_concept_ids": subtask_ids,
@@ -2495,6 +2511,71 @@ def update_task_fields(
             assign_task(task_concept_id, str(raw_assignee))
             changed_fields.append("assignee_concept_id")
 
+    created_by_field_present = (
+        "created_by_concept_id" in fields or "creator_concept_id" in fields
+    )
+    if created_by_field_present:
+        raw_created_by = fields.get("created_by_concept_id", fields.get("creator_concept_id"))
+        existing_created_by_raw = (
+            (task_doc.get("relationships") or {}).get(PREDICATE_HAS_CREATED_BY, [])
+        )
+        if isinstance(existing_created_by_raw, str):
+            existing_created_by = [existing_created_by_raw]
+        elif isinstance(existing_created_by_raw, list):
+            existing_created_by = [
+                candidate
+                for candidate in existing_created_by_raw
+                if isinstance(candidate, str) and candidate.strip()
+            ]
+        else:
+            existing_created_by = []
+
+        if raw_created_by is None or (
+            isinstance(raw_created_by, str) and not raw_created_by.strip()
+        ):
+            for existing_creator in existing_created_by:
+                ConceptsRepository.mutate_relationship_edge(
+                    source_id=task_concept_id,
+                    kind=PREDICATE_HAS_CREATED_BY,
+                    target_id=existing_creator,
+                    action="remove",
+                    maintain_inverse=False,
+                )
+        else:
+            created_by_concept_id = _normalise_optional_concept_id(raw_created_by)
+            if not created_by_concept_id:
+                raise InvalidTaskDataError(
+                    f"Invalid created_by_concept_id: {raw_created_by}"
+                )
+            if not ConceptsRepository.find_one(
+                {"concept_id": created_by_concept_id},
+                projection={"_id": 1},
+            ):
+                raise InvalidTaskDataError(
+                    f"created_by_concept_id not found: {created_by_concept_id}"
+                )
+
+            for existing_creator in existing_created_by:
+                if existing_creator == created_by_concept_id:
+                    continue
+                ConceptsRepository.mutate_relationship_edge(
+                    source_id=task_concept_id,
+                    kind=PREDICATE_HAS_CREATED_BY,
+                    target_id=existing_creator,
+                    action="remove",
+                    maintain_inverse=False,
+                )
+
+            if created_by_concept_id not in existing_created_by:
+                ConceptsRepository.mutate_relationship_edge(
+                    source_id=task_concept_id,
+                    kind=PREDICATE_HAS_CREATED_BY,
+                    target_id=created_by_concept_id,
+                    action="add",
+                    maintain_inverse=False,
+                )
+        changed_fields.append("created_by_concept_id")
+
     if "title" in fields:
         title_value = fields.get("title")
         if not isinstance(title_value, str) or not title_value.strip():
@@ -2636,6 +2717,70 @@ def update_task_fields(
         )
         changed_fields.append("backlog_rank")
 
+    if "reporter_concept_id" in fields:
+        raw_reporter = fields.get("reporter_concept_id")
+        if raw_reporter is None or (
+            isinstance(raw_reporter, str) and not raw_reporter.strip()
+        ):
+            reporter_concept_id = None
+        else:
+            reporter_concept_id = _normalise_optional_concept_id(raw_reporter)
+            if not reporter_concept_id:
+                raise InvalidTaskDataError(
+                    f"Invalid reporter_concept_id: {raw_reporter}"
+                )
+            if not ConceptsRepository.find_one(
+                {"concept_id": reporter_concept_id},
+                projection={"_id": 1},
+            ):
+                raise InvalidTaskDataError(
+                    f"reporter_concept_id not found: {reporter_concept_id}"
+                )
+        _set_task_metadata_value(
+            task_concept_id=task_concept_id,
+            metadata_key=TASK_METADATA_KEY_JIRA_REPORTER_CONCEPT_ID,
+            value=reporter_concept_id,
+        )
+        changed_fields.append("reporter_concept_id")
+
+    watcher_field_present = (
+        "watcher_concept_ids" in fields or "watchers_concept_ids" in fields
+    )
+    if watcher_field_present:
+        raw_watchers = fields.get(
+            "watcher_concept_ids",
+            fields.get("watchers_concept_ids"),
+        )
+        watcher_concept_ids: list[str] = []
+        if raw_watchers is None:
+            watcher_concept_ids = []
+        elif isinstance(raw_watchers, list):
+            for raw_watcher in raw_watchers:
+                watcher_concept_id = _normalise_optional_concept_id(raw_watcher)
+                if not watcher_concept_id:
+                    raise InvalidTaskDataError(
+                        "watcher_concept_ids must contain valid concept IDs"
+                    )
+                if not ConceptsRepository.find_one(
+                    {"concept_id": watcher_concept_id},
+                    projection={"_id": 1},
+                ):
+                    raise InvalidTaskDataError(
+                        f"watcher_concept_id not found: {watcher_concept_id}"
+                    )
+                if watcher_concept_id not in watcher_concept_ids:
+                    watcher_concept_ids.append(watcher_concept_id)
+        else:
+            raise InvalidTaskDataError(
+                "watcher_concept_ids must be a list (or null to clear)"
+            )
+        _replace_task_metadata_list(
+            task_concept_id=task_concept_id,
+            metadata_key=TASK_METADATA_KEY_JIRA_WATCHER_CONCEPT_IDS,
+            entries=watcher_concept_ids,
+        )
+        changed_fields.append("watcher_concept_ids")
+
     if "parent_task_concept_id" in fields:
         parent_raw = fields.get("parent_task_concept_id")
         if parent_raw is None or (isinstance(parent_raw, str) and not parent_raw.strip()):
@@ -2668,6 +2813,8 @@ def update_task_fields(
             "status",
             "assignee_concept_id",
             "assignee_id",
+            "created_by_concept_id",
+            "creator_concept_id",
             "title",
             "description",
             "priority",
@@ -2678,6 +2825,9 @@ def update_task_fields(
             "fix_versions",
             "sprint_values",
             "backlog_rank",
+            "reporter_concept_id",
+            "watcher_concept_ids",
+            "watchers_concept_ids",
             "parent_task_concept_id",
             "epic_task_concept_id",
         }

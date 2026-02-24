@@ -10,14 +10,26 @@ designed for:
 
 from __future__ import annotations
 
+import re
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Mapping, Sequence
 
+from ..db.repositories.concepts_repository import ConceptsRepository
+from ..db.repositories.text_value_repository import (
+    TextRelationsRepository,
+    TextValuesRepository,
+)
+from ..utils.concept_id_utils import canonicalise_vontology_concept_id, ensure_v_concept_prefix
+from .concept_resolution_service import resolve_concept_by_name
+from .concept_service import create_concept, get_concept_by_concept_id
+from .text_value_service import upsert_text_for_concept
 from .task_management_service import (
     InvalidTaskDataError,
     create_task,
     find_task_by_external_reference,
     link_tasks,
+    search_tasks,
     set_task_epic,
     set_task_parent,
     update_task_fields,
@@ -28,6 +40,9 @@ from .task_management_service import (
 _JIRA_SOURCE_SYSTEM = "jira"
 _DEFAULT_PRIORITY = "medium"
 _DEFAULT_STATUS = "pending"
+_JIRA_EMAIL_PREDICATE = "#V#has_email"
+_JIRA_PARTICIPANT_REPORTER_METADATA_KEY = "jira_reporter_concept_id"
+_JIRA_PARTICIPANT_WATCHERS_METADATA_KEY = "jira_watcher_concept_ids"
 
 _JIRA_STATUS_TO_VON_STATUS = {
     "to do": "pending",
@@ -397,6 +412,392 @@ def _extract_issue_fields(issue: Mapping[str, Any]) -> Mapping[str, Any]:
     return {}
 
 
+def _normalise_jira_account_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _normalise_email(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip().lower()
+    return cleaned or None
+
+
+def _extract_jira_participant(raw_value: Any) -> Mapping[str, Any] | None:
+    if not isinstance(raw_value, Mapping):
+        return None
+    account_id = _normalise_jira_account_id(
+        raw_value.get("accountId") or raw_value.get("account_id")
+    )
+    email = _normalise_email(raw_value.get("emailAddress") or raw_value.get("email_address"))
+    display_name_raw = (
+        raw_value.get("displayName")
+        or raw_value.get("display_name")
+        or raw_value.get("name")
+    )
+    display_name = (
+        str(display_name_raw).strip()
+        if isinstance(display_name_raw, str) and str(display_name_raw).strip()
+        else None
+    )
+    if not account_id and not email and not display_name:
+        return None
+    return {
+        "account_id": account_id,
+        "email_address": email,
+        "display_name": display_name,
+        "active": (
+            bool(raw_value.get("active")) if isinstance(raw_value.get("active"), bool) else None
+        ),
+    }
+
+
+def _extract_jira_watcher_participants(
+    issue: Mapping[str, Any],
+    fields: Mapping[str, Any],
+) -> tuple[list[Mapping[str, Any]], int | None]:
+    containers: list[Any] = [
+        issue.get("watchers"),
+        issue.get("watcher"),
+        fields.get("watchers"),
+        fields.get("watcher"),
+        fields.get("watches"),
+    ]
+
+    watch_count: int | None = None
+    watchers: list[Mapping[str, Any]] = []
+    for container in containers:
+        if isinstance(container, Mapping):
+            raw_count = container.get("watchCount")
+            if isinstance(raw_count, int) and raw_count >= 0:
+                watch_count = raw_count
+
+            if isinstance(container.get("watchers"), list):
+                watchers.extend(
+                    item for item in container.get("watchers", []) if isinstance(item, Mapping)
+                )
+            if isinstance(container.get("items"), list):
+                watchers.extend(
+                    item for item in container.get("items", []) if isinstance(item, Mapping)
+                )
+            if (
+                isinstance(container.get("accountId"), str)
+                or isinstance(container.get("emailAddress"), str)
+                or isinstance(container.get("displayName"), str)
+            ):
+                watchers.append(container)
+        elif isinstance(container, list):
+            watchers.extend(item for item in container if isinstance(item, Mapping))
+
+    deduped: list[Mapping[str, Any]] = []
+    seen: set[str] = set()
+    for watcher in watchers:
+        participant = _extract_jira_participant(watcher)
+        if participant is None:
+            continue
+        account_id = participant.get("account_id")
+        email = participant.get("email_address")
+        display_name = participant.get("display_name")
+        dedupe_key = (
+            str(account_id).strip().lower()
+            if isinstance(account_id, str) and account_id.strip()
+            else (
+                str(email).strip().lower()
+                if isinstance(email, str) and email.strip()
+                else str(display_name).strip().lower()
+            )
+        )
+        if not dedupe_key or dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        deduped.append(participant)
+
+    return deduped, watch_count
+
+
+def _resolve_concept_id_by_text_relation(
+    *,
+    predicate: str,
+    text: str,
+) -> str | None:
+    if not isinstance(predicate, str) or not predicate.strip():
+        return None
+    if not isinstance(text, str) or not text.strip():
+        return None
+
+    escaped = re.escape(text.strip())
+    text_docs = list(
+        TextValuesRepository.find(
+            {"text": {"$regex": f"^{escaped}$", "$options": "i"}},
+            projection={"_id": 1},
+            limit=20,
+        )
+    )
+    if not text_docs:
+        return None
+
+    candidate_ids: set[str] = set()
+    predicate_values = [predicate]
+    if predicate.startswith("#V#"):
+        predicate_values.append(predicate.replace("#V#", "", 1))
+    else:
+        predicate_values.append(f"#V#{predicate}")
+
+    for text_doc in text_docs:
+        text_value_id = text_doc.get("_id")
+        if text_value_id is None:
+            continue
+        relation_rows = list(
+            TextRelationsRepository.find(
+                {
+                    "object_text_id": {"$in": [text_value_id, str(text_value_id)]},
+                    "predicate": {"$in": predicate_values},
+                },
+                projection={"subject_concept_id": 1},
+                limit=20,
+            )
+        )
+        for relation in relation_rows:
+            subject_concept_id = relation.get("subject_concept_id")
+            if not isinstance(subject_concept_id, str) or not subject_concept_id.strip():
+                continue
+            candidate_ids.add(subject_concept_id.strip())
+
+    if not candidate_ids:
+        return None
+
+    for candidate_id in sorted(candidate_ids):
+        if ConceptsRepository.find_one({"concept_id": candidate_id}, {"_id": 1}):
+            return candidate_id
+    return None
+
+
+def _resolve_existing_person_concept_id(
+    *,
+    account_id: str | None,
+    email_address: str | None,
+    display_name: str | None,
+) -> str | None:
+    if account_id:
+        try:
+            account_resolution = resolve_concept_by_name(
+                name=account_id,
+                instance_of="#V#person",
+                match_code_strings=False,
+                max_results=5,
+            )
+        except Exception:
+            account_resolution = {}
+        if (
+            isinstance(account_resolution, Mapping)
+            and account_resolution.get("status") == "resolved"
+        ):
+            resolved_id = account_resolution.get("resolved_concept_id")
+            if isinstance(resolved_id, str) and resolved_id.strip():
+                return resolved_id.strip()
+
+    if email_address:
+        resolved_by_email = _resolve_concept_id_by_text_relation(
+            predicate=_JIRA_EMAIL_PREDICATE,
+            text=email_address,
+        )
+        if resolved_by_email:
+            return resolved_by_email
+
+    if display_name:
+        try:
+            name_resolution = resolve_concept_by_name(
+                name=display_name,
+                instance_of="#V#person",
+                match_code_strings=False,
+                max_results=5,
+            )
+        except Exception:
+            name_resolution = {}
+        if isinstance(name_resolution, Mapping) and name_resolution.get("status") == "resolved":
+            resolved_id = name_resolution.get("resolved_concept_id")
+            if isinstance(resolved_id, str) and resolved_id.strip():
+                return resolved_id.strip()
+
+    return None
+
+
+def _build_jira_person_concept_id(
+    *,
+    account_id: str | None,
+    email_address: str | None,
+    display_name: str | None,
+) -> str:
+    seed = account_id or email_address or display_name or f"participant_{uuid.uuid4().hex[:8]}"
+    canonical = canonicalise_vontology_concept_id(f"jira_person_{seed}")
+    if canonical:
+        return canonical
+    return f"#V#jira_person_{uuid.uuid4().hex[:8]}"
+
+
+def _upsert_jira_participant_aliases(
+    *,
+    concept_id: str,
+    account_id: str | None,
+    email_address: str | None,
+) -> None:
+    if account_id:
+        upsert_text_for_concept(
+            subject_concept_id=concept_id,
+            predicate="hasName",
+            text=account_id,
+            lang="en-NZ",
+            context={"name_type": "CODE", "source": "jira_account_id"},
+        )
+    if email_address:
+        upsert_text_for_concept(
+            subject_concept_id=concept_id,
+            predicate=_JIRA_EMAIL_PREDICATE,
+            text=email_address,
+            lang="en-NZ",
+            context={"source": "jira_account_profile"},
+        )
+
+
+def _ensure_jira_participant_concept(
+    *,
+    raw_participant: Mapping[str, Any] | None,
+    account_id_to_concept_id: Mapping[str, str],
+    account_cache: Dict[str, str],
+    email_cache: Dict[str, str],
+    actor_concept_id: str | None,
+    organisation_concept_id: str | None,
+    allow_lookup: bool,
+    allow_create: bool,
+) -> Dict[str, Any]:
+    participant = _extract_jira_participant(raw_participant)
+    if participant is None:
+        return {"concept_id": None, "resolution": "no_participant_payload"}
+
+    account_id = participant.get("account_id")
+    email_address = participant.get("email_address")
+    display_name = participant.get("display_name")
+
+    mapped_concept_id: str | None = None
+    resolution = "unresolved"
+
+    if isinstance(account_id, str) and account_id:
+        explicit_mapped = account_id_to_concept_id.get(account_id)
+        if explicit_mapped:
+            mapped_concept_id = explicit_mapped
+            resolution = "mapped_from_account_map"
+
+    if mapped_concept_id is None and isinstance(account_id, str) and account_id:
+        cached = account_cache.get(account_id)
+        if cached:
+            mapped_concept_id = cached
+            resolution = "mapped_from_account_cache"
+
+    if mapped_concept_id is None and isinstance(email_address, str) and email_address:
+        cached_email = email_cache.get(email_address)
+        if cached_email:
+            mapped_concept_id = cached_email
+            resolution = "mapped_from_email_cache"
+
+    if mapped_concept_id is None and allow_lookup:
+        resolved = _resolve_existing_person_concept_id(
+            account_id=account_id if isinstance(account_id, str) else None,
+            email_address=email_address if isinstance(email_address, str) else None,
+            display_name=display_name if isinstance(display_name, str) else None,
+        )
+        if isinstance(resolved, str) and resolved.strip():
+            mapped_concept_id = resolved.strip()
+            resolution = "mapped_from_existing_concept"
+
+    created_concept = False
+    if mapped_concept_id is None and allow_create:
+        concept_name = (
+            display_name
+            if isinstance(display_name, str) and display_name
+            else (
+                email_address
+                if isinstance(email_address, str) and email_address
+                else (
+                    f"Jira user {account_id}"
+                    if isinstance(account_id, str) and account_id
+                    else "Jira user"
+                )
+            )
+        )
+        candidate_concept_id = _build_jira_person_concept_id(
+            account_id=account_id if isinstance(account_id, str) else None,
+            email_address=email_address if isinstance(email_address, str) else None,
+            display_name=display_name if isinstance(display_name, str) else None,
+        )
+        try:
+            created = create_concept(
+                name=concept_name,
+                concept_id=candidate_concept_id,
+                parent_concept_ids=["#V#person"],
+                create_as_instance=True,
+                created_by_concept_id=actor_concept_id,
+                organisation_concept_id=organisation_concept_id,
+            )
+            created_concept_id = created.get("concept_id") if isinstance(created, Mapping) else None
+            if isinstance(created_concept_id, str) and created_concept_id.strip():
+                mapped_concept_id = created_concept_id.strip()
+            else:
+                mapped_concept_id = candidate_concept_id
+            created_concept = True
+            resolution = "created_new_concept"
+        except Exception:
+            existing = get_concept_by_concept_id(candidate_concept_id)
+            existing_concept_id = existing.get("concept_id") if isinstance(existing, Mapping) else None
+            if isinstance(existing_concept_id, str) and existing_concept_id.strip():
+                mapped_concept_id = existing_concept_id.strip()
+                resolution = "mapped_existing_candidate_concept"
+
+    if isinstance(mapped_concept_id, str) and mapped_concept_id:
+        mapped_concept_id = ensure_v_concept_prefix(mapped_concept_id) or mapped_concept_id
+        try:
+            _upsert_jira_participant_aliases(
+                concept_id=mapped_concept_id,
+                account_id=account_id if isinstance(account_id, str) else None,
+                email_address=(
+                    email_address if isinstance(email_address, str) and email_address else None
+                ),
+            )
+        except Exception:
+            # Alias persistence is best-effort; mapping should still proceed.
+            pass
+
+        if isinstance(account_id, str) and account_id:
+            account_cache[account_id] = mapped_concept_id
+        if isinstance(email_address, str) and email_address:
+            email_cache[email_address] = mapped_concept_id
+
+    return {
+        "concept_id": mapped_concept_id,
+        "resolution": resolution,
+        "created_concept": created_concept,
+        "participant": participant,
+    }
+
+
+def _participant_reference_payload(
+    *,
+    participant: Mapping[str, Any] | None,
+    concept_id: str | None,
+) -> Dict[str, Any] | None:
+    if not isinstance(participant, Mapping):
+        return None
+    payload = {
+        "account_id": participant.get("account_id"),
+        "display_name": participant.get("display_name"),
+        "email_address": participant.get("email_address"),
+        "concept_id": concept_id,
+    }
+    return payload
+
+
 def _issue_reference_payload(
     issue: Mapping[str, Any],
     *,
@@ -411,6 +812,14 @@ def _issue_reference_payload(
     epic_issue_key: str | None,
     link_summaries: list[Dict[str, str]],
     assignee: Mapping[str, Any] | None,
+    creator: Mapping[str, Any] | None,
+    reporter: Mapping[str, Any] | None,
+    watcher_participants: list[Mapping[str, Any]],
+    watcher_count: int | None,
+    assignee_concept_id: str | None,
+    creator_concept_id: str | None,
+    reporter_concept_id: str | None,
+    watcher_concept_ids: list[str],
 ) -> Dict[str, Any]:
     fields = _extract_issue_fields(issue)
     project = fields.get("project")
@@ -440,12 +849,49 @@ def _issue_reference_payload(
         "status_history": status_history,
         "imported_at": _iso_now(),
     }
-    if isinstance(assignee, Mapping):
-        payload["assignee"] = {
-            "account_id": assignee.get("accountId"),
-            "display_name": assignee.get("displayName"),
-            "email_address": assignee.get("emailAddress"),
-        }
+
+    assignee_payload = _participant_reference_payload(
+        participant=assignee,
+        concept_id=assignee_concept_id,
+    )
+    creator_payload = _participant_reference_payload(
+        participant=creator,
+        concept_id=creator_concept_id,
+    )
+    reporter_payload = _participant_reference_payload(
+        participant=reporter,
+        concept_id=reporter_concept_id,
+    )
+
+    watcher_payloads = [
+        _participant_reference_payload(
+            participant=watcher,
+            concept_id=watcher_concept_ids[idx] if idx < len(watcher_concept_ids) else None,
+        )
+        for idx, watcher in enumerate(watcher_participants)
+        if isinstance(watcher, Mapping)
+    ]
+    watcher_payloads = [item for item in watcher_payloads if isinstance(item, dict)]
+
+    payload["participants"] = {
+        "assignee": assignee_payload,
+        "creator": creator_payload,
+        "reporter": reporter_payload,
+        "watchers": watcher_payloads,
+        "watcher_count": watcher_count,
+    }
+    payload[_JIRA_PARTICIPANT_REPORTER_METADATA_KEY] = reporter_concept_id
+    payload[_JIRA_PARTICIPANT_WATCHERS_METADATA_KEY] = watcher_concept_ids
+
+    if assignee_payload:
+        payload["assignee"] = assignee_payload
+    if creator_payload:
+        payload["creator"] = creator_payload
+    if reporter_payload:
+        payload["reporter"] = reporter_payload
+    if watcher_payloads:
+        payload["watchers"] = watcher_payloads
+
     return payload
 
 
@@ -470,6 +916,46 @@ def _resolve_existing_task_id(
             task_id = raw_task_id.strip()
     cache[jira_issue_key] = task_id
     return task_id
+
+
+def list_imported_jira_issue_keys(
+    *,
+    organisation_concept_id: str | None = None,
+    limit: int = 2000,
+) -> list[str]:
+    """Return Jira issue keys already linked via task external_references."""
+
+    try:
+        bounded_limit = max(1, min(int(limit), 2000))
+    except (TypeError, ValueError):
+        bounded_limit = 2000
+
+    search_result = search_tasks(
+        organisation_concept_id=organisation_concept_id,
+        limit=bounded_limit,
+        offset=0,
+    )
+    raw_tasks = search_result.get("tasks")
+    tasks = raw_tasks if isinstance(raw_tasks, list) else []
+
+    keys: list[str] = []
+    seen: set[str] = set()
+    for task in tasks:
+        if not isinstance(task, Mapping):
+            continue
+        external_references = task.get("external_references")
+        if not isinstance(external_references, Mapping):
+            continue
+        jira_reference = external_references.get(_JIRA_SOURCE_SYSTEM)
+        if not isinstance(jira_reference, Mapping):
+            continue
+        raw_issue_key = jira_reference.get("external_id") or jira_reference.get("issue_key")
+        issue_key = _normalise_issue_key(raw_issue_key)
+        if not issue_key or issue_key in seen:
+            continue
+        seen.add(issue_key)
+        keys.append(issue_key)
+    return keys
 
 
 _PARITY_CLASS_MUST_FIX = "must_fix"
@@ -759,7 +1245,10 @@ def import_jira_issues_to_tasks(
     actor_concept_id: str | None = None,
     organisation_concept_id: str | None = None,
     assignee_account_id_to_concept_id: Mapping[str, str] | None = None,
+    jira_account_id_to_concept_id: Mapping[str, str] | None = None,
     update_existing: bool = True,
+    auto_resolve_participants: bool = True,
+    create_missing_participant_concepts: bool = True,
 ) -> Dict[str, Any]:
     """Import Jira issues into Von tasks.
 
@@ -769,19 +1258,33 @@ def import_jira_issues_to_tasks(
         actor_concept_id: Optional Von concept id of the importing actor.
         organisation_concept_id: Optional organisation scope for created tasks.
         assignee_account_id_to_concept_id: Optional map from Jira accountId to
-            Von concept ids for assignee linkage.
+            Von concept ids for assignee linkage (legacy alias for
+            jira_account_id_to_concept_id).
+        jira_account_id_to_concept_id: Optional map from Jira accountId to Von
+            person concept IDs used for assignee/creator/reporter/watchers.
         update_existing: When True, reruns update already-mapped tasks.
+        auto_resolve_participants: When True, attempt deterministic participant
+            concept resolution from Jira accountId/email/display name.
+        create_missing_participant_concepts: When True, create #V#person concepts
+            for unresolved Jira participants when dry_run is False.
     """
 
-    assignee_map = (
-        {
-            str(key).strip(): str(value).strip()
-            for key, value in assignee_account_id_to_concept_id.items()
-            if str(key).strip() and str(value).strip()
-        }
-        if isinstance(assignee_account_id_to_concept_id, Mapping)
-        else {}
-    )
+    participant_map: Dict[str, str] = {}
+    raw_maps = []
+    if isinstance(assignee_account_id_to_concept_id, Mapping):
+        raw_maps.append(assignee_account_id_to_concept_id)
+    if isinstance(jira_account_id_to_concept_id, Mapping):
+        raw_maps.append(jira_account_id_to_concept_id)
+    for raw_map in raw_maps:
+        for key, value in raw_map.items():
+            account_id = _normalise_jira_account_id(key)
+            concept_id = ensure_v_concept_prefix(value)
+            if not account_id or not concept_id:
+                continue
+            participant_map[account_id] = concept_id
+
+    participant_account_cache: Dict[str, str] = {}
+    participant_email_cache: Dict[str, str] = {}
 
     issue_results: list[Dict[str, Any]] = []
     existing_cache: dict[str, str | None] = {}
@@ -799,6 +1302,9 @@ def import_jira_issues_to_tasks(
         "dropped_fields": 0,
         "mapped_relations": 0,
         "dropped_relations": 0,
+        "participant_fields_mapped": 0,
+        "participant_fields_dropped": 0,
+        "participant_concepts_created": 0,
     }
 
     # Pass 1: create/update base task records and persist external references.
@@ -906,22 +1412,149 @@ def import_jira_issues_to_tasks(
         if start_date:
             mapped_fields.append("start_date")
 
-        assignee = fields.get("assignee")
-        assignee_concept_id = None
-        if isinstance(assignee, Mapping):
-            account_id = assignee.get("accountId")
-            if isinstance(account_id, str) and account_id.strip():
-                mapped = assignee_map.get(account_id.strip())
-                if mapped:
-                    assignee_concept_id = mapped
-                    mapped_fields.append("assignee")
-                else:
-                    dropped_fields.append(
-                        {
-                            "field": "assignee",
-                            "reason": "jira_assignee_mapping_missing",
-                        }
-                    )
+        assignee_raw = fields.get("assignee")
+        creator_raw = fields.get("creator")
+        reporter_raw = fields.get("reporter")
+        watcher_participants, watcher_count = _extract_jira_watcher_participants(
+            raw_issue,
+            fields,
+        )
+
+        assignee_resolution = _ensure_jira_participant_concept(
+            raw_participant=assignee_raw if isinstance(assignee_raw, Mapping) else None,
+            account_id_to_concept_id=participant_map,
+            account_cache=participant_account_cache,
+            email_cache=participant_email_cache,
+            actor_concept_id=actor_concept_id,
+            organisation_concept_id=organisation_concept_id,
+            allow_lookup=bool(auto_resolve_participants),
+            allow_create=(
+                bool(auto_resolve_participants)
+                and bool(create_missing_participant_concepts)
+                and not dry_run
+            ),
+        )
+        creator_resolution = _ensure_jira_participant_concept(
+            raw_participant=creator_raw if isinstance(creator_raw, Mapping) else None,
+            account_id_to_concept_id=participant_map,
+            account_cache=participant_account_cache,
+            email_cache=participant_email_cache,
+            actor_concept_id=actor_concept_id,
+            organisation_concept_id=organisation_concept_id,
+            allow_lookup=bool(auto_resolve_participants),
+            allow_create=(
+                bool(auto_resolve_participants)
+                and bool(create_missing_participant_concepts)
+                and not dry_run
+            ),
+        )
+        reporter_resolution = _ensure_jira_participant_concept(
+            raw_participant=reporter_raw if isinstance(reporter_raw, Mapping) else None,
+            account_id_to_concept_id=participant_map,
+            account_cache=participant_account_cache,
+            email_cache=participant_email_cache,
+            actor_concept_id=actor_concept_id,
+            organisation_concept_id=organisation_concept_id,
+            allow_lookup=bool(auto_resolve_participants),
+            allow_create=(
+                bool(auto_resolve_participants)
+                and bool(create_missing_participant_concepts)
+                and not dry_run
+            ),
+        )
+
+        assignee_concept_id = (
+            assignee_resolution.get("concept_id")
+            if isinstance(assignee_resolution.get("concept_id"), str)
+            else None
+        )
+        creator_concept_id = (
+            creator_resolution.get("concept_id")
+            if isinstance(creator_resolution.get("concept_id"), str)
+            else None
+        )
+        reporter_concept_id = (
+            reporter_resolution.get("concept_id")
+            if isinstance(reporter_resolution.get("concept_id"), str)
+            else None
+        )
+
+        watcher_resolution_rows: list[Dict[str, Any]] = []
+        watcher_concept_ids: list[str] = []
+        for watcher_raw in watcher_participants:
+            watcher_resolution = _ensure_jira_participant_concept(
+                raw_participant=watcher_raw,
+                account_id_to_concept_id=participant_map,
+                account_cache=participant_account_cache,
+                email_cache=participant_email_cache,
+                actor_concept_id=actor_concept_id,
+                organisation_concept_id=organisation_concept_id,
+                allow_lookup=bool(auto_resolve_participants),
+                allow_create=(
+                    bool(auto_resolve_participants)
+                    and bool(create_missing_participant_concepts)
+                    and not dry_run
+                ),
+            )
+            watcher_resolution_rows.append(watcher_resolution)
+            concept_id = watcher_resolution.get("concept_id")
+            if isinstance(concept_id, str) and concept_id and concept_id not in watcher_concept_ids:
+                watcher_concept_ids.append(concept_id)
+
+        participant_resolution = {
+            "assignee": assignee_resolution,
+            "creator": creator_resolution,
+            "reporter": reporter_resolution,
+            "watchers": watcher_resolution_rows,
+        }
+
+        for role_name, concept_id, missing_reason in (
+            ("assignee", assignee_concept_id, "jira_assignee_mapping_missing"),
+            ("creator", creator_concept_id, "jira_creator_mapping_missing"),
+            ("reporter", reporter_concept_id, "jira_reporter_mapping_missing"),
+        ):
+            role_source = participant_resolution.get(role_name)
+            role_participant = (
+                role_source.get("participant") if isinstance(role_source, Mapping) else None
+            )
+            if isinstance(concept_id, str) and concept_id:
+                mapped_fields.append(role_name)
+                summary["participant_fields_mapped"] = int(
+                    summary.get("participant_fields_mapped", 0)
+                ) + 1
+                if isinstance(role_source, Mapping) and role_source.get("created_concept"):
+                    summary["participant_concepts_created"] = int(
+                        summary.get("participant_concepts_created", 0)
+                    ) + 1
+            elif isinstance(role_participant, Mapping):
+                dropped_fields.append({"field": role_name, "reason": missing_reason})
+                summary["participant_fields_dropped"] = int(
+                    summary.get("participant_fields_dropped", 0)
+                ) + 1
+
+        if watcher_participants:
+            if watcher_concept_ids:
+                mapped_fields.append("watchers")
+                summary["participant_fields_mapped"] = int(
+                    summary.get("participant_fields_mapped", 0)
+                ) + len(watcher_concept_ids)
+                summary["participant_concepts_created"] = int(
+                    summary.get("participant_concepts_created", 0)
+                ) + sum(
+                    1
+                    for row in watcher_resolution_rows
+                    if isinstance(row, Mapping) and row.get("created_concept")
+                )
+            else:
+                dropped_fields.append(
+                    {
+                        "field": "watchers",
+                        "reason": "jira_watcher_mapping_missing",
+                    }
+                )
+                summary["participant_fields_dropped"] = int(
+                    summary.get("participant_fields_dropped", 0)
+                ) + len(watcher_participants)
 
         parent_issue_key = _extract_parent_issue_key(fields)
         if parent_issue_key:
@@ -983,6 +1616,12 @@ def import_jira_issues_to_tasks(
             update_fields_payload["start_date"] = start_date
         if assignee_concept_id is not None:
             update_fields_payload["assignee_concept_id"] = assignee_concept_id
+        if creator_concept_id is not None:
+            update_fields_payload["created_by_concept_id"] = creator_concept_id
+        if reporter_concept_id is not None:
+            update_fields_payload["reporter_concept_id"] = reporter_concept_id
+        if watcher_concept_ids:
+            update_fields_payload["watcher_concept_ids"] = watcher_concept_ids
         if component_names:
             update_fields_payload["components"] = component_names
         if fix_version_names:
@@ -1021,7 +1660,27 @@ def import_jira_issues_to_tasks(
                         parent_issue_key=parent_issue_key,
                         epic_issue_key=epic_issue_key,
                         link_summaries=issue_links,
-                        assignee=assignee if isinstance(assignee, Mapping) else None,
+                        assignee=(
+                            assignee_resolution.get("participant")
+                            if isinstance(assignee_resolution, Mapping)
+                            else None
+                        ),
+                        creator=(
+                            creator_resolution.get("participant")
+                            if isinstance(creator_resolution, Mapping)
+                            else None
+                        ),
+                        reporter=(
+                            reporter_resolution.get("participant")
+                            if isinstance(reporter_resolution, Mapping)
+                            else None
+                        ),
+                        watcher_participants=watcher_participants,
+                        watcher_count=watcher_count,
+                        assignee_concept_id=assignee_concept_id,
+                        creator_concept_id=creator_concept_id,
+                        reporter_concept_id=reporter_concept_id,
+                        watcher_concept_ids=watcher_concept_ids,
                     )
                     upsert_task_external_reference(
                         task_id,
@@ -1040,7 +1699,7 @@ def import_jira_issues_to_tasks(
                         title=title,
                         description=description,
                         assignee_concept_id=assignee_concept_id,
-                        created_by_concept_id=actor_concept_id,
+                        created_by_concept_id=creator_concept_id or actor_concept_id,
                         organisation_concept_id=organisation_concept_id,
                     )
                     created_task_id = created.get("task_concept_id")
@@ -1066,7 +1725,27 @@ def import_jira_issues_to_tasks(
                         parent_issue_key=parent_issue_key,
                         epic_issue_key=epic_issue_key,
                         link_summaries=issue_links,
-                        assignee=assignee if isinstance(assignee, Mapping) else None,
+                        assignee=(
+                            assignee_resolution.get("participant")
+                            if isinstance(assignee_resolution, Mapping)
+                            else None
+                        ),
+                        creator=(
+                            creator_resolution.get("participant")
+                            if isinstance(creator_resolution, Mapping)
+                            else None
+                        ),
+                        reporter=(
+                            reporter_resolution.get("participant")
+                            if isinstance(reporter_resolution, Mapping)
+                            else None
+                        ),
+                        watcher_participants=watcher_participants,
+                        watcher_count=watcher_count,
+                        assignee_concept_id=assignee_concept_id,
+                        creator_concept_id=creator_concept_id,
+                        reporter_concept_id=reporter_concept_id,
+                        watcher_concept_ids=watcher_concept_ids,
                     )
                     upsert_task_external_reference(
                         task_id,
@@ -1104,6 +1783,7 @@ def import_jira_issues_to_tasks(
                 "epic_issue_key": epic_issue_key,
                 "issue_links": issue_links,
                 "relation_results": relation_results,
+                "participant_mappings": participant_resolution,
                 "project_key": project_key,
                 "project_name": project_name,
             }

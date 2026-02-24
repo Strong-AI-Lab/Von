@@ -16,6 +16,9 @@ def _jira_issue(
     parent_key: str | None = None,
     links: list[dict[str, Any]] | None = None,
     assignee_account_id: str | None = None,
+    creator_account_id: str | None = None,
+    reporter_account_id: str | None = None,
+    watcher_account_ids: list[str] | None = None,
     project_key: str = "JVNAUTOSCI",
     project_name: str = "JVNAUTOSCI Project",
     extra_fields: dict[str, Any] | None = None,
@@ -47,7 +50,30 @@ def _jira_issue(
             "accountId": assignee_account_id,
             "displayName": "Example Person",
         }
-    return {"key": key, "fields": fields, "id": key.split("-")[-1]}
+    if creator_account_id:
+        fields["creator"] = {
+            "accountId": creator_account_id,
+            "displayName": "Creator Person",
+        }
+    if reporter_account_id:
+        fields["reporter"] = {
+            "accountId": reporter_account_id,
+            "displayName": "Reporter Person",
+        }
+
+    issue: Dict[str, Any] = {"key": key, "fields": fields, "id": key.split("-")[-1]}
+    if watcher_account_ids:
+        issue["watchers"] = {
+            "watchCount": len(watcher_account_ids),
+            "watchers": [
+                {
+                    "accountId": watcher_account_id,
+                    "displayName": f"Watcher {idx + 1}",
+                }
+                for idx, watcher_account_id in enumerate(watcher_account_ids)
+            ],
+        }
+    return issue
 
 
 def test_import_jira_issues_dry_run_reports_mapping_and_drops(monkeypatch):
@@ -299,3 +325,104 @@ def test_import_jira_issues_pilot_validation_recommends_go_with_conditions(monke
     summary = pilot_validation.get("summary") or {}
     assert summary.get("must_fix_gap_count") == 0
     assert summary.get("acceptable_defer_gap_count", 0) >= 1
+
+
+def test_import_jira_issues_preserves_participant_concepts_from_account_map(monkeypatch):
+    created_calls: list[dict[str, Any]] = []
+    update_calls: list[dict[str, Any]] = []
+    external_refs: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        import_service,
+        "find_task_by_external_reference",
+        lambda **_kwargs: None,
+    )
+
+    def _fake_create_task(**kwargs):
+        created_calls.append(kwargs)
+        return {"task_concept_id": "#V#task_imported_participants"}
+
+    def _fake_update_task_fields(task_id: str, *, fields: dict[str, Any], **_kwargs):
+        update_calls.append({"task_id": task_id, "fields": fields})
+        return {"task": {"task_concept_id": task_id}}
+
+    def _fake_upsert_task_external_reference(
+        task_concept_id: str,
+        *,
+        reference_payload: dict[str, Any],
+        **_kwargs,
+    ):
+        external_refs.append(
+            {"task_concept_id": task_concept_id, "reference_payload": reference_payload}
+        )
+        return {"task_concept_id": task_concept_id}
+
+    monkeypatch.setattr(import_service, "create_task", _fake_create_task)
+    monkeypatch.setattr(import_service, "update_task_fields", _fake_update_task_fields)
+    monkeypatch.setattr(
+        import_service,
+        "upsert_task_external_reference",
+        _fake_upsert_task_external_reference,
+    )
+    monkeypatch.setattr(import_service, "set_task_parent", lambda *_a, **_k: {})
+    monkeypatch.setattr(import_service, "set_task_epic", lambda *_a, **_k: {})
+    monkeypatch.setattr(import_service, "link_tasks", lambda *_a, **_k: {})
+
+    issue = _jira_issue(
+        "JVNAUTOSCI-2601",
+        assignee_account_id="jira-assignee-1",
+        creator_account_id="jira-creator-1",
+        reporter_account_id="jira-reporter-1",
+        watcher_account_ids=["jira-watcher-1", "jira-watcher-2"],
+    )
+    report = import_service.import_jira_issues_to_tasks(
+        issues=[issue],
+        dry_run=False,
+        auto_resolve_participants=False,
+        create_missing_participant_concepts=False,
+        jira_account_id_to_concept_id={
+            "jira-assignee-1": "#V#person_assignee",
+            "jira-creator-1": "#V#person_creator",
+            "jira-reporter-1": "#V#person_reporter",
+            "jira-watcher-1": "#V#person_watcher_1",
+            "jira-watcher-2": "#V#person_watcher_2",
+        },
+    )
+
+    assert report.get("success") is True
+    assert created_calls
+    assert created_calls[0].get("created_by_concept_id") == "#V#person_creator"
+    assert created_calls[0].get("assignee_concept_id") == "#V#person_assignee"
+
+    assert update_calls
+    updated_fields = update_calls[0]["fields"]
+    assert updated_fields.get("assignee_concept_id") == "#V#person_assignee"
+    assert updated_fields.get("created_by_concept_id") == "#V#person_creator"
+    assert updated_fields.get("reporter_concept_id") == "#V#person_reporter"
+    assert updated_fields.get("watcher_concept_ids") == [
+        "#V#person_watcher_1",
+        "#V#person_watcher_2",
+    ]
+
+    issue_row = report["issues"][0]
+    assert "assignee" in issue_row["mapped_fields"]
+    assert "creator" in issue_row["mapped_fields"]
+    assert "reporter" in issue_row["mapped_fields"]
+    assert "watchers" in issue_row["mapped_fields"]
+    assert issue_row.get("participant_mappings", {}).get("creator", {}).get("concept_id") == (
+        "#V#person_creator"
+    )
+
+    assert external_refs
+    participants_payload = (
+        external_refs[0]["reference_payload"].get("participants")
+        if isinstance(external_refs[0]["reference_payload"], dict)
+        else {}
+    )
+    assert isinstance(participants_payload, dict)
+    assert participants_payload.get("assignee", {}).get("concept_id") == "#V#person_assignee"
+    assert participants_payload.get("creator", {}).get("concept_id") == "#V#person_creator"
+    assert participants_payload.get("reporter", {}).get("concept_id") == "#V#person_reporter"
+    watcher_payload = participants_payload.get("watchers")
+    assert isinstance(watcher_payload, list)
+    assert len(watcher_payload) == 2

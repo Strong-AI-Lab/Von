@@ -663,6 +663,87 @@ class TestTaskParityDatesAndEpic:
         assert any("metadata.sprint_values" in payload for payload in set_payloads)
         assert any("metadata.backlog_rank" in payload for payload in set_payloads)
 
+    @patch("src.backend.services.task_management_service.get_task")
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.get_texts_for_concept")
+    def test_update_task_fields_supports_creator_reporter_and_watchers(
+        self,
+        mock_get_texts: MagicMock,
+        mock_repo: MagicMock,
+        mock_get_task: MagicMock,
+    ) -> None:
+        task_doc = {
+            "concept_id": "#V#task_1",
+            "relationships": {
+                "is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID],
+                "#V#hasCreatedBy": ["#V#user_old_creator"],
+            },
+            "metadata": {},
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+        }
+
+        known_people = {
+            "#V#user_creator",
+            "#V#user_reporter",
+            "#V#user_watcher_1",
+            "#V#user_watcher_2",
+        }
+
+        def _fake_find_one(query: Dict[str, Any], projection: Optional[Dict[str, Any]] = None):
+            concept_id = query.get("concept_id")
+            if concept_id == "#V#task_1":
+                return task_doc
+            if concept_id in known_people:
+                return {"concept_id": concept_id}
+            return None
+
+        mock_repo.find_one.side_effect = _fake_find_one
+        mock_get_texts.return_value = []
+        mock_get_task.return_value = {
+            "task_concept_id": "#V#task_1",
+            "created_by_concept_id": "#V#user_creator",
+            "reporter_concept_id": "#V#user_reporter",
+            "watcher_concept_ids": ["#V#user_watcher_1", "#V#user_watcher_2"],
+        }
+
+        result = update_task_fields(
+            "#V#task_1",
+            fields={
+                "created_by_concept_id": "#V#user_creator",
+                "reporter_concept_id": "#V#user_reporter",
+                "watcher_concept_ids": ["#V#user_watcher_1", "#V#user_watcher_2"],
+            },
+            actor_concept_id="#V#user_alice",
+        )
+
+        assert "created_by_concept_id" in result["changed_fields"]
+        assert "reporter_concept_id" in result["changed_fields"]
+        assert "watcher_concept_ids" in result["changed_fields"]
+        assert any(
+            call.kwargs.get("kind") == "#V#hasCreatedBy"
+            and call.kwargs.get("target_id") == "#V#user_creator"
+            and call.kwargs.get("action") == "add"
+            for call in mock_repo.mutate_relationship_edge.call_args_list
+        )
+
+        update_payloads = [
+            call.args[1]
+            for call in mock_repo.update_one.call_args_list
+            if len(call.args) >= 2 and isinstance(call.args[1], dict)
+        ]
+        set_payloads = [
+            payload.get("$set", {})
+            for payload in update_payloads
+            if isinstance(payload.get("$set"), dict)
+        ]
+        assert any(
+            "metadata.jira_reporter_concept_id" in payload for payload in set_payloads
+        )
+        assert any(
+            "metadata.jira_watcher_concept_ids" in payload for payload in set_payloads
+        )
+
     @patch("src.backend.services.task_management_service.ConceptsRepository")
     @patch("src.backend.services.task_management_service.get_texts_for_concept")
     def test_search_tasks_filters_start_date_and_epic(
