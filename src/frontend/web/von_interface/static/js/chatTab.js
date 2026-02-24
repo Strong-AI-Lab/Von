@@ -9739,26 +9739,17 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         fragment.appendChild(placeholder);
     }
 
-    if (pinnedSessions.length > 0) {
-        const pinnedGroupLabel = document.createElement('div');
-        pinnedGroupLabel.className = 'chat-session-tabs-group-label';
-        pinnedGroupLabel.textContent = `Pinned (${pinnedSessions.length})`;
-        fragment.appendChild(pinnedGroupLabel);
-    }
-
     orderedVisibleSessions.forEach((session, index) => {
         const sid = (typeof session?.session_id === 'string') ? session.session_id.trim() : '';
         if (!sid) {
             return;
         }
         const isPinned = isConversationPinned(sid);
-
-        if (pinnedSessions.length > 0 && unpinnedSessions.length > 0 && index === pinnedSessions.length) {
-            const recentGroupLabel = document.createElement('div');
-            recentGroupLabel.className = 'chat-session-tabs-group-label';
-            recentGroupLabel.textContent = 'Recent';
-            fragment.appendChild(recentGroupLabel);
-        }
+        const isFirstPinnedTab = pinnedSessions.length > 0 && index === 0 && isPinned;
+        const isFirstRecentTab = pinnedSessions.length > 0 && unpinnedSessions.length > 0 && index === pinnedSessions.length;
+        const groupLabelText = isFirstPinnedTab
+            ? `Pinned (${pinnedSessions.length})`
+            : (isFirstRecentTab ? 'Recent' : '');
 
         const displayName = getSessionDisplayName(session);
         const timestampSource = (typeof session?.last_message_at === 'string' && session.last_message_at.trim())
@@ -9779,6 +9770,21 @@ function renderChatSessionTabs(sessions, activeSessionId) {
 
         if (sid === activeSessionId) {
             tab.classList.add('is-active');
+        }
+
+        if (groupLabelText) {
+            tab.classList.add('chat-session-tab-group-start');
+            const groupBadge = document.createElement('span');
+            groupBadge.className = 'chat-session-tab-group-badge';
+            if (isFirstRecentTab) {
+                tab.classList.add('chat-session-tab-group-start-recent');
+                groupBadge.classList.add('chat-session-tab-group-badge-recent');
+            } else {
+                groupBadge.classList.add('chat-session-tab-group-badge-pinned');
+            }
+            groupBadge.textContent = groupLabelText;
+            groupBadge.setAttribute('aria-hidden', 'true');
+            tab.appendChild(groupBadge);
         }
 
         if (sid === loadingChatSessionId) {
