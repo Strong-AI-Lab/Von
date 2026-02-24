@@ -26,10 +26,12 @@ from .concept_service import create_concept, get_concept_by_concept_id
 from .text_value_service import upsert_text_for_concept
 from .task_management_service import (
     InvalidTaskDataError,
+    TASK_METADATA_KEY_EXTERNAL_REFERENCES,
+    TASK_METADATA_KEY_ORGANISATION,
+    TASK_SPECIFICATION_TYPE_ID,
     create_task,
     find_task_by_external_reference,
     link_tasks,
-    search_tasks,
     set_task_epic,
     set_task_parent,
     update_task_fields,
@@ -930,31 +932,64 @@ def list_imported_jira_issue_keys(
     except (TypeError, ValueError):
         bounded_limit = 2000
 
-    search_result = search_tasks(
-        organisation_concept_id=organisation_concept_id,
-        limit=bounded_limit,
-        offset=0,
-    )
-    raw_tasks = search_result.get("tasks")
-    tasks = raw_tasks if isinstance(raw_tasks, list) else []
+    query: Dict[str, Any] = {
+        "relationships.is_an_instance_of": TASK_SPECIFICATION_TYPE_ID,
+        f"metadata.{TASK_METADATA_KEY_EXTERNAL_REFERENCES}.{_JIRA_SOURCE_SYSTEM}.external_id": {
+            "$exists": True
+        },
+    }
+    if isinstance(organisation_concept_id, str) and organisation_concept_id.strip():
+        org_scope = ensure_v_concept_prefix(organisation_concept_id)
+        # Include legacy unscoped task rows so organisation-scoped backfill can
+        # discover and repair prior imports written without organisation context.
+        query["$or"] = [
+            {f"metadata.{TASK_METADATA_KEY_ORGANISATION}": org_scope},
+            {f"metadata.{TASK_METADATA_KEY_ORGANISATION}": None},
+        ]
 
     keys: list[str] = []
     seen: set[str] = set()
-    for task in tasks:
-        if not isinstance(task, Mapping):
-            continue
-        external_references = task.get("external_references")
-        if not isinstance(external_references, Mapping):
-            continue
-        jira_reference = external_references.get(_JIRA_SOURCE_SYSTEM)
-        if not isinstance(jira_reference, Mapping):
-            continue
-        raw_issue_key = jira_reference.get("external_id") or jira_reference.get("issue_key")
-        issue_key = _normalise_issue_key(raw_issue_key)
-        if not issue_key or issue_key in seen:
-            continue
-        seen.add(issue_key)
-        keys.append(issue_key)
+    skip = 0
+    batch_size = min(max(200, bounded_limit), 1000)
+    projection = {
+        f"metadata.{TASK_METADATA_KEY_EXTERNAL_REFERENCES}.{_JIRA_SOURCE_SYSTEM}": 1,
+    }
+
+    while len(keys) < bounded_limit:
+        docs = list(
+            ConceptsRepository.find(
+                query,
+                projection=projection,
+                sort=[("updated_at", -1), ("concept_id", 1)],
+                skip=skip,
+                limit=min(batch_size, max(1, bounded_limit - len(keys))),
+            )
+        )
+        if not docs:
+            break
+        skip += len(docs)
+        for doc in docs:
+            if not isinstance(doc, Mapping):
+                continue
+            metadata = doc.get("metadata")
+            if not isinstance(metadata, Mapping):
+                continue
+            external_references = metadata.get(TASK_METADATA_KEY_EXTERNAL_REFERENCES)
+            if not isinstance(external_references, Mapping):
+                continue
+            jira_reference = external_references.get(_JIRA_SOURCE_SYSTEM)
+            if not isinstance(jira_reference, Mapping):
+                continue
+            raw_issue_key = jira_reference.get("external_id") or jira_reference.get(
+                "issue_key"
+            )
+            issue_key = _normalise_issue_key(raw_issue_key)
+            if not issue_key or issue_key in seen:
+                continue
+            seen.add(issue_key)
+            keys.append(issue_key)
+            if len(keys) >= bounded_limit:
+                break
     return keys
 
 
@@ -1610,6 +1645,8 @@ def import_jira_issues_to_tasks(
             "priority": mapped_priority,
             "labels": labels,
         }
+        if organisation_concept_id is not None:
+            update_fields_payload["organisation_concept_id"] = organisation_concept_id
         if due_date is not None:
             update_fields_payload["due_date"] = due_date
         if start_date is not None:

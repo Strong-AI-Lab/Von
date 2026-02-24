@@ -12872,6 +12872,9 @@ def _task_import_jira_issues(**kwargs):
         import_jira_issues_to_tasks,
         list_imported_jira_issue_keys,
     )
+    from ...services.workflow_event_integration_service import (
+        resolve_event_actor_context,
+    )
 
     issue_keys = _normalise_issue_keys_input(kwargs.get("issue_keys"))
     jql = kwargs.get("jql")
@@ -12921,6 +12924,27 @@ def _task_import_jira_issues(**kwargs):
         kwargs.get("create_missing_participant_concepts"),
         default=True,
     )
+    namespace_value = _clean_optional_string(kwargs.get("namespace"))
+    requested_actor_concept_id = _normalise_optional_concept_id(
+        kwargs.get("actor_concept_id")
+    )
+    requested_org_concept_id = _normalise_optional_concept_id(
+        kwargs.get("organisation_concept_id")
+    )
+    resolved_user_concept_id, resolved_org_concept_id = resolve_event_actor_context(
+        user_id=requested_actor_concept_id,
+        org_id=requested_org_concept_id,
+        namespace=namespace_value,
+    )
+    actor_concept_id = requested_actor_concept_id or _normalise_optional_concept_id(
+        resolved_user_concept_id
+    )
+    if actor_concept_id is None:
+        # Backwards compatibility for callers passing namespace=#V#user only.
+        actor_concept_id = _normalise_optional_concept_id(namespace_value)
+    organisation_concept_id = requested_org_concept_id or _normalise_optional_concept_id(
+        resolved_org_concept_id
+    )
     try:
         backfill_limit = int(kwargs.get("backfill_limit", 2000))
     except (TypeError, ValueError):
@@ -12945,7 +12969,7 @@ def _task_import_jira_issues(**kwargs):
 
         if backfill_existing_imports:
             backfill_keys = list_imported_jira_issue_keys(
-                organisation_concept_id=kwargs.get("organisation_concept_id"),
+                organisation_concept_id=organisation_concept_id,
                 limit=backfill_limit,
             )
             for issue_key in backfill_keys:
@@ -12953,7 +12977,6 @@ def _task_import_jira_issues(**kwargs):
                     discovered_keys.append(issue_key)
                     backfill_discovered_count += 1
 
-        namespace_value = kwargs.get("namespace")
         if (
             auto_map_namespace_to_jira_user
             and isinstance(namespace_value, str)
@@ -13065,25 +13088,36 @@ def _task_import_jira_issues(**kwargs):
     issue_docs = fetch_payload.get("issues") if isinstance(fetch_payload, dict) else None
     if not isinstance(issue_docs, list):
         issue_docs = []
-    namespace_value = kwargs.get("namespace")
     namespace_account_id = (
         fetch_payload.get("namespace_account_id")
         if isinstance(fetch_payload, Mapping)
         else None
     )
+    namespace_identity_concept_id = actor_concept_id
+    if (
+        namespace_identity_concept_id is None
+        and isinstance(namespace_value, str)
+        and namespace_value.strip()
+        and "@" not in namespace_value
+        and "/" not in namespace_value
+    ):
+        namespace_identity_concept_id = _normalise_optional_concept_id(namespace_value)
     if (
         isinstance(namespace_account_id, str)
         and namespace_account_id.strip()
-        and isinstance(namespace_value, str)
-        and namespace_value.strip()
+        and isinstance(namespace_identity_concept_id, str)
+        and namespace_identity_concept_id.strip()
     ):
-        participant_map.setdefault(namespace_account_id.strip(), namespace_value.strip())
+        participant_map.setdefault(
+            namespace_account_id.strip(),
+            namespace_identity_concept_id.strip(),
+        )
 
     report = import_jira_issues_to_tasks(
         issues=[item for item in issue_docs if isinstance(item, dict)],
         dry_run=dry_run,
-        actor_concept_id=namespace_value,
-        organisation_concept_id=kwargs.get("organisation_concept_id"),
+        actor_concept_id=actor_concept_id,
+        organisation_concept_id=organisation_concept_id,
         assignee_account_id_to_concept_id=assignee_map,
         jira_account_id_to_concept_id=participant_map,
         update_existing=_coerce_bool_input(

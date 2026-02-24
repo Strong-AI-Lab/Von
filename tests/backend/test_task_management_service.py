@@ -6,8 +6,8 @@ Unit tests for task creation, retrieval, status updates, and assignment.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -688,6 +688,7 @@ class TestTaskParityDatesAndEpic:
             "#V#user_reporter",
             "#V#user_watcher_1",
             "#V#user_watcher_2",
+            "#V#sail_org",
         }
 
         def _fake_find_one(query: Dict[str, Any], projection: Optional[Dict[str, Any]] = None):
@@ -705,6 +706,7 @@ class TestTaskParityDatesAndEpic:
             "created_by_concept_id": "#V#user_creator",
             "reporter_concept_id": "#V#user_reporter",
             "watcher_concept_ids": ["#V#user_watcher_1", "#V#user_watcher_2"],
+            "organisation_concept_id": "#V#sail_org",
         }
 
         result = update_task_fields(
@@ -713,6 +715,7 @@ class TestTaskParityDatesAndEpic:
                 "created_by_concept_id": "#V#user_creator",
                 "reporter_concept_id": "#V#user_reporter",
                 "watcher_concept_ids": ["#V#user_watcher_1", "#V#user_watcher_2"],
+                "organisation_concept_id": "#V#sail_org",
             },
             actor_concept_id="#V#user_alice",
         )
@@ -720,6 +723,7 @@ class TestTaskParityDatesAndEpic:
         assert "created_by_concept_id" in result["changed_fields"]
         assert "reporter_concept_id" in result["changed_fields"]
         assert "watcher_concept_ids" in result["changed_fields"]
+        assert "organisation_concept_id" in result["changed_fields"]
         assert any(
             call.kwargs.get("kind") == "#V#hasCreatedBy"
             and call.kwargs.get("target_id") == "#V#user_creator"
@@ -743,6 +747,68 @@ class TestTaskParityDatesAndEpic:
         assert any(
             "metadata.jira_watcher_concept_ids" in payload for payload in set_payloads
         )
+        assert any(
+            "metadata.organisation_concept_id" in payload for payload in set_payloads
+        )
+        assert any(
+            payload.get("relationships.specific_to_org") == ["#V#sail_org"]
+            for payload in set_payloads
+        )
+
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.get_texts_for_concept")
+    def test_search_tasks_pagination_is_stable_across_offsets(
+        self,
+        mock_get_texts: MagicMock,
+        mock_repo: MagicMock,
+    ) -> None:
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        docs = [
+            {
+                "concept_id": f"#V#task_{idx:03d}",
+                "relationships": {"is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID]},
+                "metadata": {},
+                "created_at": base + timedelta(minutes=idx),
+                "updated_at": base + timedelta(minutes=idx),
+            }
+            for idx in range(1, 251)
+        ]
+
+        def _fake_find(
+            _filter: Dict[str, Any],
+            projection: Optional[Dict[str, Any]] = None,  # noqa: ARG001
+            sort: Optional[List] = None,  # noqa: ARG001
+            skip: int = 0,
+            limit: int = 0,
+        ):
+            rows = list(docs)
+            if skip:
+                rows = rows[skip:]
+            if limit:
+                rows = rows[:limit]
+            return rows
+
+        def _fake_get_texts(
+            concept_id: str, *args: Any, **kwargs: Any  # noqa: ARG001
+        ) -> list[dict[str, str]]:
+            return [
+                {"predicate": "#V#hasName", "text": concept_id},
+                {"predicate": "#V#hasTaskStatus", "text": "pending"},
+            ]
+
+        mock_repo.find.side_effect = _fake_find
+        mock_get_texts.side_effect = _fake_get_texts
+
+        page_one = search_tasks(limit=200, offset=0)
+        page_two = search_tasks(limit=200, offset=200)
+
+        page_one_ids = [task["task_concept_id"] for task in page_one["tasks"]]
+        page_two_ids = [task["task_concept_id"] for task in page_two["tasks"]]
+
+        assert page_one["count"] == 200
+        assert page_two["count"] == 50
+        assert set(page_one_ids).isdisjoint(page_two_ids)
+        assert len(set(page_one_ids + page_two_ids)) == 250
 
     @patch("src.backend.services.task_management_service.ConceptsRepository")
     @patch("src.backend.services.task_management_service.get_texts_for_concept")
@@ -892,6 +958,45 @@ class TestTaskExternalReferences:
             .get("external_id")
             == "JVNAUTOSCI-777"
         )
+
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.get_texts_for_concept")
+    def test_find_task_by_external_reference_org_lookup_falls_back_to_legacy_unscoped(
+        self,
+        mock_get_texts: MagicMock,
+        mock_repo: MagicMock,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        legacy_doc = {
+            "concept_id": "#V#task_imported_legacy",
+            "relationships": {"is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID]},
+            "metadata": {
+                "external_references": {"jira": {"external_id": "JVNAUTOSCI-888"}},
+                "organisation_concept_id": None,
+            },
+            "created_at": now,
+            "updated_at": now,
+        }
+        mock_repo.find_one.side_effect = [None, legacy_doc]
+        mock_get_texts.return_value = [
+            {"predicate": "#V#hasName", "text": "Imported legacy task"},
+            {"predicate": "#V#hasTaskStatus", "text": "pending"},
+        ]
+
+        result = find_task_by_external_reference(
+            source_system="jira",
+            external_id="JVNAUTOSCI-888",
+            organisation_concept_id="#V#sail_org",
+        )
+
+        assert result is not None
+        assert result["task_concept_id"] == "#V#task_imported_legacy"
+        assert mock_repo.find_one.call_count == 2
+        first_query = mock_repo.find_one.call_args_list[0].args[0]
+        second_query = mock_repo.find_one.call_args_list[1].args[0]
+        assert first_query.get("metadata.organisation_concept_id") == "#V#sail_org"
+        assert "metadata.organisation_concept_id" in second_query
+        assert second_query.get("metadata.organisation_concept_id") is None
 
     @patch("src.backend.services.task_management_service.get_task")
     @patch("src.backend.services.task_management_service._get_task_doc")

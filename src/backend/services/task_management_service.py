@@ -1472,9 +1472,14 @@ def search_tasks(
             )
         query_filter[f"metadata.{TASK_METADATA_KEY_ORGANISATION}"] = org_id
 
-    scan_limit = max(limit + offset, 200)
-    scan_limit = min(scan_limit, 2000)
-    docs = list(ConceptsRepository.find(query_filter, limit=scan_limit))
+    # Use deterministic storage ordering before in-memory filters so paged reads do
+    # not drift or duplicate items across offsets.
+    docs = list(
+        ConceptsRepository.find(
+            query_filter,
+            sort=[("updated_at", -1), ("created_at", -1), ("concept_id", 1)],
+        )
+    )
     tasks = [_build_task_response(doc) for doc in docs]
 
     status_values: set[str] = set()
@@ -2717,6 +2722,40 @@ def update_task_fields(
         )
         changed_fields.append("backlog_rank")
 
+    if "organisation_concept_id" in fields:
+        raw_org = fields.get("organisation_concept_id")
+        if raw_org is None or (isinstance(raw_org, str) and not raw_org.strip()):
+            organisation_concept_id = None
+        else:
+            organisation_concept_id = _normalise_optional_concept_id(raw_org)
+            if not organisation_concept_id:
+                raise InvalidTaskDataError(
+                    f"Invalid organisation_concept_id: {raw_org}"
+                )
+            if not ConceptsRepository.find_one(
+                {"concept_id": organisation_concept_id},
+                projection={"_id": 1},
+            ):
+                raise InvalidTaskDataError(
+                    f"organisation_concept_id not found: {organisation_concept_id}"
+                )
+        _set_task_metadata_value(
+            task_concept_id=task_concept_id,
+            metadata_key=TASK_METADATA_KEY_ORGANISATION,
+            value=organisation_concept_id,
+        )
+        ConceptsRepository.update_one(
+            {"concept_id": task_concept_id},
+            {
+                "$set": {
+                    "relationships.specific_to_org": (
+                        [organisation_concept_id] if organisation_concept_id else []
+                    )
+                }
+            },
+        )
+        changed_fields.append("organisation_concept_id")
+
     if "reporter_concept_id" in fields:
         raw_reporter = fields.get("reporter_concept_id")
         if raw_reporter is None or (
@@ -2825,6 +2864,7 @@ def update_task_fields(
             "fix_versions",
             "sprint_values",
             "backlog_rank",
+            "organisation_concept_id",
             "reporter_concept_id",
             "watcher_concept_ids",
             "watchers_concept_ids",
@@ -2886,19 +2926,29 @@ def find_task_by_external_reference(
     source_key = _normalise_external_reference_source_system(source_system)
     external_value = _normalise_external_reference_id(external_id)
 
-    query: Dict[str, Any] = {
+    query_base: Dict[str, Any] = {
         "relationships.is_an_instance_of": TASK_SPECIFICATION_TYPE_ID,
         f"metadata.{TASK_METADATA_KEY_EXTERNAL_REFERENCES}.{source_key}.external_id": external_value,
     }
+    doc: Dict[str, Any] | None = None
     if organisation_concept_id:
         org_id = _normalise_optional_concept_id(organisation_concept_id)
         if not org_id:
             raise InvalidTaskDataError(
                 f"Invalid organisation_concept_id: {organisation_concept_id}"
             )
-        query[f"metadata.{TASK_METADATA_KEY_ORGANISATION}"] = org_id
+        scoped_query = dict(query_base)
+        scoped_query[f"metadata.{TASK_METADATA_KEY_ORGANISATION}"] = org_id
+        doc = ConceptsRepository.find_one(scoped_query)
+        if not isinstance(doc, dict) or not _is_task_doc(doc):
+            # Legacy imports were often unscoped; allow a constrained fallback
+            # to null/absent organisation scope for idempotent repair runs.
+            legacy_query = dict(query_base)
+            legacy_query[f"metadata.{TASK_METADATA_KEY_ORGANISATION}"] = None
+            doc = ConceptsRepository.find_one(legacy_query)
+    else:
+        doc = ConceptsRepository.find_one(query_base)
 
-    doc = ConceptsRepository.find_one(query)
     if not isinstance(doc, dict) or not _is_task_doc(doc):
         return None
     return _build_task_response(doc)

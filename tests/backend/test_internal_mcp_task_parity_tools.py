@@ -432,6 +432,101 @@ def test_task_import_jira_issues_gateway_backfill_and_namespace_identity_mapping
     _assert_schema_conformance(gateway, "task_import_jira_issues", payload)
 
 
+def test_task_import_jira_issues_gateway_resolves_org_scope_for_backfill_and_import(
+    monkeypatch,
+):
+    gateway = _build_gateway()
+    captured_import_kwargs: dict[str, object] = {}
+    captured_backfill_kwargs: dict[str, object] = {}
+
+    class _FakeProxy:
+        async def get_issue(self, *, issue_key: str, fields=None):  # noqa: ARG002
+            return {
+                "key": issue_key,
+                "fields": {
+                    "summary": "Imported issue",
+                    "description": {
+                        "type": "doc",
+                        "version": 1,
+                        "content": [
+                            {
+                                "type": "paragraph",
+                                "content": [{"type": "text", "text": "Desc"}],
+                            }
+                        ],
+                    },
+                    "status": {"name": "To Do"},
+                    "priority": {"name": "Medium"},
+                    "labels": [],
+                    "issuelinks": [],
+                },
+            }
+
+        async def get_myself(self):
+            return {"accountId": "jira-current-user"}
+
+    async def _fake_get_jira_proxy():
+        return _FakeProxy()
+
+    def _fake_list_imported_jira_issue_keys(**kwargs):
+        captured_backfill_kwargs.update(kwargs)
+        return ["JVNAUTOSCI-4111"]
+
+    def _fake_import_jira_issues_to_tasks(**kwargs):
+        captured_import_kwargs.update(kwargs)
+        issues = kwargs.get("issues")
+        issue_count = len(issues) if isinstance(issues, list) else 0
+        return {
+            "success": True,
+            "dry_run": bool(kwargs.get("dry_run")),
+            "summary": {"total_issues": issue_count},
+            "issues": [
+                {
+                    "jira_issue_key": "JVNAUTOSCI-4111",
+                    "action": "would_update",
+                    "mapped_fields": ["summary->title", "status", "priority"],
+                    "dropped_fields": [],
+                    "relation_results": [],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.jira_proxy_mcp.get_jira_proxy",
+        _fake_get_jira_proxy,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.jira_task_import_service.list_imported_jira_issue_keys",
+        _fake_list_imported_jira_issue_keys,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.jira_task_import_service.import_jira_issues_to_tasks",
+        _fake_import_jira_issues_to_tasks,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_event_integration_service.resolve_event_actor_context",
+        lambda **_kwargs: ("#V#current_user", "#V#sail_org"),
+    )
+
+    payload = gateway.invoke(
+        "task_import_jira_issues",
+        {
+            "backfill_existing_imports": True,
+            "dry_run": True,
+            "namespace": "#V#current_user@sail_org",
+        },
+    ).payload
+
+    assert payload.get("success") is True
+    assert captured_backfill_kwargs.get("organisation_concept_id") == "#V#sail_org"
+    assert captured_import_kwargs.get("organisation_concept_id") == "#V#sail_org"
+    assert captured_import_kwargs.get("actor_concept_id") == "#V#current_user"
+    participant_map = captured_import_kwargs.get("jira_account_id_to_concept_id")
+    assert isinstance(participant_map, dict)
+    assert participant_map.get("jira-current-user") == "#V#current_user"
+    _assert_schema_conformance(gateway, "task_import_jira_issues", payload)
+
+
 def test_task_transition_gateway_success_and_error_schema(monkeypatch):
     gateway = _build_gateway()
 
