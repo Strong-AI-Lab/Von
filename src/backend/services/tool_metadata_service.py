@@ -383,6 +383,16 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "category": "vontology",
         "display_template": "Read: {filename}",
     },
+    "index_file_copy": {
+        "salience": "medium",
+        "category": "vontology",
+        "display_template": "Indexed file copy",
+    },
+    "import_local_file_copy": {
+        "salience": "medium",
+        "category": "vontology",
+        "display_template": "Imported local file",
+    },
     "generate_concept_description": {
         "salience": "medium",
         "category": "vontology",

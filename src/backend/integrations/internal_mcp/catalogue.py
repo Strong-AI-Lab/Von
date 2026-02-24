@@ -3039,6 +3039,258 @@ def _read_file_copy(**kwargs):
     return _run_read()
 
 
+def _index_file_copy(**kwargs):
+    from ...services.rag_service import RAGBackendUnavailable, get_rag_service
+
+    concept_id = kwargs.get("concept_id") or kwargs.get("file_copy_concept_id")
+    if not isinstance(concept_id, str) or not concept_id.strip():
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: concept_id",
+            details={"missing": ["concept_id"]},
+            suggestions=["Provide the concept ID of a #V#computer_file_copy instance"],
+        )
+    concept_id = concept_id.strip()
+
+    ns_report = _resolve_rag_namespace_from_kwargs(kwargs)
+    ns_error = _rag_namespace_resolution_error(ns_report)
+    if ns_error is not None:
+        return ns_error
+    ns = ns_report.get("namespace")
+    if not isinstance(ns, str) or not ns.strip():
+        return make_error_response(
+            "namespace_required",
+            "File-copy indexing requires authenticated user context (namespace)",
+            details={"namespace_report": ns_report},
+        )
+    ns = ns.strip()
+
+    max_bytes = kwargs.get("max_bytes")
+    if max_bytes is None:
+        max_bytes = 10_000_000
+    allow_large = bool(kwargs.get("allow_large", False))
+
+    read_payload = _read_file_copy(
+        concept_id=concept_id,
+        max_bytes=max_bytes,
+        allow_large=allow_large,
+        as_text=True,
+        namespace=ns,
+    )
+    if not isinstance(read_payload, dict):
+        return make_error_response(
+            "read_file_copy_failed",
+            "Unexpected read_file_copy response shape",
+            details={"response_type": type(read_payload).__name__},
+        )
+    if read_payload.get("success") is not True:
+        return {
+            "success": False,
+            "error": read_payload.get("error") or read_payload.get("error_code"),
+            "message": read_payload.get("message")
+            or "Failed to read file-copy bytes for indexing",
+            "concept_id": concept_id,
+            "namespace": ns,
+            **ns_report,
+            "read_result": read_payload,
+        }
+
+    text_payload = read_payload.get("text")
+    text = text_payload if isinstance(text_payload, str) else ""
+    if not text.strip():
+        return {
+            "success": False,
+            "error": "unsupported_or_empty_content",
+            "message": (
+                "File-copy content could not be extracted into indexable text."
+            ),
+            "concept_id": concept_id,
+            "namespace": ns,
+            **ns_report,
+            "read_result": read_payload,
+        }
+
+    try:
+        from ...services.computer_file_copy_service import build_file_copy_artifact_record
+
+        artifact_record = build_file_copy_artifact_record(file_copy_concept_id=concept_id)
+    except Exception:
+        artifact_record = None
+
+    doc_id_raw = kwargs.get("document_id")
+    if isinstance(doc_id_raw, str) and doc_id_raw.strip():
+        doc_id = doc_id_raw.strip()
+    else:
+        doc_id = f"file_copy:{concept_id}"
+
+    metadata: dict[str, Any] = {
+        "source": "file_copy_blob",
+        "concept_id": concept_id,
+        "namespace": ns,
+        "namespace_source": ns_report.get("namespace_source"),
+        "content_type": read_payload.get("content_type"),
+        "original_filename": read_payload.get("original_filename"),
+        "size_bytes": read_payload.get("size_bytes"),
+        "blob": read_payload.get("blob"),
+    }
+    if isinstance(artifact_record, dict):
+        metadata["artifact_record"] = artifact_record
+        provenance = artifact_record.get("provenance")
+        if isinstance(provenance, dict):
+            metadata["artifact_provenance"] = provenance
+
+    doc = {
+        "id": doc_id,
+        "text": text,
+        "metadata": metadata,
+    }
+
+    try:
+        rag = get_rag_service()
+    except RAGBackendUnavailable as exc:
+        return make_error_response(
+            "rag_backend_unavailable",
+            f"RAG backend unavailable: {exc}",
+            details={"exception_type": "RAGBackendUnavailable"},
+        )
+
+    try:
+        indexed_count, failed_count = rag.upsert_documents([doc], namespace=ns)
+    except Exception as exc:
+        return make_error_response(
+            "rag_upsert_failed",
+            f"RAG upsert failed: {exc}",
+            details={
+                "exception_type": type(exc).__name__,
+                "concept_id": concept_id,
+                "document_id": doc_id,
+                "namespace": ns,
+            },
+            suggestions=[
+                "Verify RAG backend configuration and embedding model availability",
+                "Retry with a smaller max_bytes if the file is very large",
+            ],
+        )
+
+    payload = {
+        "success": indexed_count > 0 and failed_count == 0,
+        "concept_id": concept_id,
+        "document_id": doc_id,
+        "indexed_count": int(indexed_count or 0),
+        "failed_count": int(failed_count or 0),
+        "namespace": ns,
+        **ns_report,
+        "text_length": len(text),
+        "content_type": read_payload.get("content_type"),
+        "original_filename": read_payload.get("original_filename"),
+    }
+    if isinstance(artifact_record, dict):
+        payload["artifact_record"] = artifact_record
+    return payload
+
+
+def _import_local_file_copy(**kwargs):
+    from pathlib import Path
+    from ...security.access_control import (
+        get_effective_user_concept_id,
+        override_current_organisation,
+        override_current_user,
+    )
+    from ...services.computer_file_copy_service import import_local_file_copy
+
+    local_path = kwargs.get("local_path")
+    if not isinstance(local_path, str) or not local_path.strip():
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: local_path",
+            details={"missing": ["local_path"]},
+            suggestions=[
+                "Provide a local filesystem path within the current workspace"
+            ],
+        )
+    local_path = local_path.strip()
+
+    ns_report = _resolve_rag_namespace_from_kwargs(kwargs)
+    ns_error = _rag_namespace_resolution_error(ns_report)
+    if ns_error is not None:
+        return ns_error
+    ns = ns_report.get("namespace")
+    if not isinstance(ns, str) or not ns.strip():
+        return make_error_response(
+            "namespace_required",
+            "Local file import requires authenticated user context (namespace)",
+            details={"namespace_report": ns_report},
+        )
+    ns = ns.strip()
+
+    type_concept_id_raw = kwargs.get("type_concept_id")
+    type_concept_id = (
+        type_concept_id_raw.strip()
+        if isinstance(type_concept_id_raw, str) and type_concept_id_raw.strip()
+        else "#V#computer_file_copy"
+    )
+    source_system_raw = kwargs.get("source_system")
+    source_system = (
+        source_system_raw.strip()
+        if isinstance(source_system_raw, str) and source_system_raw.strip()
+        else "filesystem_import"
+    )
+    source_identifier = kwargs.get("source_identifier")
+    source_uri = kwargs.get("source_uri")
+    source_identifier = (
+        source_identifier.strip()
+        if isinstance(source_identifier, str) and source_identifier.strip()
+        else None
+    )
+    source_uri = (
+        source_uri.strip()
+        if isinstance(source_uri, str) and source_uri.strip()
+        else None
+    )
+
+    workspace_root = Path(__file__).resolve().parents[4]
+    user_part: str | None = None
+    org_part: str | None = None
+    if "@" in ns:
+        user_raw, org_raw = ns.split("@", 1)
+        user_part = user_raw.strip() or None
+        org_part = org_raw.strip() or None
+        if org_part and not org_part.startswith("#V#"):
+            org_part = f"#V#{org_part}"
+    else:
+        user_part = ns
+
+    def _run_import():
+        user_concept_id = get_effective_user_concept_id()
+        if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+            return make_error_response(
+                "authentication_required",
+                "User authentication required to import local files",
+                suggestions=["Ensure user context is set before calling this tool"],
+            )
+
+        result = import_local_file_copy(
+            local_path=local_path,
+            user_concept_id=user_concept_id.strip(),
+            type_concept_id=type_concept_id,
+            allowed_root=workspace_root,
+            source_system=source_system,
+            source_identifier=source_identifier,
+            source_uri=source_uri,
+        )
+        if isinstance(result, dict):
+            result = dict(result)
+            result.setdefault("namespace", ns)
+            result.update(ns_report)
+            result["allowed_root"] = str(workspace_root)
+        return result
+
+    if user_part or org_part:
+        with override_current_user(user_part), override_current_organisation(org_part):
+            return _run_import()
+    return _run_import()
+
+
 def _get_predicate_extent(**kwargs):
     from ...server.routes.predicate_routes import get_predicate_extent_data
 
@@ -4653,6 +4905,96 @@ def _read_file_copy_output_schema() -> Schema:
             "text (str, when as_text=true) or bytes_base64 (str, when as_text=false), "
             "encoding (str, when as_text=true), text_extraction (str, optional), "
             "or error (str) if failed."
+        ),
+    )
+
+
+def _index_file_copy_input_schema() -> Schema:
+    return Schema(
+        required={
+            "concept_id": str,
+        },
+        optional={
+            "namespace": (str, type(None)),
+            "document_id": (str, type(None)),
+            "max_bytes": (int, type(None)),
+            "allow_large": (bool, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "index_file_copy input: concept_id (str for a #V#computer_file_copy instance), "
+            "namespace (required user@org context), optional document_id override, optional "
+            "max_bytes and allow_large controls forwarded to read_file_copy."
+        ),
+    )
+
+
+def _index_file_copy_output_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "success": (bool, type(None)),
+            "error": (str, type(None)),
+            "message": (str, type(None)),
+            "concept_id": (str, type(None)),
+            "document_id": (str, type(None)),
+            "indexed_count": (int, type(None)),
+            "failed_count": (int, type(None)),
+            "namespace": (str, type(None)),
+            "text_length": (int, type(None)),
+            "content_type": (str, type(None)),
+            "original_filename": (str, type(None)),
+            "artifact_record": (dict, type(None)),
+            "read_result": (dict, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "index_file_copy output: success flag plus indexing counts/document_id for a "
+            "blob-backed file-copy ingestion into RAG."
+        ),
+    )
+
+
+def _import_local_file_copy_input_schema() -> Schema:
+    return Schema(
+        required={
+            "local_path": str,
+        },
+        optional={
+            "namespace": (str, type(None)),
+            "type_concept_id": (str, type(None)),
+            "source_system": (str, type(None)),
+            "source_identifier": (str, type(None)),
+            "source_uri": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "import_local_file_copy input: local_path (workspace file path) plus namespace "
+            "user@org context; optional file-copy type and provenance source fields."
+        ),
+    )
+
+
+def _import_local_file_copy_output_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "success": (bool, type(None)),
+            "error": (str, type(None)),
+            "message": (str, type(None)),
+            "concept_id": (str, type(None)),
+            "type_concept_id": (str, type(None)),
+            "uploaded_at": (str, type(None)),
+            "local_path": (str, type(None)),
+            "storage": (dict, type(None)),
+            "artifact_record": (dict, type(None)),
+            "namespace": (str, type(None)),
+            "allowed_root": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "import_local_file_copy output: blob-store registration result with created "
+            "#V#computer_file_copy concept and canonical artifact_record."
         ),
     )
 
@@ -9134,6 +9476,17 @@ def _build_rag_file_copy_item(
         preview_parts.append(content_type)
     preview = " | ".join(preview_parts)
 
+    artifact_record: dict[str, Any] | None = None
+    try:
+        from ...services.computer_file_copy_service import build_file_copy_artifact_record
+
+        artifact_record = build_file_copy_artifact_record(
+            file_copy_concept_id=concept_id,
+            concept_doc=doc,
+        )
+    except Exception:
+        artifact_record = None
+
     return {
         "collection": collection,
         "session_id": concept_id,
@@ -9152,6 +9505,7 @@ def _build_rag_file_copy_item(
         "namespace": namespace,
         "preview": preview[:4000],
         "preview_length": len(preview),
+        "artifact_record": artifact_record,
         "item_kind": "file_copy_concept",
         "source_system": "mongo.concepts",
         "namespace_source": namespace_source,
@@ -14808,6 +15162,30 @@ def build_default_catalogue() -> MethodCatalogue:
                 "Use when the user asks to read, summarise, analyse, or extract information from "
                 "a file they uploaded or an artefact stored as a #V#computer_file_copy. "
                 "Requires authenticated user context and the file-copy concept_id."
+            ),
+        ),
+        MethodDefinition(
+            name="index_file_copy",
+            handler=_index_file_copy,
+            input_schema=_index_file_copy_input_schema(),
+            output_schema=_index_file_copy_output_schema(),
+            category="write",
+            timeout_sec=30.0,
+            description=(
+                "Read a blob-backed #V#computer_file_copy and index its extracted text into RAG "
+                "for the effective namespace. Supports PDFs and other file types handled by read_file_copy."
+            ),
+        ),
+        MethodDefinition(
+            name="import_local_file_copy",
+            handler=_import_local_file_copy,
+            input_schema=_import_local_file_copy_input_schema(),
+            output_schema=_import_local_file_copy_output_schema(),
+            category="write",
+            timeout_sec=30.0,
+            description=(
+                "Import a local workspace file into the configured blob store and register a "
+                "#V#computer_file_copy concept with canonical provenance metadata."
             ),
         ),
         # LinkedIn Data Dump MCP tools (local external server)

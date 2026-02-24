@@ -285,8 +285,11 @@ def _infer_tool_family(tool_name: str) -> str:
         "list_papers",
         "read_paper",
         "read_file_copy",
+        "import_local_file_copy",
     }:
         return "arxiv"
+    if tool_name in {"index_file_copy"}:
+        return "rag"
     if tool_name.startswith("linkedin_"):
         return "linkedin"
     if tool_name.startswith("task_") or tool_name in {
