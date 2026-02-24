@@ -134,3 +134,26 @@ describe('relationship dropdown enter selection precedence', () => {
         expect(selected).toEqual(items[0]);
     });
 });
+
+describe('description editor sizing helper', () => {
+    afterEach(() => {
+        jest.resetModules();
+    });
+
+    test('keeps height close to display height when already in a safe range', () => {
+        const { computeDescriptionEditorHeightPx } = require(dynamicTabsModulePath);
+        expect(computeDescriptionEditorHeightPx(220, 900)).toBe(220);
+    });
+
+    test('applies a floor when display height is too small or missing', () => {
+        const { computeDescriptionEditorHeightPx } = require(dynamicTabsModulePath);
+        expect(computeDescriptionEditorHeightPx(20, 900)).toBe(72);
+        expect(computeDescriptionEditorHeightPx(undefined, 900)).toBe(72);
+    });
+
+    test('caps to viewport-aware maximum so action buttons remain visible', () => {
+        const { computeDescriptionEditorHeightPx } = require(dynamicTabsModulePath);
+        // viewport 500 -> cap ~= 500 - 120 => 380
+        expect(computeDescriptionEditorHeightPx(700, 500)).toBe(380);
+    });
+});

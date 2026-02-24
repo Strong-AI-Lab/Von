@@ -3531,15 +3531,29 @@ async function populateTypeDescription(conceptId, suffix) {
             // Store original content for cancel functionality
             const originalContent = display.innerHTML;
             const originalText = display.dataset.rawText || display.textContent || '';
+            const targetEditorHeightPx = computeDescriptionEditorHeightPx(
+                display.getBoundingClientRect()?.height,
+                (typeof window !== 'undefined' ? window.innerHeight : null)
+            );
 
             // Hide display and show textarea with current content
             display.classList.add('hidden');
             textarea.classList.remove('hidden');
             textarea.value = originalText;
+            // Keep edit height close to the pre-edit display, with viewport-safe clamping.
+            textarea.style.minHeight = `${targetEditorHeightPx}px`;
+            textarea.style.height = `${targetEditorHeightPx}px`;
             textarea.focus();
 
             // Show save/cancel actions
             editActions.classList.remove('hidden');
+            try {
+                requestAnimationFrame(() => {
+                    try {
+                        editActions.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+                    } catch (_) { /* no-op */ }
+                });
+            } catch (_) { /* no-op */ }
 
             // Disable edit button
             newEdit.disabled = true;
@@ -3557,6 +3571,11 @@ async function populateTypeDescription(conceptId, suffix) {
             // Hide textarea and show display
             textarea.classList.add('hidden');
             display.classList.remove('hidden');
+            editActions.classList.add('hidden');
+            newEdit.disabled = false;
+            textarea.style.height = '';
+            textarea.style.minHeight = '';
+            delete textarea.dataset.originalContent;
             statusEl.textContent = '';
         });
 
@@ -3593,6 +3612,9 @@ async function populateTypeDescription(conceptId, suffix) {
                 display.classList.remove('hidden');
                 editActions.classList.add('hidden');
                 newEdit.disabled = false;
+                textarea.style.height = '';
+                textarea.style.minHeight = '';
+                delete textarea.dataset.originalContent;
             } catch (e) {
                 statusEl.textContent = `Error: ${e.message}`;
             }
@@ -4498,6 +4520,42 @@ export function chooseDropdownEnterSelection(items, activeIndex, rawQuery) {
     }
 
     return candidates[0];
+}
+
+const DESCRIPTION_EDITOR_MIN_HEIGHT_PX = 72;
+const DESCRIPTION_EDITOR_MAX_HEIGHT_PX = 560;
+const DESCRIPTION_EDITOR_ACTIONS_BUFFER_PX = 120;
+
+/**
+ * Compute a practical editor height for description edit mode.
+ *
+ * The target should roughly match the pre-edit rendered description height while
+ * staying within the viewport so Save/Cancel controls remain visible.
+ */
+export function computeDescriptionEditorHeightPx(displayHeightPx, viewportHeightPx) {
+    const displayHeight = Number(displayHeightPx);
+    const viewportHeight = Number(viewportHeightPx);
+    const saneDisplayHeight = Number.isFinite(displayHeight) && displayHeight > 0
+        ? Math.round(displayHeight)
+        : DESCRIPTION_EDITOR_MIN_HEIGHT_PX;
+
+    let viewportCapPx = DESCRIPTION_EDITOR_MAX_HEIGHT_PX;
+    if (Number.isFinite(viewportHeight) && viewportHeight > 0) {
+        viewportCapPx = Math.max(
+            DESCRIPTION_EDITOR_MIN_HEIGHT_PX,
+            Math.round(viewportHeight - DESCRIPTION_EDITOR_ACTIONS_BUFFER_PX)
+        );
+    }
+
+    const maxAllowedHeightPx = Math.max(
+        DESCRIPTION_EDITOR_MIN_HEIGHT_PX,
+        Math.min(DESCRIPTION_EDITOR_MAX_HEIGHT_PX, viewportCapPx)
+    );
+
+    return Math.max(
+        DESCRIPTION_EDITOR_MIN_HEIGHT_PX,
+        Math.min(saneDisplayHeight, maxAllowedHeightPx)
+    );
 }
 
 // Helper: tailor a Type concept tab presentation
