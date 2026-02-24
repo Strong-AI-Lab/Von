@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import mimetypes
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Mapping
 
 
@@ -433,4 +437,273 @@ def fetch_file_copy_bytes(
         "success": True,
         "info": info,
         "data": bytes(data_bytes),
+    }
+
+
+def _normalise_optional_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _normalise_type_concept_ids(relationships: Mapping[str, Any]) -> list[str]:
+    raw = relationships.get("is_an_instance_of")
+    if isinstance(raw, list):
+        return [str(v) for v in raw if isinstance(v, str) and v.strip()]
+    if isinstance(raw, str) and raw.strip():
+        return [raw.strip()]
+    return []
+
+
+def build_file_copy_artifact_record(
+    *,
+    file_copy_concept_id: str | None = None,
+    concept_doc: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Build a canonical artefact record for a blob-backed file-copy concept.
+
+    This record is the shared metadata shape used across retrieval and indexing
+    paths so callers can pass one stable reference instead of ad-hoc field sets.
+    """
+
+    concept_id: str | None = None
+    if isinstance(file_copy_concept_id, str) and file_copy_concept_id.strip():
+        concept_id = file_copy_concept_id.strip()
+    elif isinstance(concept_doc, Mapping):
+        raw_concept_id = concept_doc.get("concept_id")
+        if isinstance(raw_concept_id, str) and raw_concept_id.strip():
+            concept_id = raw_concept_id.strip()
+    if concept_id is None:
+        return None
+
+    doc: Mapping[str, Any] | None = concept_doc
+    if not isinstance(doc, Mapping):
+        try:
+            from ..db.repositories.concepts_repository import ConceptsRepository
+
+            resolved = ConceptsRepository.find_one(
+                {"concept_id": concept_id},
+                {
+                    "concept_id": 1,
+                    "name": 1,
+                    "attributes": 1,
+                    "relationships.is_an_instance_of": 1,
+                    "created_at": 1,
+                    "updated_at": 1,
+                },
+            )
+        except Exception:
+            resolved = None
+        if not isinstance(resolved, Mapping):
+            return None
+        doc = resolved
+
+    attributes_raw = doc.get("attributes")
+    attributes: Mapping[str, Any] = (
+        attributes_raw if isinstance(attributes_raw, Mapping) else {}
+    )
+    relationships_raw = doc.get("relationships")
+    relationships: Mapping[str, Any] = (
+        relationships_raw if isinstance(relationships_raw, Mapping) else {}
+    )
+
+    info = resolve_file_copy_blob_info(file_copy_concept_id=concept_id)
+    if info is None:
+        return None
+
+    original_filename = _normalise_optional_text(info.original_filename) or _normalise_optional_text(
+        doc.get("name")
+    )
+    source_system = (
+        _normalise_optional_text(attributes.get("source_system"))
+        or _normalise_optional_text(attributes.get("source"))
+    )
+    source_identifier = (
+        _normalise_optional_text(attributes.get("source_identifier"))
+        or _normalise_optional_text(attributes.get("original_identifier"))
+    )
+    source_uri = (
+        _normalise_optional_text(attributes.get("source_uri"))
+        or _normalise_optional_text(attributes.get("source_url"))
+    )
+    sha256 = _first_text_value(concept_id, "#V#has_sha256") or _normalise_optional_text(
+        attributes.get("sha256")
+    )
+    uploaded_at = _first_text_value(
+        concept_id, "#V#has_upload_timestamp"
+    ) or _normalise_optional_text(attributes.get("uploaded_at"))
+    ingested_at = _normalise_optional_text(attributes.get("ingested_at"))
+    created_at = _normalise_optional_text(doc.get("created_at"))
+    updated_at = _normalise_optional_text(doc.get("updated_at"))
+    type_concept_ids = _normalise_type_concept_ids(relationships)
+
+    return {
+        "artifact_id": concept_id,
+        "concept_id": concept_id,
+        "name": original_filename,
+        "content_type": _normalise_optional_text(info.content_type),
+        "size_bytes": info.size_bytes,
+        "sha256": sha256,
+        "blob": {
+            "backend": _normalise_optional_text(info.blob_backend),
+            "key": info.blob_key,
+            "uri": _normalise_optional_text(info.blob_uri),
+        },
+        "type_concept_ids": type_concept_ids,
+        "provenance": {
+            "source": source_system,
+            "source_identifier": source_identifier,
+            "source_uri": source_uri,
+            "uploaded_at": uploaded_at,
+            "ingested_at": ingested_at,
+            "created_at": created_at,
+            "updated_at": updated_at,
+        },
+    }
+
+
+def _slugify_concept_id_for_blob_key(concept_id: str) -> str:
+    cleaned = (concept_id or "").strip()
+    if cleaned.startswith("#V#"):
+        cleaned = cleaned[3:]
+    cleaned = cleaned.strip().lower()
+    cleaned = re.sub(r"[^a-z0-9]+", "_", cleaned).strip("_")
+    return cleaned or "unknown"
+
+
+def import_local_file_copy(
+    *,
+    local_path: str,
+    user_concept_id: str,
+    type_concept_id: str = "#V#computer_file_copy",
+    allowed_root: str | Path | None = None,
+    source_system: str = "filesystem_import",
+    source_identifier: str | None = None,
+    source_uri: str | None = None,
+) -> dict[str, Any]:
+    """Import a local file into blob storage and register a file-copy concept."""
+
+    if not isinstance(local_path, str) or not local_path.strip():
+        return {"success": False, "error": "missing_local_path"}
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        return {"success": False, "error": "missing_user_concept_id"}
+
+    path = Path(local_path.strip()).expanduser()
+    try:
+        resolved = path.resolve(strict=True)
+    except Exception:
+        return {"success": False, "error": "local_path_not_found", "local_path": local_path}
+    if not resolved.is_file():
+        return {"success": False, "error": "local_path_not_file", "local_path": str(resolved)}
+
+    if allowed_root is not None:
+        try:
+            root = Path(allowed_root).expanduser().resolve(strict=True)
+        except Exception:
+            return {"success": False, "error": "invalid_allowed_root"}
+        if resolved != root and root not in resolved.parents:
+            return {
+                "success": False,
+                "error": "path_outside_allowed_root",
+                "local_path": str(resolved),
+                "allowed_root": str(root),
+            }
+
+    try:
+        data = resolved.read_bytes()
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": "local_file_read_failed",
+            "message": str(exc),
+            "local_path": str(resolved),
+        }
+    if not data:
+        return {"success": False, "error": "empty_file", "local_path": str(resolved)}
+
+    sha256 = hashlib.sha256(data).hexdigest()
+    size_bytes = len(data)
+    original_filename = resolved.name
+    content_type, _encoding = mimetypes.guess_type(original_filename)
+    user_slug = _slugify_concept_id_for_blob_key(user_concept_id)
+    safe_filename = re.sub(r"[^A-Za-z0-9._-]+", "_", original_filename).strip("._")
+    safe_filename = safe_filename or "file.bin"
+    uploaded_at = _now_utc_iso()
+
+    try:
+        resolved_uri = resolved.as_uri()
+    except Exception:
+        resolved_uri = None
+
+    metadata: dict[str, Any] = {
+        "original_filename": original_filename,
+        "user_concept_id": user_concept_id.strip(),
+        "uploaded_at": uploaded_at,
+        "source_system": source_system,
+        "source_identifier": source_identifier or str(resolved),
+        "source_uri": source_uri or resolved_uri,
+        "ingested_at": uploaded_at,
+    }
+
+    blob_key = f"imports/{user_slug}/{sha256}/{safe_filename}"
+    try:
+        from .blob_uploads import BlobUploadError, put_bytes_durable
+
+        stored = put_bytes_durable(
+            key=blob_key,
+            data=data,
+            content_type=content_type,
+            metadata=metadata,
+            sha256=sha256,
+            size_bytes=size_bytes,
+        )
+    except BlobUploadError as exc:
+        return {
+            "success": False,
+            "error": "blob_store_upload_failed",
+            "message": str(exc),
+            "local_path": str(resolved),
+            "blob_key": blob_key,
+        }
+
+    try:
+        created = create_computer_file_copy_instance(
+            type_concept_id=type_concept_id,
+            user_concept_id=user_concept_id,
+            name=original_filename,
+            sha256=sha256,
+            size_bytes=size_bytes,
+            content_type=content_type,
+            blob_backend=stored.ref.backend,
+            blob_key=stored.ref.key,
+            blob_uri=stored.ref.uri,
+            metadata=metadata,
+        )
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": "file_copy_register_failed",
+            "message": str(exc),
+            "local_path": str(resolved),
+            "blob_key": blob_key,
+        }
+
+    artifact_record = build_file_copy_artifact_record(file_copy_concept_id=created.concept_id)
+
+    return {
+        "success": True,
+        "concept_id": created.concept_id,
+        "type_concept_id": created.type_concept_id,
+        "uploaded_at": created.uploaded_at,
+        "local_path": str(resolved),
+        "storage": {
+            "backend": stored.ref.backend,
+            "key": stored.ref.key,
+            "uri": stored.ref.uri,
+            "content_type": stored.ref.content_type,
+            "size_bytes": stored.ref.size_bytes,
+            "metadata": stored.ref.metadata,
+        },
+        "artifact_record": artifact_record,
     }
