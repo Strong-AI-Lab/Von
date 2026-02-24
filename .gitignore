@@ -67,7 +67,6 @@ venv.bak/
 !.vscode/settings.json
 !.vscode/.env.tests
 !.vscode/scripts/**
-!__pycache__/
 .pytest_cache
 vs_BuildTools.exe
 install_output.txt
