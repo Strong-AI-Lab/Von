@@ -52,6 +52,47 @@ def test_jira_hygiene_discover_and_propose_through_gateway(monkeypatch) -> None:
                     },
                 ]
             }
+        if 'statusCategory = "In Progress"' in jql:
+            return {
+                "issues": [
+                    {
+                        "key": "JVNAUTOSCI-9103",
+                        "fields": {
+                            "summary": "Deployment hardening sweep complete",
+                            "issuetype": {"name": "Task"},
+                            "status": {
+                                "name": "In Progress",
+                                "statusCategory": {"name": "In Progress"},
+                            },
+                            "updated": "2026-02-01T00:00:00.000+0000",
+                            "subtasks": [
+                                {
+                                    "fields": {
+                                        "status": {
+                                            "name": "Done",
+                                            "statusCategory": {"name": "Done"},
+                                        }
+                                    }
+                                }
+                            ],
+                        },
+                    },
+                    {
+                        "key": "JVNAUTOSCI-9104",
+                        "fields": {
+                            "summary": "Old in-progress item with no active child scope",
+                            "issuetype": {"name": "Task"},
+                            "status": {
+                                "name": "In Progress",
+                                "statusCategory": {"name": "In Progress"},
+                            },
+                            "updated": "2025-01-01T00:00:00.000+0000",
+                            "subtasks": [],
+                            "issuelinks": [],
+                        },
+                    },
+                ]
+            }
         return {
             "issues": [
                 {
@@ -100,6 +141,10 @@ def test_jira_hygiene_discover_and_propose_through_gateway(monkeypatch) -> None:
     assert discover.get("discovery_counts", {}).get("epics") == 2
     assert discover.get("discovery_counts", {}).get("orphans") == 2
     assert discover.get("discovery_counts", {}).get("cross_cutting") == 1
+    assert discover.get("discovery_counts", {}).get("in_progress_candidates") == 2
+    in_progress_summary = discover.get("in_progress_review_summary", {})
+    assert in_progress_summary.get("candidate_done") == 1
+    assert in_progress_summary.get("candidate_todo") == 1
 
     proposal = gateway.invoke(
         "jira_hygiene_propose",
@@ -107,6 +152,7 @@ def test_jira_hygiene_discover_and_propose_through_gateway(monkeypatch) -> None:
             "epic_catalogue": discover.get("epic_catalogue"),
             "orphan_candidates": discover.get("orphan_candidates"),
             "cross_cutting_candidates": discover.get("cross_cutting_candidates"),
+            "in_progress_candidates": discover.get("in_progress_candidates"),
             "batch_size": 5,
         },
     ).payload
@@ -114,6 +160,9 @@ def test_jira_hygiene_discover_and_propose_through_gateway(monkeypatch) -> None:
     assert proposal.get("proposal_summary", {}).get("ready_to_execute_count", 0) >= 1
     assert proposal.get("execution_plan", {}).get("batch_size") == 5
     assert isinstance(proposal.get("ready_to_execute"), list)
+    reasons = {str(item.get("reason")) for item in proposal.get("needs_decision", [])}
+    assert "in_progress_review_candidate_done" in reasons
+    assert "in_progress_review_candidate_todo" in reasons
 
 
 def test_jira_hygiene_approval_and_execute_retries_through_gateway(monkeypatch) -> None:

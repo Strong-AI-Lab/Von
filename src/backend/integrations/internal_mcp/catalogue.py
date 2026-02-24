@@ -8173,12 +8173,14 @@ def _jira_hygiene_discover_input_schema() -> Schema:
             "max_issues": (int, str, type(None)),
             "max_epics": (int, str, type(None)),
             "include_cross_cutting": (bool, str, type(None)),
+            "include_in_progress_candidates": (bool, str, type(None)),
             "namespace": (str, type(None)),
         },
         allow_unknown=True,
         description=(
             "jira_hygiene_discover input: optional project_key/candidate_epic_keys "
-            "and paging controls (max_issues, max_epics)."
+            "and paging controls (max_issues, max_epics), plus optional "
+            "include_in_progress_candidates review extraction."
         ),
     )
 
@@ -8190,13 +8192,15 @@ def _jira_hygiene_propose_input_schema() -> Schema:
             "epic_catalogue": (list, type(None)),
             "orphan_candidates": (list, type(None)),
             "cross_cutting_candidates": (list, type(None)),
+            "in_progress_candidates": (list, type(None)),
             "batch_size": (int, str, type(None)),
             "namespace": (str, type(None)),
         },
         allow_unknown=True,
         description=(
             "jira_hygiene_propose input: discovery payload fields (epic_catalogue, "
-            "orphan_candidates, cross_cutting_candidates) and optional batch_size."
+            "orphan_candidates, cross_cutting_candidates, in_progress_candidates) "
+            "and optional batch_size."
         ),
     )
 
@@ -11134,6 +11138,10 @@ def _jira_hygiene_discover(**kwargs):
             kwargs.get("include_cross_cutting"),
             default=True,
         ),
+        include_in_progress_candidates=_coerce_bool_input(
+            kwargs.get("include_in_progress_candidates"),
+            default=True,
+        ),
     )
 
 
@@ -11151,6 +11159,8 @@ def _jira_hygiene_propose(**kwargs):
         or discovery_payload.get("orphan_candidates"),
         cross_cutting_candidates=kwargs.get("cross_cutting_candidates")
         or discovery_payload.get("cross_cutting_candidates"),
+        in_progress_candidates=kwargs.get("in_progress_candidates")
+        or discovery_payload.get("in_progress_candidates"),
         batch_size=kwargs.get("batch_size"),
     )
 

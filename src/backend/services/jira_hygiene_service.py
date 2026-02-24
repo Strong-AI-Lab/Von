@@ -40,9 +40,170 @@ _TRANSIENT_ERROR_MARKERS: tuple[str, ...] = (
     "504",
 )
 
+_DONE_STATUS_NAMES: set[str] = {
+    "done",
+    "closed",
+    "resolved",
+    "superseded",
+    "won't fix",
+    "wont fix",
+}
+
+_IN_PROGRESS_STALE_DAYS = 14
+
+_IN_PROGRESS_RECOMMENDATION_CANDIDATE_DONE = "candidate_done"
+_IN_PROGRESS_RECOMMENDATION_CANDIDATE_TODO = "candidate_todo"
+_IN_PROGRESS_RECOMMENDATION_KEEP = "keep_in_progress"
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_jira_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    try:
+        # Jira often returns offsets like +1300, but datetime.fromisoformat expects +13:00.
+        if len(text) > 5 and (text[-5] in {"+", "-"}) and text[-3] != ":":
+            text = f"{text[:-2]}:{text[-2:]}"
+        parsed = datetime.fromisoformat(text)
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _status_category_name(raw_status: Any) -> str | None:
+    if not isinstance(raw_status, Mapping):
+        return None
+    raw_category = raw_status.get("statusCategory")
+    if isinstance(raw_category, Mapping):
+        name = raw_category.get("name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    return None
+
+
+def _status_is_done(raw_status: Any) -> bool:
+    if not isinstance(raw_status, Mapping):
+        if isinstance(raw_status, str):
+            return raw_status.strip().lower() in _DONE_STATUS_NAMES
+        return False
+    category_name = _status_category_name(raw_status)
+    if isinstance(category_name, str) and category_name.strip().lower() == "done":
+        return True
+    status_name = raw_status.get("name")
+    if isinstance(status_name, str) and status_name.strip():
+        return status_name.strip().lower() in _DONE_STATUS_NAMES
+    return False
+
+
+def _extract_subtask_progress(fields: Mapping[str, Any]) -> tuple[int, int, int]:
+    raw_subtasks = fields.get("subtasks")
+    if not isinstance(raw_subtasks, list):
+        return (0, 0, 0)
+    total = 0
+    done = 0
+    for subtask in raw_subtasks:
+        if not isinstance(subtask, Mapping):
+            continue
+        total += 1
+        subtask_fields = _extract_issue_fields(subtask)
+        if _status_is_done(subtask_fields.get("status")):
+            done += 1
+    open_count = max(0, total - done)
+    return (total, done, open_count)
+
+
+def _extract_linked_issue_progress(fields: Mapping[str, Any]) -> tuple[int, int]:
+    raw_links = fields.get("issuelinks")
+    if not isinstance(raw_links, list):
+        return (0, 0)
+
+    done_count = 0
+    not_done_count = 0
+    for link in raw_links:
+        if not isinstance(link, Mapping):
+            continue
+        for side in ("inwardIssue", "outwardIssue"):
+            linked_issue = link.get(side)
+            if not isinstance(linked_issue, Mapping):
+                continue
+            linked_fields = _extract_issue_fields(linked_issue)
+            raw_status = linked_fields.get("status")
+            if not raw_status:
+                continue
+            if _status_is_done(raw_status):
+                done_count += 1
+            else:
+                not_done_count += 1
+    return (done_count, not_done_count)
+
+
+def _days_since(updated_at: Any, *, now_utc: datetime) -> int | None:
+    parsed = _parse_jira_datetime(updated_at)
+    if parsed is None:
+        return None
+    return max(0, int((now_utc - parsed.astimezone(timezone.utc)).days))
+
+
+def _build_in_progress_review_record(
+    issue_doc: Mapping[str, Any],
+    *,
+    now_utc: datetime,
+) -> dict[str, Any] | None:
+    issue_record = _extract_issue_record(issue_doc)
+    if issue_record is None:
+        return None
+
+    issue_type_name = issue_record.get("issue_type")
+    issue_type_normalised = str(issue_type_name or "").strip().lower()
+    if issue_type_normalised == "epic" or _is_subtask_issue(issue_type_name):
+        return None
+
+    fields = _extract_issue_fields(issue_doc)
+    if not isinstance(fields.get("status"), Mapping):
+        return None
+
+    subtasks_total, subtasks_done, subtasks_open = _extract_subtask_progress(fields)
+    linked_done_count, linked_not_done_count = _extract_linked_issue_progress(fields)
+    days_since_update = _days_since(fields.get("updated"), now_utc=now_utc)
+
+    recommended_action = _IN_PROGRESS_RECOMMENDATION_KEEP
+    reason = "active_scope_detected"
+
+    if subtasks_total > 0 and subtasks_open == 0:
+        recommended_action = _IN_PROGRESS_RECOMMENDATION_CANDIDATE_DONE
+        reason = "all_subtasks_done"
+    elif (
+        subtasks_total == 0
+        and linked_not_done_count == 0
+        and days_since_update is not None
+        and days_since_update >= _IN_PROGRESS_STALE_DAYS
+    ):
+        recommended_action = _IN_PROGRESS_RECOMMENDATION_CANDIDATE_TODO
+        reason = "stale_without_active_children"
+
+    return {
+        "issue_key": issue_record["issue_key"],
+        "summary": issue_record.get("summary"),
+        "issue_type": issue_record.get("issue_type"),
+        "status": issue_record.get("status"),
+        "parent_issue_key": issue_record.get("parent_issue_key"),
+        "updated": fields.get("updated"),
+        "status_category_changed": fields.get("statuscategorychangedate"),
+        "days_since_update": days_since_update,
+        "subtasks_total": subtasks_total,
+        "subtasks_done": subtasks_done,
+        "subtasks_open": subtasks_open,
+        "linked_done_count": linked_done_count,
+        "linked_not_done_count": linked_not_done_count,
+        "recommended_action": recommended_action,
+        "recommended_action_reason": reason,
+    }
 
 
 def _coerce_int(
@@ -334,6 +495,7 @@ def discover_jira_hygiene(
     max_issues: int | None = None,
     max_epics: int | None = None,
     include_cross_cutting: bool = True,
+    include_in_progress_candidates: bool = True,
 ) -> dict[str, Any]:
     """Discover epic catalogue and Jira hygiene candidates."""
     project_key_norm = str(project_key or _DEFAULT_PROJECT_KEY).strip().upper()
@@ -360,6 +522,12 @@ def discover_jira_hygiene(
         "AND issuetype != Epic "
         "AND issuetype != Sub-task "
         "ORDER BY created DESC"
+    )
+    in_progress_jql = (
+        f"project = {project_key_norm} "
+        'AND statusCategory = "In Progress" '
+        "AND issuetype != Epic "
+        "ORDER BY updated DESC"
     )
 
     epic_response = search_issues(
@@ -399,9 +567,43 @@ def discover_jira_hygiene(
             "error_details": dict(candidate_response),
         }
 
+    in_progress_response: Mapping[str, Any] | None = None
+    if include_in_progress_candidates:
+        in_progress_response = search_issues(
+            jql=in_progress_jql,
+            max_results=issue_limit,
+            fields=[
+                "summary",
+                "status",
+                "statuscategorychangedate",
+                "updated",
+                "issuetype",
+                "parent",
+                "subtasks",
+                "issuelinks",
+                "customfield_10014",
+                "customfield_10008",
+                "epic",
+                "epic_link",
+                "epicLink",
+            ],
+        )
+        if (
+            isinstance(in_progress_response, Mapping)
+            and in_progress_response.get("success") is False
+        ):
+            return {
+                "success": False,
+                "error": "in_progress_discovery_failed",
+                "error_details": dict(in_progress_response),
+            }
+
     raw_epics = _extract_issues(epic_response if isinstance(epic_response, Mapping) else {})
     raw_candidates = _extract_issues(
         candidate_response if isinstance(candidate_response, Mapping) else {}
+    )
+    raw_in_progress = _extract_issues(
+        in_progress_response if isinstance(in_progress_response, Mapping) else {}
     )
 
     epic_catalogue: list[dict[str, Any]] = []
@@ -445,23 +647,49 @@ def discover_jira_hygiene(
         if include_cross_cutting and issue_record.get("current_epic_key"):
             cross_cutting_candidates.append(issue_record)
 
+    in_progress_candidates: list[dict[str, Any]] = []
+    if include_in_progress_candidates:
+        now_utc = datetime.now(timezone.utc)
+        for raw_issue in raw_in_progress:
+            review_record = _build_in_progress_review_record(raw_issue, now_utc=now_utc)
+            if review_record is None:
+                continue
+            in_progress_candidates.append(review_record)
+
+    in_progress_review_summary = {
+        _IN_PROGRESS_RECOMMENDATION_CANDIDATE_DONE: 0,
+        _IN_PROGRESS_RECOMMENDATION_CANDIDATE_TODO: 0,
+        _IN_PROGRESS_RECOMMENDATION_KEEP: 0,
+    }
+    for item in in_progress_candidates:
+        recommendation = str(item.get("recommended_action") or "").strip().lower()
+        if recommendation in in_progress_review_summary:
+            in_progress_review_summary[recommendation] += 1
+
     return {
         "success": True,
         "project_key": project_key_norm,
         "epic_catalogue": epic_catalogue,
         "orphan_candidates": orphan_candidates,
         "cross_cutting_candidates": cross_cutting_candidates,
+        "in_progress_candidates": in_progress_candidates,
+        "in_progress_review_summary": in_progress_review_summary,
         "discovery_counts": {
             "epics": len(epic_catalogue),
             "orphans": len(orphan_candidates),
             "cross_cutting": len(cross_cutting_candidates),
+            "in_progress_candidates": len(in_progress_candidates),
             "candidate_issues_scanned": len(raw_candidates),
         },
         "missing_requested_epic_keys": missing_requested_epic_keys,
         "discovery_jql": {
             "epics": epic_jql,
             "candidates": candidate_jql,
+            "in_progress_candidates": (
+                in_progress_jql if include_in_progress_candidates else None
+            ),
         },
+        "include_in_progress_candidates": bool(include_in_progress_candidates),
         "discovered_at_utc": _utc_now_iso(),
     }
 
@@ -471,6 +699,7 @@ def propose_jira_hygiene_plan(
     epic_catalogue: Sequence[Mapping[str, Any]] | None,
     orphan_candidates: Sequence[Mapping[str, Any]] | None,
     cross_cutting_candidates: Sequence[Mapping[str, Any]] | None = None,
+    in_progress_candidates: Sequence[Mapping[str, Any]] | None = None,
     batch_size: int | None = None,
 ) -> dict[str, Any]:
     """Build a deterministic dry-run proposal for Jira hygiene actions."""
@@ -479,11 +708,19 @@ def propose_jira_hygiene_plan(
     cross_cutting = [
         dict(item) for item in (cross_cutting_candidates or []) if isinstance(item, Mapping)
     ]
+    in_progress = [
+        dict(item) for item in (in_progress_candidates or []) if isinstance(item, Mapping)
+    ]
 
     ready_to_execute: list[dict[str, Any]] = []
     needs_decision: list[dict[str, Any]] = []
     no_action: list[dict[str, Any]] = []
     grouped_counts: dict[str, dict[str, int]] = {}
+    in_progress_review_counts = {
+        _IN_PROGRESS_RECOMMENDATION_CANDIDATE_DONE: 0,
+        _IN_PROGRESS_RECOMMENDATION_CANDIDATE_TODO: 0,
+        _IN_PROGRESS_RECOMMENDATION_KEEP: 0,
+    }
 
     for issue in orphans:
         issue_key = _normalise_issue_key(issue.get("issue_key"))
@@ -585,6 +822,43 @@ def propose_jira_hygiene_plan(
         )
         bucket["add_comment"] += 1
 
+    for issue in in_progress:
+        issue_key = _normalise_issue_key(issue.get("issue_key"))
+        if not issue_key:
+            continue
+        recommended_action = str(issue.get("recommended_action") or "").strip().lower()
+        if recommended_action not in in_progress_review_counts:
+            recommended_action = _IN_PROGRESS_RECOMMENDATION_KEEP
+        in_progress_review_counts[recommended_action] += 1
+
+        if recommended_action in {
+            _IN_PROGRESS_RECOMMENDATION_CANDIDATE_DONE,
+            _IN_PROGRESS_RECOMMENDATION_CANDIDATE_TODO,
+        }:
+            needs_decision.append(
+                {
+                    "issue_key": issue_key,
+                    "summary": issue.get("summary"),
+                    "reason": f"in_progress_review_{recommended_action}",
+                    "recommended_action": recommended_action,
+                    "recommended_action_reason": issue.get("recommended_action_reason"),
+                    "days_since_update": issue.get("days_since_update"),
+                    "subtasks_total": issue.get("subtasks_total"),
+                    "subtasks_done": issue.get("subtasks_done"),
+                    "subtasks_open": issue.get("subtasks_open"),
+                    "linked_done_count": issue.get("linked_done_count"),
+                    "linked_not_done_count": issue.get("linked_not_done_count"),
+                }
+            )
+        else:
+            no_action.append(
+                {
+                    "issue_key": issue_key,
+                    "summary": issue.get("summary"),
+                    "reason": "in_progress_review_keep",
+                }
+            )
+
     proposed_batch_size = _coerce_int(
         batch_size,
         default=_DEFAULT_BATCH_SIZE,
@@ -602,6 +876,7 @@ def propose_jira_hygiene_plan(
         "needs_decision_count": len(needs_decision),
         "no_action_count": len(no_action),
         "grouped_counts_by_epic": grouped_counts,
+        "in_progress_review_counts": in_progress_review_counts,
     }
 
     return {
