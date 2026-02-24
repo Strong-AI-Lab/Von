@@ -5,9 +5,10 @@
  * Tasks are stored as Vontology concepts and accessed via REST API.
  */
 
-import { deleteJson, getJson, patchJson, postJson } from '../apiService.js';
+import { deleteJson, getJson, patchJson, postJson, getUserContext } from '../apiService.js';
 import { activateTab } from '../tabNavigation.js';
 import { showToast } from '../utils/toast.js';
+import { selectBestNameForContext } from '../utils/nameSelection.js';
 
 // Task panel state
 let _panelEl = null;
@@ -23,6 +24,13 @@ let _queryFilter = '';
 let _viewMode = 'board';
 let _isGlobalTabMode = false;  // True when rendering into global tasks tab
 let _taskDetailState = {};  // taskId -> detail panel state
+let _taskGroupStorageKey = null;
+let _selectedTaskGroupIds = new Set();  // Selected ontology-backed task groups.
+let _taskGroupOptions = [];
+const _taskGroupDisplayNameCache = new Map();
+const _taskGroupNameFetchInFlight = new Set();
+
+const TASK_GROUP_STORAGE_KEY_PREFIX = 'von_task_group_filter_v1';
 
 // Constants
 const TASK_STATUS_OPTIONS = [
@@ -135,6 +143,8 @@ export function initializeTaskPanel() {
         console.warn('[taskPanel] Panel elements not found in DOM');
         return;
     }
+    loadTaskGroupSelectionFromStorage();
+    renderTaskGroupFilterControls();
 
     // Set up close button
     const closeBtn = document.getElementById('closeTaskPanel');
@@ -195,6 +205,7 @@ export function initializeTaskPanel() {
  */
 export function showTaskPanel() {
     if (_panelEl) {
+        loadTaskGroupSelectionFromStorage();
         _isGlobalTabMode = false;
         _taskListEl = document.getElementById('taskList') || _taskListEl;
         _panelEl.classList.remove('hidden');
@@ -232,6 +243,7 @@ export function toggleTaskPanel() {
  * Renders into the globalTasksContainer instead of the overlay panel.
  */
 export async function showGlobalTasks() {
+    loadTaskGroupSelectionFromStorage();
     _currentSessionId = null;  // Clear session filter
     _isGlobalTabMode = true;
 
@@ -285,6 +297,7 @@ function renderGlobalTasksTabContent() {
                 <button id="refreshGlobalTasksBtn" class="task-refresh-btn" title="Refresh tasks">🔄</button>
             </div>
         </div>
+        <div id="globalTaskGroupFilterRow" class="task-group-filter-row hidden" aria-label="Task groups"></div>
         <div class="global-tasks-create">
             <input type="text" id="globalNewTaskTitle" class="task-input" placeholder="Task title...">
             <textarea id="globalNewTaskDescription" class="task-textarea" placeholder="Task description..." rows="2"></textarea>
@@ -350,6 +363,7 @@ function renderGlobalTasksTabContent() {
 
     // Update the task list element reference for global mode
     _taskListEl = _globalTasksContainer.querySelector('#globalTaskList');
+    renderTaskGroupFilterControls();
 }
 
 /**
@@ -423,6 +437,7 @@ export function getTaskCount() {
 export async function loadTasks(sessionId = null) {
     if (_isLoading) return;
 
+    loadTaskGroupSelectionFromStorage();
     _isLoading = true;
     updateLoadingState(true);
 
@@ -447,6 +462,7 @@ export async function loadTasks(sessionId = null) {
         const response = await getJson(url);
         _tasks = response.tasks || [];
         pruneTaskDetailState();
+        refreshTaskGroupOptions();
         renderTaskList();
         updateTaskCountBadge();
 
@@ -465,6 +481,7 @@ export async function loadTasks(sessionId = null) {
 export async function loadMyTasks(statusFilter = null) {
     if (_isLoading) return;
 
+    loadTaskGroupSelectionFromStorage();
     _isLoading = true;
     updateLoadingState(true);
 
@@ -484,6 +501,7 @@ export async function loadMyTasks(statusFilter = null) {
         const response = await getJson(url);
         _tasks = response.tasks || [];
         pruneTaskDetailState();
+        refreshTaskGroupOptions();
         renderTaskList();
         updateTaskCountBadge();
 
@@ -529,15 +547,22 @@ function renderTaskList() {
                 return false;
             }
         }
+        if (_selectedTaskGroupIds.size > 0) {
+            const taskGroupId = deriveTaskGroupConceptId(task);
+            if (!taskGroupId || !_selectedTaskGroupIds.has(taskGroupId)) {
+                return false;
+            }
+        }
         return true;
     });
 
     if (filteredTasks.length === 0) {
+        const hasGroupFilter = _selectedTaskGroupIds.size > 0;
         _taskListEl.innerHTML = `
             <div class="task-empty-state">
                 <span class="task-empty-icon">📋</span>
                 <p>No tasks match the active filters</p>
-                <p class="task-empty-hint">Create a task using the form above</p>
+                <p class="task-empty-hint">${hasGroupFilter ? 'Adjust selected task groups to broaden the list' : 'Create a task using the form above'}</p>
             </div>
         `;
         return;
@@ -630,6 +655,235 @@ function normaliseTaskConceptId(value) {
     const trimmed = value.trim();
     if (!trimmed.startsWith('#V#') || trimmed.length <= 3) return '';
     return trimmed;
+}
+
+function deriveTaskGroupConceptId(task) {
+    if (!task || typeof task !== 'object') return '';
+    const candidates = [
+        task.task_group_concept_id,
+        task.group_concept_id,
+        task.parent_task_concept_id,
+        task.epic_task_concept_id,
+    ];
+    for (const candidate of candidates) {
+        const normalised = normaliseTaskConceptId(candidate);
+        if (normalised) {
+            return normalised;
+        }
+    }
+    return '';
+}
+
+function deriveGroupLabelFromConceptId(conceptId) {
+    const normalised = normaliseTaskConceptId(conceptId);
+    if (!normalised) return 'Unknown group';
+    const slug = normalised.slice(3);
+    const label = slug
+        .split(/[_-]+/)
+        .map((part) => part.trim())
+        .filter(Boolean)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(' ');
+    return label || normalised;
+}
+
+function getTaskGroupStorageKey() {
+    let userId = 'anonymous';
+    let orgId = 'none';
+    try {
+        const ctx = getUserContext ? getUserContext() : {};
+        const normalisedUser = normaliseTaskConceptId(ctx?.user_id);
+        const normalisedOrg = normaliseTaskConceptId(ctx?.org_id);
+        if (normalisedUser) userId = normalisedUser;
+        if (normalisedOrg) orgId = normalisedOrg;
+    } catch (_) {
+        // Ignore local/session storage lookup errors.
+    }
+    return `${TASK_GROUP_STORAGE_KEY_PREFIX}:${userId}:${orgId}`;
+}
+
+function loadTaskGroupSelectionFromStorage() {
+    const nextStorageKey = getTaskGroupStorageKey();
+    if (_taskGroupStorageKey === nextStorageKey) return;
+    _taskGroupStorageKey = nextStorageKey;
+    _selectedTaskGroupIds = new Set();
+    try {
+        const raw = localStorage.getItem(_taskGroupStorageKey);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return;
+        parsed.forEach((item) => {
+            const normalised = normaliseTaskConceptId(item);
+            if (normalised) {
+                _selectedTaskGroupIds.add(normalised);
+            }
+        });
+    } catch (err) {
+        console.warn('[taskPanel] Failed to read task group filter selection:', err);
+    }
+}
+
+function persistTaskGroupSelectionToStorage() {
+    if (!_taskGroupStorageKey) {
+        _taskGroupStorageKey = getTaskGroupStorageKey();
+    }
+    try {
+        localStorage.setItem(
+            _taskGroupStorageKey,
+            JSON.stringify([..._selectedTaskGroupIds]),
+        );
+    } catch (err) {
+        console.warn('[taskPanel] Failed to persist task group filter selection:', err);
+    }
+}
+
+function compareTaskGroupOptions(left, right) {
+    const leftName = String(left?.displayName || '');
+    const rightName = String(right?.displayName || '');
+    return leftName.localeCompare(rightName, undefined, { sensitivity: 'base' });
+}
+
+function resolveTaskGroupDisplayName(conceptId) {
+    return (
+        _taskGroupDisplayNameCache.get(conceptId)
+        || deriveGroupLabelFromConceptId(conceptId)
+    );
+}
+
+function renderTaskGroupFilterControls() {
+    const rows = [
+        document.getElementById('taskGroupFilterRow'),
+        _globalTasksContainer?.querySelector('#globalTaskGroupFilterRow'),
+    ].filter(Boolean);
+
+    rows.forEach((row) => {
+        if (!row) return;
+        if (_taskGroupOptions.length === 0) {
+            row.classList.add('hidden');
+            row.innerHTML = '';
+            return;
+        }
+
+        row.classList.remove('hidden');
+        const allActive = _selectedTaskGroupIds.size === 0;
+        const chips = _taskGroupOptions.map((group) => {
+            const isActive = _selectedTaskGroupIds.has(group.conceptId);
+            return `
+                <button type="button"
+                    class="task-group-filter-btn ${isActive ? 'active' : ''}"
+                    data-group-id="${escapeHtml(group.conceptId)}"
+                    aria-pressed="${isActive ? 'true' : 'false'}"
+                    title="Toggle task group ${escapeHtml(group.displayName)}">
+                    ${escapeHtml(group.displayName)}
+                    <span class="task-group-filter-count">${group.count}</span>
+                </button>
+            `;
+        }).join('');
+
+        row.innerHTML = `
+            <span class="task-group-filter-label">Groups:</span>
+            <button type="button"
+                class="task-group-filter-btn task-group-filter-all ${allActive ? 'active' : ''}"
+                data-group-id=""
+                aria-pressed="${allActive ? 'true' : 'false'}"
+                title="Show all task groups">
+                All groups
+            </button>
+            ${chips}
+        `;
+
+        row.querySelectorAll('.task-group-filter-btn').forEach((btn) => {
+            btn.addEventListener('click', (event) => {
+                const groupId = normaliseTaskConceptId(
+                    event.currentTarget?.dataset?.groupId || '',
+                );
+                if (!groupId) {
+                    _selectedTaskGroupIds.clear();
+                } else if (_selectedTaskGroupIds.has(groupId)) {
+                    _selectedTaskGroupIds.delete(groupId);
+                } else {
+                    _selectedTaskGroupIds.add(groupId);
+                }
+                persistTaskGroupSelectionToStorage();
+                renderTaskGroupFilterControls();
+                renderTaskList();
+            });
+        });
+    });
+}
+
+async function ensureTaskGroupDisplayName(conceptId) {
+    const normalised = normaliseTaskConceptId(conceptId);
+    if (!normalised) return;
+    if (_taskGroupDisplayNameCache.has(normalised)) return;
+    if (_taskGroupNameFetchInFlight.has(normalised)) return;
+
+    _taskGroupNameFetchInFlight.add(normalised);
+    try {
+        const encoded = encodeURIComponent(normalised);
+        const payload = await getJson(
+            `/vontology/api/vontology/node_content?identifier=${encoded}&raw_only=1&soft=1`,
+        );
+        const fromNames = selectBestNameForContext(payload?.raw_doc?.names);
+        const displayName = (
+            (typeof fromNames === 'string' && fromNames.trim())
+            || (typeof payload?.display_name === 'string' && payload.display_name.trim())
+            || deriveGroupLabelFromConceptId(normalised)
+        );
+        _taskGroupDisplayNameCache.set(normalised, displayName);
+        let didUpdate = false;
+        _taskGroupOptions = _taskGroupOptions.map((group) => {
+            if (group.conceptId !== normalised) return group;
+            if (group.displayName === displayName) return group;
+            didUpdate = true;
+            return {
+                ...group,
+                displayName,
+            };
+        });
+        if (didUpdate) {
+            _taskGroupOptions.sort(compareTaskGroupOptions);
+            renderTaskGroupFilterControls();
+        }
+    } catch (err) {
+        // Keep fallback labels when ontology lookups fail.
+        console.debug('[taskPanel] Failed to resolve task group name:', normalised, err);
+    } finally {
+        _taskGroupNameFetchInFlight.delete(normalised);
+    }
+}
+
+function refreshTaskGroupOptions() {
+    const counts = new Map();
+    _tasks.forEach((task) => {
+        const groupId = deriveTaskGroupConceptId(task);
+        if (!groupId) return;
+        counts.set(groupId, (counts.get(groupId) || 0) + 1);
+    });
+
+    _taskGroupOptions = Array.from(counts.entries()).map(([conceptId, count]) => ({
+        conceptId,
+        count,
+        displayName: resolveTaskGroupDisplayName(conceptId),
+    }));
+    _taskGroupOptions.sort(compareTaskGroupOptions);
+
+    const availableGroupIds = new Set(_taskGroupOptions.map((group) => group.conceptId));
+    let didPruneSelection = false;
+    [..._selectedTaskGroupIds].forEach((groupId) => {
+        if (!availableGroupIds.has(groupId)) {
+            _selectedTaskGroupIds.delete(groupId);
+            didPruneSelection = true;
+        }
+    });
+    if (didPruneSelection) {
+        persistTaskGroupSelectionToStorage();
+    }
+
+    renderTaskGroupFilterControls();
+    _taskGroupOptions.forEach((group) => {
+        void ensureTaskGroupDisplayName(group.conceptId);
+    });
 }
 
 function deriveConceptNameFromId(conceptId, fallbackName = '') {
@@ -1046,6 +1300,7 @@ function replaceCachedTask(updatedTask) {
     const existingIndex = _tasks.findIndex((item) => getTaskId(item) === updatedTaskId);
     if (existingIndex >= 0) {
         _tasks[existingIndex] = updatedTask;
+        refreshTaskGroupOptions();
     }
 }
 
@@ -1403,6 +1658,7 @@ async function deleteTask(taskId) {
 
         // Remove from local cache and re-render
         _tasks = _tasks.filter(t => getTaskId(t) !== taskId);
+        refreshTaskGroupOptions();
         renderTaskList();
         updateTaskCountBadge();
 

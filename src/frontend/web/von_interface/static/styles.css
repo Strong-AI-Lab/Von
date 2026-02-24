@@ -1367,6 +1367,64 @@ body {
     flex: 1 1 180px;
 }
 
+.task-group-filter-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 2px 0 4px;
+}
+
+.task-group-filter-row.hidden {
+    display: none;
+}
+
+.task-group-filter-label {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: #64748b;
+}
+
+.task-group-filter-btn {
+    appearance: none;
+    border: 1px solid #cbd5e1;
+    background: #f8fafc;
+    color: #334155;
+    border-radius: 999px;
+    font-size: 0.74rem;
+    line-height: 1.3;
+    padding: 3px 9px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.task-group-filter-btn:hover {
+    border-color: #94a3b8;
+    background: #f1f5f9;
+}
+
+.task-group-filter-btn:focus-visible {
+    outline: 2px solid #2563eb;
+    outline-offset: 1px;
+}
+
+.task-group-filter-btn.active {
+    border-color: #1d4ed8;
+    background: #eff6ff;
+    color: #1e40af;
+}
+
+.task-group-filter-count {
+    font-size: 0.7rem;
+    line-height: 1;
+    border-radius: 999px;
+    background: rgba(148, 163, 184, 0.35);
+    color: inherit;
+    padding: 2px 6px;
+}
+
 /* Task list */
 .task-list {
     display: flex;

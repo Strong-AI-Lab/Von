@@ -6,6 +6,7 @@ const apiServiceModulePath = '../../src/frontend/web/von_interface/static/js/api
 jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => ({
     deleteJson: jest.fn(),
     getJson: jest.fn(),
+    getUserContext: jest.fn(() => ({ user_id: '#V#test_user', org_id: '#V#test_org' })),
     patchJson: jest.fn(),
     postJson: jest.fn(),
 }));
