@@ -13,6 +13,7 @@ import {
   setVontologyTreeData,
   vontologyTreeData
 } from './state.js';
+import { finishBackgroundTask, startBackgroundTask } from './backgroundTaskTracker.js';
 import { createAnnotatedFragment } from './utils/textDecorator.js';
 
 // Search configuration constants
@@ -3140,6 +3141,7 @@ const __idToElement = new Map(); // concept_id -> span.vontology-node-name
 export async function chooseBestTypeForIndividual(candidateTypeIds = []) {
   const __perfStart = (typeof window !== 'undefined' && window.performance ? performance.now() : Date.now());
   if (!candidateTypeIds || !candidateTypeIds.length) return null;
+  let countFetchTask = null;
 
   try {
     const idsParam = candidateTypeIds.join(',');
@@ -3157,11 +3159,22 @@ export async function chooseBestTypeForIndividual(candidateTypeIds = []) {
       }
       return chosenCached;
     }
+    countFetchTask = startBackgroundTask('instance_counts', {
+      label: 'Instance counts',
+      detail: `${candidateTypeIds.length} candidate types`
+    });
     const resp = await fetch(`/api/vontology/instance_counts?ids=${encodeURIComponent(idsParam)}`);
     if (!resp.ok) {
       console.warn('Failed to fetch instance counts for candidate types');
       // Ensure no stale negative/empty cache persists for this key
       try { __instanceCountsCache.delete(idsParam); } catch (_) { }
+      if (countFetchTask) {
+        finishBackgroundTask(countFetchTask, {
+          status: 'error',
+          detail: `HTTP ${resp.status}`
+        });
+        countFetchTask = null;
+      }
       return candidateTypeIds[0];
     }
     const data = await resp.json();
@@ -3191,12 +3204,26 @@ export async function chooseBestTypeForIndividual(candidateTypeIds = []) {
     // If tie in total, keep the first (stable). Optionally, we could prefer deeper nodes if depth info is available.
     const chosen = scored[0] && scored[0].id;
     console.debug('[chooseBestTypeForIndividual] chosen best type:', chosen);
+    if (countFetchTask) {
+      finishBackgroundTask(countFetchTask, {
+        status: 'success',
+        detail: `${candidateTypeIds.length} candidate types`
+      });
+      countFetchTask = null;
+    }
     if (typeof window !== 'undefined' && window.VON_PERF_LOG) {
       const dur = (window.performance ? performance.now() : Date.now()) - __perfStart;
       console.log('[perf] chooseBestTypeForIndividual duration(ms)=', dur.toFixed(2), 'candidates=', candidateTypeIds.length, 'cacheMiss=1');
     }
     return chosen;
   } catch (e) {
+    if (countFetchTask) {
+      finishBackgroundTask(countFetchTask, {
+        status: 'error',
+        error: e
+      });
+      countFetchTask = null;
+    }
     console.error('Error choosing best type for individual:', e);
     // Defensive: clear any partial cache entry that may have been set just before error
     try { /* error stage cleanup */ } catch (_) { }
@@ -4201,6 +4228,7 @@ export function preloadVontologyData() {
   }
   console.log('[preloadVontologyData] Checking whether to preload Vontology tree...');
   __vontologyPreloadInFlight = (async () => {
+    let preloadTask = null;
     try {
       // Fetch settings to determine if counts should be fetched on load
       let fetchCountsOnLoad = true;
@@ -4233,6 +4261,10 @@ export function preloadVontologyData() {
       }
 
       console.log('[preloadVontologyData] Starting background preload of Vontology tree (and counts if enabled)...');
+      preloadTask = startBackgroundTask('preload_vontology_tree', {
+        label: 'Preload Vontology tree',
+        detail: fetchCountsOnLoad ? 'Tree + entity counts' : 'Tree only'
+      });
       try { if (typeof window !== 'undefined') window.__VONTOLOGY_BUSY = true; } catch (_) { }
 
       const treePromise = fetch('/vontology/api/vontology/tree').then(r => r.ok ? r.json() : Promise.reject(`HTTP error! status: ${r.status}`));
@@ -4250,7 +4282,21 @@ export function preloadVontologyData() {
       // Also seed the global state so helpers that rely on stored tree can function sooner
       try { setVontologyTreeData(tree); } catch (_) { }
       console.log('[preloadVontologyData] Preload complete. counts_on_load=', fetchCountsOnLoad);
+      if (preloadTask) {
+        finishBackgroundTask(preloadTask, {
+          status: 'success',
+          detail: fetchCountsOnLoad ? 'Tree + counts preloaded' : 'Tree preloaded'
+        });
+        preloadTask = null;
+      }
     } catch (err) {
+      if (preloadTask) {
+        finishBackgroundTask(preloadTask, {
+          status: 'error',
+          error: err
+        });
+        preloadTask = null;
+      }
       console.warn('[preloadVontologyData] Preload failed:', err);
     }
   })().finally(() => {

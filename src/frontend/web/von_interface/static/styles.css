@@ -51,6 +51,25 @@ body {
     animation: vontology-spin 1.2s linear infinite;
 }
 
+.background-task-footer-status {
+    display: none;
+    margin-left: 8px;
+    padding: 1px 8px;
+    border-radius: 999px;
+    border: 1px solid #bfdbfe;
+    background: #eff6ff;
+    color: #1d4ed8;
+    font-size: 0.72rem;
+    font-weight: 600;
+    line-height: 1.4;
+    cursor: default;
+}
+
+.background-task-footer-status.active {
+    display: inline-flex;
+    align-items: center;
+}
+
 @keyframes vontology-spin {
     0% {
         filter: brightness(1);
@@ -8852,6 +8871,69 @@ body.settings-body {
 .runtime-hint {
     margin-top: 4px;
     font-size: 0.85rem;
+    color: #6b7280;
+}
+
+.background-task-status {
+    margin-top: 8px;
+    font-size: 0.95rem;
+    color: #4b5563;
+}
+
+.background-task-status.is-active {
+    color: #1d4ed8;
+    font-weight: 600;
+}
+
+.background-task-history {
+    margin-top: 8px;
+}
+
+.background-task-history-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 240px;
+    overflow-y: auto;
+}
+
+.background-task-history-item {
+    border: 1px solid #e5e7eb;
+    border-left: 4px solid #94a3b8;
+    border-radius: 8px;
+    padding: 8px 10px;
+    background: #f8fafc;
+}
+
+.background-task-history-item.status-success {
+    border-left-color: #16a34a;
+}
+
+.background-task-history-item.status-error {
+    border-left-color: #dc2626;
+}
+
+.background-task-history-item.status-cancelled {
+    border-left-color: #d97706;
+}
+
+.background-task-history-title {
+    font-weight: 600;
+    color: #111827;
+}
+
+.background-task-history-meta {
+    margin-top: 4px;
+    font-size: 0.82rem;
+    color: #6b7280;
+}
+
+.background-task-history-empty {
+    margin: 0;
+    font-size: 0.9rem;
     color: #6b7280;
 }
 

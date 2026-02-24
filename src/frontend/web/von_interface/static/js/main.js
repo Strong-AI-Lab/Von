@@ -7,6 +7,7 @@ import './suppressTooltips.js';
 import { activateTab, loadTabData, setupTabNavigation } from './tabNavigation.js';
 import { evaluateServerHealthState } from './utils/serverHealthState.js';
 import { handleSelectConceptByIdDetail } from './utils/selectConceptByIdHandler.js';
+import { formatBackgroundTaskSummary, formatBackgroundTaskTooltip, subscribeBackgroundTaskUpdates } from './backgroundTaskTracker.js';
 import {
   copyJsonTextWithButtonFeedback,
   initialiseCopyJsonButtonPreCopyState,
@@ -615,7 +616,8 @@ function startHealthPolling() {
   const ragChatBackfillBtn = ragModal ? document.getElementById('ragChatBackfill') : null;
   const busyEl = document.getElementById('vontologyBusyIndicator');
   const busySr = document.getElementById('vontologyBusySrStatus');
-  if (!localIpSpan && !publicIpSpan && !pidSpan && !uptimeSpan && !ragSpan && !ragModal && !busyEl) {
+  const backgroundTaskEl = document.getElementById('backgroundTaskFooterStatus');
+  if (!localIpSpan && !publicIpSpan && !pidSpan && !uptimeSpan && !ragSpan && !ragModal && !busyEl && !backgroundTaskEl) {
     return;
   }
   // Copy-to-clipboard behavior for local IP address
@@ -817,6 +819,22 @@ function startHealthPolling() {
   let healthPollQueuedImmediate = false;
   let healthPollTimerId = null;
   let lastBusyState = null;
+  let unsubscribeBackgroundTaskUpdates = null;
+
+  function updateBackgroundTaskFooter(snapshot) {
+    if (!backgroundTaskEl) return;
+    const activeTasks = Array.isArray(snapshot?.active) ? snapshot.active : [];
+    if (!activeTasks.length) {
+      backgroundTaskEl.classList.remove('active');
+      backgroundTaskEl.textContent = '';
+      backgroundTaskEl.title = '';
+      return;
+    }
+    backgroundTaskEl.textContent = formatBackgroundTaskSummary(activeTasks, { maxLabels: 1 });
+    backgroundTaskEl.title = formatBackgroundTaskTooltip(activeTasks);
+    backgroundTaskEl.classList.add('active');
+  }
+
   function updateBusyIndicator() {
     if (!busyEl) return;
     try {
@@ -836,6 +854,28 @@ function startHealthPolling() {
       }
     } catch (_) { }
   }
+
+  if (backgroundTaskEl) {
+    try {
+      unsubscribeBackgroundTaskUpdates = subscribeBackgroundTaskUpdates((snapshot) => {
+        updateBackgroundTaskFooter(snapshot);
+      });
+    } catch (_) {
+      updateBackgroundTaskFooter(null);
+    }
+  }
+
+  try {
+    window.addEventListener('beforeunload', () => {
+      try {
+        if (unsubscribeBackgroundTaskUpdates) {
+          unsubscribeBackgroundTaskUpdates();
+          unsubscribeBackgroundTaskUpdates = null;
+        }
+      } catch (_) { }
+    }, { once: true });
+  } catch (_) { }
+
   function scheduleHealthPoll(delayMs) {
     if (healthPollTimerId) {
       clearTimeout(healthPollTimerId);

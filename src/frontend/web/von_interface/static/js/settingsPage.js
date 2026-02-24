@@ -1,4 +1,10 @@
 import { getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
+import {
+  clearBackgroundTaskHistory,
+  formatBackgroundTaskSummary,
+  getBackgroundTaskState,
+  subscribeBackgroundTaskUpdates
+} from './backgroundTaskTracker.js';
 import { renderOrgSelector, setupOrgSwitchListener, switchOrganisation } from './components/orgSelector.js';
 import { populateLanguageSelect } from './languageConfig.js';
 import {
@@ -62,6 +68,7 @@ const RUNTIME_REFRESH_MS = 12000;
 let runtimeIntervalId = null;
 let runtimeAbortController = null;
 let runtimeStatusInFlight = false;
+let backgroundTaskUnsubscribe = null;
 let gmailProfileStatusInFlight = false;
 
 let __vonIsAdminOrOwner = false;
@@ -139,6 +146,134 @@ function formatUptime(ms) {
   if (h > 0) return `${h}h ${m}m ${s}s`;
   if (m > 0) return `${m}m ${s}s`;
   return `${s}s`;
+}
+
+function normaliseBackgroundTaskStatus(rawStatus) {
+  const status = String(rawStatus || '').trim().toLowerCase();
+  if (status === 'error' || status === 'failed' || status === 'failure') return 'error';
+  if (status === 'cancelled' || status === 'canceled') return 'cancelled';
+  return 'success';
+}
+
+function formatBackgroundTaskTimestamp(isoValue) {
+  const value = String(isoValue || '').trim();
+  if (!value) return 'unknown time';
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed)) return value;
+  return new Date(parsed).toLocaleString();
+}
+
+function formatBackgroundTaskDuration(durationMs) {
+  const ms = Number(durationMs);
+  if (!Number.isFinite(ms) || ms < 0) return 'duration unknown';
+  if (ms >= 1000) return `${(ms / 1000).toFixed(2)}s`;
+  return `${Math.round(ms)}ms`;
+}
+
+export function __testOnly_formatBackgroundTaskActivity(snapshot) {
+  const active = Array.isArray(snapshot?.active) ? snapshot.active.filter(Boolean) : [];
+  const history = Array.isArray(snapshot?.history) ? snapshot.history.filter(Boolean) : [];
+  const activeText = active.length
+    ? `${formatBackgroundTaskSummary(active, { maxLabels: 2 })} (${active.length} running)`
+    : 'No background tasks running.';
+  const historyRows = history.slice(0, 20).map((entry) => {
+    const status = normaliseBackgroundTaskStatus(entry.status);
+    const label = String(entry.label || entry.taskType || 'Background task').trim();
+    const detail = String(entry.detail || '').trim();
+    const duration = formatBackgroundTaskDuration(entry.durationMs);
+    const completedAt = formatBackgroundTaskTimestamp(entry.finishedAtIso);
+    const parts = [`${label}`, `status=${status}`, `duration=${duration}`, `finished=${completedAt}`];
+    if (detail) parts.push(`detail=${detail}`);
+    if (status === 'error' && entry.errorMessage) parts.push(`error=${String(entry.errorMessage).trim()}`);
+    return parts.join(' | ');
+  });
+  return { activeText, historyRows };
+}
+
+function renderBackgroundTaskActivity(snapshot = getBackgroundTaskState({ historyLimit: 20 })) {
+  const statusEl = document.getElementById('settingsBackgroundTaskStatus');
+  const historyEl = document.getElementById('settingsBackgroundTaskHistory');
+  if (!statusEl && !historyEl) return;
+
+  const active = Array.isArray(snapshot?.active) ? snapshot.active.filter(Boolean) : [];
+  const history = Array.isArray(snapshot?.history) ? snapshot.history.filter(Boolean) : [];
+  const { activeText } = __testOnly_formatBackgroundTaskActivity({ active, history });
+
+  if (statusEl) {
+    statusEl.textContent = activeText;
+    statusEl.classList.toggle('is-active', active.length > 0);
+  }
+
+  if (!historyEl) return;
+  historyEl.textContent = '';
+  if (!history.length) {
+    const empty = document.createElement('p');
+    empty.className = 'background-task-history-empty';
+    empty.textContent = 'No background tasks recorded yet.';
+    historyEl.appendChild(empty);
+    return;
+  }
+
+  const list = document.createElement('ul');
+  list.className = 'background-task-history-list';
+  history.slice(0, 20).forEach((entry) => {
+    const status = normaliseBackgroundTaskStatus(entry.status);
+    const item = document.createElement('li');
+    item.className = `background-task-history-item status-${status}`;
+
+    const title = document.createElement('div');
+    title.className = 'background-task-history-title';
+    const label = String(entry.label || entry.taskType || 'Background task').trim();
+    const detail = String(entry.detail || '').trim();
+    title.textContent = detail ? `${label}: ${detail}` : label;
+    item.appendChild(title);
+
+    const meta = document.createElement('div');
+    meta.className = 'background-task-history-meta';
+    const finishedAt = formatBackgroundTaskTimestamp(entry.finishedAtIso);
+    const duration = formatBackgroundTaskDuration(entry.durationMs);
+    const metaParts = [`Completed ${finishedAt}`, `status ${status}`, duration];
+    if (status === 'error' && entry.errorMessage) {
+      metaParts.push(`error ${String(entry.errorMessage).trim()}`);
+    }
+    meta.textContent = metaParts.join(' | ');
+    item.appendChild(meta);
+
+    list.appendChild(item);
+  });
+  historyEl.appendChild(list);
+}
+
+function setupBackgroundTaskSection() {
+  const statusEl = document.getElementById('settingsBackgroundTaskStatus');
+  const historyEl = document.getElementById('settingsBackgroundTaskHistory');
+  const clearBtn = document.getElementById('settingsClearBackgroundTaskHistoryButton');
+
+  if (!statusEl && !historyEl && !clearBtn) return;
+
+  try {
+    if (backgroundTaskUnsubscribe) {
+      backgroundTaskUnsubscribe();
+      backgroundTaskUnsubscribe = null;
+    }
+  } catch (_) { }
+
+  try {
+    backgroundTaskUnsubscribe = subscribeBackgroundTaskUpdates((snapshot) => {
+      renderBackgroundTaskActivity(snapshot);
+    });
+  } catch (_) {
+    renderBackgroundTaskActivity();
+  }
+
+  if (clearBtn && !clearBtn.dataset.backgroundTaskBound) {
+    clearBtn.dataset.backgroundTaskBound = '1';
+    clearBtn.addEventListener('click', () => {
+      clearBackgroundTaskHistory();
+      renderBackgroundTaskActivity(getBackgroundTaskState({ historyLimit: 20 }));
+      showStatusMessage('vontologyPerformanceStatus', 'Background task history cleared.', false);
+    });
+  }
 }
 
 function wireCopyButton(btn) {
@@ -1165,6 +1300,12 @@ window.addEventListener('beforeunload', () => {
     }
   } catch { }
   try { runtimeAbortController?.abort(); } catch { }
+  try {
+    if (backgroundTaskUnsubscribe) {
+      backgroundTaskUnsubscribe();
+      backgroundTaskUnsubscribe = null;
+    }
+  } catch { }
 });
 
 function getStoredJson(key) {
@@ -1245,6 +1386,7 @@ function applyStoredSelection(selectId, stored, fallbackSelected = true) {
 
 document.addEventListener('DOMContentLoaded', async () => {
   setupRuntimeSection();
+  setupBackgroundTaskSection();
   // Initialize all settings sections
   await loadAndDisplaySettings();
   setupConversationHistorySettingsSection();
