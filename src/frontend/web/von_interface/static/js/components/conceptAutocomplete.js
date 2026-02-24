@@ -35,6 +35,7 @@ function getOrCreateState(textarea) {
             selectedIndex: -1,
             results: [],
             triggerPos: null,
+            triggerEndPos: null,
             searchTimeout: null,
             dropdownPointerDown: false,
         });
@@ -94,6 +95,8 @@ export function closeAutocomplete() {
         state.isOpen = false;
         state.selectedIndex = -1;
         state.results = [];
+        state.triggerPos = null;
+        state.triggerEndPos = null;
     }
 }
 
@@ -189,6 +192,40 @@ export function getTriggerSearchText(text, cursorPos, maxLookback = 200) {
 
     const searchText = input.substring(lastTriggerIdx + 3, safeCursorPos);
     return { triggerIdx: lastTriggerIdx, searchText };
+}
+
+function isVontologyTriggerAt(text, index) {
+    if (typeof index !== 'number' || index < 0 || index + 2 >= text.length) {
+        return false;
+    }
+    return (
+        text[index] === '#' &&
+        (text[index + 1] === 'V' || text[index + 1] === 'v') &&
+        text[index + 2] === '#'
+    );
+}
+
+function getStoredTriggerRange(text, state) {
+    if (!state) {
+        return null;
+    }
+
+    const start = Number.isInteger(state.triggerPos) ? state.triggerPos : null;
+    const end = Number.isInteger(state.triggerEndPos) ? state.triggerEndPos : null;
+    if (start === null || end === null || start < 0 || end < start || end > text.length) {
+        return null;
+    }
+    if (!isVontologyTriggerAt(text, start)) {
+        return null;
+    }
+
+    // Stored ranges are only valid for the active token fragment (no whitespace).
+    const tokenFragment = text.substring(start + 3, end);
+    if (/\s/.test(tokenFragment)) {
+        return null;
+    }
+
+    return { start, end };
 }
 
 /**
@@ -320,35 +357,24 @@ function insertConcept(conceptId) {
     }
 
     const insertedId = makeNonTriggerVontologyId(conceptId);
+    const state = getOrCreateState(ta);
 
     const text = ta.value;
     const cursorPos = ta.selectionStart;
+    const storedRange = getStoredTriggerRange(text, state);
+    const fallbackTrigger = getTriggerSearchText(text, cursorPos, 100);
 
-    // Find the #V# or #v# trigger position (search backwards for the pattern)
-    let triggerIdx = -1;
-    let searchStart = Math.max(0, cursorPos - 100);
-    let substring = text.substring(searchStart, cursorPos);
+    const triggerIdx = storedRange ? storedRange.start : fallbackTrigger?.triggerIdx;
+    const replaceEnd = storedRange ? storedRange.end : cursorPos;
 
-    // Search backwards for #V# or #v#
-    for (let i = substring.length - 3; i >= 0; i--) {
-        if (
-            substring[i] === '#' &&
-            (substring[i + 1] === 'V' || substring[i + 1] === 'v') &&
-            substring[i + 2] === '#'
-        ) {
-            triggerIdx = searchStart + i;
-            break;
-        }
-    }
-
-    if (triggerIdx === -1) {
+    if (typeof triggerIdx !== 'number' || triggerIdx < 0) {
         console.warn('[conceptAutocomplete] No #V# trigger found when inserting concept');
         return;
     }
 
-    // Replace from trigger to cursor position
+    // Replace from trigger start to the captured end-of-token position.
     const before = text.substring(0, triggerIdx);
-    const after = text.substring(cursorPos);
+    const after = text.substring(replaceEnd);
 
     // Ensure a separator after the inserted concept token, otherwise subsequent typing can
     // accidentally extend the hidden token (e.g., #V\u200B#personabc), which breaks hydration.
@@ -369,6 +395,8 @@ function insertConcept(conceptId) {
     ta.focus();
 
     console.log(`[conceptAutocomplete] Inserted ${insertedId} at position ${triggerIdx}`);
+    state.triggerPos = null;
+    state.triggerEndPos = null;
 
     // Trigger input event for any listeners
     ta.dispatchEvent(new Event('input', { bubbles: true }));
@@ -456,6 +484,11 @@ function handleInput(event) {
         closeAutocomplete();
         return;
     }
+
+    // Persist the replacement range so selecting from the dropdown can replace the
+    // original typed token even if the caret has moved elsewhere.
+    state.triggerPos = lastTriggerIdx;
+    state.triggerEndPos = cursorPos;
 
     // Debounce search - capture the textarea for race condition protection
     clearTimeout(state.searchTimeout);

@@ -167,4 +167,42 @@ describe('conceptAutocomplete', () => {
             done();
         }, 300);
     });
+
+    test('selecting a concept replaces the original trigger even when caret moves', (done) => {
+        initializeConceptAutocomplete(textarea);
+
+        global.fetch = jest.fn(() =>
+            Promise.resolve({
+                ok: true,
+                json: () =>
+                    Promise.resolve({
+                        results: [{ id: '#V#person', name: 'Person', kind: 'type' }],
+                    }),
+            })
+        );
+
+        textarea.value = 'Plan #V#pe and more';
+        const triggerEnd = textarea.value.indexOf(' and more');
+        textarea.selectionStart = triggerEnd;
+        textarea.selectionEnd = triggerEnd;
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+
+        setTimeout(() => {
+            const dropdown = document.querySelector('.concept-autocomplete-dropdown');
+            const first = dropdown
+                ? dropdown.querySelector('.concept-autocomplete-item[data-concept-id="#V#person"]')
+                : null;
+            expect(first).toBeTruthy();
+
+            // Simulate the user moving the caret elsewhere before choosing.
+            textarea.selectionStart = textarea.value.length;
+            textarea.selectionEnd = textarea.value.length;
+
+            first.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+            const ZWSP = '\u200B';
+            expect(textarea.value).toBe(`Plan #V${ZWSP}#person and more`);
+            done();
+        }, 300);
+    });
 });
