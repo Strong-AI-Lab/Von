@@ -29,6 +29,32 @@ _log = logging.getLogger(__name__)
 message_bp = Blueprint("messages", __name__)
 
 
+def _normalise_concept_id(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    return cleaned if cleaned.startswith("#V#") else f"#V#{cleaned}"
+
+
+def _normalise_recipient_ids(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        concept_id = _normalise_concept_id(item)
+        if not isinstance(concept_id, str):
+            continue
+        lowered = concept_id.casefold()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        result.append(concept_id)
+    return result
+
+
 def _get_current_user_concept_id() -> Optional[str]:
     """Get the current user's concept_id from session or access control."""
     try:
@@ -48,9 +74,54 @@ def _get_current_user_concept_id() -> Optional[str]:
     return None
 
 
-def _get_current_org_concept_id() -> Optional[str]:
-    """Get the current organisation's concept ID from the session."""
-    return session.get("organisation_concept_id")
+def _get_current_org_concept_id(user_concept_id: Optional[str]) -> Optional[str]:
+    """Get the current organisation's concept ID from effective window/session context."""
+    if isinstance(user_concept_id, str) and user_concept_id.strip():
+        try:
+            from ...services.window_session_context_service import get_effective_context
+
+            window_session_id = request.headers.get("X-Von-Window-Session")
+            effective = get_effective_context(
+                window_session_id,
+                dict(session),
+                user_concept_id.strip(),
+            )
+            org_id = _normalise_concept_id(effective.get("organisation_id"))
+            if org_id:
+                return org_id
+        except Exception:
+            pass
+
+    return _normalise_concept_id(session.get("organisation_concept_id"))
+
+
+def _authorise_sender_and_recipients_for_org(
+    *,
+    sender_id: str,
+    recipient_ids: list[str],
+    organisation_concept_id: str,
+) -> tuple[bool, list[str]]:
+    from ...services.organisation_membership_service import get_organisation_members
+
+    members = get_organisation_members(organisation_concept_id)
+    org_member_ids = {
+        normalised
+        for normalised in (
+            _normalise_concept_id(member.get("user_concept_id"))
+            for member in members.get("members", [])
+            if isinstance(member, dict)
+        )
+        if isinstance(normalised, str)
+    }
+
+    invalid_ids: list[str] = []
+    if sender_id not in org_member_ids:
+        invalid_ids.append(sender_id)
+    for recipient_id in recipient_ids:
+        if recipient_id not in org_member_ids:
+            invalid_ids.append(recipient_id)
+
+    return (len(invalid_ids) == 0, invalid_ids)
 
 
 @message_bp.route("/", methods=["POST"])
@@ -71,13 +142,16 @@ def send_message() -> ResponseReturnValue:
     if not sender_id:
         return jsonify({"error": "Authentication required"}), 401
 
-    org_id = _get_current_org_concept_id()
+    sender_id = sender_id.strip()
+    org_id = _get_current_org_concept_id(sender_id)
+    if not isinstance(org_id, str) or not org_id:
+        return jsonify({"error": "No organisation context"}), 400
 
-    data = request.get_json()
-    if not data:
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
         return jsonify({"error": "Request body required"}), 400
 
-    recipient_ids = data.get("recipient_ids", [])
+    recipient_ids = _normalise_recipient_ids(data.get("recipient_ids"))
     content = data.get("content", "").strip()
 
     if not recipient_ids:
@@ -86,6 +160,32 @@ def send_message() -> ResponseReturnValue:
         return jsonify({"error": "Message content is required"}), 400
 
     try:
+        is_authorised, invalid_ids = _authorise_sender_and_recipients_for_org(
+            sender_id=sender_id,
+            recipient_ids=recipient_ids,
+            organisation_concept_id=org_id,
+        )
+        if not is_authorised:
+            return (
+                jsonify(
+                    {
+                        "error": "Sender/recipient must share the current organisation",
+                        "invalid_concept_ids": invalid_ids,
+                    }
+                ),
+                403,
+            )
+
+        metadata = data.get("metadata")
+        metadata_payload = metadata if isinstance(metadata, dict) else {}
+        metadata_payload = dict(metadata_payload)
+        metadata_payload.setdefault("delivery_channel", "interuser_message")
+        metadata_payload.setdefault("intent", "info")
+        metadata_payload.setdefault(
+            "attribution",
+            f"Sent by Von on behalf of {sender_id}",
+        )
+
         message = create_message(
             sender_id=sender_id,
             recipient_ids=recipient_ids,
@@ -94,7 +194,23 @@ def send_message() -> ResponseReturnValue:
             thread_id=data.get("thread_id"),
             reply_to_id=data.get("reply_to_id"),
             org_id=org_id,
-            metadata=data.get("metadata"),
+            metadata=metadata_payload,
+        )
+
+        from ...services.episode_logging_service import log_episode
+
+        log_episode(
+            episode_type="interuser_message_sent",
+            actor_user_id=sender_id,
+            organisation_concept_id=org_id,
+            payload={
+                "message_id": message.get("concept_id"),
+                "recipient_ids": recipient_ids,
+                "intent": metadata_payload.get("intent"),
+                "thread_id": data.get("thread_id"),
+                "reply_to_id": data.get("reply_to_id"),
+            },
+            status="sent",
         )
 
         # Return sanitised response
@@ -104,6 +220,7 @@ def send_message() -> ResponseReturnValue:
                     "success": True,
                     "message_id": message.get("concept_id"),
                     "sent_at": message.get("concept_data", {}).get("sent_at"),
+                    "attribution": metadata_payload.get("attribution"),
                 }
             ),
             201,

@@ -75,6 +75,11 @@ class TestCreateMessage:
         assert "#V#user_bob" in result["relationships"]["specific_to_user"]
         assert result["relationships"][PREDICATE_SENDER] == ["#V#user_alice"]
         assert result["relationships"][PREDICATE_RECIPIENT] == ["#V#user_bob"]
+        assert result["concept_data"]["content_fallback"] == "Hello Bob!"
+        assert (
+            result["concept_data"]["attribution"]
+            == "Sent by Von on behalf of #V#user_alice"
+        )
         mock_launch_workflow.assert_called_once()
 
     @patch("src.backend.services.message_service.get_concepts_collection")
@@ -152,6 +157,34 @@ class TestCreateMessage:
         )
 
         assert result["concept_data"]["subject"] == "Important Update"
+        mock_launch_workflow.assert_called_once()
+
+    @patch("src.backend.services.message_service.get_concepts_collection")
+    @patch("src.backend.services.message_service.ConceptsRepository")
+    @patch("src.backend.services.message_service.upsert_text_for_concept")
+    @patch("src.backend.services.message_service.maybe_launch_direct_message_workflow")
+    def test_create_message_uses_metadata_attribution_when_provided(
+        self,
+        mock_launch_workflow: MagicMock,
+        mock_upsert: MagicMock,
+        mock_repo: MagicMock,
+        mock_get_coll: MagicMock,
+    ) -> None:
+        """create_message() should keep explicit attribution metadata."""
+        mock_get_coll.return_value = MagicMock()
+        mock_repo.insert_one.return_value = None
+
+        result = create_message(
+            sender_id="#V#user_alice",
+            recipient_ids=["#V#user_bob"],
+            content="Attribution override",
+            metadata={"attribution": "Sent by Von on behalf of Alice"},
+        )
+
+        assert result["concept_data"]["attribution"] == "Sent by Von on behalf of Alice"
+        assert result["concept_data"]["metadata"]["attribution"] == (
+            "Sent by Von on behalf of Alice"
+        )
         mock_launch_workflow.assert_called_once()
 
     def test_create_message_empty_sender(self) -> None:
