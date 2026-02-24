@@ -39,6 +39,7 @@ import {
     linkifyVontologyTokensInElement,
     normalisePotentialConceptId
 } from './utils/textDecorator.js';
+import { openSettingsTabAndFocus } from './utils/settingsNavigation.js';
 import { showToast } from './utils/toast.js';
 
 // Helper to build fetch headers with window session context (JVNAUTOSCI-1011)
@@ -9359,35 +9360,9 @@ function _startChatTabsLoadingTicker() {
 }
 
 function openSettingsToLogin() {
-    try {
-        const settingsTabButton = document.querySelector('.tab-button[data-tab="settingsTab"]');
-        if (settingsTabButton) {
-            settingsTabButton.click();
-        }
-
-        const sendFocusMessage = (attempt = 0) => {
-            const frame = document.getElementById('settingsFrame');
-            const targetWindow = frame?.contentWindow;
-            if (targetWindow) {
-                try {
-                    targetWindow.postMessage({ type: 'von:focus-current-user-settings' }, window.location.origin);
-                } catch (_) {
-                    // Best-effort
-                }
-
-                if (attempt < 8) {
-                    setTimeout(() => sendFocusMessage(attempt + 1), 250);
-                }
-                return;
-            }
-
-            if (attempt < 8) {
-                setTimeout(() => sendFocusMessage(attempt + 1), 250);
-            }
-        };
-
-        sendFocusMessage(0);
-    } catch (err) {
+    const opened = openSettingsTabAndFocus('von:focus-current-user-settings');
+    if (!opened) {
+        const err = new Error('Failed to open settings tab');
         console.warn('[chatTab] Failed to open Settings for login:', err);
         try { showToast('Unable to open Settings for login.', true); } catch (_) { }
     }

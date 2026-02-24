@@ -94,6 +94,27 @@ function _focusCurrentUserSettingsSection() {
   } catch { }
 }
 
+function _focusModelSettingsSection() {
+  try {
+    const section = document.getElementById('premium-model-settings') || document.getElementById('ollima-settings');
+    if (section) {
+      section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    setTimeout(() => {
+      try {
+        const focusTarget =
+          document.getElementById('globalModelSelect')
+          || document.getElementById('openaiModelSelect')
+          || section?.querySelector('select, input, button');
+        if (focusTarget && typeof focusTarget.focus === 'function') {
+          focusTarget.focus();
+        }
+      } catch { }
+    }, 250);
+  } catch { }
+}
+
 // Allow parent (main app) to request focus on the login area from elsewhere (e.g. chat tabs placeholder).
 try {
   window.addEventListener('message', (event) => {
@@ -102,6 +123,8 @@ try {
       const type = event?.data?.type;
       if (type === 'von:focus-current-user-settings') {
         _focusCurrentUserSettingsSection();
+      } else if (type === 'von:focus-model-settings') {
+        _focusModelSettingsSection();
       }
     } catch { }
   });
