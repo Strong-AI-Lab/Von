@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -41,6 +44,84 @@ from ...workflows.workflow_definition_identity_service import (
 logger = logging.getLogger(__name__)
 
 workflows_bp = Blueprint("workflows", __name__)
+
+_WORKFLOW_DEFINITIONS_CACHE_LOCK = threading.Lock()
+_WORKFLOW_DEFINITIONS_CACHE: Dict[
+    Tuple[int, Optional[str], Optional[str], Optional[str]], Dict[str, Any]
+] = {}
+_WORKFLOW_DEFINITIONS_CACHE_MAX_ENTRIES = 32
+_WORKFLOW_DEFINITIONS_CACHE_TTL_SECONDS_DEFAULT = 8.0
+
+
+def _read_workflow_definitions_cache_ttl_seconds() -> float:
+    raw = os.getenv(
+        "VON_WORKFLOW_DEFINITIONS_CACHE_TTL_SECONDS",
+        str(_WORKFLOW_DEFINITIONS_CACHE_TTL_SECONDS_DEFAULT),
+    )
+    try:
+        ttl = float(raw)
+    except (TypeError, ValueError):
+        return _WORKFLOW_DEFINITIONS_CACHE_TTL_SECONDS_DEFAULT
+    return max(0.0, ttl)
+
+
+def _read_cached_workflow_definitions(
+    *,
+    cache_key: Tuple[int, Optional[str], Optional[str], Optional[str]],
+    bypass_cache: bool,
+) -> Optional[Dict[str, Any]]:
+    if bypass_cache:
+        return None
+
+    ttl_seconds = _read_workflow_definitions_cache_ttl_seconds()
+    if ttl_seconds <= 0.0:
+        return None
+
+    now_monotonic = time.monotonic()
+    with _WORKFLOW_DEFINITIONS_CACHE_LOCK:
+        entry = _WORKFLOW_DEFINITIONS_CACHE.get(cache_key)
+        if not isinstance(entry, dict):
+            return None
+        expires_at = entry.get("expires_at_monotonic")
+        payload = entry.get("payload")
+        if (
+            not isinstance(expires_at, (int, float))
+            or now_monotonic >= float(expires_at)
+            or not isinstance(payload, dict)
+        ):
+            _WORKFLOW_DEFINITIONS_CACHE.pop(cache_key, None)
+            return None
+        return payload
+
+
+def _write_cached_workflow_definitions(
+    *,
+    cache_key: Tuple[int, Optional[str], Optional[str], Optional[str]],
+    payload: Dict[str, Any],
+) -> None:
+    ttl_seconds = _read_workflow_definitions_cache_ttl_seconds()
+    if ttl_seconds <= 0.0:
+        return
+
+    now_monotonic = time.monotonic()
+    expires_at = now_monotonic + ttl_seconds
+    with _WORKFLOW_DEFINITIONS_CACHE_LOCK:
+        _WORKFLOW_DEFINITIONS_CACHE[cache_key] = {
+            "expires_at_monotonic": expires_at,
+            "stored_at_monotonic": now_monotonic,
+            "payload": payload,
+        }
+        if len(_WORKFLOW_DEFINITIONS_CACHE) <= _WORKFLOW_DEFINITIONS_CACHE_MAX_ENTRIES:
+            return
+        oldest_key = None
+        oldest_stamp = float("inf")
+        for key, value in _WORKFLOW_DEFINITIONS_CACHE.items():
+            stored_at = value.get("stored_at_monotonic")
+            if isinstance(stored_at, (int, float)) and float(stored_at) < oldest_stamp:
+                oldest_key = key
+                oldest_stamp = float(stored_at)
+        if oldest_key is not None:
+            _WORKFLOW_DEFINITIONS_CACHE.pop(oldest_key, None)
 
 
 @workflows_bp.get("/api/workflows/definitions/<path:workflow_id>")
@@ -100,6 +181,20 @@ def api_list_workflow_definitions():
     namespace = request.args.get("namespace")
     session_id = request.args.get("session_id")
     turn_id = request.args.get("turn_id")
+    bypass_cache = request.args.get("nocache", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    cache_key = (limit, namespace or None, session_id or None, turn_id or None)
+
+    cached_payload = _read_cached_workflow_definitions(
+        cache_key=cache_key,
+        bypass_cache=bypass_cache,
+    )
+    if isinstance(cached_payload, dict):
+        return jsonify(cached_payload)
 
     try:
         from ...workflows.durable.registry_factory import (
@@ -223,19 +318,19 @@ def api_list_workflow_definitions():
                 }
             )
 
-        return jsonify(
-            {
-                "items": items,
-                "count": len(items),
-                "total": len(workflow_ids),
-                "episodes_scope": {
-                    "namespace": namespace or None,
-                    "session_id": session_id or None,
-                    "turn_id": turn_id or None,
-                },
-                "parity_inventory": inventory_snapshot,
-            }
-        )
+        payload = {
+            "items": items,
+            "count": len(items),
+            "total": len(workflow_ids),
+            "episodes_scope": {
+                "namespace": namespace or None,
+                "session_id": session_id or None,
+                "turn_id": turn_id or None,
+            },
+            "parity_inventory": inventory_snapshot,
+        }
+        _write_cached_workflow_definitions(cache_key=cache_key, payload=payload)
+        return jsonify(payload)
     except Exception as exc:
         logger.exception("Failed to list workflow definitions via API")
         return jsonify({"error": "workflow_definitions_list_failed", "detail": str(exc)}), 500
