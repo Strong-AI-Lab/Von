@@ -11,6 +11,7 @@ import pytest
 def app_client(monkeypatch):
     # Must be set before importing mongo_client so USE_MOCK_DB is computed correctly.
     monkeypatch.setenv("VON_USE_MOCK_DB", "1")
+    monkeypatch.setenv("VON_WORKFLOW_DEFINITIONS_CACHE_TTL_SECONDS", "0")
 
     import src.backend.db.mongo_client as mongo_client
 
@@ -684,3 +685,148 @@ def test_trigger_workflow_schedule_route_rejects_unrunnable_workflow(
     assert "workflow_definition_not_registered" in payload["verification"]["preflight"][
         "errors"
     ]
+
+
+def test_workflow_definitions_list_uses_short_ttl_cache(monkeypatch, app_client):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+    import src.backend.services.workflow_discovery_service as workflow_discovery_service
+    import src.backend.workflows.durable.registry_factory as registry_factory
+
+    class _FakeDefinition:
+        initial_state = "start"
+        purpose = "purpose"
+
+    class _FakeRegistration:
+        def __init__(self):
+            self.definition = _FakeDefinition()
+            self.purpose = "purpose"
+            self.source = "built_in"
+
+    class _FakeRegistry:
+        def all_workflow_ids(self):
+            return ["#V#cached_workflow"]
+
+        def get(self, workflow_id):
+            return _FakeDefinition()
+
+        def get_registration(self, workflow_id):
+            return _FakeRegistration()
+
+    calls = {"build_registry": 0}
+
+    def _fake_build_registry():
+        calls["build_registry"] += 1
+        return _FakeRegistry()
+
+    monkeypatch.setenv("VON_WORKFLOW_DEFINITIONS_CACHE_TTL_SECONDS", "60")
+    monkeypatch.setattr(
+        registry_factory,
+        "build_durable_workflow_registry_read_only",
+        _fake_build_registry,
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "get_workflow_registry_inventory_snapshot",
+        lambda: {"counts": {"registry": 1, "vontology_discovered": 1}},
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "get_workflow_usage_aggregates_for_workflows",
+        lambda workflow_ids: {},
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "get_workflow_episode_counts_for_workflows",
+        lambda workflow_ids, namespace=None, session_id=None, turn_id=None: {
+            "#V#cached_workflow": 0
+        },
+    )
+    monkeypatch.setattr(
+        workflow_discovery_service,
+        "classify_workflow_concept_executability",
+        lambda workflow_id: (True, "executable_now", None),
+    )
+
+    with workflows_routes._WORKFLOW_DEFINITIONS_CACHE_LOCK:
+        workflows_routes._WORKFLOW_DEFINITIONS_CACHE.clear()
+
+    resp1 = app_client.get("/api/workflows/definitions?limit=10")
+    assert resp1.status_code == 200
+    resp2 = app_client.get("/api/workflows/definitions?limit=10")
+    assert resp2.status_code == 200
+
+    assert calls["build_registry"] == 1
+    payload = resp2.get_json()
+    assert payload["count"] == 1
+    assert payload["items"][0]["workflow_id"] == "#V#cached_workflow"
+
+
+def test_workflow_definitions_list_nocache_bypasses_cache(monkeypatch, app_client):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+    import src.backend.services.workflow_discovery_service as workflow_discovery_service
+    import src.backend.workflows.durable.registry_factory as registry_factory
+
+    class _FakeDefinition:
+        initial_state = "start"
+        purpose = "purpose"
+
+    class _FakeRegistration:
+        def __init__(self):
+            self.definition = _FakeDefinition()
+            self.purpose = "purpose"
+            self.source = "built_in"
+
+    class _FakeRegistry:
+        def all_workflow_ids(self):
+            return ["#V#cached_workflow"]
+
+        def get(self, workflow_id):
+            return _FakeDefinition()
+
+        def get_registration(self, workflow_id):
+            return _FakeRegistration()
+
+    calls = {"build_registry": 0}
+
+    def _fake_build_registry():
+        calls["build_registry"] += 1
+        return _FakeRegistry()
+
+    monkeypatch.setenv("VON_WORKFLOW_DEFINITIONS_CACHE_TTL_SECONDS", "60")
+    monkeypatch.setattr(
+        registry_factory,
+        "build_durable_workflow_registry_read_only",
+        _fake_build_registry,
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "get_workflow_registry_inventory_snapshot",
+        lambda: {"counts": {"registry": 1, "vontology_discovered": 1}},
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "get_workflow_usage_aggregates_for_workflows",
+        lambda workflow_ids: {},
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "get_workflow_episode_counts_for_workflows",
+        lambda workflow_ids, namespace=None, session_id=None, turn_id=None: {
+            "#V#cached_workflow": 0
+        },
+    )
+    monkeypatch.setattr(
+        workflow_discovery_service,
+        "classify_workflow_concept_executability",
+        lambda workflow_id: (True, "executable_now", None),
+    )
+
+    with workflows_routes._WORKFLOW_DEFINITIONS_CACHE_LOCK:
+        workflows_routes._WORKFLOW_DEFINITIONS_CACHE.clear()
+
+    resp1 = app_client.get("/api/workflows/definitions?limit=10")
+    assert resp1.status_code == 200
+    resp2 = app_client.get("/api/workflows/definitions?limit=10&nocache=true")
+    assert resp2.status_code == 200
+
+    assert calls["build_registry"] == 2

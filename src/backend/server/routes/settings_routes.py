@@ -1,5 +1,7 @@
 import os
 import json
+import threading
+import time
 from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify, current_app, send_file, session
 from werkzeug.utils import secure_filename
@@ -182,6 +184,60 @@ def _is_admin_or_owner_session() -> bool:
 # They remain empty until first relevant operation to avoid changing baseline /diag output.
 _IMPORT_METRICS: dict = {}
 _ORPHAN_SCAN_METRICS: dict = {}
+_OLLAMA_MODELS_CACHE_LOCK = threading.Lock()
+_OLLAMA_MODELS_CACHE: dict = {}
+_OLLAMA_MODELS_CACHE_TTL_SECONDS_DEFAULT = 20.0
+
+
+def _read_ollama_models_cache_ttl_seconds() -> float:
+    raw = os.getenv(
+        "VON_OLLAMA_MODELS_CACHE_TTL_SECONDS",
+        str(_OLLAMA_MODELS_CACHE_TTL_SECONDS_DEFAULT),
+    )
+    try:
+        ttl = float(raw)
+    except (TypeError, ValueError):
+        return _OLLAMA_MODELS_CACHE_TTL_SECONDS_DEFAULT
+    return max(0.0, ttl)
+
+
+def _read_cached_ollama_models(*, bypass_cache: bool) -> Optional[list]:
+    if bypass_cache:
+        return None
+
+    ttl_seconds = _read_ollama_models_cache_ttl_seconds()
+    if ttl_seconds <= 0.0:
+        return None
+
+    now_monotonic = time.monotonic()
+    with _OLLAMA_MODELS_CACHE_LOCK:
+        expires_at = _OLLAMA_MODELS_CACHE.get("expires_at_monotonic")
+        models = _OLLAMA_MODELS_CACHE.get("models")
+        if (
+            not isinstance(expires_at, (int, float))
+            or now_monotonic >= float(expires_at)
+            or not isinstance(models, list)
+        ):
+            _OLLAMA_MODELS_CACHE.clear()
+            return None
+        return models
+
+
+def _write_cached_ollama_models(models: list) -> None:
+    ttl_seconds = _read_ollama_models_cache_ttl_seconds()
+    if ttl_seconds <= 0.0:
+        return
+
+    now_monotonic = time.monotonic()
+    with _OLLAMA_MODELS_CACHE_LOCK:
+        _OLLAMA_MODELS_CACHE.clear()
+        _OLLAMA_MODELS_CACHE.update(
+            {
+                "models": models,
+                "stored_at_monotonic": now_monotonic,
+                "expires_at_monotonic": now_monotonic + ttl_seconds,
+            }
+        )
 
 
 def _utc_now_iso() -> str:
@@ -1259,11 +1315,23 @@ def set_ollama_hosts():
 @settings_bp.route("/ollama/models", methods=["GET"])
 def get_ollama_models_from_all_hosts():
     """API endpoint to get all Ollama models from all configured hosts."""
+    bypass_cache = request.args.get("nocache", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    cached_models = _read_cached_ollama_models(bypass_cache=bypass_cache)
+    if isinstance(cached_models, list):
+        return jsonify({"success": True, "models": cached_models}), 200
+
     try:
         from ...languagemodels.llm_interface import OllamaClient  # inline import
 
         # Get models from all hosts
         all_models = OllamaClient.list_models_from_all_hosts()
+        if isinstance(all_models, list):
+            _write_cached_ollama_models(all_models)
 
         current_app.logger.info(
             f"Retrieved {len(all_models)} Ollama models from all hosts"

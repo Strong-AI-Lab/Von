@@ -5,7 +5,7 @@ import { getLanguageDisplayName } from './languageConfig.js';
 import { escapeHtml } from './markdownUtils.js';
 import './suppressTooltips.js';
 import { activateTab, loadTabData, setupTabNavigation } from './tabNavigation.js';
-import { shouldMarkServerDown } from './utils/serverHealthState.js';
+import { evaluateServerHealthState } from './utils/serverHealthState.js';
 import { handleSelectConceptByIdDetail } from './utils/selectConceptByIdHandler.js';
 import {
   copyJsonTextWithButtonFeedback,
@@ -686,14 +686,76 @@ function startHealthPolling() {
   let lastIdentity = { pid: null, start: null };
   let reloadTriggered = false;
   let serverReachable = null;
+  let serverHealthUiState = 'waiting';
   let hasSeenSuccessfulHealthPoll = false;
+  let firstFailureAtMs = null;
+  let lastHealthSuccessAtMs = null;
+  let lastHealthErrorKind = null;
+  let lastHealthErrorDetail = null;
+  let latestHealthDiagnostics = null;
+
+  function publishHealthPollDiagnostics(diagnostics) {
+    if (!diagnostics || typeof diagnostics !== 'object') return;
+    latestHealthDiagnostics = diagnostics;
+    try {
+      window.__vonHealthPollDiagnostics = diagnostics;
+    } catch (_) {
+      // Ignore non-writable globals in constrained environments.
+    }
+    try {
+      document.dispatchEvent(new CustomEvent('von:healthPollDiagnostics', { detail: diagnostics }));
+    } catch (_) {
+      // Non-fatal diagnostic event.
+    }
+  }
 
   function setServerReachableState(isReachable) {
     serverReachable = (typeof isReachable === 'boolean') ? isReachable : null;
     setFooterServerReachability(serverReachable);
   }
 
-  setServerReachableState(null);
+  function setServerHealthUiState(nextState, diagnostics = null) {
+    const safeState = (nextState === 'healthy' || nextState === 'waiting' || nextState === 'degraded' || nextState === 'down')
+      ? nextState
+      : 'waiting';
+    serverHealthUiState = safeState;
+    if (safeState === 'down') {
+      setServerReachableState(false);
+    } else if (safeState === 'waiting') {
+      setServerReachableState(null);
+    } else {
+      setServerReachableState(true);
+    }
+    if (diagnostics && typeof diagnostics === 'object') {
+      publishHealthPollDiagnostics({ state: safeState, ...diagnostics });
+    }
+  }
+
+  function isThinkingActive() {
+    try {
+      const wrapper = document.getElementById('thinkingCardWrapper');
+      if (wrapper) {
+        return wrapper.getAttribute('aria-hidden') !== 'true';
+      }
+      const loadingIndicator = document.getElementById('loadingIndicator');
+      if (loadingIndicator) {
+        return loadingIndicator.style.display !== 'none';
+      }
+    } catch (_) {
+      // Ignore transient DOM read issues.
+    }
+    return false;
+  }
+
+  setServerHealthUiState('waiting', {
+    failureCount: 0,
+    failureWindowMs: 0,
+    downFailureThreshold: null,
+    downFailureWindowThresholdMs: null,
+    hasSeenSuccessfulHealthPoll: false,
+    isThinkingActive: false,
+    source: 'health_poll_initialise'
+  });
 
   function autoReloadEnabled() {
     try { return localStorage.getItem('von:autoReloadOnRestart') === '1'; } catch (_) { return false; }
@@ -712,13 +774,26 @@ function startHealthPolling() {
   function updateUptimeLoop() {
     if (uptimeSpan) {
       const uptimeContainer = uptimeSpan.parentElement;
-      if (serverReachable === false) {
+      if (serverHealthUiState === 'down') {
         uptimeSpan.textContent = 'server down';
         uptimeSpan.title = 'Von server is unreachable';
         if (uptimeContainer) uptimeContainer.classList.add('pid-error');
-      } else if (serverReachable === null) {
+      } else if (serverHealthUiState === 'waiting') {
         uptimeSpan.textContent = 'waiting for server';
         uptimeSpan.title = 'Waiting for initial server health response';
+        if (uptimeContainer) uptimeContainer.classList.remove('pid-error');
+      } else if (serverHealthUiState === 'degraded') {
+        const failureCountTitle = Number.isFinite(latestHealthDiagnostics?.failureCount)
+          ? `consecutive failures=${latestHealthDiagnostics.failureCount}`
+          : null;
+        const failureWindowTitle = Number.isFinite(latestHealthDiagnostics?.failureWindowMs)
+          ? `failure window=${Math.round(latestHealthDiagnostics.failureWindowMs / 1000)}s`
+          : null;
+        const detail = [failureCountTitle, failureWindowTitle].filter(Boolean).join(' | ');
+        uptimeSpan.textContent = 'degraded (retrying)';
+        uptimeSpan.title = detail
+          ? `Health probes are failing but below down threshold (${detail})`
+          : 'Health probes are failing but below down threshold';
         if (uptimeContainer) uptimeContainer.classList.remove('pid-error');
       } else if (startTimeIso) {
         const started = Date.parse(startTimeIso);
@@ -789,7 +864,24 @@ function startHealthPolling() {
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
       hasSeenSuccessfulHealthPoll = true;
-      setServerReachableState(true);
+      firstFailureAtMs = null;
+      lastHealthSuccessAtMs = Date.now();
+      lastHealthErrorKind = null;
+      lastHealthErrorDetail = null;
+      const successState = evaluateServerHealthState({
+        hasSeenSuccessfulHealthPoll,
+        failureCount: 0,
+        firstFailureAtMs: null,
+        nowMs: lastHealthSuccessAtMs,
+        isThinkingActive: isThinkingActive(),
+      });
+      setServerHealthUiState('healthy', {
+        ...successState.diagnostics,
+        source: 'health_poll_success',
+        lastSuccessAgeMs: 0,
+        lastErrorKind: null,
+        lastErrorDetail: null,
+      });
       const newPid = (typeof data.pid !== 'undefined') ? data.pid : null;
       const newStart = data.start_time || null;
       const newLocalIp = data.local_ip || null;
@@ -1878,11 +1970,36 @@ function startHealthPolling() {
       failureCount = 0; // reset on success
     } catch (e) {
       failureCount++;
-      const markDown = shouldMarkServerDown({
+      if (!Number.isFinite(firstFailureAtMs)) {
+        firstFailureAtMs = Date.now();
+      }
+      const nowMs = Date.now();
+      const activeThinking = isThinkingActive();
+      const evaluation = evaluateServerHealthState({
         hasSeenSuccessfulHealthPoll,
-        failureCount
+        failureCount,
+        firstFailureAtMs,
+        nowMs,
+        isThinkingActive: activeThinking,
       });
-      setServerReachableState(markDown ? false : null);
+      const markDown = evaluation.markDown;
+      const isHttpError = typeof e?.message === 'string' && e.message.startsWith('HTTP ');
+      lastHealthErrorKind = e?.name === 'AbortError'
+        ? 'timeout'
+        : (isHttpError ? 'http' : 'network_or_unknown');
+      lastHealthErrorDetail = typeof e?.message === 'string'
+        ? e.message
+        : String(e || '');
+      const lastSuccessAgeMs = Number.isFinite(lastHealthSuccessAtMs)
+        ? Math.max(0, nowMs - lastHealthSuccessAtMs)
+        : null;
+      setServerHealthUiState(evaluation.state, {
+        ...evaluation.diagnostics,
+        source: 'health_poll_failure',
+        lastSuccessAgeMs,
+        lastErrorKind: lastHealthErrorKind,
+        lastErrorDetail: lastHealthErrorDetail,
+      });
       if (pidSpan) {
         if (markDown) {
           pidSpan.textContent = '-';
