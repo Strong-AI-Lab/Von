@@ -29,6 +29,62 @@ def _assert_schema_conformance(gateway: InternalMCPGateway, method: str, payload
     assert ok, f"{method} output schema mismatch: {errors}"
 
 
+def _patch_task_import_write_path(monkeypatch):
+    external_mapping: dict[str, str] = {}
+    created_counter = {"count": 0}
+
+    def _fake_find(**kwargs):
+        issue_key = kwargs.get("external_id")
+        if isinstance(issue_key, str):
+            task_id = external_mapping.get(issue_key)
+            if isinstance(task_id, str) and task_id:
+                return {"task_concept_id": task_id}
+        return None
+
+    def _fake_create_task(**_kwargs):
+        created_counter["count"] += 1
+        return {"task_concept_id": f"#V#task_imported_{created_counter['count']}"}
+
+    def _fake_upsert_external_reference(
+        task_concept_id: str,
+        *,
+        external_id: str,
+        **_kwargs,
+    ):
+        external_mapping[external_id] = task_concept_id
+        return {"task_concept_id": task_concept_id}
+
+    monkeypatch.setattr(
+        "src.backend.services.jira_task_import_service.find_task_by_external_reference",
+        _fake_find,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.jira_task_import_service.create_task",
+        _fake_create_task,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.jira_task_import_service.update_task_fields",
+        lambda *_args, **_kwargs: {"task": {}},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.jira_task_import_service.upsert_task_external_reference",
+        _fake_upsert_external_reference,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.jira_task_import_service.set_task_parent",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.jira_task_import_service.set_task_epic",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.jira_task_import_service.link_tasks",
+        lambda *_args, **_kwargs: {},
+    )
+    return external_mapping
+
+
 def test_task_parity_methods_registered_in_catalogue():
     methods = set(build_default_catalogue().list_methods())
     expected = {
@@ -154,6 +210,138 @@ def test_task_import_jira_issues_gateway_accepts_issue_objects_from_discovery(mo
     assert payload.get("summary", {}).get("total_issues") == 1
     assert fetched_issue_keys == ["JVNAUTOSCI-3002"]
     _assert_schema_conformance(gateway, "task_import_jira_issues", payload)
+
+
+def test_task_import_jira_issues_gateway_syncs_migrated_label_on_write(monkeypatch):
+    gateway = _build_gateway()
+    _patch_task_import_write_path(monkeypatch)
+
+    jira_labels = {"JVNAUTOSCI-3003": ["jira-migration"]}
+    update_calls: list[dict[str, object]] = []
+
+    class _FakeProxy:
+        async def get_issue(self, *, issue_key: str, fields=None):  # noqa: ARG002
+            return {
+                "key": issue_key,
+                "fields": {
+                    "summary": "Imported issue",
+                    "description": {
+                        "type": "doc",
+                        "version": 1,
+                        "content": [
+                            {
+                                "type": "paragraph",
+                                "content": [{"type": "text", "text": "Desc"}],
+                            }
+                        ],
+                    },
+                    "status": {"name": "To Do"},
+                    "priority": {"name": "Medium"},
+                    "labels": list(jira_labels.get(issue_key, [])),
+                    "project": {"key": "JVNAUTOSCI", "name": "JVNAUTOSCI Project"},
+                    "issuelinks": [],
+                },
+            }
+
+        async def update_issue(self, *, issue_key: str, payload):
+            update_calls.append({"issue_key": issue_key, "payload": payload})
+            labels = (
+                payload.get("fields", {}).get("labels")
+                if isinstance(payload, dict)
+                else None
+            )
+            if isinstance(labels, list):
+                jira_labels[issue_key] = [str(label) for label in labels]
+            return {"success": True}
+
+    async def _fake_get_jira_proxy():
+        return _FakeProxy()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.jira_proxy_mcp.get_jira_proxy",
+        _fake_get_jira_proxy,
+    )
+
+    payload = gateway.invoke(
+        "task_import_jira_issues",
+        {"issue_keys": ["JVNAUTOSCI-3003"], "dry_run": False},
+    ).payload
+    assert payload.get("success") is True
+    sync_report = payload.get("source_label_sync") or {}
+    assert sync_report.get("eligible_issue_count") == 1
+    assert sync_report.get("updated_count") == 1
+    assert sync_report.get("already_present_count") == 0
+    assert jira_labels["JVNAUTOSCI-3003"] == ["jira-migration", "migrated"]
+    assert len(update_calls) == 1
+    _assert_schema_conformance(gateway, "task_import_jira_issues", payload)
+
+
+def test_task_import_jira_issues_gateway_migrated_label_sync_is_idempotent(monkeypatch):
+    gateway = _build_gateway()
+    _patch_task_import_write_path(monkeypatch)
+
+    jira_labels = {"JVNAUTOSCI-3004": ["jira-migration"]}
+    update_calls: list[dict[str, object]] = []
+
+    class _FakeProxy:
+        async def get_issue(self, *, issue_key: str, fields=None):  # noqa: ARG002
+            return {
+                "key": issue_key,
+                "fields": {
+                    "summary": "Imported issue",
+                    "description": {
+                        "type": "doc",
+                        "version": 1,
+                        "content": [
+                            {
+                                "type": "paragraph",
+                                "content": [{"type": "text", "text": "Desc"}],
+                            }
+                        ],
+                    },
+                    "status": {"name": "In Progress"},
+                    "priority": {"name": "Medium"},
+                    "labels": list(jira_labels.get(issue_key, [])),
+                    "project": {"key": "JVNAUTOSCI", "name": "JVNAUTOSCI Project"},
+                    "issuelinks": [],
+                },
+            }
+
+        async def update_issue(self, *, issue_key: str, payload):
+            update_calls.append({"issue_key": issue_key, "payload": payload})
+            labels = (
+                payload.get("fields", {}).get("labels")
+                if isinstance(payload, dict)
+                else None
+            )
+            if isinstance(labels, list):
+                jira_labels[issue_key] = [str(label) for label in labels]
+            return {"success": True}
+
+    async def _fake_get_jira_proxy():
+        return _FakeProxy()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.jira_proxy_mcp.get_jira_proxy",
+        _fake_get_jira_proxy,
+    )
+
+    first_payload = gateway.invoke(
+        "task_import_jira_issues",
+        {"issue_keys": ["JVNAUTOSCI-3004"], "dry_run": False},
+    ).payload
+    second_payload = gateway.invoke(
+        "task_import_jira_issues",
+        {"issue_keys": ["JVNAUTOSCI-3004"], "dry_run": False},
+    ).payload
+
+    first_sync = first_payload.get("source_label_sync") or {}
+    second_sync = second_payload.get("source_label_sync") or {}
+    assert first_sync.get("updated_count") == 1
+    assert second_sync.get("updated_count") == 0
+    assert second_sync.get("already_present_count") == 1
+    assert len(update_calls) == 1
+    _assert_schema_conformance(gateway, "task_import_jira_issues", second_payload)
 
 
 def test_task_transition_gateway_success_and_error_schema(monkeypatch):

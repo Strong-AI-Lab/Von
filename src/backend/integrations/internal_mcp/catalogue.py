@@ -12180,6 +12180,33 @@ def _coerce_bool_input(value: Any, *, default: bool) -> bool:
     return default
 
 
+def _normalise_jira_label(value: Any, *, default: str | None = None) -> str | None:
+    candidate = value if value is not None else default
+    if not isinstance(candidate, str):
+        return None
+    cleaned = candidate.strip()
+    return cleaned or None
+
+
+def _normalise_jira_labels(raw_labels: Any) -> list[str]:
+    if not isinstance(raw_labels, list):
+        return []
+    labels: list[str] = []
+    seen: set[str] = set()
+    for item in raw_labels:
+        if not isinstance(item, str):
+            continue
+        cleaned = item.strip()
+        if not cleaned:
+            continue
+        lowered = cleaned.casefold()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        labels.append(cleaned)
+    return labels
+
+
 def _task_import_jira_issues(**kwargs):
     """Import Jira issues into Von tasks with dry-run and idempotent reruns."""
     from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
@@ -12203,6 +12230,14 @@ def _task_import_jira_issues(**kwargs):
         max_results = 50
     max_results = max(1, min(max_results, 200))
     dry_run = _coerce_bool_input(kwargs.get("dry_run"), default=True)
+    sync_source_labels = _coerce_bool_input(
+        kwargs.get("sync_source_labels"),
+        default=True,
+    )
+    source_migrated_label = _normalise_jira_label(
+        kwargs.get("source_migrated_label"),
+        default="migrated",
+    )
 
     assignee_map_raw = kwargs.get("assignee_account_id_to_concept_id")
     assignee_map = assignee_map_raw if isinstance(assignee_map_raw, dict) else {}
@@ -12303,7 +12338,229 @@ def _task_import_jira_issues(**kwargs):
     if not isinstance(report, dict):
         return make_error_response("UNEXPECTED_ERROR", "Importer returned invalid payload")
 
+    issue_docs_by_key: dict[str, Mapping[str, Any]] = {}
+    for issue_doc in issue_docs:
+        if not isinstance(issue_doc, Mapping):
+            continue
+        issue_key_raw = issue_doc.get("key")
+        if not isinstance(issue_key_raw, str) or not issue_key_raw.strip():
+            continue
+        issue_docs_by_key[issue_key_raw.strip().upper()] = issue_doc
+
+    issue_rows_raw = report.get("issues")
+    issue_rows = issue_rows_raw if isinstance(issue_rows_raw, list) else []
+
+    def _is_label_sync_candidate(action_value: Any) -> bool:
+        if not isinstance(action_value, str):
+            return False
+        if dry_run:
+            return action_value in {"would_create", "would_update"}
+        return action_value in {"created", "updated", "skipped_existing"}
+
+    async def _sync_source_labels_to_jira() -> dict[str, Any]:
+        sync_report: dict[str, Any] = {
+            "enabled": bool(sync_source_labels),
+            "dry_run": bool(dry_run),
+            "label": source_migrated_label,
+            "eligible_issue_count": 0,
+            "updated_count": 0,
+            "would_update_count": 0,
+            "already_present_count": 0,
+            "error_count": 0,
+            "results": [],
+        }
+
+        if not sync_source_labels:
+            sync_report["status"] = "disabled"
+            return sync_report
+
+        if not isinstance(source_migrated_label, str) or not source_migrated_label:
+            sync_report["status"] = "disabled_invalid_label"
+            return sync_report
+
+        candidate_keys: list[str] = []
+        for issue_row in issue_rows:
+            if not isinstance(issue_row, Mapping):
+                continue
+            issue_key_raw = issue_row.get("jira_issue_key")
+            if not isinstance(issue_key_raw, str) or not issue_key_raw.strip():
+                continue
+            issue_key = issue_key_raw.strip().upper()
+            if issue_key in candidate_keys:
+                continue
+            if not _is_label_sync_candidate(issue_row.get("action")):
+                continue
+            candidate_keys.append(issue_key)
+
+        sync_report["eligible_issue_count"] = len(candidate_keys)
+
+        if not candidate_keys:
+            sync_report["status"] = "no_candidates"
+            return sync_report
+
+        target_label_cf = source_migrated_label.casefold()
+        proxy = await get_jira_proxy() if not dry_run else None
+
+        for issue_key in candidate_keys:
+            issue_doc = issue_docs_by_key.get(issue_key)
+            fields_value = (
+                issue_doc.get("fields") if isinstance(issue_doc, Mapping) else None
+            )
+            labels_value = (
+                fields_value.get("labels") if isinstance(fields_value, Mapping) else None
+            )
+            existing_labels = _normalise_jira_labels(labels_value)
+
+            # If labels are missing from the fetched payload, re-fetch just labels to
+            # avoid overwriting existing source labels.
+            if (
+                not dry_run
+                and labels_value is None
+                and proxy is not None
+            ):
+                try:
+                    refreshed_issue = await proxy.get_issue(
+                        issue_key=issue_key,
+                        fields=["labels"],
+                    )
+                    if isinstance(refreshed_issue, Mapping):
+                        refreshed_fields = refreshed_issue.get("fields")
+                        if isinstance(refreshed_fields, Mapping):
+                            existing_labels = _normalise_jira_labels(
+                                refreshed_fields.get("labels")
+                            )
+                except Exception:
+                    # Keep existing_labels from the original payload and let update attempt decide.
+                    pass
+
+            has_label = any(
+                isinstance(label, str) and label.casefold() == target_label_cf
+                for label in existing_labels
+            )
+            labels_with_migrated = _normalise_jira_labels(
+                list(existing_labels) + [source_migrated_label]
+            )
+
+            if has_label:
+                sync_report["already_present_count"] = int(
+                    sync_report["already_present_count"]
+                ) + 1
+                sync_report["results"].append(
+                    {
+                        "issue_key": issue_key,
+                        "status": "already_present",
+                        "labels": existing_labels,
+                    }
+                )
+                continue
+
+            if dry_run:
+                sync_report["would_update_count"] = int(
+                    sync_report["would_update_count"]
+                ) + 1
+                sync_report["results"].append(
+                    {
+                        "issue_key": issue_key,
+                        "status": "would_update",
+                        "labels_before": existing_labels,
+                        "labels_after": labels_with_migrated,
+                    }
+                )
+                continue
+
+            if proxy is None:
+                sync_report["error_count"] = int(sync_report["error_count"]) + 1
+                sync_report["results"].append(
+                    {
+                        "issue_key": issue_key,
+                        "status": "error",
+                        "error": "jira_proxy_unavailable",
+                    }
+                )
+                continue
+
+            try:
+                update_result = await proxy.update_issue(
+                    issue_key=issue_key,
+                    payload={"fields": {"labels": labels_with_migrated}},
+                )
+                if isinstance(update_result, Mapping):
+                    if update_result.get("success") is False:
+                        raise RuntimeError(str(update_result.get("error") or update_result))
+                    if update_result.get("error"):
+                        raise RuntimeError(str(update_result.get("error")))
+                sync_report["updated_count"] = int(sync_report["updated_count"]) + 1
+                sync_report["results"].append(
+                    {
+                        "issue_key": issue_key,
+                        "status": "updated",
+                        "labels_before": existing_labels,
+                        "labels_after": labels_with_migrated,
+                    }
+                )
+            except Exception as exc:
+                sync_report["error_count"] = int(sync_report["error_count"]) + 1
+                sync_report["results"].append(
+                    {
+                        "issue_key": issue_key,
+                        "status": "error",
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "labels_before": existing_labels,
+                    }
+                )
+
+        if int(sync_report["error_count"]) > 0:
+            sync_report["status"] = "completed_with_errors"
+        elif dry_run and int(sync_report["would_update_count"]) > 0:
+            sync_report["status"] = "dry_run_preview"
+        else:
+            sync_report["status"] = "completed"
+
+        return sync_report
+
+    try:
+        source_label_sync_report = _run_async_compat(_sync_source_labels_to_jira)
+    except JiraProxyError as exc:
+        source_label_sync_report = {
+            "enabled": bool(sync_source_labels),
+            "dry_run": bool(dry_run),
+            "label": source_migrated_label,
+            "eligible_issue_count": 0,
+            "updated_count": 0,
+            "would_update_count": 0,
+            "already_present_count": 0,
+            "error_count": 1,
+            "status": "jira_proxy_error",
+            "results": [
+                {
+                    "status": "error",
+                    "error": f"JiraProxyError: {exc}",
+                }
+            ],
+        }
+    except Exception as exc:
+        source_label_sync_report = {
+            "enabled": bool(sync_source_labels),
+            "dry_run": bool(dry_run),
+            "label": source_migrated_label,
+            "eligible_issue_count": 0,
+            "updated_count": 0,
+            "would_update_count": 0,
+            "already_present_count": 0,
+            "error_count": 1,
+            "status": "unexpected_error",
+            "results": [
+                {
+                    "status": "error",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            ],
+        }
+
     report["success"] = bool(report.get("success", True))
+    if int(source_label_sync_report.get("error_count", 0)) > 0:
+        report["success"] = False
+    report["source_label_sync"] = source_label_sync_report
     report["fetch"] = {
         "requested_issue_count": len(fetch_payload.get("requested_issue_keys", []))
         if isinstance(fetch_payload, dict)
@@ -15084,6 +15341,8 @@ def build_default_catalogue() -> MethodCatalogue:
                     "max_results": (int, type(None)),
                     "dry_run": (bool, type(None)),
                     "update_existing": (bool, type(None)),
+                    "sync_source_labels": (bool, type(None)),
+                    "source_migrated_label": (str, type(None)),
                     "assignee_account_id_to_concept_id": (dict, type(None)),
                     "organisation_concept_id": (str, type(None)),
                     "namespace": (str, type(None)),
@@ -15091,7 +15350,9 @@ def build_default_catalogue() -> MethodCatalogue:
                 allow_unknown=True,
                 description=(
                     "Import Jira issues into Von tasks using issue_keys and/or jql. "
-                    "Dry-run is enabled by default for preview-safe execution."
+                    "Dry-run is enabled by default for preview-safe execution. "
+                    "When dry_run=false, source Jira labels are synchronised with "
+                    "'migrated' by default (configurable)."
                 ),
             ),
             output_schema=task_import_jira_issues_output_schema,
@@ -15099,7 +15360,7 @@ def build_default_catalogue() -> MethodCatalogue:
             description=(
                 "Migrate Jira issues to Von tasks with idempotent reruns keyed by Jira issue key. "
                 "Produces a mapping report listing mapped/dropped fields, relation outcomes, "
-                "and pilot validation recommendations."
+                "source-label sync outcomes, and pilot validation recommendations."
             ),
         ),
         MethodDefinition(
