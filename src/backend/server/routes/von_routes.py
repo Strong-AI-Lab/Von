@@ -8214,6 +8214,8 @@ def history_sessions():
             resolve_conversation_owner,
         )
 
+        warnings: list[str] = []
+
         # JVNAUTOSCI-1011: Use window session context if available
         window_session_id = request.headers.get("X-Von-Window-Session")
         effective = get_effective_context(
@@ -8246,8 +8248,27 @@ def history_sessions():
             include_legacy=include_legacy,
             summary_mode=summary_mode,
         )
+        if not isinstance(sessions, list):
+            sessions = []
 
-        shared_invites = list_accepted_invites_for_user(user_concept_id=user_concept_id)
+        shared_invites: list[dict[str, Any]] = []
+        try:
+            raw_shared_invites = list_accepted_invites_for_user(
+                user_concept_id=user_concept_id
+            )
+            if isinstance(raw_shared_invites, list):
+                shared_invites = [
+                    invite for invite in raw_shared_invites if isinstance(invite, dict)
+                ]
+        except Exception as exc:
+            current_app.logger.warning(
+                "history_sessions: failed to load accepted shared invites for %s: %s",
+                user_concept_id,
+                exc,
+                exc_info=True,
+            )
+            warnings.append("accepted_invites_unavailable")
+
         # JVNAUTOSCI-1004: Filter shared invites by current organisation
         if organisation_concept_id:
             shared_invites = [
@@ -8258,15 +8279,15 @@ def history_sessions():
                     in (None, organisation_concept_id)
                 )
             ]
+
         invite_by_session: dict[str, dict] = {}
         for invite in shared_invites:
-            if not isinstance(invite, dict):
-                continue
             invite_session_id = invite.get("session_id")
             if isinstance(invite_session_id, str) and invite_session_id:
                 invite_by_session.setdefault(invite_session_id, invite)
 
         if invite_by_session:
+            session_enrichment_errors = 0
             for summary in sessions:
                 if not isinstance(summary, dict):
                     continue
@@ -8276,37 +8297,63 @@ def history_sessions():
                 invite = invite_by_session.get(session_id)
                 if not isinstance(invite, dict):
                     continue
+                try:
+                    inviter_id = _normalise_concept_id(invite.get("inviter_user_id"))
+                    owner_id = _normalise_concept_id(
+                        invite.get("conversation_owner_user_id")
+                        or invite.get("inviter_user_id")
+                    )
+                    if not invite.get("conversation_owner_user_id"):
+                        resolved_owner = resolve_conversation_owner(session_id=session_id)
+                        resolved_owner_id = _normalise_concept_id(resolved_owner)
+                        if resolved_owner_id:
+                            owner_id = resolved_owner_id
 
-                inviter_id = _normalise_concept_id(invite.get("inviter_user_id"))
-                owner_id = _normalise_concept_id(
-                    invite.get("conversation_owner_user_id")
-                    or invite.get("inviter_user_id")
+                    summary["shared_with_me"] = True
+                    if inviter_id:
+                        summary["shared_from_user_id"] = inviter_id
+                    if owner_id:
+                        summary["shared_owner_user_id"] = owner_id
+                    if invite.get("invite_id"):
+                        summary["invite_id"] = invite.get("invite_id")
+                    shared_timestamp = (
+                        invite.get("accepted_at")
+                        or invite.get("updated_at")
+                        or invite.get("created_at")
+                    )
+                    summary["shared_accepted_at"] = shared_timestamp
+                except Exception:
+                    session_enrichment_errors += 1
+                    current_app.logger.warning(
+                        "history_sessions: failed to enrich shared session row %s",
+                        session_id,
+                        exc_info=True,
+                    )
+            if session_enrichment_errors > 0:
+                warnings.append(
+                    f"shared_session_enrichment_errors:{session_enrichment_errors}"
                 )
-                if not invite.get("conversation_owner_user_id"):
-                    resolved_owner = resolve_conversation_owner(session_id=session_id)
-                    resolved_owner_id = _normalise_concept_id(resolved_owner)
-                    if resolved_owner_id:
-                        owner_id = resolved_owner_id
-
-                summary["shared_with_me"] = True
-                if inviter_id:
-                    summary["shared_from_user_id"] = inviter_id
-                if owner_id:
-                    summary["shared_owner_user_id"] = owner_id
-                if invite.get("invite_id"):
-                    summary["invite_id"] = invite.get("invite_id")
-                shared_timestamp = (
-                    invite.get("accepted_at")
-                    or invite.get("updated_at")
-                    or invite.get("created_at")
-                )
-                summary["shared_accepted_at"] = shared_timestamp
 
         # Flag owner's sessions that have accepted participants (JVNAUTOSCI-1002)
         # This enables the owner to subscribe to SSE updates from participants
-        outgoing_accepted = list_outgoing_accepted_invites_for_user(
-            user_concept_id=user_concept_id
-        )
+        outgoing_accepted: list[dict[str, Any]] = []
+        try:
+            raw_outgoing = list_outgoing_accepted_invites_for_user(
+                user_concept_id=user_concept_id
+            )
+            if isinstance(raw_outgoing, list):
+                outgoing_accepted = [
+                    invite for invite in raw_outgoing if isinstance(invite, dict)
+                ]
+        except Exception as exc:
+            current_app.logger.warning(
+                "history_sessions: failed to load outgoing accepted invites for %s: %s",
+                user_concept_id,
+                exc,
+                exc_info=True,
+            )
+            warnings.append("outgoing_invites_unavailable")
+
         if organisation_concept_id:
             outgoing_accepted = [
                 invite
@@ -8318,8 +8365,6 @@ def history_sessions():
             ]
         outgoing_by_session: dict[str, list] = {}
         for invite in outgoing_accepted:
-            if not isinstance(invite, dict):
-                continue
             out_session_id = invite.get("session_id")
             if isinstance(out_session_id, str) and out_session_id:
                 outgoing_by_session.setdefault(out_session_id, []).append(invite)
@@ -8335,64 +8380,78 @@ def history_sessions():
         existing_session_ids = {
             s.get("session_id") for s in sessions if isinstance(s, dict)
         }
-        shared_sessions = []
+        shared_sessions: list[dict[str, Any]] = []
+        shared_invite_resolution_errors = 0
         for invite in shared_invites:
-            if not isinstance(invite, dict):
-                continue
-            inviter_id = _normalise_concept_id(invite.get("inviter_user_id"))
-            owner_id = _normalise_concept_id(
-                invite.get("conversation_owner_user_id")
-                or invite.get("inviter_user_id")
-            )
-            session_id = invite.get("session_id")
-            if not owner_id or not isinstance(session_id, str) or not session_id:
-                continue
-            if not invite.get("conversation_owner_user_id"):
-                resolved_owner = resolve_conversation_owner(session_id=session_id)
-                resolved_owner_id = _normalise_concept_id(resolved_owner)
-                if resolved_owner_id:
-                    owner_id = resolved_owner_id
-            if session_id in existing_session_ids:
-                continue
-            owner_namespace = _derive_namespace_for_user_org(
-                owner_id, invite.get("organisation_concept_id")
-            ) or chat_history_service.resolve_chat_history_namespace(owner_id)
-            summary = chat_history_service.get_chat_history_session_summary(
-                owner_id,
-                session_id,
-                namespace=owner_namespace,
-                summary_mode=summary_mode,
-            )
-            if not isinstance(summary, dict) and owner_id:
+            try:
+                inviter_id = _normalise_concept_id(invite.get("inviter_user_id"))
+                owner_id = _normalise_concept_id(
+                    invite.get("conversation_owner_user_id")
+                    or invite.get("inviter_user_id")
+                )
+                session_id = invite.get("session_id")
+                if not owner_id or not isinstance(session_id, str) or not session_id:
+                    continue
+                if not invite.get("conversation_owner_user_id"):
+                    resolved_owner = resolve_conversation_owner(session_id=session_id)
+                    resolved_owner_id = _normalise_concept_id(resolved_owner)
+                    if resolved_owner_id:
+                        owner_id = resolved_owner_id
+                if session_id in existing_session_ids:
+                    continue
+                owner_namespace = _derive_namespace_for_user_org(
+                    owner_id, invite.get("organisation_concept_id")
+                ) or chat_history_service.resolve_chat_history_namespace(owner_id)
                 summary = chat_history_service.get_chat_history_session_summary(
                     owner_id,
                     session_id,
-                    namespace=None,
+                    namespace=owner_namespace,
                     summary_mode=summary_mode,
                 )
-            if not isinstance(summary, dict):
-                continue
-            shared_timestamp = (
-                invite.get("accepted_at")
-                or invite.get("updated_at")
-                or invite.get("created_at")
-            )
-            existing_last = summary.get("last_message_at")
-            if not existing_last:
-                shared_dt = chat_history_service._coerce_datetime(shared_timestamp)
-                if shared_dt:
-                    summary["last_message_at"] = shared_dt.isoformat().replace(
-                        "+00:00", "Z"
+                if not isinstance(summary, dict) and owner_id:
+                    summary = chat_history_service.get_chat_history_session_summary(
+                        owner_id,
+                        session_id,
+                        namespace=None,
+                        summary_mode=summary_mode,
                     )
-            summary["shared_with_me"] = True
-            if inviter_id:
-                summary["shared_from_user_id"] = inviter_id
-            summary["shared_owner_user_id"] = owner_id
-            summary["invite_id"] = invite.get("invite_id")
-            summary["shared_accepted_at"] = shared_timestamp
-            shared_sessions.append(summary)
+                if not isinstance(summary, dict):
+                    continue
+                shared_timestamp = (
+                    invite.get("accepted_at")
+                    or invite.get("updated_at")
+                    or invite.get("created_at")
+                )
+                existing_last = summary.get("last_message_at")
+                if not existing_last:
+                    shared_dt = chat_history_service._coerce_datetime(shared_timestamp)
+                    if shared_dt:
+                        summary["last_message_at"] = shared_dt.isoformat().replace(
+                            "+00:00", "Z"
+                        )
+                summary["shared_with_me"] = True
+                if inviter_id:
+                    summary["shared_from_user_id"] = inviter_id
+                summary["shared_owner_user_id"] = owner_id
+                summary["invite_id"] = invite.get("invite_id")
+                summary["shared_accepted_at"] = shared_timestamp
+                shared_sessions.append(summary)
+            except Exception:
+                shared_invite_resolution_errors += 1
+                current_app.logger.warning(
+                    "history_sessions: failed to resolve shared invite row",
+                    exc_info=True,
+                )
+        if shared_invite_resolution_errors > 0:
+            warnings.append(
+                f"shared_invite_resolution_errors:{shared_invite_resolution_errors}"
+            )
 
-        combined = sessions + shared_sessions
+        combined = [
+            session_row
+            for session_row in (sessions + shared_sessions)
+            if isinstance(session_row, dict)
+        ]
         combined.sort(
             key=lambda s: chat_history_service._coerce_datetime(
                 s.get("last_message_at") if isinstance(s, dict) else None
@@ -8401,15 +8460,17 @@ def history_sessions():
             reverse=True,
         )
 
-        return jsonify(
-            {
-                "authenticated": True,
-                "sessions": combined,
-                "active_session_id": session.get("session_id"),
-            }
-        )
+        response_payload: dict[str, Any] = {
+            "authenticated": True,
+            "sessions": combined,
+            "active_session_id": session.get("session_id"),
+        }
+        if warnings:
+            response_payload["warnings"] = warnings
+
+        return jsonify(response_payload)
     except Exception as e:
-        print(f"Error retrieving history sessions: {e}")
+        current_app.logger.exception("Error retrieving history sessions")
         return jsonify({"error": str(e)}), 500
 
 

@@ -65,6 +65,8 @@ _WRITE_TOOL_NAMES = {
     "pull_request_review_write",
     "push_files",
     "remove_relationship",
+    "remove_relationships_bulk",
+    "undo_relationship_removal",
     "sub_issue_write",
     "upsert_renderer_profile",
     "upsert_singleton_text_relation",

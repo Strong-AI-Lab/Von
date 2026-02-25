@@ -1312,240 +1312,46 @@ def _add_relationship(**kwargs):
 
 
 def _remove_relationship(**kwargs):
-    """Remove a relationship between two concepts. Text relations removal is not supported here."""
-    from ...db.repositories.concepts_repository import ConceptsRepository
+    """Remove one concept-to-concept relationship via the canonical service path."""
+    from ...services.relationship_removal_service import remove_relationship
 
     source_id = kwargs.get("source_id")
     predicate = kwargs.get("predicate")
     target = kwargs.get("target")
+    relation_id = kwargs.get("relation_id")
 
-    if not source_id:
-        return make_error_response(
-            "missing_parameter",
-            "Missing 'source_id' parameter",
-            details={"missing": ["source_id"]},
-            suggestions=["Provide the source concept ID"],
-        )
-    if not predicate:
-        return make_error_response(
-            "missing_parameter",
-            "Missing 'predicate' parameter",
-            details={"missing": ["predicate"]},
-            suggestions=["Provide the predicate to remove"],
-        )
-    if not target:
-        return make_error_response(
-            "missing_parameter",
-            "Missing 'target' parameter",
-            details={"missing": ["target"]},
-            suggestions=["Provide the target concept ID"],
-        )
+    if not relation_id:
+        missing: list[str] = []
+        if not source_id:
+            missing.append("source_id")
+        if not predicate:
+            missing.append("predicate")
+        if not target:
+            missing.append("target")
+        if missing:
+            return make_error_response(
+                "missing_parameter",
+                "Missing required parameters for remove_relationship",
+                details={"missing": missing},
+                suggestions=[
+                    "Provide relation_id OR provide source_id, predicate, and target",
+                ],
+            )
 
     try:
-        repo = ConceptsRepository
-
-        from ...services.relationship_write_service import (
-            normalise_structural_predicate,
+        return remove_relationship(
+            relation_id=relation_id,
+            source_id=source_id,
+            predicate=predicate,
+            target=target,
+            mode=kwargs.get("mode"),
+            cascade=kwargs.get("cascade"),
+            dry_run=kwargs.get("dry_run", False),
+            confirmed=kwargs.get("confirmed", False),
+            operator_override=kwargs.get("operator_override", False),
+            reason=kwargs.get("reason"),
+            request_id=kwargs.get("request_id"),
         )
-        from ...vontology.code_concepts_registry import (
-            build_virtual_concept_doc,
-            is_code_concept_id,
-        )
-        from ...vontology.utils_vontology import is_predicate
-
-        # Verify source concept exists
-        src = repo.find_one({"concept_id": source_id})
-        if not src:
-            return make_error_response(
-                "source_concept_not_found",
-                f"Source concept '{source_id}' not found",
-                details={"role": "source", "concept_id": source_id},
-                suggestions=[
-                    "Check the concept ID for typos",
-                    "Verify the concept exists using fetch_concept",
-                ],
-                related_concept_ids=[source_id],
-            )
-
-        # This tool only supports concept-to-concept relationships. Provide an
-        # explicit, agent-readable error when users attempt to remove text relations.
-        predicate_str = (
-            predicate.strip() if isinstance(predicate, str) else str(predicate)
-        )
-        predicate_normalised = (
-            predicate_str[3:] if predicate_str.startswith("#V#") else predicate_str
-        )
-        well_known_text_predicates = {"hasContent", "hasDescription", "hasName"}
-        if predicate_normalised in well_known_text_predicates:
-            return make_error_response(
-                "unsupported_text_relation_removal",
-                "Text relation removal is not supported by remove_relationship",
-                details={
-                    "predicate_input": predicate,
-                    "predicate": predicate_normalised,
-                },
-                suggestions=["Use delete_text_relation to remove text relations"],
-            )
-
-        # Canonical predicate normalisation is shared with add_relationship.
-        rel_kind = normalise_structural_predicate(predicate_str)
-
-        # Determine if this is a text predicate (binary_text_predicate instance)
-        if isinstance(rel_kind, str) and rel_kind.startswith("#V#"):
-            pred_doc = repo.find_one(
-                {"concept_id": rel_kind}, {"relationships.is_an_instance_of": 1}
-            )
-            if pred_doc:
-                instance_of = pred_doc.get("relationships", {}).get(
-                    "is_an_instance_of", []
-                )
-                if isinstance(instance_of, str):
-                    instance_of = [instance_of]
-                if "#V#binary_text_predicate" in instance_of:
-                    return make_error_response(
-                        "unsupported_text_relation_removal",
-                        "Text relation removal is not supported by remove_relationship",
-                        details={"predicate": rel_kind, "predicate_input": predicate},
-                        suggestions=[
-                            "Use delete_text_relation to remove text relations"
-                        ],
-                    )
-
-        # Guardrail: concept-to-concept relationship predicates must be either:
-        # - one of the structural relationship kinds (is_a_type_of, has_subtype, ...), or
-        # - a Vontology predicate concept id (starts with #V# and exists as a predicate).
-        from ...db.repositories.concepts_repository import RELATIONSHIP_KINDS
-
-        if isinstance(rel_kind, str) and rel_kind in RELATIONSHIP_KINDS:
-            pass
-        elif isinstance(rel_kind, str) and rel_kind.startswith("#V#"):
-            pred_doc = repo.find_one(
-                {"concept_id": rel_kind}, {"concept_id": 1, "relationships": 1}
-            )
-            if pred_doc is None and is_code_concept_id(rel_kind):
-                pred_doc = build_virtual_concept_doc(rel_kind)
-            if pred_doc is None:
-                return make_error_response(
-                    "predicate_concept_not_found",
-                    (
-                        f"Predicate concept '{rel_kind}' not found. "
-                        "Create it as a predicate in the Vontology (e.g. as an instance of #V#predicate) "
-                        "before using it as a relationship."
-                    ),
-                    details={
-                        "role": "predicate",
-                        "predicate": rel_kind,
-                        "predicate_input": predicate,
-                    },
-                    suggestions=[
-                        "Create the predicate concept first using create_concepts with kind='predicate'"
-                    ],
-                    related_concept_ids=[rel_kind],
-                )
-            if not is_predicate(pred_doc):
-                return make_error_response(
-                    "predicate_concept_not_typed",
-                    (
-                        f"Concept '{rel_kind}' exists but is not typed as a predicate. "
-                        "Predicates must be instances of #V#predicate (or a predicate subtype)."
-                    ),
-                    details={
-                        "role": "predicate",
-                        "predicate": rel_kind,
-                        "predicate_input": predicate,
-                        "required_instance_of": "#V#predicate",
-                    },
-                    suggestions=[
-                        "Add an instance_of relationship from this concept to #V#predicate using add_relationship"
-                    ],
-                    related_concept_ids=[rel_kind, "#V#predicate"],
-                )
-        else:
-            return make_error_response(
-                "invalid_relationship_predicate",
-                (
-                    "Invalid relationship predicate. For concept-to-concept relationships, "
-                    "use a structural predicate (e.g. 'typeOf', 'instance_of') or a '#V#...' predicate concept id."
-                ),
-                details={"predicate_input": predicate, "predicate_canonical": rel_kind},
-                suggestions=[
-                    "Use 'instance_of', 'typeOf', or a '#V#' prefixed predicate concept ID"
-                ],
-            )
-
-        # Ensure the relationship field exists (optional sanity)
-        existing = (
-            repo.find_one({"concept_id": source_id}, {f"relationships.{rel_kind}": 1})
-            or {}
-        )
-        rels = existing.get("relationships") or {}
-        curr = rels.get(rel_kind)
-        # Normalise to list
-        if isinstance(curr, str):
-            curr_list = [curr] if curr else []
-        elif isinstance(curr, list):
-            curr_list = curr
-        else:
-            curr_list = []
-
-        if target not in curr_list:
-            return {
-                "success": True,
-                "message": "Relationship not present",
-                "source_id": source_id,
-                "predicate": rel_kind,
-                "target": target,
-                "already_absent": True,
-            }
-
-        update_result = repo.update_one(
-            {"concept_id": source_id},
-            {"$pull": {f"relationships.{rel_kind}": target}},
-        )
-
-        if update_result.modified_count > 0:
-            try:
-                from ...services.workflow_event_integration_service import (
-                    EVENT_TYPE_RELATIONSHIP_REMOVED,
-                    maybe_launch_vontology_mutation_workflow,
-                    resolve_event_actor_context,
-                )
-
-                actor_id, actor_org = resolve_event_actor_context()
-                maybe_launch_vontology_mutation_workflow(
-                    mutation_event_type=EVENT_TYPE_RELATIONSHIP_REMOVED,
-                    mutation_id=f"{source_id}:{rel_kind}:{target}",
-                    user_id=actor_id,
-                    org_id=actor_org,
-                    event_payload={
-                        "source_id": source_id,
-                        "predicate": rel_kind,
-                        "target_id": target,
-                    },
-                    inputs={
-                        "source_id": source_id,
-                        "predicate": rel_kind,
-                        "target_id": target,
-                    },
-                )
-            except Exception:
-                pass
-            return {
-                "success": True,
-                "source_id": source_id,
-                "predicate": rel_kind,
-                "target": target,
-                "removed": True,
-            }
-        else:
-            # Matched but no modification (race or duplicate state)
-            return {
-                "success": True,
-                "source_id": source_id,
-                "predicate": rel_kind,
-                "target": target,
-                "removed": False,
-            }
     except Exception as e:
         return make_error_response(
             "exception",
@@ -1554,8 +1360,79 @@ def _remove_relationship(**kwargs):
                 "source_id": source_id,
                 "predicate": predicate,
                 "target": target,
+                "relation_id": relation_id,
                 "exception_type": type(e).__name__,
             },
+        )
+
+
+def _preview_remove_relationship(**kwargs):
+    from ...services.relationship_removal_service import preview_remove_relationship
+
+    try:
+        return preview_remove_relationship(
+            relation_id=kwargs.get("relation_id"),
+            source_id=kwargs.get("source_id"),
+            predicate=kwargs.get("predicate"),
+            target=kwargs.get("target"),
+            request_id=kwargs.get("request_id"),
+        )
+    except Exception as e:
+        return make_error_response(
+            "exception",
+            f"Exception: {str(e)}",
+            details={"exception_type": type(e).__name__},
+        )
+
+
+def _remove_relationships_bulk(**kwargs):
+    from ...services.relationship_removal_service import remove_relationships_bulk
+
+    try:
+        return remove_relationships_bulk(
+            relation_ids=kwargs.get("relation_ids"),
+            relations=kwargs.get("relations"),
+            filter=kwargs.get("filter"),
+            mode=kwargs.get("mode"),
+            cascade=kwargs.get("cascade"),
+            dry_run=kwargs.get("dry_run", False),
+            confirmed=kwargs.get("confirmed", False),
+            operator_override=kwargs.get("operator_override", False),
+            reason=kwargs.get("reason"),
+            request_id=kwargs.get("request_id"),
+            stop_on_error=kwargs.get("stop_on_error", False),
+        )
+    except Exception as e:
+        return make_error_response(
+            "exception",
+            f"Exception: {str(e)}",
+            details={"exception_type": type(e).__name__},
+        )
+
+
+def _undo_relationship_removal(**kwargs):
+    from ...services.relationship_removal_service import undo_relationship_removal
+
+    undo_token = kwargs.get("undo_token")
+    if not undo_token:
+        return make_error_response(
+            "missing_parameter",
+            "Missing 'undo_token' parameter",
+            details={"missing": ["undo_token"]},
+            suggestions=["Provide the undo_token returned by remove_relationship(s)_bulk"],
+        )
+
+    try:
+        return undo_relationship_removal(
+            undo_token=undo_token,
+            request_id=kwargs.get("request_id"),
+            confirmed=kwargs.get("confirmed", True),
+        )
+    except Exception as e:
+        return make_error_response(
+            "exception",
+            f"Exception: {str(e)}",
+            details={"exception_type": type(e).__name__},
         )
 
 
@@ -4641,14 +4518,22 @@ def _add_relationship_output_schema() -> Schema:
 
 def _remove_relationship_input_schema() -> Schema:
     return Schema(
-        required={
-            "source_id": str,
-            "predicate": str,
-            "target": str,
+        required={},
+        optional={
+            "relation_id": (str, type(None)),
+            "source_id": (str, type(None)),
+            "predicate": (str, type(None)),
+            "target": (str, type(None)),
+            "mode": (str, type(None)),
+            "cascade": (str, type(None)),
+            "dry_run": (bool, type(None)),
+            "confirmed": (bool, type(None)),
+            "operator_override": (bool, type(None)),
+            "reason": (str, type(None)),
+            "request_id": (str, type(None)),
         },
-        optional={},
         allow_unknown=True,
-        description="remove_relationship input: source_id (str, concept ID), predicate (str, relationship type like 'instance_of', 'typeOf', or custom predicate), target (str, target concept ID). Only concept-to-concept relationships are supported.",
+        description="remove_relationship input: relation_id OR source_id+predicate+target. Optional mode/cascade/confirmation controls. Only concept-to-concept relationships are supported.",
     )
 
 
@@ -4667,9 +4552,138 @@ def _remove_relationship_output_schema() -> Schema:
             "error": (str, type(None)),
             "error_code": (str, type(None)),
             "error_details": (dict, type(None)),
+            "status": (str, type(None)),
+            "relation_id": (str, type(None)),
+            "mode_returned": (str, type(None)),
+            "cascade_policy": (str, type(None)),
+            "correlation_id": (str, type(None)),
+            "request_id": (str, type(None)),
+            "warnings": (list, type(None)),
+            "undo_token": (str, type(None)),
+            "audit_record_id": (str, type(None)),
+            "dry_run": (bool, type(None)),
+            "impact": (dict, type(None)),
+            "candidates": (list, type(None)),
+            "candidate_count": (int, type(None)),
         },
         allow_unknown=True,
-        description="remove_relationship output: success (bool), source_id, predicate, target, removed (bool), already_absent (bool when relation was not present), message, error, error_code (str), error_details (dict)",
+        description="remove_relationship output: success (bool), source_id/predicate/target, removed/already_absent, status, relation_id, mode/cascade details, warnings, audit metadata, undo_token, and structured errors.",
+    )
+
+
+def _preview_remove_relationship_input_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "relation_id": (str, type(None)),
+            "source_id": (str, type(None)),
+            "predicate": (str, type(None)),
+            "target": (str, type(None)),
+            "request_id": (str, type(None)),
+        },
+        allow_unknown=True,
+        description="preview_remove_relationship input: relation_id OR source_id+predicate with optional target to preview impact before deletion.",
+    )
+
+
+def _preview_remove_relationship_output_schema() -> Schema:
+    return Schema(
+        required={"success": bool},
+        optional={
+            "status": (str, type(None)),
+            "source_id": (str, type(None)),
+            "predicate": (str, type(None)),
+            "target": (str, type(None)),
+            "relation_id": (str, type(None)),
+            "correlation_id": (str, type(None)),
+            "request_id": (str, type(None)),
+            "dry_run": (bool, type(None)),
+            "impact": (dict, type(None)),
+            "warnings": (list, type(None)),
+            "candidates": (list, type(None)),
+            "candidate_count": (int, type(None)),
+            "error": (str, type(None)),
+            "error_code": (str, type(None)),
+            "error_details": (dict, type(None)),
+        },
+        allow_unknown=True,
+        description="preview_remove_relationship output: dry-run impact report with warnings/dependencies, plus not_found/ambiguous/error states without mutation side effects.",
+    )
+
+
+def _remove_relationships_bulk_input_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "relation_ids": (list, type(None)),
+            "relations": (list, type(None)),
+            "filter": (dict, type(None)),
+            "mode": (str, type(None)),
+            "cascade": (str, type(None)),
+            "dry_run": (bool, type(None)),
+            "confirmed": (bool, type(None)),
+            "operator_override": (bool, type(None)),
+            "reason": (str, type(None)),
+            "request_id": (str, type(None)),
+            "stop_on_error": (bool, type(None)),
+        },
+        allow_unknown=True,
+        description="remove_relationships_bulk input: explicit relation_ids and/or triple relations and/or filter-based selector for bulk removal with deterministic reporting.",
+    )
+
+
+def _remove_relationships_bulk_output_schema() -> Schema:
+    return Schema(
+        required={"success": bool},
+        optional={
+            "status": (str, type(None)),
+            "dry_run": (bool, type(None)),
+            "mode_returned": (str, type(None)),
+            "cascade_policy": (str, type(None)),
+            "correlation_id": (str, type(None)),
+            "request_id": (str, type(None)),
+            "results": (list, type(None)),
+            "summary": (dict, type(None)),
+            "undo_token": (str, type(None)),
+            "document_model_note": (str, type(None)),
+            "error": (str, type(None)),
+            "error_code": (str, type(None)),
+        },
+        allow_unknown=True,
+        description="remove_relationships_bulk output: deterministic per-item results with aggregate summary, partial-failure reporting, and optional undo_token for soft-delete mode.",
+    )
+
+
+def _undo_relationship_removal_input_schema() -> Schema:
+    return Schema(
+        required={"undo_token": str},
+        optional={
+            "request_id": (str, type(None)),
+            "confirmed": (bool, type(None)),
+        },
+        allow_unknown=True,
+        description="undo_relationship_removal input: undo_token returned by remove_relationship/remove_relationships_bulk soft-delete operations.",
+    )
+
+
+def _undo_relationship_removal_output_schema() -> Schema:
+    return Schema(
+        required={"success": bool},
+        optional={
+            "status": (str, type(None)),
+            "undo_token": (str, type(None)),
+            "correlation_id": (str, type(None)),
+            "request_id": (str, type(None)),
+            "restored_count": (int, type(None)),
+            "already_restored_count": (int, type(None)),
+            "error_count": (int, type(None)),
+            "errors": (list, type(None)),
+            "error": (str, type(None)),
+            "error_code": (str, type(None)),
+            "error_details": (dict, type(None)),
+        },
+        allow_unknown=True,
+        description="undo_relationship_removal output: restoration summary for a soft-delete undo token, including partial failure details when relevant.",
     )
 
 
@@ -15195,6 +15209,30 @@ def build_default_catalogue() -> MethodCatalogue:
             output_schema=_remove_relationship_output_schema(),
             category="write",
             description="Remove a relationship between two concepts (concept-to-concept only). Use to clean incorrect type/instance links or other structural predicates. Text relation removal is not supported in this tool.",
+        ),
+        MethodDefinition(
+            name="preview_remove_relationship",
+            handler=_preview_remove_relationship,
+            input_schema=_preview_remove_relationship_input_schema(),
+            output_schema=_preview_remove_relationship_output_schema(),
+            category="read",
+            description="Preview relationship removal effects without mutating data. Supports relation_id or triple selectors and returns impact/warning diagnostics.",
+        ),
+        MethodDefinition(
+            name="remove_relationships_bulk",
+            handler=_remove_relationships_bulk,
+            input_schema=_remove_relationships_bulk_input_schema(),
+            output_schema=_remove_relationships_bulk_output_schema(),
+            category="write",
+            description="Bulk-remove concept relationships using explicit relation IDs, triples, and/or filter selectors. Returns deterministic per-item status with partial-failure reporting.",
+        ),
+        MethodDefinition(
+            name="undo_relationship_removal",
+            handler=_undo_relationship_removal,
+            input_schema=_undo_relationship_removal_input_schema(),
+            output_schema=_undo_relationship_removal_output_schema(),
+            category="write",
+            description="Restore relationships removed in soft-delete mode by supplying an undo token returned from prior removal operations.",
         ),
         MethodDefinition(
             name="delete_concept",

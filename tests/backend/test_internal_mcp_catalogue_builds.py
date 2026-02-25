@@ -6,6 +6,9 @@ def test_internal_mcp_catalogue_builds_and_includes_relationship_tools():
 
     assert "add_relationship" in methods
     assert "remove_relationship" in methods
+    assert "preview_remove_relationship" in methods
+    assert "remove_relationships_bulk" in methods
+    assert "undo_relationship_removal" in methods
     assert "turn_execution_list" in methods
     assert "turn_execution_get" in methods
     assert "turn_execution_search_failures" in methods

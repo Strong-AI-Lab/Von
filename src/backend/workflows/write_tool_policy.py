@@ -26,6 +26,8 @@ HIGH_IMPACT_VONTOLOGY_WRITE_TOOLS: frozenset[str] = frozenset(
         "create_concepts",
         "add_relationship",
         "remove_relationship",
+        "remove_relationships_bulk",
+        "undo_relationship_removal",
         "merge_concepts",
         "delete_concept",
         "update_concept",

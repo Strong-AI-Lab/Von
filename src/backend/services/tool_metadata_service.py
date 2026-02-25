@@ -77,6 +77,21 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "category": "vontology",
         "display_template": "Removed: {predicate} → {target}",
     },
+    "preview_remove_relationship": {
+        "salience": "medium",
+        "category": "vontology",
+        "display_template": "Preview remove: {predicate} → {target}",
+    },
+    "remove_relationships_bulk": {
+        "salience": "high",
+        "category": "vontology",
+        "display_template": "Bulk removed relationships: {removed_count}",
+    },
+    "undo_relationship_removal": {
+        "salience": "high",
+        "category": "vontology",
+        "display_template": "Undo restored: {restored_count}",
+    },
     "add_names": {
         "salience": "high",
         "category": "vontology",

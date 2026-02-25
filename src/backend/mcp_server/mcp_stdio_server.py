@@ -112,6 +112,9 @@ from src.backend.integrations.internal_mcp.catalogue import _jira_search
 from src.backend.integrations.internal_mcp.catalogue import _jira_transition_issue
 from src.backend.integrations.internal_mcp.catalogue import _jira_update_issue
 from src.backend.integrations.internal_mcp.catalogue import _remove_relationship
+from src.backend.integrations.internal_mcp.catalogue import _preview_remove_relationship
+from src.backend.integrations.internal_mcp.catalogue import _remove_relationships_bulk
+from src.backend.integrations.internal_mcp.catalogue import _undo_relationship_removal
 from src.backend.integrations.internal_mcp.catalogue import (
     _turn_execution_build_benchmark,
 )
@@ -2133,22 +2136,24 @@ async def _handle_add_relationship(arguments: dict[str, Any]) -> list[TextConten
 
 
 async def _handle_remove_relationship(arguments: dict[str, Any]) -> list[TextContent]:
+    relation_id = arguments.get("relation_id")
     source_id = arguments.get("source_id")
     predicate = arguments.get("predicate")
     target = arguments.get("target")
-    if not source_id or not predicate or not target:
+    if not relation_id and (not source_id or not predicate or not target):
         missing: list[str] = []
-        if not source_id:
-            missing.append("source_id")
-        if not predicate:
-            missing.append("predicate")
-        if not target:
-            missing.append("target")
+        if not relation_id:
+            if not source_id:
+                missing.append("source_id")
+            if not predicate:
+                missing.append("predicate")
+            if not target:
+                missing.append("target")
         return [
             _json_text(
                 {
                     "success": False,
-                    "error": "Missing required parameters: source_id, predicate, and target",
+                    "error": "Missing required parameters: relation_id OR source_id/predicate/target",
                     "error_code": "missing_parameter",
                     "error_details": {"missing": missing},
                 }
@@ -2156,7 +2161,17 @@ async def _handle_remove_relationship(arguments: dict[str, Any]) -> list[TextCon
         ]
     try:
         result = _remove_relationship(
-            source_id=source_id, predicate=predicate, target=target
+            relation_id=relation_id,
+            source_id=source_id,
+            predicate=predicate,
+            target=target,
+            mode=arguments.get("mode"),
+            cascade=arguments.get("cascade"),
+            dry_run=arguments.get("dry_run", False),
+            confirmed=arguments.get("confirmed", False),
+            operator_override=arguments.get("operator_override", False),
+            reason=arguments.get("reason"),
+            request_id=arguments.get("request_id"),
         )
         return [_json_text(result)]
     except Exception as exc:
@@ -2165,6 +2180,97 @@ async def _handle_remove_relationship(arguments: dict[str, Any]) -> list[TextCon
                 {
                     "success": False,
                     "error": f"Failed to remove relationship: {str(exc)}",
+                    "error_code": "exception",
+                    "error_details": {"exception_type": type(exc).__name__},
+                }
+            )
+        ]
+
+
+async def _handle_preview_remove_relationship(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    try:
+        result = _preview_remove_relationship(
+            relation_id=arguments.get("relation_id"),
+            source_id=arguments.get("source_id"),
+            predicate=arguments.get("predicate"),
+            target=arguments.get("target"),
+            request_id=arguments.get("request_id"),
+        )
+        return [_json_text(result)]
+    except Exception as exc:
+        return [
+            _json_text(
+                {
+                    "success": False,
+                    "error": f"Failed to preview relationship removal: {str(exc)}",
+                    "error_code": "exception",
+                    "error_details": {"exception_type": type(exc).__name__},
+                }
+            )
+        ]
+
+
+async def _handle_remove_relationships_bulk(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    try:
+        result = _remove_relationships_bulk(
+            relation_ids=arguments.get("relation_ids"),
+            relations=arguments.get("relations"),
+            filter=arguments.get("filter"),
+            mode=arguments.get("mode"),
+            cascade=arguments.get("cascade"),
+            dry_run=arguments.get("dry_run", False),
+            confirmed=arguments.get("confirmed", False),
+            operator_override=arguments.get("operator_override", False),
+            reason=arguments.get("reason"),
+            request_id=arguments.get("request_id"),
+            stop_on_error=arguments.get("stop_on_error", False),
+        )
+        return [_json_text(result)]
+    except Exception as exc:
+        return [
+            _json_text(
+                {
+                    "success": False,
+                    "error": f"Failed to bulk-remove relationships: {str(exc)}",
+                    "error_code": "exception",
+                    "error_details": {"exception_type": type(exc).__name__},
+                }
+            )
+        ]
+
+
+async def _handle_undo_relationship_removal(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    undo_token = arguments.get("undo_token")
+    if not undo_token:
+        return [
+            _json_text(
+                {
+                    "success": False,
+                    "error": "Missing required parameter: undo_token",
+                    "error_code": "missing_parameter",
+                    "error_details": {"missing": ["undo_token"]},
+                }
+            )
+        ]
+    try:
+        result = _undo_relationship_removal(
+            undo_token=undo_token,
+            request_id=arguments.get("request_id"),
+            confirmed=arguments.get("confirmed", True),
+        )
+        return [_json_text(result)]
+    except Exception as exc:
+        return [
+            _json_text(
+                {
+                    "success": False,
+                    "error": f"Failed to undo relationship removal: {str(exc)}",
                     "error_code": "exception",
                     "error_details": {"exception_type": type(exc).__name__},
                 }
@@ -2813,6 +2919,9 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "gmail_modify_labels": _handle_gmail_modify_labels,
     "add_relationship": _handle_add_relationship,
     "remove_relationship": _handle_remove_relationship,
+    "preview_remove_relationship": _handle_preview_remove_relationship,
+    "remove_relationships_bulk": _handle_remove_relationships_bulk,
+    "undo_relationship_removal": _handle_undo_relationship_removal,
     "delete_concept": _handle_delete_concept,
     "merge_concepts": _handle_merge_concepts,
     "update_concept": _handle_update_concept,

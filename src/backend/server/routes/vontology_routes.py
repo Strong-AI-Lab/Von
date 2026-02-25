@@ -4412,31 +4412,82 @@ def remove_relationship_route():
     Body: { source_id: str, kind: str, target_id: str }
     """
     data = request.get_json() or {}
+    relation_id = data.get("relation_id")
     source_id = data.get("source_id")
-    kind = data.get("kind")
-    target_id = data.get("target_id")
+    kind = data.get("kind") or data.get("predicate")
+    target_id = data.get("target_id") or data.get("target")
+    mode = data.get("mode")
+    cascade = data.get("cascade")
+    dry_run = data.get("dry_run", False)
+    confirmed = data.get("confirmed", False)
+    operator_override = data.get("operator_override", False)
+    reason = data.get("reason")
+    request_id = data.get("request_id")
     current_app.logger.info(
         f"Received request for /api/vontology/relationships/remove: {data}"
     )
 
-    if not source_id or not target_id or not kind:
+    if not relation_id and (not source_id or not target_id or not kind):
         return (
             jsonify(
                 {
                     "success": False,
-                    "error": "Missing 'source_id', 'target_id', or 'kind'.",
+                    "error": "Missing relation selector. Provide relation_id OR source_id/target_id/kind.",
                 }
             ),
             400,
         )
 
-    if source_id == target_id:
+    if source_id and target_id and source_id == target_id:
         return (
             jsonify(
                 {"success": False, "error": "Source and target cannot be the same."}
             ),
             400,
         )
+
+    if relation_id:
+        try:
+            from ...services.relationship_removal_service import remove_relationship
+
+            service_result = remove_relationship(
+                relation_id=relation_id,
+                source_id=source_id,
+                predicate=kind,
+                target=target_id,
+                mode=mode,
+                cascade=cascade,
+                dry_run=dry_run,
+                confirmed=confirmed,
+                operator_override=operator_override,
+                reason=reason,
+                request_id=request_id,
+            )
+            status_name = str(service_result.get("status") or "")
+            if service_result.get("success") is True:
+                return jsonify(service_result), 200
+            if status_name == "forbidden":
+                return jsonify(service_result), 403
+            if status_name == "confirmation_required":
+                return jsonify(service_result), 400
+            if status_name == "not_found":
+                return jsonify(service_result), 404
+            return jsonify(service_result), 500
+        except Exception as exc:
+            current_app.logger.error(
+                "Error removing relationship via relation_id selector: %s",
+                exc,
+                exc_info=True,
+            )
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "error": f"Failed to remove relationship: {str(exc)}",
+                    }
+                ),
+                500,
+            )
 
     structural_allowed = {
         "is_a_type_of",
@@ -4445,10 +4496,12 @@ def remove_relationship_route():
         "has_instance",
         "related_to",
     }
-    is_dynamic_predicate_kind = (
-        kind.startswith("#V#") and kind not in structural_allowed
+    is_dynamic_predicate_kind = bool(
+        isinstance(kind, str)
+        and kind.startswith("#V#")
+        and kind not in structural_allowed
     )
-    if kind not in structural_allowed and not is_dynamic_predicate_kind:
+    if relation_id is None and kind not in structural_allowed and not is_dynamic_predicate_kind:
         return (
             jsonify(
                 {"success": False, "error": f"Invalid relationship kind '{kind}'."}
@@ -4515,10 +4568,13 @@ def remove_relationship_route():
                 except Exception:
                     namespace = None
 
+                source_text_concept_id = str(source_id)
+                text_predicate = str(kind)
+                text_target_value = str(target_id)
                 result = delete_text_relation_by_predicate_and_text(
-                    subject_concept_id=source_id,
-                    predicate=kind,
-                    text=target_id,  # target_id is actually the text value for text predicates
+                    subject_concept_id=source_text_concept_id,
+                    predicate=text_predicate,
+                    text=text_target_value,  # target_id is actually the text value for text predicates
                 )
 
                 maybe_delete_text_relation_doc_from_rag(
@@ -4591,78 +4647,32 @@ def remove_relationship_route():
                         500,
                     )
 
-        # For non-text predicates, ensure both documents exist
-        src = repo.find_one({"concept_id": source_id})
-        tgt = repo.find_one({"concept_id": target_id})
-        if not src:
-            return (
-                jsonify(
-                    {"success": False, "error": f"Source '{source_id}' not found."}
-                ),
-                404,
-            )
-        if not tgt:
-            return (
-                jsonify(
-                    {"success": False, "error": f"Target '{target_id}' not found."}
-                ),
-                404,
-            )
+        from ...services.relationship_removal_service import remove_relationship
 
-        # Helper to normalize to array then remove value using $pull
-        def _ensure_array_and_remove(cid: str, rel_kind: str, rel_target: str):
-            existing = (
-                repo.find_one({"concept_id": cid}, {f"relationships.{rel_kind}": 1})
-                or {}
-            )
-            rels = existing.get("relationships") or {}
-            curr = rels.get(rel_kind)
-            if isinstance(curr, list):
-                pass
-            elif isinstance(curr, str):
-                # Convert to array representation to safely pull
-                repo.update_one(
-                    {"concept_id": cid}, {"$set": {f"relationships.{rel_kind}": [curr]}}
-                )
-            else:
-                # Nothing to remove; ensure array exists
-                repo.update_one(
-                    {"concept_id": cid}, {"$set": {f"relationships.{rel_kind}": []}}
-                )
-            repo.update_one(
-                {"concept_id": cid},
-                {"$pull": {f"relationships.{rel_kind}": rel_target}},
-            )
+        service_result = remove_relationship(
+            relation_id=relation_id,
+            source_id=source_id,
+            predicate=kind,
+            target=target_id,
+            mode=mode,
+            cascade=cascade,
+            dry_run=dry_run,
+            confirmed=confirmed,
+            operator_override=operator_override,
+            reason=reason,
+            request_id=request_id,
+        )
 
-        # Remove forward relation (normalized)
-        _ensure_array_and_remove(source_id, kind, target_id)
-
-        # Maintain inverse only for structural kinds
-        if not is_dynamic_predicate_kind:
-            inverse_map = {
-                "is_a_type_of": ("has_subtype", target_id, source_id),
-                "has_subtype": ("is_a_type_of", target_id, source_id),
-                "is_an_instance_of": ("has_instance", target_id, source_id),
-                "has_instance": ("is_an_instance_of", target_id, source_id),
-                "related_to": ("related_to", target_id, source_id),
-            }
-            inv_kind, inv_src, inv_tgt = inverse_map[kind]
-            _ensure_array_and_remove(inv_src, inv_kind, inv_tgt)
-
-        try:
-            from ...vontology.utils_vontology import invalidate_vontology_caches
-
-            invalidate_vontology_caches(
-                [source_id, target_id],
-                correlation_id=str(uuid.uuid4()),
-            )
-        except Exception:
-            current_app.logger.debug(
-                "Relationship remove cache invalidation failed",
-                exc_info=True,
-            )
-
-        return jsonify({"success": True, "message": "Relationship removed."}), 200
+        status_name = str(service_result.get("status") or "")
+        if service_result.get("success") is True:
+            return jsonify(service_result), 200
+        if status_name == "forbidden":
+            return jsonify(service_result), 403
+        if status_name == "confirmation_required":
+            return jsonify(service_result), 400
+        if status_name == "not_found":
+            return jsonify(service_result), 404
+        return jsonify(service_result), 500
     except Exception as e:
         current_app.logger.error(f"Error removing relationship: {e}", exc_info=True)
         return (
@@ -4671,6 +4681,83 @@ def remove_relationship_route():
             ),
             500,
         )
+
+
+@vontology_bp.route("/relationships/remove/preview", methods=["POST"])
+def preview_remove_relationship_route():
+    """Preview relationship removal without mutating data."""
+    data = request.get_json() or {}
+    from ...services.relationship_removal_service import preview_remove_relationship
+
+    result = preview_remove_relationship(
+        relation_id=data.get("relation_id"),
+        source_id=data.get("source_id"),
+        predicate=data.get("kind") or data.get("predicate"),
+        target=data.get("target_id") or data.get("target"),
+        request_id=data.get("request_id"),
+    )
+
+    status_name = str(result.get("status") or "")
+    if status_name == "forbidden":
+        return jsonify(result), 403
+    if status_name == "error":
+        return jsonify(result), 400
+    return jsonify(result), 200
+
+
+@vontology_bp.route("/relationships/remove/bulk", methods=["POST"])
+def remove_relationships_bulk_route():
+    """Bulk-remove relationships with deterministic summary reporting."""
+    data = request.get_json() or {}
+    from ...services.relationship_removal_service import remove_relationships_bulk
+
+    result = remove_relationships_bulk(
+        relation_ids=data.get("relation_ids"),
+        relations=data.get("relations"),
+        filter=data.get("filter"),
+        mode=data.get("mode"),
+        cascade=data.get("cascade"),
+        dry_run=data.get("dry_run", False),
+        confirmed=data.get("confirmed", False),
+        operator_override=data.get("operator_override", False),
+        reason=data.get("reason"),
+        request_id=data.get("request_id"),
+        stop_on_error=data.get("stop_on_error", False),
+    )
+
+    status_name = str(result.get("status") or "")
+    if status_name == "forbidden":
+        return jsonify(result), 403
+    if status_name == "confirmation_required":
+        return jsonify(result), 400
+    if status_name == "error":
+        return jsonify(result), 500 if not result.get("success") else 200
+    return jsonify(result), 200
+
+
+@vontology_bp.route("/relationships/remove/undo", methods=["POST"])
+def undo_relationship_removal_route():
+    """Restore a prior soft-delete relationship removal by undo_token."""
+    data = request.get_json() or {}
+    undo_token = data.get("undo_token")
+    if not undo_token:
+        return jsonify({"success": False, "error": "undo_token required"}), 400
+
+    from ...services.relationship_removal_service import undo_relationship_removal
+
+    result = undo_relationship_removal(
+        undo_token=undo_token,
+        request_id=data.get("request_id"),
+        confirmed=data.get("confirmed", True),
+    )
+    status_name = str(result.get("status") or "")
+    if status_name == "not_found":
+        return jsonify(result), 404
+    if status_name == "confirmation_required":
+        return jsonify(result), 400
+    if status_name == "error":
+        return jsonify(result), 500
+    return jsonify(result), 200
 
 
 @vontology_bp.route("/concept/flag", methods=["POST"])
