@@ -715,6 +715,30 @@ class InternalMCPChatOrchestrator:
             min_value=0,
             max_value=20,
         )
+        # Completion-gate repeat loop guardrails (JVNAUTOSCI-1288).
+        # These bounds apply to the "repeat until complete" turn loop when
+        # required effects remain unresolved after a pass.
+        self._completion_gate_loop_max_attempts = self._coerce_int(
+            None,
+            env_var="VON_COMPLETION_GATE_LOOP_MAX_ATTEMPTS_PER_TURN",
+            default=1,
+            min_value=0,
+            max_value=20,
+        )
+        self._completion_gate_loop_max_elapsed_ms = self._coerce_int(
+            None,
+            env_var="VON_COMPLETION_GATE_LOOP_MAX_ELAPSED_MS",
+            default=60_000,
+            min_value=1_000,
+            max_value=600_000,
+        )
+        self._completion_gate_loop_no_progress_limit = self._coerce_int(
+            None,
+            env_var="VON_COMPLETION_GATE_LOOP_NO_PROGRESS_LIMIT",
+            default=1,
+            min_value=0,
+            max_value=10,
+        )
         self._default_gmail_profile = default_gmail_profile
 
         # Optional progress callback for UI telemetry (JVNAUTOSCI-942).
@@ -3187,6 +3211,46 @@ class InternalMCPChatOrchestrator:
         emit_phase_transition = data.get("emit_phase_transition")
         aux_llm_calls = data["aux_llm_calls"]
         llm_calls = data["llm_calls"]
+        repeat_iteration = bool(data.get("completion_gate_repeat_iteration"))
+        if repeat_iteration:
+            repeat_attempt = self._coerce_non_negative_int(
+                data.get("completion_gate_loop_attempts"),
+                default=0,
+                max_value=20,
+            )
+            repeat_max_attempts = self._coerce_non_negative_int(
+                data.get("completion_gate_loop_max_attempts"),
+                default=int(getattr(self, "_completion_gate_loop_max_attempts", 1)),
+                max_value=20,
+            )
+            repeat_reason = data.get("completion_gate_loop_retry_reason")
+            repeat_reason_text = (
+                str(repeat_reason).strip() if isinstance(repeat_reason, str) else ""
+            )
+            if isinstance(augmented_context, list):
+                loop_note = (
+                    "Previous tool-calling iteration did not satisfy required effects. "
+                    f"Repeat attempt {repeat_attempt} of {repeat_max_attempts}. "
+                    "Use this context to execute remaining actions and avoid repeating "
+                    "no-op or already-failed calls."
+                )
+                if repeat_reason_text:
+                    loop_note = f"{loop_note} Prior gate reason: {repeat_reason_text}"
+                augmented_context.append({"role": "system", "content": loop_note})
+            if isinstance(aux_llm_calls, list):
+                try:
+                    aux_llm_calls.append(
+                        {
+                            "type": "completion_gate_repeat_iteration",
+                            "attempt": repeat_attempt,
+                            "max_attempts": repeat_max_attempts,
+                            "retry_reason": repeat_reason_text,
+                        }
+                    )
+                except Exception:
+                    pass
+            # Consume repeat marker for this planning pass.
+            data["completion_gate_repeat_iteration"] = False
         missing_tool_call_retry_attempts = self._coerce_non_negative_int(
             data.get("missing_tool_call_retry_attempts"),
             default=0,
@@ -4551,6 +4615,53 @@ class InternalMCPChatOrchestrator:
         requires_follow_up = bool(
             completion_gate_payload.get("requires_follow_up", False)
         )
+        loop_attempts = self._coerce_non_negative_int(
+            data.get("completion_gate_loop_attempts"),
+            default=0,
+            max_value=20,
+        )
+        loop_max_attempts = self._coerce_non_negative_int(
+            data.get("completion_gate_loop_max_attempts"),
+            default=int(getattr(self, "_completion_gate_loop_max_attempts", 1)),
+            max_value=20,
+        )
+        loop_max_elapsed_ms = self._coerce_non_negative_int(
+            data.get("completion_gate_loop_max_elapsed_ms"),
+            default=int(getattr(self, "_completion_gate_loop_max_elapsed_ms", 60_000)),
+            max_value=600_000,
+        )
+        loop_no_progress_streak = self._coerce_non_negative_int(
+            data.get("completion_gate_loop_no_progress_streak"),
+            default=0,
+            max_value=20,
+        )
+        loop_no_progress_limit = self._coerce_non_negative_int(
+            data.get("completion_gate_loop_no_progress_limit"),
+            default=int(getattr(self, "_completion_gate_loop_no_progress_limit", 1)),
+            max_value=20,
+        )
+        loop_last_invocation_count = self._coerce_non_negative_int(
+            data.get("completion_gate_loop_last_invocation_count"),
+            default=0,
+            max_value=100_000,
+        )
+        loop_last_blocking_signature_raw = data.get(
+            "completion_gate_loop_last_blocking_signature"
+        )
+        loop_last_blocking_signature = (
+            str(loop_last_blocking_signature_raw).strip()
+            if isinstance(loop_last_blocking_signature_raw, str)
+            else ""
+        )
+        loop_started_monotonic_raw = data.get("completion_gate_loop_started_monotonic")
+        if isinstance(loop_started_monotonic_raw, (int, float)):
+            loop_started_monotonic = float(loop_started_monotonic_raw)
+        else:
+            loop_started_monotonic = time.monotonic()
+        loop_elapsed_ms = max(
+            0,
+            int((time.monotonic() - loop_started_monotonic) * 1000),
+        )
 
         final_response = data.get("final_response")
         if not isinstance(final_response, str):
@@ -4582,6 +4693,54 @@ class InternalMCPChatOrchestrator:
             else:
                 final_response = status_line
 
+        invocations_raw = data.get("invocations")
+        invocation_count = len(invocations_raw) if isinstance(invocations_raw, list) else 0
+        blocking_signature = f"{decision}:{'|'.join(sorted(blocking_effect_ids))}"
+        progress_observed = invocation_count > loop_last_invocation_count
+        same_blocking_signature = (
+            bool(loop_last_blocking_signature)
+            and loop_last_blocking_signature == blocking_signature
+        )
+        if requires_follow_up and (not progress_observed) and same_blocking_signature:
+            loop_no_progress_streak += 1
+        else:
+            loop_no_progress_streak = 0
+
+        repeat_iteration = False
+        repeat_stop_reason: str | None = None
+        loop_retry_reason: str | None = None
+
+        if requires_follow_up:
+            if loop_attempts >= loop_max_attempts:
+                repeat_stop_reason = "attempt_budget_exhausted"
+            elif loop_elapsed_ms >= loop_max_elapsed_ms:
+                repeat_stop_reason = "elapsed_budget_exhausted"
+            elif (
+                loop_no_progress_limit > 0
+                and loop_attempts > 0
+                and loop_no_progress_streak >= loop_no_progress_limit
+            ):
+                repeat_stop_reason = "no_progress_guard_triggered"
+            else:
+                repeat_iteration = True
+                loop_attempts += 1
+                reason_parts: list[str] = []
+                if decision_reason:
+                    reason_parts.append(decision_reason)
+                if blocking_effect_ids:
+                    reason_parts.append(
+                        "Blocking effect IDs: " + ", ".join(blocking_effect_ids)
+                    )
+                loop_retry_reason = (
+                    " ".join(reason_parts) if reason_parts else "Required effects unresolved."
+                )
+
+        if repeat_iteration:
+            # The next planning state should consume this marker and inject
+            # bounded retry context, then clear the marker.
+            safe_to_claim_completion = False
+            requires_follow_up = True
+
         aux_llm_calls = data.get("aux_llm_calls")
         if isinstance(aux_llm_calls, list):
             try:
@@ -4594,6 +4753,15 @@ class InternalMCPChatOrchestrator:
                         "safe_to_claim_completion": safe_to_claim_completion,
                         "requires_follow_up": requires_follow_up,
                         "blocking_effect_ids": list(blocking_effect_ids),
+                        "repeat_iteration": repeat_iteration,
+                        "repeat_stop_reason": repeat_stop_reason,
+                        "loop_attempts": loop_attempts,
+                        "loop_max_attempts": loop_max_attempts,
+                        "loop_elapsed_ms": loop_elapsed_ms,
+                        "loop_max_elapsed_ms": loop_max_elapsed_ms,
+                        "loop_no_progress_streak": loop_no_progress_streak,
+                        "loop_no_progress_limit": loop_no_progress_limit,
+                        "loop_retry_reason": loop_retry_reason,
                     }
                 )
             except Exception:
@@ -4607,6 +4775,18 @@ class InternalMCPChatOrchestrator:
                 "completion_gate_blocking_effect_ids": list(blocking_effect_ids),
                 "completion_gate_safe_to_claim_completion": safe_to_claim_completion,
                 "completion_gate_requires_follow_up": requires_follow_up,
+                "completion_gate_repeat_iteration": repeat_iteration,
+                "completion_gate_loop_retry_reason": loop_retry_reason,
+                "completion_gate_loop_stop_reason": repeat_stop_reason,
+                "completion_gate_loop_attempts": loop_attempts,
+                "completion_gate_loop_max_attempts": loop_max_attempts,
+                "completion_gate_loop_elapsed_ms": loop_elapsed_ms,
+                "completion_gate_loop_max_elapsed_ms": loop_max_elapsed_ms,
+                "completion_gate_loop_started_monotonic": loop_started_monotonic,
+                "completion_gate_loop_no_progress_streak": loop_no_progress_streak,
+                "completion_gate_loop_no_progress_limit": loop_no_progress_limit,
+                "completion_gate_loop_last_invocation_count": invocation_count,
+                "completion_gate_loop_last_blocking_signature": blocking_signature,
                 "result": requires_follow_up,
             }
         )
@@ -14600,6 +14780,31 @@ class InternalMCPChatOrchestrator:
                     "safe_to_claim_completion": safe_to_claim_completion,
                     "requires_follow_up": requires_follow_up,
                     "blocking_effect_ids": blocking_effect_ids,
+                    "repeat_iteration": bool(
+                        workflow_data.get("completion_gate_repeat_iteration", False)
+                    ),
+                    "loop_stop_reason": _safe_scalar_text(
+                        workflow_data.get("completion_gate_loop_stop_reason")
+                    ),
+                    "loop_attempts": int(
+                        workflow_data.get("completion_gate_loop_attempts") or 0
+                    ),
+                    "loop_max_attempts": int(
+                        workflow_data.get("completion_gate_loop_max_attempts") or 0
+                    ),
+                    "loop_elapsed_ms": int(
+                        workflow_data.get("completion_gate_loop_elapsed_ms") or 0
+                    ),
+                    "loop_max_elapsed_ms": int(
+                        workflow_data.get("completion_gate_loop_max_elapsed_ms") or 0
+                    ),
+                    "loop_no_progress_streak": int(
+                        workflow_data.get("completion_gate_loop_no_progress_streak")
+                        or 0
+                    ),
+                    "loop_no_progress_limit": int(
+                        workflow_data.get("completion_gate_loop_no_progress_limit") or 0
+                    ),
                 },
                 "terminal": {
                     "completed": bool(completed),
@@ -14738,6 +14943,14 @@ class InternalMCPChatOrchestrator:
                 "completion_gate_decision_reason",
                 "completion_gate_requires_follow_up",
                 "completion_gate_safe_to_claim_completion",
+                "completion_gate_repeat_iteration",
+                "completion_gate_loop_stop_reason",
+                "completion_gate_loop_attempts",
+                "completion_gate_loop_max_attempts",
+                "completion_gate_loop_elapsed_ms",
+                "completion_gate_loop_max_elapsed_ms",
+                "completion_gate_loop_no_progress_streak",
+                "completion_gate_loop_no_progress_limit",
             ):
                 if key in workflow_data:
                     payload[key] = workflow_data.get(key)
@@ -19124,6 +19337,25 @@ class InternalMCPChatOrchestrator:
             "missing_tool_call_retry_budget": int(
                 self._max_missing_tool_call_retries_per_turn
             ),
+            # Completion-gate repeat-until-complete loop settings.
+            "completion_gate_repeat_iteration": False,
+            "completion_gate_loop_retry_reason": None,
+            "completion_gate_loop_stop_reason": None,
+            "completion_gate_loop_attempts": 0,
+            "completion_gate_loop_max_attempts": int(
+                self._completion_gate_loop_max_attempts
+            ),
+            "completion_gate_loop_started_monotonic": float(time.monotonic()),
+            "completion_gate_loop_elapsed_ms": 0,
+            "completion_gate_loop_max_elapsed_ms": int(
+                self._completion_gate_loop_max_elapsed_ms
+            ),
+            "completion_gate_loop_no_progress_streak": 0,
+            "completion_gate_loop_no_progress_limit": int(
+                self._completion_gate_loop_no_progress_limit
+            ),
+            "completion_gate_loop_last_invocation_count": 0,
+            "completion_gate_loop_last_blocking_signature": "",
         }
 
         tc_result = self.execute_workflow(

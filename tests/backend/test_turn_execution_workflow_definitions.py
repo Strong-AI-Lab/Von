@@ -39,6 +39,10 @@ def test_tool_calling_workflow_includes_turn_execution_critic_and_gate() -> None
 
     completion_gate = workflow.states["completion_gate"]
     assert completion_gate.actions[0].action_id == "turn_execution.completion_gate"
+    assert any(
+        t.to_state == "plan" and t.reason == "completion_gate_repeat_iteration"
+        for t in completion_gate.transitions
+    )
     assert any(t.to_state == "completed" for t in completion_gate.transitions)
 
 

@@ -230,3 +230,107 @@ def test_turn_execution_critic_treats_diagnostic_prompt_as_non_mutating() -> Non
     assert isinstance(completion_gate, dict)
     assert completion_gate.get("decision") == "completed"
     assert completion_gate.get("safe_to_claim_completion") is True
+
+
+def test_turn_completion_gate_requests_repeat_when_budget_available() -> None:
+    orchestrator = _build_orchestrator()
+    request = _build_request(
+        action_id="turn_execution.completion_gate",
+        data={
+            "final_response": "I have completed the update.",
+            "invocations": [],
+            "turn_execution_record": {
+                "completion_gate": {
+                    "decision": "escalation_required",
+                    "decision_reason": "Required mutation was not executed.",
+                    "safe_to_claim_completion": False,
+                    "requires_follow_up": True,
+                    "blocking_effect_ids": ["effect_1"],
+                }
+            },
+            "completion_gate_loop_attempts": 0,
+            "completion_gate_loop_max_attempts": 1,
+            "completion_gate_loop_max_elapsed_ms": 60_000,
+            "completion_gate_loop_no_progress_streak": 0,
+            "completion_gate_loop_no_progress_limit": 1,
+            "completion_gate_loop_last_invocation_count": 0,
+            "completion_gate_loop_last_blocking_signature": "",
+        },
+    )
+
+    result = orchestrator._action_turn_execution_completion_gate(request)
+    assert result.ok
+    assert result.outputs.get("completion_gate_repeat_iteration") is True
+    assert result.outputs.get("completion_gate_loop_attempts") == 1
+    assert result.outputs.get("completion_gate_loop_stop_reason") is None
+    assert result.outputs.get("completion_gate_requires_follow_up") is True
+
+
+def test_turn_completion_gate_stops_repeat_when_attempt_budget_exhausted() -> None:
+    orchestrator = _build_orchestrator()
+    request = _build_request(
+        action_id="turn_execution.completion_gate",
+        data={
+            "final_response": "I have completed the update.",
+            "invocations": [],
+            "turn_execution_record": {
+                "completion_gate": {
+                    "decision": "escalation_required",
+                    "decision_reason": "Required mutation was not executed.",
+                    "safe_to_claim_completion": False,
+                    "requires_follow_up": True,
+                    "blocking_effect_ids": ["effect_1"],
+                }
+            },
+            "completion_gate_loop_attempts": 1,
+            "completion_gate_loop_max_attempts": 1,
+            "completion_gate_loop_max_elapsed_ms": 60_000,
+            "completion_gate_loop_no_progress_streak": 0,
+            "completion_gate_loop_no_progress_limit": 1,
+            "completion_gate_loop_last_invocation_count": 0,
+            "completion_gate_loop_last_blocking_signature": "",
+        },
+    )
+
+    result = orchestrator._action_turn_execution_completion_gate(request)
+    assert result.ok
+    assert result.outputs.get("completion_gate_repeat_iteration") is False
+    assert (
+        result.outputs.get("completion_gate_loop_stop_reason")
+        == "attempt_budget_exhausted"
+    )
+
+
+def test_turn_completion_gate_stops_repeat_when_no_progress_guard_triggers() -> None:
+    orchestrator = _build_orchestrator()
+    request = _build_request(
+        action_id="turn_execution.completion_gate",
+        data={
+            "final_response": "I have completed the update.",
+            "invocations": [],
+            "turn_execution_record": {
+                "completion_gate": {
+                    "decision": "escalation_required",
+                    "decision_reason": "Required mutation was not executed.",
+                    "safe_to_claim_completion": False,
+                    "requires_follow_up": True,
+                    "blocking_effect_ids": ["effect_1"],
+                }
+            },
+            "completion_gate_loop_attempts": 1,
+            "completion_gate_loop_max_attempts": 3,
+            "completion_gate_loop_max_elapsed_ms": 60_000,
+            "completion_gate_loop_no_progress_streak": 0,
+            "completion_gate_loop_no_progress_limit": 1,
+            "completion_gate_loop_last_invocation_count": 0,
+            "completion_gate_loop_last_blocking_signature": "escalation_required:effect_1",
+        },
+    )
+
+    result = orchestrator._action_turn_execution_completion_gate(request)
+    assert result.ok
+    assert result.outputs.get("completion_gate_repeat_iteration") is False
+    assert (
+        result.outputs.get("completion_gate_loop_stop_reason")
+        == "no_progress_guard_triggered"
+    )
