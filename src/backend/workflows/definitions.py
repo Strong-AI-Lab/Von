@@ -545,6 +545,11 @@ def build_tool_calling_workflow() -> WorkflowDefinition:
         ),
         transitions=(
             _transition_if_flag_set(
+                "completion_gate_repeat_iteration",
+                to_state="plan",
+                reason="completion_gate_repeat_iteration",
+            ),
+            _transition_if_flag_set(
                 "completion_gate_requires_follow_up",
                 to_state="completed",
                 reason="follow_up_required",
