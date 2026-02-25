@@ -19,7 +19,13 @@ class _DummyGateway:
 
 
 def _build_orchestrator() -> InternalMCPChatOrchestrator:
-    return InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+    # Avoid full orchestrator initialisation in unit tests.
+    # Constructor bootstrap can require external workflow registry state that is
+    # irrelevant for testing isolated turn-execution actions.
+    return cast(
+        InternalMCPChatOrchestrator,
+        object.__new__(InternalMCPChatOrchestrator),
+    )
 
 
 def _build_request(
@@ -150,3 +156,77 @@ def test_turn_completion_gate_appends_execution_status_for_unresolved_effect() -
         for entry in aux_llm_calls
         if isinstance(entry, dict)
     )
+
+
+def test_turn_execution_critic_flags_missing_non_kb_mutation_execution() -> None:
+    orchestrator = _build_orchestrator()
+    request = _build_request(
+        action_id="turn_execution.critic",
+        data={
+            "prompt": "Please create a Jira task for this regression and assign it to me.",
+            "final_response": "Done.",
+            "invocations": [],
+            "aux_llm_calls": [],
+            "turn_id": "req-turn-critic-2",
+            "conversation_session_id": "session-critic-2",
+            "workflow_discovery_result": None,
+            "workflow_routing": {
+                "workflow_id": "#V#tool_calling_workflow",
+                "verdict": "tool_seeking",
+            },
+        },
+    )
+
+    result = orchestrator._action_turn_execution_critic(request)
+    assert result.ok
+
+    record = result.outputs.get("turn_execution_record")
+    assert isinstance(record, dict)
+
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    assert len(required_effects) == 1
+    assert required_effects[0]["status"] == "not_executed"
+
+    completion_gate = record.get("completion_gate")
+    assert isinstance(completion_gate, dict)
+    assert completion_gate.get("decision") == "escalation_required"
+    assert completion_gate.get("safe_to_claim_completion") is False
+
+
+def test_turn_execution_critic_treats_diagnostic_prompt_as_non_mutating() -> None:
+    orchestrator = _build_orchestrator()
+    request = _build_request(
+        action_id="turn_execution.critic",
+        data={
+            "prompt": (
+                "You didn't actually create the task instance this time. "
+                "Inspect the telemetry and explain why."
+            ),
+            "final_response": "No mutation was attempted in this turn.",
+            "invocations": [],
+            "aux_llm_calls": [],
+            "turn_id": "req-turn-critic-3",
+            "conversation_session_id": "session-critic-3",
+            "workflow_discovery_result": None,
+            "workflow_routing": {
+                "workflow_id": "#V#tool_calling_workflow",
+                "verdict": "tool_seeking",
+            },
+        },
+    )
+
+    result = orchestrator._action_turn_execution_critic(request)
+    assert result.ok
+
+    record = result.outputs.get("turn_execution_record")
+    assert isinstance(record, dict)
+
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    assert required_effects == []
+
+    completion_gate = record.get("completion_gate")
+    assert isinstance(completion_gate, dict)
+    assert completion_gate.get("decision") == "completed"
+    assert completion_gate.get("safe_to_claim_completion") is True

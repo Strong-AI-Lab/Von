@@ -120,6 +120,91 @@ _KB_TERMS = (
     "relationships",
 )
 
+_WRITE_OBJECT_TERMS = (
+    "attachment",
+    "branch",
+    "comment",
+    "concept",
+    "file",
+    "issue",
+    "jira",
+    "predicate",
+    "pull request",
+    "relation",
+    "relationship",
+    "schedule",
+    "subtask",
+    "task",
+    "ticket",
+    "todo",
+    "to-do",
+    "to do",
+    "workflow",
+)
+
+_DIAGNOSTIC_ONLY_PHRASES = (
+    "didn't actually",
+    "did not actually",
+    "explain why",
+    "inspect the telemetry",
+    "what went wrong",
+    "why did not",
+    "why didn't",
+    "why was not",
+    "why wasn't",
+)
+
+_ACTION_REQUEST_MUTATION_PATTERN = re.compile(
+    r"\b(?:can you|could you|go ahead(?: and)?|please|would you)\s+"
+    r"(?:add|apply|attach|create|delete|link|modify|remove|rename|set|update)\b"
+)
+
+_NEGATED_MUTATION_PREFIX_PATTERN = re.compile(
+    r"(?:did(?:n't| not)|was(?:n't| not)|were(?:n't| not)|not)\s+(?:actually\s+)?$"
+)
+
+
+def _has_affirmative_mutation_term(prompt_text: str) -> bool:
+    if not prompt_text:
+        return False
+    for term in _MUTATION_INTENT_TERMS:
+        start = 0
+        while True:
+            index = prompt_text.find(term, start)
+            if index < 0:
+                break
+
+            before = prompt_text[index - 1] if index > 0 else " "
+            end_index = index + len(term)
+            after = prompt_text[end_index] if end_index < len(prompt_text) else " "
+            if (before.isalnum() or before == "_") or (after.isalnum() or after == "_"):
+                start = index + len(term)
+                continue
+
+            window_start = max(0, index - 48)
+            prefix = prompt_text[window_start:index]
+            if _NEGATED_MUTATION_PREFIX_PATTERN.search(prefix):
+                start = index + len(term)
+                continue
+
+            return True
+    return False
+
+
+def _looks_like_diagnostic_only_prompt(prompt_text: str) -> bool:
+    if not prompt_text:
+        return False
+    if not any(phrase in prompt_text for phrase in _DIAGNOSTIC_ONLY_PHRASES):
+        return False
+    if _ACTION_REQUEST_MUTATION_PATTERN.search(prompt_text):
+        return False
+    if re.match(
+        r"^\s*(?:add|apply|attach|create|delete|link|modify|remove|rename|set|update)\b",
+        prompt_text,
+    ):
+        return False
+    return True
+
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -427,8 +512,10 @@ def _infer_mutation_required_effect(
     prompt_clean = prompt_text if isinstance(prompt_text, str) else ""
     lowered = prompt_clean.lower()
 
-    has_mutation_term = any(token in lowered for token in _MUTATION_INTENT_TERMS)
+    has_mutation_term = _has_affirmative_mutation_term(lowered)
     has_kb_term = any(token in lowered for token in _KB_TERMS)
+    has_write_object_term = any(token in lowered for token in _WRITE_OBJECT_TERMS)
+    diagnostic_only_prompt = _looks_like_diagnostic_only_prompt(lowered)
     explicit_missing_relation_phrase = any(
         phrase in lowered
         for phrase in (
@@ -441,8 +528,11 @@ def _infer_mutation_required_effect(
     )
 
     mutation_intent = explicit_missing_relation_phrase or (
-        has_mutation_term and has_kb_term
+        has_mutation_term and (has_kb_term or has_write_object_term)
     )
+    if diagnostic_only_prompt and not explicit_missing_relation_phrase:
+        mutation_intent = False
+
     if not mutation_intent and not successful_write_tools and not failed_tools and not blocked_tools:
         return None
 
