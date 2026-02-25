@@ -5,6 +5,7 @@ from __future__ import annotations
 import types
 import pytest
 import src.backend.server.routes.von_routes as von_routes
+from pymongo.errors import PyMongoError
 
 
 @pytest.fixture
@@ -121,7 +122,9 @@ def test_set_chat_session_returns_history_and_updates_session(monkeypatch, app_c
     import src.backend.services.chat_history_service as chat_history_service
 
     monkeypatch.setattr(
-        chat_history_service, "get_chat_history_collection_service", lambda: _FakeColl()
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **kwargs: _FakeColl(),
     )
 
     with client.session_transaction() as sess:
@@ -169,7 +172,9 @@ def test_set_chat_session_skips_history_when_requested(monkeypatch, app_client):
     import src.backend.services.chat_history_service as chat_history_service
 
     monkeypatch.setattr(
-        chat_history_service, "get_chat_history_collection_service", lambda: coll
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **kwargs: coll,
     )
 
     with client.session_transaction() as sess:
@@ -214,7 +219,9 @@ def test_set_chat_session_allows_shared_invite(monkeypatch, app_client):
     import src.backend.services.chat_history_service as chat_history_service
 
     monkeypatch.setattr(
-        chat_history_service, "get_chat_history_collection_service", lambda: coll
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **kwargs: coll,
     )
 
     import src.backend.services.shared_conversation_service as shared_conversation_service
@@ -287,3 +294,127 @@ def test_history_uses_query_session_id(monkeypatch, app_client):
 
     with client.session_transaction() as sess:
         assert sess.get("session_id") == "session-from-cookie"
+
+
+def test_set_chat_session_returns_retryable_on_transient_mongo_failure(
+    monkeypatch, app_client
+):
+    _, client = app_client
+
+    class _FailingColl:
+        def find_one(self, query, projection=None, **kwargs):
+            raise PyMongoError("timed out while reading chat session")
+
+    import src.backend.services.chat_history_service as chat_history_service
+
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **kwargs: _FailingColl(),
+    )
+    monkeypatch.setattr(
+        chat_history_service,
+        "find_chat_history_document_for_read",
+        lambda coll, query, projection=None: coll.find_one(query, projection),
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "_resolve_shared_conversation_owner",
+        lambda **kwargs: (None, None),
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "get_effective_context",
+        lambda *args, **kwargs: {"namespace": "#V#u"},
+    )
+
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#u"
+
+    resp = client.post("/von/api/session/set_chat_session", json={"session_id": "s1"})
+
+    assert resp.status_code == 503
+    payload = resp.get_json()
+    assert payload["retryable"] is True
+    assert payload["degraded"] is True
+
+
+def test_history_returns_degraded_payload_for_transient_chat_history_errors(
+    monkeypatch, app_client
+):
+    _, client = app_client
+    import src.backend.services.chat_history_service as chat_history_service
+
+    monkeypatch.setattr(
+        chat_history_service,
+        "resolve_chat_history_namespace",
+        lambda user_id: "#V#u",
+    )
+    monkeypatch.setattr(
+        chat_history_service,
+        "has_chat_history_session",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_segments",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            chat_history_service.ChatHistoryServiceError(
+                "timed out while retrieving history"
+            )
+        ),
+    )
+    monkeypatch.setattr(von_routes, "chat_history_service", chat_history_service)
+    monkeypatch.setattr(
+        von_routes,
+        "_resolve_shared_conversation_owner",
+        lambda **kwargs: ("#V#u", None),
+    )
+
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#u"
+        sess["session_id"] = "session-from-cookie"
+
+    resp = client.get("/von/history?segments=1&session_id=session-from-query")
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["degraded"] is True
+    assert payload["retryable"] is True
+    assert payload["history"] == []
+    assert payload["total_segments"] == 0
+
+
+def test_history_length_returns_degraded_payload_for_transient_errors(
+    monkeypatch, app_client
+):
+    _, client = app_client
+    import src.backend.services.chat_history_service as chat_history_service
+
+    monkeypatch.setattr(
+        von_routes,
+        "get_effective_context",
+        lambda *args, **kwargs: {"namespace": "#V#u"},
+    )
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_length",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            chat_history_service.ChatHistoryServiceError(
+                "replicaSetNoPrimary timed out"
+            )
+        ),
+    )
+    monkeypatch.setattr(von_routes, "chat_history_service", chat_history_service)
+
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#u"
+
+    resp = client.get("/von/history/length")
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["degraded"] is True
+    assert payload["retryable"] is True
+    assert payload["history_length"] == 0
+    assert payload["session_count"] == 0

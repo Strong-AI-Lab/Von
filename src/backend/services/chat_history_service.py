@@ -2,12 +2,21 @@
 
 import hashlib
 import logging
+import os
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Iterable
 from pymongo import ASCENDING, DESCENDING
-from pymongo.errors import PyMongoError
+from pymongo.errors import (
+    AutoReconnect,
+    ConnectionFailure,
+    NetworkTimeout,
+    PyMongoError,
+    ServerSelectionTimeoutError,
+)
+from pymongo.read_preferences import ReadPreference
 from ..db.mongo_client import get_db
 from ..models.chat_history_model import chat_history_collection_name
 from .turn_execution_record_service import (
@@ -29,6 +38,179 @@ _DETERMINISTIC_RAG_DOC_NAMESPACE = uuid.UUID("8c5a7fa9-9a7c-4f0f-8c1f-f4ad7f9f6f
 _SESSION_NAME_MAX_LEN = 80
 _CHAT_HISTORY_INDEXES_READY = False
 _CHAT_HISTORY_INDEXES_LOCK = threading.Lock()
+_CHAT_HISTORY_READ_CIRCUIT_LOCK = threading.Lock()
+_CHAT_HISTORY_READ_CIRCUIT_UNTIL_MONOTONIC = 0.0
+_CHAT_HISTORY_READ_CIRCUIT_LAST_ERROR: Optional[str] = None
+
+
+def _parse_bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = str(raw).strip().lower()
+    if value in {"1", "true", "yes", "on", "y"}:
+        return True
+    if value in {"0", "false", "no", "off", "n"}:
+        return False
+    return default
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        parsed = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        parsed = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _chat_history_use_primary_preferred_reads() -> bool:
+    return _parse_bool_env("VON_CHAT_HISTORY_PRIMARY_PREFERRED_READS", True)
+
+
+def _chat_history_read_max_time_ms() -> int:
+    return _positive_int_env("VON_CHAT_HISTORY_READ_MAX_TIME_MS", 2200)
+
+
+def _chat_history_read_circuit_seconds() -> float:
+    return _positive_float_env("VON_CHAT_HISTORY_READ_CIRCUIT_SECONDS", 3.0)
+
+
+def _is_transient_chat_history_error(exc: Exception) -> bool:
+    if isinstance(
+        exc,
+        (NetworkTimeout, ServerSelectionTimeoutError, AutoReconnect, ConnectionFailure),
+    ):
+        return True
+    message = str(exc).lower()
+    transient_markers = (
+        "timed out",
+        "no primary",
+        "replicasetnoprimary",
+        "connection pool paused",
+        "server selection timeout",
+        "networktimeout",
+        "temporarily unavailable",
+        "read circuit open",
+    )
+    return any(marker in message for marker in transient_markers)
+
+
+def is_transient_chat_history_error(exc: Exception) -> bool:
+    """Expose transient-error classification for route-level fail-soft behaviour."""
+    return _is_transient_chat_history_error(exc)
+
+
+def get_chat_history_read_max_time_ms() -> int:
+    """Expose read max-time for route-level point reads in conversation endpoints."""
+    return _chat_history_read_max_time_ms()
+
+
+def find_chat_history_document_for_read(
+    chat_history_coll,
+    query: Dict[str, Any],
+    projection: Optional[Dict[str, Any]] = None,
+):
+    """Run a bounded read-only find_one against chat_history."""
+    return _read_find_one(chat_history_coll, query, projection)
+
+
+def _current_chat_history_read_circuit_remaining_seconds() -> float:
+    now = time.monotonic()
+    with _CHAT_HISTORY_READ_CIRCUIT_LOCK:
+        return max(0.0, _CHAT_HISTORY_READ_CIRCUIT_UNTIL_MONOTONIC - now)
+
+
+def _guard_chat_history_read(op_name: str) -> None:
+    remaining = _current_chat_history_read_circuit_remaining_seconds()
+    if remaining <= 0:
+        return
+    with _CHAT_HISTORY_READ_CIRCUIT_LOCK:
+        last_error = _CHAT_HISTORY_READ_CIRCUIT_LAST_ERROR
+    detail = f"; last_error={last_error}" if last_error else ""
+    raise ChatHistoryServiceError(
+        f"Chat history temporarily unavailable for {op_name}; "
+        f"read circuit open for {remaining:.1f}s{detail}"
+    )
+
+
+def _record_chat_history_read_failure(op_name: str, exc: Exception) -> None:
+    if not _is_transient_chat_history_error(exc):
+        return
+    cooldown_seconds = _chat_history_read_circuit_seconds()
+    opened_until = time.monotonic() + cooldown_seconds
+    with _CHAT_HISTORY_READ_CIRCUIT_LOCK:
+        global _CHAT_HISTORY_READ_CIRCUIT_UNTIL_MONOTONIC
+        global _CHAT_HISTORY_READ_CIRCUIT_LAST_ERROR
+        _CHAT_HISTORY_READ_CIRCUIT_UNTIL_MONOTONIC = max(
+            _CHAT_HISTORY_READ_CIRCUIT_UNTIL_MONOTONIC, opened_until
+        )
+        _CHAT_HISTORY_READ_CIRCUIT_LAST_ERROR = str(exc)
+    logger.warning(
+        "Opening chat history read circuit for %.1fs after %s failure: %s",
+        cooldown_seconds,
+        op_name,
+        exc,
+    )
+
+
+def _record_chat_history_read_success() -> None:
+    if _current_chat_history_read_circuit_remaining_seconds() <= 0:
+        return
+    with _CHAT_HISTORY_READ_CIRCUIT_LOCK:
+        global _CHAT_HISTORY_READ_CIRCUIT_UNTIL_MONOTONIC
+        global _CHAT_HISTORY_READ_CIRCUIT_LAST_ERROR
+        _CHAT_HISTORY_READ_CIRCUIT_UNTIL_MONOTONIC = 0.0
+        _CHAT_HISTORY_READ_CIRCUIT_LAST_ERROR = None
+
+
+def _read_find_one(chat_history_coll, query: Dict[str, Any], projection: Optional[Dict[str, Any]] = None):
+    max_time_ms = _chat_history_read_max_time_ms()
+    kwargs: Dict[str, Any] = {}
+    if max_time_ms > 0:
+        kwargs["max_time_ms"] = max_time_ms
+    try:
+        return chat_history_coll.find_one(query, projection, **kwargs)
+    except TypeError:
+        # Test doubles may not accept max_time_ms kwargs.
+        return chat_history_coll.find_one(query, projection)
+
+
+def _read_find(chat_history_coll, query: Dict[str, Any], projection: Optional[Dict[str, Any]] = None):
+    cursor = chat_history_coll.find(query, projection)
+    max_time_ms = _chat_history_read_max_time_ms()
+    if max_time_ms > 0:
+        try:
+            cursor = cursor.max_time_ms(max_time_ms)
+        except Exception:
+            # Some fake cursor implementations in tests may not support max_time_ms.
+            pass
+    return cursor
+
+
+def _read_aggregate(chat_history_coll, pipeline: List[Dict[str, Any]]):
+    max_time_ms = _chat_history_read_max_time_ms()
+    kwargs: Dict[str, Any] = {}
+    if max_time_ms > 0:
+        kwargs["maxTimeMS"] = max_time_ms
+    try:
+        return chat_history_coll.aggregate(pipeline, **kwargs)
+    except TypeError:
+        # Test doubles may not accept maxTimeMS kwargs.
+        return chat_history_coll.aggregate(pipeline)
 
 
 def _ensure_chat_history_indexes(collection) -> None:
@@ -347,13 +529,19 @@ class ChatHistoryServiceError(Exception):
     pass
 
 
-def get_chat_history_collection_service():
+def get_chat_history_collection_service(*, read_only: bool = False):
     """Get the chat_history collection."""
     db = get_db()
     if db is None:
         return None
     coll = db[chat_history_collection_name]
     _ensure_chat_history_indexes(coll)
+    if read_only and _chat_history_use_primary_preferred_reads():
+        try:
+            coll = coll.with_options(read_preference=ReadPreference.PRIMARY_PREFERRED)
+        except Exception:
+            # Safety: if read-preference tuning is unavailable, fall back to default.
+            pass
     return coll
 
 
@@ -622,17 +810,23 @@ def get_chat_history(user_id: str, session_id: str) -> List[Dict[str, Any]]:
     if not user_id or not session_id:
         raise ChatHistoryServiceError("user_id and session_id are required.")
 
-    chat_history_coll = get_chat_history_collection_service()
+    chat_history_coll = get_chat_history_collection_service(read_only=True)
     if chat_history_coll is None:
         raise ChatHistoryServiceError("Could not connect to chat history collection.")
 
+    _guard_chat_history_read("get_chat_history")
+
     try:
-        doc = chat_history_coll.find_one({"user_id": user_id, "session_id": session_id})
+        doc = _read_find_one(
+            chat_history_coll, {"user_id": user_id, "session_id": session_id}
+        )
+        _record_chat_history_read_success()
 
         if doc:
             return doc.get("history", [])
         return []
     except PyMongoError as e:
+        _record_chat_history_read_failure("get_chat_history", e)
         logger.error(f"Error retrieving chat history: {e}", exc_info=True)
         raise ChatHistoryServiceError(f"Could not retrieve chat history: {e}") from e
 
@@ -660,9 +854,11 @@ def get_chat_history_segments(
     if not session_id:
         raise ChatHistoryServiceError("session_id is required.")
 
-    chat_history_coll = get_chat_history_collection_service()
+    chat_history_coll = get_chat_history_collection_service(read_only=True)
     if chat_history_coll is None:
         raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    _guard_chat_history_read("get_chat_history_segments")
 
     try:
         query = build_chat_history_query(
@@ -689,11 +885,13 @@ def get_chat_history_segments(
                     },
                 ]
                 try:
-                    doc = next(chat_history_coll.aggregate(pipeline), None)
+                    doc = next(_read_aggregate(chat_history_coll, pipeline), None)
+                except PyMongoError:
+                    raise
                 except Exception:
                     doc = None
             if doc is None:
-                doc = chat_history_coll.find_one(query, projection)
+                doc = _read_find_one(chat_history_coll, query, projection)
                 if doc is not None:
                     full_history = doc.get("history") or []
                     if isinstance(full_history, list):
@@ -701,12 +899,14 @@ def get_chat_history_segments(
                         doc = dict(doc)
                         doc["history"] = full_history[-history_tail_limit:]
         else:
-            doc = chat_history_coll.find_one(query, projection)
+            doc = _read_find_one(chat_history_coll, query, projection)
         if not doc:
+            _record_chat_history_read_success()
             return ([], {"history_truncated": False}) if return_meta else []
 
         history = doc.get("history") or []
         if not isinstance(history, list) or not history:
+            _record_chat_history_read_success()
             return ([], {"history_truncated": False}) if return_meta else []
         if history_length is None:
             history_length_raw = doc.get("history_length")
@@ -749,10 +949,12 @@ def get_chat_history_segments(
             segments = stripped
 
         result = _chunk_history_segments(segments, segment_size)
+        _record_chat_history_read_success()
         if return_meta:
             return result, {"history_truncated": history_truncated}
         return result
     except PyMongoError as e:
+        _record_chat_history_read_failure("get_chat_history_segments", e)
         logger.error(f"Error retrieving segmented chat history: {e}", exc_info=True)
         raise ChatHistoryServiceError(
             f"Could not retrieve segmented chat history: {e}"
@@ -775,9 +977,11 @@ def get_chat_history_debug_entry(
     if not isinstance(history_index, int) or history_index < 0:
         raise ChatHistoryServiceError("history_index must be a non-negative integer.")
 
-    chat_history_coll = get_chat_history_collection_service()
+    chat_history_coll = get_chat_history_collection_service(read_only=True)
     if chat_history_coll is None:
         raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    _guard_chat_history_read("get_chat_history_debug_entry")
 
     try:
         query = build_chat_history_query(
@@ -787,20 +991,26 @@ def get_chat_history_debug_entry(
             include_legacy=include_legacy,
         )
         projection = {"history": {"$slice": [history_index, 1]}}
-        doc = chat_history_coll.find_one(query, projection)
+        doc = _read_find_one(chat_history_coll, query, projection)
         if not doc:
+            _record_chat_history_read_success()
             return None
         history = doc.get("history") or []
         if not isinstance(history, list) or not history:
+            _record_chat_history_read_success()
             return None
         entry = history[0]
         if not isinstance(entry, dict):
+            _record_chat_history_read_success()
             return None
         debug_data = entry.get("llm_debug_data")
         if not isinstance(debug_data, dict):
+            _record_chat_history_read_success()
             return None
+        _record_chat_history_read_success()
         return debug_data
     except PyMongoError as e:
+        _record_chat_history_read_failure("get_chat_history_debug_entry", e)
         logger.error(
             "Error retrieving llm_debug_data at history index %s: %s",
             history_index,
@@ -1482,22 +1692,51 @@ def get_chat_history_length(
     if not user_id:
         raise ChatHistoryServiceError("user_id is required.")
 
-    chat_history_coll = get_chat_history_collection_service()
+    chat_history_coll = get_chat_history_collection_service(read_only=True)
     if chat_history_coll is None:
         raise ChatHistoryServiceError("Could not connect to chat history collection.")
 
+    _guard_chat_history_read("get_chat_history_length")
+
     try:
-        total_turns = 0
         query = build_chat_history_query(
             user_id=user_id, namespace=namespace, include_legacy=include_legacy
         )
-        for doc in chat_history_coll.find(query):
-            history = doc.get("history", [])
-            if not isinstance(history, list):
-                continue
-            total_turns += sum(1 for _ in _iter_non_reset_messages(history))
+        pipeline = [
+            {"$match": query},
+            {
+                "$project": {
+                    "_id": 0,
+                    "message_count": {
+                        "$size": {
+                            "$filter": {
+                                "input": {"$ifNull": ["$history", []]},
+                                "as": "msg",
+                                "cond": {
+                                    "$not": {
+                                        "$and": [
+                                            {"$eq": ["$$msg.role", "system"]},
+                                            {"$eq": ["$$msg.content", "__RESET__"]},
+                                        ]
+                                    }
+                                },
+                            }
+                        }
+                    },
+                }
+            },
+            {"$group": {"_id": None, "total_turns": {"$sum": "$message_count"}}},
+        ]
+        summary = next(_read_aggregate(chat_history_coll, pipeline), None)
+        total_turns = 0
+        if isinstance(summary, dict):
+            raw_total = summary.get("total_turns")
+            if isinstance(raw_total, int) and raw_total >= 0:
+                total_turns = raw_total
+        _record_chat_history_read_success()
         return total_turns
     except PyMongoError as e:
+        _record_chat_history_read_failure("get_chat_history_length", e)
         logger.error(f"Error retrieving chat history length: {e}", exc_info=True)
         raise ChatHistoryServiceError(
             f"Could not retrieve chat history length: {e}"
@@ -1514,30 +1753,140 @@ def get_chat_history_session_count(
     if not user_id:
         raise ChatHistoryServiceError("user_id is required.")
 
-    chat_history_coll = get_chat_history_collection_service()
+    chat_history_coll = get_chat_history_collection_service(read_only=True)
     if chat_history_coll is None:
         raise ChatHistoryServiceError("Could not connect to chat history collection.")
 
+    _guard_chat_history_read("get_chat_history_session_count")
+
     try:
-        count = 0
         query = build_chat_history_query(
             user_id=user_id, namespace=namespace, include_legacy=include_legacy
         )
-        for doc in chat_history_coll.find(query, {"history": 1, "session_name": 1}):
-            history = doc.get("history") or []
-            if not isinstance(history, list):
-                history = []
-            has_messages = any(True for _ in _iter_non_reset_messages(history))
-            session_name = doc.get("session_name")
-            has_name = isinstance(session_name, str) and session_name.strip()
-            if has_messages or has_name:
-                count += 1
+        pipeline = [
+            {"$match": query},
+            {
+                "$project": {
+                    "_id": 0,
+                    "message_count": {
+                        "$size": {
+                            "$filter": {
+                                "input": {"$ifNull": ["$history", []]},
+                                "as": "msg",
+                                "cond": {
+                                    "$not": {
+                                        "$and": [
+                                            {"$eq": ["$$msg.role", "system"]},
+                                            {"$eq": ["$$msg.content", "__RESET__"]},
+                                        ]
+                                    }
+                                },
+                            }
+                        }
+                    },
+                    "has_name": {
+                        "$gt": [
+                            {"$strLenCP": {"$trim": {"input": {"$ifNull": ["$session_name", ""]}}}},
+                            0,
+                        ]
+                    },
+                }
+            },
+            {
+                "$group": {
+                    "_id": None,
+                    "session_count": {
+                        "$sum": {
+                            "$cond": [
+                                {"$or": [{"$gt": ["$message_count", 0]}, "$has_name"]},
+                                1,
+                                0,
+                            ]
+                        }
+                    },
+                }
+            },
+        ]
+        summary = next(_read_aggregate(chat_history_coll, pipeline), None)
+        count = 0
+        if isinstance(summary, dict):
+            raw_count = summary.get("session_count")
+            if isinstance(raw_count, int) and raw_count >= 0:
+                count = raw_count
+        _record_chat_history_read_success()
         return count
     except PyMongoError as e:
+        _record_chat_history_read_failure("get_chat_history_session_count", e)
         logger.error(f"Error retrieving chat history session count: {e}", exc_info=True)
         raise ChatHistoryServiceError(
             f"Could not retrieve chat history session count: {e}"
         ) from e
+
+
+def _build_session_summary_from_metadata(
+    doc: Dict[str, Any],
+    *,
+    session_id_override: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    session_id = (
+        session_id_override
+        if isinstance(session_id_override, str) and session_id_override
+        else doc.get("session_id")
+    )
+    if not isinstance(session_id, str) or not session_id:
+        return None
+
+    session_name = _normalise_session_name(doc.get("session_name"))
+    created_ts = _infer_created_timestamp(doc)
+    last_ts = _coerce_datetime(doc.get("updated_at")) or created_ts
+
+    # Metadata-only summaries intentionally avoid history reads for resilience.
+    if not session_name and last_ts is None and created_ts is None:
+        return None
+
+    return {
+        "session_id": session_id,
+        "session_name": session_name,
+        "message_count": None,
+        "last_message_at": last_ts.isoformat() if last_ts else None,
+        "is_completed": False,
+        "completed_at": None,
+        "created_at": created_ts.isoformat() if created_ts else None,
+        "namespace": doc.get("namespace"),
+        "preview": None,
+    }
+
+
+def _get_chat_history_session_summaries_metadata_only(
+    chat_history_coll,
+    *,
+    query: Dict[str, Any],
+    safe_limit: int,
+) -> List[Dict[str, Any]]:
+    projection: Dict[str, Any] = {
+        "session_id": 1,
+        "session_name": 1,
+        "created_at": 1,
+        "updated_at": 1,
+        "namespace": 1,
+    }
+    docs = list(_read_find(chat_history_coll, query, projection))
+
+    summaries: List[Dict[str, Any]] = []
+    for doc in docs:
+        if not isinstance(doc, dict):
+            continue
+        summary = _build_session_summary_from_metadata(doc)
+        if summary is None:
+            continue
+        summaries.append(summary)
+
+    summaries.sort(
+        key=lambda s: _coerce_datetime(s.get("last_message_at"))
+        or datetime(1970, 1, 1, tzinfo=timezone.utc),
+        reverse=True,
+    )
+    return summaries[:safe_limit]
 
 
 def get_chat_history_session_summaries(
@@ -1550,14 +1899,16 @@ def get_chat_history_session_summaries(
 ) -> List[Dict[str, Any]]:
     """Return per-session summaries ordered by inferred last message timestamp desc.
 
-    summary_mode="light" avoids loading full histories and omits message_count/preview.
+    summary_mode="light" is metadata-only to avoid large history reads.
     """
     if not user_id:
         raise ChatHistoryServiceError("user_id is required.")
 
-    chat_history_coll = get_chat_history_collection_service()
+    chat_history_coll = get_chat_history_collection_service(read_only=True)
     if chat_history_coll is None:
         raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    _guard_chat_history_read("get_chat_history_session_summaries")
 
     safe_limit = 50
     if isinstance(limit, int) and limit > 0:
@@ -1566,68 +1917,82 @@ def get_chat_history_session_summaries(
     mode = summary_mode.strip().lower() if isinstance(summary_mode, str) else "full"
     light_mode = mode in ("light", "minimal", "summary")
 
-    try:
-        query = build_chat_history_query(
-            user_id=user_id, namespace=namespace, include_legacy=include_legacy
-        )
-        docs: List[Dict[str, Any]]
-        history_field = "history"
-        if light_mode:
-            history_field = "history_tail"
-            pipeline = [
-                {"$match": query},
-                {
-                    "$project": {
-                        "session_id": 1,
-                        "session_name": 1,
-                        "created_at": 1,
-                        "updated_at": 1,
-                        "namespace": 1,
-                        "history_tail": {"$slice": [{"$ifNull": ["$history", []]}, -1]},
-                        "message_count": {
-                            "$size": {
-                                "$filter": {
-                                    "input": {"$ifNull": ["$history", []]},
-                                    "as": "msg",
-                                    "cond": {
-                                        "$not": {
-                                            "$and": [
-                                                {"$eq": ["$$msg.role", "system"]},
-                                                {"$eq": ["$$msg.content", "__RESET__"]},
-                                            ]
-                                        }
-                                    },
-                                }
-                            }
-                        },
-                    }
-                },
-            ]
-            docs = list(chat_history_coll.aggregate(pipeline))
-        else:
-            projection: Dict[str, Any] = {
-                "session_id": 1,
-                "history": 1,
-                "created_at": 1,
-                "updated_at": 1,
-                "namespace": 1,
-                "session_name": 1,
-            }
-            docs = list(chat_history_coll.find(query, projection))
+    query = build_chat_history_query(
+        user_id=user_id, namespace=namespace, include_legacy=include_legacy
+    )
 
+    if light_mode:
+        try:
+            summaries = _get_chat_history_session_summaries_metadata_only(
+                chat_history_coll, query=query, safe_limit=safe_limit
+            )
+            _record_chat_history_read_success()
+            return summaries
+        except PyMongoError as e:
+            _record_chat_history_read_failure(
+                "get_chat_history_session_summaries", e
+            )
+            logger.error(
+                "Error retrieving metadata-only chat history session summaries: %s",
+                e,
+                exc_info=True,
+            )
+            raise ChatHistoryServiceError(
+                f"Could not retrieve chat history session summaries: {e}"
+            ) from e
+
+    try:
+        projection: Dict[str, Any] = {
+            "session_id": 1,
+            "history": 1,
+            "created_at": 1,
+            "updated_at": 1,
+            "namespace": 1,
+            "session_name": 1,
+        }
+        docs = list(_read_find(chat_history_coll, query, projection))
+    except PyMongoError as e:
+        _record_chat_history_read_failure("get_chat_history_session_summaries", e)
+        # Atlas timeout resilience: fall back to metadata-only summaries when
+        # fetching full history payloads is too expensive.
+        logger.warning(
+            "Full chat history session summaries failed; falling back to metadata-only summaries: %s",
+            e,
+            exc_info=True,
+        )
+        try:
+            summaries = _get_chat_history_session_summaries_metadata_only(
+                chat_history_coll, query=query, safe_limit=safe_limit
+            )
+            _record_chat_history_read_success()
+            return summaries
+        except PyMongoError as fallback_error:
+            _record_chat_history_read_failure(
+                "get_chat_history_session_summaries", fallback_error
+            )
+            logger.error(
+                "Metadata-only fallback for chat history session summaries also failed: %s",
+                fallback_error,
+                exc_info=True,
+            )
+            raise ChatHistoryServiceError(
+                f"Could not retrieve chat history session summaries: {e}"
+            ) from fallback_error
+
+    try:
         summaries: List[Dict[str, Any]] = []
         for doc in docs:
             session_id = doc.get("session_id")
             if not isinstance(session_id, str) or not session_id:
                 continue
 
-            history = doc.get(history_field) or []
+            history = doc.get("history") or []
             if not isinstance(history, list):
                 history = []
 
             session_name = _normalise_session_name(doc.get("session_name"))
             non_reset = list(_iter_non_reset_messages(history))
-            has_messages = bool(history) if light_mode else bool(non_reset)
+            has_messages = bool(non_reset)
             if not has_messages and not session_name:
                 continue
 
@@ -1645,24 +2010,18 @@ def get_chat_history_session_summaries(
             last_ts = _infer_last_message_timestamp(doc)
             created_ts = _infer_created_timestamp(doc)
 
-            message_count = None
-            preview = None
-            if light_mode:
-                if isinstance(doc.get("message_count"), int):
-                    message_count = doc.get("message_count")
-            else:
-                message_count = len(non_reset)
-                last_user_msg = None
-                for msg in reversed(non_reset):
-                    if msg.get("role") == "user":
-                        content = msg.get("content")
-                        if isinstance(content, str) and content.strip():
-                            last_user_msg = content.strip()
-                            break
+            message_count = len(non_reset)
+            last_user_msg = None
+            for msg in reversed(non_reset):
+                if msg.get("role") == "user":
+                    content = msg.get("content")
+                    if isinstance(content, str) and content.strip():
+                        last_user_msg = content.strip()
+                        break
 
-                preview = last_user_msg
-                if isinstance(preview, str) and len(preview) > 140:
-                    preview = preview[:140] + "."
+            preview = last_user_msg
+            if isinstance(preview, str) and len(preview) > 140:
+                preview = preview[:140] + "."
 
             summaries.append(
                 {
@@ -1685,8 +2044,10 @@ def get_chat_history_session_summaries(
             or datetime(1970, 1, 1, tzinfo=timezone.utc),
             reverse=True,
         )
+        _record_chat_history_read_success()
         return summaries[:safe_limit]
     except PyMongoError as e:
+        _record_chat_history_read_failure("get_chat_history_session_summaries", e)
         logger.error(
             f"Error retrieving chat history session summaries: {e}", exc_info=True
         )
@@ -1705,9 +2066,11 @@ def has_chat_history_session(
     if not user_id or not session_id:
         return False
 
-    chat_history_coll = get_chat_history_collection_service()
+    chat_history_coll = get_chat_history_collection_service(read_only=True)
     if chat_history_coll is None:
         raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    _guard_chat_history_read("has_chat_history_session")
 
     query = build_chat_history_query(
         user_id=user_id,
@@ -1715,7 +2078,13 @@ def has_chat_history_session(
         namespace=namespace,
         include_legacy=include_legacy,
     )
-    return chat_history_coll.find_one(query, {"_id": 1}) is not None
+    try:
+        result = _read_find_one(chat_history_coll, query, {"_id": 1}) is not None
+        _record_chat_history_read_success()
+        return result
+    except PyMongoError as e:
+        _record_chat_history_read_failure("has_chat_history_session", e)
+        raise ChatHistoryServiceError(f"Could not check chat history session: {e}") from e
 
 
 def get_chat_history_session_summary(
@@ -1729,9 +2098,11 @@ def get_chat_history_session_summary(
     if not user_id or not session_id:
         raise ChatHistoryServiceError("user_id and session_id are required.")
 
-    chat_history_coll = get_chat_history_collection_service()
+    chat_history_coll = get_chat_history_collection_service(read_only=True)
     if chat_history_coll is None:
         raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    _guard_chat_history_read("get_chat_history_session_summary")
 
     mode = summary_mode.strip().lower() if isinstance(summary_mode, str) else "full"
     light_mode = mode in ("light", "minimal", "summary")
@@ -1743,60 +2114,86 @@ def get_chat_history_session_summary(
         include_legacy=include_legacy,
     )
 
+    metadata_projection: Dict[str, Any] = {
+        "session_id": 1,
+        "session_name": 1,
+        "created_at": 1,
+        "updated_at": 1,
+        "namespace": 1,
+    }
     if light_mode:
-        pipeline = [
-            {"$match": query},
-            {
-                "$project": {
-                    "session_id": 1,
-                    "session_name": 1,
-                    "created_at": 1,
-                    "updated_at": 1,
-                    "namespace": 1,
-                    "history_tail": {"$slice": [{"$ifNull": ["$history", []]}, -1]},
-                    "message_count": {
-                        "$size": {
-                            "$filter": {
-                                "input": {"$ifNull": ["$history", []]},
-                                "as": "msg",
-                                "cond": {
-                                    "$not": {
-                                        "$and": [
-                                            {"$eq": ["$$msg.role", "system"]},
-                                            {"$eq": ["$$msg.content", "__RESET__"]},
-                                        ]
-                                    }
-                                },
-                            }
-                        }
-                    },
-                }
-            },
-        ]
-        doc = next(chat_history_coll.aggregate(pipeline), None)
-        history_field = "history_tail"
-    else:
-        projection: Dict[str, Any] = {
-            "session_id": 1,
-            "history": 1,
-            "created_at": 1,
-            "updated_at": 1,
-            "namespace": 1,
-            "session_name": 1,
-        }
-        doc = chat_history_coll.find_one(query, projection)
-        history_field = "history"
+        try:
+            metadata_doc = _read_find_one(chat_history_coll, query, metadata_projection)
+        except PyMongoError as e:
+            _record_chat_history_read_failure("get_chat_history_session_summary", e)
+            logger.error(
+                "Error retrieving metadata-only chat history session summary: %s",
+                e,
+                exc_info=True,
+            )
+            raise ChatHistoryServiceError(
+                f"Could not retrieve chat history session summary: {e}"
+            ) from e
+        if not isinstance(metadata_doc, dict):
+            _record_chat_history_read_success()
+            return None
+        summary = _build_session_summary_from_metadata(
+            metadata_doc, session_id_override=session_id
+        )
+        _record_chat_history_read_success()
+        return summary
+
+    projection: Dict[str, Any] = {
+        "session_id": 1,
+        "history": 1,
+        "created_at": 1,
+        "updated_at": 1,
+        "namespace": 1,
+        "session_name": 1,
+    }
+    try:
+        doc = _read_find_one(chat_history_coll, query, projection)
+    except PyMongoError as e:
+        _record_chat_history_read_failure("get_chat_history_session_summary", e)
+        logger.warning(
+            "Full chat history session summary failed; falling back to metadata-only summary: %s",
+            e,
+            exc_info=True,
+        )
+        try:
+            metadata_doc = _read_find_one(chat_history_coll, query, metadata_projection)
+        except PyMongoError as fallback_error:
+            _record_chat_history_read_failure(
+                "get_chat_history_session_summary", fallback_error
+            )
+            logger.error(
+                "Metadata-only fallback for chat history session summary failed: %s",
+                fallback_error,
+                exc_info=True,
+            )
+            raise ChatHistoryServiceError(
+                f"Could not retrieve chat history session summary: {e}"
+            ) from fallback_error
+        if not isinstance(metadata_doc, dict):
+            _record_chat_history_read_success()
+            return None
+        summary = _build_session_summary_from_metadata(
+            metadata_doc, session_id_override=session_id
+        )
+        _record_chat_history_read_success()
+        return summary
 
     if not isinstance(doc, dict):
+        _record_chat_history_read_success()
         return None
 
-    history = doc.get(history_field) or []
+    history = doc.get("history") or []
     if not isinstance(history, list):
         history = []
 
     session_name = _normalise_session_name(doc.get("session_name"))
     non_reset = list(_iter_non_reset_messages(history))
-    has_messages = bool(history) if light_mode else bool(non_reset)
+    has_messages = bool(non_reset)
     if not has_messages and not session_name:
         return None
 
@@ -1814,26 +2211,20 @@ def get_chat_history_session_summary(
     last_ts = _infer_last_message_timestamp(doc)
     created_ts = _infer_created_timestamp(doc)
 
-    message_count = None
-    preview = None
-    if light_mode:
-        if isinstance(doc.get("message_count"), int):
-            message_count = doc.get("message_count")
-    else:
-        message_count = len(non_reset)
-        last_user_msg = None
-        for msg in reversed(non_reset):
-            if msg.get("role") == "user":
-                content = msg.get("content")
-                if isinstance(content, str) and content.strip():
-                    last_user_msg = content.strip()
-                    break
+    message_count = len(non_reset)
+    last_user_msg = None
+    for msg in reversed(non_reset):
+        if msg.get("role") == "user":
+            content = msg.get("content")
+            if isinstance(content, str) and content.strip():
+                last_user_msg = content.strip()
+                break
 
-        preview = last_user_msg
-        if isinstance(preview, str) and len(preview) > 140:
-            preview = preview[:140] + "."
+    preview = last_user_msg
+    if isinstance(preview, str) and len(preview) > 140:
+        preview = preview[:140] + "."
 
-    return {
+    summary = {
         "session_id": session_id,
         "session_name": session_name,
         "message_count": message_count,
@@ -1844,6 +2235,8 @@ def get_chat_history_session_summary(
         "namespace": doc.get("namespace"),
         "preview": preview,
     }
+    _record_chat_history_read_success()
+    return summary
 
 
 def create_chat_session(

@@ -150,10 +150,12 @@ def test_get_chat_history_segments_skips_empty_segments(monkeypatch):
     monkeypatch.setattr(
         chat_history_service,
         "get_chat_history_collection_service",
-        lambda: _FakeCollection(docs),
+        lambda **kwargs: _FakeCollection(docs),
     )
 
-    segments = chat_history_service.get_chat_history_segments("#V#u", "s1")
+    segments_result = chat_history_service.get_chat_history_segments("#V#u", "s1")
+    assert isinstance(segments_result, list)
+    segments = segments_result
 
     # Should skip the leading empty segment and the double-reset empties.
     assert len(segments) == 2
@@ -191,10 +193,12 @@ def test_get_chat_history_segments_scopes_to_requested_session(monkeypatch):
     monkeypatch.setattr(
         chat_history_service,
         "get_chat_history_collection_service",
-        lambda: _FakeCollection(docs),
+        lambda **kwargs: _FakeCollection(docs),
     )
 
-    segments = chat_history_service.get_chat_history_segments("#V#u", "s_new")
+    segments_result = chat_history_service.get_chat_history_segments("#V#u", "s_new")
+    assert isinstance(segments_result, list)
+    segments = segments_result
 
     assert len(segments) == 1
     assert segments[0][0]["content"] == "new"
@@ -221,12 +225,14 @@ def test_get_chat_history_segments_chunks_large_segments(monkeypatch):
     monkeypatch.setattr(
         chat_history_service,
         "get_chat_history_collection_service",
-        lambda: _FakeCollection(docs),
+        lambda **kwargs: _FakeCollection(docs),
     )
 
-    segments = chat_history_service.get_chat_history_segments(
+    segments_result = chat_history_service.get_chat_history_segments(
         "#V#u", "s1", segment_size=2
     )
+    assert isinstance(segments_result, list)
+    segments = segments_result
 
     assert [len(segment) for segment in segments] == [2, 2, 1]
     assert [m["content"] for m in segments[0]] == ["m1", "m2"]
@@ -255,15 +261,17 @@ def test_get_chat_history_segments_strips_debug_when_requested(monkeypatch):
     monkeypatch.setattr(
         chat_history_service,
         "get_chat_history_collection_service",
-        lambda: _FakeCollection(docs),
+        lambda **kwargs: _FakeCollection(docs),
     )
 
-    segments = chat_history_service.get_chat_history_segments(
+    segments_result = chat_history_service.get_chat_history_segments(
         "#V#u",
         "s1",
         include_locations=True,
         include_debug=False,
     )
+    assert isinstance(segments_result, list)
+    segments = segments_result
 
     assert len(segments) == 1
     assert len(segments[0]) == 1
@@ -289,15 +297,17 @@ def test_get_chat_history_segments_reports_truncation(monkeypatch):
     monkeypatch.setattr(
         chat_history_service,
         "get_chat_history_collection_service",
-        lambda: _FakeCollection(docs),
+        lambda **kwargs: _FakeCollection(docs),
     )
 
-    segments, meta = chat_history_service.get_chat_history_segments(
+    result = chat_history_service.get_chat_history_segments(
         "#V#u",
         "s1",
         history_tail_limit=2,
         return_meta=True,
     )
+    assert isinstance(result, tuple)
+    segments, meta = result
 
     assert isinstance(segments, list)
     assert meta["history_truncated"] is True
@@ -324,15 +334,17 @@ def test_get_chat_history_segments_offsets_locations_with_tail_limit(monkeypatch
     monkeypatch.setattr(
         chat_history_service,
         "get_chat_history_collection_service",
-        lambda: _FakeCollection(docs),
+        lambda **kwargs: _FakeCollection(docs),
     )
 
-    segments = chat_history_service.get_chat_history_segments(
+    segments_result = chat_history_service.get_chat_history_segments(
         "#V#u",
         "s1",
         include_locations=True,
         history_tail_limit=2,
     )
+    assert isinstance(segments_result, list)
+    segments = segments_result
 
     assert len(segments) == 1
     assert [m["content"] for m in segments[0]] == ["m4", "m5"]
@@ -357,7 +369,7 @@ def test_get_chat_history_debug_entry_returns_payload(monkeypatch):
     monkeypatch.setattr(
         chat_history_service,
         "get_chat_history_collection_service",
-        lambda: _FakeCollection(docs),
+        lambda **kwargs: _FakeCollection(docs),
     )
 
     debug_data = chat_history_service.get_chat_history_debug_entry(

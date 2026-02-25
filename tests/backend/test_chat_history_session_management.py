@@ -24,7 +24,7 @@ def test_create_chat_session_sets_name_and_namespace(monkeypatch):
     monkeypatch.setattr(
         chat_history_service,
         "get_chat_history_collection_service",
-        lambda: _FakeColl(),
+        lambda **kwargs: _FakeColl(),
     )
     monkeypatch.setattr(
         chat_history_service,
@@ -66,7 +66,7 @@ def test_rename_chat_session_updates_name(monkeypatch):
     monkeypatch.setattr(
         chat_history_service,
         "get_chat_history_collection_service",
-        lambda: _FakeColl(),
+        lambda **kwargs: _FakeColl(),
     )
 
     result = chat_history_service.rename_chat_session(

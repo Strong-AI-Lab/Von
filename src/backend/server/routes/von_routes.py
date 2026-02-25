@@ -7667,6 +7667,24 @@ def history():
             }
         )
     except Exception as e:
+        if chat_history_service.is_transient_chat_history_error(e):
+            current_app.logger.warning(
+                "history endpoint degraded due to transient chat history error: %s",
+                e,
+                exc_info=True,
+            )
+            return jsonify(
+                {
+                    "history": [],
+                    "segments_returned": 0,
+                    "total_segments": 0,
+                    "has_more_history": False,
+                    "degraded": True,
+                    "retryable": True,
+                    "error": "Chat history temporarily unavailable; please retry.",
+                    "detail": str(e)[:300],
+                }
+            )
         print(f"Error retrieving history: {e}")
         return jsonify({"error": str(e)}), 500
 
@@ -8187,6 +8205,23 @@ def history_length():
             }
         )
     except Exception as e:
+        if chat_history_service.is_transient_chat_history_error(e):
+            current_app.logger.warning(
+                "history_length degraded due to transient chat history error: %s",
+                e,
+                exc_info=True,
+            )
+            return jsonify(
+                {
+                    "history_length": 0,
+                    "session_count": 0,
+                    "authenticated": True,
+                    "degraded": True,
+                    "retryable": True,
+                    "error": "Chat history metrics temporarily unavailable; showing fallback values.",
+                    "detail": str(e)[:300],
+                }
+            )
         print(f"Error retrieving history length: {e}")
         return jsonify({"error": str(e)}), 500
 
@@ -8960,7 +8995,7 @@ def set_chat_session():
             include_history = True
 
         # Verify the session belongs to this user.
-        coll = chat_history_service.get_chat_history_collection_service()
+        coll = chat_history_service.get_chat_history_collection_service(read_only=True)
         if coll is None:
             return jsonify({"error": "Chat history unavailable"}), 503
 
@@ -8980,7 +9015,9 @@ def set_chat_session():
         projection = {"session_name": 1}
         if include_history:
             projection["history"] = 1
-        user_doc = coll.find_one(query, projection)
+        user_doc = chat_history_service.find_chat_history_document_for_read(
+            coll, query, projection
+        )
         owner_user_id, invite = _resolve_shared_conversation_owner(
             user_concept_id=user_concept_id, session_id=session_id
         )
@@ -8996,14 +9033,18 @@ def set_chat_session():
                 session_id=session_id,
                 namespace=owner_namespace,
             )
-            owner_doc = coll.find_one(shared_query, projection)
+            owner_doc = chat_history_service.find_chat_history_document_for_read(
+                coll, shared_query, projection
+            )
             if not owner_doc:
                 shared_query = chat_history_service.build_chat_history_query(
                     user_id=owner_user_id,
                     session_id=session_id,
                     namespace=None,
                 )
-                owner_doc = coll.find_one(shared_query, projection)
+                owner_doc = chat_history_service.find_chat_history_document_for_read(
+                    coll, shared_query, projection
+                )
 
         doc = owner_doc or user_doc
         if not doc:
@@ -9090,6 +9131,23 @@ def set_chat_session():
             200,
         )
     except Exception as e:
+        if chat_history_service.is_transient_chat_history_error(e):
+            current_app.logger.warning(
+                "set_chat_session transient failure for session switch: %s",
+                e,
+                exc_info=True,
+            )
+            return (
+                jsonify(
+                    {
+                        "error": "Conversation switch temporarily unavailable; please retry.",
+                        "detail": str(e)[:300],
+                        "retryable": True,
+                        "degraded": True,
+                    }
+                ),
+                503,
+            )
         print(f"Error setting chat session: {e}")
         return jsonify({"error": str(e)}), 500
 

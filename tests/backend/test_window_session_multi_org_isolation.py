@@ -215,7 +215,7 @@ class TestSetChatSessionUsesWindowContext:
         monkeypatch.setattr(
             chat_history_service,
             "get_chat_history_collection_service",
-            lambda: _FakeColl(),
+            lambda **kwargs: _FakeColl(),
         )
 
         # Stub shared conversation resolver to return no shared invite
@@ -287,7 +287,7 @@ class TestSetChatSessionUsesWindowContext:
         monkeypatch.setattr(
             chat_history_service,
             "get_chat_history_collection_service",
-            lambda: _FakeColl(),
+            lambda **kwargs: _FakeColl(),
         )
 
         # Stub shared conversation resolver to return no shared invite
@@ -414,7 +414,7 @@ class TestChatSessionLinksUsesWindowContext:
     def test_session_links_uses_window_namespace(self, monkeypatch, app_client):
         """Session links should be fetched using the window's namespace."""
         _, client = app_client
-        captured_namespaces: list[str] = []
+        captured_namespaces: list[str | None] = []
 
         import src.backend.services.chat_history_service as chat_history_service
 
@@ -470,7 +470,7 @@ class TestHistoryBackfillUsesWindowContext:
     def test_backfill_spoken_uses_window_namespace(self, monkeypatch, app_client):
         """Backfill spoken should verify session access using the window session's namespace."""
         _, client = app_client
-        captured_namespace_checks: list[str] = []
+        captured_namespace_checks: list[str | None] = []
 
         import src.backend.services.chat_history_service as chat_history_service
 
@@ -478,7 +478,7 @@ class TestHistoryBackfillUsesWindowContext:
             captured_namespace_checks.append(namespace)
             return True  # Session exists
 
-        def fake_get_collection():
+        def fake_get_collection(**kwargs):
             class _FakeColl:
                 def find_one(self, query, projection=None):
                     return {

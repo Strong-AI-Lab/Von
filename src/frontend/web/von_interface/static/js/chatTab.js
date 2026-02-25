@@ -10371,20 +10371,41 @@ async function switchToChatSession(sessionId) {
     updateHistoryBanner();
 
     try {
-        const setSessionStart = performance.now();
-        const response = await fetch('/von/api/session/set_chat_session', {
-            method: 'POST',
-            headers: buildChatFetchHeaders({ 'Content-Type': 'application/json' }),
-            body: JSON.stringify({ session_id: sid, include_history: false })
-        });
-        const data = await response.json();
-        const setSessionMs = Math.round(performance.now() - setSessionStart);
-        console.log('[chatTab] switchToChatSession set_chat_session', {
-            ok: response.ok,
-            status: response.status,
-            duration_ms: setSessionMs,
-            session_id: data?.session_id || sid
-        });
+        let response = null;
+        let data = null;
+        let setSessionMs = 0;
+        const maxAttempts = 2;
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+            const setSessionStart = performance.now();
+            response = await fetch('/von/api/session/set_chat_session', {
+                method: 'POST',
+                headers: buildChatFetchHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify({ session_id: sid, include_history: false })
+            });
+            data = await response.json().catch(() => ({}));
+            setSessionMs = Math.round(performance.now() - setSessionStart);
+            console.log('[chatTab] switchToChatSession set_chat_session', {
+                ok: response.ok,
+                status: response.status,
+                duration_ms: setSessionMs,
+                session_id: data?.session_id || sid,
+                attempt
+            });
+
+            if (response.ok) {
+                break;
+            }
+
+            const retryable = Boolean(data?.retryable) || response.status === 503;
+            if (!retryable || attempt >= maxAttempts) {
+                break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 320));
+        }
+
+        if (!response) {
+            throw new Error('No response from set_chat_session');
+        }
 
         if (!response.ok) {
             const msg = data?.error ? String(data.error) : 'Unable to switch session.';
@@ -10701,7 +10722,7 @@ async function updateHistoryLength() {
                                 }
                             } catch (_) { /* ignore */ }
 
-                            const res = await fetch('/von/history/sessions?limit=50', {
+                            const res = await fetch('/von/history/sessions?limit=50&summary=light', {
                                 cache: 'no-store',
                                 headers: buildChatFetchHeaders()
                             });

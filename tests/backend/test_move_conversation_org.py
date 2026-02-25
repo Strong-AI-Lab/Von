@@ -7,6 +7,7 @@ and the /von/api/session/move_chat_session_org endpoint.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -169,7 +170,7 @@ class TestMoveConversationEndpoint:
         import types
 
         # Stub Google auth dependencies
-        fake_flow_module = types.ModuleType("google_auth_oauthlib.flow")
+        fake_flow_module: Any = types.ModuleType("google_auth_oauthlib.flow")
 
         class _DummyFlow:
             def __init__(self, *args, **kwargs):
@@ -188,16 +189,17 @@ class TestMoveConversationEndpoint:
                 return None
 
         fake_flow_module.Flow = _DummyFlow
-        sys.modules["google_auth_oauthlib"] = types.ModuleType("google_auth_oauthlib")
-        sys.modules["google_auth_oauthlib"].flow = fake_flow_module
+        fake_google_auth_oauthlib: Any = types.ModuleType("google_auth_oauthlib")
+        fake_google_auth_oauthlib.flow = fake_flow_module
+        sys.modules["google_auth_oauthlib"] = fake_google_auth_oauthlib
         sys.modules["google_auth_oauthlib.flow"] = fake_flow_module
 
-        fake_id_token_module = types.ModuleType("google.oauth2.id_token")
+        fake_id_token_module: Any = types.ModuleType("google.oauth2.id_token")
         fake_id_token_module.verify_oauth2_token = lambda *args, **kwargs: {
             "sub": "dummy-user"
         }
 
-        fake_credentials_module = types.ModuleType("google.oauth2.credentials")
+        fake_credentials_module: Any = types.ModuleType("google.oauth2.credentials")
 
         class _DummyCredentials:
             def __init__(self, id_token: str = "dummy-token"):
@@ -205,7 +207,9 @@ class TestMoveConversationEndpoint:
 
         fake_credentials_module.Credentials = _DummyCredentials
 
-        fake_service_account_module = types.ModuleType("google.oauth2.service_account")
+        fake_service_account_module: Any = types.ModuleType(
+            "google.oauth2.service_account"
+        )
 
         class _DummyServiceAccountCredentials:
             def __init__(self, *args, **kwargs):
@@ -213,7 +217,7 @@ class TestMoveConversationEndpoint:
 
         fake_service_account_module.Credentials = _DummyServiceAccountCredentials
 
-        fake_oauth2_package = types.ModuleType("google.oauth2")
+        fake_oauth2_package: Any = types.ModuleType("google.oauth2")
         fake_oauth2_package.id_token = fake_id_token_module
         fake_oauth2_package.credentials = fake_credentials_module
         fake_oauth2_package.service_account = fake_service_account_module
@@ -360,7 +364,7 @@ class TestMoveConversationEndpoint:
         monkeypatch.setattr(
             chat_svc,
             "get_chat_history_collection_service",
-            lambda: mock_coll,
+            lambda **kwargs: mock_coll,
         )
 
         monkeypatch.setattr(
@@ -445,7 +449,7 @@ class TestMoveConversationEndpoint:
         monkeypatch.setattr(
             chat_svc,
             "get_chat_history_collection_service",
-            lambda: mock_coll,
+            lambda **kwargs: mock_coll,
         )
 
         # There are invites for users not in target org
