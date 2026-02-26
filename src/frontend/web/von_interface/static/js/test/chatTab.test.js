@@ -501,6 +501,22 @@ describe('thinking liveness presentation', () => {
 });
 
 describe('thinking card display state reducer', () => {
+    test('keeps card expanded during non-terminal progress updates', () => {
+        let state = __testOnly_reduceThinkingCardDisplayState(null, { type: 'reset_for_active' });
+        state = __testOnly_reduceThinkingCardDisplayState(state, {
+            type: 'manual_set',
+            expanded: false
+        });
+
+        state = __testOnly_reduceThinkingCardDisplayState(state, {
+            type: 'progress_update',
+            progress: { status: 'pending' }
+        });
+
+        expect(state.expanded).toBe(true);
+        expect(state.autoFurlApplied).toBe(false);
+    });
+
     test('auto-furls once on first terminal progress update', () => {
         let state = __testOnly_reduceThinkingCardDisplayState(null, { type: 'reset_for_active' });
         expect(state.expanded).toBe(true);
@@ -566,7 +582,7 @@ describe('thinking card toggle accessibility', () => {
         delete global.fetch;
     });
 
-    test('sets aria-expanded while active and allows manual toggle', async () => {
+    test('keeps card expanded while active and disables collapse toggle', async () => {
         const { getUserContext } = require('../apiService.js');
         getUserContext.mockReturnValue({
             user_id: 'user',
@@ -624,11 +640,12 @@ describe('thinking card toggle accessibility', () => {
 
         expect(toggleButton.getAttribute('aria-hidden')).toBe('false');
         expect(toggleButton.getAttribute('aria-expanded')).toBe('true');
+        expect(toggleButton.disabled).toBe(true);
 
         toggleButton.click();
 
-        expect(toggleButton.getAttribute('aria-expanded')).toBe('false');
-        expect(wrapper.classList.contains('is-collapsed')).toBe(true);
+        expect(toggleButton.getAttribute('aria-expanded')).toBe('true');
+        expect(wrapper.classList.contains('is-collapsed')).toBe(false);
         expect(detail.getAttribute('aria-hidden')).toBe('true');
 
         document.getElementById('abortButton').click();
@@ -639,6 +656,77 @@ describe('thinking card toggle accessibility', () => {
         expect(toggleButton.getAttribute('aria-hidden')).toBe('true');
 
         await expect(sendPromise).resolves.toBeUndefined();
+    });
+
+    test('shows finished run history collapsed and allows expanding afterwards', async () => {
+        const { getUserContext } = require('../apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        document.getElementById('promptInput').value = 'test prompt';
+
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/api/settings/')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ show_tool_use_during_thinking: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/progress/')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        status: 'completed',
+                        phase: 'tool_execute',
+                        phase_label: 'Executing tools',
+                        tool: 'search_knowledge_base',
+                        result_summary: 'Completed'
+                    })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        response: 'Done',
+                        llm_debug: { model: 'gpt-5.2' }
+                    })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        await expect(sendMessage()).resolves.toBeUndefined();
+
+        const wrapper = document.getElementById('thinkingCardWrapper');
+        const toggleButton = document.getElementById('thinkingCardToggleButton');
+        const detail = document.getElementById('loadingIndicatorDetail');
+
+        expect(wrapper.getAttribute('aria-hidden')).toBe('false');
+        expect(toggleButton.getAttribute('aria-hidden')).toBe('false');
+        expect(toggleButton.disabled).toBe(false);
+        expect(toggleButton.getAttribute('aria-expanded')).toBe('false');
+        expect(detail.getAttribute('aria-hidden')).toBe('true');
+        expect(detail.innerHTML).toContain('search_knowledge_base');
+
+        toggleButton.click();
+
+        expect(toggleButton.getAttribute('aria-expanded')).toBe('true');
+        expect(detail.getAttribute('aria-hidden')).toBe('false');
     });
 });
 
