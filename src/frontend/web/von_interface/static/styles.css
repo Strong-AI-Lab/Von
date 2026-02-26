@@ -7396,6 +7396,25 @@ button.prompt-vontology-cartouche {
     border-color: #f5c2c7;
 }
 
+#serverUptimeValue.health-telemetry-copyable {
+    cursor: pointer;
+    text-decoration: underline dotted;
+    text-underline-offset: 2px;
+}
+
+#serverUptimeValue.health-telemetry-copyable:focus {
+    outline: 1px solid #93c5fd;
+    border-radius: 4px;
+}
+
+#serverUptimeValue.health-telemetry-copy-success {
+    color: #065f46;
+}
+
+#serverUptimeValue.health-telemetry-copy-error {
+    color: #991b1b;
+}
+
 .footer-separator {
     margin: 0 4px;
     opacity: 0.5;

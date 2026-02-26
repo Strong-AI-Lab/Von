@@ -16,6 +16,8 @@ import {
     __testOnly_deriveLlmDebugWarnings,
     __testOnly_hydrateChatConceptCartouches,
     __testOnly_jumpToLatestUnreadBoundary,
+    __testOnly_shouldMaintainSharedConversationStreamForInputs,
+    __testOnly_shouldRunSharedSessionBadgePollingForInputs,
     __testOnly_renderDisplayElementsIntoContainer,
     __testOnly_ensureScrollToEndButton,
     __testOnly_scrollConversationToEnd,
@@ -217,6 +219,46 @@ describe('workflow status query scoping', () => {
 
         expect(params.get('namespace')).toBe('#V#michael_witbrock');
         expect(params.has('status')).toBe(false);
+    });
+});
+
+describe('shared conversation stream eligibility', () => {
+    test('requires active session, visible document, and shared session status', () => {
+        expect(__testOnly_shouldMaintainSharedConversationStreamForInputs({
+            sessionId: 'session-a',
+            activeSessionId: 'session-a',
+            isVisible: true,
+            isSharedSession: true
+        })).toBe(true);
+    });
+
+    test('rejects reconnect for non-active shared sessions', () => {
+        expect(__testOnly_shouldMaintainSharedConversationStreamForInputs({
+            sessionId: 'session-a',
+            activeSessionId: 'session-b',
+            isVisible: true,
+            isSharedSession: true
+        })).toBe(false);
+    });
+
+    test('rejects reconnect when tab is hidden', () => {
+        expect(__testOnly_shouldMaintainSharedConversationStreamForInputs({
+            sessionId: 'session-a',
+            activeSessionId: 'session-a',
+            isVisible: false,
+            isSharedSession: true
+        })).toBe(false);
+    });
+});
+
+describe('shared session badge polling eligibility', () => {
+    test('runs polling only when visible', () => {
+        expect(__testOnly_shouldRunSharedSessionBadgePollingForInputs({
+            isVisible: true
+        })).toBe(true);
+        expect(__testOnly_shouldRunSharedSessionBadgePollingForInputs({
+            isVisible: false
+        })).toBe(false);
     });
 });
 

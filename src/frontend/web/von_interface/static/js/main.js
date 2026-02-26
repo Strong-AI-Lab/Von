@@ -10,10 +10,12 @@ import { handleSelectConceptByIdDetail } from './utils/selectConceptByIdHandler.
 import { formatBackgroundTaskSummary, formatBackgroundTaskTooltip, subscribeBackgroundTaskUpdates } from './backgroundTaskTracker.js';
 import {
   copyJsonTextWithButtonFeedback,
+  copyTextWithClipboardFallback,
   initialiseCopyJsonButtonPreCopyState,
   resetCopyJsonButtonPreCopyState
 } from './utils/copyJsonButtonState.js';
 import { getSessionScopedNamespace, hasSessionOrgContext, syncNamespaceFromLocalStorage, syncOrgContextFromLocalStorage } from './utils/sessionScopedStorage.js';
+import { buildHealthTelemetryCopyPayload, buildHealthTelemetrySnapshot } from './utils/healthTelemetrySnapshot.js';
 import { isVontologyBusy, loadKeyConceptsForUser, preloadVontologyData, selectVontologyNodeByIdentifier, setupVontologySearchUI } from './vontology.js';
 
 // JVNAUTOSCI-1011: getCurrentNamespace is now provided by sessionScopedStorage.js
@@ -662,6 +664,21 @@ function startHealthPolling() {
       } catch (err) { console.warn('PID copy failed', err); }
     });
   }
+  if (uptimeSpan && uptimeSpan.dataset.healthTelemetryCopyBound !== 'true') {
+    uptimeSpan.dataset.healthTelemetryCopyBound = 'true';
+    uptimeSpan.setAttribute('role', 'button');
+    uptimeSpan.setAttribute('tabindex', '0');
+    uptimeSpan.addEventListener('click', () => {
+      if (!canCopyHealthTelemetryFromUptime()) return;
+      void copyCurrentHealthTelemetry('uptime_badge_click');
+    });
+    uptimeSpan.addEventListener('keydown', (event) => {
+      if (!canCopyHealthTelemetryFromUptime()) return;
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      void copyCurrentHealthTelemetry('uptime_badge_keypress');
+    });
+  }
   const HEALTH_START_TIME_CACHE_KEY = 'von_server_start_time_iso';
   const healthLoopStartedAtMs = Date.now();
   function readCachedStartTimeIso() {
@@ -689,12 +706,25 @@ function startHealthPolling() {
   let reloadTriggered = false;
   let serverReachable = null;
   let serverHealthUiState = 'waiting';
+  let failureCount = 0;
+  let healthPollInFlight = false;
+  let healthPollQueuedImmediate = false;
+  let healthPollTimerId = null;
+  let nextScheduledHealthPollAtMs = null;
+  let lastHealthCheckCompletedAtMs = null;
   let hasSeenSuccessfulHealthPoll = false;
   let firstFailureAtMs = null;
   let lastHealthSuccessAtMs = null;
   let lastHealthErrorKind = null;
   let lastHealthErrorDetail = null;
+  let lastHealthSuccessPid = null;
+  let lastHealthStateSource = 'health_poll_initialise';
   let latestHealthDiagnostics = null;
+  let latestHealthTelemetry = null;
+  let lastHealthTelemetryCopyAttempt = null;
+  let lastBusyState = null;
+  let unsubscribeBackgroundTaskUpdates = null;
+  let uptimeTelemetryCopyFeedbackTimerId = null;
 
   function publishHealthPollDiagnostics(diagnostics) {
     if (!diagnostics || typeof diagnostics !== 'object') return;
@@ -729,8 +759,13 @@ function startHealthPolling() {
       setServerReachableState(true);
     }
     if (diagnostics && typeof diagnostics === 'object') {
-      publishHealthPollDiagnostics({ state: safeState, ...diagnostics });
+      const diagnosticsPayload = { state: safeState, ...diagnostics };
+      if (typeof diagnosticsPayload.source === 'string' && diagnosticsPayload.source.trim()) {
+        lastHealthStateSource = diagnosticsPayload.source.trim();
+      }
+      publishHealthPollDiagnostics(diagnosticsPayload);
     }
+    publishHealthTelemetry('health_state_transition');
   }
 
   function isThinkingActive() {
@@ -773,16 +808,166 @@ function startHealthPolling() {
     if (m > 0) return `${m}m ${s}s`;
     return `${s}s`;
   }
+
+  function getBrowserOnlineState() {
+    try {
+      return (typeof navigator !== 'undefined' && typeof navigator.onLine === 'boolean')
+        ? navigator.onLine
+        : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function publishHealthTelemetry(eventSource = null) {
+    const locationHref = (typeof window !== 'undefined' && window.location)
+      ? (window.location.href || null)
+      : null;
+    const locationOrigin = (typeof window !== 'undefined' && window.location)
+      ? (window.location.origin || null)
+      : null;
+    const locationPathname = (typeof window !== 'undefined' && window.location)
+      ? (window.location.pathname || null)
+      : null;
+    const locationPort = (typeof window !== 'undefined' && window.location)
+      ? (window.location.port || null)
+      : null;
+    const realtimeConnectionTelemetry = (typeof window !== 'undefined' && window.__vonRealtimeConnectionTelemetry && typeof window.__vonRealtimeConnectionTelemetry === 'object')
+      ? window.__vonRealtimeConnectionTelemetry
+      : null;
+    const snapshot = buildHealthTelemetrySnapshot({
+      state: serverHealthUiState,
+      eventSource,
+      stateSource: lastHealthStateSource,
+      nowMs: Date.now(),
+      serverReachable,
+      hasSeenSuccessfulHealthPoll,
+      failureCount,
+      firstFailureAtMs,
+      lastHealthCheckCompletedAtMs,
+      lastHealthSuccessAtMs,
+      lastHealthSuccessPid,
+      lastErrorKind: lastHealthErrorKind,
+      lastErrorDetail: lastHealthErrorDetail,
+      diagnostics: latestHealthDiagnostics,
+      pollInFlight: healthPollInFlight,
+      pollQueuedImmediate: healthPollQueuedImmediate,
+      nextPollAtMs: nextScheduledHealthPollAtMs,
+      browserOnline: getBrowserOnlineState(),
+      isVontologyBusy: !!lastBusyState,
+      healthLoopStartedAtMs,
+      lastCopyAttempt: lastHealthTelemetryCopyAttempt,
+      realtimeConnectionTelemetry,
+      locationHref,
+      locationOrigin,
+      locationPathname,
+      locationPort,
+    });
+    latestHealthTelemetry = snapshot;
+    try {
+      window.__vonHealthTelemetry = snapshot;
+    } catch (_) {
+      // Ignore non-writable globals in constrained environments.
+    }
+    try {
+      document.dispatchEvent(new CustomEvent('von:healthTelemetryUpdated', { detail: snapshot }));
+    } catch (_) {
+      // Non-fatal telemetry event.
+    }
+    return snapshot;
+  }
+  function formatSecondsAgo(ms) {
+    if (!Number.isFinite(ms) || ms < 0) return null;
+    return `${Math.max(0, Math.floor(ms / 1000))}s ago`;
+  }
+
+  function canCopyHealthTelemetryFromUptime() {
+    return serverHealthUiState === 'down' || serverHealthUiState === 'degraded' || serverHealthUiState === 'waiting';
+  }
+
+  function updateUptimeCopyFeedbackClass(copied) {
+    if (!uptimeSpan) return;
+    uptimeSpan.classList.remove('health-telemetry-copy-success', 'health-telemetry-copy-error');
+    uptimeSpan.classList.add(copied ? 'health-telemetry-copy-success' : 'health-telemetry-copy-error');
+    if (uptimeTelemetryCopyFeedbackTimerId) {
+      clearTimeout(uptimeTelemetryCopyFeedbackTimerId);
+    }
+    uptimeTelemetryCopyFeedbackTimerId = setTimeout(() => {
+      uptimeTelemetryCopyFeedbackTimerId = null;
+      if (uptimeSpan) {
+        uptimeSpan.classList.remove('health-telemetry-copy-success', 'health-telemetry-copy-error');
+      }
+    }, 1800);
+  }
+
+  async function copyCurrentHealthTelemetry(copySource = 'uptime_badge_click') {
+    const attemptStartedAtMs = Date.now();
+    lastHealthTelemetryCopyAttempt = {
+      copySource,
+      attemptedAtMs: attemptStartedAtMs,
+      attemptedAtIso: new Date(attemptStartedAtMs).toISOString(),
+      copied: null,
+    };
+    const snapshot = publishHealthTelemetry('health_telemetry_copy_attempted');
+    const snapshotForCopy = (latestHealthTelemetry && typeof latestHealthTelemetry === 'object')
+      ? latestHealthTelemetry
+      : snapshot;
+    const payload = buildHealthTelemetryCopyPayload(snapshotForCopy, {
+      copySource,
+      nowMs: attemptStartedAtMs,
+    });
+    const payloadText = JSON.stringify(payload, null, 2);
+    try {
+      window.__vonLastHealthTelemetryCopyPayload = payload;
+    } catch (_) {
+      // Ignore non-writable globals.
+    }
+    let copied = false;
+    try {
+      copied = await copyTextWithClipboardFallback(payloadText);
+    } catch (_) {
+      copied = false;
+    }
+    const attemptCompletedAtMs = Date.now();
+    lastHealthTelemetryCopyAttempt = {
+      ...lastHealthTelemetryCopyAttempt,
+      copied,
+      completedAtMs: attemptCompletedAtMs,
+      completedAtIso: new Date(attemptCompletedAtMs).toISOString(),
+      copyPayloadBytes: payloadText.length,
+    };
+    publishHealthTelemetry(copied ? 'health_telemetry_copy_succeeded' : 'health_telemetry_copy_failed');
+    updateUptimeCopyFeedbackClass(copied);
+    return copied;
+  }
+
   function updateUptimeLoop() {
     if (uptimeSpan) {
       const uptimeContainer = uptimeSpan.parentElement;
+      const telemetryCopyEnabled = canCopyHealthTelemetryFromUptime();
+      const copyHint = telemetryCopyEnabled ? 'Click to copy health telemetry JSON' : null;
+      uptimeSpan.classList.toggle('health-telemetry-copyable', telemetryCopyEnabled);
+      uptimeSpan.setAttribute('aria-disabled', telemetryCopyEnabled ? 'false' : 'true');
       if (serverHealthUiState === 'down') {
-        uptimeSpan.textContent = 'server down';
-        uptimeSpan.title = 'Von server is unreachable';
+        const lastCheckAgeMs = Number.isFinite(lastHealthCheckCompletedAtMs)
+          ? Math.max(0, Date.now() - lastHealthCheckCompletedAtMs)
+          : null;
+        const lastCheckLabel = formatSecondsAgo(lastCheckAgeMs);
+        const lastSuccessLabel = Number.isFinite(lastHealthSuccessAtMs)
+          ? formatUptime(Math.max(0, Date.now() - lastHealthSuccessAtMs))
+          : null;
+        uptimeSpan.textContent = lastCheckLabel
+          ? `server down (checked ${lastCheckLabel})`
+          : 'server down';
+        const baseTitle = lastSuccessLabel
+          ? `Von server is unreachable | Last healthy response ${lastSuccessLabel} ago`
+          : 'Von server is unreachable';
+        uptimeSpan.title = copyHint ? `${baseTitle} | ${copyHint}` : baseTitle;
         if (uptimeContainer) uptimeContainer.classList.add('pid-error');
       } else if (serverHealthUiState === 'waiting') {
         uptimeSpan.textContent = 'waiting for server';
-        uptimeSpan.title = 'Waiting for initial server health response';
+        const baseTitle = 'Waiting for initial server health response';
+        uptimeSpan.title = copyHint ? `${baseTitle} | ${copyHint}` : baseTitle;
         if (uptimeContainer) uptimeContainer.classList.remove('pid-error');
       } else if (serverHealthUiState === 'degraded') {
         const failureCountTitle = Number.isFinite(latestHealthDiagnostics?.failureCount)
@@ -793,9 +978,10 @@ function startHealthPolling() {
           : null;
         const detail = [failureCountTitle, failureWindowTitle].filter(Boolean).join(' | ');
         uptimeSpan.textContent = 'degraded (retrying)';
-        uptimeSpan.title = detail
+        const baseTitle = detail
           ? `Health probes are failing but below down threshold (${detail})`
           : 'Health probes are failing but below down threshold';
+        uptimeSpan.title = copyHint ? `${baseTitle} | ${copyHint}` : baseTitle;
         if (uptimeContainer) uptimeContainer.classList.remove('pid-error');
       } else if (startTimeIso) {
         const started = Date.parse(startTimeIso);
@@ -814,12 +1000,6 @@ function startHealthPolling() {
     }
     requestAnimationFrame(() => setTimeout(updateUptimeLoop, 1000));
   }
-  let failureCount = 0;
-  let healthPollInFlight = false;
-  let healthPollQueuedImmediate = false;
-  let healthPollTimerId = null;
-  let lastBusyState = null;
-  let unsubscribeBackgroundTaskUpdates = null;
 
   function updateBackgroundTaskFooter(snapshot) {
     if (!backgroundTaskEl) return;
@@ -851,6 +1031,7 @@ function startHealthPolling() {
       if (lastBusyState !== busy) {
         lastBusyState = busy;
         document.dispatchEvent(new CustomEvent('von:vontologyBusyChange', { detail: { busy } }));
+        publishHealthTelemetry('vontology_busy_changed');
       }
     } catch (_) { }
   }
@@ -877,24 +1058,37 @@ function startHealthPolling() {
   } catch (_) { }
 
   function scheduleHealthPoll(delayMs) {
+    const safeDelayMs = Number.isFinite(delayMs) ? Math.max(0, Math.trunc(delayMs)) : 0;
     if (healthPollTimerId) {
       clearTimeout(healthPollTimerId);
     }
+    nextScheduledHealthPollAtMs = Date.now() + safeDelayMs;
+    publishHealthTelemetry('health_poll_scheduled');
     healthPollTimerId = setTimeout(() => {
       healthPollTimerId = null;
+      nextScheduledHealthPollAtMs = null;
+      publishHealthTelemetry('health_poll_schedule_fired');
       void poll();
-    }, delayMs);
+    }, safeDelayMs);
   }
 
   async function poll() {
     if (healthPollInFlight) {
       healthPollQueuedImmediate = true;
+      publishHealthTelemetry('health_poll_queued_immediate');
       return;
     }
 
     healthPollInFlight = true;
-    updateBusyIndicator();
-    const busy = isVontologyBusy();
+    nextScheduledHealthPollAtMs = null;
+    publishHealthTelemetry('health_poll_started');
+    let busy = false;
+    try {
+      updateBusyIndicator();
+      busy = isVontologyBusy();
+    } catch (_) {
+      busy = false;
+    }
     let nextDelay = 5000; // base
     try {
       const controller = new AbortController();
@@ -903,6 +1097,7 @@ function startHealthPolling() {
       clearTimeout(timeout);
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
+      lastHealthCheckCompletedAtMs = Date.now();
       hasSeenSuccessfulHealthPoll = true;
       firstFailureAtMs = null;
       lastHealthSuccessAtMs = Date.now();
@@ -923,6 +1118,7 @@ function startHealthPolling() {
         lastErrorDetail: null,
       });
       const newPid = (typeof data.pid !== 'undefined') ? data.pid : null;
+      lastHealthSuccessPid = Number.isFinite(Number(newPid)) ? Number(newPid) : null;
       const newStart = data.start_time || null;
       const newLocalIp = data.local_ip || null;
       const newPublicIp = data.public_ip || null;
@@ -2009,11 +2205,21 @@ function startHealthPolling() {
       if (newStart !== null) lastIdentity.start = newStart;
       failureCount = 0; // reset on success
     } catch (e) {
+      lastHealthCheckCompletedAtMs = Date.now();
       failureCount++;
       if (!Number.isFinite(firstFailureAtMs)) {
         firstFailureAtMs = Date.now();
       }
       const nowMs = Date.now();
+      const isHttpError = typeof e?.message === 'string' && e.message.startsWith('HTTP ');
+      const errorKind = e?.name === 'AbortError'
+        ? 'timeout'
+        : (isHttpError ? 'http' : 'network_or_unknown');
+      const errorDetail = typeof e?.message === 'string'
+        ? e.message
+        : String(e || '');
+      lastHealthErrorKind = errorKind;
+      lastHealthErrorDetail = errorDetail;
       const activeThinking = isThinkingActive();
       const evaluation = evaluateServerHealthState({
         hasSeenSuccessfulHealthPoll,
@@ -2021,15 +2227,9 @@ function startHealthPolling() {
         firstFailureAtMs,
         nowMs,
         isThinkingActive: activeThinking,
+        latestErrorKind: lastHealthErrorKind,
       });
       const markDown = evaluation.markDown;
-      const isHttpError = typeof e?.message === 'string' && e.message.startsWith('HTTP ');
-      lastHealthErrorKind = e?.name === 'AbortError'
-        ? 'timeout'
-        : (isHttpError ? 'http' : 'network_or_unknown');
-      lastHealthErrorDetail = typeof e?.message === 'string'
-        ? e.message
-        : String(e || '');
       const lastSuccessAgeMs = Number.isFinite(lastHealthSuccessAtMs)
         ? Math.max(0, nowMs - lastHealthSuccessAtMs)
         : null;
@@ -2049,14 +2249,20 @@ function startHealthPolling() {
           pidSpan.parentElement.classList.remove('pid-error');
         }
       }
-      // Exponential backoff on failures (5s,10s,20s,30s cap)
-      nextDelay = Math.min(30000, 5000 * Math.pow(2, Math.min(failureCount - 1, 3)));
+      // Exponential backoff on failures. Timeouts retry sooner so status can recover quickly
+      // after transient saturation (while still backing off to avoid request pileups).
+      const failureBackoffCapMs = (lastHealthErrorKind === 'timeout') ? 15000 : 30000;
+      const effectiveBackoffCapMs = (lastHealthErrorKind === 'network_or_unknown')
+        ? 15000
+        : failureBackoffCapMs;
+      nextDelay = Math.min(effectiveBackoffCapMs, 5000 * Math.pow(2, Math.min(failureCount - 1, 3)));
     }
     // If ontology is busy, stretch the delay (but keep success shorter than failure backoff)
     if (busy) {
       nextDelay = Math.min(15000, Math.max(nextDelay, 10000));
     }
     healthPollInFlight = false;
+    publishHealthTelemetry('health_poll_finished');
     if (healthPollQueuedImmediate) {
       healthPollQueuedImmediate = false;
       scheduleHealthPoll(250);

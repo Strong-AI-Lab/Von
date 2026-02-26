@@ -112,6 +112,8 @@ const INCOMING_INVITE_POLL_INTERVAL_MS = 60_000;
 let incomingInvitePollTimerId = null;
 let incomingInviteLoadInFlight = false;
 let incomingInviteAbortController = null;
+const SHARED_SESSION_BADGE_POLL_INTERVAL_MS = 60_000;
+let sharedSessionBadgePollTimerId = null;
 
 // JVNAUTOSCI-1002: SSE streaming for shared conversation turn updates
 const sharedConversationStreams = new Map();
@@ -147,6 +149,11 @@ const workflowDefinitionsState = {
     lastRequestQuery: '',
     showDesigns: false
 };
+const WORKFLOW_DEFINITIONS_SILENT_REFRESH_COOLDOWN_MS = 15_000;
+const WORKFLOW_DEFINITIONS_FETCH_TIMEOUT_MS = 20_000;
+let workflowStatusPanelInitialised = false;
+let chatTabInitialised = false;
+const REALTIME_CONNECTION_TELEMETRY_SCHEMA_VERSION = 1;
 const workflowEpisodesState = {
     open: false,
     workflowId: '',
@@ -158,6 +165,97 @@ const workflowEpisodesState = {
     lastRequestQuery: '',
     lastFetchedAt: 0
 };
+
+function isDocumentVisibleForRealtimeConnections() {
+    try {
+        if (typeof document === 'undefined') return true;
+        if (typeof document.visibilityState === 'string') {
+            return document.visibilityState !== 'hidden';
+        }
+        return !document.hidden;
+    } catch (_) {
+        return true;
+    }
+}
+
+function shouldRunSharedSessionBadgePollingForInputs({
+    isVisible
+} = {}) {
+    return !!isVisible;
+}
+
+function shouldRunSharedSessionBadgePolling() {
+    return shouldRunSharedSessionBadgePollingForInputs({
+        isVisible: isDocumentVisibleForRealtimeConnections()
+    });
+}
+
+function shouldMaintainSharedConversationStreamForInputs({
+    sessionId,
+    activeSessionId,
+    isVisible,
+    isSharedSession
+} = {}) {
+    const sid = String(sessionId || '').trim();
+    if (!sid) return false;
+    if (!isVisible) return false;
+    if (String(activeSessionId || '').trim() !== sid) return false;
+    return !!isSharedSession;
+}
+
+function shouldMaintainSharedConversationStream(sessionId) {
+    const sid = String(sessionId || '').trim();
+    return shouldMaintainSharedConversationStreamForInputs({
+        sessionId: sid,
+        activeSessionId: activeChatSessionId,
+        isVisible: isDocumentVisibleForRealtimeConnections(),
+        isSharedSession: isSharedConversationSession(sid)
+    });
+}
+
+function shouldMaintainWorkflowStatusStream() {
+    const { panel } = getWorkflowStatusElements();
+    if (!panel || typeof EventSource === 'undefined') return false;
+    return isDocumentVisibleForRealtimeConnections();
+}
+
+function buildRealtimeConnectionTelemetrySnapshot(source = 'unknown') {
+    const eventSource = (typeof source === 'string' && source.trim()) ? source.trim() : 'unknown';
+    const visibilityState = (typeof document !== 'undefined' && typeof document.visibilityState === 'string')
+        ? document.visibilityState
+        : null;
+    return {
+        schemaVersion: REALTIME_CONNECTION_TELEMETRY_SCHEMA_VERSION,
+        generatedAtMs: Date.now(),
+        generatedAtIso: new Date().toISOString(),
+        eventSource,
+        visibilityState,
+        documentVisible: isDocumentVisibleForRealtimeConnections(),
+        activeChatSessionId: activeChatSessionId || null,
+        sharedStreamCount: sharedConversationStreams.size,
+        sharedStreamSessionIds: Array.from(sharedConversationStreams.keys()),
+        sharedReconnectTrackedCount: sharedConversationReconnectAttempts.size,
+        workflowStreamConnected: !!workflowStatusStreamState.eventSource,
+        workflowReconnectScheduled: !!workflowStatusStreamState.reconnectTimeoutId,
+        incomingInvitePollingActive: !!incomingInvitePollTimerId,
+        sharedSessionBadgePollingActive: !!sharedSessionBadgePollTimerId,
+    };
+}
+
+function publishRealtimeConnectionTelemetry(source = 'unknown') {
+    const snapshot = buildRealtimeConnectionTelemetrySnapshot(source);
+    try {
+        window.__vonRealtimeConnectionTelemetry = snapshot;
+    } catch (_) {
+        // Ignore non-writable globals in constrained environments.
+    }
+    try {
+        document.dispatchEvent(new CustomEvent('von:realtimeConnectionTelemetryUpdated', { detail: snapshot }));
+    } catch (_) {
+        // Telemetry dispatch should not block normal flow.
+    }
+    return snapshot;
+}
 
 // Lightweight client-side telemetry for chat session tab loading (elapsed + ETA).
 // Stored locally only; intended to feed future introspection.
@@ -12008,6 +12106,7 @@ function closeSharedConversationStream(sessionId = null) {
         }
         sharedConversationStreams.delete(sessionId);
         sharedConversationReconnectAttempts.delete(sessionId);
+        publishRealtimeConnectionTelemetry('shared_stream_closed');
         return;
     }
 
@@ -12021,21 +12120,14 @@ function closeSharedConversationStream(sessionId = null) {
     });
     sharedConversationStreams.clear();
     sharedConversationReconnectAttempts.clear();
+    publishRealtimeConnectionTelemetry('shared_streams_closed_all');
 }
 
 function syncSharedConversationStreams() {
+    // Keep a single shared-conversation stream per tab to avoid exhausting
+    // browser/server connection slots under multi-tab usage.
     const desiredSessions = new Set();
-    if (Array.isArray(sessionTabsCache)) {
-        sessionTabsCache.forEach((session) => {
-            const sid = (typeof session?.session_id === 'string') ? session.session_id.trim() : '';
-            if (!sid) return;
-            if (isSharedConversationSession(sid)) {
-                desiredSessions.add(sid);
-            }
-        });
-    }
-
-    if (activeChatSessionId && isSharedConversationSession(activeChatSessionId)) {
+    if (shouldMaintainSharedConversationStream(activeChatSessionId)) {
         desiredSessions.add(activeChatSessionId);
     }
 
@@ -12048,6 +12140,7 @@ function syncSharedConversationStreams() {
     desiredSessions.forEach((sid) => {
         void startSharedConversationStream(sid);
     });
+    publishRealtimeConnectionTelemetry('shared_stream_sync');
 }
 
 /**
@@ -12058,7 +12151,7 @@ async function startSharedConversationStream(sessionId) {
     const sid = String(sessionId || '').trim();
     if (!sid) return;
 
-    if (!isSharedConversationSession(sid)) {
+    if (!shouldMaintainSharedConversationStream(sid)) {
         closeSharedConversationStream(sid);
         return;
     }
@@ -12075,10 +12168,12 @@ async function startSharedConversationStream(sessionId) {
     const url = `/von/api/shared_conversations/stream?session_id=${encodeURIComponent(sid)}`;
     const eventSource = new EventSource(url);
     sharedConversationStreams.set(sid, eventSource);
+    publishRealtimeConnectionTelemetry('shared_stream_started');
 
     eventSource.onopen = () => {
         console.log('[chatTab] SSE stream connected', { sessionId: sid });
         sharedConversationReconnectAttempts.set(sid, 0);
+        publishRealtimeConnectionTelemetry('shared_stream_open');
     };
 
     eventSource.onerror = () => {
@@ -12090,8 +12185,9 @@ async function startSharedConversationStream(sessionId) {
         if (eventSource.readyState === EventSource.CLOSED) {
             eventSource.close();
             sharedConversationStreams.delete(sid);
+            publishRealtimeConnectionTelemetry('shared_stream_closed_remote');
 
-            if (isSharedConversationSession(sid) || activeChatSessionId === sid) {
+            if (shouldMaintainSharedConversationStream(sid)) {
                 const attempts = (sharedConversationReconnectAttempts.get(sid) || 0) + 1;
                 sharedConversationReconnectAttempts.set(sid, attempts);
                 const delay = Math.min(
@@ -12100,10 +12196,13 @@ async function startSharedConversationStream(sessionId) {
                 );
                 console.log('[chatTab] SSE reconnecting in', delay, 'ms, attempt', attempts);
                 setTimeout(() => {
-                    if ((activeChatSessionId === sid || isSharedConversationSession(sid)) && !sharedConversationStreams.has(sid)) {
+                    if (shouldMaintainSharedConversationStream(sid) && !sharedConversationStreams.has(sid)) {
                         void startSharedConversationStream(sid);
                     }
                 }, delay);
+            } else {
+                sharedConversationReconnectAttempts.delete(sid);
+                publishRealtimeConnectionTelemetry('shared_stream_reconnect_skipped');
             }
         }
     };
@@ -13343,6 +13442,17 @@ async function refreshWorkflowStatusSnapshot({ silent = false } = {}) {
 async function refreshAvailableWorkflowDefinitions({ silent = false } = {}) {
     const { panel } = getWorkflowStatusElements();
     if (!panel) return;
+    if (workflowDefinitionsState.loading) return;
+
+    const now = Date.now();
+    if (
+        silent
+        && Number.isFinite(workflowDefinitionsState.lastFetchedAt)
+        && workflowDefinitionsState.lastFetchedAt > 0
+        && (now - workflowDefinitionsState.lastFetchedAt) < WORKFLOW_DEFINITIONS_SILENT_REFRESH_COOLDOWN_MS
+    ) {
+        return;
+    }
 
     workflowDefinitionsState.loading = true;
     workflowDefinitionsState.error = '';
@@ -13354,11 +13464,16 @@ async function refreshAvailableWorkflowDefinitions({ silent = false } = {}) {
     params.set('limit', '200');
     workflowDefinitionsState.lastRequestQuery = params.toString();
 
+    let timeoutId = null;
     try {
+        const controller = new AbortController();
+        timeoutId = setTimeout(() => controller.abort(), WORKFLOW_DEFINITIONS_FETCH_TIMEOUT_MS);
         const resp = await fetch(
             `/api/workflows/definitions?${params.toString()}`,
-            { method: 'GET', headers: buildChatFetchHeaders() }
+            { method: 'GET', headers: buildChatFetchHeaders(), signal: controller.signal }
         );
+        clearTimeout(timeoutId);
+        timeoutId = null;
         if (!resp.ok) {
             throw new Error(`HTTP ${resp.status}`);
         }
@@ -13368,16 +13483,22 @@ async function refreshAvailableWorkflowDefinitions({ silent = false } = {}) {
         workflowDefinitionsState.lastFetchedAt = Date.now();
         workflowDefinitionsState.error = '';
     } catch (err) {
+        const isAbortError = err && typeof err === 'object' && err.name === 'AbortError';
         workflowDefinitionsState.error = 'Could not load available workflows';
         workflowDefinitionsState.lastPayload = {
             error: 'workflow_definitions_fetch_failed',
-            detail: err instanceof Error ? err.message : String(err || 'unknown_error'),
+            detail: isAbortError
+                ? `Request timed out after ${Math.round(WORKFLOW_DEFINITIONS_FETCH_TIMEOUT_MS / 1000)}s`
+                : (err instanceof Error ? err.message : String(err || 'unknown_error')),
             request_query: workflowDefinitionsState.lastRequestQuery || null
         };
         if (!silent) {
             console.warn('[workflowStatus] Available workflow fetch failed', err);
         }
     } finally {
+        if (timeoutId) {
+            clearTimeout(timeoutId);
+        }
         workflowDefinitionsState.loading = false;
         if (workflowDefinitionsState.visible) {
             renderWorkflowStatusBody();
@@ -13385,7 +13506,7 @@ async function refreshAvailableWorkflowDefinitions({ silent = false } = {}) {
     }
 }
 
-function stopWorkflowStatusStream() {
+function stopWorkflowStatusStream(source = 'workflow_stream_stopped') {
     if (workflowStatusStreamState.reconnectTimeoutId) {
         clearTimeout(workflowStatusStreamState.reconnectTimeoutId);
         workflowStatusStreamState.reconnectTimeoutId = null;
@@ -13394,9 +13515,15 @@ function stopWorkflowStatusStream() {
         workflowStatusStreamState.eventSource.close();
         workflowStatusStreamState.eventSource = null;
     }
+    publishRealtimeConnectionTelemetry(source);
 }
 
 function scheduleWorkflowStatusReconnect() {
+    if (!shouldMaintainWorkflowStatusStream()) {
+        workflowStatusStreamState.reconnectAttempts = 0;
+        publishRealtimeConnectionTelemetry('workflow_stream_reconnect_skipped');
+        return;
+    }
     if (workflowStatusStreamState.reconnectTimeoutId) return;
     workflowStatusStreamState.reconnectAttempts += 1;
     const delay = Math.min(
@@ -13407,21 +13534,26 @@ function scheduleWorkflowStatusReconnect() {
         workflowStatusStreamState.reconnectTimeoutId = null;
         startWorkflowStatusStream();
     }, delay);
+    publishRealtimeConnectionTelemetry('workflow_stream_reconnect_scheduled');
 }
 
 function startWorkflowStatusStream() {
-    const { panel } = getWorkflowStatusElements();
-    if (!panel || typeof EventSource === 'undefined') return;
+    if (!shouldMaintainWorkflowStatusStream()) {
+        stopWorkflowStatusStream('workflow_stream_not_started_visibility');
+        return;
+    }
 
-    stopWorkflowStatusStream();
+    stopWorkflowStatusStream('workflow_stream_restart');
 
     const params = buildWorkflowStatusStreamQuery();
     const url = `/api/workflows/instances/stream?${params.toString()}`;
     const eventSource = new EventSource(url);
     workflowStatusStreamState.eventSource = eventSource;
+    publishRealtimeConnectionTelemetry('workflow_stream_started');
 
     eventSource.onopen = () => {
         workflowStatusStreamState.reconnectAttempts = 0;
+        publishRealtimeConnectionTelemetry('workflow_stream_open');
     };
 
     eventSource.onerror = () => {
@@ -13429,6 +13561,7 @@ function startWorkflowStatusStream() {
         if (eventSource.readyState === EventSource.CLOSED) {
             eventSource.close();
             workflowStatusStreamState.eventSource = null;
+            publishRealtimeConnectionTelemetry('workflow_stream_closed_remote');
             scheduleWorkflowStatusReconnect();
         }
     };
@@ -13448,6 +13581,8 @@ function startWorkflowStatusStream() {
 function initializeWorkflowStatusPanel() {
     const { panel, refreshButton, toggleAvailableButton, showDesignsCheckbox, copyJsonButton } = getWorkflowStatusElements();
     if (!panel) return;
+    if (workflowStatusPanelInitialised) return;
+    workflowStatusPanelInitialised = true;
     const {
         closeButton: closeEpisodesButton,
         copyJsonButton: copyEpisodesJsonButton
@@ -13482,7 +13617,7 @@ function initializeWorkflowStatusPanel() {
         copyEpisodesJsonButton.dataset.bound = 'true';
     }
 
-    if (refreshButton) {
+    if (refreshButton && refreshButton.dataset.bound !== 'true') {
         refreshButton.addEventListener('click', () => {
             if (workflowDefinitionsState.visible) {
                 void refreshAvailableWorkflowDefinitions();
@@ -13490,6 +13625,7 @@ function initializeWorkflowStatusPanel() {
             }
             void refreshWorkflowStatusSnapshot();
         });
+        refreshButton.dataset.bound = 'true';
     }
 
     if (copyJsonButton) {
@@ -13502,7 +13638,7 @@ function initializeWorkflowStatusPanel() {
         }
     }
 
-    if (toggleAvailableButton) {
+    if (toggleAvailableButton && toggleAvailableButton.dataset.bound !== 'true') {
         toggleAvailableButton.addEventListener('click', () => {
             workflowDefinitionsState.visible = !workflowDefinitionsState.visible;
             updateWorkflowStatusActionButtons();
@@ -13513,18 +13649,78 @@ function initializeWorkflowStatusPanel() {
                 renderWorkflowStatusBody();
             }
         });
+        toggleAvailableButton.dataset.bound = 'true';
     }
 
     startWorkflowStatusStream();
     void refreshWorkflowStatusSnapshot({ silent: true });
-    void refreshAvailableWorkflowDefinitions({ silent: true });
 }
 
 function startIncomingInvitePolling() {
+    if (!isDocumentVisibleForRealtimeConnections()) {
+        return;
+    }
     if (incomingInvitePollTimerId) return;
     incomingInvitePollTimerId = window.setInterval(() => {
         void loadIncomingInvites({ silent: true });
     }, INCOMING_INVITE_POLL_INTERVAL_MS);
+    publishRealtimeConnectionTelemetry('incoming_invite_polling_started');
+}
+
+function stopIncomingInvitePolling() {
+    if (!incomingInvitePollTimerId) return;
+    clearInterval(incomingInvitePollTimerId);
+    incomingInvitePollTimerId = null;
+    publishRealtimeConnectionTelemetry('incoming_invite_polling_stopped');
+}
+
+function startSharedSessionBadgePolling() {
+    if (!shouldRunSharedSessionBadgePolling()) {
+        return;
+    }
+    if (sharedSessionBadgePollTimerId) return;
+    sharedSessionBadgePollTimerId = window.setInterval(() => {
+        if (!shouldRunSharedSessionBadgePolling()) {
+            return;
+        }
+        // Keep shared conversation unread badges eventually consistent even when
+        // SSE is paused for inactive/hidden sessions.
+        scheduleChatSessionTabsRefresh();
+    }, SHARED_SESSION_BADGE_POLL_INTERVAL_MS);
+    publishRealtimeConnectionTelemetry('shared_session_badge_polling_started');
+}
+
+function stopSharedSessionBadgePolling() {
+    if (!sharedSessionBadgePollTimerId) return;
+    clearInterval(sharedSessionBadgePollTimerId);
+    sharedSessionBadgePollTimerId = null;
+    publishRealtimeConnectionTelemetry('shared_session_badge_polling_stopped');
+}
+
+function handleRealtimeConnectionsVisibilityChange() {
+    const visible = isDocumentVisibleForRealtimeConnections();
+    if (!visible) {
+        closeSharedConversationStream();
+        stopWorkflowStatusStream('workflow_stream_stopped_visibility_hidden');
+        stopIncomingInvitePolling();
+        stopSharedSessionBadgePolling();
+        try {
+            incomingInviteAbortController?.abort();
+        } catch (_) {
+            // Ignore abort race.
+        }
+        publishRealtimeConnectionTelemetry('document_hidden');
+        return;
+    }
+
+    syncSharedConversationStreams();
+    startWorkflowStatusStream();
+    startIncomingInvitePolling();
+    startSharedSessionBadgePolling();
+    scheduleChatSessionTabsRefresh(true);
+    void loadIncomingInvites({ silent: true });
+    void refreshWorkflowStatusSnapshot({ silent: true });
+    publishRealtimeConnectionTelemetry('document_visible');
 }
 
 async function handleOrgSwitchForChatTab(_detail) {
@@ -13549,7 +13745,7 @@ async function handleOrgSwitchForChatTab(_detail) {
     }
 
     closeSharedConversationStream();
-    stopWorkflowStatusStream();
+    stopWorkflowStatusStream('workflow_stream_stopped_org_switch');
     workflowStatusStreamState.items.clear();
     renderWorkflowStatusBody();
 
@@ -13588,6 +13784,8 @@ async function handleOrgSwitchForChatTab(_detail) {
     void loadIncomingInvites({ silent: true });
     startWorkflowStatusStream();
     void refreshWorkflowStatusSnapshot({ silent: true });
+    syncSharedConversationStreams();
+    publishRealtimeConnectionTelemetry('org_switch_completed');
 }
 
 try {
@@ -13615,20 +13813,32 @@ function handleAuthStatusChangeForChatTab(detail) {
         container.hidden = false;
     }
 
-    stopWorkflowStatusStream();
+    closeSharedConversationStream();
+    stopWorkflowStatusStream('workflow_stream_stopped_auth_change');
     workflowStatusStreamState.items.clear();
     renderWorkflowStatusBody();
 
     if (detail?.authenticated !== false) {
         startWorkflowStatusStream();
         void refreshWorkflowStatusSnapshot({ silent: true });
+        startIncomingInvitePolling();
+        startSharedSessionBadgePolling();
+    } else {
+        stopIncomingInvitePolling();
+        stopSharedSessionBadgePolling();
     }
 
     scheduleChatSessionTabsRefresh(true);
     void loadIncomingInvites({ silent: true });
+    publishRealtimeConnectionTelemetry('auth_status_changed');
 }
 
 export function initializeChatTab() {
+    if (chatTabInitialised) {
+        console.warn('[chatTab] initializeChatTab called more than once; skipping duplicate initialisation.');
+        return;
+    }
+    chatTabInitialised = true;
     console.log("Initializing chat tab...");
 
     // JVNAUTOSCI-1014: Load hidden session IDs from localStorage (user-scoped)
@@ -13694,6 +13904,7 @@ export function initializeChatTab() {
 
     if (!sendButton || !resetButton || !promptInput) {
         console.error("Chat tab elements not found");
+        chatTabInitialised = false;
         return;
     }
 
@@ -13865,6 +14076,13 @@ export function initializeChatTab() {
 
     void loadIncomingInvites({ silent: true });
     startIncomingInvitePolling();
+    document.addEventListener('visibilitychange', handleRealtimeConnectionsVisibilityChange);
+    window.addEventListener('beforeunload', () => {
+        closeSharedConversationStream();
+        stopWorkflowStatusStream('workflow_stream_stopped_unload');
+        stopIncomingInvitePolling();
+        stopSharedSessionBadgePolling();
+    }, { once: true });
 
     // JVNAUTOSCI-1040: Initialize task panel
     initializeTaskPanel();
@@ -13887,6 +14105,7 @@ export function initializeChatTab() {
 
     // Phase 5: Workflow monitor panel
     initializeWorkflowStatusPanel();
+    handleRealtimeConnectionsVisibilityChange();
 
     // Load annotation toggle state from localStorage (default: false)
     const savedState = localStorage.getItem('annotationToggleEnabled');
@@ -16242,6 +16461,12 @@ export function __testOnly_setWorkflowShowDesigns(enabled) {
 }
 export function __testOnly_buildWorkflowMonitorExportPayload() {
     return buildWorkflowMonitorExportPayload();
+}
+export function __testOnly_shouldMaintainSharedConversationStreamForInputs(inputs = {}) {
+    return shouldMaintainSharedConversationStreamForInputs(inputs);
+}
+export function __testOnly_shouldRunSharedSessionBadgePollingForInputs(inputs = {}) {
+    return shouldRunSharedSessionBadgePollingForInputs(inputs);
 }
 export function __testOnly_renderDisplayElementsIntoContainer(container, debugData) {
     renderTableDisplayElementsIntoContainer(container, debugData);
