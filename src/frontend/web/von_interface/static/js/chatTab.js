@@ -747,7 +747,14 @@ function reduceThinkingCardDisplayState(state, event = {}) {
     }
 
     if (type === 'progress_update') {
-        if (!current.autoFurlApplied && isTerminalThinkingProgress(event.progress)) {
+        if (!isTerminalThinkingProgress(event.progress)) {
+            return {
+                ...current,
+                expanded: true
+            };
+        }
+
+        if (!current.autoFurlApplied) {
             return {
                 expanded: false,
                 autoFurlApplied: true
@@ -776,7 +783,11 @@ function ensureThinkingCardDisplayState(request) {
     return request.thinkingCardDisplayState;
 }
 
-function syncThinkingCardExpandedStateToDom(request = activeChatRequest) {
+function getThinkingCardDisplayRequest() {
+    return activeChatRequest || lastFinishedThinkingCard;
+}
+
+function syncThinkingCardExpandedStateToDom(request = getThinkingCardDisplayRequest()) {
     const wrapper = document.getElementById('thinkingCardWrapper');
     const detailEl = getLoadingIndicatorDetailEl();
     const toggleButton = getThinkingCardToggleButtonEl();
@@ -826,11 +837,77 @@ function applyThinkingCardDisplayStateUpdate(request, event = {}) {
     return next;
 }
 
-function toggleThinkingCardExpanded(request = activeChatRequest) {
+function toggleThinkingCardExpanded(request = getThinkingCardDisplayRequest()) {
     if (!request || typeof request !== 'object') {
         return;
     }
+
+    const isActiveTurnRequest = request === activeChatRequest;
+    if (isActiveTurnRequest && !isTerminalThinkingProgress(request.latestProgress)) {
+        applyThinkingCardDisplayStateUpdate(request, {
+            type: 'manual_set',
+            expanded: true
+        });
+        return;
+    }
+
     applyThinkingCardDisplayStateUpdate(request, { type: 'manual_toggle' });
+}
+
+function createThinkingCardHistorySnapshot(request) {
+    if (!request || typeof request !== 'object') {
+        return null;
+    }
+
+    const latestProgress = (request.latestProgress && typeof request.latestProgress === 'object')
+        ? { ...request.latestProgress }
+        : null;
+    const toolHistory = Array.isArray(request.toolUseProgressHistory)
+        ? request.toolUseProgressHistory.map((entry) => ({ ...entry }))
+        : [];
+    const workflowDiscovery = (request.workflowDiscovery && typeof request.workflowDiscovery === 'object')
+        ? {
+            ...request.workflowDiscovery,
+            matches: Array.isArray(request.workflowDiscovery.matches)
+                ? request.workflowDiscovery.matches.map((match) => ({ ...match }))
+                : []
+        }
+        : null;
+
+    const effectiveProgressForTerminal = latestProgress || { status: 'completed' };
+    const completedDisplayState = reduceThinkingCardDisplayState(
+        request.thinkingCardDisplayState,
+        { type: 'progress_update', progress: effectiveProgressForTerminal }
+    );
+
+    return {
+        toolUseProgressHistory: toolHistory,
+        workflowDiscovery,
+        latestProgress,
+        thinkingStartedAtMs: Number.isFinite(request.thinkingStartedAtMs) ? Number(request.thinkingStartedAtMs) : null,
+        thinkingFinishedAtMs: Date.now(),
+        thinkingCardDisplayState: completedDisplayState
+    };
+}
+
+function persistFinishedThinkingCard(request) {
+    const snapshot = createThinkingCardHistorySnapshot(request);
+    if (!snapshot) {
+        lastFinishedThinkingCard = null;
+        return false;
+    }
+
+    const detailHtml = renderThinkingCardBodyHTML(snapshot);
+    if (!detailHtml) {
+        lastFinishedThinkingCard = null;
+        return false;
+    }
+
+    lastFinishedThinkingCard = snapshot;
+    setLoadingIndicatorText(formatToolUseProgressText(snapshot.latestProgress, snapshot));
+    setLoadingIndicatorDetailHtml(detailHtml);
+    updateThinkingCardMeta(snapshot, snapshot.latestProgress || null);
+    return true;
 }
 
 function createClientRequestId() {
@@ -1147,7 +1224,10 @@ function updateThinkingCardMeta(request, progress) {
         ? Number(request.thinkingStartedAtMs)
         : null;
     if (thinkingStartedAtMs !== null) {
-        const elapsedMs = Date.now() - thinkingStartedAtMs;
+        const elapsedReferenceMs = request && Number.isFinite(request.thinkingFinishedAtMs)
+            ? Number(request.thinkingFinishedAtMs)
+            : Date.now();
+        const elapsedMs = elapsedReferenceMs - thinkingStartedAtMs;
         bits.push(formatThinkingDuration(elapsedMs));
     }
 
@@ -7748,6 +7828,7 @@ function createChatDebugWarningIndicator(warnings) {
 }
 
 let activeChatRequest = null;
+let lastFinishedThinkingCard = null;
 let queuedChatPrompts = [];
 let queuedChatPromptCounter = 0;
 let queuedChatPromptDrainTimer = null;
@@ -14433,7 +14514,8 @@ export function initializeChatTab() {
     console.log("Chat tab initialized successfully");
 }
 
-function setThinkingState(isThinking, request = activeChatRequest) {
+function setThinkingState(isThinking, request = activeChatRequest, options = {}) {
+    const preserveFinishedCard = !!options.preserveFinishedCard;
     const wrapper = document.getElementById('thinkingCardWrapper');
     const loadingIndicator = document.getElementById('loadingIndicator');
     const loadingDetail = document.getElementById('loadingIndicatorDetail');
@@ -14454,8 +14536,13 @@ function setThinkingState(isThinking, request = activeChatRequest) {
 
     // Toggle wrapper visibility (controls the entire card)
     if (wrapper) {
-        wrapper.setAttribute('aria-hidden', isThinking ? 'false' : 'true');
-        if (!isThinking) {
+        if (isThinking || preserveFinishedCard) {
+            wrapper.setAttribute('aria-hidden', 'false');
+        } else {
+            wrapper.setAttribute('aria-hidden', 'true');
+        }
+
+        if (!isThinking && !preserveFinishedCard) {
             wrapper.classList.remove('has-tools');
             wrapper.classList.remove('is-collapsed');
             wrapper.classList.remove('is-expanded');
@@ -14465,22 +14552,20 @@ function setThinkingState(isThinking, request = activeChatRequest) {
     if (loadingIndicator) {
         if (isThinking) {
             setLoadingIndicatorText(DEFAULT_THINKING_TEXT);
-        } else {
+        } else if (!preserveFinishedCard) {
             setLoadingIndicatorText(DEFAULT_THINKING_TEXT);
         }
     }
 
     if (loadingDetail) {
-        if (!isThinking) {
+        if (!isThinking && !preserveFinishedCard) {
             loadingDetail.innerHTML = '';
             loadingDetail.setAttribute('aria-hidden', 'true');
         }
     }
 
-    if (metaEl) {
-        if (!isThinking) {
-            metaEl.textContent = '';
-        }
+    if (metaEl && !isThinking && !preserveFinishedCard) {
+        metaEl.textContent = '';
     }
 
     if (statusBadge) {
@@ -14500,7 +14585,8 @@ function setThinkingState(isThinking, request = activeChatRequest) {
     }
 
     if (toggleButton) {
-        toggleButton.setAttribute('aria-hidden', isThinking ? 'false' : 'true');
+        toggleButton.setAttribute('aria-hidden', (isThinking || preserveFinishedCard) ? 'false' : 'true');
+        toggleButton.disabled = isThinking;
     }
 
     if (abortButton) {
@@ -14517,7 +14603,7 @@ function setThinkingState(isThinking, request = activeChatRequest) {
         }
     }
 
-    if (isThinking) {
+    if (isThinking || preserveFinishedCard) {
         syncThinkingCardExpandedStateToDom(request);
     }
 }
@@ -15130,6 +15216,7 @@ async function handleSendPrompt(options = {}) {
 
     // Refresh setting in the background; default is enabled.
     void refreshToolUseDuringThinkingSetting();
+    lastFinishedThinkingCard = null;
 
     const clientRequestId = createClientRequestId();
     const request = {
@@ -15293,7 +15380,13 @@ async function handleSendPrompt(options = {}) {
         if (isStillActive) {
             stopToolUseProgressPolling(request);
             stopThinkingTooltipTicker(request);
-            setThinkingState(false, request);
+            const persisted = !request.aborted && persistFinishedThinkingCard(request);
+            if (persisted) {
+                setThinkingState(false, lastFinishedThinkingCard, { preserveFinishedCard: true });
+            } else {
+                lastFinishedThinkingCard = null;
+                setThinkingState(false, request);
+            }
             activeChatRequest = null;
         }
         updateHistoryLength();
@@ -15326,6 +15419,8 @@ async function handleResetContext() {
 
             transcriptTurns.length = 0;
             llmDebugData.clear();
+            lastFinishedThinkingCard = null;
+            setThinkingState(false, null);
             updateHistoryLength();
             scheduleChatSessionTabsRefresh(true);
 
