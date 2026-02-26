@@ -23,6 +23,7 @@ let dynamicConceptTabs = new Map();
 let dynamicAnnotationTabs = new Map();
 let annotationTabCounter = 0;
 const annotationEnabled = isAnnotationEnabled();
+const TAB_CLOSE_ANIMATION_MS = 160;
 // Singleton context menu element for tab operations (created lazily)
 let tabContextMenu = null;
 let currentContextMenuTarget = null; // The tab button element for which menu opened
@@ -532,6 +533,69 @@ async function getOpenInstanceIdsForType(typeId, recursive) {
 // Exports for tests
 export { getOpenInstanceIdsForType, getOpenSubtypeTypeIds };
 
+function userPrefersReducedMotion() {
+    try {
+        return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+    } catch (_) {
+        return false;
+    }
+}
+
+function removeTabElements(tabButton, tabContent, { animate = true } = {}) {
+    const removeNow = () => {
+        if (tabButton && tabButton.parentNode) {
+            tabButton.parentNode.removeChild(tabButton);
+        }
+        if (tabContent && tabContent.parentNode) {
+            tabContent.parentNode.removeChild(tabContent);
+        }
+    };
+
+    const shouldAnimate = animate && !userPrefersReducedMotion();
+    if (!shouldAnimate) {
+        removeNow();
+        return;
+    }
+
+    if (tabButton) {
+        tabButton.classList.add('tab-button-closing');
+    }
+    if (tabContent) {
+        tabContent.classList.add('tab-content-closing');
+    }
+
+    setTimeout(removeNow, TAB_CLOSE_ANIMATION_MS);
+}
+
+function createCloseTabButton(title, onClose) {
+    const closeButton = document.createElement('span');
+    closeButton.className = 'close-tab';
+    closeButton.textContent = '×';
+    closeButton.title = title;
+    closeButton.setAttribute('role', 'button');
+    closeButton.setAttribute('tabindex', '0');
+    closeButton.setAttribute('aria-label', title);
+
+    const triggerClose = (event) => {
+        if (event && typeof event.preventDefault === 'function') {
+            event.preventDefault();
+        }
+        if (event && typeof event.stopPropagation === 'function') {
+            event.stopPropagation();
+        }
+        onClose();
+    };
+
+    closeButton.addEventListener('click', triggerClose);
+    closeButton.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+            triggerClose(event);
+        }
+    });
+
+    return closeButton;
+}
+
 /**
  * Creates or activates a dynamic concept tab for the given concept
  * @param {string} conceptId - The concept ID (e.g., "#V#Person")
@@ -759,6 +823,14 @@ async function updateTabLabelWithShortestName(conceptId, tabButton, force = fals
             tabButton.dataset.shortestLabelApplied = '1';
             tabButton.dataset.shortestLabelLanguage = lang;
         }
+        tabButton.title = shortest;
+        tabButton.setAttribute('aria-label', `Open concept tab: ${shortest}`);
+        const closeButton = tabButton.querySelector('.close-tab');
+        if (closeButton) {
+            const closeLabel = `Close ${shortest} tab`;
+            closeButton.title = closeLabel;
+            closeButton.setAttribute('aria-label', closeLabel);
+        }
         // Even if unchanged, record language to avoid redundant future recomputations
         if (!tabButton.dataset.shortestLabelLanguage) tabButton.dataset.shortestLabelLanguage = lang;
     } catch (e) {
@@ -784,6 +856,8 @@ function createTabButton(tabId, displayName, conceptId, kind, opts = {}) {
     tabButton.className = 'tab-button closable';
     tabButton.dataset.tab = tabId;
     tabButton.dataset.conceptId = conceptId;
+    tabButton.title = displayName;
+    tabButton.setAttribute('aria-label', `Open concept tab: ${displayName}`);
     if (kind === 'type') {
         tabButton.classList.add('type-tab');
     } else if (kind === 'individual') {
@@ -821,6 +895,7 @@ function createTabButton(tabId, displayName, conceptId, kind, opts = {}) {
 
     // Create tab text
     const tabText = document.createElement('span');
+    tabText.className = 'tab-button-label';
     tabText.textContent = displayName;
     tabButton.appendChild(tabText);
     if (tabButton.__newBadge) {
@@ -829,17 +904,10 @@ function createTabButton(tabId, displayName, conceptId, kind, opts = {}) {
     }
 
     // Create close button
-    const closeButton = document.createElement('span');
-    closeButton.className = 'close-tab';
-    closeButton.textContent = '×';
-    closeButton.title = `Close ${displayName} tab`;
-
-    // Close button click handler
-    closeButton.addEventListener('click', (e) => {
-        e.stopPropagation(); // Prevent tab activation
-        closeDynamicConceptTab(conceptId);
-    });
-
+    const closeButton = createCloseTabButton(
+        `Close ${displayName} tab`,
+        () => closeDynamicConceptTab(conceptId)
+    );
     tabButton.appendChild(closeButton);
 
     // Tab button click handler
@@ -972,20 +1040,6 @@ export function closeDynamicConceptTab(conceptId) {
     // Check if this tab is currently active
     const isActive = tabInfo.content.classList.contains('active');
 
-    // Remove DOM elements
-    if (tabInfo.button && tabInfo.button.parentNode) {
-        // Clear any pending badge timers to avoid leaks
-        try {
-            const t = tabInfo.button.dataset?.newBadgeTimer;
-            if (t) clearTimeout(Number(t));
-        } catch (_) { /* no-op */ }
-        tabInfo.button.parentNode.removeChild(tabInfo.button);
-    }
-
-    if (tabInfo.content && tabInfo.content.parentNode) {
-        tabInfo.content.parentNode.removeChild(tabInfo.content);
-    }
-
     // Remove from tracking
     dynamicConceptTabs.delete(conceptId);
 
@@ -995,6 +1049,19 @@ export function closeDynamicConceptTab(conceptId) {
         activateTab('chatTab');
     }
 
+    // Clear any pending badge timers to avoid leaks
+    try {
+        const t = tabInfo.button?.dataset?.newBadgeTimer;
+        if (t) clearTimeout(Number(t));
+    } catch (_) { /* no-op */ }
+
+    try {
+        tabInfo.button.classList.remove('active');
+        tabInfo.content.classList.remove('active');
+    } catch (_) { /* ignore */ }
+
+    removeTabElements(tabInfo.button, tabInfo.content);
+
     console.log(`[dynamicTabs] Successfully closed tab for concept: ${conceptId}`);
 }
 
@@ -1003,12 +1070,11 @@ function closeDynamicAnnotationTab(tabId) {
     const info = dynamicAnnotationTabs.get(tabId);
     if (!info) return;
     const isActive = info.content.classList.contains('active');
-    if (info.button && info.button.parentNode) {
-        info.button.parentNode.removeChild(info.button);
-    }
-    if (info.content && info.content.parentNode) {
-        info.content.parentNode.removeChild(info.content);
-    }
+    try {
+        info.button.classList.remove('active');
+        info.content.classList.remove('active');
+    } catch (_) { /* ignore */ }
+    removeTabElements(info.button, info.content);
     dynamicAnnotationTabs.delete(tabId);
     if (isActive) {
         try { activateTab('annotationTab'); } catch (_) { }
@@ -1037,14 +1103,10 @@ function createAnnotationTab(text, conceptName, source) {
         // Fallback: plain text if innerHTML injection fails for any reason
         tabButton.textContent = `${icon} ${conceptName}`;
     }
-    const closeButton = document.createElement('span');
-    closeButton.className = 'close-tab';
-    closeButton.textContent = '×';
-    closeButton.title = 'Close annotation tab';
-    closeButton.addEventListener('click', (e) => {
-        e.stopPropagation();
-        closeDynamicAnnotationTab(tabId);
-    });
+    const closeButton = createCloseTabButton(
+        'Close annotation tab',
+        () => closeDynamicAnnotationTab(tabId)
+    );
     tabButton.appendChild(closeButton);
     tabButton.addEventListener('click', () => activateTab(tabId));
     insertTabButton(tabButton);
@@ -3347,7 +3409,7 @@ async function populateTypeDescription(conceptId, suffix) {
 
         // Only the core elements are required to proceed; delete button may be absent in older markup
         if (!(display && editActions && textarea && editBtn && saveBtn && cancelBtn)) {
-            const isTestEnv = (typeof jest !== 'undefined') || (typeof process !== 'undefined' && process?.env?.JEST_WORKER_ID);
+            const isTestEnv = (typeof jest !== 'undefined') || !!(globalThis?.process?.env?.JEST_WORKER_ID);
             // One-time synthesis attempt for runtime (not only test) if host section exists or can be created.
             let synthesized = false;
             let host = document.getElementById(`typeDescriptionSection_${suffix}`);

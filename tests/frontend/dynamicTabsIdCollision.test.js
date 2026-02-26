@@ -157,3 +157,76 @@ describe('description editor sizing helper', () => {
         expect(computeDescriptionEditorHeightPx(700, 500)).toBe(380);
     });
 });
+
+describe('dynamic tab accessibility and close behaviour', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <div id="tabContainer" class="tab-container">
+                <div class="tab-button" data-tab="chatTab">Chat</div>
+                <div class="tab-button" data-tab="vontologyTab">Vontology</div>
+                <div class="tab-button" data-tab="importExportTab">Import/Export</div>
+            </div>
+            <div class="tab-content-area"></div>
+        `;
+        global.fetch = jest.fn(async () => ({ ok: false, status: 404, text: async () => '' }));
+    });
+
+    afterEach(() => {
+        jest.useRealTimers();
+        jest.resetModules();
+        jest.restoreAllMocks();
+        delete global.fetch;
+        delete window.matchMedia;
+    });
+
+    test('creates accessible close controls and tab tooltip text', () => {
+        const { createOrActivateConceptTab } = require(dynamicTabsModulePath);
+        const conceptName = 'This is a very long concept label for truncation checks';
+        createOrActivateConceptTab('#V#long_label', conceptName, false, { kind: 'type' });
+
+        const tabButton = document.querySelector('.tab-button.closable[data-concept-id="#V#long_label"]');
+        expect(tabButton).not.toBeNull();
+        const tabLabel = tabButton.querySelector('.tab-button-label');
+        expect(tabLabel).not.toBeNull();
+        const renderedLabel = tabLabel.textContent;
+        expect(renderedLabel).toBeTruthy();
+        expect(tabButton.title).toBe(renderedLabel);
+        expect(tabButton.getAttribute('aria-label')).toBe(`Open concept tab: ${renderedLabel}`);
+
+        const closeButton = tabButton.querySelector('.close-tab');
+        expect(closeButton).not.toBeNull();
+        expect(closeButton.getAttribute('role')).toBe('button');
+        expect(closeButton.getAttribute('tabindex')).toBe('0');
+        expect(closeButton.getAttribute('aria-label')).toBe(`Close ${renderedLabel} tab`);
+    });
+
+    test('applies a closing class before removing a closed concept tab', () => {
+        jest.useFakeTimers();
+        const { createOrActivateConceptTab, closeDynamicConceptTab } = require(dynamicTabsModulePath);
+        createOrActivateConceptTab('#V#fade_out', 'Fade out tab', false, { kind: 'type' });
+
+        const tabButton = document.querySelector('.tab-button.closable[data-concept-id="#V#fade_out"]');
+        const tabContent = document.querySelector('.tab-content[data-concept-id="#V#fade_out"]');
+        expect(tabButton).not.toBeNull();
+        expect(tabContent).not.toBeNull();
+
+        closeDynamicConceptTab('#V#fade_out');
+        expect(tabButton.classList.contains('tab-button-closing')).toBe(true);
+        expect(tabContent.classList.contains('tab-content-closing')).toBe(true);
+
+        jest.advanceTimersByTime(170);
+        expect(document.querySelector('.tab-button.closable[data-concept-id="#V#fade_out"]')).toBeNull();
+        expect(document.querySelector('.tab-content[data-concept-id="#V#fade_out"]')).toBeNull();
+    });
+
+    test('removes closed tabs immediately when reduced motion is preferred', () => {
+        window.matchMedia = jest.fn(() => ({ matches: true }));
+        const { createOrActivateConceptTab, closeDynamicConceptTab } = require(dynamicTabsModulePath);
+        createOrActivateConceptTab('#V#reduce_motion', 'Reduced motion tab', false, { kind: 'type' });
+
+        closeDynamicConceptTab('#V#reduce_motion');
+
+        expect(document.querySelector('.tab-button.closable[data-concept-id="#V#reduce_motion"]')).toBeNull();
+        expect(document.querySelector('.tab-content[data-concept-id="#V#reduce_motion"]')).toBeNull();
+    });
+});
