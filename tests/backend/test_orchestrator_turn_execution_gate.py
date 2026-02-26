@@ -253,6 +253,66 @@ def test_turn_execution_critic_treats_diagnostic_prompt_as_non_mutating() -> Non
     assert completion_gate.get("safe_to_claim_completion") is True
 
 
+def test_turn_execution_critic_flags_worker_unavailable_zero_execution() -> None:
+    orchestrator = _build_orchestrator()
+    request = _build_request(
+        action_id="turn_execution.critic",
+        data={
+            "prompt": "Yes",
+            "final_response": "Completed.",
+            "invocations": [],
+            "aux_llm_calls": [],
+            "turn_id": "req-turn-critic-worker-unavailable",
+            "conversation_session_id": "session-critic-worker-unavailable",
+            "workflow_discovery_result": None,
+            "workflow_routing": {
+                "workflow_id": "#V#tool_calling_workflow",
+                "verdict": "tool_seeking",
+            },
+            "turn_execution_diagnostics": {
+                "latest_progress": {
+                    "counters": {"tools_started": 0, "tools_completed": 0},
+                    "diagnostic_events": [
+                        {
+                            "stage": "tool_plan",
+                            "phase": "tool_plan",
+                            "event_kind": "heartbeat",
+                            "liveness_reason": "worker_unavailable",
+                        }
+                    ],
+                }
+            },
+        },
+    )
+
+    result = orchestrator._action_turn_execution_critic(request)
+    assert result.ok
+
+    record = result.outputs.get("turn_execution_record")
+    assert isinstance(record, dict)
+
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    assert len(required_effects) == 1
+    effect = required_effects[0]
+    assert effect.get("effect_type") == "tool_execution"
+    assert effect.get("status") == "not_executed"
+    assert "worker_unavailable_zero_execution" in list(effect.get("failure_codes") or [])
+
+    execution = record.get("execution")
+    assert isinstance(execution, dict)
+    execution_summary = execution.get("summary")
+    assert isinstance(execution_summary, dict)
+    assert execution_summary.get("planned_count") == 1
+    assert execution_summary.get("executed_count") == 0
+
+    completion_gate = record.get("completion_gate")
+    assert isinstance(completion_gate, dict)
+    assert completion_gate.get("decision") == "escalation_required"
+    assert completion_gate.get("decision_reason") == "Required tool execution was not observed."
+    assert completion_gate.get("safe_to_claim_completion") is False
+
+
 def test_turn_completion_gate_requests_repeat_when_budget_available() -> None:
     orchestrator = _build_orchestrator()
     request = _build_request(
