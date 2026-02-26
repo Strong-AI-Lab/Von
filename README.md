@@ -50,6 +50,8 @@ cd Von
 
 ```
 
+**VSCode workspace policy:** Committed workspace settings in `.vscode/` are intentionally limited to portable testing defaults (pytest/jest and safe test DB settings). Keep personal editor preferences (for example command auto-approve lists, local Jira views, and machine-specific paths) in your **user** VSCode settings, not workspace settings.
+
 If directly running `./setup_all.ps1` does not work, then run each setup script separately:
 
 ```powershell
