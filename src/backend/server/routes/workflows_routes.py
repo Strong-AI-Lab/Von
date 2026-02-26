@@ -49,6 +49,10 @@ _WORKFLOW_DEFINITIONS_CACHE_LOCK = threading.Lock()
 _WORKFLOW_DEFINITIONS_CACHE: Dict[
     Tuple[int, Optional[str], Optional[str], Optional[str]], Dict[str, Any]
 ] = {}
+_WORKFLOW_DEFINITIONS_REFRESH_LOCKS_LOCK = threading.Lock()
+_WORKFLOW_DEFINITIONS_REFRESH_LOCKS: Dict[
+    Tuple[int, Optional[str], Optional[str], Optional[str]], threading.Lock
+] = {}
 _WORKFLOW_DEFINITIONS_CACHE_MAX_ENTRIES = 32
 _WORKFLOW_DEFINITIONS_CACHE_TTL_SECONDS_DEFAULT = 8.0
 
@@ -65,33 +69,58 @@ def _read_workflow_definitions_cache_ttl_seconds() -> float:
     return max(0.0, ttl)
 
 
-def _read_cached_workflow_definitions(
+def _read_cached_workflow_definitions_entry(
     *,
     cache_key: Tuple[int, Optional[str], Optional[str], Optional[str]],
     bypass_cache: bool,
-) -> Optional[Dict[str, Any]]:
+) -> Tuple[Optional[Dict[str, Any]], bool]:
     if bypass_cache:
-        return None
+        return None, False
 
     ttl_seconds = _read_workflow_definitions_cache_ttl_seconds()
     if ttl_seconds <= 0.0:
-        return None
+        return None, False
 
     now_monotonic = time.monotonic()
     with _WORKFLOW_DEFINITIONS_CACHE_LOCK:
         entry = _WORKFLOW_DEFINITIONS_CACHE.get(cache_key)
         if not isinstance(entry, dict):
-            return None
+            return None, False
         expires_at = entry.get("expires_at_monotonic")
         payload = entry.get("payload")
-        if (
-            not isinstance(expires_at, (int, float))
-            or now_monotonic >= float(expires_at)
-            or not isinstance(payload, dict)
-        ):
+        if not isinstance(payload, dict):
             _WORKFLOW_DEFINITIONS_CACHE.pop(cache_key, None)
-            return None
+            return None, False
+        if not isinstance(expires_at, (int, float)):
+            _WORKFLOW_DEFINITIONS_CACHE.pop(cache_key, None)
+            return None, False
+        is_fresh = now_monotonic < float(expires_at)
+        return payload, is_fresh
+
+
+def _read_cached_workflow_definitions(
+    *,
+    cache_key: Tuple[int, Optional[str], Optional[str], Optional[str]],
+    bypass_cache: bool,
+) -> Optional[Dict[str, Any]]:
+    payload, is_fresh = _read_cached_workflow_definitions_entry(
+        cache_key=cache_key,
+        bypass_cache=bypass_cache,
+    )
+    if is_fresh and isinstance(payload, dict):
         return payload
+    return None
+
+
+def _get_workflow_definitions_refresh_lock(
+    cache_key: Tuple[int, Optional[str], Optional[str], Optional[str]],
+) -> threading.Lock:
+    with _WORKFLOW_DEFINITIONS_REFRESH_LOCKS_LOCK:
+        lock = _WORKFLOW_DEFINITIONS_REFRESH_LOCKS.get(cache_key)
+        if lock is None:
+            lock = threading.Lock()
+            _WORKFLOW_DEFINITIONS_REFRESH_LOCKS[cache_key] = lock
+        return lock
 
 
 def _write_cached_workflow_definitions(
@@ -188,15 +217,36 @@ def api_list_workflow_definitions():
         "on",
     }
     cache_key = (limit, namespace or None, session_id or None, turn_id or None)
-
-    cached_payload = _read_cached_workflow_definitions(
-        cache_key=cache_key,
-        bypass_cache=bypass_cache,
-    )
-    if isinstance(cached_payload, dict):
-        return jsonify(cached_payload)
-
+    refresh_lock: threading.Lock | None = None
+    refresh_lock_acquired = False
     try:
+        cached_payload, cached_is_fresh = _read_cached_workflow_definitions_entry(
+            cache_key=cache_key,
+            bypass_cache=bypass_cache,
+        )
+        if cached_is_fresh and isinstance(cached_payload, dict):
+            return jsonify(cached_payload)
+
+        if not bypass_cache:
+            refresh_lock = _get_workflow_definitions_refresh_lock(cache_key)
+            refresh_lock_acquired = refresh_lock.acquire(blocking=False)
+            if not refresh_lock_acquired:
+                if isinstance(cached_payload, dict):
+                    logger.info(
+                        "[workflow_definitions] Serving stale cache while refresh in progress for key=%s",
+                        cache_key,
+                    )
+                    return jsonify(cached_payload)
+                return (
+                    jsonify(
+                        {
+                            "error": "workflow_definitions_refresh_in_progress",
+                            "detail": "Workflow definitions refresh is already running; retry shortly.",
+                        }
+                    ),
+                    503,
+                )
+
         from ...workflows.durable.registry_factory import (
             build_durable_workflow_registry_read_only,
             get_workflow_registry_inventory_snapshot,
@@ -334,6 +384,9 @@ def api_list_workflow_definitions():
     except Exception as exc:
         logger.exception("Failed to list workflow definitions via API")
         return jsonify({"error": "workflow_definitions_list_failed", "detail": str(exc)}), 500
+    finally:
+        if refresh_lock is not None and refresh_lock_acquired:
+            refresh_lock.release()
 
 
 @workflows_bp.get("/api/workflows/executions/<execution_id>")

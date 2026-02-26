@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+import time
 import types
 
 import pytest
@@ -830,3 +831,87 @@ def test_workflow_definitions_list_nocache_bypasses_cache(monkeypatch, app_clien
     assert resp2.status_code == 200
 
     assert calls["build_registry"] == 2
+
+
+def test_workflow_definitions_list_serves_stale_when_refresh_in_progress(
+    monkeypatch, app_client
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+    import src.backend.workflows.durable.registry_factory as registry_factory
+
+    cache_key = (10, None, None, None)
+    stale_payload = {
+        "items": [
+            {
+                "workflow_id": "#V#stale_workflow",
+                "description": "stale",
+                "description_source": "cache",
+                "initial_state": "start",
+                "source": "built_in",
+                "definition_identity": None,
+                "attempts": 0,
+                "completions": 0,
+                "completion_rate": None,
+                "last_episode_at": None,
+                "episodes_count": 0,
+                "is_executable": True,
+                "executability_reason": "executable_now",
+                "executability_detail": None,
+            }
+        ],
+        "count": 1,
+        "total": 1,
+        "episodes_scope": {"namespace": None, "session_id": None, "turn_id": None},
+        "parity_inventory": {},
+    }
+
+    monkeypatch.setenv("VON_WORKFLOW_DEFINITIONS_CACHE_TTL_SECONDS", "60")
+
+    with workflows_routes._WORKFLOW_DEFINITIONS_CACHE_LOCK:
+        workflows_routes._WORKFLOW_DEFINITIONS_CACHE.clear()
+        workflows_routes._WORKFLOW_DEFINITIONS_CACHE[cache_key] = {
+            "expires_at_monotonic": time.monotonic() - 1.0,
+            "stored_at_monotonic": time.monotonic() - 5.0,
+            "payload": stale_payload,
+        }
+
+    monkeypatch.setattr(
+        registry_factory,
+        "build_durable_workflow_registry_read_only",
+        lambda: (_ for _ in ()).throw(AssertionError("Should not rebuild registry")),
+    )
+
+    lock = workflows_routes._get_workflow_definitions_refresh_lock(cache_key)
+    acquired = lock.acquire(blocking=False)
+    assert acquired is True
+    try:
+        resp = app_client.get("/api/workflows/definitions?limit=10")
+    finally:
+        lock.release()
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["count"] == 1
+    assert payload["items"][0]["workflow_id"] == "#V#stale_workflow"
+
+
+def test_workflow_definitions_list_refresh_in_progress_without_stale_returns_503(
+    app_client,
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    cache_key = (10, None, None, None)
+    with workflows_routes._WORKFLOW_DEFINITIONS_CACHE_LOCK:
+        workflows_routes._WORKFLOW_DEFINITIONS_CACHE.clear()
+
+    lock = workflows_routes._get_workflow_definitions_refresh_lock(cache_key)
+    acquired = lock.acquire(blocking=False)
+    assert acquired is True
+    try:
+        resp = app_client.get("/api/workflows/definitions?limit=10")
+    finally:
+        lock.release()
+
+    assert resp.status_code == 503
+    payload = resp.get_json()
+    assert payload["error"] == "workflow_definitions_refresh_in_progress"
