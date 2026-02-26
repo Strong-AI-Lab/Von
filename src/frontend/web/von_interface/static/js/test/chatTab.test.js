@@ -24,6 +24,7 @@ import {
     __testOnly_setLatestUnreadBoundary,
     __testOnly_showNewSharedMessagesIndicator,
     __testOnly_updateScrollToEndButtonVisibility,
+    __testOnly_reduceThinkingCardDisplayState,
     __testOnly_resetChatConceptMetaCaches,
     formatChatTimestamp,
     sendMessage
@@ -499,6 +500,148 @@ describe('thinking liveness presentation', () => {
     });
 });
 
+describe('thinking card display state reducer', () => {
+    test('auto-furls once on first terminal progress update', () => {
+        let state = __testOnly_reduceThinkingCardDisplayState(null, { type: 'reset_for_active' });
+        expect(state.expanded).toBe(true);
+        expect(state.autoFurlApplied).toBe(false);
+
+        state = __testOnly_reduceThinkingCardDisplayState(state, {
+            type: 'progress_update',
+            progress: { status: 'completed' }
+        });
+        expect(state.expanded).toBe(false);
+        expect(state.autoFurlApplied).toBe(true);
+    });
+
+    test('manual reopen after terminal state is preserved', () => {
+        let state = __testOnly_reduceThinkingCardDisplayState(null, { type: 'reset_for_active' });
+        state = __testOnly_reduceThinkingCardDisplayState(state, {
+            type: 'progress_update',
+            progress: { status: 'error' }
+        });
+        expect(state.expanded).toBe(false);
+
+        state = __testOnly_reduceThinkingCardDisplayState(state, {
+            type: 'manual_set',
+            expanded: true
+        });
+        expect(state.expanded).toBe(true);
+
+        state = __testOnly_reduceThinkingCardDisplayState(state, {
+            type: 'progress_update',
+            progress: { status: 'completed' }
+        });
+        expect(state.expanded).toBe(true);
+        expect(state.autoFurlApplied).toBe(true);
+    });
+});
+
+describe('thinking card toggle accessibility', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <div id="scrollableField"></div>
+            <div class="thinking-card-wrapper" id="thinkingCardWrapper" aria-hidden="true">
+                <div class="thinking-card" role="status" aria-live="polite">
+                    <div class="thinking-card-header" id="loadingIndicator">
+                        <span class="thinking-card-phase loading-indicator-text">Thinking...</span>
+                        <span id="thinkingCardStatusBadge" class="thinking-card-status active" aria-hidden="true">Active</span>
+                        <span class="thinking-card-meta" id="thinkingCardMeta"></span>
+                        <button id="thinkingCardToggleButton" type="button" aria-hidden="true" aria-expanded="true" aria-controls="loadingIndicatorDetail">Collapse</button>
+                        <button id="retryThinkingButton" type="button" aria-hidden="true">Retry</button>
+                        <button id="copyThinkingDiagnosticsButton" type="button" aria-hidden="true">Copy diagnostics</button>
+                        <button id="abortButton" type="button" aria-hidden="true"></button>
+                    </div>
+                    <div class="thinking-card-body" id="loadingIndicatorDetail" aria-live="polite"></div>
+                </div>
+            </div>
+            <button id="sendButton"></button>
+            <textarea id="promptInput"></textarea>
+            <input type="checkbox" id="annotationToggle" />
+        `;
+    });
+
+    afterEach(() => {
+        jest.restoreAllMocks();
+        delete global.fetch;
+    });
+
+    test('sets aria-expanded while active and allows manual toggle', async () => {
+        const { getUserContext } = require('../apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        document.getElementById('promptInput').value = 'test prompt';
+
+        let generateSignal = null;
+        global.fetch = jest.fn((url, options = {}) => {
+            if (typeof url === 'string' && url.startsWith('/api/settings/')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ show_tool_use_during_thinking: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/progress/')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 202,
+                    json: async () => ({})
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                generateSignal = options.signal;
+                return new Promise((resolve, reject) => {
+                    if (generateSignal) {
+                        generateSignal.addEventListener('abort', () => {
+                            const err = new Error('aborted');
+                            err.name = 'AbortError';
+                            reject(err);
+                        });
+                    }
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        const sendPromise = sendMessage();
+        const toggleButton = document.getElementById('thinkingCardToggleButton');
+        const wrapper = document.getElementById('thinkingCardWrapper');
+        const detail = document.getElementById('loadingIndicatorDetail');
+
+        expect(toggleButton.getAttribute('aria-hidden')).toBe('false');
+        expect(toggleButton.getAttribute('aria-expanded')).toBe('true');
+
+        toggleButton.click();
+
+        expect(toggleButton.getAttribute('aria-expanded')).toBe('false');
+        expect(wrapper.classList.contains('is-collapsed')).toBe(true);
+        expect(detail.getAttribute('aria-hidden')).toBe('true');
+
+        document.getElementById('abortButton').click();
+        await new Promise((r) => setTimeout(r, 0));
+
+        expect(generateSignal).not.toBeNull();
+        expect(generateSignal.aborted).toBe(true);
+        expect(toggleButton.getAttribute('aria-hidden')).toBe('true');
+
+        await expect(sendPromise).resolves.toBeUndefined();
+    });
+});
+
 describe('chat abort behaviour', () => {
     beforeEach(() => {
         document.body.innerHTML = `
@@ -562,7 +705,8 @@ describe('chat abort behaviour', () => {
 
         const sendPromise = sendMessage();
 
-        expect(document.getElementById('sendButton').disabled).toBe(true);
+        expect(document.getElementById('sendButton').disabled).toBe(false);
+        expect(document.getElementById('sendButton').textContent).toBe('Queue Prompt');
         expect(document.getElementById('abortButton').getAttribute('aria-hidden')).toBe('false');
 
         document.getElementById('abortButton').click();
