@@ -1,11 +1,23 @@
 {
-  "typescript.enablePromptUseWorkspaceTsdk": true,
-  "terminal.integrated.shellIntegration.suggestEnabled": true,
+  "python.defaultInterpreterPath": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+  "python.terminal.activateEnvironment": true,
+  "python.terminal.useEnvFile": true,
+  "python.envFile": "${workspaceFolder}\\.vscode\\.env.tests",
+  "python.testing.pytestEnabled": true,
+  "python.testing.unittestEnabled": false,
   "python.testing.pytestArgs": [
     "-q",
     "tests"
   ],
-  "security.promptForLocalFileProtocolHandling": false,
+  "python.testing.pytestLogLevel": "WARNING",
+  "python.testing.pytestEnv": {
+    "VON_DB_NAME": "test_von_db",
+    "VON_USE_MOCK_DB": "1"
+  },
+  "jest.jestCommandLine": "npm run test:frontend --",
+  "jest.rootPath": "${workspaceFolder}",
+  "jest.runMode": "on-demand",
+  "terminal.integrated.defaultProfile.windows": "PowerShell",
   "files.watcherExclude": {
     "**/coverage/**": true,
     "**/dist/**": true,
@@ -15,299 +27,6 @@
     "**/logs/**": true,
     "**/__pycache__/**": true
   },
-  "python.terminal.useEnvFile": true,
-  "git.autofetch": true,
-  "python.testing.pytestLogLevel": "WARNING",
-  "editor.tabSize": 4,
-  "typescript.inlayHints.variableTypes.enabled": true,
-  "atlascode.jira.lastCreateSiteAndProject": {
-    "siteId": "b2b12142-9002-4b11-b421-83f073678fd3",
-    "projectKey": "JVNAUTOSCI"
-  },
-  "workbench.tree.expandMode": "singleClick",
-  "typescript.inlayHints.parameterNames.enabled": "literals",
-  "python.terminal.activateEnvironment": true,
-  "chat.tools.terminal.autoApprove": {
-    "Remove-Item Env:CI": true,
-    "Remove-Item Env:ATLASSIAN_CLOUD_ID": true,
-    "curl": true,
-    "npx jest": true,
-    "pdm run pytest": true,
-    "git commit -m": true,
-    "git": true,
-    "pytest": true,
-    "py -m pytest": true,
-    "python -m pytest": true,
-    "python -m pytest -q": true,
-    "npm run -s test": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "npx jest --listTests": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "npx jest --passWithNoTests": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "add": true,
-    "tests": true,
-    "pwsh": true,
-    ".\\.venv\\Scripts\\python -m pytest -q": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "Get-Content": true,
-    "python scripts/recompute_inherited_salient.py --dry-run": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "npm -v": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "npm test": true,
-    "python scripts/migrate_add_hypothesized_relations.py --dry-run": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "python scripts/meta_relations_admin.py -h": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "python scripts/meta_relations_admin.py get-suggested --type-id #V#person": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "python scripts/meta_relations_admin.py get-suggested --type-id '#V#person'": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "./run.ps1 restart": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "pdm install": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "type": true,
-    "npm run test:frontend": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "pdm run python scripts/mark_code_referenced_concepts.py --list-concepts-with-paths --list-only --progress": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "pdm run python scripts/mark_code_referenced_concepts.py --progress": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "pdm run python scripts/mark_code_referenced_concepts.py --list-concepts --list-only": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "python scripts/analyze_notes_description_gaps.py --verbose": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "pdm list": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "git show stash@{0}:.vscode/settings.json": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "git show \"stash@{0}:.vscode/settings.json\"": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "git stash drop stash@{0}": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "git stash drop \"stash@{0}\"": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "python scripts/measure_tree_build_extended.py": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "pdm": true,
-    "python scripts/maintenance/relation_coverage_summary.py --db von_db": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "Invoke-RestMethod": true,
-    "ConvertTo-Json": true,
-    "sed": true,
-    "python src/workflows/von/main.py --port 5000": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "npm install": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "./run.ps1 start": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "python scripts/test_find_user_by_email.py": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "%(committerdate:relative)": true,
-    "%(authorname)": true,
-    "%(subject)\"": true,
-    "npx": true,
-    "cd c:/Users/witbr/Documents/Programming/Strong-AI-Lab/Von-Private; powershell -Command \"Get-Content docs/AINotes.md | Select-Object -First 40\"": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "powershell -NoLogo -NoProfile -Command \"Write-Output $env:ATLASSIAN_CLOUD_ID\"": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "concept_id": true,
-    "/extent": true,
-    "/metadata": true,
-    "node -c tests/frontend/predicateUtils.test.js": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "limit=15\"": true,
-    "$null": true,
-    "Out-Null": true,
-    "Start-Sleep -Seconds 20; Get-Content logs/von_5000_*.log -Wait | Select-String \"concept_search.*New Z|Using text_relations|Using legacy fallback\" | Select-Object -First 25": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "Start-Sleep -Seconds 2; curl -s \"http://127.0.0.1:5000/vontology/api/vontology/search?q=NZ&limit=5&include_individuals=true\" 2>$null | Out-Null; Get-Content logs/von_5000_*.log | Select-String \"concept_search.*\" | Select-Object -Last 15": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "& { $env:VON_DB_NAME = 'test_von_db'; pdm run pytest tests/backend/integrations/test_arxiv_proxy.py tests/test_internal_mcp_gateway.py -v }": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    ".\\run.ps1": true,
-    "Remove-Item": true,
-    "Serving": true,
-    "arxiv_proxy\"": true,
-    "$env:VON_LOG_LEVEL = 'DEBUG'; .\\run.ps1 restart": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "Invoke-WebRequest -Uri \"http://localhost:5000\" -UseBasicParsing | Select-Object StatusCode": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "Invoke-WebRequest -Uri \"http://localhost:5000/health\" -UseBasicParsing -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Content": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "uv tool list": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "$env:VON_DB_NAME": true,
-    "Validation\"": true,
-    "$code": true,
-    "/^\\$code = @'\nimport asyncio\nimport os\nfrom mcp\\.client\\.stdio import StdioServerParameters, stdio_client\nfrom mcp\\.client\\.session import ClientSession\nimport json\n\nasync def main\\(\\):\n    params = StdioServerParameters\\(\n        command=\"npx\",\n        args=\\[\"-y\", \"tavily-mcp@latest\"\\],\n        env=\\{\"TAVILY_API_KEY\": os\\.environ\\[\"TAVILY_API_KEY\"\\]\\},\n    \\)\n    async with stdio_client\\(params\\) as \\(read_stream, write_stream\\):\n        async with ClientSession\\(read_stream, write_stream\\) as session:\n            await session\\.initialize\\(\\)\n            tools = await session\\.list_tools\\(\\)\n            payload = \\[tool\\.model_dump\\(\\) for tool in tools\\.tools\\]\n            print\\(json\\.dumps\\(payload, indent=2\\)\\)\n\nasyncio\\.run\\(main\\(\\)\\)\n'@\npdm run python -c \\$code$/": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "/^\\$code = @'\nfrom src\\.backend\\.mcp_server\\.mcp_server import app\n\nwith app\\.test_client\\(\\) as client:\n    payload = \\{\n        \"url\": \"https://en\\.wikipedia\\.org/wiki/Artificial_general_intelligence\"\n    \\}\n    resp = client\\.post\\('/extract_url', json=payload\\)\n    print\\('status', resp\\.status_code\\)\n    print\\('payload', resp\\.get_json\\(\\)\\)\n'@\npdm run python -c \\$code$/": {
-      "approve": true,
-      "matchCommandLine": true
-    },
-    "settings\"": true,
-    "gh": true,
-    "{": true,
-    "/^& \\{ \\$env:VON_DB_NAME = 'test_von_db'; pdm run pytest; \\$env:VON_DB_NAME = 'von_db' \\}$/": {
-      "approve": true,
-      "matchCommandLine": true
-    }
-  },
-  "chat.mcp.assisted.nuget.enabled": true,
-  "typescript.tsserver.maxTsServerMemory": 4096,
-  "terminal.integrated.environmentChangesRelaunch": false,
-  "isort.args": [
-    "--profile",
-    "black"
-  ],
-  "explorer.confirmDragAndDrop": false,
-  "editor.codeActionsOnSave": {
-    "source.organizeImports": "explicit",
-    "source.fixAll.eslint": "explicit"
-  },
-  "python.languageServer": "Pylance",
-  "python.testing.pytestEnv": {
-    "VON_DB_NAME": "test_von_db",
-    "VON_USE_MOCK_DB": "1"
-  },
-  "geminicodeassist.project": "big-stream-0f8b1",
-  "chat.instructionsFilesLocations": {
-    ".github/instructions": true,
-    "C:\\Users\\witbr\\.aitk\\instructions\\": true,
-    "C:\\Users\\mwit860\\.aitk\\instructions\\": true
-  },
-  "atlascode.jira.jqlList": [
-    {
-      "id": "a00b6c75-f462-4934-a15d-c2e5578223c7",
-      "siteId": "b2b12142-9002-4b11-b421-83f073678fd3",
-      "name": "KnowKat Active and Todo",
-      "query": "project = KKAT AND statusCategory != Done",
-      "enabled": true,
-      "monitor": false
-    },
-    {
-      "id": "e5780c55-f2a3-434d-9247-e21bd97b2831",
-      "siteId": "b2b12142-9002-4b11-b421-83f073678fd3",
-      "name": "Von Active and Todo",
-      "query": "project = JVNAUTOSCI AND statusCategory != Done",
-      "enabled": true,
-      "monitor": false
-    }
-  ],
-  "python.defaultInterpreterPath": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
-  "javascript.suggestionActions.enabled": true,
-  "workbench.editor.enablePreview": false,
-  "python.analysis.inlayHints.functionReturnTypes": true,
-  "jest.jestCommandLine": "npm run test:frontend --",
-  "terminal.integrated.defaultProfile.windows": "PowerShell",
-  "jest.rootPath": "${workspaceFolder}",
-  "files.trimTrailingWhitespace": true,
-  "chat.agent.maxRequests": 100,
-  "atlascode.jira.enabled": true,
-  "atlascode.rovodev.enabled": false,
-  "atlascode.rovodev.showEntitlementNotifications": false,
-  "typescript.inlayHints.enumMemberValues.enabled": true,
-  "git.pruneOnFetch": true,
-  "terminal.integrated.showEnvironmentContributions": false,
-  "jest.runMode": "on-demand",
-  "editor.rulers": [
-    100
-  ],
-  "files.insertFinalNewline": true,
-  "chat.edits2.enabled": true,
-  "editor.trimAutoWhitespace": true,
-  "terminal.integrated.shellIntegration.enabled": true,
-  "terminal.integrated.profiles.windows": {
-    "PowerShell": {
-      "path": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-      "args": [
-        "-NoLogo"
-      ]
-    }
-  },
-  "chat.editing.confirmEditRequestRemoval": false,
-  "python.testing.pytestEnabled": true,
   "files.exclude": {
     "**/__pycache__": true,
     "**/.pytest_cache": true,
@@ -315,10 +34,6 @@
     "**/coverage": true,
     "**/dist": true
   },
-  "editor.renderWhitespace": "selection",
-  "github.copilot.nextEditSuggestions.enabled": true,
-  "chatgpt.openOnStartup": true,
-  "python.editor.formatOnSave": true,
   "search.exclude": {
     "**/coverage": true,
     "**/dist": true,
@@ -326,64 +41,6 @@
     "**/.venv": true,
     "**/logs": true
   },
-  "jupyter.interactiveWindow.textEditor.executeSelection": true,
-  "python.analysis.inlayHints.variableTypes": true,
-  "python.editor.defaultFormatter": "ms-python.black-formatter",
-  "jest.debugMode": true,
-  "typescript.preferences.importModuleSpecifier": "non-relative",
-  "chat.editing.autoAcceptDelay": 20,
-  "editor.formatOnSaveMode": "file",
-  "jest.enableInlineErrorMessages": true,
-  "jest.shell": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-  "python.analysis.importFormat": "absolute",
-  "chat.mcp.serverSampling": {
-    "Global in Code - Insiders: mongodb": {
-      "allowedModels": [
-        "copilot/auto",
-        "copilot/claude-sonnet-4",
-        "copilot/gemini-2.5-pro",
-        "copilot/gpt-5"
-      ]
-    },
-    "Global in Code - Insiders: atlassian": {
-      "allowedModels": [
-        "copilot/auto",
-        "copilot/claude-sonnet-4",
-        "copilot/gemini-2.5-pro",
-        "copilot/gpt-5",
-        "copilot/gpt-5-mini"
-      ]
-    }
-  },
-  "terminal.integrated.automationProfile.windows": {
-    "path": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-    "args": [
-      "-NoLogo"
-    ]
-  },
-  "python.testing.unittestEnabled": false,
-  "macros": {
-    "addCopilotContextWithToast": [
-      "github.copilot.chat.addActiveEditorAsContext",
-      {
-        "command": "workbench.action.showNotification",
-        "args": {
-          "message": "Copilot: File context added ✅"
-        }
-      }
-    ]
-  },
-  "editor.formatOnSave": true,
-  "python.envFile": "${workspaceFolder}\\.vscode\\.env.tests",
-  "atlassian.jira.cloud.id": "b2b12142-9002-4b11-b421-83f073678fd3",
-  "python.exclude": [
-    "**/Von-Private/.venv/**"
-  ],
-  "jupyter.askForKernelRestart": false,
-  "typescript.inlayHints.functionLikeReturnTypes.enabled": true,
-  "git.confirmSync": false,
-  "files.eol": "\n",
-  "chat.mcp.autostart": "newAndOutdated",
   "[html]": {
     "editor.formatOnSave": false
   }

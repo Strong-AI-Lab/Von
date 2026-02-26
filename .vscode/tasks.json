@@ -27,11 +27,6 @@
 			"problemMatcher": []
 		},
 		{
-			"label": "todo",
-			"type": "shell",
-			"command": "Write-Output \"TODO placeholder\""
-		},
-		{
 			"label": "pytest:backend",
 			"type": "shell",
 			"command": "pdm run pytest tests/backend -q",
@@ -46,31 +41,6 @@
 			"isBackground": false,
 			"problemMatcher": [],
 			"group": "test"
-		},
-		{
-			"label": "git: add styles.css",
-			"type": "shell",
-			"command": "git",
-			"args": [
-				"-C",
-				"C:\\Users\\witbr\\Documents\\Programming\\Strong-AI-Lab\\Von",
-				"add",
-				"src/frontend/web/von_interface/static/styles.css"
-			],
-			"isBackground": false
-		},
-		{
-			"label": "git: commit cartouche colours",
-			"type": "shell",
-			"command": "git",
-			"args": [
-				"-C",
-				"C:\\Users\\witbr\\Documents\\Programming\\Strong-AI-Lab\\Von",
-				"commit",
-				"-m",
-				"Make predicate cartouche kind tags violet"
-			],
-			"isBackground": false
 		}
 	]
 }
