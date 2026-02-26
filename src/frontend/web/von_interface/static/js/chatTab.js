@@ -572,6 +572,17 @@ const TOOL_USE_SETTING_REFRESH_COOLDOWN_MS = 30_000;
 const THINKING_STATUS_ACTIVE = 'active';
 const THINKING_STATUS_WAITING = 'waiting';
 const THINKING_STATUS_STALLED = 'stalled';
+const THINKING_CARD_TOGGLE_LABEL_EXPANDED = 'Collapse';
+const THINKING_CARD_TOGGLE_LABEL_COLLAPSED = 'Expand';
+const THINKING_TERMINAL_PROGRESS_STATUSES = new Set([
+    'completed',
+    'done',
+    'error',
+    'cancelled',
+    'canceled',
+    'aborted',
+    'failed'
+]);
 const DIAGNOSTICS_EXPORT_ENDPOINT = '/von/diagnostics/export';
 const DIAGNOSTICS_EXPORT_SHORTCUT_HINT = 'Ctrl+Shift+D';
 
@@ -645,6 +656,8 @@ function setLoadingIndicatorDetailHtml(html) {
             wrapper.classList.remove('has-tools');
         }
     }
+
+    syncThinkingCardExpandedStateToDom();
 }
 
 /**
@@ -672,6 +685,152 @@ function _setLoadingIndicatorDetailText(text) {
             wrapper.classList.remove('has-tools');
         }
     }
+
+    syncThinkingCardExpandedStateToDom();
+}
+
+function createThinkingCardDisplayState() {
+    return {
+        expanded: true,
+        autoFurlApplied: false
+    };
+}
+
+function normaliseThinkingCardDisplayState(state) {
+    if (!state || typeof state !== 'object') {
+        return createThinkingCardDisplayState();
+    }
+    return {
+        expanded: state.expanded !== false,
+        autoFurlApplied: state.autoFurlApplied === true
+    };
+}
+
+function normaliseThinkingProgressStatus(progress) {
+    const status = (progress && typeof progress.status === 'string')
+        ? progress.status.trim().toLowerCase()
+        : '';
+    return status;
+}
+
+function isTerminalThinkingProgress(progress) {
+    const status = normaliseThinkingProgressStatus(progress);
+    if (!status) {
+        return false;
+    }
+    return THINKING_TERMINAL_PROGRESS_STATUSES.has(status);
+}
+
+function reduceThinkingCardDisplayState(state, event = {}) {
+    const current = normaliseThinkingCardDisplayState(state);
+    const type = (event && typeof event.type === 'string') ? event.type.trim() : '';
+
+    if (type === 'reset_for_active') {
+        return createThinkingCardDisplayState();
+    }
+
+    if (type === 'manual_toggle') {
+        return {
+            ...current,
+            expanded: !current.expanded
+        };
+    }
+
+    if (type === 'manual_set') {
+        if (typeof event.expanded !== 'boolean') {
+            return current;
+        }
+        return {
+            ...current,
+            expanded: event.expanded
+        };
+    }
+
+    if (type === 'progress_update') {
+        if (!current.autoFurlApplied && isTerminalThinkingProgress(event.progress)) {
+            return {
+                expanded: false,
+                autoFurlApplied: true
+            };
+        }
+        return current;
+    }
+
+    return current;
+}
+
+export function __testOnly_reduceThinkingCardDisplayState(state, event = {}) {
+    return reduceThinkingCardDisplayState(state, event);
+}
+
+function getThinkingCardToggleButtonEl() {
+    return document.getElementById('thinkingCardToggleButton');
+}
+
+function ensureThinkingCardDisplayState(request) {
+    if (!request || typeof request !== 'object') {
+        return null;
+    }
+
+    request.thinkingCardDisplayState = normaliseThinkingCardDisplayState(request.thinkingCardDisplayState);
+    return request.thinkingCardDisplayState;
+}
+
+function syncThinkingCardExpandedStateToDom(request = activeChatRequest) {
+    const wrapper = document.getElementById('thinkingCardWrapper');
+    const detailEl = getLoadingIndicatorDetailEl();
+    const toggleButton = getThinkingCardToggleButtonEl();
+    if (!wrapper) {
+        return;
+    }
+
+    const state = ensureThinkingCardDisplayState(request) || createThinkingCardDisplayState();
+    const hasTools = wrapper.classList.contains('has-tools');
+    const expanded = state.expanded !== false;
+
+    wrapper.classList.toggle('is-collapsed', !expanded);
+    wrapper.classList.toggle('is-expanded', expanded);
+
+    if (detailEl) {
+        const showBody = expanded && hasTools;
+        detailEl.setAttribute('aria-hidden', showBody ? 'false' : 'true');
+    }
+
+    if (toggleButton) {
+        toggleButton.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        if (expanded) {
+            toggleButton.textContent = THINKING_CARD_TOGGLE_LABEL_EXPANDED;
+            toggleButton.setAttribute('aria-label', 'Collapse thinking details');
+            toggleButton.title = 'Collapse thinking details';
+        } else {
+            toggleButton.textContent = THINKING_CARD_TOGGLE_LABEL_COLLAPSED;
+            toggleButton.setAttribute('aria-label', 'Expand thinking details');
+            toggleButton.title = 'Expand thinking details';
+        }
+    }
+}
+
+function applyThinkingCardDisplayStateUpdate(request, event = {}) {
+    if (!request || typeof request !== 'object') {
+        return null;
+    }
+
+    const previous = normaliseThinkingCardDisplayState(request.thinkingCardDisplayState);
+    const next = reduceThinkingCardDisplayState(previous, event);
+    request.thinkingCardDisplayState = next;
+
+    if (previous.expanded !== next.expanded || previous.autoFurlApplied !== next.autoFurlApplied) {
+        syncThinkingCardExpandedStateToDom(request);
+    }
+
+    return next;
+}
+
+function toggleThinkingCardExpanded(request = activeChatRequest) {
+    if (!request || typeof request !== 'object') {
+        return;
+    }
+    applyThinkingCardDisplayStateUpdate(request, { type: 'manual_toggle' });
 }
 
 function createClientRequestId() {
@@ -1331,6 +1490,10 @@ function startToolUseProgressPolling(request) {
                     phase_label: 'Waiting for status',
                     liveness_state: THINKING_STATUS_WAITING
                 };
+                applyThinkingCardDisplayStateUpdate(request, {
+                    type: 'progress_update',
+                    progress: request.latestProgress
+                });
                 setLoadingIndicatorText(formatToolUseProgressText(request.latestProgress, request));
                 updateThinkingCardMeta(request, request.latestProgress);
                 poll.nextDelayMs = Math.min(10_000, poll.nextDelayMs * 1.7);
@@ -1346,6 +1509,10 @@ function startToolUseProgressPolling(request) {
                     phase_label: 'Waiting for status',
                     liveness_state: THINKING_STATUS_WAITING
                 };
+                applyThinkingCardDisplayStateUpdate(request, {
+                    type: 'progress_update',
+                    progress: request.latestProgress
+                });
                 setLoadingIndicatorText(formatToolUseProgressText(request.latestProgress, request));
                 updateThinkingCardMeta(request, request.latestProgress);
                 poll.nextDelayMs = Math.min(5000, poll.nextDelayMs * 1.4);
@@ -1360,6 +1527,10 @@ function startToolUseProgressPolling(request) {
             }
             const progress = await resp.json();
             request.latestProgress = progress;
+            applyThinkingCardDisplayStateUpdate(request, {
+                type: 'progress_update',
+                progress
+            });
             if (!Array.isArray(request.progressEvents)) {
                 request.progressEvents = [];
             }
@@ -14262,10 +14433,11 @@ export function initializeChatTab() {
     console.log("Chat tab initialized successfully");
 }
 
-function setThinkingState(isThinking) {
+function setThinkingState(isThinking, request = activeChatRequest) {
     const wrapper = document.getElementById('thinkingCardWrapper');
     const loadingIndicator = document.getElementById('loadingIndicator');
     const loadingDetail = document.getElementById('loadingIndicatorDetail');
+    const toggleButton = getThinkingCardToggleButtonEl();
     const abortButton = document.getElementById('abortButton');
     const retryButton = document.getElementById('retryThinkingButton');
     const copyDiagnosticsButton = document.getElementById('copyThinkingDiagnosticsButton');
@@ -14273,11 +14445,20 @@ function setThinkingState(isThinking) {
     const sendButton = document.getElementById('sendButton');
     const metaEl = document.getElementById('thinkingCardMeta');
 
+    if (isThinking && request) {
+        request.thinkingCardDisplayState = reduceThinkingCardDisplayState(
+            request.thinkingCardDisplayState,
+            { type: 'reset_for_active' }
+        );
+    }
+
     // Toggle wrapper visibility (controls the entire card)
     if (wrapper) {
         wrapper.setAttribute('aria-hidden', isThinking ? 'false' : 'true');
         if (!isThinking) {
             wrapper.classList.remove('has-tools');
+            wrapper.classList.remove('is-collapsed');
+            wrapper.classList.remove('is-expanded');
         }
     }
 
@@ -14292,6 +14473,7 @@ function setThinkingState(isThinking) {
     if (loadingDetail) {
         if (!isThinking) {
             loadingDetail.innerHTML = '';
+            loadingDetail.setAttribute('aria-hidden', 'true');
         }
     }
 
@@ -14317,6 +14499,10 @@ function setThinkingState(isThinking) {
         sendButton.textContent = isThinking ? 'Queue Prompt' : 'Send Prompt';
     }
 
+    if (toggleButton) {
+        toggleButton.setAttribute('aria-hidden', isThinking ? 'false' : 'true');
+    }
+
     if (abortButton) {
         abortButton.setAttribute('aria-hidden', isThinking ? 'false' : 'true');
     }
@@ -14329,6 +14515,10 @@ function setThinkingState(isThinking) {
             copyDiagnosticsButton.textContent = 'Copy diagnostics';
             copyDiagnosticsButton.classList.remove('success-feedback', 'error-feedback');
         }
+    }
+
+    if (isThinking) {
+        syncThinkingCardExpandedStateToDom(request);
     }
 }
 
@@ -14369,7 +14559,6 @@ function abortActiveChatRequest() {
 
     const request = activeChatRequest;
     request.aborted = true;
-    activeChatRequest = null;
 
     stopToolUseProgressPolling(request);
     stopThinkingTooltipTicker(request);
@@ -14380,7 +14569,8 @@ function abortActiveChatRequest() {
         // Ignore abort errors.
     }
 
-    setThinkingState(false);
+    setThinkingState(false, request);
+    activeChatRequest = null;
     restorePromptEditingState(request);
 }
 
@@ -14692,9 +14882,17 @@ async function copyActiveThinkingDiagnostics(button = null) {
 }
 
 function ensureAbortButtonBound() {
+    const toggleButton = getThinkingCardToggleButtonEl();
     const abortButton = document.getElementById('abortButton');
     const retryButton = document.getElementById('retryThinkingButton');
     const copyDiagnosticsButton = document.getElementById('copyThinkingDiagnosticsButton');
+
+    if (toggleButton && toggleButton.dataset.bound !== '1') {
+        toggleButton.dataset.bound = '1';
+        toggleButton.addEventListener('click', () => {
+            toggleThinkingCardExpanded();
+        });
+    }
 
     if (abortButton && abortButton.dataset.bound !== '1') {
         abortButton.dataset.bound = '1';
@@ -14934,9 +15132,23 @@ async function handleSendPrompt(options = {}) {
     void refreshToolUseDuringThinkingSetting();
 
     const clientRequestId = createClientRequestId();
+    const request = {
+        abortController: new AbortController(),
+        promptRaw,
+        selectionStart,
+        selectionEnd,
+        aborted: false,
+        clientRequestId,
+        thinkingStartedAtMs: Date.now(),
+        toolUseProgressHistory: [],
+        latestProgress: null,
+        progressEvents: [],
+        thinkingCardDisplayState: reduceThinkingCardDisplayState(null, { type: 'reset_for_active' })
+    };
+    activeChatRequest = request;
 
     // Show loading indicator and disable send button
-    setThinkingState(true);
+    setThinkingState(true, request);
 
     // Create turn IDs for user and assistant
     const userTurnId = `u-${Date.now()}`;
@@ -14962,22 +15174,8 @@ async function handleSendPrompt(options = {}) {
         promptInput.value = '';
         promptInput.dispatchEvent(new Event('input', { bubbles: true }));
     }
-    let request = null;
-    try {
-        request = {
-            abortController: new AbortController(),
-            promptRaw,
-            selectionStart,
-            selectionEnd,
-            aborted: false,
-            clientRequestId,
-            thinkingStartedAtMs: Date.now(),
-            toolUseProgressHistory: [],
-            latestProgress: null,
-            progressEvents: []
-        };
-        activeChatRequest = request;
 
+    try {
         setLoadingIndicatorTooltip(formatToolUseHistoryTooltip(request));
 
         startThinkingTooltipTicker(request);
@@ -15093,10 +15291,10 @@ async function handleSendPrompt(options = {}) {
     } finally {
         const isStillActive = activeChatRequest === request;
         if (isStillActive) {
-            activeChatRequest = null;
             stopToolUseProgressPolling(request);
             stopThinkingTooltipTicker(request);
-            setThinkingState(false);
+            setThinkingState(false, request);
+            activeChatRequest = null;
         }
         updateHistoryLength();
         scheduleQueuedChatPromptDrain();
