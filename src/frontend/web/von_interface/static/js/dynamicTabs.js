@@ -2397,7 +2397,7 @@ async function ensureUnifiedDescriptionSection(conceptId, suffix) {
                 const initialHtml = existingDisplay ? existingDisplay.innerHTML : '<i>Loading description...</i>';
                 descSection.innerHTML = `
                 <h3 class="concept-list-title">Description</h3>
-                <div class="type-description-wrapper" style="position:relative;">
+                <div class="type-description-wrapper">
                   <div id="typeDescriptionDisplay_${suffix}" class="concept-type-description editable-description" tabindex="0">${initialHtml}</div>
                   <textarea id="typeDescriptionTextarea_${suffix}" class="description-editor hidden" placeholder="Enter description..." rows="6"></textarea>
                   <div class="desc-actions text-block-actions">
@@ -2429,7 +2429,7 @@ async function ensureUnifiedDescriptionSection(conceptId, suffix) {
             descSection.className = 'concept-list-subsection';
             descSection.innerHTML = `
                 <h3 class="concept-list-title">Description</h3>
-                <div class="type-description-wrapper" style="position:relative;">
+                <div class="type-description-wrapper">
                   <div id="typeDescriptionDisplay_${suffix}" class="concept-type-description editable-description" tabindex="0"><i>Loading description...</i></div>
                   <textarea id="typeDescriptionTextarea_${suffix}" class="description-editor hidden" placeholder="Enter description..." rows="6"></textarea>
                   <div class="desc-actions text-block-actions">
@@ -3120,8 +3120,8 @@ function openRawJsonModal(containerEl, conceptId, jsonText, isRaw = false, meta 
     const titleLabel = isRaw ? 'Raw Mongo DB object' : 'Full concept payload';
     const modeBadge = `<span class="raw-mode-badge ${isRaw ? 'badge-raw' : 'badge-full'}">${isRaw ? 'RAW' : 'FULL'}</span>`;
     const subNote = isRaw
-        ? '<small style="color:#6b7280">This is the stored document (no enrichment). Shift-click { } for full payload.</small>'
-        : '<small style="color:#6b7280">Includes derived fields & relationships. Click { } without Shift for raw stored document.</small>';
+        ? '<small class="raw-json-note">This is the stored document (no enrichment). Shift-click { } for full payload.</small>'
+        : '<small class="raw-json-note">Includes derived fields & relationships. Click { } without Shift for raw stored document.</small>';
     overlay.innerHTML = `
             <div class="raw-json-dialog">
                 <div class="raw-json-header">
@@ -3158,14 +3158,10 @@ function openRawJsonModal(containerEl, conceptId, jsonText, isRaw = false, meta 
     // Populate stats if meta provided
     const statsEl = overlay.querySelector('.raw-json-stats');
     if (statsEl && meta) {
-        const { latencyMs, byteSize, pref } = meta;
+        const { latencyMs, byteSize } = meta;
         const prettySize = humanFileSize(byteSize);
         statsEl.textContent = `${isRaw ? 'RAW' : 'FULL'} • ${prettySize} • ${latencyMs.toFixed(1)} ms`;
-        statsEl.style.fontSize = '0.75rem';
-        statsEl.style.color = '#6b7280';
-        statsEl.style.display = 'flex';
-        statsEl.style.alignItems = 'center';
-        statsEl.style.gap = '6px';
+        statsEl.classList.add('raw-json-stats-meta');
     }
 
     const copyBtn = overlay.querySelector('.raw-json-copy');
@@ -3231,7 +3227,7 @@ function openTextRelationsModal(containerEl, conceptId, jsonText, meta = null) {
                     <button class="text-relations-close" title="Close">×</button>
                 </div>
                 <div class="raw-json-body">
-                    <small style="color:#6b7280">All text relations for this concept (read-only)</small>
+                    <small class="raw-json-note">All text relations for this concept (read-only)</small>
                     <div class="text-relations-inspector"></div>
                 </div>
                 <div class="raw-json-footer">
@@ -3421,7 +3417,7 @@ async function populateTypeDescription(conceptId, suffix) {
             if (!host.innerHTML) {
                 host.innerHTML = `
                                                 <h3 class="concept-list-title">Description</h3>
-                                                <div class="type-description-wrapper" style="position:relative;">
+                                                <div class="type-description-wrapper">
                                                     <div id="typeDescriptionDisplay_${suffix}" class="concept-type-description editable-description" tabindex="0"><i>Loading description...</i></div>
                                                     <textarea id="typeDescriptionTextarea_${suffix}" class="description-editor hidden" rows="6"></textarea>
                                                     <div class="desc-actions text-block-actions">
@@ -3802,15 +3798,14 @@ async function populateNotesSection(conceptId, suffix) {
 
         const section = document.createElement('div');
         section.id = `notesMultiSection_${suffix}`;
-        section.className = 'concept-notes-multi-section';
-        section.style.margin = '8px 0 16px 0';
+        section.className = 'concept-notes-multi-section concept-text-multi-section';
         section.innerHTML = `
-                    <div class="notes-multi-header" style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
-                        <h3 id="notesHeading_${suffix}" style="margin:0;font-size:1rem;color:#374151;">Notes</h3>
+                    <div class="notes-multi-header concept-text-multi-header">
+                        <h3 id="notesHeading_${suffix}" class="concept-text-multi-heading">Notes</h3>
                         <button type="button" id="addNoteButton_${suffix}" class="circular-add-button" aria-describedby="notesStatus_${suffix}" aria-label="Add a new note"></button>
                     </div>
-                    <div id="notesList_${suffix}" class="notes-list" role="list" aria-labelledby="notesHeading_${suffix}" style="display:flex;flex-direction:column;gap:10px;"></div>
-                    <div id="notesStatus_${suffix}" class="notes-status" role="status" aria-live="polite" style="font-size:0.75rem;color:#6b7280;margin-top:4px;"></div>`;
+                    <div id="notesList_${suffix}" class="notes-list concept-text-multi-list" role="list" aria-labelledby="notesHeading_${suffix}"></div>
+                    <div id="notesStatus_${suffix}" class="notes-status concept-text-status" role="status" aria-live="polite"></div>`;
         // Insert near description (after description sections if present, before other fields)
         const anchor = document.getElementById(`typeDescriptionSection_${suffix}`);
         if (anchor && anchor.parentNode) {
@@ -3852,12 +3847,8 @@ async function populateNotesSection(conceptId, suffix) {
             if (!notes.length) return;
             for (const n of notes) {
                 const item = document.createElement('div');
-                item.className = 'note-item';
+                item.className = 'note-item concept-text-item';
                 item.setAttribute('role', 'listitem');
-                item.style.border = '1px solid #e5e7eb';
-                item.style.background = '#f9fafb';
-                item.style.padding = '8px 10px';
-                item.style.position = 'relative';
                 item.dataset.relationId = n.relation_id;
 
                 // Smart render note text (detect markdown)
@@ -3867,26 +3858,24 @@ async function populateNotesSection(conceptId, suffix) {
                 safeText = escapeHtml(noteText);
                 truncated = safeText.length > 800;
                 displayHtml = truncated ? safeText.slice(0, 800) + '…' : safeText || '<i>(empty)</i>';
-                const viewClasses = isMarkdown ? 'note-view markdown-rendered' : 'note-view';
-                const viewStyle = isMarkdown
-                    ? 'white-space:normal;font-size:0.85rem;line-height:1.25;max-height:220px;overflow:auto;'
-                    : 'white-space:pre-wrap;font-size:0.85rem;line-height:1.25;max-height:220px;overflow:auto;';
+                const viewClasses = isMarkdown ? 'note-view concept-text-view markdown-rendered' : 'note-view concept-text-view';
+                const expandHiddenClass = truncated ? '' : ' text-action-hidden';
                 const annotateButton = annotationEnabled
                     ? '<button type="button" class="round-icon-button note-annotate-btn" title="Annotate note" aria-label="Annotate note" data-icon="annotate" data-keep-title="true"></button>'
                     : '';
                 item.innerHTML = `
-                                                 <div class="${viewClasses}" data-full="${safeText}" data-truncated="${truncated ? '1' : '0'}" style="${viewStyle}">${displayHtml}</div>
-                   <div class="note-edit hidden" style="margin-top:4px;">
-                      <textarea class="note-textarea" style="width:100%;min-height:120px;font-family:monospace;font-size:0.8rem;padding:6px;">${escapeHtml(n.text || '')}</textarea>
-                      <div style="margin-top:4px;display:flex;gap:8px;align-items:center;">
+                                                 <div class="${viewClasses}" data-full="${safeText}" data-truncated="${truncated ? '1' : '0'}">${displayHtml}</div>
+                   <div class="note-edit hidden concept-text-edit">
+                      <textarea class="note-textarea concept-text-editor" aria-label="Edit note text">${escapeHtml(n.text || '')}</textarea>
+                      <div class="concept-text-edit-row">
                         <button type="button" class="small-btn primary note-save">Save</button>
                         <button type="button" class="small-btn note-cancel">Cancel</button>
-                        <span class="note-status" style="font-size:0.7rem;color:#6b7280;"></span>
+                        <span class="note-status concept-text-inline-status"></span>
                       </div>
                    </div>
                    <div class="note-actions text-block-actions">
                              <button type="button" class="round-icon-button note-copy-btn" title="Copy note to clipboard" aria-label="Copy note to clipboard" data-icon="copy" data-keep-title="true"></button>
-                             <button type="button" class="round-icon-button note-expand-btn" title="Show more" aria-label="Show full note" data-icon="expand" data-keep-title="true" ${truncated ? '' : 'style="display:none;"'}></button>
+                             <button type="button" class="round-icon-button note-expand-btn${expandHiddenClass}" title="Show more" aria-label="Show full note" data-icon="expand" data-keep-title="true"></button>
                              ${annotateButton}
                              <button type="button" class="round-icon-button note-edit-btn" title="Edit note" aria-label="Edit note" data-icon="edit" data-keep-title="true"></button>
                              <button type="button" class="round-icon-button note-delete-btn" title="Delete note" aria-label="Delete note" data-icon="delete" data-keep-title="true"></button>
@@ -3903,8 +3892,6 @@ async function populateNotesSection(conceptId, suffix) {
                     if (viewEl) {
                         void renderSmartTextAsync(noteText, true).then((html) => {
                             viewEl.innerHTML = html || '<i>(empty)</i>';
-                            // Markdown is injected as HTML; do not preserve whitespace formatting.
-                            viewEl.style.whiteSpace = 'normal';
                             updateVerticalResizeHandleIfOverflow(viewEl);
                         }).catch(() => {
                             // Leave plaintext fallback.
@@ -3994,7 +3981,7 @@ async function populateNotesSection(conceptId, suffix) {
             }
 
             editBtn.addEventListener('click', () => {
-                editWrap.classList.remove('hidden'); editWrap.style.removeProperty('display');
+                editWrap.classList.remove('hidden');
                 viewEl.classList.add('hidden'); editBtn.disabled = true; status.textContent = ''; textarea.focus();
             });
             cancelBtn.addEventListener('click', () => {
@@ -4095,16 +4082,14 @@ async function populateNotesSection(conceptId, suffix) {
             // Prevent multiple new editors
             if (listEl.querySelector('.note-item.new-note')) return;
             const wrapper = document.createElement('div');
-            wrapper.className = 'note-item new-note';
-            wrapper.style.border = '1px dashed #9ca3af';
-            wrapper.style.padding = '8px 10px';
+            wrapper.className = 'note-item new-note concept-text-item concept-text-item-draft';
             wrapper.innerHTML = `
-                            <div style="font-size:0.75rem;color:#6b7280;margin-bottom:4px;">New Note</div>
-                            <textarea class="new-note-text" aria-label="New note text" style="width:100%;min-height:120px;font-family:monospace;font-size:0.8rem;padding:6px;"></textarea>
-                            <div style="margin-top:6px;display:flex;gap:8px;align-items:center;">
+                            <div class="concept-text-draft-label">New Note</div>
+                            <textarea class="new-note-text concept-text-editor" aria-label="New note text"></textarea>
+                            <div class="concept-text-create-row">
                                 <button type="button" class="small-btn primary create-note" aria-label="Create note">Create</button>
                                 <button type="button" class="small-btn cancel-note" aria-label="Cancel new note">Cancel</button>
-                                <span class="create-status" role="status" aria-live="polite" style="font-size:0.7rem;color:#6b7280;"></span>
+                                <span class="create-status concept-text-inline-status" role="status" aria-live="polite"></span>
                             </div>`;
             listEl.insertBefore(wrapper, listEl.firstChild);
             const ta = wrapper.querySelector('.new-note-text');
@@ -4172,15 +4157,14 @@ async function populateContentSection(conceptId, suffix) {
 
         const section = document.createElement('div');
         section.id = `contentMultiSection_${suffix}`;
-        section.className = 'concept-content-multi-section';
-        section.style.margin = '8px 0 16px 0';
+        section.className = 'concept-content-multi-section concept-text-multi-section';
         section.innerHTML = `
-                    <div class="content-multi-header" style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
-                        <h3 id="contentHeading_${suffix}" style="margin:0;font-size:1rem;color:#374151;">Content</h3>
+                    <div class="content-multi-header concept-text-multi-header">
+                        <h3 id="contentHeading_${suffix}" class="concept-text-multi-heading">Content</h3>
                         <button type="button" id="addContentButton_${suffix}" class="circular-add-button" aria-describedby="contentStatus_${suffix}" aria-label="Add new content"></button>
                     </div>
-                    <div id="contentList_${suffix}" class="content-list" role="list" aria-labelledby="contentHeading_${suffix}" style="display:flex;flex-direction:column;gap:10px;"></div>
-                    <div id="contentStatus_${suffix}" class="content-status" role="status" aria-live="polite" style="font-size:0.75rem;color:#6b7280;margin-top:4px;"></div>`;
+                    <div id="contentList_${suffix}" class="content-list concept-text-multi-list" role="list" aria-labelledby="contentHeading_${suffix}"></div>
+                    <div id="contentStatus_${suffix}" class="content-status concept-text-status" role="status" aria-live="polite"></div>`;
         // Insert after notes section if present, otherwise after description sections
         const notesAnchor = document.getElementById(`notesMultiSection_${suffix}`);
         const descAnchor = document.getElementById(`typeDescriptionSection_${suffix}`);
@@ -4233,12 +4217,8 @@ async function populateContentSection(conceptId, suffix) {
             if (!contentItems.length) return;
             for (const c of contentItems) {
                 const item = document.createElement('div');
-                item.className = 'content-item';
+                item.className = 'content-item concept-text-item concept-text-item-content';
                 item.setAttribute('role', 'listitem');
-                item.style.border = '1px solid #e5e7eb';
-                item.style.background = '#f8fafc';
-                item.style.padding = '8px 10px';
-                item.style.position = 'relative';
                 item.dataset.relationId = c.relation_id;
 
                 // Smart render content text (detect markdown)
@@ -4248,26 +4228,24 @@ async function populateContentSection(conceptId, suffix) {
                 safeText = escapeHtml(contentText);
                 truncated = safeText.length > 1000;
                 displayHtml = truncated ? safeText.slice(0, 1000) + '…' : safeText || '<i>(empty)</i>';
-                const viewClasses = isMarkdown ? 'content-view markdown-rendered' : 'content-view';
-                const viewStyle = isMarkdown
-                    ? 'white-space:normal;font-size:0.85rem;line-height:1.25;max-height:250px;overflow:auto;'
-                    : 'white-space:pre-wrap;font-size:0.85rem;line-height:1.25;max-height:250px;overflow:auto;';
+                const viewClasses = isMarkdown ? 'content-view concept-text-view markdown-rendered' : 'content-view concept-text-view';
+                const expandHiddenClass = truncated ? '' : ' text-action-hidden';
                 const annotateButton = annotationEnabled
                     ? '<button type="button" class="round-icon-button content-annotate-btn" title="Annotate content" aria-label="Annotate content" data-icon="annotate"></button>'
                     : '';
                 item.innerHTML = `
-                                                 <div class="${viewClasses}" data-full="${safeText}" data-truncated="${truncated ? '1' : '0'}" style="${viewStyle}">${displayHtml}</div>
-                   <div class="content-edit hidden" style="margin-top:4px;">
-                      <textarea class="content-textarea" style="width:100%;min-height:150px;font-family:monospace;font-size:0.8rem;padding:6px;">${escapeHtml(c.text || '')}</textarea>
-                      <div style="margin-top:4px;display:flex;gap:8px;align-items:center;">
+                                                 <div class="${viewClasses}" data-full="${safeText}" data-truncated="${truncated ? '1' : '0'}">${displayHtml}</div>
+                   <div class="content-edit hidden concept-text-edit">
+                      <textarea class="content-textarea concept-text-editor concept-text-editor-content" aria-label="Edit content text">${escapeHtml(c.text || '')}</textarea>
+                      <div class="concept-text-edit-row">
                         <button type="button" class="small-btn primary content-save">Save</button>
                         <button type="button" class="small-btn content-cancel">Cancel</button>
-                        <span class="content-status" style="font-size:0.7rem;color:#6b7280;"></span>
+                        <span class="content-status concept-text-inline-status"></span>
                       </div>
                    </div>
                    <div class="content-actions text-block-actions">
                              <button type="button" class="round-icon-button content-copy-btn" title="Copy content to clipboard" aria-label="Copy content to clipboard" data-icon="copy"></button>
-                             <button type="button" class="round-icon-button content-expand-btn" title="Show more" aria-label="Show full content" data-icon="expand" ${truncated ? '' : 'style="display:none;"'}></button>
+                             <button type="button" class="round-icon-button content-expand-btn${expandHiddenClass}" title="Show more" aria-label="Show full content" data-icon="expand"></button>
                              ${annotateButton}
                              <button type="button" class="round-icon-button content-edit-btn" title="Edit content" aria-label="Edit content" data-icon="edit"></button>
                              <button type="button" class="round-icon-button content-delete-btn" title="Delete content" aria-label="Delete content" data-icon="delete"></button>
@@ -4284,8 +4262,6 @@ async function populateContentSection(conceptId, suffix) {
                     if (viewEl) {
                         void renderSmartTextAsync(contentText, true).then((html) => {
                             viewEl.innerHTML = html || '<i>(empty)</i>';
-                            // Markdown is injected as HTML; do not preserve whitespace formatting.
-                            viewEl.style.whiteSpace = 'normal';
                             updateVerticalResizeHandleIfOverflow(viewEl);
                         }).catch(() => {
                             // Leave plaintext fallback.
@@ -4375,7 +4351,7 @@ async function populateContentSection(conceptId, suffix) {
             }
 
             editBtn.addEventListener('click', () => {
-                editWrap.classList.remove('hidden'); editWrap.style.removeProperty('display');
+                editWrap.classList.remove('hidden');
                 viewEl.classList.add('hidden'); editBtn.disabled = true; status.textContent = ''; textarea.focus();
             });
             cancelBtn.addEventListener('click', () => {
@@ -4476,16 +4452,14 @@ async function populateContentSection(conceptId, suffix) {
             // Prevent multiple new editors
             if (listEl.querySelector('.content-item.new-content')) return;
             const wrapper = document.createElement('div');
-            wrapper.className = 'content-item new-content';
-            wrapper.style.border = '1px dashed #9ca3af';
-            wrapper.style.padding = '8px 10px';
+            wrapper.className = 'content-item new-content concept-text-item concept-text-item-content concept-text-item-draft';
             wrapper.innerHTML = `
-                            <div style="font-size:0.75rem;color:#6b7280;margin-bottom:4px;">New Content</div>
-                            <textarea class="new-content-text" aria-label="New content text" style="width:100%;min-height:150px;font-family:monospace;font-size:0.8rem;padding:6px;" placeholder="Enter content text (e.g., grant application, call for papers)..."></textarea>
-                            <div style="margin-top:6px;display:flex;gap:8px;align-items:center;">
+                            <div class="concept-text-draft-label">New Content</div>
+                            <textarea class="new-content-text concept-text-editor concept-text-editor-content" aria-label="New content text" placeholder="Enter content text (e.g., grant application, call for papers)..."></textarea>
+                            <div class="concept-text-create-row">
                                 <button type="button" class="small-btn primary create-content" aria-label="Create content">Create</button>
                                 <button type="button" class="small-btn cancel-content" aria-label="Cancel new content">Cancel</button>
-                                <span class="create-status" role="status" aria-live="polite" style="font-size:0.7rem;color:#6b7280;"></span>
+                                <span class="create-status concept-text-inline-status" role="status" aria-live="polite"></span>
                             </div>`;
             listEl.insertBefore(wrapper, listEl.firstChild);
             const ta = wrapper.querySelector('.new-content-text');
@@ -4690,7 +4664,7 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
         // Show loading indicator immediately
         const content = document.getElementById(`relationshipsContent_${suffix}`) || document.getElementById('relationshipsContent');
         if (content) {
-            content.innerHTML = '<div style="color: #999; padding: 12px;">Loading relationships...</div>';
+            content.innerHTML = '<div class="relationships-loading">Loading relationships...</div>';
         }
 
         const container = document.getElementById(`relationshipsSection_${suffix}`) || document.getElementById('relationshipsSection');
@@ -5879,7 +5853,7 @@ async function renderRelationships(conceptId, suffix, kind) {
         content.innerHTML = '';
         content.appendChild(tableContainer);
     } catch (e) {
-        content.innerHTML = `<span style="color:red">Failed to load relationships (${e.message})</span>`;
+        content.innerHTML = `<span class="relationships-error">Failed to load relationships (${e.message})</span>`;
     }
 }
 // Helper: Add analysis and relationship buttons next to JSON button
@@ -5893,9 +5867,6 @@ function attachAnalysisButtons(headerDiv, conceptId, kind) {
         // Create container for the new buttons
         const buttonGroup = document.createElement('div');
         buttonGroup.className = 'analysis-buttons-group';
-        buttonGroup.style.display = 'flex';
-        buttonGroup.style.gap = '4px';
-        buttonGroup.style.marginLeft = '8px';
 
         // 1. Flag Toggle Button
         const flagBtn = document.createElement('button');

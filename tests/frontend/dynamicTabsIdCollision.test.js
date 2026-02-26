@@ -230,3 +230,58 @@ describe('dynamic tab accessibility and close behaviour', () => {
         expect(document.querySelector('.tab-content[data-concept-id="#V#reduce_motion"]')).toBeNull();
     });
 });
+
+describe('notes and content editor markup hygiene', () => {
+    beforeEach(() => {
+        document.body.innerHTML = '<div id="conceptStep1_test"></div>';
+        global.fetch = jest.fn(async (url) => {
+            const requestUrl = String(url);
+            if (requestUrl.includes('/texts?predicate=hasNote')) {
+                return {
+                    ok: true,
+                    json: async () => ({
+                        count: 1,
+                        texts: [{ relation_id: 'note-1', text: 'A short note' }]
+                    })
+                };
+            }
+            if (requestUrl.includes('/texts?limit=200')) {
+                return {
+                    ok: true,
+                    json: async () => ({
+                        texts: [{ relation_id: 'content-1', predicate: 'hasContent', text: 'A short content item' }]
+                    })
+                };
+            }
+            return { ok: true, json: async () => ({ texts: [], count: 0 }) };
+        });
+    });
+
+    afterEach(() => {
+        jest.resetModules();
+        jest.restoreAllMocks();
+        delete global.fetch;
+    });
+
+    test('populateNotesSection uses class-based layout without inline style attributes', async () => {
+        const { populateNotesSection } = require(dynamicTabsModulePath);
+        await populateNotesSection('#V#note_concept', 'test');
+
+        const section = document.getElementById('notesMultiSection_test');
+        expect(section).not.toBeNull();
+        expect(section.querySelectorAll('[style]')).toHaveLength(0);
+        expect(section.querySelector('.concept-text-multi-header')).not.toBeNull();
+        expect(section.querySelector('.concept-text-editor')).not.toBeNull();
+    });
+
+    test('populateContentSection uses class-based layout without inline style attributes', async () => {
+        const { populateContentSection } = require(dynamicTabsModulePath);
+        await populateContentSection('#V#content_concept', 'test');
+
+        const section = document.getElementById('contentMultiSection_test');
+        expect(section).not.toBeNull();
+        expect(section.querySelectorAll('[style]')).toHaveLength(0);
+        expect(section.querySelector('.concept-text-multi-header')).not.toBeNull();
+        expect(section.querySelector('.concept-text-view')).not.toBeNull();
+    });
+});

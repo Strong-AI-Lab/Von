@@ -27,6 +27,29 @@
     --von-tab-close-slot: 22px;
     --von-tab-label-max-width: clamp(120px, 18vw, 240px);
     --von-tab-close-transition-ms: 160ms;
+    --von-tab-close-hover-bg: #ff6b6b;
+    --von-tab-close-hover-text: #fff;
+    --von-tab-type-bg: #e9f2ff;
+    --von-tab-type-bg-hover: #dcebff;
+    --von-tab-type-bg-active: #d2e6ff;
+    --von-tab-type-border: #b6dbff;
+    --von-tab-type-text: #0f2a49;
+    --von-tab-individual-bg: #f0f7ea;
+    --von-tab-individual-bg-hover: #e8f1e0;
+    --von-tab-individual-bg-active: #e0edd4;
+    --von-tab-individual-border: #cfe3b4;
+    --von-tab-individual-text: #1f3a1a;
+    --von-tab-predicate-bg: #f5f0ff;
+    --von-tab-predicate-bg-hover: #ede5ff;
+    --von-tab-predicate-bg-active: #e8dfff;
+    --von-tab-predicate-border: #d4c5f9;
+    --von-tab-predicate-text: #4a3871;
+    --von-muted-meta: #6b7280;
+    --von-muted-meta-strong: #374151;
+    --von-card-border: #e5e7eb;
+    --von-card-note-bg: #f9fafb;
+    --von-card-content-bg: #f8fafc;
+    --von-card-draft-border: #9ca3af;
 }
 
 /* General Styles */
@@ -3112,8 +3135,8 @@ body {
 }
 
 .close-tab:hover {
-    background-color: #ff6b6b;
-    color: #fff;
+    background-color: var(--von-tab-close-hover-bg);
+    color: var(--von-tab-close-hover-text);
 }
 
 .close-tab:focus-visible {
@@ -8170,69 +8193,63 @@ button.prompt-vontology-cartouche {
 
 /* Visual distinction for dynamic concept tabs by kind */
 .tab-button.type-tab {
-    background-color: #e9f2ff;
-    /* light blue tint */
-    border-color: #b6dbff;
-    color: #0f2a49;
+    background-color: var(--von-tab-type-bg);
+    border-color: var(--von-tab-type-border);
+    color: var(--von-tab-type-text);
 }
 
 .tab-button.type-tab:hover {
-    background-color: #dcebff;
+    background-color: var(--von-tab-type-bg-hover);
 }
 
 .tab-button.individual-tab {
-    background-color: #f0f7ea;
-    /* light green tint */
-    border-color: #cfe3b4;
-    color: #1f3a1a;
+    background-color: var(--von-tab-individual-bg);
+    border-color: var(--von-tab-individual-border);
+    color: var(--von-tab-individual-text);
 }
 
 .tab-button.individual-tab:hover {
-    background-color: #e8f1e0;
+    background-color: var(--von-tab-individual-bg-hover);
 }
 
 /* Ensure active state keeps a slightly darker colored background rather than white */
 /* Increase specificity to override inline template .tab-button.active rule */
 .tab-container .tab-button.type-tab.active {
-    background-color: #d2e6ff;
-    /* slightly darker blue */
-    border-bottom-color: #d2e6ff;
+    background-color: var(--von-tab-type-bg-active);
+    border-bottom-color: var(--von-tab-type-bg-active);
 }
 
 .tab-container .tab-button.individual-tab.active {
-    background-color: #e0edd4;
-    /* slightly darker green */
-    border-bottom-color: #e0edd4;
+    background-color: var(--von-tab-individual-bg-active);
+    border-bottom-color: var(--von-tab-individual-bg-active);
 }
 
 /* Unselected (non-active) tabs keep lighter colors; no change needed but keep for clarity */
 .tab-container .tab-button.type-tab:not(.active) {
-    background-color: #e9f2ff;
+    background-color: var(--von-tab-type-bg);
 }
 
 .tab-container .tab-button.individual-tab:not(.active) {
-    background-color: #f0f7ea;
+    background-color: var(--von-tab-individual-bg);
 }
 
 .tab-button.predicate-tab {
-    background-color: #f5f0ff;
-    /* lavender tint for predicates */
-    border-color: #d4c5f9;
-    color: #4a3871;
+    background-color: var(--von-tab-predicate-bg);
+    border-color: var(--von-tab-predicate-border);
+    color: var(--von-tab-predicate-text);
 }
 
 .tab-button.predicate-tab:hover {
-    background-color: #ede5ff;
+    background-color: var(--von-tab-predicate-bg-hover);
 }
 
 .tab-container .tab-button.predicate-tab.active {
-    background-color: #e8dfff;
-    /* slightly darker lavender */
-    border-bottom-color: #e8dfff;
+    background-color: var(--von-tab-predicate-bg-active);
+    border-bottom-color: var(--von-tab-predicate-bg-active);
 }
 
 .tab-container .tab-button.predicate-tab:not(.active) {
-    background-color: #f5f0ff;
+    background-color: var(--von-tab-predicate-bg);
 }
 
 /* Small badge injected into Concept tab headers to show tab kind */
@@ -8830,6 +8847,12 @@ html body .names-list-container .name-cartouche .name-delete-button:disabled:hov
     background: transparent;
 }
 
+.raw-json-note {
+    display: block;
+    margin-bottom: 8px;
+    color: var(--von-muted-meta);
+}
+
 .raw-json-inspector,
 .text-relations-inspector,
 .annotation-json-inspector {
@@ -8857,6 +8880,14 @@ html body .names-list-container .name-cartouche .name-delete-button:disabled:hov
     justify-content: flex-end;
     padding: 10px 12px;
     border-top: 1px solid #e5e7eb;
+}
+
+.raw-json-stats-meta {
+    font-size: 0.75rem;
+    color: var(--von-muted-meta);
+    display: flex;
+    align-items: center;
+    gap: 6px;
 }
 
 /* Text relations (attributes): keep long values contained and scrollable */
@@ -9509,9 +9540,114 @@ body.settings-body {
     margin-left: 4px;
 }
 
+.text-action-hidden {
+    display: none !important;
+}
+
 /* Type description wrapper needs relative positioning for absolutely positioned action buttons */
 .type-description-wrapper {
     position: relative;
+}
+
+.concept-text-multi-section {
+    margin: 8px 0 16px 0;
+}
+
+.concept-text-multi-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.concept-text-multi-heading {
+    margin: 0;
+    font-size: 1rem;
+    color: var(--von-muted-meta-strong);
+}
+
+.concept-text-multi-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.concept-text-status {
+    margin-top: 4px;
+    font-size: 0.75rem;
+    color: var(--von-muted-meta);
+}
+
+.concept-text-item {
+    position: relative;
+    padding: 8px 10px;
+    border: 1px solid var(--von-card-border);
+    background: var(--von-card-note-bg);
+}
+
+.content-item.concept-text-item,
+.concept-text-item.concept-text-item-content {
+    background: var(--von-card-content-bg);
+}
+
+.concept-text-item.concept-text-item-draft {
+    border-style: dashed;
+    border-color: var(--von-card-draft-border);
+}
+
+.concept-text-view {
+    white-space: pre-wrap;
+    font-size: 0.85rem;
+    line-height: 1.25;
+    max-height: 220px;
+    overflow: auto;
+}
+
+.content-view.concept-text-view {
+    max-height: 250px;
+}
+
+.concept-text-view.markdown-rendered {
+    white-space: normal;
+}
+
+.concept-text-edit {
+    margin-top: 4px;
+}
+
+.concept-text-editor {
+    width: 100%;
+    min-height: 120px;
+    font-family: monospace;
+    font-size: 0.8rem;
+    padding: 6px;
+}
+
+.concept-text-editor.concept-text-editor-content {
+    min-height: 150px;
+}
+
+.concept-text-edit-row,
+.concept-text-create-row {
+    margin-top: 4px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.concept-text-create-row {
+    margin-top: 6px;
+}
+
+.concept-text-inline-status {
+    font-size: 0.7rem;
+    color: var(--von-muted-meta);
+}
+
+.concept-text-draft-label {
+    font-size: 0.75rem;
+    color: var(--von-muted-meta);
+    margin-bottom: 4px;
 }
 
 /* Provide consistent icon rendering via data-icon (allows later swap to SVG) */
@@ -9549,6 +9685,15 @@ body.settings-body {
     display: flex;
     gap: 4px;
     margin-left: 8px;
+}
+
+.relationships-loading {
+    color: #999;
+    padding: 12px;
+}
+
+.relationships-error {
+    color: #b91c1c;
 }
 
 .analysis-flag-button,
