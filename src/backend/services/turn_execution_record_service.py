@@ -147,6 +147,8 @@ _WRITE_OBJECT_TERMS = (
 _DIAGNOSTIC_ONLY_PHRASES = (
     "didn't actually",
     "did not actually",
+    "don't program",
+    "do not program",
     "explain why",
     "inspect the telemetry",
     "what went wrong",
@@ -164,6 +166,15 @@ _ACTION_REQUEST_MUTATION_PATTERN = re.compile(
 _NEGATED_MUTATION_PREFIX_PATTERN = re.compile(
     r"(?:did(?:n't| not)|was(?:n't| not)|were(?:n't| not)|not)\s+(?:actually\s+)?$"
 )
+
+_TOOL_CALLING_SELECTOR_VERDICTS = {"tool_seeking", "tool_calling"}
+
+_TOOL_EXECUTION_FAILURE_REASON_MAP = {
+    "worker_unavailable_zero_execution": "Tool execution was blocked while workers were unavailable.",
+    "missing_tool_call_parse_error": "Tool call parsing failed before any tool execution occurred.",
+    "missing_tool_call_retry_exhausted": "Tool-call recovery exhausted retries without executing a tool.",
+    "missing_tool_call_unresolved": "Tool-calling was selected but no executable tool call was produced.",
+}
 
 
 def _has_affirmative_mutation_term(prompt_text: str) -> bool:
@@ -222,6 +233,31 @@ def _safe_str(value: Any) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned or None
+
+
+def _safe_non_negative_int(value: Any, *, default: int = 0) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = default
+    return max(0, parsed)
+
+
+def _normalise_failure_codes(raw_codes: Any) -> list[str]:
+    if not isinstance(raw_codes, list):
+        return []
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in raw_codes:
+        code = _safe_str(item)
+        if not code:
+            continue
+        lowered = code.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        ordered.append(code)
+    return ordered
 
 
 def _derive_actor_concept_from_namespace(namespace: Any) -> str | None:
@@ -504,6 +540,195 @@ def _summarise_tool_invocations(
     )
 
 
+def _summarise_tool_execution_context(
+    *,
+    workflow_routing: Mapping[str, Any] | None,
+    turn_execution_diagnostics: Mapping[str, Any] | None,
+    aux_llm_calls: Sequence[Mapping[str, Any]] | None,
+    serialised_invocations: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    selected_workflow_id = (
+        _safe_str(workflow_routing.get("workflow_id"))
+        if isinstance(workflow_routing, Mapping)
+        else None
+    )
+    selector_verdict = (
+        _safe_str(workflow_routing.get("verdict"))
+        if isinstance(workflow_routing, Mapping)
+        else None
+    )
+    selector_verdict_lower = (selector_verdict or "").lower()
+    selected_workflow_id_lower = (selected_workflow_id or "").lower()
+
+    tool_route_selected = bool(
+        selector_verdict_lower in _TOOL_CALLING_SELECTOR_VERDICTS
+        or "tool_calling_workflow" in selected_workflow_id_lower
+    )
+
+    latest_progress = (
+        turn_execution_diagnostics.get("latest_progress")
+        if isinstance(turn_execution_diagnostics, Mapping)
+        else None
+    )
+    counters = (
+        latest_progress.get("counters")
+        if isinstance(latest_progress, Mapping)
+        else None
+    )
+    progress_tools_started = (
+        _safe_non_negative_int(counters.get("tools_started"))
+        if isinstance(counters, Mapping)
+        else 0
+    )
+    progress_tools_completed = (
+        _safe_non_negative_int(counters.get("tools_completed"))
+        if isinstance(counters, Mapping)
+        else 0
+    )
+
+    diagnostic_events = []
+    if isinstance(latest_progress, Mapping):
+        raw_events = latest_progress.get("diagnostic_events")
+        if isinstance(raw_events, list):
+            diagnostic_events = [
+                event for event in raw_events if isinstance(event, Mapping)
+            ]
+
+    worker_unavailable_event_count = 0
+    tool_call_start_event_count = 0
+    tool_plan_stage_event_count = 0
+    tool_execute_stage_event_count = 0
+    for event in diagnostic_events:
+        liveness_reason = (_safe_str(event.get("liveness_reason")) or "").lower()
+        if liveness_reason == "worker_unavailable":
+            worker_unavailable_event_count += 1
+        event_kind = (_safe_str(event.get("event_kind")) or "").lower()
+        if event_kind == "tool_call_start":
+            tool_call_start_event_count += 1
+        stage = (_safe_str(event.get("stage")) or "").lower()
+        phase = (_safe_str(event.get("phase")) or "").lower()
+        if "tool_plan" in {stage, phase}:
+            tool_plan_stage_event_count += 1
+        if "tool_execute" in {stage, phase}:
+            tool_execute_stage_event_count += 1
+
+    parse_error_invocation_count = 0
+    validation_error_invocation_count = 0
+    for invocation in serialised_invocations:
+        if not isinstance(invocation, Mapping):
+            continue
+        tool_name = (_safe_str(invocation.get("tool")) or "").lower()
+        if tool_name == "__tool_call_parse_error__":
+            parse_error_invocation_count += 1
+        elif tool_name == "__tool_call_validation_error__":
+            validation_error_invocation_count += 1
+
+    missing_tool_parse_error_count = 0
+    missing_tool_retry_exhausted_count = 0
+    missing_tool_unresolved_count = 0
+    for entry in aux_llm_calls or ():
+        if not isinstance(entry, Mapping):
+            continue
+        entry_type = (_safe_str(entry.get("type")) or "").lower()
+        if entry_type == "missing_tool_call_detection":
+            parse_error = _safe_str(entry.get("parse_error"))
+            retry_reason = _safe_str(entry.get("retry_reason"))
+            if parse_error:
+                missing_tool_parse_error_count += 1
+            if retry_reason:
+                missing_tool_unresolved_count += 1
+        elif entry_type == "missing_tool_call_retry":
+            retry_reason = _safe_str(entry.get("retry_reason"))
+            if not retry_reason:
+                continue
+            stage = (_safe_str(entry.get("stage")) or "").lower()
+            retries_remaining = _safe_non_negative_int(entry.get("retries_remaining"))
+            if stage == "skipped" or retries_remaining <= 0:
+                missing_tool_retry_exhausted_count += 1
+
+    invocation_count = len(serialised_invocations)
+    observed_started_count = max(progress_tools_started, tool_call_start_event_count)
+    observed_executed_count = max(progress_tools_completed, invocation_count)
+
+    failure_codes: list[str] = []
+    if observed_executed_count <= 0 and worker_unavailable_event_count > 0:
+        failure_codes.append("worker_unavailable_zero_execution")
+    if missing_tool_parse_error_count > 0 or parse_error_invocation_count > 0:
+        failure_codes.append("missing_tool_call_parse_error")
+    if missing_tool_retry_exhausted_count > 0:
+        failure_codes.append("missing_tool_call_retry_exhausted")
+    if (
+        observed_executed_count <= 0
+        and missing_tool_unresolved_count > 0
+        and tool_plan_stage_event_count > 0
+        and tool_execute_stage_event_count <= 0
+    ):
+        failure_codes.append("missing_tool_call_unresolved")
+
+    planned_count = max(
+        observed_started_count,
+        invocation_count,
+        1 if (tool_route_selected and failure_codes) else 0,
+    )
+
+    return {
+        "tool_route_selected": tool_route_selected,
+        "selected_workflow_id": selected_workflow_id,
+        "selector_verdict": selector_verdict,
+        "planned_count": planned_count,
+        "started_count": observed_started_count,
+        "executed_count": observed_executed_count,
+        "invocation_count": invocation_count,
+        "worker_unavailable_event_count": worker_unavailable_event_count,
+        "tool_plan_stage_event_count": tool_plan_stage_event_count,
+        "tool_execute_stage_event_count": tool_execute_stage_event_count,
+        "failure_codes": list(failure_codes),
+        "zero_tools_executed": observed_executed_count <= 0,
+        "parse_error_invocation_count": parse_error_invocation_count,
+        "validation_error_invocation_count": validation_error_invocation_count,
+    }
+
+
+def _infer_tool_execution_required_effect(
+    *,
+    execution_summary: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(execution_summary, Mapping):
+        return None
+    if not bool(execution_summary.get("tool_route_selected")):
+        return None
+
+    executed_count = _safe_non_negative_int(execution_summary.get("executed_count"))
+    if executed_count > 0:
+        return None
+
+    failure_codes = _normalise_failure_codes(execution_summary.get("failure_codes"))
+    if not failure_codes:
+        return None
+
+    primary_failure_code = failure_codes[0]
+    status_reason = _TOOL_EXECUTION_FAILURE_REASON_MAP.get(
+        primary_failure_code,
+        "Tool-calling workflow selected but no tool execution was observed.",
+    )
+
+    return {
+        "effect_id": "effect_tool_execution_1",
+        "intent_origin": "workflow_contract",
+        "effect_type": "tool_execution",
+        "description": "Run at least one tool call for this tool-calling turn.",
+        "required_tools": [],
+        "targets": [],
+        "required_predicates": [],
+        "postcondition_required": True,
+        "postcondition_strategy": "execution_observed",
+        "status": "not_executed",
+        "status_reason": status_reason,
+        "failure_code": primary_failure_code,
+        "failure_codes": list(failure_codes),
+    }
+
+
 def _infer_mutation_required_effect(
     *,
     prompt_text: Any,
@@ -583,28 +808,48 @@ def _build_postcondition_checks(
     for effect in required_effects:
         effect_id = _safe_str(effect.get("effect_id")) or "effect_1"
         effect_status = _safe_str(effect.get("status")) or "pending"
-        if effect_status == "satisfied" and successful_write_tools:
-            check_status = "inconclusive"
-            evidence = (
-                "Write tool invocation succeeded but explicit state re-query was not run."
-            )
-        elif effect_status in {"not_satisfied", "not_executed"}:
-            check_status = "not_verified"
-            evidence = "Required mutation effect is unresolved."
+        effect_type = _safe_str(effect.get("effect_type")) or "kb_mutation"
+        if effect_type == "tool_execution":
+            if effect_status == "satisfied":
+                check_status = "verified"
+                evidence = "Required tool execution was observed."
+            elif effect_status in {"not_satisfied", "not_executed"}:
+                check_status = "not_verified"
+                evidence = (
+                    _safe_str(effect.get("status_reason"))
+                    or "Required tool execution was not observed."
+                )
+            else:
+                check_status = "inconclusive"
+                evidence = "Tool execution verification outcome is inconclusive."
         else:
-            check_status = "inconclusive"
-            evidence = "Mutation verification outcome is inconclusive."
+            if effect_status == "satisfied" and successful_write_tools:
+                check_status = "inconclusive"
+                evidence = (
+                    "Write tool invocation succeeded but explicit state re-query was not run."
+                )
+            elif effect_status in {"not_satisfied", "not_executed"}:
+                check_status = "not_verified"
+                evidence = "Required mutation effect is unresolved."
+            else:
+                check_status = "inconclusive"
+                evidence = "Mutation verification outcome is inconclusive."
 
         checks.append(
             {
                 "check_id": f"check_{effect_id}",
                 "effect_id": effect_id,
-                "check_type": "predicate_exists",
+                "check_type": (
+                    "tool_execution_observed"
+                    if effect_type == "tool_execution"
+                    else "predicate_exists"
+                ),
                 "check_tool": "derived.turn_execution",
                 "check_payload": {},
                 "observed": {
                     "successful_write_tools": list(successful_write_tools),
                     "effect_status": effect_status,
+                    "effect_type": effect_type,
                 },
                 "status": check_status,
                 "evidence": evidence,
@@ -647,13 +892,25 @@ def _derive_completion_gate(
     decision = "completed"
     decision_reason = "No blocking effect detected."
     blocking_effect_ids: list[str] = []
+    blocking_failure_codes: list[str] = []
 
     unresolved_effect_ids: list[str] = []
+    unresolved_effect_types: set[str] = set()
+    unresolved_failure_codes: list[str] = []
     for effect in required_effects:
         effect_status = _safe_str(effect.get("status")) or ""
         effect_id = _safe_str(effect.get("effect_id")) or "effect_1"
         if effect_status in {"not_satisfied", "not_executed"}:
             unresolved_effect_ids.append(effect_id)
+            effect_type = _safe_str(effect.get("effect_type"))
+            if effect_type:
+                unresolved_effect_types.add(effect_type)
+            unresolved_failure_codes.extend(
+                _normalise_failure_codes(effect.get("failure_codes"))
+            )
+            single_failure_code = _safe_str(effect.get("failure_code"))
+            if single_failure_code:
+                unresolved_failure_codes.append(single_failure_code)
 
     unresolved_check_ids: list[str] = []
     for check in postcondition_checks:
@@ -663,6 +920,14 @@ def _derive_completion_gate(
 
     if unresolved_effect_ids:
         blocking_effect_ids = sorted(set(unresolved_effect_ids))
+        if unresolved_failure_codes:
+            blocking_failure_codes = sorted(
+                {
+                    code
+                    for code in unresolved_failure_codes
+                    if isinstance(code, str) and code.strip()
+                }
+            )
         if any(
             (_safe_str(effect.get("status")) or "") == "not_satisfied"
             for effect in required_effects
@@ -671,7 +936,10 @@ def _derive_completion_gate(
             decision_reason = "Mutation attempt failed or was blocked."
         else:
             decision = "escalation_required"
-            decision_reason = "Required mutation was not executed."
+            if unresolved_effect_types == {"tool_execution"}:
+                decision_reason = "Required tool execution was not observed."
+            else:
+                decision_reason = "Required mutation was not executed."
     elif unresolved_check_ids:
         blocking_effect_ids = sorted(set(unresolved_check_ids))
         decision = "partial"
@@ -689,6 +957,7 @@ def _derive_completion_gate(
         "decision": decision,
         "decision_reason": decision_reason,
         "blocking_effect_ids": blocking_effect_ids,
+        "blocking_failure_codes": blocking_failure_codes,
         "safe_to_claim_completion": safe_to_claim,
         "requires_follow_up": not safe_to_claim,
     }
@@ -734,6 +1003,16 @@ def build_turn_execution_record(
         blocked_tools,
         successful_write_tools,
     ) = _summarise_tool_invocations(tool_invocations)
+    execution_summary = _summarise_tool_execution_context(
+        workflow_routing=workflow_routing,
+        turn_execution_diagnostics=(
+            turn_execution_diagnostics
+            if isinstance(turn_execution_diagnostics, Mapping)
+            else None
+        ),
+        aux_llm_calls=aux_llm_calls,
+        serialised_invocations=serialised_invocations,
+    )
 
     required_effects: list[dict[str, Any]] = []
     mutation_effect = _infer_mutation_required_effect(
@@ -744,6 +1023,12 @@ def build_turn_execution_record(
     )
     if mutation_effect is not None:
         required_effects.append(mutation_effect)
+    elif not successful_write_tools:
+        tool_execution_effect = _infer_tool_execution_required_effect(
+            execution_summary=execution_summary
+        )
+        if tool_execution_effect is not None:
+            required_effects.append(tool_execution_effect)
 
     postcondition_checks = _build_postcondition_checks(
         required_effects=required_effects,
@@ -844,6 +1129,7 @@ def build_turn_execution_record(
         "required_effects": required_effects,
         "execution": {
             "tool_invocations": serialised_invocations,
+            "summary": execution_summary,
             "diagnostic_events": diagnostic_events,
             "retry": retry,
             "workflow_stage_model": build_conversation_turn_stage_model_snapshot(),
