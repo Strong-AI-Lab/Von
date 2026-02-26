@@ -534,6 +534,11 @@ class InternalMCPChatOrchestrator:
         r"\bcall\s+`?([a-z_][a-z0-9_]*)`?\b",
         flags=re.IGNORECASE,
     )
+    _WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID = (
+        "#V#workflow_introspection_maintenance_workflow"
+    )
+    _INTROSPECTION_AUTOTRIGGER_ENV = "VON_WORKFLOW_INTROSPECTION_AUTOTRIGGER_ENABLE"
+    _INTROSPECTION_AUTO_APPLY_ENV = "VON_WORKFLOW_INTROSPECTION_AUTO_APPLY"
     # Structured tool-call candidate baseline and provider constraints.
     #
     # Keep this baseline minimal: it should preserve core recovery and lookup
@@ -4741,6 +4746,114 @@ class InternalMCPChatOrchestrator:
             safe_to_claim_completion = False
             requires_follow_up = True
 
+        introspection_autotrigger: dict[str, Any] | None = None
+        autotrigger_enabled = os.getenv(
+            self._INTROSPECTION_AUTOTRIGGER_ENV, "1"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        already_autotriggered = bool(data.get("workflow_introspection_autotriggered"))
+        if (
+            autotrigger_enabled
+            and requires_follow_up
+            and not repeat_iteration
+            and not already_autotriggered
+        ):
+            def _clean_text(value: Any) -> str | None:
+                if not isinstance(value, str):
+                    return None
+                cleaned = value.strip()
+                return cleaned or None
+
+            namespace = _clean_text(
+                getattr(request.environment, "user_namespace", None)
+            ) or _clean_text(data.get("namespace"))
+            user_concept_id = _clean_text(data.get("user_concept_id")) or _clean_text(
+                data.get("actor_concept_id")
+            )
+            org_concept_id = _clean_text(data.get("org_concept_id"))
+            selected_workflow_id = None
+            workflow_selection = (
+                record.get("workflow_selection")
+                if isinstance(record.get("workflow_selection"), Mapping)
+                else {}
+            )
+            if isinstance(workflow_selection, Mapping):
+                selected_workflow_id = _clean_text(
+                    workflow_selection.get("selected_workflow_id")
+                )
+
+            auto_apply_repairs = os.getenv(
+                self._INTROSPECTION_AUTO_APPLY_ENV, "1"
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            request_id = _clean_text(data.get("turn_id"))
+            conversation_session_id = _clean_text(data.get("conversation_session_id"))
+            prompt_text = str(data.get("prompt") or "").strip()
+            incident_text = (
+                prompt_text[:500]
+                if prompt_text
+                else str(decision_reason or "")[:500]
+            )
+            try:
+                create_payload = {
+                    "workflow_id": self._WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
+                    "namespace": namespace,
+                    "user_id": user_concept_id or "anonymous",
+                    "org_id": org_concept_id or "default",
+                    "max_retries": 1,
+                    "inputs": {
+                        "namespace": namespace,
+                        "request_id": request_id,
+                        "session_id": conversation_session_id,
+                        "selected_workflow_id": selected_workflow_id,
+                        "incident_text": incident_text,
+                        "apply_repairs": auto_apply_repairs,
+                        "dry_run": False,
+                    },
+                }
+                result = self._gateway.invoke("workflow_create_instance", create_payload)
+                payload = result.payload if isinstance(result.payload, Mapping) else {}
+                ok = bool(payload.get("success", False))
+                introspection_autotrigger = {
+                    "attempted": True,
+                    "enabled": True,
+                    "success": ok,
+                    "instance_id": payload.get("instance_id"),
+                    "status": payload.get("status"),
+                    "error": payload.get("error"),
+                    "error_code": payload.get("error_code"),
+                    "workflow_id": self._WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
+                }
+                data["workflow_introspection_autotriggered"] = ok
+            except Exception as exc:
+                introspection_autotrigger = {
+                    "attempted": True,
+                    "enabled": True,
+                    "success": False,
+                    "workflow_id": self._WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
+                    "error": str(exc),
+                    "error_code": "workflow_introspection_autotrigger_failed",
+                }
+                data["workflow_introspection_autotriggered"] = False
+        elif autotrigger_enabled:
+            introspection_autotrigger = {
+                "attempted": False,
+                "enabled": True,
+                "reason": (
+                    "repeat_iteration"
+                    if repeat_iteration
+                    else "already_autotriggered"
+                    if already_autotriggered
+                    else "no_follow_up_required"
+                ),
+                "workflow_id": self._WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
+            }
+        else:
+            introspection_autotrigger = {
+                "attempted": False,
+                "enabled": False,
+                "reason": "autotrigger_disabled",
+                "workflow_id": self._WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
+            }
+
         aux_llm_calls = data.get("aux_llm_calls")
         if isinstance(aux_llm_calls, list):
             try:
@@ -4762,6 +4875,7 @@ class InternalMCPChatOrchestrator:
                         "loop_no_progress_streak": loop_no_progress_streak,
                         "loop_no_progress_limit": loop_no_progress_limit,
                         "loop_retry_reason": loop_retry_reason,
+                        "workflow_introspection_autotrigger": introspection_autotrigger,
                     }
                 )
             except Exception:
@@ -4787,6 +4901,7 @@ class InternalMCPChatOrchestrator:
                 "completion_gate_loop_no_progress_limit": loop_no_progress_limit,
                 "completion_gate_loop_last_invocation_count": invocation_count,
                 "completion_gate_loop_last_blocking_signature": blocking_signature,
+                "workflow_introspection_autotrigger": introspection_autotrigger,
                 "result": requires_follow_up,
             }
         )

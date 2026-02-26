@@ -18,6 +18,27 @@ class _DummyGateway:
         raise RuntimeError("invoke should not be called in this test")
 
 
+class _GatewayResult:
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.payload = payload
+
+
+class _RecordingGateway:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def describe_methods(self) -> dict[str, Any]:
+        return {}
+
+    def invoke(self, tool_name: str, payload: dict[str, Any]) -> _GatewayResult:
+        self.calls.append((tool_name, payload))
+        if tool_name == "workflow_create_instance":
+            return _GatewayResult(
+                {"success": True, "instance_id": "wf-maint-1", "status": "pending"}
+            )
+        return _GatewayResult({"success": True})
+
+
 def _build_orchestrator() -> InternalMCPChatOrchestrator:
     # Avoid full orchestrator initialisation in unit tests.
     # Constructor bootstrap can require external workflow registry state that is
@@ -334,3 +355,60 @@ def test_turn_completion_gate_stops_repeat_when_no_progress_guard_triggers() -> 
         result.outputs.get("completion_gate_loop_stop_reason")
         == "no_progress_guard_triggered"
     )
+
+
+def test_turn_completion_gate_autotriggers_workflow_introspection(monkeypatch) -> None:
+    monkeypatch.setenv("VON_WORKFLOW_INTROSPECTION_AUTOTRIGGER_ENABLE", "1")
+    monkeypatch.setenv("VON_WORKFLOW_INTROSPECTION_AUTO_APPLY", "1")
+
+    orchestrator = _build_orchestrator()
+    gateway = _RecordingGateway()
+    orchestrator._gateway = cast(Any, gateway)
+
+    request = _build_request(
+        action_id="turn_execution.completion_gate",
+        data={
+            "prompt": "Why did this conflate task tooling and concepts?",
+            "turn_id": "req-introspection-1",
+            "conversation_session_id": "session-introspection-1",
+            "user_concept_id": "#V#test_user",
+            "org_concept_id": "#V#test_org",
+            "turn_execution_record": {
+                "workflow_selection": {
+                    "selected_workflow_id": "#V#tool_calling_workflow",
+                },
+                "completion_gate": {
+                    "decision": "escalation_required",
+                    "decision_reason": "Conflation suspected.",
+                    "safe_to_claim_completion": False,
+                    "requires_follow_up": True,
+                    "blocking_effect_ids": ["effect_1"],
+                },
+            },
+            "completion_gate_loop_attempts": 1,
+            "completion_gate_loop_max_attempts": 1,
+            "completion_gate_loop_max_elapsed_ms": 60_000,
+            "completion_gate_loop_no_progress_streak": 0,
+            "completion_gate_loop_no_progress_limit": 2,
+            "completion_gate_loop_last_invocation_count": 0,
+            "completion_gate_loop_last_blocking_signature": "",
+        },
+    )
+
+    result = orchestrator._action_turn_execution_completion_gate(request)
+    assert result.ok
+
+    autotrigger = result.outputs.get("workflow_introspection_autotrigger")
+    assert isinstance(autotrigger, dict)
+    assert autotrigger.get("success") is True
+    assert autotrigger.get("instance_id") == "wf-maint-1"
+
+    assert gateway.calls
+    tool_name, payload = gateway.calls[0]
+    assert tool_name == "workflow_create_instance"
+    assert payload.get("workflow_id") == (
+        "#V#workflow_introspection_maintenance_workflow"
+    )
+    inputs = payload.get("inputs")
+    assert isinstance(inputs, dict)
+    assert inputs.get("request_id") == "req-introspection-1"

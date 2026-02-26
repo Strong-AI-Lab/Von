@@ -35,6 +35,10 @@ from .planning_workflow import (
     get_planning_workflow_registration,
     register_planning_actions,
 )
+from .workflow_introspection_maintenance_workflow import (
+    get_workflow_introspection_maintenance_registration,
+    register_workflow_introspection_maintenance_actions,
+)
 from ..vontology_loader import (
     build_workflow_process_graph,
     discover_workflow_ids,
@@ -397,6 +401,7 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
     registry.register(get_enrichment_workflow_registration())
     registry.register(get_rumination_workflow_registration())
     registry.register(get_planning_workflow_registration())
+    registry.register(get_workflow_introspection_maintenance_registration())
 
     # 3. Vontology-discovered workflows
     discovered_workflow_ids: List[str] = []
@@ -528,6 +533,7 @@ def build_durable_action_registry() -> ActionRegistry:
     register_enrichment_actions(registry)
     register_rumination_actions(registry)
     register_planning_actions(registry)
+    register_workflow_introspection_maintenance_actions(registry)
     # Keep durable action routing aligned with orchestrator routing: if an
     # action ID is not explicitly registered, treat it as an MCP tool name.
     registry.set_fallback_handler(_durable_mcp_fallback_action)
