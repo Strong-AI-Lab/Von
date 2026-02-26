@@ -78,6 +78,11 @@ function getSelectedConceptIdForSuffix(suffix) {
   try {
     const containerId = suffix ? `conceptTab_${suffix}` : 'conceptTab';
     const container = document.getElementById(containerId) || document;
+    const containerConceptId = container?.dataset?.conceptId;
+    if (containerConceptId) {
+      return containerConceptId;
+    }
+
     const expectedRadioName = suffix ? `selectedconcept_${suffix}` : 'selectedconcept';
     const radios = container.querySelectorAll('input[type="radio"]');
     for (const radio of radios) {
@@ -2974,7 +2979,7 @@ export async function addNewName(suffix = '') {
   // Update display
   await displayConceptNames(currentConceptNames, suffix);
 
-  const conceptId = getCurrentlySelectedConceptId();
+  const conceptId = getSelectedConceptIdForSuffix(suffix);
   if (!conceptId) {
     console.error('No concept selected');
     return;
@@ -2999,8 +3004,8 @@ export async function addNewName(suffix = '') {
 
   // Notify dynamic tabs that names for this concept changed so labels can update
   try {
-    const conceptId = getCurrentlySelectedConceptId();
-    const evt = new CustomEvent('concept-names-changed', { detail: { conceptId } });
+    const conceptIdForEvt = getSelectedConceptIdForSuffix(suffix);
+    const evt = new CustomEvent('concept-names-changed', { detail: { conceptId: conceptIdForEvt } });
     document.dispatchEvent(evt);
   } catch (_) { /* ignore */ }
 
@@ -3019,7 +3024,7 @@ export async function deleteName(index, suffix = '') {
     return; // Don't allow deleting the last name
   }
 
-  const conceptId = getCurrentlySelectedConceptId();
+  const conceptId = getSelectedConceptIdForSuffix(suffix);
   if (!conceptId) {
     console.error('No concept selected');
     return;
@@ -3065,7 +3070,7 @@ export async function deleteName(index, suffix = '') {
  * @param {string} suffix - Optional suffix for dynamic tabs
  */
 async function updateConceptNameEntry(index, newValue, suffix = '') {
-  const conceptId = getCurrentlySelectedConceptId();
+  const conceptId = getSelectedConceptIdForSuffix(suffix);
   if (!conceptId) {
     console.error('No concept selected');
     return;
