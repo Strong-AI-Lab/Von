@@ -29,6 +29,10 @@ import {
     parseIsoTimestampMs,
     selectConversationHistorySessions
 } from './utils/conversationHistoryPreferences.js';
+import {
+    normaliseConversationSessionViewModel,
+    normaliseConversationSessionViewModels
+} from './utils/chatSessionViewModel.js';
 import { getSessionScopedNamespace, getSessionScopedOrgContext } from './utils/sessionScopedStorage.js';
 import {
     applyCartoucheAppearance,
@@ -534,7 +538,9 @@ async function deleteConversation(sessionId) {
             return false;
         }
         // Remove from cache and re-render
-        sessionTabsCache = sessionTabsCache.filter(s => s?.session_id !== sessionId);
+        sessionTabsCache = normaliseConversationSessionViewModels(
+            sessionTabsCache.filter(s => s?.session_id !== sessionId)
+        );
         // Also remove from hidden set if present
         hiddenChatSessionIds.delete(sessionId);
         pinnedChatSessionIds.delete(sessionId);
@@ -8635,12 +8641,14 @@ async function assignChatSessionToCurrentOrg(sessionId) {
         const resp = await postJson('/von/api/session/assign_chat_session_org', { session_id: sid });
         const updatedNamespace = resp?.namespace;
         if (updatedNamespace) {
-            sessionTabsCache = sessionTabsCache.map((session) => {
-                if (String(session?.session_id || '') === sid) {
-                    return { ...session, namespace: updatedNamespace };
-                }
-                return session;
-            });
+            sessionTabsCache = normaliseConversationSessionViewModels(
+                sessionTabsCache.map((session) => {
+                    if (String(session?.session_id || '') === sid) {
+                        return { ...session, namespace: updatedNamespace };
+                    }
+                    return session;
+                })
+            );
         }
         showToast('Conversation updated to current organisation.', 'success');
         _renderChatSessionMetadataPanel({
@@ -8761,7 +8769,9 @@ async function promptMoveToOrganisation(sessionId) {
             const revokedCount = resp.invites_revoked || 0;
 
             // Remove conversation from current view since it now belongs to a different namespace
-            sessionTabsCache = sessionTabsCache.filter((s) => String(s?.session_id || '') !== sid);
+            sessionTabsCache = normaliseConversationSessionViewModels(
+                sessionTabsCache.filter((s) => String(s?.session_id || '') !== sid)
+            );
 
             // If moved the active session, switch to first available or null
             if (activeChatSessionId === sid) {
@@ -10067,9 +10077,11 @@ async function refreshChatSessionTabs() {
             });
         }
 
+        const normalisedSessions = normaliseConversationSessionViewModels(sessions);
+
         // If the server temporarily reports no sessions (e.g. after creating a new chat
         // while history is still updating), keep the existing UI rather than hiding it.
-        if (sessions.length === 0) {
+        if (normalisedSessions.length === 0) {
             if (hasCachedTabs) {
                 console.warn('[chatTab] Session list empty during refresh; keeping existing tabs');
                 setTimeout(() => scheduleChatSessionTabsRefresh(true), 2000);
@@ -10103,13 +10115,13 @@ async function refreshChatSessionTabs() {
             _stopChatTabsLoadingTicker();
         }
 
-        sessionTabsCache = sessions;
+        sessionTabsCache = normalisedSessions;
         const activeSessionId = (typeof data?.active_session_id === 'string' && data.active_session_id.trim())
             ? data.active_session_id.trim()
             : null;
 
         if (activeSessionId) {
-            const activeSession = sessions.find(
+            const activeSession = normalisedSessions.find(
                 s => (typeof s?.session_id === 'string') && s.session_id === activeSessionId
             );
             activeChatSessionOwnerId = activeSession?.shared_owner_user_id || null;
@@ -10119,13 +10131,13 @@ async function refreshChatSessionTabs() {
         // This prevents race conditions where the user clicks a tab but the server response
         // from a concurrent refresh overwrites their selection.
         if (activeSessionId && !activeChatSessionId) {
-            const activeSession = sessions.find(
+            const activeSession = normalisedSessions.find(
                 s => (typeof s?.session_id === 'string') && s.session_id === activeSessionId
             );
             setActiveChatSession(activeSessionId, activeSession?.session_name);
         }
 
-        renderChatSessionTabs(sessions, activeChatSessionId || activeSessionId);
+        renderChatSessionTabs(normalisedSessions, activeChatSessionId || activeSessionId);
         syncSharedConversationStreams();
 
         const sidForMeta = activeChatSessionId || activeSessionId;
@@ -10156,7 +10168,8 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         return;
     }
 
-    if (!Array.isArray(sessions) || sessions.length === 0) {
+    const canonicalSessions = normaliseConversationSessionViewModels(sessions);
+    if (canonicalSessions.length === 0) {
         renderChatSessionTabsPlaceholder('empty');
         lastRenderedSessionCount = 0;
         setChatSessionCount(0);
@@ -10165,11 +10178,12 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         _clearChatSessionMetadata();
         return;
     }
+    sessionTabsCache = canonicalSessions;
 
     // JVNAUTOSCI-1014: Filter hidden sessions unless showHiddenSessions is enabled.
     const sessionsAfterHiddenFilter = showHiddenSessions
-        ? sessions
-        : sessions.filter(s => !isConversationHidden(s?.session_id));
+        ? canonicalSessions
+        : canonicalSessions.filter(s => !isConversationHidden(s?.session_id));
 
     const conversationHistorySettings = loadConversationHistorySettings((key) => safeLocalStorageGet(key));
     const filteredResult = selectConversationHistorySessions({
@@ -10716,7 +10730,7 @@ async function createChatSession(sessionName) {
             : '';
 
     if (effectiveSessionId) {
-        const newSession = {
+        const newSession = normaliseConversationSessionViewModel({
             session_id: effectiveSessionId,
             session_name: effectiveName || null,
             message_count: 0,
@@ -10724,11 +10738,11 @@ async function createChatSession(sessionName) {
             created_at: nowIso,
             is_completed: false,
             completed_at: null
-        };
-        sessionTabsCache = [
+        });
+        sessionTabsCache = normaliseConversationSessionViewModels([
             newSession,
             ...sessionTabsCache.filter(s => String(s?.session_id || '') !== effectiveSessionId)
-        ];
+        ]);
         renderChatSessionTabs(sessionTabsCache, effectiveSessionId);
     }
 
@@ -10800,15 +10814,17 @@ async function renameChatSession(sessionId, sessionName) {
         const updatedName = (typeof data?.session_name === 'string' && data.session_name.trim())
             ? data.session_name.trim()
             : name;
-        sessionTabsCache = sessionTabsCache.map((session) => {
-            if (String(session?.session_id || '') !== sid) {
-                return session;
-            }
-            return {
-                ...session,
-                session_name: updatedName
-            };
-        });
+        sessionTabsCache = normaliseConversationSessionViewModels(
+            sessionTabsCache.map((session) => {
+                if (String(session?.session_id || '') !== sid) {
+                    return session;
+                }
+                return {
+                    ...session,
+                    session_name: updatedName
+                };
+            })
+        );
         renderChatSessionTabs(sessionTabsCache, activeChatSessionId || sid);
     }
 
@@ -12423,20 +12439,30 @@ function updateChatSessionTabUnreadBadge(sessionId, unreadCount) {
 function updateSharedSessionCache(sessionId, payload) {
     const sid = String(sessionId || '').trim();
     if (!sid || !Array.isArray(sessionTabsCache)) return null;
-    const session = sessionTabsCache.find(
+    const sessionIndex = sessionTabsCache.findIndex(
         s => String(s?.session_id || '') === sid
     );
-    if (!session) return null;
+    if (sessionIndex < 0) return null;
+    const session = sessionTabsCache[sessionIndex];
+    const updatedSession = { ...session };
     const createdAt = payload?.created_at;
     const content = payload?.content;
     if (typeof createdAt === 'string' && createdAt.trim()) {
-        session.last_message_at = createdAt;
+        updatedSession.last_message_at = createdAt;
     }
     if (typeof content === 'string' && content.trim()) {
-        session.preview = content.trim();
-        updateChatSessionTabPreview(sid, session.preview);
+        updatedSession.preview = content.trim();
     }
-    return session;
+    const normalised = normaliseConversationSessionViewModel(updatedSession) || updatedSession;
+    sessionTabsCache = [
+        ...sessionTabsCache.slice(0, sessionIndex),
+        normalised,
+        ...sessionTabsCache.slice(sessionIndex + 1)
+    ];
+    if (typeof content === 'string' && content.trim()) {
+        updateChatSessionTabPreview(sid, normalised.preview);
+    }
+    return normalised;
 }
 
 function markSharedSessionUnread(sessionId) {
