@@ -36,11 +36,46 @@ from .workflow_definition_identity_service import (
     validate_workflow_definition_contract,
 )
 from .workflow_registry import WorkflowRegistry
-from .durable.file_copy_interpretation_workflow import (
-    FILE_COPY_INTERPRETATION_WORKFLOW_ID,
-)
 
 logger = logging.getLogger(__name__)
+
+# Keep durable workflow identity constants local in this module to avoid importing
+# ``workflows.durable`` during authority bootstrap (that path imports registry
+# factory and can create circular imports).
+FILE_COPY_INTERPRETATION_WORKFLOW_ID = "#V#file_copy_interpretation_workflow"
+WORKFLOW_CREATION_WORKFLOW_ID = "#V#von_workflow_creation_workflow"
+
+WORKFLOW_CREATION_STEP_IDENTIFY_NEED = "#V#workflow_creation_step_identify_need"
+WORKFLOW_CREATION_STEP_DESIGN_STRUCTURE = "#V#workflow_creation_step_design_structure"
+WORKFLOW_CREATION_STEP_CREATE_WORKFLOW_TYPE = (
+    "#V#workflow_creation_step_create_workflow_type"
+)
+WORKFLOW_CREATION_STEP_CREATE_STEP_CONCEPTS = (
+    "#V#workflow_creation_step_create_step_concepts"
+)
+WORKFLOW_CREATION_STEP_ESTABLISH_RELATIONSHIPS = (
+    "#V#workflow_creation_step_establish_relationships"
+)
+WORKFLOW_CREATION_STEP_VERIFY_DISCOVERABILITY = (
+    "#V#workflow_creation_step_verify_discoverability"
+)
+WORKFLOW_CREATION_STEP_DOCUMENT_IN_JIRA = "#V#workflow_creation_step_document_in_jira"
+
+WORKFLOW_CREATION_ACTION_IDENTIFY_NEED = "workflow_creation.identify_need"
+WORKFLOW_CREATION_ACTION_DESIGN_STRUCTURE = "workflow_creation.design_structure"
+WORKFLOW_CREATION_ACTION_CREATE_WORKFLOW_TYPE = (
+    "workflow_creation.create_workflow_type"
+)
+WORKFLOW_CREATION_ACTION_CREATE_STEP_CONCEPTS = (
+    "workflow_creation.create_step_concepts"
+)
+WORKFLOW_CREATION_ACTION_ESTABLISH_RELATIONSHIPS = (
+    "workflow_creation.establish_relationships"
+)
+WORKFLOW_CREATION_ACTION_VERIFY_DISCOVERABILITY = (
+    "workflow_creation.verify_discoverability"
+)
+WORKFLOW_CREATION_ACTION_FINALISE = "workflow_creation.finalise"
 
 
 # Ordered from preferred canonical type to legacy fallbacks.
@@ -67,6 +102,12 @@ CANONICAL_CHAT_WORKFLOW_IDS: tuple[str, ...] = (
 # Additional built-in workflows that should be published when registered.
 CANONICAL_DURABLE_WORKFLOW_IDS: tuple[str, ...] = (
     FILE_COPY_INTERPRETATION_WORKFLOW_ID,
+)
+
+# Additional Vontology-authored governance workflows that should be repaired to
+# canonical executable graph form when present in the registry.
+CANONICAL_VONTOLOGY_GOVERNANCE_WORKFLOW_IDS: tuple[str, ...] = (
+    WORKFLOW_CREATION_WORKFLOW_ID,
 )
 
 _CANONICAL_GRAPH_PREDICATES: Dict[str, str] = {
@@ -101,6 +142,7 @@ _SLUG_SANITISER_RE = re.compile(r"[^a-z0-9_]+")
 @dataclass(frozen=True)
 class _CanonicalStepPublicationSpec:
     state_id: str
+    concept_id: str | None = None
     action_id: str | None = None
     next_state: str | None = None
     on_true_state: str | None = None
@@ -297,6 +339,52 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
             _CanonicalStepPublicationSpec(state_id="failed"),
         ),
     ),
+    WORKFLOW_CREATION_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state=WORKFLOW_CREATION_STEP_IDENTIFY_NEED,
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id=WORKFLOW_CREATION_STEP_IDENTIFY_NEED,
+                concept_id=WORKFLOW_CREATION_STEP_IDENTIFY_NEED,
+                action_id=WORKFLOW_CREATION_ACTION_IDENTIFY_NEED,
+                next_state=WORKFLOW_CREATION_STEP_DESIGN_STRUCTURE,
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id=WORKFLOW_CREATION_STEP_DESIGN_STRUCTURE,
+                concept_id=WORKFLOW_CREATION_STEP_DESIGN_STRUCTURE,
+                action_id=WORKFLOW_CREATION_ACTION_DESIGN_STRUCTURE,
+                next_state=WORKFLOW_CREATION_STEP_CREATE_WORKFLOW_TYPE,
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id=WORKFLOW_CREATION_STEP_CREATE_WORKFLOW_TYPE,
+                concept_id=WORKFLOW_CREATION_STEP_CREATE_WORKFLOW_TYPE,
+                action_id=WORKFLOW_CREATION_ACTION_CREATE_WORKFLOW_TYPE,
+                next_state=WORKFLOW_CREATION_STEP_CREATE_STEP_CONCEPTS,
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id=WORKFLOW_CREATION_STEP_CREATE_STEP_CONCEPTS,
+                concept_id=WORKFLOW_CREATION_STEP_CREATE_STEP_CONCEPTS,
+                action_id=WORKFLOW_CREATION_ACTION_CREATE_STEP_CONCEPTS,
+                next_state=WORKFLOW_CREATION_STEP_ESTABLISH_RELATIONSHIPS,
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id=WORKFLOW_CREATION_STEP_ESTABLISH_RELATIONSHIPS,
+                concept_id=WORKFLOW_CREATION_STEP_ESTABLISH_RELATIONSHIPS,
+                action_id=WORKFLOW_CREATION_ACTION_ESTABLISH_RELATIONSHIPS,
+                next_state=WORKFLOW_CREATION_STEP_VERIFY_DISCOVERABILITY,
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id=WORKFLOW_CREATION_STEP_VERIFY_DISCOVERABILITY,
+                concept_id=WORKFLOW_CREATION_STEP_VERIFY_DISCOVERABILITY,
+                action_id=WORKFLOW_CREATION_ACTION_VERIFY_DISCOVERABILITY,
+                next_state=WORKFLOW_CREATION_STEP_DOCUMENT_IN_JIRA,
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id=WORKFLOW_CREATION_STEP_DOCUMENT_IN_JIRA,
+                concept_id=WORKFLOW_CREATION_STEP_DOCUMENT_IN_JIRA,
+                action_id=WORKFLOW_CREATION_ACTION_FINALISE,
+            ),
+        ),
+    ),
 }
 
 
@@ -396,6 +484,9 @@ def publish_canonical_chat_workflow_graphs(
     for workflow_id in CANONICAL_DURABLE_WORKFLOW_IDS:
         if registry.get_registration(workflow_id) is not None:
             target_workflow_ids.append(workflow_id)
+    for workflow_id in CANONICAL_VONTOLOGY_GOVERNANCE_WORKFLOW_IDS:
+        if registry.get_registration(workflow_id) is not None:
+            target_workflow_ids.append(workflow_id)
 
     for workflow_id in target_workflow_ids:
         spec = _CANONICAL_WORKFLOW_PUBLICATION_SPECS.get(workflow_id)
@@ -429,10 +520,18 @@ def publish_canonical_chat_workflow_graphs(
                     workflow_id,
                 )
 
-        step_id_by_state: Dict[str, str] = {
-            step.state_id: _step_concept_id(workflow_id=workflow_id, state_id=step.state_id)
-            for step in spec.steps
-        }
+        step_id_by_state: Dict[str, str] = {}
+        for step in spec.steps:
+            explicit_concept_id = (
+                step.concept_id.strip()
+                if isinstance(step.concept_id, str) and step.concept_id.strip()
+                else None
+            )
+            step_id_by_state[step.state_id] = (
+                explicit_concept_id
+                if explicit_concept_id is not None
+                else _step_concept_id(workflow_id=workflow_id, state_id=step.state_id)
+            )
         ordered_step_ids = [step_id_by_state[step.state_id] for step in spec.steps]
         initial_step_id = step_id_by_state.get(spec.initial_state)
         if not initial_step_id:
@@ -550,11 +649,22 @@ def publish_canonical_chat_workflow_graphs(
                 if registration is not None
                 else None
             )
+            registration_source = (
+                str(getattr(registration, "source", "") or "").strip().lower()
+                if registration is not None
+                else ""
+            )
             supported_action_ids = (
                 collect_workflow_action_ids(registration_definition)
                 if registration_definition is not None
                 else ()
             )
+            enforce_supported_actions = True
+            # Vontology-authored workflows can legitimately publish richer action
+            # bindings than the currently loaded registration snapshot (for
+            # example when bootstrapping an action-less graph to executable form).
+            if registration_source == "vontology" and not supported_action_ids:
+                enforce_supported_actions = False
             published_definition = load_workflow_definition_from_vontology(workflow_id)
             if published_definition is None:
                 errors_by_workflow_id[workflow_id] = (
@@ -569,7 +679,7 @@ def publish_canonical_chat_workflow_graphs(
             contract_validation = validate_workflow_definition_contract(
                 definition=published_definition,
                 supported_action_ids=supported_action_ids,
-                enforce_supported_actions=True,
+                enforce_supported_actions=enforce_supported_actions,
             )
             _graph, graph_warnings = build_workflow_process_graph(workflow_id)
             warning_items = [

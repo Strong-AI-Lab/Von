@@ -97,7 +97,9 @@ def test_bootstrap_workflow_concepts_creates_missing(monkeypatch):
     assert report["counts"]["created"] == 1
     assert report["created_workflow_ids"] == ["#V#wf_create"]
     assert created_payloads
-    payload = created_payloads[0]
+    payload = next(
+        item for item in created_payloads if item.get("concept_id") == "#V#wf_create"
+    )
     assert payload["concept_id"] == "#V#wf_create"
     assert payload["parent_concept_ids"] == ["#V#ai_workflow"]
     assert payload["create_as_instance"] is True

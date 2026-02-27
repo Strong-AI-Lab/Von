@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -39,6 +40,8 @@ WORKFLOW_TYPE_IDS = (
     "#V#workflow",
     "#V#durable_workflow",
 )
+
+WORKFLOW_CREATION_WORKFLOW_ID = "#V#von_workflow_creation_workflow"
 
 # Default relevance threshold (0.0-1.0)
 DEFAULT_RELEVANCE_THRESHOLD = 0.70
@@ -629,6 +632,37 @@ def _count_executable_matches(matches: List[WorkflowMatch]) -> int:
     return sum(1 for match in matches if bool(match.is_executable))
 
 
+_WORKFLOW_CREATION_INTENT_RE = re.compile(
+    r"\b(create|build|generate)\b[\s\w]{0,64}\bworkflow\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_workflow_creation_request(query: str) -> bool:
+    text = str(query or "").strip()
+    if not text:
+        return False
+    if not _WORKFLOW_CREATION_INTENT_RE.search(text):
+        return False
+    return "description" in text.lower() or "request" in text.lower()
+
+
+def _seed_workflow_creation_candidate(query: str) -> list[WorkflowMatch]:
+    if not _looks_like_workflow_creation_request(query):
+        return []
+    return [
+        WorkflowMatch(
+            concept_id=WORKFLOW_CREATION_WORKFLOW_ID,
+            name="Von Workflow Creation Workflow",
+            description=(
+                "Create and verify executable workflows from a workflow description/request."
+            ),
+            relevance_score=1.0,
+            match_source="intent_seed",
+        )
+    ]
+
+
 def discover_workflows(
     query: str,
     *,
@@ -674,7 +708,7 @@ def discover_workflows(
         )
 
     start_time = time.perf_counter()
-    all_matches: List[WorkflowMatch] = []
+    all_matches: List[WorkflowMatch] = _seed_workflow_creation_candidate(query)
     errors: List[str] = []
 
     # Search both sources
