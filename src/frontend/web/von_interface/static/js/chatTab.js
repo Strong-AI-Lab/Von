@@ -8373,6 +8373,18 @@ function setActiveChatSession(sessionId, sessionName) {
 
     // JVNAUTOSCI-1040: Update task panel with new session
     setTaskPanelSession(activeChatSessionId);
+
+    // Keep metadata header title in sync when the active session name changes
+    // (for example, after an in-place rename of the active conversation).
+    if (activeChatSessionId && activeChatSessionLinks?.sessionId === activeChatSessionId) {
+        _renderChatSessionMetadataPanel({
+            sessionId: activeChatSessionId,
+            links: activeChatSessionLinks?.links,
+            statusText: activeChatSessionLinks?.statusText,
+            statusTone: activeChatSessionLinks?.statusTone,
+            disabled: activeChatSessionLinks?.disabled
+        });
+    }
 }
 
 function getChatSessionTabsContainer() {
@@ -8403,6 +8415,45 @@ function setChatSessionCount(count) {
 
 function getChatSessionMetadataEl() {
     return document.getElementById('chatSessionMetadata');
+}
+
+function _resolveCurrentChatSessionTitle(sessionId) {
+    const sid = (typeof sessionId === 'string' && sessionId.trim())
+        ? sessionId.trim()
+        : (activeChatSessionId || null);
+
+    const activeName = (typeof activeChatSessionName === 'string' && activeChatSessionName.trim())
+        ? activeChatSessionName.trim()
+        : '';
+    if (activeName && sid && sid === activeChatSessionId) {
+        return activeName;
+    }
+
+    if (sid) {
+        const sessionMeta = _getSessionMetaById(sid);
+        if (sessionMeta) {
+            return getSessionDisplayName(sessionMeta);
+        }
+    }
+
+    if (activeName) {
+        return activeName;
+    }
+
+    return sid ? getShortSessionId(sid) : '';
+}
+
+function _appendChatSessionCurrentTitle(container, sessionId) {
+    if (!container) return;
+    const title = _resolveCurrentChatSessionTitle(sessionId);
+    if (!title) return;
+
+    const titleEl = document.createElement('div');
+    titleEl.className = 'chat-session-current-title';
+    titleEl.textContent = title;
+    titleEl.title = title;
+    titleEl.setAttribute('aria-label', `Current conversation: ${title}`);
+    container.appendChild(titleEl);
 }
 
 function _normaliseChatSessionLinks(links) {
@@ -8696,6 +8747,8 @@ function _renderChatSessionMetadataMessage(message) {
 
     const isCollapsed = _isChatSessionMetadataCollapsed();
 
+    _appendChatSessionCurrentTitle(el, activeChatSessionId);
+
     const header = document.createElement('div');
     header.className = 'chat-session-metadata-header';
 
@@ -8959,6 +9012,8 @@ function _renderChatSessionMetadataPanel({ sessionId, links, statusText, statusT
     if (isCollapsed && chatSessionMetadataOpenKey) {
         chatSessionMetadataOpenKey = null;
     }
+
+    _appendChatSessionCurrentTitle(el, sid);
 
     const header = document.createElement('div');
     header.className = 'chat-session-metadata-header';

@@ -4,16 +4,20 @@ const chatTabModulePath = '../../src/frontend/web/von_interface/static/js/chatTa
 
 jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => ({
     annotateTurn: jest.fn(),
-    getUserContext: jest.fn()
+    getUserContext: jest.fn(() => ({ user_id: '#V#test_user', org_id: '#V#test_org' })),
+    getWindowSessionId: jest.fn(() => 'test-window-session-id'),
+    WINDOW_SESSION_HEADER: 'X-Von-Window-Session'
 }));
 
 jest.mock('../../src/frontend/web/von_interface/static/js/domUtils.js', () => ({
     elements: {},
+    getCurrentUserConceptId: jest.fn(() => '#V#test_user'),
     renderSpanSuggestions: jest.fn()
 }));
 
 describe('chat session metadata label links', () => {
     beforeEach(() => {
+        jest.resetModules();
         document.body.innerHTML = '<div id="chatSessionMetadata"></div>';
     });
 
@@ -58,5 +62,63 @@ describe('chat session metadata label links', () => {
         ]);
 
         document.removeEventListener('von:selectConceptById', handler);
+    });
+
+    test('Shows current conversation title above Conversation context', async () => {
+        const longName = 'Represent SAIL architecture and long-term integration roadmap with workflow checks';
+        document.body.innerHTML = '<div id="chatSessionTabs"></div><div id="chatSessionMetadata"></div><div id="scrollableField"></div>';
+
+        global.fetch = jest.fn(async (url) => {
+            if (String(url).startsWith('/von/api/session/context')) {
+                return {
+                    ok: true,
+                    json: async () => ({
+                        authenticated: true,
+                        user_id: '#V#test_user',
+                        organisation_id: '#V#test_org',
+                        namespace: '#V#test_user@test_org'
+                    })
+                };
+            }
+            if (String(url).startsWith('/von/history/sessions')) {
+                return {
+                    ok: true,
+                    json: async () => ({
+                        authenticated: true,
+                        active_session_id: 's-long',
+                        sessions: [
+                            { session_id: 's-long', session_name: longName }
+                        ]
+                    })
+                };
+            }
+            if (String(url).startsWith('/von/api/session/chat_session_links')) {
+                return {
+                    ok: true,
+                    json: async () => ({ session_links: {} })
+                };
+            }
+            return { ok: true, json: async () => ({}) };
+        });
+
+        const chatTab = require(chatTabModulePath);
+        await window.refreshChatSessionTabsForOrgSwitch();
+
+        chatTab.__test_only__renderChatSessionMetadataPanel({
+            sessionId: 's-long',
+            links: {},
+            statusText: null,
+            statusTone: null,
+            disabled: false
+        });
+
+        const metadataEl = document.getElementById('chatSessionMetadata');
+        const titleEl = metadataEl.querySelector('.chat-session-current-title');
+        expect(titleEl).toBeTruthy();
+        expect((titleEl.textContent || '').trim()).toBe(longName);
+
+        const header = metadataEl.querySelector('.chat-session-metadata-header');
+        expect(header).toBeTruthy();
+        expect(header.previousElementSibling).toBe(titleEl);
     });
 });

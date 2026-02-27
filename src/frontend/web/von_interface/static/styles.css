@@ -5387,6 +5387,15 @@ footer {
     border-bottom: 1px solid #e5e7eb;
 }
 
+.chat-session-current-title {
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.25;
+    color: #0f172a;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
 .chat-session-metadata-header {
     display: flex;
     align-items: center;
