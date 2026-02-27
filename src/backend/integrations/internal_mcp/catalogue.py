@@ -139,6 +139,27 @@ def _get_concept_by_concept_id(**kwargs):
     return concept
 
 
+def _find_relations_with_argument(**kwargs):
+    from ...services.concept_relation_service import find_relations_with_argument
+
+    concept_id = kwargs.get("concept_id")
+    if concept_id is None or not str(concept_id).strip():
+        raise ValueError("concept_id is required")
+
+    return find_relations_with_argument(
+        concept_id=str(concept_id),
+        argument_index=kwargs.get("argument_index"),
+        predicate_filter=kwargs.get("predicate_filter"),
+        relation_kind=kwargs.get("relation_kind"),
+        scope=kwargs.get("scope"),
+        include_text_snippets=bool(kwargs.get("include_text_snippets", False)),
+        include_concept_preview=bool(kwargs.get("include_concept_preview", True)),
+        limit=kwargs.get("limit"),
+        offset=kwargs.get("offset"),
+        sort_by=kwargs.get("sort_by"),
+    )
+
+
 def _get_context(**kwargs):
     from ...services.settings_service import (
         resolve_llm_setting,
@@ -4364,6 +4385,51 @@ def _fetch_concept_content_input_schema() -> Schema:
         optional={"reconstruct_md": (bool, type(None))},
         allow_unknown=True,
         description="fetch_concept_content input: concept_id (str), reconstruct_md (bool optional default true)",
+    )
+
+
+def _find_relations_with_argument_input_schema() -> Schema:
+    return Schema(
+        required={"concept_id": str},
+        optional={
+            "argument_index": (int, str, type(None)),
+            "predicate_filter": (list, type(None)),
+            "relation_kind": (str, type(None)),
+            "scope": (str, type(None)),
+            "include_text_snippets": (bool, type(None)),
+            "include_concept_preview": (bool, type(None)),
+            "limit": (int, type(None)),
+            "offset": (int, type(None)),
+            "sort_by": (str, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "find_relations_with_argument input: concept_id (required), argument_index "
+            "(int or 'any'), predicate_filter (list of predicate IDs or substrings), "
+            "relation_kind ('any'|'binary'|'text'), scope (optional), include_text_snippets "
+            "(bool), include_concept_preview (bool), paging (limit/offset), sort_by, "
+            "and optional namespace passthrough."
+        ),
+    )
+
+
+def _find_relations_with_argument_output_schema() -> Schema:
+    return Schema(
+        required={
+            "concept_id": str,
+            "total_hits": int,
+            "hits": list,
+            "paging": dict,
+        },
+        optional={},
+        allow_unknown=True,
+        description=(
+            "find_relations_with_argument output: concept_id, total_hits, hits[] "
+            "(source_concept_id, predicate_concept_id, relation_kind, argument_indexes, "
+            "target_value, optional previews/snippets, relation_metadata, access_granted, "
+            "follow_up_actions, score), and paging metadata."
+        ),
     )
 
 
@@ -15066,6 +15132,18 @@ def build_default_catalogue() -> MethodCatalogue:
             output_schema=None,
             category="read",
             description="Fetch full details of ONE specific concept by its ID (format: #V#concept_name). Use when you already know the exact concept_id and need complete information (description, predicates, relationships). Don't use for searching.",
+        ),
+        MethodDefinition(
+            name="find_relations_with_argument",
+            handler=_find_relations_with_argument,
+            input_schema=_find_relations_with_argument_input_schema(),
+            output_schema=_find_relations_with_argument_output_schema(),
+            category="read",
+            description=(
+                "Find relation assertions where a concept appears in one or more argument "
+                "positions. Supports exact graph matching and full-text text-relation matching "
+                "with optional predicate/kind filters and pagination."
+            ),
         ),
         MethodDefinition(
             name="create_concepts",

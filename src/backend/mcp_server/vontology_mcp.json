@@ -502,6 +502,84 @@
             }
         },
         {
+            "name": "find_relations_with_argument",
+            "description": "Find relation assertions where a concept appears in one or more argument positions. Supports exact graph matching and full-text text-relation matching with optional predicate/kind filters and pagination.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string"
+                    },
+                    "argument_index": {
+                        "type": [
+                            "integer",
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "predicate_filter": {
+                        "type": [
+                            "array",
+                            "null"
+                        ]
+                    },
+                    "relation_kind": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "scope": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "include_text_snippets": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "include_concept_preview": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "limit": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "offset": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "sort_by": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "concept_id"
+                ],
+                "additionalProperties": true,
+                "description": "find_relations_with_argument input: concept_id (required), argument_index (int or 'any'), predicate_filter (list of predicate IDs or substrings), relation_kind ('any'|'binary'|'text'), scope (optional), include_text_snippets (bool), include_concept_preview (bool), paging (limit/offset), sort_by, and optional namespace passthrough."
+            }
+        },
+        {
             "name": "find_subconcepts",
             "description": "Finds all direct subconcepts (children) of a given concept in the Vontology hierarchy",
             "inputSchema": {
@@ -1227,6 +1305,48 @@
             }
         },
         {
+            "name": "preview_remove_relationship",
+            "description": "Preview relationship removal effects without mutating data. Supports relation_id or triple selectors and returns impact/warning diagnostics.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "relation_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "source_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "predicate": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "target": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "request_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "preview_remove_relationship input: relation_id OR source_id+predicate with optional target to preview impact before deletion."
+            }
+        },
+        {
             "name": "qna_search",
             "description": "Question-answering optimized search that returns a direct answer to a specific question. Use when user asks a direct question that needs a factual answer from the web. Returns both a concise answer and supporting sources. Uses advanced search depth by default for better answer quality. Best for factual questions like 'When was X founded?', 'What is the population of Y?', 'Who invented Z?', 'How does X work?'. More focused and answer-oriented than general search.",
             "inputSchema": {
@@ -1255,23 +1375,154 @@
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "relation_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
                     "source_id": {
-                        "type": "string"
+                        "type": [
+                            "string",
+                            "null"
+                        ]
                     },
                     "predicate": {
-                        "type": "string"
+                        "type": [
+                            "string",
+                            "null"
+                        ]
                     },
                     "target": {
-                        "type": "string"
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "mode": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "cascade": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "dry_run": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "confirmed": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "operator_override": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "reason": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "request_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
                     }
                 },
-                "required": [
-                    "source_id",
-                    "predicate",
-                    "target"
-                ],
+                "required": [],
                 "additionalProperties": true,
-                "description": "remove_relationship input: source_id (str, concept ID), predicate (str, relationship type like 'instance_of', 'typeOf', or custom predicate), target (str, target concept ID). Only concept-to-concept relationships are supported."
+                "description": "remove_relationship input: relation_id OR source_id+predicate+target. Optional mode/cascade/confirmation controls. Only concept-to-concept relationships are supported."
+            }
+        },
+        {
+            "name": "remove_relationships_bulk",
+            "description": "Bulk-remove concept relationships using explicit relation IDs, triples, and/or filter selectors. Returns deterministic per-item status with partial-failure reporting.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "relation_ids": {
+                        "type": [
+                            "array",
+                            "null"
+                        ]
+                    },
+                    "relations": {
+                        "type": [
+                            "array",
+                            "null"
+                        ]
+                    },
+                    "filter": {
+                        "type": [
+                            "object",
+                            "null"
+                        ]
+                    },
+                    "mode": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "cascade": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "dry_run": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "confirmed": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "operator_override": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "reason": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "request_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "stop_on_error": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "remove_relationships_bulk input: explicit relation_ids and/or triple relations and/or filter-based selector for bulk removal with deterministic reporting."
             }
         },
         {
@@ -1827,6 +2078,35 @@
                 "required": [],
                 "additionalProperties": true,
                 "description": "Search turn execution records for likely failure-to-act patterns and return aggregated failure modes."
+            }
+        },
+        {
+            "name": "undo_relationship_removal",
+            "description": "Restore relationships removed in soft-delete mode by supplying an undo token returned from prior removal operations.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "undo_token": {
+                        "type": "string"
+                    },
+                    "request_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "confirmed": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "undo_token"
+                ],
+                "additionalProperties": true,
+                "description": "undo_relationship_removal input: undo_token returned by remove_relationship/remove_relationships_bulk soft-delete operations."
             }
         },
         {

@@ -72,6 +72,7 @@ from src.backend.services.concept_service import (
 )
 from src.backend.services.concept_relation_service import (
     build_concept_relations_payload,
+    find_relations_with_argument,
 )
 from src.backend.services.concept_search_service import search_concepts
 from src.backend.services.concept_embedding_service import (
@@ -1355,6 +1356,50 @@ async def _handle_fetch_concept(arguments: dict[str, Any]) -> list[TextContent]:
                 error_code="operation_failed",
                 suggestions=["Verify the concept_id exists", "Check parameter values"],
                 related_concept_ids=[concept_id] if concept_id else None,
+            )
+        ]
+
+
+async def _handle_find_relations_with_argument(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    concept_id = arguments.get("concept_id")
+    if concept_id is None or not str(concept_id).strip():
+        return [
+            _json_error(
+                "Missing concept_id parameter",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide the concept_id to search for",
+                    "Use search_concepts if you need to discover concept IDs first",
+                ],
+            )
+        ]
+
+    try:
+        payload = find_relations_with_argument(
+            concept_id=str(concept_id),
+            argument_index=arguments.get("argument_index"),
+            predicate_filter=arguments.get("predicate_filter"),
+            relation_kind=arguments.get("relation_kind"),
+            scope=arguments.get("scope"),
+            include_text_snippets=bool(arguments.get("include_text_snippets", False)),
+            include_concept_preview=bool(arguments.get("include_concept_preview", True)),
+            limit=arguments.get("limit"),
+            offset=arguments.get("offset"),
+            sort_by=arguments.get("sort_by"),
+        )
+        return [_json_text(payload)]
+    except Exception as exc:
+        return [
+            _json_error(
+                f"Failed to search relations: {exc}",
+                error_code="operation_failed",
+                suggestions=[
+                    "Check argument_index (integer >= 1 or 'any')",
+                    "Use relation_kind in {any, binary, text}",
+                ],
+                related_concept_ids=[str(concept_id)],
             )
         ]
 
@@ -2897,6 +2942,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "add_names": _handle_add_names,
     "get_tree": _handle_get_tree,
     "fetch_concept": _handle_fetch_concept,
+    "find_relations_with_argument": _handle_find_relations_with_argument,
     "fetch_concept_content": _handle_fetch_concept_content,
     "concept_exists": _handle_concept_exists,
     "search_concepts": _handle_search_concepts,

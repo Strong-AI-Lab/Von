@@ -56,6 +56,7 @@ VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES: tuple[str, ...] = (
     "fetch_concept",
     "fetch_concept_content",
     "finalise_cached_paper",
+    "find_relations_with_argument",
     "find_concepts_by_name",
     "find_subconcepts",
     "get_concept_index_status",
