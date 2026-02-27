@@ -183,11 +183,30 @@ def app(monkeypatch):
         fake_add_message_to_history,
     )
 
+    workflow_launch_calls = []
+
+    def fake_maybe_launch_file_copy_uploaded_workflow(**kwargs):
+        workflow_launch_calls.append(kwargs)
+        return {
+            "success": True,
+            "triggered": True,
+            "event_type": "file_copy.uploaded",
+            "workflow_id": "#V#file_copy_interpretation_workflow",
+            "reason": "created_new_instance",
+            "instance_id": "test-instance-1",
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_event_integration_service.maybe_launch_file_copy_uploaded_workflow",
+        fake_maybe_launch_file_copy_uploaded_workflow,
+    )
+
     flask_app.config["TEST_FAKE_STORE"] = fake_store
     flask_app.config["TEST_CREATED"] = created
     flask_app.config["TEST_UPSERTS"] = upserts
     flask_app.config["TEST_UPDATES"] = updates
     flask_app.config["TEST_HISTORY_CALLS"] = history_calls
+    flask_app.config["TEST_WORKFLOW_LAUNCH_CALLS"] = workflow_launch_calls
     flask_app.config["TEST_CONCEPT_DOCS"] = concept_docs
     return flask_app
 
@@ -226,6 +245,8 @@ def test_upload_stores_bytes_and_registers_concept(app):
     body = resp.get_json()
     assert body["success"] is True
     assert body["chat_history_recorded"] is True
+    assert body["workflow_event_launch"]["success"] is True
+    assert body["workflow_event_launch"]["event_type"] == "file_copy.uploaded"
     assert body["uploaded"]["type_concept_id"] == "#V#computer_file_copy"
     assert body["uploaded"]["sha256"] == expected_sha256
     assert body["uploaded"]["original_filename"] == "notes.txt"
@@ -264,6 +285,11 @@ def test_upload_stores_bytes_and_registers_concept(app):
     assert "Blob URI:" in assistant_text
     assert "local://" in assistant_text
     assert expected_sha256 in assistant_text
+
+    workflow_calls = app.config["TEST_WORKFLOW_LAUNCH_CALLS"]
+    assert len(workflow_calls) == 1
+    assert workflow_calls[0]["file_copy_concept_id"] == body["uploaded"]["concept_id"]
+    assert workflow_calls[0]["uploaded_by_concept_id"] == "#V#user"
 
 
 def test_download_round_trip_and_access_control(app):
@@ -326,3 +352,5 @@ def test_upload_returns_error_when_blob_store_fails(app, monkeypatch):
 
     created = app.config["TEST_CREATED"]
     assert created == []
+    workflow_calls = app.config["TEST_WORKFLOW_LAUNCH_CALLS"]
+    assert workflow_calls == []

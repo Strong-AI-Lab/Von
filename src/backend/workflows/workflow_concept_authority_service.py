@@ -36,6 +36,9 @@ from .workflow_definition_identity_service import (
     validate_workflow_definition_contract,
 )
 from .workflow_registry import WorkflowRegistry
+from .durable.file_copy_interpretation_workflow import (
+    FILE_COPY_INTERPRETATION_WORKFLOW_ID,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +62,11 @@ CANONICAL_CHAT_WORKFLOW_IDS: tuple[str, ...] = (
     CONCEPT_SUGGESTION_PREFLIGHT_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+)
+
+# Additional built-in workflows that should be published when registered.
+CANONICAL_DURABLE_WORKFLOW_IDS: tuple[str, ...] = (
+    FILE_COPY_INTERPRETATION_WORKFLOW_ID,
 )
 
 _CANONICAL_GRAPH_PREDICATES: Dict[str, str] = {
@@ -246,7 +254,9 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
             _CanonicalStepPublicationSpec(
                 state_id="completion_gate",
                 action_id="turn_execution.completion_gate",
-                on_true_state="completed",
+                # Built-in workflow allows completion-gate retries by
+                # transitioning back to plan when repeat_iteration is set.
+                on_true_state="plan",
                 on_false_state="completed",
             ),
             _CanonicalStepPublicationSpec(state_id="completed"),
@@ -267,6 +277,24 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
                 next_state="completed",
             ),
             _CanonicalStepPublicationSpec(state_id="completed"),
+        ),
+    ),
+    FILE_COPY_INTERPRETATION_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state="interpret",
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id="interpret",
+                action_id="interpret_file_copy",
+                on_true_state="index",
+                on_false_state="complete",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="index",
+                action_id="index_file_copy",
+                next_state="complete",
+            ),
+            _CanonicalStepPublicationSpec(state_id="complete"),
+            _CanonicalStepPublicationSpec(state_id="failed"),
         ),
     ),
 }
@@ -364,7 +392,12 @@ def publish_canonical_chat_workflow_graphs(
     workflow_type_ids = list(resolve_available_workflow_type_ids())
     preferred_workflow_type = workflow_type_ids[0] if workflow_type_ids else None
 
-    for workflow_id in CANONICAL_CHAT_WORKFLOW_IDS:
+    target_workflow_ids = list(CANONICAL_CHAT_WORKFLOW_IDS)
+    for workflow_id in CANONICAL_DURABLE_WORKFLOW_IDS:
+        if registry.get_registration(workflow_id) is not None:
+            target_workflow_ids.append(workflow_id)
+
+    for workflow_id in target_workflow_ids:
         spec = _CANONICAL_WORKFLOW_PUBLICATION_SPECS.get(workflow_id)
         registration = registry.get_registration(workflow_id)
         if spec is None or registration is None:
@@ -569,7 +602,7 @@ def publish_canonical_chat_workflow_graphs(
 
     return {
         "counts": {
-            "workflows_targeted": len(CANONICAL_CHAT_WORKFLOW_IDS),
+            "workflows_targeted": len(target_workflow_ids),
             "workflows_published": len(published),
             "workflows_skipped_missing_registration": len(skipped_missing_registration),
             "workflows_skipped_missing_concept": len(skipped_missing_concept),

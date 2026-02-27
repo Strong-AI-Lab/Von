@@ -37,6 +37,7 @@ EVENT_TYPE_TEXT_RELATION_UPSERTED = "text_relation.upserted"
 EVENT_TYPE_TEXT_RELATION_UPDATED = "text_relation.updated"
 EVENT_TYPE_TEXT_RELATION_DELETED = "text_relation.deleted"
 EVENT_TYPE_VONTOLOGY_MUTATED = "vontology.mutated"
+EVENT_TYPE_FILE_COPY_UPLOADED = "file_copy.uploaded"
 
 # Backward-compatible environment wiring (legacy/system bootstrap).
 EVENT_WORKFLOW_ID_ENV_MAP: dict[str, str] = {
@@ -45,6 +46,7 @@ EVENT_WORKFLOW_ID_ENV_MAP: dict[str, str] = {
     EVENT_TYPE_EFFORT_UNIT_COMPLETED: "VON_EVENT_EFFORT_UNIT_COMPLETED_WORKFLOW_ID",
     EVENT_TYPE_DIRECT_MESSAGE_CREATED: "VON_EVENT_DIRECT_MESSAGE_WORKFLOW_ID",
     EVENT_TYPE_TYPE_CREATED: "VON_EVENT_TYPE_CREATED_WORKFLOW_ID",
+    EVENT_TYPE_FILE_COPY_UPLOADED: "VON_EVENT_FILE_COPY_UPLOADED_WORKFLOW_ID",
 }
 
 _DEFAULT_EVENT_BINDINGS: tuple[dict[str, Any], ...] = (
@@ -52,6 +54,21 @@ _DEFAULT_EVENT_BINDINGS: tuple[dict[str, Any], ...] = (
         "event_type": EVENT_TYPE_TYPE_CREATED,
         "workflow_id": "#V#salient_predicate_governance_workflow",
         "input_mapping": {"type_concept_id": "event.concept_id"},
+        "enabled": True,
+    },
+    {
+        "event_type": EVENT_TYPE_FILE_COPY_UPLOADED,
+        "workflow_id": "#V#file_copy_interpretation_workflow",
+        "input_mapping": {
+            "concept_id": "event.file_copy_concept_id",
+            "file_copy_concept_id": "event.file_copy_concept_id",
+            "content_type": "event.content_type",
+            "original_filename": "event.original_filename",
+            "size_bytes": "event.size_bytes",
+            "sha256": "event.sha256",
+            "blob_uri": "event.blob_uri",
+            "index_in_rag": "event.index_in_rag",
+        },
         "enabled": True,
     },
 )
@@ -1303,3 +1320,65 @@ def maybe_launch_vontology_mutation_workflow(
         "specific_triggered": bool(specific_result.get("triggered")),
         "catch_all_triggered": bool(catch_all_result.get("triggered")),
     }
+
+
+def maybe_launch_file_copy_uploaded_workflow(
+    *,
+    file_copy_concept_id: str,
+    uploaded_by_concept_id: str | None,
+    organisation_concept_id: str | None,
+    namespace: str | None = None,
+    content_type: str | None = None,
+    original_filename: str | None = None,
+    size_bytes: int | None = None,
+    sha256: str | None = None,
+    blob_uri: str | None = None,
+    uploaded_at_iso: str | None = None,
+    index_in_rag: bool = True,
+) -> dict[str, Any]:
+    """Launch interpretation workflow(s) for a newly uploaded file copy."""
+
+    concept_id = str(file_copy_concept_id or "").strip()
+    if not concept_id:
+        return {
+            "success": False,
+            "triggered": False,
+            "outcome": "not_triggered",
+            "event_type": EVENT_TYPE_FILE_COPY_UPLOADED,
+            "reason": "missing_file_copy_concept_id",
+            "hint": "Provide file_copy_concept_id for upload-event workflow launch.",
+        }
+
+    ensure_report = ensure_default_event_bindings()
+    launch_result = launch_event_workflow(
+        event_type=EVENT_TYPE_FILE_COPY_UPLOADED,
+        event_id=concept_id,
+        user_id=uploaded_by_concept_id,
+        org_id=organisation_concept_id,
+        namespace=namespace,
+        event_payload={
+            "concept_id": concept_id,
+            "file_copy_concept_id": concept_id,
+            "content_type": content_type,
+            "original_filename": original_filename,
+            "size_bytes": size_bytes,
+            "sha256": sha256,
+            "blob_uri": blob_uri,
+            "uploaded_at": uploaded_at_iso,
+            "index_in_rag": bool(index_in_rag),
+        },
+        inputs={
+            "concept_id": concept_id,
+            "file_copy_concept_id": concept_id,
+            "content_type": content_type,
+            "original_filename": original_filename,
+            "size_bytes": size_bytes,
+            "sha256": sha256,
+            "blob_uri": blob_uri,
+            "uploaded_at": uploaded_at_iso,
+            "index_in_rag": bool(index_in_rag),
+        },
+    )
+    if isinstance(launch_result, dict):
+        launch_result["default_binding_bootstrap"] = ensure_report
+    return launch_result

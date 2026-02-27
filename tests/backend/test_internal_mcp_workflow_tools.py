@@ -458,7 +458,9 @@ def test_workflow_list_definitions_exists_and_returns_data():
     assert "workflow_list_definitions" in methods
 
     handler = catalogue.get("workflow_list_definitions").handler
-    result = handler(limit=10)
+    # Keep the sample wide enough that newly-registered durable workflows do
+    # not get paged out and cause false negatives.
+    result = handler(limit=200)
 
     assert result.get("success") is True
     assert "definitions" in result
@@ -475,6 +477,7 @@ def test_workflow_list_definitions_exists_and_returns_data():
     assert "#V#rag_text_relation_sync_workflow" in def_ids
     assert "#V#enrichment_workflow" in def_ids
     assert "#V#planning_workflow" in def_ids
+    assert "#V#file_copy_interpretation_workflow" in def_ids
     assert any("description_source" in d for d in result["definitions"])
     assert any("definition_identity" in d for d in result["definitions"])
     assert any("background_launch_policy_source" in d for d in result["definitions"])

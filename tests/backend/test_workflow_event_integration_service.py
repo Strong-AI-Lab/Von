@@ -10,10 +10,12 @@ from src.backend.workflows.durable.models import EventWorkflowBinding
 from src.backend.services.workflow_event_integration_service import (
     EVENT_TYPE_CONCEPT_UPDATED,
     EVENT_TYPE_EFFORT_UNIT_COMPLETED,
+    EVENT_TYPE_FILE_COPY_UPLOADED,
     EVENT_TYPE_TASK_CREATED,
     EVENT_TYPE_VONTOLOGY_MUTATED,
     launch_event_workflow,
     maybe_launch_effort_unit_completed_workflow,
+    maybe_launch_file_copy_uploaded_workflow,
     maybe_launch_vontology_mutation_workflow,
     maybe_launch_task_status_workflow,
 )
@@ -476,6 +478,43 @@ def test_maybe_launch_effort_unit_completed_workflow_emits_completion_event(
     assert called_args.kwargs["event_payload"]["successor_effort_unit_type_ids"] == [
         "#V#conference_presentation"
     ]
+
+
+@patch("src.backend.services.workflow_event_integration_service.launch_event_workflow")
+@patch(
+    "src.backend.services.workflow_event_integration_service.ensure_default_event_bindings"
+)
+def test_maybe_launch_file_copy_uploaded_workflow_emits_upload_event(
+    mock_ensure_default_event_bindings: MagicMock,
+    mock_launch_event_workflow: MagicMock,
+) -> None:
+    mock_ensure_default_event_bindings.return_value = {"success": True, "ensured": True}
+    mock_launch_event_workflow.return_value = {"success": True, "triggered": True}
+
+    result = maybe_launch_file_copy_uploaded_workflow(
+        file_copy_concept_id="#V#uploaded_file_copy_123",
+        uploaded_by_concept_id="#V#user_alice",
+        organisation_concept_id="#V#org_nao",
+        content_type="image/png",
+        original_filename="screenshot.png",
+        size_bytes=1024,
+        sha256="abc123",
+        blob_uri="local://uploads/user/abc/screenshot.png",
+        uploaded_at_iso="2026-02-27T09:00:00+00:00",
+        index_in_rag=True,
+    )
+
+    assert result["success"] is True
+    assert result["triggered"] is True
+    assert result["default_binding_bootstrap"]["ensured"] is True
+    mock_ensure_default_event_bindings.assert_called_once()
+
+    called_args = mock_launch_event_workflow.call_args
+    assert called_args is not None
+    assert called_args.kwargs["event_type"] == EVENT_TYPE_FILE_COPY_UPLOADED
+    assert called_args.kwargs["event_id"] == "#V#uploaded_file_copy_123"
+    assert called_args.kwargs["inputs"]["file_copy_concept_id"] == "#V#uploaded_file_copy_123"
+    assert called_args.kwargs["inputs"]["index_in_rag"] is True
 
 
 @patch("src.backend.services.workflow_event_integration_service.launch_event_workflow")

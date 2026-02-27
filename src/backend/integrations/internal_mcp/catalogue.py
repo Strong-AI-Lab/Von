@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, List, Mapping, Sequence
 
@@ -2001,14 +2002,62 @@ def _read_paper(**kwargs):
     return _run_async_compat(_async_read)
 
 
+def _normalise_namespace_override(namespace: Any) -> str | None:
+    if not isinstance(namespace, str):
+        return None
+    cleaned = namespace.strip()
+    return cleaned or None
+
+
+def _namespace_actor_overrides_from_namespace(
+    namespace: str | None,
+) -> tuple[str | None, str | None]:
+    """Resolve optional user/org auth overrides from namespace payload."""
+
+    namespace_clean = _normalise_namespace_override(namespace)
+    if namespace_clean is None:
+        return None, None
+
+    user_part: str | None
+    org_part: str | None
+    if "@" in namespace_clean:
+        user_raw, org_raw = namespace_clean.split("@", 1)
+        user_part = user_raw.strip() or None
+        org_part = org_raw.strip() or None
+    elif "/" in namespace_clean:
+        user_raw, org_raw = namespace_clean.split("/", 1)
+        user_part = user_raw.strip() or None
+        org_part = org_raw.strip() or None
+    else:
+        user_part = namespace_clean
+        org_part = None
+
+    if org_part and not org_part.startswith("#V#"):
+        org_part = f"#V#{org_part}"
+    return user_part, org_part
+
+
+@contextmanager
+def _with_namespace_actor_override(namespace: str | None):
+    """Apply best-effort auth context override for namespace-driven tool calls."""
+
+    from ...security.access_control import (
+        override_current_organisation,
+        override_current_user,
+    )
+
+    user_part, org_part = _namespace_actor_overrides_from_namespace(namespace)
+    if user_part or org_part:
+        with override_current_user(user_part), override_current_organisation(org_part):
+            yield
+        return
+    yield
+
+
 # Blob/file-copy retrieval
 def _read_file_copy(**kwargs):
     import os
-    from ...security.access_control import (
-        get_effective_user_concept_id,
-        override_current_user,
-        override_current_organisation,
-    )
+    from ...security.access_control import get_effective_user_concept_id
     from ...services.computer_file_copy_service import fetch_file_copy_bytes
 
     concept_id = kwargs.get("concept_id") or kwargs.get("file_copy_concept_id")
@@ -2059,17 +2108,7 @@ def _read_file_copy(**kwargs):
         if max_bytes is None or max_bytes > max_override:
             max_bytes = max_override
 
-    namespace = kwargs.get("namespace")
-    user_part = None
-    org_part = None
-    if isinstance(namespace, str) and "@" in namespace:
-        user_part, org_part = namespace.split("@", 1)
-        user_part = (user_part or "").strip() or None
-        org_part = (org_part or "").strip() or None
-        if org_part and not org_part.startswith("#V#"):
-            org_part = f"#V#{org_part}"
-    elif isinstance(namespace, str) and namespace.strip():
-        user_part = namespace.strip()
+    namespace = _normalise_namespace_override(kwargs.get("namespace"))
 
     def _run_read():
         user_concept_id = get_effective_user_concept_id()
@@ -2925,11 +2964,316 @@ def _read_file_copy(**kwargs):
 
         return payload
 
-    if user_part or org_part:
-        with override_current_user(user_part), override_current_organisation(org_part):
-            return _run_read()
+    with _with_namespace_actor_override(namespace):
+        return _run_read()
 
-    return _run_read()
+
+def _interpret_file_copy(**kwargs):
+    import json
+
+    from ...services.computer_file_copy_service import fetch_file_copy_bytes
+    from ...services.file_copy_interpretation_service import (
+        build_document_interpretation,
+        build_image_interpretation,
+        is_image_file,
+    )
+    from ...services.rag_text_relation_change_hook_service import (
+        maybe_sync_concept_text_relations_to_rag,
+    )
+    from ...services.text_value_service import upsert_singleton_text_relation
+
+    concept_id = kwargs.get("concept_id") or kwargs.get("file_copy_concept_id")
+    if not isinstance(concept_id, str) or not concept_id.strip():
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: concept_id",
+            details={"missing": ["concept_id"]},
+            suggestions=[
+                "Provide concept_id for a blob-backed #V#computer_file_copy instance"
+            ],
+        )
+    concept_id = concept_id.strip()
+
+    max_bytes = kwargs.get("max_bytes")
+    if max_bytes is None:
+        max_bytes = 10_000_000
+    else:
+        try:
+            max_bytes = int(max_bytes)
+        except (TypeError, ValueError):
+            return make_error_response(
+                "invalid_parameter",
+                "Invalid max_bytes: must be an integer",
+                details={"max_bytes": max_bytes},
+            )
+        if max_bytes <= 0:
+            return make_error_response(
+                "invalid_parameter",
+                "max_bytes must be positive",
+                details={"max_bytes": max_bytes},
+            )
+
+    max_persist_content_chars_raw = kwargs.get("max_persist_content_chars")
+    if max_persist_content_chars_raw is None:
+        max_persist_content_chars = 20_000
+    else:
+        try:
+            max_persist_content_chars = int(max_persist_content_chars_raw)
+        except (TypeError, ValueError):
+            return make_error_response(
+                "invalid_parameter",
+                "Invalid max_persist_content_chars: must be an integer",
+                details={"max_persist_content_chars": max_persist_content_chars_raw},
+            )
+        if max_persist_content_chars < 0:
+            return make_error_response(
+                "invalid_parameter",
+                "max_persist_content_chars must be zero or positive",
+                details={"max_persist_content_chars": max_persist_content_chars},
+            )
+
+    allow_large = bool(kwargs.get("allow_large", False))
+    persist = bool(kwargs.get("persist", True))
+    persist_description = bool(kwargs.get("persist_description", True))
+    persist_content = bool(kwargs.get("persist_content", True))
+    persist_interpretation_json = bool(kwargs.get("persist_interpretation_json", True))
+    include_semantic_description = bool(kwargs.get("include_semantic_description", True))
+    include_text = bool(kwargs.get("include_text", False))
+    model_override = (
+        kwargs.get("vision_model")
+        if isinstance(kwargs.get("vision_model"), str)
+        else None
+    )
+    prompt_override = (
+        kwargs.get("semantic_prompt")
+        if isinstance(kwargs.get("semantic_prompt"), str)
+        else None
+    )
+
+    namespace = _normalise_namespace_override(kwargs.get("namespace"))
+    ns_report = _resolve_rag_namespace_from_kwargs(kwargs)
+    if bool(ns_report.get("namespace_mismatch")):
+        return {
+            "success": False,
+            "error": "namespace_mismatch",
+            "message": (
+                "Explicit namespace conflicts with derived user/org namespace; "
+                "interpretation was not executed."
+            ),
+            **ns_report,
+        }
+    effective_namespace = namespace
+    if effective_namespace is None:
+        derived_ns = ns_report.get("namespace")
+        if isinstance(derived_ns, str) and derived_ns.strip():
+            effective_namespace = derived_ns.strip()
+
+    read_payload = _read_file_copy(
+        concept_id=concept_id,
+        max_bytes=max_bytes,
+        allow_large=allow_large,
+        as_text=True,
+        namespace=effective_namespace,
+    )
+    if not isinstance(read_payload, dict):
+        return make_error_response(
+            "read_file_copy_failed",
+            "Unexpected read_file_copy response shape",
+            details={"response_type": type(read_payload).__name__},
+        )
+    if read_payload.get("success") is not True:
+        return {
+            "success": False,
+            "error": read_payload.get("error") or read_payload.get("error_code"),
+            "message": read_payload.get("message")
+            or "Failed to read file-copy bytes for interpretation",
+            "concept_id": concept_id,
+            "namespace": effective_namespace,
+            **ns_report,
+            "read_result": read_payload,
+        }
+
+    content_type = read_payload.get("content_type")
+    original_filename = read_payload.get("original_filename")
+    extracted_text_raw = read_payload.get("text")
+    extracted_text = (
+        extracted_text_raw if isinstance(extracted_text_raw, str) else None
+    )
+    file_kind = (
+        "image"
+        if is_image_file(
+            content_type=content_type if isinstance(content_type, str) else None,
+            filename=(
+                original_filename if isinstance(original_filename, str) else None
+            ),
+        )
+        else "document"
+    )
+
+    interpretation: dict[str, Any]
+    image_fetch_error: str | None = None
+    if file_kind == "image":
+        with _with_namespace_actor_override(effective_namespace):
+            image_fetch = fetch_file_copy_bytes(
+                file_copy_concept_id=concept_id,
+                max_bytes=max_bytes,
+                allow_large=allow_large,
+            )
+        if not isinstance(image_fetch, dict) or image_fetch.get("success") is not True:
+            image_fetch_error = str(
+                image_fetch.get("error") if isinstance(image_fetch, dict) else "unknown"
+            )
+            interpretation = {
+                "kind": "image",
+                "description": (
+                    "Image uploaded but byte-level visual interpretation could not be completed."
+                ),
+                "content_text": extracted_text,
+                "content_length": len(extracted_text) if extracted_text else 0,
+                "subject_tags": ["image"],
+                "image_fetch_error": image_fetch_error,
+            }
+        else:
+            image_bytes = image_fetch.get("data") or b""
+            interpretation = build_image_interpretation(
+                data_bytes=bytes(image_bytes),
+                content_type=content_type if isinstance(content_type, str) else None,
+                original_filename=(
+                    original_filename if isinstance(original_filename, str) else None
+                ),
+                include_semantic_description=include_semantic_description,
+                model_override=model_override,
+                prompt_override=prompt_override,
+            )
+            interpreted_content = interpretation.get("content_text")
+            if (
+                isinstance(interpreted_content, str)
+                and interpreted_content.strip()
+                and (
+                    not isinstance(extracted_text, str)
+                    or len(interpreted_content.strip()) > len(extracted_text.strip())
+                )
+            ):
+                extracted_text = interpreted_content.strip()
+    else:
+        interpretation = build_document_interpretation(
+            extracted_text=extracted_text,
+            content_type=content_type if isinstance(content_type, str) else None,
+            original_filename=(
+                original_filename if isinstance(original_filename, str) else None
+            ),
+        )
+
+    description_text = interpretation.get("description")
+    description = description_text if isinstance(description_text, str) else None
+    content_for_persist = extracted_text if isinstance(extracted_text, str) else None
+    content_truncated = False
+    if (
+        isinstance(content_for_persist, str)
+        and max_persist_content_chars > 0
+        and len(content_for_persist) > max_persist_content_chars
+    ):
+        content_for_persist = content_for_persist[:max_persist_content_chars]
+        content_truncated = True
+    if max_persist_content_chars == 0:
+        content_for_persist = None
+
+    persisted_relations: list[dict[str, Any]] = []
+    persist_errors: list[dict[str, Any]] = []
+    if persist:
+        writes: list[tuple[str, str | None]] = []
+        if persist_description and isinstance(description, str) and description.strip():
+            writes.append(("hasDescription", description.strip()))
+        if (
+            persist_content
+            and isinstance(content_for_persist, str)
+            and content_for_persist.strip()
+        ):
+            writes.append(("hasContent", content_for_persist.strip()))
+        if persist_interpretation_json:
+            writes.append(
+                (
+                    "#V#has_file_copy_interpretation_json",
+                    json.dumps(interpretation, ensure_ascii=False),
+                )
+            )
+
+        with _with_namespace_actor_override(effective_namespace):
+            for predicate, text_value in writes:
+                if not isinstance(text_value, str) or not text_value.strip():
+                    continue
+                try:
+                    relation = upsert_singleton_text_relation(
+                        subject_concept_id=concept_id,
+                        predicate=predicate,
+                        text=text_value,
+                        lang="en-NZ",
+                        garbage_collect=True,
+                        context={
+                            "source": "interpret_file_copy",
+                            "file_kind": file_kind,
+                        },
+                    )
+                    relation_id = (
+                        relation.get("relation_id")
+                        if isinstance(relation, dict)
+                        else None
+                    )
+                    persisted_relations.append(
+                        {
+                            "predicate": predicate,
+                            "relation_id": relation_id,
+                            "text_length": len(text_value),
+                        }
+                    )
+                    maybe_sync_concept_text_relations_to_rag(
+                        namespace=effective_namespace,
+                        concept_id=concept_id,
+                        predicate=predicate,
+                    )
+                except Exception as exc:
+                    persist_errors.append(
+                        {
+                            "predicate": predicate,
+                            "error": str(exc),
+                        }
+                    )
+
+    content_text = extracted_text if isinstance(extracted_text, str) else None
+    text_preview = None
+    if isinstance(content_text, str):
+        text_preview = (
+            content_text[:4000] + "..."
+            if len(content_text) > 4000
+            else content_text
+        )
+
+    return {
+        "success": len(persist_errors) == 0,
+        "concept_id": concept_id,
+        "file_kind": file_kind,
+        "description": description,
+        "content_type": content_type,
+        "original_filename": original_filename,
+        "text_length": len(content_text) if isinstance(content_text, str) else 0,
+        "text_preview": text_preview,
+        "text": content_text if include_text else None,
+        "content_truncated_for_persist": content_truncated,
+        "interpretation": interpretation,
+        "persisted": persist and len(persist_errors) == 0,
+        "persisted_relations": persisted_relations,
+        "persist_errors": persist_errors,
+        "namespace": effective_namespace,
+        **ns_report,
+        "read_result": {
+            "text_extraction": read_payload.get("text_extraction"),
+            "text_extraction_error": read_payload.get("text_extraction_error"),
+            "size_bytes": read_payload.get("size_bytes"),
+            "byte_length": read_payload.get("byte_length"),
+            "blob": read_payload.get("blob"),
+        },
+        "image_fetch_error": image_fetch_error,
+    }
 
 
 def _index_file_copy(**kwargs):
@@ -3084,11 +3428,7 @@ def _index_file_copy(**kwargs):
 
 def _import_local_file_copy(**kwargs):
     from pathlib import Path
-    from ...security.access_control import (
-        get_effective_user_concept_id,
-        override_current_organisation,
-        override_current_user,
-    )
+    from ...security.access_control import get_effective_user_concept_id
     from ...services.computer_file_copy_service import import_local_file_copy
 
     local_path = kwargs.get("local_path")
@@ -3142,16 +3482,6 @@ def _import_local_file_copy(**kwargs):
     )
 
     workspace_root = Path(__file__).resolve().parents[4]
-    user_part: str | None = None
-    org_part: str | None = None
-    if "@" in ns:
-        user_raw, org_raw = ns.split("@", 1)
-        user_part = user_raw.strip() or None
-        org_part = org_raw.strip() or None
-        if org_part and not org_part.startswith("#V#"):
-            org_part = f"#V#{org_part}"
-    else:
-        user_part = ns
 
     def _run_import():
         user_concept_id = get_effective_user_concept_id()
@@ -3178,10 +3508,8 @@ def _import_local_file_copy(**kwargs):
             result["allowed_root"] = str(workspace_root)
         return result
 
-    if user_part or org_part:
-        with override_current_user(user_part), override_current_organisation(org_part):
-            return _run_import()
-    return _run_import()
+    with _with_namespace_actor_override(ns):
+        return _run_import()
 
 
 def _get_predicate_extent(**kwargs):
@@ -5026,6 +5354,68 @@ def _index_file_copy_output_schema() -> Schema:
         description=(
             "index_file_copy output: success flag plus indexing counts/document_id for a "
             "blob-backed file-copy ingestion into RAG."
+        ),
+    )
+
+
+def _interpret_file_copy_input_schema() -> Schema:
+    return Schema(
+        required={
+            "concept_id": str,
+        },
+        optional={
+            "namespace": (str, type(None)),
+            "max_bytes": (int, type(None)),
+            "allow_large": (bool, type(None)),
+            "persist": (bool, type(None)),
+            "persist_description": (bool, type(None)),
+            "persist_content": (bool, type(None)),
+            "persist_interpretation_json": (bool, type(None)),
+            "include_semantic_description": (bool, type(None)),
+            "vision_model": (str, type(None)),
+            "semantic_prompt": (str, type(None)),
+            "include_text": (bool, type(None)),
+            "max_persist_content_chars": (int, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "interpret_file_copy input: concept_id for a #V#computer_file_copy instance. "
+            "Optionally pass namespace, max_bytes/allow_large, and persistence controls. "
+            "For image files (including screenshots, faces, and building photos), this tool "
+            "extracts OCR and semantic descriptions and persists canonical hasDescription/"
+            "hasContent plus structured interpretation metadata."
+        ),
+    )
+
+
+def _interpret_file_copy_output_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "success": (bool, type(None)),
+            "error": (str, type(None)),
+            "message": (str, type(None)),
+            "concept_id": (str, type(None)),
+            "file_kind": (str, type(None)),
+            "description": (str, type(None)),
+            "content_type": (str, type(None)),
+            "original_filename": (str, type(None)),
+            "text_length": (int, type(None)),
+            "text_preview": (str, type(None)),
+            "text": (str, type(None)),
+            "content_truncated_for_persist": (bool, type(None)),
+            "interpretation": (dict, type(None)),
+            "persisted": (bool, type(None)),
+            "persisted_relations": (list, type(None)),
+            "persist_errors": (list, type(None)),
+            "namespace": (str, type(None)),
+            "read_result": (dict, type(None)),
+            "image_fetch_error": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "interpret_file_copy output: interpretation summary and persistence status "
+            "for a blob-backed file-copy concept."
         ),
     )
 
@@ -15430,6 +15820,20 @@ def build_default_catalogue() -> MethodCatalogue:
             description=(
                 "Read a blob-backed #V#computer_file_copy and index its extracted text into RAG "
                 "for the effective namespace. Supports PDFs and other file types handled by read_file_copy."
+            ),
+        ),
+        MethodDefinition(
+            name="interpret_file_copy",
+            handler=_interpret_file_copy,
+            input_schema=_interpret_file_copy_input_schema(),
+            output_schema=_interpret_file_copy_output_schema(),
+            category="write",
+            timeout_sec=45.0,
+            description=(
+                "Interpret an uploaded #V#computer_file_copy and persist rich concept text relations. "
+                "For screenshots and other images (including face/building photos), this runs OCR plus "
+                "semantic image description where available, then writes hasDescription/hasContent and "
+                "structured interpretation metadata."
             ),
         ),
         MethodDefinition(
