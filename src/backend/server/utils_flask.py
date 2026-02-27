@@ -1,5 +1,6 @@
 import sys
 import os
+import datetime as _dt
 
 # Adjust path to ensure project root and src are included for imports BEFORE any backend.* imports
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
@@ -563,22 +564,99 @@ def create_flask_app(
             pass
         gateway_instance = None
     app.config["INTERNAL_MCP_GATEWAY"] = gateway_instance
-    orchestrator_instance = None
+    # Keep HTTP startup non-blocking: orchestrator construction can be expensive
+    # because it builds workflow/action registries (including Vontology policy checks).
+    # When this blocks the main thread, the process can be alive for minutes without
+    # binding the web port, which prevents run.ps1 health/browser flow from completing.
+    app.config["INTERNAL_MCP_ORCHESTRATOR"] = None
+    app.config["INTERNAL_MCP_ORCHESTRATOR_STATUS"] = {
+        "state": "disabled" if gateway_instance is None else "pending",
+        "ready": False,
+        "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }
+
     if gateway_instance is not None:
-        try:
-            orchestrator_instance = InternalMCPChatOrchestrator(
-                gateway=gateway_instance,
-                logger=app.logger.getChild("mcp_orchestrator") if app.logger else None,
-                max_tool_invocations=8,  # JVNAUTOSCI-699: Allow complex chained workflows
-                default_gmail_profile=os.getenv("VON_GMAIL_DEFAULT_PROFILE") or None,
-            )
-        except Exception as exc:  # pragma: no cover - defensive bootstrap
+        orchestrator_logger = app.logger.getChild("mcp_orchestrator") if app.logger else None
+        blocking_orchestrator_start = (
+            os.getenv("VON_INTERNAL_MCP_ORCHESTRATOR_BLOCKING_STARTUP", "0")
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"}
+        )
+
+        def _build_orchestrator() -> None:
+            start_perf = time.perf_counter()
+            app.config["INTERNAL_MCP_ORCHESTRATOR_STATUS"] = {
+                "state": "initialising",
+                "ready": False,
+                "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            }
             try:
-                app.logger.warning("[mcp_orchestrator] Failed to initialise: %s", exc)
+                orchestrator_instance = InternalMCPChatOrchestrator(
+                    gateway=gateway_instance,
+                    logger=orchestrator_logger,
+                    max_tool_invocations=8,  # JVNAUTOSCI-699: Allow complex chained workflows
+                    default_gmail_profile=os.getenv("VON_GMAIL_DEFAULT_PROFILE") or None,
+                )
+                duration_ms = int((time.perf_counter() - start_perf) * 1000)
+                app.config["INTERNAL_MCP_ORCHESTRATOR"] = orchestrator_instance
+                app.config["INTERNAL_MCP_ORCHESTRATOR_STATUS"] = {
+                    "state": "ready",
+                    "ready": True,
+                    "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                    "duration_ms": duration_ms,
+                }
+                try:
+                    app.logger.info(
+                        "[mcp_orchestrator] Initialised in %dms (blocking_startup=%s).",
+                        duration_ms,
+                        blocking_orchestrator_start,
+                    )
+                except Exception:
+                    pass
+            except Exception as exc:  # pragma: no cover - defensive bootstrap
+                app.config["INTERNAL_MCP_ORCHESTRATOR_STATUS"] = {
+                    "state": "failed",
+                    "ready": False,
+                    "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                    "error": str(exc),
+                }
+                try:
+                    app.logger.warning("[mcp_orchestrator] Failed to initialise: %s", exc)
+                except Exception:
+                    pass
+
+        if blocking_orchestrator_start:
+            _build_orchestrator()
+        else:
+            try:
+                app.logger.info(
+                    "[mcp_orchestrator] Deferring initialisation to background thread "
+                    "(set VON_INTERNAL_MCP_ORCHESTRATOR_BLOCKING_STARTUP=1 to restore blocking startup)."
+                )
             except Exception:
                 pass
-            orchestrator_instance = None
-    app.config["INTERNAL_MCP_ORCHESTRATOR"] = orchestrator_instance
+            try:
+                import threading
+
+                threading.Thread(
+                    target=_build_orchestrator,
+                    name="mcp_orchestrator_init",
+                    daemon=True,
+                ).start()
+            except Exception as exc:  # pragma: no cover - defensive bootstrap
+                app.config["INTERNAL_MCP_ORCHESTRATOR_STATUS"] = {
+                    "state": "failed",
+                    "ready": False,
+                    "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                    "error": f"thread_start_failed:{exc}",
+                }
+                try:
+                    app.logger.warning(
+                        "[mcp_orchestrator] Failed to start async init thread: %s", exc
+                    )
+                except Exception:
+                    pass
 
     # Start DB connection monitor (idempotent)
     try:
@@ -609,26 +687,106 @@ def create_flask_app(
                 pass
 
     # --- Durable Workflow System Startup ---
-    # Start background worker and scheduler for durable workflows.
-    # Skip during pytest to avoid DB side-effects during test imports.
+    # Keep HTTP startup non-blocking: durable startup can synchronously build
+    # workflow/action registries and perform recovery, which can take minutes
+    # and delay the first HTTP bind.
+    app.config["DURABLE_WORKFLOW_COMPONENTS"] = None
+    app.config["DURABLE_WORKFLOW_STARTUP_STATUS"] = {
+        "state": "skipped_pytest" if _is_running_under_pytest() else "pending",
+        "ready": False,
+        "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }
     durable_workflow_components = None
     if not _is_running_under_pytest():
-        try:
-            durable_workflow_components = _start_durable_workflow_system(app.logger)
-            if durable_workflow_components is not None:
-                app.config["DURABLE_WORKFLOW_COMPONENTS"] = durable_workflow_components
+        blocking_durable_startup = (
+            os.getenv("VON_DURABLE_WORKFLOWS_BLOCKING_STARTUP", "0").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
 
-                # Register atexit handler for graceful shutdown
-                import atexit
-
-                atexit.register(_stop_durable_workflow_system)
-        except Exception as exc:  # pragma: no cover
+        def _bootstrap_durable_workflow_system() -> None:
+            app.config["DURABLE_WORKFLOW_STARTUP_STATUS"] = {
+                "state": "initialising",
+                "ready": False,
+                "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            }
+            startup_perf = time.perf_counter()
             try:
-                app.logger.warning(
-                    "[startup] Durable workflow system startup failed: %s", exc
+                components = _start_durable_workflow_system(app.logger)
+                duration_ms = int((time.perf_counter() - startup_perf) * 1000)
+                if components is not None:
+                    app.config["DURABLE_WORKFLOW_COMPONENTS"] = components
+                    app.config["DURABLE_WORKFLOW_STARTUP_STATUS"] = {
+                        "state": "ready",
+                        "ready": True,
+                        "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                        "duration_ms": duration_ms,
+                    }
+                    try:
+                        app.logger.info(
+                            "[durable_workflows] Initialised in %dms (blocking_startup=%s).",
+                            duration_ms,
+                            blocking_durable_startup,
+                        )
+                    except Exception:
+                        pass
+
+                    # Register atexit handler for graceful shutdown once running.
+                    import atexit
+
+                    atexit.register(_stop_durable_workflow_system)
+                else:
+                    app.config["DURABLE_WORKFLOW_STARTUP_STATUS"] = {
+                        "state": "not_started",
+                        "ready": False,
+                        "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                        "duration_ms": duration_ms,
+                    }
+            except Exception as exc:  # pragma: no cover
+                app.config["DURABLE_WORKFLOW_STARTUP_STATUS"] = {
+                    "state": "failed",
+                    "ready": False,
+                    "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                    "error": str(exc),
+                }
+                try:
+                    app.logger.warning(
+                        "[startup] Durable workflow system startup failed: %s", exc
+                    )
+                except Exception:
+                    pass
+
+        if blocking_durable_startup:
+            _bootstrap_durable_workflow_system()
+        else:
+            try:
+                app.logger.info(
+                    "[durable_workflows] Deferring startup to background thread "
+                    "(set VON_DURABLE_WORKFLOWS_BLOCKING_STARTUP=1 to restore blocking startup)."
                 )
             except Exception:
                 pass
+            try:
+                import threading
+
+                threading.Thread(
+                    target=_bootstrap_durable_workflow_system,
+                    name="durable_workflow_startup",
+                    daemon=True,
+                ).start()
+            except Exception as exc:  # pragma: no cover
+                app.config["DURABLE_WORKFLOW_STARTUP_STATUS"] = {
+                    "state": "failed",
+                    "ready": False,
+                    "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                    "error": f"thread_start_failed:{exc}",
+                }
+                try:
+                    app.logger.warning(
+                        "[durable_workflows] Failed to start async startup thread: %s",
+                        exc,
+                    )
+                except Exception:
+                    pass
 
     # Prompt concept health logging
     try:
@@ -2212,6 +2370,12 @@ def create_flask_app(
                     "configured": True,
                     "error": str(exc),
                 }
+        diag["internal_mcp_orchestrator_startup"] = app.config.get(
+            "INTERNAL_MCP_ORCHESTRATOR_STATUS"
+        )
+        diag["durable_workflow_startup"] = app.config.get(
+            "DURABLE_WORKFLOW_STARTUP_STATUS"
+        )
         # Annotation / phrase cache stats (best-effort)
         try:
             from ..services.annotation_extraction_service import phrase_cache_stats, fallback_nonjson_metric_stats  # type: ignore
