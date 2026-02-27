@@ -8,6 +8,7 @@ import {
     __testOnly_buildWorkflowStatusQuery,
     __testOnly_buildWorkflowStatusStreamQuery,
     __testOnly_buildLlmDebugMetadata,
+    __testOnly_extractImageFilesFromClipboardEvent,
     __testOnly_convertInlineQuotedStrongSegmentsToButtons,
     __testOnly_convertQuotedInstructionBlockquotesToButtons,
     __testOnly_convertQuotedInstructionListItemsToButtons,
@@ -124,6 +125,71 @@ describe('formatChatTimestamp', () => {
         expect(result).not.toContain('Yesterday');
         const month = tenDaysAgo.toLocaleString([], { month: 'short' });
         expect(result).toContain(month);
+    });
+});
+
+describe('clipboard image extraction for uploads', () => {
+    afterEach(() => {
+        jest.restoreAllMocks();
+    });
+
+    test('normalises unnamed clipboard image files into uploadable files', () => {
+        jest.spyOn(Date, 'now').mockReturnValue(1735689600000);
+        const rawClipboardFile = new File(['pixels'], '', { type: 'image/png' });
+        const event = {
+            clipboardData: {
+                items: [
+                    {
+                        kind: 'file',
+                        type: 'image/png',
+                        getAsFile: () => rawClipboardFile
+                    }
+                ]
+            }
+        };
+
+        const files = __testOnly_extractImageFilesFromClipboardEvent(event);
+        expect(files).toHaveLength(1);
+        expect(files[0].type).toBe('image/png');
+        expect(files[0].name).toBe('pasted-image-1735689600000-1.png');
+    });
+
+    test('ignores non-image clipboard entries', () => {
+        const event = {
+            clipboardData: {
+                items: [
+                    {
+                        kind: 'string',
+                        type: 'text/plain',
+                        getAsFile: () => null
+                    },
+                    {
+                        kind: 'file',
+                        type: 'application/pdf',
+                        getAsFile: () => new File(['pdf'], 'doc.pdf', { type: 'application/pdf' })
+                    }
+                ]
+            }
+        };
+
+        const files = __testOnly_extractImageFilesFromClipboardEvent(event);
+        expect(files).toEqual([]);
+    });
+
+    test('falls back to clipboardData.files when clipboardData.items is unavailable', () => {
+        const event = {
+            clipboardData: {
+                files: [
+                    new File(['img'], 'clipboard-face.jpg', { type: 'image/jpeg' }),
+                    new File(['txt'], 'notes.txt', { type: 'text/plain' })
+                ]
+            }
+        };
+
+        const files = __testOnly_extractImageFilesFromClipboardEvent(event);
+        expect(files).toHaveLength(1);
+        expect(files[0].name).toBe('clipboard-face.jpg');
+        expect(files[0].type).toBe('image/jpeg');
     });
 });
 

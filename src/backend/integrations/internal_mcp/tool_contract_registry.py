@@ -289,6 +289,7 @@ def _infer_tool_family(tool_name: str) -> str:
         "list_papers",
         "read_paper",
         "read_file_copy",
+        "interpret_file_copy",
         "import_local_file_copy",
     }:
         return "arxiv"

@@ -5771,6 +5771,107 @@ function isFileDragEvent(event) {
     }
 }
 
+const CLIPBOARD_IMAGE_EXTENSION_BY_MIME = Object.freeze({
+    'image/png': 'png',
+    'image/jpeg': 'jpg',
+    'image/jpg': 'jpg',
+    'image/webp': 'webp',
+    'image/gif': 'gif',
+    'image/bmp': 'bmp',
+    'image/tiff': 'tiff',
+    'image/heic': 'heic',
+    'image/heif': 'heif'
+});
+
+function getClipboardImageExtension(contentType) {
+    const mime = String(contentType || '').trim().toLowerCase();
+    return CLIPBOARD_IMAGE_EXTENSION_BY_MIME[mime] || 'png';
+}
+
+function normaliseClipboardImageFile(file, index = 0, timestampMs = Date.now()) {
+    if (!(file instanceof Blob)) {
+        return null;
+    }
+
+    const contentType = String(file.type || '').trim().toLowerCase();
+    if (!contentType.startsWith('image/')) {
+        return null;
+    }
+
+    const existingName = typeof file?.name === 'string' ? file.name.trim() : '';
+    if (file instanceof File && existingName) {
+        return file;
+    }
+
+    const extension = getClipboardImageExtension(contentType);
+    const generatedName = `pasted-image-${timestampMs}-${index + 1}.${extension}`;
+
+    try {
+        if (typeof File === 'function') {
+            return new File([file], generatedName, {
+                type: contentType || 'image/png',
+                lastModified:
+                    Number.isFinite(file?.lastModified) && Number(file.lastModified) > 0
+                        ? Number(file.lastModified)
+                        : timestampMs
+            });
+        }
+    } catch (_) {
+        // Ignore and fall back to a best-effort Blob object.
+    }
+
+    return file;
+}
+
+function extractImageFilesFromClipboardEvent(event) {
+    const clipboardData = event?.clipboardData;
+    if (!clipboardData) return [];
+
+    const timestampMs = Date.now();
+    const collectedFiles = [];
+    const seenCandidates = new Set();
+    const appendCandidate = (candidate) => {
+        if (!candidate || seenCandidates.has(candidate)) return;
+        seenCandidates.add(candidate);
+        const normalised = normaliseClipboardImageFile(
+            candidate,
+            collectedFiles.length,
+            timestampMs
+        );
+        if (normalised) {
+            collectedFiles.push(normalised);
+        }
+    };
+
+    try {
+        const items = Array.from(clipboardData.items || []);
+        for (const item of items) {
+            const kind = String(item?.kind || '').trim().toLowerCase();
+            const itemType = String(item?.type || '').trim().toLowerCase();
+            if (kind !== 'file' || !itemType.startsWith('image/')) continue;
+            if (typeof item.getAsFile !== 'function') continue;
+            appendCandidate(item.getAsFile());
+        }
+    } catch (_) {
+        // Ignore and continue with clipboardData.files fallback.
+    }
+
+    if (collectedFiles.length > 0) {
+        return collectedFiles;
+    }
+
+    try {
+        const files = Array.from(clipboardData.files || []);
+        for (const file of files) {
+            appendCandidate(file);
+        }
+    } catch (_) {
+        return collectedFiles;
+    }
+
+    return collectedFiles;
+}
+
 async function uploadSingleFileToVon(file) {
     if (!file) {
         throw new Error('No file provided');
@@ -14283,6 +14384,21 @@ export function initializeChatTab() {
         document.addEventListener('dragover', preventIfFiles);
         document.addEventListener('drop', preventIfFiles);
 
+        const handleClipboardImagePaste = (event) => {
+            const pastedImageFiles = extractImageFilesFromClipboardEvent(event);
+            if (!pastedImageFiles.length) return;
+
+            event.preventDefault();
+            event.stopPropagation();
+
+            // Route clipboard images through the same upload path used for
+            // drag/drop and file-picker uploads so workflow handling is
+            // consistent across all attachment entry points.
+            void uploadFilesToVon(pastedImageFiles);
+        };
+
+        chatTab.addEventListener('paste', handleClipboardImagePaste);
+
         // Local UI + drop handling
         const applyDragOverState = () => {
             scrollableField.classList.add('drag-over');
@@ -16873,6 +16989,9 @@ export function __testOnly_buildDiagnosticsExportRequestPayload() {
 }
 export function __testOnly_buildSanitisedLlmDebugExportPayload(debugData) {
     return buildSanitisedLlmDebugExportPayload(debugData);
+}
+export function __testOnly_extractImageFilesFromClipboardEvent(event) {
+    return extractImageFilesFromClipboardEvent(event);
 }
 export { formatChatTimestamp, showLlmDebugPopup, switchToChatSession, updateHistoryLength };
 

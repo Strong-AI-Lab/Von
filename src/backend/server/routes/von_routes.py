@@ -1262,6 +1262,43 @@ def upload_file_to_blob_store_and_vontology():
         file_copy_concept_id=instance_concept_id,
     )
 
+    organisation_concept_id = session.get("organisation_concept_id")
+    if not isinstance(organisation_concept_id, str) or not organisation_concept_id.strip():
+        organisation_concept_id = None
+    else:
+        organisation_concept_id = organisation_concept_id.strip()
+
+    try:
+        from ...services.workflow_event_integration_service import (
+            maybe_launch_file_copy_uploaded_workflow,
+        )
+
+        workflow_event_launch = maybe_launch_file_copy_uploaded_workflow(
+            file_copy_concept_id=instance_concept_id,
+            uploaded_by_concept_id=user_concept_id.strip(),
+            organisation_concept_id=organisation_concept_id,
+            content_type=content_type,
+            original_filename=original_filename,
+            size_bytes=size_bytes,
+            sha256=sha256,
+            blob_uri=str(blob_ref.uri),
+            uploaded_at_iso=uploaded_at,
+            index_in_rag=True,
+        )
+    except Exception as exc:
+        current_app.logger.warning(
+            "[files/upload] Failed to launch file-copy upload workflow event: %s",
+            exc,
+        )
+        workflow_event_launch = {
+            "success": False,
+            "triggered": False,
+            "outcome": "not_triggered",
+            "event_type": "file_copy.uploaded",
+            "reason": "workflow_event_launch_failed",
+            "error": str(exc),
+        }
+
     return (
         jsonify(
             {
@@ -1283,6 +1320,7 @@ def upload_file_to_blob_store_and_vontology():
                     "metadata": blob_ref.metadata,
                 },
                 "chat_history_recorded": bool(chat_history_recorded),
+                "workflow_event_launch": workflow_event_launch,
             }
         ),
         200,

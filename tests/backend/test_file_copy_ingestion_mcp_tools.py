@@ -84,3 +84,106 @@ def test_import_local_file_copy_uses_authenticated_context(monkeypatch):
     assert result["success"] is True
     assert result["concept_id"] == "#V#imported_file"
     assert result["namespace"] == "#V#user@org"
+
+
+def test_interpret_file_copy_persists_image_interpretation(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.catalogue._read_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "text": "OCR text from screenshot",
+            "content_type": "image/png",
+            "original_filename": "screenshot.png",
+            "size_bytes": 1280,
+            "byte_length": 1280,
+            "blob": {"backend": "local", "key": "uploads/user/hash/screenshot.png"},
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.computer_file_copy_service.fetch_file_copy_bytes",
+        lambda **_kwargs: {"success": True, "data": b"\x89PNG..."},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.file_copy_interpretation_service.build_image_interpretation",
+        lambda **_kwargs: {
+            "kind": "image",
+            "description": "University enrolment screenshot with tabular student details.",
+            "subject_tags": ["screenshot_or_interface", "text_heavy"],
+            "content_text": "OCR text from screenshot",
+            "content_length": 24,
+        },
+    )
+
+    writes: list[dict[str, object]] = []
+
+    def _fake_upsert_singleton_text_relation(**kwargs):
+        writes.append(dict(kwargs))
+        return {"relation_id": f"rel-{len(writes)}"}
+
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.upsert_singleton_text_relation",
+        _fake_upsert_singleton_text_relation,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.rag_text_relation_change_hook_service.maybe_sync_concept_text_relations_to_rag",
+        lambda **_kwargs: None,
+    )
+
+    result = cat._interpret_file_copy(
+        concept_id="#V#file_copy_image_test",
+        namespace="#V#user@org",
+    )
+
+    assert result["success"] is True
+    assert result["file_kind"] == "image"
+    assert result["description"].startswith("University enrolment screenshot")
+    assert result["persisted"] is True
+    assert len(result["persisted_relations"]) == 3
+    written_predicates = [row["predicate"] for row in writes]
+    assert "hasDescription" in written_predicates
+    assert "hasContent" in written_predicates
+    assert "#V#has_file_copy_interpretation_json" in written_predicates
+
+
+def test_interpret_file_copy_supports_non_persist_mode(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.catalogue._read_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "text": "Document body text",
+            "content_type": "text/plain",
+            "original_filename": "notes.txt",
+            "size_bytes": 64,
+            "byte_length": 64,
+            "blob": {"backend": "local", "key": "uploads/user/hash/notes.txt"},
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.file_copy_interpretation_service.build_document_interpretation",
+        lambda **_kwargs: {
+            "kind": "document",
+            "description": "Document text extracted: Document body text",
+            "subject_tags": ["document"],
+            "content_text": "Document body text",
+            "content_length": 18,
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.upsert_singleton_text_relation",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("should_not_write")),
+    )
+
+    result = cat._interpret_file_copy(
+        concept_id="#V#file_copy_doc_test",
+        namespace="#V#user@org",
+        persist=False,
+    )
+
+    assert result["success"] is True
+    assert result["file_kind"] == "document"
+    assert result["persisted"] is False
+    assert result["persisted_relations"] == []
