@@ -128,6 +128,101 @@ function conceptApiFetch(url, options = {}) {
     }
 }
 
+function normaliseRelationshipTargets(raw) {
+    if (Array.isArray(raw)) {
+        return raw
+            .map((value) => (typeof value === 'string' ? value.trim() : ''))
+            .filter(Boolean);
+    }
+    if (typeof raw === 'string' && raw.trim()) {
+        return [raw.trim()];
+    }
+    return [];
+}
+
+export function deriveInstanceTypeSummaryLabels(parentsData, conceptData, nodeData) {
+    const parentEntries = Array.isArray(parentsData?.parents) ? parentsData.parents : [];
+    const nameById = new Map();
+    const orderedIds = [];
+
+    for (const entry of parentEntries) {
+        if (!entry || typeof entry !== 'object') continue;
+        const candidateId = typeof entry.concept_id === 'string'
+            ? entry.concept_id
+            : (typeof entry.id === 'string' ? entry.id : '');
+        const candidateName = typeof entry.name === 'string' && entry.name.trim()
+            ? entry.name.trim()
+            : '';
+        if (candidateId) {
+            if (!orderedIds.includes(candidateId)) orderedIds.push(candidateId);
+            if (candidateName) nameById.set(candidateId, candidateName);
+        } else if (candidateName && !orderedIds.includes(candidateName)) {
+            orderedIds.push(candidateName);
+        }
+    }
+
+    const conceptRels = (conceptData && typeof conceptData === 'object' && conceptData.relationships && typeof conceptData.relationships === 'object')
+        ? conceptData.relationships
+        : {};
+    const nodeRels = (nodeData && typeof nodeData === 'object' && nodeData.raw_doc && typeof nodeData.raw_doc === 'object' && nodeData.raw_doc.relationships && typeof nodeData.raw_doc.relationships === 'object')
+        ? nodeData.raw_doc.relationships
+        : {};
+
+    const relCandidates = [
+        conceptRels.is_an_instance_of,
+        conceptRels.is_an_instance_ofs,
+        nodeRels.is_an_instance_of,
+        nodeData?.is_an_instance_of
+    ];
+
+    for (const raw of relCandidates) {
+        const ids = normaliseRelationshipTargets(raw);
+        for (const id of ids) {
+            if (!orderedIds.includes(id)) orderedIds.push(id);
+        }
+    }
+
+    return orderedIds.map((id) => nameById.get(id) || id);
+}
+
+export function deriveRelationshipExtentFallbackRows(conceptId, conceptData) {
+    if (!conceptData || typeof conceptData !== 'object') return [];
+    const relationships = conceptData.relationships;
+    if (!relationships || typeof relationships !== 'object') return [];
+
+    const rows = [];
+    const updatedAt = conceptData.updated_at || conceptData.updated || null;
+    const sourceConceptId = typeof conceptData.concept_id === 'string' && conceptData.concept_id.trim()
+        ? conceptData.concept_id.trim()
+        : conceptId;
+
+    for (const [predicateId, rawTargets] of Object.entries(relationships)) {
+        if (!predicateId || predicateId === 'most_salient_type') continue;
+        const targets = normaliseRelationshipTargets(rawTargets);
+        if (!targets.length) continue;
+        targets.forEach((targetValue, idx) => {
+            rows.push({
+                relation_id: `fallback::${sourceConceptId}::${predicateId}::${idx}`,
+                source: 'structured',
+                relation_kind: 'binary',
+                role: 'arg1',
+                predicate_id: predicateId,
+                arg1_value: sourceConceptId,
+                arg1_is_concept: !!normalisePotentialConceptId(sourceConceptId),
+                arg2_value: targetValue,
+                arg2_is_concept: !!normalisePotentialConceptId(targetValue),
+                arg2_index: idx + 2,
+                source_concept_id: sourceConceptId,
+                target_value: targetValue,
+                updated_at: updatedAt,
+                is_asserted: true
+            });
+        });
+    }
+
+    return rows;
+}
+
 function updateVerticalResizeHandleIfOverflow(el) {
     if (!el || typeof el !== 'object') return;
     try {
@@ -2269,7 +2364,7 @@ async function adaptIndividualConceptTabUI(conceptId, suffix) {
         // Insert a small types summary line under the title
         const step1 = document.getElementById(`conceptStep1_${suffix}`) || document.getElementById('conceptStep1');
         if (step1 && !step1.querySelector('.concept-types-summary')) {
-            const types = Array.isArray(parentsData.parents) ? parentsData.parents.map(p => p.name).filter(Boolean) : [];
+            const types = deriveInstanceTypeSummaryLabels(parentsData, conceptData, nodeData);
             const summary = document.createElement('div');
             summary.className = 'concept-types-summary';
             summary.style.margin = '6px 0 10px 0';
@@ -3512,6 +3607,21 @@ async function populateTypeDescription(conceptId, suffix) {
                         applyRawDescription(found.text || '');
                         textarea.value = found.text || '';
                         console.debug('[dynamicTabs] Description loaded (relations list fallback)', { conceptId, relationId });
+                        return;
+                    }
+                }
+
+                // Canonical fallback: concept endpoint already resolves authoritative hasDescription where available.
+                const conceptUrl = `/api/concepts/${encodedId}`;
+                res = await conceptApiFetch(conceptUrl);
+                if (res.ok) {
+                    data = await res.json().catch(() => ({}));
+                    const conceptDescription = typeof data.description === 'string' ? data.description : null;
+                    if (conceptDescription !== null) {
+                        applyRawDescription(conceptDescription);
+                        textarea.value = conceptDescription;
+                        relationId = null;
+                        console.debug('[dynamicTabs] Description loaded (concept endpoint canonical fallback)', { conceptId });
                         return;
                     }
                 }
@@ -5662,7 +5772,21 @@ async function renderRelationships(conceptId, suffix, kind) {
             throw new Error(data.error || `HTTP ${resp.status}`);
         }
 
-        const rows = Array.isArray(data.rows) ? data.rows : [];
+        let rows = Array.isArray(data.rows) ? data.rows : [];
+        if (!rows.length) {
+            try {
+                const conceptResp = await conceptApiFetch(`/api/concepts/${encodeURIComponent(conceptId)}`);
+                if (conceptResp.ok) {
+                    const conceptPayload = await conceptResp.json().catch(() => null);
+                    const fallbackRows = deriveRelationshipExtentFallbackRows(conceptId, conceptPayload);
+                    if (fallbackRows.length) {
+                        rows = fallbackRows;
+                    }
+                }
+            } catch (fallbackErr) {
+                console.debug('[dynamicTabs] Relationship fallback synthesis failed', fallbackErr);
+            }
+        }
         if (!rows.length) {
             content.innerHTML = '<i>No relationships yet.</i>';
             return;

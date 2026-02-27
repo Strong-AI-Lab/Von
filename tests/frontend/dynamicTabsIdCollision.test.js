@@ -285,3 +285,47 @@ describe('notes and content editor markup hygiene', () => {
         expect(section.querySelector('.concept-text-view')).not.toBeNull();
     });
 });
+
+describe('individual concept detail fallbacks', () => {
+    afterEach(() => {
+        jest.resetModules();
+    });
+
+    test('deriveInstanceTypeSummaryLabels uses instance-of relationships when parents endpoint is empty', () => {
+        const { deriveInstanceTypeSummaryLabels } = require(dynamicTabsModulePath);
+
+        const labels = deriveInstanceTypeSummaryLabels(
+            { parents: [] },
+            {
+                relationships: {
+                    is_an_instance_of: ['#V#software_repository']
+                }
+            },
+            {}
+        );
+
+        expect(labels).toEqual(['#V#software_repository']);
+    });
+
+    test('deriveRelationshipExtentFallbackRows synthesises structured rows from concept relationships', () => {
+        const { deriveRelationshipExtentFallbackRows } = require(dynamicTabsModulePath);
+
+        const rows = deriveRelationshipExtentFallbackRows('#V#atlascode_github_repository', {
+            concept_id: '#V#atlascode_github_repository',
+            updated_at: '2026-02-23T10:00:00Z',
+            relationships: {
+                '#V#maintained_by': ['#V#atlassian']
+            }
+        });
+
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+            source: 'structured',
+            relation_kind: 'binary',
+            role: 'arg1',
+            predicate_id: '#V#maintained_by',
+            arg1_value: '#V#atlascode_github_repository',
+            arg2_value: '#V#atlassian'
+        });
+    });
+});
