@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ..prompt.annotation_prompt import AnnotationPromptBuilder
+from .description_metadata_service import extract_inline_description_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -330,17 +331,52 @@ class DescriptionGenerationService:
         # Store if requested
         if store:
             try:
+                cleaned_description, extracted_metadata = (
+                    extract_inline_description_metadata(description)
+                )
+                if cleaned_description:
+                    description = cleaned_description
+                now_iso = datetime.now(timezone.utc).isoformat()
+                provenance_payload: Dict[str, Any] = {
+                    "source": "llm_generation",
+                    "service": "description_generation_service",
+                    "timestamp": now_iso,
+                }
+                context_payload: Dict[str, Any] = {
+                    "generated": True,
+                    "jira": "JVNAUTOSCI-1044",
+                }
+                if extracted_metadata:
+                    if isinstance(extracted_metadata.get("source"), str):
+                        provenance_payload.setdefault(
+                            "source_label", extracted_metadata["source"]
+                        )
+                    if isinstance(extracted_metadata.get("attribution"), str):
+                        provenance_payload.setdefault(
+                            "attribution", extracted_metadata["attribution"]
+                        )
+                    if isinstance(extracted_metadata.get("timestamp"), str):
+                        provenance_payload.setdefault(
+                            "upstream_timestamp", extracted_metadata["timestamp"]
+                        )
+                    if isinstance(extracted_metadata.get("parent"), str):
+                        context_payload.setdefault(
+                            "parent_concept_id", extracted_metadata["parent"]
+                        )
+                    confidence_score = extracted_metadata.get("confidence_score")
+                    if isinstance(confidence_score, (int, float)):
+                        context_payload.setdefault(
+                            "confidence_score", float(confidence_score)
+                        )
+                    context_payload["inline_metadata_migrated"] = True
+
                 upsert_text_for_concept(
                     subject_concept_id=concept_id,
                     predicate="hasDescription",
                     text=description,
                     lang="en-NZ",
-                    provenance={
-                        "source": "llm_generation",
-                        "service": "description_generation_service",
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                    },
-                    context={"generated": True, "jira": "JVNAUTOSCI-1044"},
+                    provenance=provenance_payload,
+                    context=context_payload,
                 )
                 logger.info(f"Stored generated description for {concept_id}")
             except Exception as e:

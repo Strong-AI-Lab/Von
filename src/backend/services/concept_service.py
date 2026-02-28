@@ -76,7 +76,8 @@ from ..security.access_control import (
     get_effective_user_concept_id,
     apply_concept_query_filter,
 )
-from .text_value_service import upsert_text_for_concept
+from .description_metadata_service import extract_inline_description_metadata
+from .text_value_service import get_texts_for_concept, upsert_text_for_concept
 from ..db.repositories.text_value_repository import TextRelationsRepository
 
 # Setup logger
@@ -3165,17 +3166,73 @@ def update_concept_description(concept_id: str, new_description: str) -> bool:
             )
             return False
 
+        existing_context: Dict[str, Any] = {}
+        existing_provenance: Dict[str, Any] = {}
+        cleaned_description, extracted_inline_metadata = (
+            extract_inline_description_metadata(new_description)
+        )
+        description_to_store = (
+            cleaned_description if cleaned_description.strip() else new_description
+        )
+
         try:
+            existing_descriptions = get_texts_for_concept(
+                subject_concept_id=concept_id, predicate="hasDescription", limit=1
+            )
+            if existing_descriptions:
+                first = existing_descriptions[0]
+                if isinstance(first.get("context"), dict):
+                    existing_context = dict(first["context"])
+                if isinstance(first.get("provenance"), dict):
+                    existing_provenance = dict(first["provenance"])
+        except Exception as e:  # pragma: no cover
+            logger.warning(
+                "update_concept_description: failed to read existing metadata for %s: %s",
+                concept_id,
+                e,
+            )
+
+        try:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            provenance_payload: Dict[str, Any] = dict(existing_provenance)
+            context_payload: Dict[str, Any] = dict(existing_context)
+            if not provenance_payload:
+                provenance_payload["source"] = "update_concept_description"
+            provenance_payload["last_edited_at"] = now_iso
+            provenance_payload.setdefault("last_edited_by", "update_concept_description")
+            context_payload.setdefault("write_strategy", "relations_only_v2")
+
+            if extracted_inline_metadata:
+                if isinstance(extracted_inline_metadata.get("source"), str):
+                    provenance_payload.setdefault(
+                        "source_label", extracted_inline_metadata["source"]
+                    )
+                if isinstance(extracted_inline_metadata.get("attribution"), str):
+                    provenance_payload.setdefault(
+                        "attribution", extracted_inline_metadata["attribution"]
+                    )
+                if isinstance(extracted_inline_metadata.get("timestamp"), str):
+                    provenance_payload.setdefault(
+                        "upstream_timestamp", extracted_inline_metadata["timestamp"]
+                    )
+                if isinstance(extracted_inline_metadata.get("parent"), str):
+                    context_payload.setdefault(
+                        "parent_concept_id", extracted_inline_metadata["parent"]
+                    )
+                confidence_score = extracted_inline_metadata.get("confidence_score")
+                if isinstance(confidence_score, (int, float)):
+                    context_payload.setdefault(
+                        "confidence_score", float(confidence_score)
+                    )
+                context_payload["inline_metadata_migrated"] = True
+
             tv_payload = upsert_text_for_concept(
                 subject_concept_id=concept_id,
                 predicate="hasDescription",
-                text=new_description,
+                text=description_to_store,
                 lang="en",
-                provenance={
-                    "source": "update_concept_description",
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                },
-                context={"write_strategy": "relations_only_v2"},
+                provenance=provenance_payload,
+                context=context_payload,
             )
             new_text_value_id = tv_payload.get("text_value_id")
             relation_id = tv_payload.get("relation_id")
