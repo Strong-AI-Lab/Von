@@ -4769,6 +4769,187 @@ async function adaptTypeConceptTabUI(conceptId, suffix) {
     }
 }
 // --- Relationships UI ---
+const RELATIONSHIP_UNCERTAINTY_FILTERS = Object.freeze({
+    all: { uncertaintyMode: 'include_uncertain', includeUncertain: true },
+    asserted_only: { uncertaintyMode: 'asserted_only', includeUncertain: false },
+    uncertain_only: { uncertaintyMode: 'uncertain_only', includeUncertain: true }
+});
+const RELATIONSHIP_DEFAULT_UNCERTAIN_STATUSES = Object.freeze(['proposed']);
+const RELATIONSHIP_SORT_OPTIONS = Object.freeze(
+    new Set(['recency_desc', 'recency_asc', 'confidence_desc', 'confidence_asc'])
+);
+const relationshipExtentUiState = new Map();
+
+function getRelationshipExtentUiStateKey(conceptId, suffix) {
+    return `${String(conceptId || '')}::${String(suffix || '')}`;
+}
+
+function getRelationshipExtentUiState(conceptId, suffix) {
+    const key = getRelationshipExtentUiStateKey(conceptId, suffix);
+    const existing = relationshipExtentUiState.get(key);
+    if (existing) {
+        return existing;
+    }
+    const initial = { uncertaintyFilter: 'all', sortBy: 'recency_desc' };
+    relationshipExtentUiState.set(key, initial);
+    return initial;
+}
+
+function setRelationshipExtentUiState(conceptId, suffix, patch = {}) {
+    const state = getRelationshipExtentUiState(conceptId, suffix);
+    if (typeof patch.uncertaintyFilter === 'string' && RELATIONSHIP_UNCERTAINTY_FILTERS[patch.uncertaintyFilter]) {
+        state.uncertaintyFilter = patch.uncertaintyFilter;
+    }
+    if (typeof patch.sortBy === 'string' && RELATIONSHIP_SORT_OPTIONS.has(patch.sortBy)) {
+        state.sortBy = patch.sortBy;
+    }
+    relationshipExtentUiState.set(getRelationshipExtentUiStateKey(conceptId, suffix), state);
+    return state;
+}
+
+export function deriveRelationshipExtentQuery(uncertaintyFilter = 'all') {
+    const selected = RELATIONSHIP_UNCERTAINTY_FILTERS[String(uncertaintyFilter || 'all')] || RELATIONSHIP_UNCERTAINTY_FILTERS.all;
+    return {
+        uncertaintyMode: selected.uncertaintyMode,
+        includeUncertain: selected.includeUncertain,
+        uncertaintyStatuses: [...RELATIONSHIP_DEFAULT_UNCERTAIN_STATUSES]
+    };
+}
+
+function getRowUncertaintyPayload(row) {
+    if (!row || typeof row !== 'object') {
+        return {};
+    }
+    const uncertainty = row.uncertainty;
+    return (uncertainty && typeof uncertainty === 'object') ? uncertainty : {};
+}
+
+function normaliseConfidenceScore(rawValue) {
+    const value = Number(rawValue);
+    if (!Number.isFinite(value)) {
+        return null;
+    }
+    return Math.max(0, Math.min(1, value));
+}
+
+export function getRelationshipConfidenceScore(row) {
+    const uncertainty = getRowUncertaintyPayload(row);
+    return normaliseConfidenceScore(uncertainty.confidence_score);
+}
+
+function formatRelationshipConfidence(row) {
+    const confidence = getRelationshipConfidenceScore(row);
+    if (confidence === null) {
+        return 'N/A';
+    }
+    return `${Math.round(confidence * 100)}%`;
+}
+
+export function summariseRelationshipProvenance(row) {
+    const uncertainty = getRowUncertaintyPayload(row);
+    const provenance = (uncertainty.provenance && typeof uncertainty.provenance === 'object')
+        ? uncertainty.provenance
+        : {};
+    const source = String(provenance.source || '').trim();
+    const sourceInteraction = String(provenance.source_interaction_id || '').trim();
+    const rejectedBy = String(provenance.rejected_by || '').trim();
+    const segments = [];
+    if (source) segments.push(`source: ${source}`);
+    if (sourceInteraction) segments.push(`interaction: ${sourceInteraction}`);
+    if (rejectedBy) segments.push(`rejected by: ${rejectedBy}`);
+    return segments.join(' | ');
+}
+
+function getRelationshipSortTimestamp(row) {
+    const uncertainty = getRowUncertaintyPayload(row);
+    const candidates = [uncertainty.updated_at_utc, row?.updated_at, uncertainty.created_at_utc];
+    for (const candidate of candidates) {
+        if (!candidate) continue;
+        const timestamp = new Date(candidate).getTime();
+        if (Number.isFinite(timestamp)) {
+            return timestamp;
+        }
+    }
+    return 0;
+}
+
+export function sortRelationshipExtentRows(rows, sortBy = 'recency_desc') {
+    const mode = RELATIONSHIP_SORT_OPTIONS.has(sortBy) ? sortBy : 'recency_desc';
+    const working = Array.isArray(rows) ? [...rows] : [];
+    working.sort((a, b) => {
+        if (mode === 'confidence_desc' || mode === 'confidence_asc') {
+            const left = getRelationshipConfidenceScore(a);
+            const right = getRelationshipConfidenceScore(b);
+            const leftScore = left === null ? -1 : left;
+            const rightScore = right === null ? -1 : right;
+            if (leftScore !== rightScore) {
+                return mode === 'confidence_desc' ? rightScore - leftScore : leftScore - rightScore;
+            }
+            return getRelationshipSortTimestamp(b) - getRelationshipSortTimestamp(a);
+        }
+        const leftTs = getRelationshipSortTimestamp(a);
+        const rightTs = getRelationshipSortTimestamp(b);
+        if (leftTs !== rightTs) {
+            return mode === 'recency_asc' ? leftTs - rightTs : rightTs - leftTs;
+        }
+        return String(a?.relation_id || '').localeCompare(String(b?.relation_id || ''));
+    });
+    return working;
+}
+
+function ensureRelationshipsToolbar(container, conceptId, suffix, kind) {
+    if (!container) return;
+    const state = getRelationshipExtentUiState(conceptId, suffix);
+    let toolbar = container.querySelector('.relationships-toolbar');
+    if (!toolbar) {
+        toolbar = document.createElement('div');
+        toolbar.className = 'relationships-toolbar';
+        toolbar.innerHTML = `
+            <div class="relationships-toolbar-group">
+                <label for="relationshipUncertaintyFilter_${suffix || 'default'}">State</label>
+                <select id="relationshipUncertaintyFilter_${suffix || 'default'}" class="relationships-toolbar-select" aria-label="Relationship state filter">
+                    <option value="all">All</option>
+                    <option value="asserted_only">Asserted only</option>
+                    <option value="uncertain_only">Uncertain only</option>
+                </select>
+            </div>
+            <div class="relationships-toolbar-group">
+                <label for="relationshipSortBy_${suffix || 'default'}">Sort</label>
+                <select id="relationshipSortBy_${suffix || 'default'}" class="relationships-toolbar-select" aria-label="Relationship sort order">
+                    <option value="recency_desc">Recency (newest first)</option>
+                    <option value="recency_asc">Recency (oldest first)</option>
+                    <option value="confidence_desc">Confidence (highest first)</option>
+                    <option value="confidence_asc">Confidence (lowest first)</option>
+                </select>
+            </div>
+        `;
+        container.insertBefore(toolbar, container.firstChild);
+    }
+
+    const filterSelect = toolbar.querySelector(`#relationshipUncertaintyFilter_${suffix || 'default'}`);
+    const sortSelect = toolbar.querySelector(`#relationshipSortBy_${suffix || 'default'}`);
+    if (filterSelect) {
+        filterSelect.value = state.uncertaintyFilter;
+        if (filterSelect.dataset.bound !== 'true') {
+            filterSelect.addEventListener('change', async () => {
+                setRelationshipExtentUiState(conceptId, suffix, { uncertaintyFilter: filterSelect.value });
+                await renderRelationships(conceptId, suffix, kind);
+            });
+            filterSelect.dataset.bound = 'true';
+        }
+    }
+    if (sortSelect) {
+        sortSelect.value = state.sortBy;
+        if (sortSelect.dataset.bound !== 'true') {
+            sortSelect.addEventListener('change', async () => {
+                setRelationshipExtentUiState(conceptId, suffix, { sortBy: sortSelect.value });
+                await renderRelationships(conceptId, suffix, kind);
+            });
+            sortSelect.dataset.bound = 'true';
+        }
+    }
+}
+
 async function initializeRelationshipsUI(conceptId, suffix, kind) {
     try {
         // Show loading indicator immediately
@@ -4779,6 +4960,7 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
 
         const container = document.getElementById(`relationshipsSection_${suffix}`) || document.getElementById('relationshipsSection');
         if (!container) return;
+        ensureRelationshipsToolbar(container, conceptId, suffix, kind);
 
         // Simple in-memory caches (module scope) – create if not already
         if (!window.__dynamicTabsCaches) {
@@ -5766,7 +5948,21 @@ async function renderRelationships(conceptId, suffix, kind) {
     if (!content) return;
     content.innerHTML = '<div>Loading relationships...</div>';
     try {
-        const resp = await fetch(`/vontology/api/vontology/relationships/extent?concept_id=${encodeURIComponent(conceptId)}&limit=500`);
+        const uiState = getRelationshipExtentUiState(conceptId, suffix);
+        const extentQuery = deriveRelationshipExtentQuery(uiState.uncertaintyFilter);
+        const params = new URLSearchParams();
+        params.set('concept_id', conceptId);
+        params.set('limit', '500');
+        if (extentQuery.uncertaintyMode) {
+            params.set('uncertainty_mode', extentQuery.uncertaintyMode);
+        }
+        if (extentQuery.includeUncertain) {
+            params.set('include_uncertain', 'true');
+        }
+        for (const status of extentQuery.uncertaintyStatuses || []) {
+            params.append('uncertainty_status', status);
+        }
+        const resp = await fetch(`/vontology/api/vontology/relationships/extent?${params.toString()}`);
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok || !data.success) {
             throw new Error(data.error || `HTTP ${resp.status}`);
@@ -5791,6 +5987,7 @@ async function renderRelationships(conceptId, suffix, kind) {
             content.innerHTML = '<i>No relationships yet.</i>';
             return;
         }
+        rows = sortRelationshipExtentRows(rows, uiState.sortBy);
 
         const toPredicateConceptId = (predicateId) => {
             if (!predicateId || typeof predicateId !== 'string') {
@@ -5861,6 +6058,42 @@ async function renderRelationships(conceptId, suffix, kind) {
             return cell;
         };
 
+        const createRelationStateCell = (row) => {
+            const cell = document.createElement('td');
+            const state = String(row?.relation_state || (row?.is_asserted ? 'asserted' : 'uncertain')).trim().toLowerCase() || 'asserted';
+            const uncertainty = getRowUncertaintyPayload(row);
+            const uncertaintyStatus = String(uncertainty.status || '').trim().toLowerCase();
+            const badge = document.createElement('span');
+            badge.className = `relationship-state-badge state-${state}`;
+            badge.textContent = state === 'uncertain' ? 'Uncertain' : 'Asserted';
+            if (state === 'uncertain' && uncertaintyStatus) {
+                badge.textContent = `${badge.textContent} (${uncertaintyStatus})`;
+            }
+            badge.setAttribute('aria-label', `Relationship state ${badge.textContent}`);
+            cell.appendChild(badge);
+            return cell;
+        };
+
+        const createConfidenceCell = (row) => {
+            const cell = document.createElement('td');
+            const confidenceText = formatRelationshipConfidence(row);
+            cell.textContent = confidenceText;
+            cell.className = 'relationship-confidence-cell';
+            cell.setAttribute('aria-label', `Relationship confidence ${confidenceText}`);
+            return cell;
+        };
+
+        const createProvenanceCell = (row) => {
+            const cell = document.createElement('td');
+            const provenanceSummary = summariseRelationshipProvenance(row);
+            cell.textContent = provenanceSummary || 'N/A';
+            if (provenanceSummary) {
+                cell.title = provenanceSummary;
+            }
+            cell.className = 'relationship-provenance-cell';
+            return cell;
+        };
+
         const tableContainer = document.createElement('div');
         tableContainer.className = 'predicate-extent-table-container';
         const table = document.createElement('table');
@@ -5868,7 +6101,7 @@ async function renderRelationships(conceptId, suffix, kind) {
 
         const thead = document.createElement('thead');
         const headRow = document.createElement('tr');
-        ['Role', 'Predicate', 'Arg1', 'Arg2', 'Source', 'Updated', 'Actions'].forEach((label) => {
+        ['Role', 'Predicate', 'Arg1', 'Arg2', 'State', 'Confidence', 'Provenance', 'Source', 'Updated', 'Actions'].forEach((label) => {
             const th = document.createElement('th');
             th.textContent = label;
             headRow.appendChild(th);
@@ -5901,14 +6134,20 @@ async function renderRelationships(conceptId, suffix, kind) {
                 tr.appendChild(createTextCell(row.arg2_value || '', row.arg2_lang || ''));
             }
 
+            tr.appendChild(createRelationStateCell(row));
+            tr.appendChild(createConfidenceCell(row));
+            tr.appendChild(createProvenanceCell(row));
+
             const sourceCell = document.createElement('td');
             sourceCell.textContent = row.source || 'structured';
             sourceCell.className = `source-${row.source || 'structured'}`;
             tr.appendChild(sourceCell);
 
             const updatedCell = document.createElement('td');
-            if (row.updated_at) {
-                const date = new Date(row.updated_at);
+            const uncertaintyMeta = getRowUncertaintyPayload(row);
+            const updatedCandidate = uncertaintyMeta.updated_at_utc || row.updated_at || uncertaintyMeta.created_at_utc;
+            if (updatedCandidate) {
+                const date = new Date(updatedCandidate);
                 if (!Number.isNaN(date.getTime())) {
                     updatedCell.textContent = date.toLocaleString('en-NZ', {
                         year: 'numeric',
@@ -5919,7 +6158,7 @@ async function renderRelationships(conceptId, suffix, kind) {
                     });
                     updatedCell.title = date.toISOString();
                 } else {
-                    updatedCell.textContent = row.updated_at;
+                    updatedCell.textContent = String(updatedCandidate);
                 }
             } else {
                 updatedCell.textContent = 'N/A';
@@ -5927,46 +6166,125 @@ async function renderRelationships(conceptId, suffix, kind) {
             tr.appendChild(updatedCell);
 
             const actionCell = document.createElement('td');
-            const removeBtn = document.createElement('button');
-            removeBtn.type = 'button';
-            removeBtn.className = 'chip-remove';
-            removeBtn.textContent = '×';
-            removeBtn.title = 'Remove assertion';
-            removeBtn.addEventListener('click', async () => {
-                try {
-                    if (row.relation_kind === 'text') {
-                        const deleteResp = await fetch(`/api/concepts/${encodeURIComponent(row.arg1_value)}/texts`, {
-                            method: 'DELETE',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ predicate: row.predicate_id, text: row.arg2_value })
-                        });
-                        const payload = await deleteResp.json().catch(() => ({}));
-                        if (!deleteResp.ok || payload.error) {
-                            throw new Error(payload.error || `HTTP ${deleteResp.status}`);
-                        }
-                        dispatchConceptUpdated([conceptId], { reason: 'text_relation_removed', source: 'relationships_ui' });
-                    } else {
-                        const deleteResp = await fetch('/vontology/api/vontology/relationships/remove', {
+            const state = String(row?.relation_state || (row?.is_asserted ? 'asserted' : 'uncertain')).trim().toLowerCase() || 'asserted';
+            const uncertainty = getRowUncertaintyPayload(row);
+            const assertionId = String(uncertainty.assertion_id || '').trim();
+            const uncertaintyStatus = String(uncertainty.status || '').trim().toLowerCase();
+            const canReviewUncertain = state === 'uncertain' && assertionId && (!uncertaintyStatus || uncertaintyStatus === 'proposed');
+
+            if (canReviewUncertain) {
+                const confirmBtn = document.createElement('button');
+                confirmBtn.type = 'button';
+                confirmBtn.className = 'relationship-action-button relationship-action-confirm';
+                confirmBtn.textContent = 'Confirm';
+                confirmBtn.title = 'Promote uncertain relationship to asserted';
+                confirmBtn.setAttribute('aria-label', 'Confirm uncertain relationship');
+                confirmBtn.addEventListener('click', async () => {
+                    try {
+                        const promoteResp = await fetch('/vontology/api/vontology/relationships/uncertain/promote', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({
-                                source_id: row.arg1_value,
-                                kind: row.predicate_id,
-                                target_id: row.arg2_value
+                                source_id: row.source_concept_id || row.arg1_value,
+                                assertion_id: assertionId,
+                                operator: 'ui'
                             })
                         });
-                        const payload = await deleteResp.json().catch(() => ({}));
-                        if (!deleteResp.ok || payload.error) {
-                            throw new Error(payload.error || `HTTP ${deleteResp.status}`);
+                        const payload = await promoteResp.json().catch(() => ({}));
+                        if (!promoteResp.ok || !payload.success) {
+                            throw new Error(payload.error || `HTTP ${promoteResp.status}`);
                         }
-                        dispatchConceptUpdated([row.arg1_value, row.arg2_value], { reason: 'relationship_removed', source: 'relationships_ui' });
+                        dispatchConceptUpdated([row.source_concept_id || row.arg1_value, row.arg2_value, conceptId], { reason: 'uncertain_relationship_promoted', source: 'relationships_ui' });
+                        await renderRelationships(conceptId, suffix, kind);
+                    } catch (err) {
+                        alert(`Failed to confirm relationship: ${err.message}`);
                     }
-                    await renderRelationships(conceptId, suffix, kind);
-                } catch (err) {
-                    alert(`Failed to remove relationship: ${err.message}`);
-                }
-            });
-            actionCell.appendChild(removeBtn);
+                });
+
+                const rejectBtn = document.createElement('button');
+                rejectBtn.type = 'button';
+                rejectBtn.className = 'relationship-action-button relationship-action-reject';
+                rejectBtn.textContent = 'Reject';
+                rejectBtn.title = 'Reject or defer uncertain relationship';
+                rejectBtn.setAttribute('aria-label', 'Reject uncertain relationship');
+                rejectBtn.addEventListener('click', async () => {
+                    const promptMessage = 'Optional reason for rejection/deferment (leave blank to use default):';
+                    const reasonInput = window.prompt(promptMessage, '');
+                    if (reasonInput === null) {
+                        return;
+                    }
+                    const reason = String(reasonInput || '').trim() || 'deferred_by_user';
+                    try {
+                        const rejectResp = await fetch('/vontology/api/vontology/relationships/uncertain/reject', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                source_id: row.source_concept_id || row.arg1_value,
+                                assertion_id: assertionId,
+                                reason,
+                                operator: 'ui'
+                            })
+                        });
+                        const payload = await rejectResp.json().catch(() => ({}));
+                        if (!rejectResp.ok || !payload.success) {
+                            throw new Error(payload.error || `HTTP ${rejectResp.status}`);
+                        }
+                        dispatchConceptUpdated([row.source_concept_id || row.arg1_value, conceptId], { reason: 'uncertain_relationship_rejected', source: 'relationships_ui' });
+                        await renderRelationships(conceptId, suffix, kind);
+                    } catch (err) {
+                        alert(`Failed to reject relationship: ${err.message}`);
+                    }
+                });
+
+                actionCell.appendChild(confirmBtn);
+                actionCell.appendChild(rejectBtn);
+            } else if (state === 'uncertain') {
+                const statusLabel = document.createElement('span');
+                statusLabel.className = 'relationship-action-readonly';
+                statusLabel.textContent = uncertaintyStatus ? `No actions (${uncertaintyStatus})` : 'No actions';
+                actionCell.appendChild(statusLabel);
+            } else {
+                const removeBtn = document.createElement('button');
+                removeBtn.type = 'button';
+                removeBtn.className = 'chip-remove';
+                removeBtn.textContent = '×';
+                removeBtn.title = 'Remove assertion';
+                removeBtn.addEventListener('click', async () => {
+                    try {
+                        if (row.relation_kind === 'text') {
+                            const deleteResp = await fetch(`/api/concepts/${encodeURIComponent(row.arg1_value)}/texts`, {
+                                method: 'DELETE',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ predicate: row.predicate_id, text: row.arg2_value })
+                            });
+                            const payload = await deleteResp.json().catch(() => ({}));
+                            if (!deleteResp.ok || payload.error) {
+                                throw new Error(payload.error || `HTTP ${deleteResp.status}`);
+                            }
+                            dispatchConceptUpdated([conceptId], { reason: 'text_relation_removed', source: 'relationships_ui' });
+                        } else {
+                            const deleteResp = await fetch('/vontology/api/vontology/relationships/remove', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    source_id: row.arg1_value,
+                                    kind: row.predicate_id,
+                                    target_id: row.arg2_value
+                                })
+                            });
+                            const payload = await deleteResp.json().catch(() => ({}));
+                            if (!deleteResp.ok || payload.error) {
+                                throw new Error(payload.error || `HTTP ${deleteResp.status}`);
+                            }
+                            dispatchConceptUpdated([row.arg1_value, row.arg2_value], { reason: 'relationship_removed', source: 'relationships_ui' });
+                        }
+                        await renderRelationships(conceptId, suffix, kind);
+                    } catch (err) {
+                        alert(`Failed to remove relationship: ${err.message}`);
+                    }
+                });
+                actionCell.appendChild(removeBtn);
+            }
             tr.appendChild(actionCell);
 
             tbody.appendChild(tr);
