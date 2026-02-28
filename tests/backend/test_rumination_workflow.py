@@ -153,6 +153,55 @@ class TestRuminationAssessGaps:
             assessment = result.outputs["gap_assessment"]
             assert all(v == 0 for v in assessment.values())
 
+    def test_assess_includes_relation_gap_candidates(self) -> None:
+        from src.backend.workflows.action_registry import (
+            WorkflowActionRequest,
+            WorkflowEnvironment,
+        )
+        from src.backend.workflows.durable.rumination_workflow import (
+            _handle_assess_gaps,
+        )
+
+        with (
+            patch(
+                "src.backend.workflows.durable.rumination_workflow."
+                "_count_concepts_missing_predicate",
+                return_value=0,
+            ),
+            patch(
+                "src.backend.workflows.durable.rumination_workflow."
+                "_count_isolated_concepts",
+                return_value=0,
+            ),
+            patch(
+                "src.backend.workflows.durable.rumination_workflow."
+                "_list_relation_gap_candidates",
+                return_value=[
+                    {
+                        "concept_id": "#V#alice",
+                        "missing_predicates": ["#V#has_affiliation"],
+                    },
+                    {
+                        "concept_id": "#V#bob",
+                        "missing_predicates": ["#V#depends_on"],
+                    },
+                ],
+            ),
+        ):
+            env = WorkflowEnvironment(llm_client=None)
+            req = WorkflowActionRequest(
+                action_id="rumination.assess_gaps",
+                inputs={},
+                environment=env,
+                data={},
+            )
+
+            result = _handle_assess_gaps(req)
+            assert result.ok
+            assessment = result.outputs["gap_assessment"]
+            assert assessment["missing_relations"] == 2
+            assert len(result.outputs["relation_gap_candidates"]) == 2
+
 
 class TestRuminationPlanEnrichment:
     """Test the budget-aware planning handler."""
@@ -394,6 +443,79 @@ class TestRuminationDispatch:
         assert result.ok
         assert result.outputs["has_more_tasks"] is False
 
+    def test_dispatch_relation_completion_dry_run(self) -> None:
+        from src.backend.workflows.action_registry import (
+            WorkflowActionRequest,
+            WorkflowEnvironment,
+        )
+        from src.backend.workflows.durable.rumination_workflow import (
+            _handle_dispatch_enrichment,
+        )
+
+        with patch(
+            "src.backend.workflows.durable.rumination_workflow."
+            "_dispatch_relation_completion_task",
+            return_value={
+                "metrics": {
+                    "concepts_considered": 1,
+                    "proposed_relations": 2,
+                    "auto_applied_relations": 0,
+                    "would_apply_relations": 1,
+                    "deferred_relations": 1,
+                    "confirmed_relations": 0,
+                    "failed_relations": 0,
+                },
+                "proposal_details": [
+                    {
+                        "source_id": "#V#alice",
+                        "predicate": "#V#has_affiliation",
+                        "action": "would_auto_apply",
+                    }
+                ],
+                "deferred_questions": [
+                    {
+                        "source_id": "#V#alice",
+                        "predicate": "#V#depends_on",
+                        "question": "What should the dependency relation be?",
+                    }
+                ],
+            },
+        ):
+            env = WorkflowEnvironment(llm_client=None)
+            req = WorkflowActionRequest(
+                action_id="rumination.dispatch_enrichment",
+                inputs={},
+                environment=env,
+                data={
+                    "dry_run": True,
+                    "enrichment_plan": [
+                        {
+                            "gap_name": "missing_relations",
+                            "predicate": "__relation_completion__",
+                            "dispatch_mode": "relation_completion",
+                            "allocation": 1,
+                        }
+                    ],
+                    "plan_index": 0,
+                    "dispatched_tasks": [],
+                    "total_processed": 0,
+                    "total_failed": 0,
+                    "relation_metrics": {},
+                    "relation_changes": [],
+                    "relation_questions": [],
+                },
+            )
+
+            result = _handle_dispatch_enrichment(req)
+            assert result.ok
+            assert result.outputs["has_more_tasks"] is False
+            metrics = result.outputs["relation_metrics"]
+            assert metrics["proposed_relations"] == 2
+            assert metrics["would_apply_relations"] == 1
+            assert metrics["deferred_relations"] == 1
+            assert len(result.outputs["relation_changes"]) == 1
+            assert len(result.outputs["relation_questions"]) == 1
+
 
 class TestRuminationFinalise:
     """Test the finalise handler."""
@@ -429,6 +551,106 @@ class TestRuminationFinalise:
         assert summary["total_failed"] == 2
         assert summary["success"] is False  # failed > 0
         assert summary["tasks_dispatched"] == 1
+
+    def test_finalise_includes_relation_metrics(self) -> None:
+        from src.backend.workflows.action_registry import (
+            WorkflowActionRequest,
+            WorkflowEnvironment,
+        )
+        from src.backend.workflows.durable.rumination_workflow import (
+            _handle_finalise,
+        )
+
+        env = WorkflowEnvironment(llm_client=None)
+        req = WorkflowActionRequest(
+            action_id="rumination.finalise",
+            inputs={},
+            environment=env,
+            data={
+                "gap_assessment": {"missing_relations": 1},
+                "dispatched_tasks": [{"gap_name": "missing_relations"}],
+                "total_processed": 0,
+                "total_failed": 0,
+                "relation_metrics": {"proposed_relations": 3, "deferred_relations": 2},
+                "relation_changes": [{"source_id": "#V#alice"}],
+                "relation_questions": [{"source_id": "#V#alice"}],
+            },
+        )
+
+        result = _handle_finalise(req)
+        assert result.ok
+        summary = result.outputs["rumination_result"]
+        assert summary["relation_metrics"]["proposed_relations"] == 3
+        assert summary["relation_changes_count"] == 1
+        assert summary["relation_questions_count"] == 1
+
+
+class TestRuminationRelationCompletionHelpers:
+    def test_dispatch_relation_completion_auto_apply_dry_run(self) -> None:
+        from src.backend.workflows.durable.rumination_workflow import (
+            _dispatch_relation_completion_task,
+        )
+
+        instance_doc = {
+            "concept_id": "#V#alice",
+            "relationships": {},
+            "hypothesized_relations": {
+                "#V#has_affiliation": [
+                    {"value": "#V#strong_ai_lab", "confidence_score": 0.99}
+                ]
+            },
+            "name": "Alice",
+        }
+
+        def _fake_find_one(query, projection=None):
+            cid = (query or {}).get("concept_id")
+            if cid == "#V#alice":
+                return instance_doc
+            if cid == "#V#strong_ai_lab":
+                return {"concept_id": "#V#strong_ai_lab"}
+            return None
+
+        with (
+            patch(
+                "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
+                side_effect=_fake_find_one,
+            ),
+            patch(
+                "src.backend.services.relation_elicitation_service."
+                "RelationElicitationService.generate_question_for_elicit",
+                return_value="What is Alice's affiliation?",
+            ),
+            patch(
+                "src.backend.services.relationship_write_service.add_relationship"
+            ) as mock_add_relationship,
+        ):
+            result = _dispatch_relation_completion_task(
+                task={
+                    "gap_name": "missing_relations",
+                    "predicate": "__relation_completion__",
+                    "allocation": 1,
+                    "auto_apply_confidence_threshold": 0.95,
+                },
+                ctx={
+                    "dry_run": True,
+                    "relation_gap_candidates": [
+                        {
+                            "concept_id": "#V#alice",
+                            "missing_predicates": ["#V#has_affiliation"],
+                        }
+                    ],
+                },
+            )
+
+        metrics = result["metrics"]
+        assert metrics["concepts_considered"] == 1
+        assert metrics["proposed_relations"] == 1
+        assert metrics["would_apply_relations"] == 1
+        assert metrics["auto_applied_relations"] == 0
+        assert metrics["deferred_relations"] == 0
+        assert len(result["proposal_details"]) == 1
+        assert result["proposal_details"][0]["action"] == "would_auto_apply"
+        mock_add_relationship.assert_not_called()
 
 
 class TestRuminationRegistration:

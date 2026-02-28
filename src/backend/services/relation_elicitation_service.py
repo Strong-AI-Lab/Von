@@ -24,7 +24,12 @@ class RelationElicitationService:
             self.llm_client = None
             self._llm_initialisation_error = exc
 
-    def get_elicitation_opportunities(self, instance_id: str) -> List[str]:
+    def get_elicitation_opportunities(
+        self,
+        instance_id: str,
+        *,
+        include_reverse_subtypes: bool = True,
+    ) -> List[str]:
         """Return unfilled suggested or salient predicates for an individual.
 
         Traverses direct and ancestor types (forward is_a_type_of + reverse has_subtype) and
@@ -79,20 +84,22 @@ class RelationElicitationService:
                             and p not in queue
                         ):
                             queue.append(p)
-            try:
-                reverse_cursor = repo.find(
-                    {"relationships.has_subtype": {"$in": [t_id]}}, {"concept_id": 1}
-                )
-                for d in reverse_cursor:
-                    cid = d.get("concept_id")
-                    if (
-                        isinstance(cid, str)
-                        and cid not in visited_types
-                        and cid not in queue
-                    ):
-                        queue.append(cid)
-            except Exception:
-                pass
+            if include_reverse_subtypes:
+                try:
+                    reverse_cursor = repo.find(
+                        {"relationships.has_subtype": {"$in": [t_id]}},
+                        {"concept_id": 1},
+                    )
+                    for d in reverse_cursor:
+                        cid = d.get("concept_id")
+                        if (
+                            isinstance(cid, str)
+                            and cid not in visited_types
+                            and cid not in queue
+                        ):
+                            queue.append(cid)
+                except Exception:
+                    pass
 
         if not candidate_predicates:
             return []
