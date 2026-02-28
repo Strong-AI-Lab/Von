@@ -6452,7 +6452,32 @@ footer {
 }
 
 .thinking-card-toggle {
-    min-width: 72px;
+    width: 22px;
+    height: 22px;
+    min-width: 22px;
+    padding: 0;
+}
+
+.thinking-card-toggle-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: transform 0.2s ease;
+}
+
+.thinking-card-toggle-icon svg {
+    width: 12px;
+    height: 12px;
+    stroke: currentColor;
+    fill: none;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    pointer-events: none;
+}
+
+.thinking-card-toggle[aria-expanded="false"] .thinking-card-toggle-icon {
+    transform: rotate(-90deg);
 }
 
 .thinking-card-stop {
@@ -6569,6 +6594,10 @@ footer {
 .thinking-card-tool-result::before {
     content: '→ ';
     opacity: 0.5;
+}
+
+.thinking-card-activity.is-low-level .thinking-card-tool-name {
+    color: #64748b;
 }
 
 /* Workflow discovery results in thinking card (JVNAUTOSCI-1076) */

@@ -26,6 +26,8 @@ import {
     __testOnly_showNewSharedMessagesIndicator,
     __testOnly_updateScrollToEndButtonVisibility,
     __testOnly_reduceThinkingCardDisplayState,
+    __testOnly_normaliseThinkingActivityHistory,
+    __testOnly_renderThinkingCardBodyHTML,
     __testOnly_resetChatConceptMetaCaches,
     formatChatTimestamp,
     sendMessage
@@ -77,7 +79,7 @@ jest.mock('../utils/textDecorator.js', () => ({
         if (/^[Vv]#/.test(raw)) raw = `#${raw}`;
         if (raw.startsWith('#v#')) raw = `#V#${raw.slice(3)}`;
         if (!raw.startsWith('#V#')) return '';
-        raw = raw.replace(/[.,:;!?\)\]\}…]+$/g, '');
+        raw = raw.replace(/[.,:;!?)}\]…]+$/g, '');
         return raw.startsWith('#V#') && raw.length > 3 ? raw : '';
     }),
     linkifyVontologyTokensInElement: jest.fn()
@@ -619,6 +621,131 @@ describe('thinking card display state reducer', () => {
     });
 });
 
+describe('thinking activity history normalisation', () => {
+    test('captures non-tool orchestration and workflow activity rows', () => {
+        const rows = __testOnly_normaliseThinkingActivityHistory([
+            {
+                sequence_no: 1,
+                status: 'phase_transition',
+                stage: 'context_build',
+                stage_label: 'Building context'
+            },
+            {
+                sequence_no: 2,
+                status: 'workflow_discovery',
+                stage: 'workflow_discovery'
+            },
+            {
+                sequence_no: 3,
+                status: 'workflow_discovery_complete',
+                stage: 'workflow_discovery_complete'
+            },
+            {
+                sequence_no: 4,
+                status: 'orchestrator_start',
+                stage: 'tool_plan'
+            },
+            {
+                sequence_no: 5,
+                status: 'llm_call_start',
+                stage: 'tool_plan',
+                model: 'gpt-test'
+            },
+            {
+                sequence_no: 6,
+                status: 'tool_call_start',
+                stage: 'tool_execute',
+                tool: 'fetch_concept'
+            },
+            {
+                sequence_no: 7,
+                status: 'tool_failed',
+                stage: 'tool_execute',
+                tool: 'fetch_concept',
+                error: 'Timeout while fetching'
+            },
+            {
+                sequence_no: 8,
+                status: 'completed',
+                stage: 'completed',
+                result_summary: 'Response generated'
+            }
+        ]);
+
+        expect(rows.map((row) => row.label)).toEqual(expect.arrayContaining([
+            'Building context',
+            'Searching workflows',
+            'Found workflows',
+            'Starting orchestrator',
+            'Starting LLM call',
+            'Starting fetch_concept',
+            'fetch_concept failed',
+            'Turn completed'
+        ]));
+        const failureRow = rows.find((row) => row.label === 'fetch_concept failed');
+        expect(failureRow?.state).toBe('failure');
+    });
+
+    test('groups contiguous low-level updates', () => {
+        const rows = __testOnly_normaliseThinkingActivityHistory([
+            {
+                sequence_no: 1,
+                status: 'llm_call_chunk',
+                event_kind: 'llm_call_chunk',
+                stage: 'tool_plan',
+                model: 'gpt-test'
+            },
+            {
+                sequence_no: 2,
+                status: 'llm_call_chunk',
+                event_kind: 'llm_call_chunk',
+                stage: 'tool_plan',
+                model: 'gpt-test'
+            },
+            {
+                sequence_no: 3,
+                status: 'heartbeat',
+                event_kind: 'heartbeat',
+                stage: 'tool_plan'
+            }
+        ]);
+
+        expect(rows).toHaveLength(2);
+        expect(rows[0].label).toBe('Streaming LLM output');
+        expect(rows[0].groupCount).toBe(2);
+        expect(rows[0].isLowLevel).toBe(true);
+        expect(rows[1].label).toBe('Waiting for updates');
+    });
+
+    test('prefers activity history rendering and falls back to tool history', () => {
+        const activityHtml = __testOnly_renderThinkingCardBodyHTML({
+            activityHistory: [{
+                label: 'Starting orchestrator',
+                detail: '',
+                state: 'pending',
+                isLowLevel: false,
+                groupCount: 1
+            }],
+            toolUseProgressHistory: [{
+                tool: 'fetch_concept',
+                resultSummary: 'Fetched'
+            }]
+        });
+        expect(activityHtml).toContain('Starting orchestrator');
+        expect(activityHtml).not.toContain('fetch_concept');
+
+        const fallbackHtml = __testOnly_renderThinkingCardBodyHTML({
+            toolUseProgressHistory: [{
+                tool: 'fetch_concept',
+                resultSummary: 'Fetched',
+                success: true
+            }]
+        });
+        expect(fallbackHtml).toContain('fetch_concept');
+        expect(fallbackHtml).toContain('Fetched');
+    });
+});
+
 describe('thinking card toggle accessibility', () => {
     beforeEach(() => {
         document.body.innerHTML = `
@@ -629,7 +756,10 @@ describe('thinking card toggle accessibility', () => {
                         <span class="thinking-card-phase loading-indicator-text">Thinking...</span>
                         <span id="thinkingCardStatusBadge" class="thinking-card-status active" aria-hidden="true">Active</span>
                         <span class="thinking-card-meta" id="thinkingCardMeta"></span>
-                        <button id="thinkingCardToggleButton" type="button" aria-hidden="true" aria-expanded="true" aria-controls="loadingIndicatorDetail">Collapse</button>
+                        <button id="thinkingCardToggleButton" type="button" aria-hidden="true" aria-expanded="true" aria-controls="loadingIndicatorDetail" aria-label="Collapse thinking details" title="Collapse thinking details">
+                            <span class="thinking-card-toggle-icon" aria-hidden="true">⌄</span>
+                            <span class="visually-hidden">Toggle thinking details</span>
+                        </button>
                         <button id="retryThinkingButton" type="button" aria-hidden="true">Retry</button>
                         <button id="copyThinkingDiagnosticsButton" type="button" aria-hidden="true">Copy diagnostics</button>
                         <button id="abortButton" type="button" aria-hidden="true"></button>
@@ -706,11 +836,15 @@ describe('thinking card toggle accessibility', () => {
 
         expect(toggleButton.getAttribute('aria-hidden')).toBe('false');
         expect(toggleButton.getAttribute('aria-expanded')).toBe('true');
+        expect(toggleButton.getAttribute('aria-label')).toBe('Collapse thinking details');
+        expect(toggleButton.getAttribute('title')).toBe('Collapse thinking details');
         expect(toggleButton.disabled).toBe(true);
 
         toggleButton.click();
 
         expect(toggleButton.getAttribute('aria-expanded')).toBe('true');
+        expect(toggleButton.getAttribute('aria-label')).toBe('Collapse thinking details');
+        expect(toggleButton.getAttribute('title')).toBe('Collapse thinking details');
         expect(wrapper.classList.contains('is-collapsed')).toBe(false);
         expect(detail.getAttribute('aria-hidden')).toBe('true');
 
@@ -786,12 +920,16 @@ describe('thinking card toggle accessibility', () => {
         expect(toggleButton.getAttribute('aria-hidden')).toBe('false');
         expect(toggleButton.disabled).toBe(false);
         expect(toggleButton.getAttribute('aria-expanded')).toBe('false');
+        expect(toggleButton.getAttribute('aria-label')).toBe('Expand thinking details');
+        expect(toggleButton.getAttribute('title')).toBe('Expand thinking details');
         expect(detail.getAttribute('aria-hidden')).toBe('true');
         expect(detail.innerHTML).toContain('search_knowledge_base');
 
         toggleButton.click();
 
         expect(toggleButton.getAttribute('aria-expanded')).toBe('true');
+        expect(toggleButton.getAttribute('aria-label')).toBe('Collapse thinking details');
+        expect(toggleButton.getAttribute('title')).toBe('Collapse thinking details');
         expect(detail.getAttribute('aria-hidden')).toBe('false');
     });
 });

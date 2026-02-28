@@ -78,7 +78,14 @@
           <span class="thinking-card-meta" id="thinkingCardMeta"></span>
           <button id="thinkingCardToggleButton" class="btn thinking-card-action thinking-card-toggle" type="button"
             aria-hidden="true" aria-expanded="true" aria-controls="loadingIndicatorDetail"
-            aria-label="Collapse thinking details" title="Collapse thinking details">Collapse</button>
+            aria-label="Collapse thinking details" title="Collapse thinking details">
+            <span class="thinking-card-toggle-icon" aria-hidden="true">
+              <svg viewBox="0 0 16 16" focusable="false">
+                <path d="M4 6l4 4 4-4"></path>
+              </svg>
+            </span>
+            <span class="visually-hidden">Toggle thinking details</span>
+          </button>
           <button id="retryThinkingButton" class="btn thinking-card-action" type="button" aria-hidden="true"
             aria-label="Retry request" title="Retry request">Retry</button>
           <button id="copyThinkingDiagnosticsButton" class="btn thinking-card-action" type="button" aria-hidden="true"
