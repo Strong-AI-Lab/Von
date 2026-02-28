@@ -2,6 +2,11 @@
 from typing import List, Dict, Any, Optional
 
 from ..services import concept_service
+from ..db.repositories.concepts_repository import ConceptsRepository
+from .uncertain_relationship_service import (
+    collect_uncertain_predicates,
+    upsert_uncertain_relationship_assertion,
+)
 
 
 class RelationElicitationService:
@@ -112,11 +117,22 @@ class RelationElicitationService:
         existing_hypothesized = set(
             (instance_concept.get("hypothesized_relations") or {}).keys()
         )
+        existing_uncertain = collect_uncertain_predicates(
+            source_id=instance_id,
+            source_doc=instance_concept,
+            include_legacy=True,
+        )
         return [
             c
             for c in candidate_predicates
             if c not in existing_relations
-            and (include_hypothesized or c not in existing_hypothesized)
+            and (
+                include_hypothesized
+                or (
+                    c not in existing_hypothesized
+                    and c not in existing_uncertain
+                )
+            )
         ]
 
     def generate_question_for_elicit(
@@ -171,8 +187,22 @@ class RelationElicitationService:
             "source": "llm_extraction",
             "evidence_count": 1,
         }
-        update_payload = {"hypothesized_relations": {predicate: [hypothesis]}}
-        concept_service.update_concept(instance_id, update_payload)
+        upsert_uncertain_relationship_assertion(
+            source_id=instance_id,
+            predicate=predicate,
+            target=hypothesis["value"],
+            confidence_score=float(hypothesis["confidence_score"]),
+            provenance={
+                "source": "relation_elicitation_service",
+                "source_interaction_id": hypothesis["source_interaction_id"],
+                "extraction_source": hypothesis["source"],
+            },
+            evidence_count=int(hypothesis.get("evidence_count", 1)),
+        )
+        ConceptsRepository.update_one(
+            {"concept_id": instance_id},
+            {"$push": {f"hypothesized_relations.{predicate}": hypothesis}},
+        )
         return hypothesis
 
     def elicit_relation(

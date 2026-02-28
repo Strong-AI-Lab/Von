@@ -1388,6 +1388,200 @@ def _remove_relationship(**kwargs):
         )
 
 
+def _upsert_uncertain_relationship_assertion(**kwargs):
+    from ...services.uncertain_relationship_service import (
+        upsert_uncertain_relationship_assertion,
+    )
+
+    source_id = kwargs.get("source_id")
+    predicate = kwargs.get("predicate")
+    target = kwargs.get("target")
+    confidence_score = kwargs.get("confidence_score")
+
+    missing: list[str] = []
+    if not source_id:
+        missing.append("source_id")
+    if not predicate:
+        missing.append("predicate")
+    if not target:
+        missing.append("target")
+    if confidence_score is None:
+        missing.append("confidence_score")
+    if missing:
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameters for upsert_uncertain_relationship_assertion",
+            details={"missing": missing},
+        )
+
+    source_id_text = str(source_id)
+    predicate_text = str(predicate)
+    target_text = str(target)
+    if not isinstance(confidence_score, (int, float, str)):
+        return make_error_response(
+            "invalid_parameter",
+            "confidence_score must be numeric",
+            details={"confidence_score": confidence_score},
+        )
+    confidence_value = float(confidence_score)
+
+    try:
+        return upsert_uncertain_relationship_assertion(
+            source_id=source_id_text,
+            predicate=predicate_text,
+            target=target_text,
+            confidence_score=confidence_value,
+            provenance=kwargs.get("provenance"),
+            status=kwargs.get("status", "proposed"),
+            assertion_id=kwargs.get("assertion_id"),
+            evidence_count=kwargs.get("evidence_count"),
+        )
+    except Exception as e:
+        return make_error_response(
+            "exception",
+            f"Exception: {str(e)}",
+            details={"exception_type": type(e).__name__},
+        )
+
+
+def _list_uncertain_relationship_assertions(**kwargs):
+    from ...services.uncertain_relationship_service import (
+        list_uncertain_relationship_assertions,
+    )
+
+    source_id = kwargs.get("source_id")
+    if not source_id:
+        return make_error_response(
+            "missing_parameter",
+            "Missing 'source_id' parameter",
+            details={"missing": ["source_id"]},
+        )
+
+    try:
+        rows = list_uncertain_relationship_assertions(
+            source_id=source_id,
+            predicate=kwargs.get("predicate"),
+            statuses=kwargs.get("statuses"),
+            include_legacy=bool(kwargs.get("include_legacy", True)),
+        )
+        return {
+            "success": True,
+            "source_id": source_id,
+            "count": len(rows),
+            "assertions": rows,
+        }
+    except Exception as e:
+        return make_error_response(
+            "exception",
+            f"Exception: {str(e)}",
+            details={"exception_type": type(e).__name__},
+        )
+
+
+def _promote_uncertain_relationship_assertion(**kwargs):
+    from ...services.uncertain_relationship_service import (
+        promote_uncertain_relationship_assertion,
+    )
+
+    source_id = kwargs.get("source_id")
+    assertion_id = kwargs.get("assertion_id")
+    missing: list[str] = []
+    if not source_id:
+        missing.append("source_id")
+    if not assertion_id:
+        missing.append("assertion_id")
+    if missing:
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameters for promote_uncertain_relationship_assertion",
+            details={"missing": missing},
+        )
+
+    source_id_text = str(source_id)
+    assertion_id_text = str(assertion_id)
+
+    try:
+        return promote_uncertain_relationship_assertion(
+            source_id=source_id_text,
+            assertion_id=assertion_id_text,
+            operator=str(kwargs.get("operator") or "mcp"),
+        )
+    except Exception as e:
+        return make_error_response(
+            "exception",
+            f"Exception: {str(e)}",
+            details={"exception_type": type(e).__name__},
+        )
+
+
+def _reject_uncertain_relationship_assertion(**kwargs):
+    from ...services.uncertain_relationship_service import (
+        reject_uncertain_relationship_assertion,
+    )
+
+    source_id = kwargs.get("source_id")
+    assertion_id = kwargs.get("assertion_id")
+    reason = kwargs.get("reason")
+    missing: list[str] = []
+    if not source_id:
+        missing.append("source_id")
+    if not assertion_id:
+        missing.append("assertion_id")
+    if not reason:
+        missing.append("reason")
+    if missing:
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameters for reject_uncertain_relationship_assertion",
+            details={"missing": missing},
+        )
+
+    source_id_text = str(source_id)
+    assertion_id_text = str(assertion_id)
+    reason_text = str(reason)
+
+    try:
+        return reject_uncertain_relationship_assertion(
+            source_id=source_id_text,
+            assertion_id=assertion_id_text,
+            reason=reason_text,
+            operator=str(kwargs.get("operator") or "mcp"),
+        )
+    except Exception as e:
+        return make_error_response(
+            "exception",
+            f"Exception: {str(e)}",
+            details={"exception_type": type(e).__name__},
+        )
+
+
+def _migrate_legacy_hypothesized_relations(**kwargs):
+    from ...services.uncertain_relationship_service import (
+        migrate_legacy_hypothesized_relations,
+    )
+
+    source_id = kwargs.get("source_id")
+    if not source_id:
+        return make_error_response(
+            "missing_parameter",
+            "Missing 'source_id' parameter",
+            details={"missing": ["source_id"]},
+        )
+
+    try:
+        return migrate_legacy_hypothesized_relations(
+            source_id=source_id,
+            predicate=kwargs.get("predicate"),
+            dry_run=bool(kwargs.get("dry_run", True)),
+        )
+    except Exception as e:
+        return make_error_response(
+            "exception",
+            f"Exception: {str(e)}",
+            details={"exception_type": type(e).__name__},
+        )
+
+
 def _preview_remove_relationship(**kwargs):
     from ...services.relationship_removal_service import preview_remove_relationship
 
@@ -4928,6 +5122,105 @@ def _remove_relationship_input_schema() -> Schema:
         },
         allow_unknown=True,
         description="remove_relationship input: relation_id OR source_id+predicate+target. Optional mode/cascade/confirmation controls. Only concept-to-concept relationships are supported.",
+    )
+
+
+def _upsert_uncertain_relationship_assertion_input_schema() -> Schema:
+    return Schema(
+        required={
+            "source_id": str,
+            "predicate": str,
+            "target": str,
+            "confidence_score": (float, int),
+        },
+        optional={
+            "status": (str, type(None)),
+            "assertion_id": (str, type(None)),
+            "provenance": (dict, type(None)),
+            "evidence_count": (int, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "upsert_uncertain_relationship_assertion input: source_id, predicate, target, "
+            "confidence_score plus optional status/assertion_id/provenance/evidence_count."
+        ),
+    )
+
+
+def _uncertain_relationship_operation_output_schema() -> Schema:
+    return Schema(
+        required={"success": bool},
+        optional={
+            "created": (bool, type(None)),
+            "already_promoted": (bool, type(None)),
+            "already_rejected": (bool, type(None)),
+            "assertion": (dict, type(None)),
+            "assertions": (list, type(None)),
+            "count": (int, type(None)),
+            "source_id": (str, type(None)),
+            "dry_run": (bool, type(None)),
+            "migrated_count": (int, type(None)),
+            "migrated_assertion_ids": (list, type(None)),
+            "write_result": (dict, type(None)),
+            "error": (str, type(None)),
+            "error_code": (str, type(None)),
+            "error_details": (dict, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "uncertain relationship lifecycle output: success plus lifecycle payloads "
+            "(assertion/assertions/create/promote/reject/migrate metadata) and structured errors."
+        ),
+    )
+
+
+def _list_uncertain_relationship_assertions_input_schema() -> Schema:
+    return Schema(
+        required={"source_id": str},
+        optional={
+            "predicate": (str, type(None)),
+            "statuses": (list, type(None)),
+            "include_legacy": (bool, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "list_uncertain_relationship_assertions input: source_id with optional predicate/status "
+            "filters and include_legacy toggle."
+        ),
+    )
+
+
+def _promote_uncertain_relationship_assertion_input_schema() -> Schema:
+    return Schema(
+        required={"source_id": str, "assertion_id": str},
+        optional={"operator": (str, type(None))},
+        allow_unknown=True,
+        description=(
+            "promote_uncertain_relationship_assertion input: source_id + assertion_id, optional operator."
+        ),
+    )
+
+
+def _reject_uncertain_relationship_assertion_input_schema() -> Schema:
+    return Schema(
+        required={"source_id": str, "assertion_id": str, "reason": str},
+        optional={"operator": (str, type(None))},
+        allow_unknown=True,
+        description=(
+            "reject_uncertain_relationship_assertion input: source_id + assertion_id + rejection reason."
+        ),
+    )
+
+
+def _migrate_legacy_hypothesized_relations_input_schema() -> Schema:
+    return Schema(
+        required={"source_id": str},
+        optional={"predicate": (str, type(None)), "dry_run": (bool, type(None))},
+        allow_unknown=True,
+        description=(
+            "migrate_legacy_hypothesized_relations input: source_id with optional predicate filter "
+            "and dry_run (default true)."
+        ),
     )
 
 
@@ -15669,6 +15962,46 @@ def build_default_catalogue() -> MethodCatalogue:
             output_schema=_add_relationship_output_schema(),
             category="write",
             description="Add a relationship between two concepts or from a concept to a text value. Use to add instance_of/typeOf relationships (e.g., add '#V#professor' as instance_of for a person), custom predicates (e.g., '#V#hasAffiliation' → 'Auckland University'), or any binary relationship. Supports both concept-to-concept relations (target is concept ID) and text predicates (target is text value). Common predicates: 'instance_of'/'instanceOf' (maps to is_an_instance_of), 'typeOf' (maps to is_a_type_of), or custom predicates like '#V#hasAffiliation', '#V#founderOf', '#V#hasResearchInterest'. Examples: source_id='#V#nikola_k._kasabov', predicate='instance_of', target='#V#professor' OR source_id='#V#nikola_k._kasabov', predicate='#V#hasAffiliation', target='Auckland University of Technology'.",
+        ),
+        MethodDefinition(
+            name="upsert_uncertain_relationship_assertion",
+            handler=_upsert_uncertain_relationship_assertion,
+            input_schema=_upsert_uncertain_relationship_assertion_input_schema(),
+            output_schema=_uncertain_relationship_operation_output_schema(),
+            category="write",
+            description="Create or update a canonical uncertain relationship assertion (confidence + provenance + lifecycle status) for a source concept.",
+        ),
+        MethodDefinition(
+            name="list_uncertain_relationship_assertions",
+            handler=_list_uncertain_relationship_assertions,
+            input_schema=_list_uncertain_relationship_assertions_input_schema(),
+            output_schema=_uncertain_relationship_operation_output_schema(),
+            category="read",
+            description="List canonical uncertain relationship assertions for a concept, optionally filtered by predicate/status and optionally merged with legacy hypothesised relation mappings.",
+        ),
+        MethodDefinition(
+            name="promote_uncertain_relationship_assertion",
+            handler=_promote_uncertain_relationship_assertion,
+            input_schema=_promote_uncertain_relationship_assertion_input_schema(),
+            output_schema=_uncertain_relationship_operation_output_schema(),
+            category="write",
+            description="Promote an uncertain relationship assertion to an asserted relationship or text relation and persist promotion linkage metadata.",
+        ),
+        MethodDefinition(
+            name="reject_uncertain_relationship_assertion",
+            handler=_reject_uncertain_relationship_assertion,
+            input_schema=_reject_uncertain_relationship_assertion_input_schema(),
+            output_schema=_uncertain_relationship_operation_output_schema(),
+            category="write",
+            description="Reject/archive an uncertain relationship assertion with a required reason while preserving provenance and lifecycle history.",
+        ),
+        MethodDefinition(
+            name="migrate_legacy_hypothesized_relations",
+            handler=_migrate_legacy_hypothesized_relations,
+            input_schema=_migrate_legacy_hypothesized_relations_input_schema(),
+            output_schema=_uncertain_relationship_operation_output_schema(),
+            category="write",
+            description="Migrate legacy hypothesized_relations into canonical uncertain relationship assertions non-destructively, with dry-run support.",
         ),
         MethodDefinition(
             name="remove_relationship",
