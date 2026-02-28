@@ -12,6 +12,10 @@ from src.backend.workflows.engine import (
     WorkflowDefinition,
     WorkflowStateSpec,
 )
+from src.backend.workflows.subworkflow_contracts import (
+    WORKFLOW_SUBWORKFLOW_ACTION_ID,
+    build_subworkflow_contract,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -41,9 +45,25 @@ def _make_definition(*, include_action: bool) -> WorkflowDefinition:
     )
 
 
-def _make_registry(definition: WorkflowDefinition | None) -> MagicMock:
+def _make_registry(
+    definition: WorkflowDefinition | None,
+    *,
+    workflow_id: str = "#V#candidate_workflow",
+    extra_definitions: dict[str, WorkflowDefinition] | None = None,
+) -> MagicMock:
     registry = MagicMock()
-    registry.get.return_value = definition
+    definitions = {
+        key: value
+        for key, value in (
+            {
+                workflow_id: definition,
+                **(extra_definitions or {}),
+            }
+        ).items()
+        if value is not None
+    }
+    registry.get.side_effect = lambda item: definitions.get(item)
+    registry.all_workflow_ids.return_value = list(definitions.keys())
     registration = MagicMock()
     registration.source = "vontology"
     registry.get_registration.return_value = registration
@@ -404,3 +424,165 @@ def test_verify_workflow_runnable_fail_closed_on_registry_exception() -> None:
 
     assert verification.runnable_verification_success is False
     assert "workflow_runnable_check_failed" in verification.errors
+
+
+def test_verify_workflow_runnable_reports_unresolved_subworkflow_contract() -> None:
+    graph = {
+        "workflow_id": "#V#candidate_workflow",
+        "initial_step": "#V#start",
+        "steps": [
+            {
+                "step_id": "#V#start",
+                "name": "Start",
+                "invokes_workflow": "#V#missing_child",
+            }
+        ],
+        "edges": [],
+        "warnings": [],
+    }
+    parent_definition = WorkflowDefinition(
+        workflow_id="#V#candidate_workflow",
+        initial_state="#V#start",
+        states={
+            "#V#start": WorkflowStateSpec(
+                state_id="#V#start",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id=WORKFLOW_SUBWORKFLOW_ACTION_ID,
+                    ),
+                ),
+                terminal=True,
+                metadata={
+                    "subworkflow_contract": build_subworkflow_contract(
+                        workflow_id="#V#missing_child",
+                        input_mappings=[
+                            {
+                                "child_input_key": "child_input",
+                                "parent_context_key": "parent_input",
+                            }
+                        ],
+                        output_mappings=[
+                            {
+                                "child_output_field": "child_output",
+                                "parent_context_key": "parent_output",
+                            }
+                        ],
+                    )
+                },
+            )
+        },
+        termination_states=("#V#start",),
+    )
+
+    with patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_process_graph",
+        return_value=(graph, []),
+    ), patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_registry_read_only",
+        return_value=_make_registry(parent_definition),
+    ), patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.build_durable_action_registry",
+        return_value=_make_action_registry(supports_action=True),
+    ), patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.load_workflow_definition_from_vontology",
+        return_value=None,
+    ):
+        verification = verify_workflow_runnable("#V#candidate_workflow")
+
+    assert verification.runnable_verification_success is False
+    assert "workflow_subworkflow_unresolved" in verification.errors
+    contract = verification.contract_validation or {}
+    assert any(
+        issue.get("reason_code") == "subworkflow_workflow_not_found"
+        for issue in contract.get("subworkflow_contract_issues", [])
+    )
+
+
+def test_verify_workflow_runnable_accepts_resolved_subworkflow_contract() -> None:
+    child_definition = WorkflowDefinition(
+        workflow_id="#V#child_workflow",
+        initial_state="#V#child_start",
+        states={
+            "#V#child_start": WorkflowStateSpec(
+                state_id="#V#child_start",
+                terminal=True,
+                metadata={
+                    "reads_context_keys": ["child_input"],
+                    "writes_context_keys": ["child_output"],
+                },
+            )
+        },
+        termination_states=("#V#child_start",),
+    )
+    parent_definition = WorkflowDefinition(
+        workflow_id="#V#candidate_workflow",
+        initial_state="#V#start",
+        states={
+            "#V#start": WorkflowStateSpec(
+                state_id="#V#start",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id=WORKFLOW_SUBWORKFLOW_ACTION_ID,
+                    ),
+                ),
+                terminal=True,
+                metadata={
+                    "subworkflow_contract": build_subworkflow_contract(
+                        workflow_id="#V#child_workflow",
+                        input_mappings=[
+                            {
+                                "child_input_key": "child_input",
+                                "parent_context_key": "parent_input",
+                            }
+                        ],
+                        output_mappings=[
+                            {
+                                "child_output_field": "child_output",
+                                "parent_context_key": "parent_output",
+                            }
+                        ],
+                    )
+                },
+            )
+        },
+        termination_states=("#V#start",),
+    )
+    definitions = {
+        "#V#candidate_workflow": parent_definition,
+        "#V#child_workflow": child_definition,
+    }
+    graph = {
+        "workflow_id": "#V#candidate_workflow",
+        "initial_step": "#V#start",
+        "steps": [
+            {
+                "step_id": "#V#start",
+                "name": "Start",
+                "invokes_workflow": "#V#child_workflow",
+            }
+        ],
+        "edges": [],
+        "warnings": [],
+    }
+
+    with patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_process_graph",
+        return_value=(graph, []),
+    ), patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_registry_read_only",
+        return_value=_make_registry(
+            parent_definition,
+            extra_definitions={"#V#child_workflow": child_definition},
+        ),
+    ), patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.build_durable_action_registry",
+        return_value=_make_action_registry(supports_action=True),
+    ), patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.load_workflow_definition_from_vontology",
+        side_effect=lambda workflow_id: definitions.get(workflow_id),
+    ):
+        verification = verify_workflow_runnable("#V#candidate_workflow")
+
+    assert verification.runnable_verification_success is True
+    assert "workflow_subworkflow_unresolved" not in verification.errors
+    assert "workflow_subworkflow_contract_mismatch" not in verification.errors

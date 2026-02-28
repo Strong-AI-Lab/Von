@@ -511,6 +511,26 @@ def publish_canonical_chat_workflow_graphs(
     for workflow_id in CANONICAL_VONTOLOGY_GOVERNANCE_WORKFLOW_IDS:
         if registry.get_registration(workflow_id) is not None:
             target_workflow_ids.append(workflow_id)
+    known_workflow_ids = tuple(
+        sorted(
+            {
+                str(item).strip()
+                for item in registry.all_workflow_ids()
+                if isinstance(item, str) and str(item).strip()
+            }
+        )
+    )
+
+    def _resolve_workflow_definition_for_validation(
+        candidate_workflow_id: str,
+    ) -> Any | None:
+        candidate_id = str(candidate_workflow_id or "").strip()
+        if not candidate_id:
+            return None
+        registered_definition = registry.get(candidate_id)
+        if registered_definition is not None:
+            return registered_definition
+        return load_workflow_definition_from_vontology(candidate_id)
 
     for workflow_id in target_workflow_ids:
         spec = _CANONICAL_WORKFLOW_PUBLICATION_SPECS.get(workflow_id)
@@ -704,6 +724,8 @@ def publish_canonical_chat_workflow_graphs(
                 definition=published_definition,
                 supported_action_ids=supported_action_ids,
                 enforce_supported_actions=enforce_supported_actions,
+                known_workflow_ids=known_workflow_ids,
+                workflow_definition_loader=_resolve_workflow_definition_for_validation,
             )
             _graph, graph_warnings = build_workflow_process_graph(workflow_id)
             warning_items = [

@@ -10,6 +10,10 @@ from ..services.text_value_service import (
     get_preferred_text_for_concept,
     get_texts_for_concept,
 )
+from .subworkflow_contracts import (
+    WORKFLOW_SUBWORKFLOW_ACTION_ID,
+    build_subworkflow_contract,
+)
 from .engine import (
     WorkflowDefinition,
     WorkflowStateSpec,
@@ -35,6 +39,16 @@ WORKFLOW_GRAPH_PREDICATE_ALIASES: Dict[str, Tuple[str, ...]] = {
         "invokesAction",
         "#V#invokes_action",
         "invokes_action",
+    ),
+    "invokesWorkflow": (
+        "#V#invokesWorkflow",
+        "invokesWorkflow",
+        "#V#invokes_workflow",
+        "invokes_workflow",
+        "#V#workflow_step_invokes_workflow",
+        "workflow_step_invokes_workflow",
+        "#V#workflowStepInvokesWorkflow",
+        "workflowStepInvokesWorkflow",
     ),
     "workflowStepInvokesTool": (
         "#V#workflow_step_invokes_tool",
@@ -397,6 +411,7 @@ def detect_vacuous_workflow_steps(
             continue
 
         invokes_action = str(step.get("invokes_action", "") or "").strip()
+        invokes_workflow = str(step.get("invokes_workflow", "") or "").strip()
         preconditions = step.get("preconditions") or []
         effects = step.get("effects") or []
         reads_variables = step.get("reads_variables") or []
@@ -407,6 +422,7 @@ def detect_vacuous_workflow_steps(
 
         has_contract = bool(
             invokes_action
+            or invokes_workflow
             or preconditions
             or effects
             or reads_variables
@@ -430,6 +446,10 @@ def detect_vacuous_workflow_steps(
                         "step_name": prev_step.get("name"),
                         "invokes_action": str(prev_step.get("invokes_action", "") or "").strip()
                         or None,
+                        "invokes_workflow": str(
+                            prev_step.get("invokes_workflow", "") or ""
+                        ).strip()
+                        or None,
                         "link_predicate": context.get("predicate"),
                     }
                 )
@@ -439,6 +459,7 @@ def detect_vacuous_workflow_steps(
                     "step_id": "__workflow_input__",
                     "step_name": "Workflow input",
                     "invokes_action": None,
+                    "invokes_workflow": None,
                     "link_predicate": None,
                 }
             ]
@@ -452,7 +473,7 @@ def detect_vacuous_workflow_steps(
                 "reason_code": WORKFLOW_STEP_VACUITY_REASON_CODE,
                 "cause": (
                     "No executable contract found for step. "
-                    "Expected invokesAction, preconditions/effects, "
+                    "Expected invokesAction/invokesWorkflow, preconditions/effects, "
                     "variable read/write declarations, "
                     "or context mapping declarations."
                 ),
@@ -743,6 +764,17 @@ def _normalise_invoked_action_target(raw_target: str) -> str | None:
         token = token.strip()
         return token or None
 
+    return target
+
+
+def _normalise_invoked_workflow_target(raw_target: str) -> str | None:
+    """Normalise workflow-subworkflow targets while preserving concept IDs."""
+
+    if not isinstance(raw_target, str):
+        return None
+    target = raw_target.strip()
+    if not target:
+        return None
     return target
 
 
@@ -1201,6 +1233,30 @@ def build_workflow_process_graph(
             matched_predicates=(invokes_action_predicate,),
         )
 
+        invokes_workflow_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES[
+            "invokesWorkflow"
+        ]
+        invokes_workflow_raw, invokes_workflow_predicate = (
+            _first_relationship_target_with_predicate(
+                step_rels,
+                invokes_workflow_candidates,
+            )
+        )
+        invokes_workflow = _normalise_invoked_workflow_target(
+            invokes_workflow_raw or ""
+        )
+        _record_legacy_alias_use(
+            legacy_aliases=legacy_aliases,
+            canonical_predicate=invokes_workflow_candidates[0],
+            matched_predicates=(invokes_workflow_predicate,),
+        )
+
+        if invokes_action and invokes_workflow:
+            warnings.append(
+                "workflow_step_multiple_invocation_targets:"
+                f"{step_id}:invokesAction+invokesWorkflow"
+            )
+
         next_step_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES["nextStep"]
         next_step, next_step_predicate = _first_relationship_target_with_predicate(
             step_rels,
@@ -1350,6 +1406,7 @@ def build_workflow_process_graph(
                 "step_id": step_id,
                 "name": doc.get("name"),
                 "invokes_action": invokes_action,
+                "invokes_workflow": invokes_workflow,
                 "preconditions": preconditions,
                 "effects": effects,
                 "reads_variables": reads_vars,
@@ -1414,6 +1471,9 @@ def load_workflow_definition_from_vontology(
     - Output mapping: reads
       ``workflow_step_maps_tool_output_field_to_context_key`` mapping concepts
       and carries structured tool-output→context write contracts.
+    - Subworkflow invocation: reads ``invokesWorkflow`` predicates and encodes
+      explicit subworkflow invocation contracts (inputs/outputs/failure mode)
+      in per-state metadata.
     - Metadata: preconditions, effects, and variable read/write lists are
       carried through as ``WorkflowStateSpec.metadata`` for introspection, along
       with context read/write contract hints.
@@ -1454,6 +1514,14 @@ def load_workflow_definition_from_vontology(
     for step in graph.get("steps", []):
         step_id = step.get("step_id")
         invokes_action = step.get("invokes_action")
+        invokes_workflow = step.get("invokes_workflow")
+        has_workflow_invocation = isinstance(invokes_workflow, str) and bool(
+            invokes_workflow.strip()
+        )
+        invocation_action_id = (
+            WORKFLOW_SUBWORKFLOW_ACTION_ID if has_workflow_invocation else invokes_action
+        )
+        mapping_target_id = invokes_workflow if has_workflow_invocation else invokes_action
         control_flow = step.get("control_flow", {})
 
         actions: list[WorkflowActionInvocation] = []
@@ -1463,7 +1531,9 @@ def load_workflow_definition_from_vontology(
         tool_output_context_mappings: list[Dict[str, str]] = []
         unresolved_output_mappings: list[str] = []
         invalid_output_mapping_specs: list[Dict[str, str]] = []
-        if invokes_action:
+        subworkflow_input_mappings: list[Dict[str, str]] = []
+        subworkflow_output_mappings: list[Dict[str, str]] = []
+        if invocation_action_id:
             # Read input mapping from Vontology (hasInputMap relationships).
             input_map: Dict[str, Any] = {}
             doc = step_docs.get(step_id, {})
@@ -1495,7 +1565,7 @@ def load_workflow_definition_from_vontology(
                         mapping_concept_id=mapping_concept_id,
                         mapping_doc=mapping_docs.get(mapping_concept_id),
                         step_id=step_id,
-                        action_id=invokes_action,
+                        action_id=mapping_target_id,
                     )
                     if not context_key or not tool_param:
                         unresolved_input_mappings.append(mapping_concept_id)
@@ -1512,10 +1582,23 @@ def load_workflow_definition_from_vontology(
                         "$mapping_concept_id": mapping_concept_id,
                     }
                     reads_context_keys.append(context_key)
+                    if has_workflow_invocation:
+                        subworkflow_input_mappings.append(
+                            {
+                                "child_input_key": tool_param,
+                                "parent_context_key": context_key,
+                                "mapping_concept_id": mapping_concept_id,
+                            }
+                        )
+
+            if has_workflow_invocation:
+                input_map["workflow_id"] = str(invokes_workflow).strip()
+                input_map["__parent_workflow_id"] = str(workflow_id or "").strip()
+                input_map["__parent_state_id"] = str(step_id or "").strip()
 
             actions.append(
                 WorkflowActionInvocation(
-                    action_id=invokes_action,
+                    action_id=invocation_action_id,
                     inputs=input_map if input_map else {},
                 )
             )
@@ -1529,7 +1612,7 @@ def load_workflow_definition_from_vontology(
                         mapping_concept_id=mapping_concept_id,
                         mapping_doc=mapping_docs.get(mapping_concept_id),
                         step_id=step_id,
-                        action_id=invokes_action,
+                        action_id=mapping_target_id,
                     )
                     if not tool_output_field or not context_key:
                         unresolved_output_mappings.append(mapping_concept_id)
@@ -1548,6 +1631,14 @@ def load_workflow_definition_from_vontology(
                             "mapping_concept_id": mapping_concept_id,
                         }
                     )
+                    if has_workflow_invocation:
+                        subworkflow_output_mappings.append(
+                            {
+                                "child_output_field": tool_output_field,
+                                "parent_context_key": context_key,
+                                "mapping_concept_id": mapping_concept_id,
+                            }
+                        )
 
         transitions: list[WorkflowTransitionSpec] = []
         transition_condition_specs: list[Dict[str, Any]] = []
@@ -1702,6 +1793,15 @@ def load_workflow_definition_from_vontology(
             step_metadata["writes_variables"] = writes_vars
         if writes_context_keys:
             step_metadata["writes_context_keys"] = writes_context_keys
+        if has_workflow_invocation:
+            workflow_target = str(invokes_workflow or "").strip()
+            if workflow_target:
+                step_metadata["invokes_workflow"] = workflow_target
+                step_metadata["subworkflow_contract"] = build_subworkflow_contract(
+                    workflow_id=workflow_target,
+                    input_mappings=subworkflow_input_mappings,
+                    output_mappings=subworkflow_output_mappings,
+                )
         if tool_output_context_mappings:
             step_metadata["tool_output_context_mappings"] = tool_output_context_mappings
         if unresolved_input_mappings:

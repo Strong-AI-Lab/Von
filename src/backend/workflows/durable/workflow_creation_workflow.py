@@ -2042,6 +2042,8 @@ def _handle_verify_discoverability(request: WorkflowActionRequest) -> WorkflowAc
         definition=definition,
         supported_action_ids=supported_actions,
         enforce_supported_actions=True,
+        known_workflow_ids=discovered,
+        workflow_definition_loader=load_workflow_definition_from_vontology,
     )
     structural_validation_passed = bool(contract.get("valid")) and discoverable
 

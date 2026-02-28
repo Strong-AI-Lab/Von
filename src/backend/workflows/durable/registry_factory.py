@@ -43,6 +43,7 @@ from .file_copy_interpretation_workflow import (
     get_file_copy_interpretation_workflow_registration,
     register_file_copy_interpretation_actions,
 )
+from .subworkflow_actions import register_subworkflow_actions
 from .workflow_creation_workflow import register_workflow_creation_actions
 from ..vontology_loader import (
     build_workflow_process_graph,
@@ -541,6 +542,7 @@ def build_durable_action_registry() -> ActionRegistry:
     register_planning_actions(registry)
     register_workflow_introspection_maintenance_actions(registry)
     register_file_copy_interpretation_actions(registry)
+    register_subworkflow_actions(registry)
     register_workflow_creation_actions(registry)
     # Keep durable action routing aligned with orchestrator routing: if an
     # action ID is not explicitly registered, treat it as an MCP tool name.

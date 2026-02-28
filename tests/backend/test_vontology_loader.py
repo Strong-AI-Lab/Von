@@ -29,6 +29,7 @@ from src.backend.workflows.engine import (
 from src.backend.workflows.vontology_loader import (
     _fetch_concepts_by_id,
     build_workflow_process_graph,
+    detect_vacuous_workflow_steps,
     discover_workflow_ids,
     load_workflow_definition_from_vontology,
     _normalise_relationship_targets,
@@ -39,6 +40,7 @@ from src.backend.workflows.vontology_loader import (
     resolve_workflow_description,
     resolve_workflow_narrative_text,
 )
+from src.backend.workflows.subworkflow_contracts import WORKFLOW_SUBWORKFLOW_ACTION_ID
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +70,7 @@ def _make_step(
     step_id: str,
     *,
     invokes_action: str | None = None,
+    invokes_workflow: str | None = None,
     next_step: str | None = None,
     on_true: str | None = None,
     on_false: str | None = None,
@@ -85,6 +88,7 @@ def _make_step(
         "step_id": step_id,
         "name": step_id,
         "invokes_action": invokes_action,
+        "invokes_workflow": invokes_workflow,
         "preconditions": preconditions or [],
         "effects": effects or [],
         "reads_variables": reads_variables or [],
@@ -449,6 +453,78 @@ class TestWorkflowGraphPredicateCompatibility:
         assert step["invokes_action"] == "fetch_concept"
         assert any(
             str(item).startswith("legacy_workflow_predicates_used:")
+            for item in warnings
+        )
+
+    def test_build_graph_reads_invokes_workflow_predicate(self):
+        workflow_doc = {
+            "concept_id": "#V#workflow_invokes_workflow_predicate",
+            "relationships": {
+                "hasInitialStep": "#V#step_a",
+                "hasStep": ["#V#step_a"],
+            },
+        }
+        step_docs = {
+            "#V#step_a": {
+                "concept_id": "#V#step_a",
+                "name": "Step A",
+                "relationships": {
+                    "invokesWorkflow": "#V#child_workflow",
+                },
+            }
+        }
+
+        with patch(
+            "src.backend.workflows.vontology_loader.ConceptsRepository.find_one",
+            return_value=workflow_doc,
+        ):
+            with patch(
+                "src.backend.workflows.vontology_loader._fetch_concepts_by_id",
+                return_value=step_docs,
+            ):
+                graph, warnings = build_workflow_process_graph(
+                    "#V#workflow_invokes_workflow_predicate"
+                )
+
+        assert graph is not None
+        step = graph["steps"][0]
+        assert step["invokes_workflow"] == "#V#child_workflow"
+        assert step["invokes_action"] is None
+        assert "workflow_step_multiple_invocation_targets" not in ",".join(warnings)
+
+    def test_build_graph_warns_when_action_and_subworkflow_are_both_set(self):
+        workflow_doc = {
+            "concept_id": "#V#workflow_dual_invocation",
+            "relationships": {
+                "hasInitialStep": "#V#step_a",
+                "hasStep": ["#V#step_a"],
+            },
+        }
+        step_docs = {
+            "#V#step_a": {
+                "concept_id": "#V#step_a",
+                "name": "Step A",
+                "relationships": {
+                    "invokesAction": "tool.call",
+                    "invokesWorkflow": "#V#child_workflow",
+                },
+            }
+        }
+
+        with patch(
+            "src.backend.workflows.vontology_loader.ConceptsRepository.find_one",
+            return_value=workflow_doc,
+        ):
+            with patch(
+                "src.backend.workflows.vontology_loader._fetch_concepts_by_id",
+                return_value=step_docs,
+            ):
+                _graph, warnings = build_workflow_process_graph(
+                    "#V#workflow_dual_invocation"
+                )
+
+        assert any(
+            str(item).startswith("workflow_step_multiple_invocation_targets:")
             for item in warnings
         )
 
@@ -1342,6 +1418,106 @@ class TestToolOutputContextMappings:
                 "reason_code": "schema_unknown_fields",
             }
         ]
+
+
+class TestSubworkflowCompositionContracts:
+    def test_load_definition_maps_invokes_workflow_to_subworkflow_action(self):
+        input_mapping_id = "#V#mapping_subworkflow_input"
+        output_mapping_id = "#V#mapping_subworkflow_output"
+        docs = {
+            "#V#step": {
+                "concept_id": "#V#step",
+                "relationships": {},
+            },
+            input_mapping_id: {
+                "concept_id": input_mapping_id,
+                "concept_data": {
+                    "workflow_mapping_spec": {
+                        "schema_version": 1,
+                        "mapping_type": "context_key_to_tool_param",
+                        "workflow_step_id": "#V#step",
+                        "tool_id": "#V#child_workflow",
+                        "context_key_concept_id": "#V#workflow_context_key_parent_input",
+                        "tool_param_name": "child_input",
+                    }
+                },
+                "relationships": {},
+            },
+            output_mapping_id: {
+                "concept_id": output_mapping_id,
+                "concept_data": {
+                    "workflow_mapping_spec": {
+                        "schema_version": 1,
+                        "mapping_type": "tool_output_field_to_context_key",
+                        "workflow_step_id": "#V#step",
+                        "tool_id": "#V#child_workflow",
+                        "tool_output_field_name": "child_output",
+                        "target_context_key_concept_id": (
+                            "#V#workflow_context_key_parent_output"
+                        ),
+                    }
+                },
+                "relationships": {},
+            },
+        }
+        steps = [
+            _make_step(
+                "#V#step",
+                invokes_workflow="#V#child_workflow",
+                context_input_mappings=[input_mapping_id],
+                tool_output_context_mappings=[output_mapping_id],
+            )
+        ]
+        graph = _make_graph(initial_step="#V#step", steps=steps)
+
+        with _stub_fetch_concepts(docs), _stub_narrative():
+            with patch(
+                "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+                return_value=(graph, []),
+            ):
+                defn = load_workflow_definition_from_vontology("#V#parent_workflow")
+
+        assert defn is not None
+        state = defn.states["#V#step"]
+        assert state.actions[0].action_id == WORKFLOW_SUBWORKFLOW_ACTION_ID
+        assert state.actions[0].inputs["workflow_id"] == "#V#child_workflow"
+        assert state.actions[0].inputs["__parent_workflow_id"] == "#V#parent_workflow"
+        assert state.actions[0].inputs["__parent_state_id"] == "#V#step"
+        assert state.actions[0].inputs["child_input"] == {
+            "$context_key": "parent_input",
+            "$mapping_concept_id": input_mapping_id,
+        }
+
+        metadata = state.metadata
+        assert metadata["invokes_workflow"] == "#V#child_workflow"
+        assert metadata["subworkflow_contract"]["workflow_id"] == "#V#child_workflow"
+        assert metadata["subworkflow_contract"]["provided_inputs"] == ["child_input"]
+        assert metadata["subworkflow_contract"]["mapped_outputs"] == ["child_output"]
+        assert metadata["tool_output_context_mappings"] == [
+            {
+                "tool_output_field": "child_output",
+                "context_key": "parent_output",
+                "mapping_concept_id": output_mapping_id,
+            }
+        ]
+
+    def test_detect_vacuous_steps_treats_invokes_workflow_as_executable_contract(self):
+        graph = _make_graph(
+            initial_step="#V#start",
+            steps=[
+                _make_step(
+                    "#V#start",
+                    invokes_workflow="#V#child_workflow",
+                )
+            ],
+        )
+
+        issues = detect_vacuous_workflow_steps(
+            workflow_id="#V#parent_workflow",
+            graph=graph,
+        )
+
+        assert issues == []
 
 
 # ---------------------------------------------------------------------------

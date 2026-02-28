@@ -27,14 +27,18 @@ import json
 import os
 import threading
 from time import monotonic, perf_counter
-from typing import Any, Dict, List, Mapping, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Sequence
 
 from ...services.feature_flags import (
     get_durable_workflows_enabled,
     get_event_workflow_integration_enabled,
 )
 from ..engine import WorkflowDefinition
-from ..vontology_loader import build_workflow_process_graph, detect_vacuous_workflow_steps
+from ..vontology_loader import (
+    build_workflow_process_graph,
+    detect_vacuous_workflow_steps,
+    load_workflow_definition_from_vontology,
+)
 from ..workflow_definition_identity_service import (
     build_workflow_definition_identity,
     collect_workflow_action_ids,
@@ -475,6 +479,8 @@ def _verify_workflow_runnable_uncached(
     fallback_enabled: bool,
     fallback_tool_names: Sequence[str],
     action_registry: Any,
+    known_workflow_ids: Sequence[str],
+    workflow_definition_loader: Callable[[str], WorkflowDefinition | None] | None,
     cache_generation: int,
     feature_signature: Mapping[str, Any],
 ) -> WorkflowRunnableVerification:
@@ -501,8 +507,6 @@ def _verify_workflow_runnable_uncached(
     authoritative_started = perf_counter()
     authoritative_definition = None
     try:
-        from ..vontology_loader import load_workflow_definition_from_vontology
-
         authoritative_definition = load_workflow_definition_from_vontology(workflow_id)
     except Exception:
         authoritative_definition = None
@@ -586,6 +590,8 @@ def _verify_workflow_runnable_uncached(
         definition=definition,
         supported_action_ids=supported_actions,
         enforce_supported_actions=True,
+        known_workflow_ids=known_workflow_ids,
+        workflow_definition_loader=workflow_definition_loader,
     )
     stage_timings_ms["contract_validation_ms"] = round(
         (perf_counter() - contract_started) * 1000.0,
@@ -666,6 +672,34 @@ def verify_workflow_runnable(workflow_id: str) -> WorkflowRunnableVerification:
             if registration
             else "unknown"
         )
+        known_workflow_ids = tuple(
+            sorted(
+                {
+                    str(item).strip()
+                    for item in getattr(registry, "all_workflow_ids", lambda: [])()
+                    if isinstance(item, str) and str(item).strip()
+                }
+            )
+        )
+
+        def _resolve_workflow_definition_for_validation(
+            candidate_workflow_id: str,
+        ) -> WorkflowDefinition | None:
+            candidate_id = str(candidate_workflow_id or "").strip()
+            if not candidate_id:
+                return None
+            try:
+                registered_definition = registry.get(candidate_id)
+                if registered_definition is not None:
+                    return registered_definition
+            except Exception:
+                # Keep validation conservative when registry lookups fail.
+                pass
+            try:
+                return load_workflow_definition_from_vontology(candidate_id)
+            except Exception:
+                return None
+
         definition_identity = build_workflow_definition_identity(
             workflow_id=workflow_id,
             source=registration_source or "unknown",
@@ -728,6 +762,8 @@ def verify_workflow_runnable(workflow_id: str) -> WorkflowRunnableVerification:
             fallback_enabled=fallback_enabled,
             fallback_tool_names=tuple(sorted(fallback_tool_names)),
             action_registry=action_registry,
+            known_workflow_ids=known_workflow_ids,
+            workflow_definition_loader=_resolve_workflow_definition_for_validation,
             cache_generation=cache_generation,
             feature_signature=feature_signature,
         )
