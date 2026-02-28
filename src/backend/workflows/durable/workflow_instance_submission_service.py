@@ -10,14 +10,29 @@ JVNAUTOSCI-1106:
 - Re-check runnability post-create before returning success.
 - Return structured verification telemetry for conceptual/executable/runnable
   states so callers can present accurate status.
+
+JVNAUTOSCI-1308:
+- Add bounded runnable-verification caching keyed by definition identity +
+  feature/runtime signatures.
+- Keep safety checks fail-closed when cache/check state is ambiguous.
+- Surface low-overhead timing telemetry for launch-time verification paths.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
+import hashlib
+import json
+import os
+import threading
+from time import monotonic, perf_counter
 from typing import Any, Dict, List, Mapping, Sequence
 
+from ...services.feature_flags import (
+    get_durable_workflows_enabled,
+    get_event_workflow_integration_enabled,
+)
 from ..engine import WorkflowDefinition
 from ..vontology_loader import build_workflow_process_graph, detect_vacuous_workflow_steps
 from ..workflow_definition_identity_service import (
@@ -30,6 +45,13 @@ from .registry_factory import (
     build_durable_action_registry,
     build_workflow_registry_read_only,
 )
+
+_RUNNABLE_CACHE_TTL_ENV = "VON_WORKFLOW_RUNNABLE_CACHE_TTL_SECONDS"
+_RUNNABLE_CACHE_MAX_ENTRIES_ENV = "VON_WORKFLOW_RUNNABLE_CACHE_MAX_ENTRIES"
+_DEFAULT_RUNNABLE_CACHE_TTL_SECONDS = 45.0
+_DEFAULT_RUNNABLE_CACHE_MAX_ENTRIES = 256
+_MAX_RUNNABLE_CACHE_ENTRIES = 2048
+_MIN_RUNNABLE_CACHE_ENTRIES = 8
 
 
 @dataclass(frozen=True)
@@ -46,6 +68,7 @@ class WorkflowRunnableVerification:
     errors: tuple[str, ...]
     definition_identity: Mapping[str, Any] | None = None
     contract_validation: Mapping[str, Any] | None = None
+    verification_telemetry: Mapping[str, Any] | None = None
 
     def to_dict(self) -> Dict[str, Any]:
         payload = {
@@ -64,6 +87,8 @@ class WorkflowRunnableVerification:
             payload["definition_identity"] = dict(self.definition_identity)
         if isinstance(self.contract_validation, Mapping):
             payload["contract_validation"] = dict(self.contract_validation)
+        if isinstance(self.verification_telemetry, Mapping):
+            payload["verification_telemetry"] = dict(self.verification_telemetry)
         return payload
 
 
@@ -93,12 +118,306 @@ class WorkflowInstanceSubmissionResult:
         return payload
 
 
+@dataclass(frozen=True)
+class _RunnableVerificationCacheEntry:
+    cache_key: str
+    workflow_id: str
+    definition_hash: str
+    created_at_monotonic: float
+    expires_at_monotonic: float
+    verification: WorkflowRunnableVerification
+
+
+_RUNNABLE_CACHE_LOCK = threading.RLock()
+_RUNNABLE_CACHE: dict[str, _RunnableVerificationCacheEntry] = {}
+_RUNNABLE_CACHE_GENERATION = 0
+_RUNNABLE_LAST_FEATURE_SIGNATURE_HASH: str | None = None
+
+
 def _normalise_warning_items(items: Sequence[Any] | None) -> List[str]:
     return [
         str(item).strip()
         for item in (items or [])
         if isinstance(item, str) and str(item).strip()
     ]
+
+
+def _read_float_env(
+    name: str,
+    *,
+    default: float,
+    minimum: float,
+    maximum: float,
+) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    if value < minimum:
+        return minimum
+    if value > maximum:
+        return maximum
+    return value
+
+
+def _read_int_env(
+    name: str,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(float(str(raw).strip()))
+    except (TypeError, ValueError):
+        return default
+    if value < minimum:
+        return minimum
+    if value > maximum:
+        return maximum
+    return value
+
+
+def _read_runnable_cache_ttl_seconds() -> float:
+    return _read_float_env(
+        _RUNNABLE_CACHE_TTL_ENV,
+        default=_DEFAULT_RUNNABLE_CACHE_TTL_SECONDS,
+        minimum=0.0,
+        maximum=3600.0,
+    )
+
+
+def _read_runnable_cache_max_entries() -> int:
+    return _read_int_env(
+        _RUNNABLE_CACHE_MAX_ENTRIES_ENV,
+        default=_DEFAULT_RUNNABLE_CACHE_MAX_ENTRIES,
+        minimum=_MIN_RUNNABLE_CACHE_ENTRIES,
+        maximum=_MAX_RUNNABLE_CACHE_ENTRIES,
+    )
+
+
+def _stable_json_hash(payload: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _truthy_env(name: str, *, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalised = str(raw).strip().lower()
+    if normalised in {"1", "true", "yes", "on", "y"}:
+        return True
+    if normalised in {"0", "false", "no", "off", "n"}:
+        return False
+    return default
+
+
+def _build_runnable_feature_signature() -> dict[str, Any]:
+    return {
+        "durable_workflows_enabled": get_durable_workflows_enabled(default=False),
+        "event_workflow_integration_enabled": get_event_workflow_integration_enabled(
+            default=True
+        ),
+        "internal_mcp_enabled": _truthy_env("VON_INTERNAL_MCP_ENABLE", default=False),
+    }
+
+
+def _with_verification_telemetry(
+    verification: WorkflowRunnableVerification,
+    telemetry: Mapping[str, Any],
+) -> WorkflowRunnableVerification:
+    return replace(verification, verification_telemetry=dict(telemetry))
+
+
+def _current_runnable_cache_generation() -> int:
+    with _RUNNABLE_CACHE_LOCK:
+        return int(_RUNNABLE_CACHE_GENERATION)
+
+
+def _increment_runnable_cache_generation_locked() -> int:
+    global _RUNNABLE_CACHE_GENERATION
+    _RUNNABLE_CACHE_GENERATION += 1
+    return _RUNNABLE_CACHE_GENERATION
+
+
+def _prune_runnable_cache_locked(now_monotonic: float, *, max_entries: int) -> None:
+    expired_keys = [
+        key
+        for key, entry in _RUNNABLE_CACHE.items()
+        if entry.expires_at_monotonic <= now_monotonic
+    ]
+    for key in expired_keys:
+        _RUNNABLE_CACHE.pop(key, None)
+
+    overflow = len(_RUNNABLE_CACHE) - max_entries
+    if overflow <= 0:
+        return
+
+    oldest_entries = sorted(
+        _RUNNABLE_CACHE.values(),
+        key=lambda item: item.created_at_monotonic,
+    )[:overflow]
+    for entry in oldest_entries:
+        _RUNNABLE_CACHE.pop(entry.cache_key, None)
+
+
+def invalidate_workflow_runnable_verification_cache(
+    *,
+    reason: str = "unspecified",
+    workflow_id: str | None = None,
+) -> dict[str, Any]:
+    """Invalidate cached runnable verification entries.
+
+    ``workflow_id`` narrows invalidation to one workflow. Omit it to clear all.
+    """
+
+    workflow_id_clean = str(workflow_id or "").strip() or None
+    reason_clean = str(reason or "").strip() or "unspecified"
+
+    with _RUNNABLE_CACHE_LOCK:
+        previous_size = len(_RUNNABLE_CACHE)
+        if workflow_id_clean:
+            keys_to_remove = [
+                key
+                for key, entry in _RUNNABLE_CACHE.items()
+                if entry.workflow_id == workflow_id_clean
+            ]
+            for key in keys_to_remove:
+                _RUNNABLE_CACHE.pop(key, None)
+            removed_count = len(keys_to_remove)
+        else:
+            _RUNNABLE_CACHE.clear()
+            removed_count = previous_size
+        generation = _increment_runnable_cache_generation_locked()
+        cache_size_after = len(_RUNNABLE_CACHE)
+
+    return {
+        "success": True,
+        "reason": reason_clean,
+        "workflow_id": workflow_id_clean,
+        "removed_count": removed_count,
+        "cache_size_after": cache_size_after,
+        "cache_generation": generation,
+    }
+
+
+def _invalidate_cache_if_feature_signature_changed(
+    feature_signature: Mapping[str, Any],
+) -> None:
+    signature_hash = _stable_json_hash(dict(feature_signature))
+    with _RUNNABLE_CACHE_LOCK:
+        global _RUNNABLE_LAST_FEATURE_SIGNATURE_HASH
+        if _RUNNABLE_LAST_FEATURE_SIGNATURE_HASH is None:
+            _RUNNABLE_LAST_FEATURE_SIGNATURE_HASH = signature_hash
+            return
+        if _RUNNABLE_LAST_FEATURE_SIGNATURE_HASH == signature_hash:
+            return
+        _RUNNABLE_CACHE.clear()
+        _increment_runnable_cache_generation_locked()
+        _RUNNABLE_LAST_FEATURE_SIGNATURE_HASH = signature_hash
+
+
+def _evict_stale_workflow_entries(
+    *,
+    workflow_id: str,
+    definition_hash: str,
+) -> int:
+    if not workflow_id or not definition_hash:
+        return 0
+    with _RUNNABLE_CACHE_LOCK:
+        stale_keys = [
+            key
+            for key, entry in _RUNNABLE_CACHE.items()
+            if entry.workflow_id == workflow_id and entry.definition_hash != definition_hash
+        ]
+        for key in stale_keys:
+            _RUNNABLE_CACHE.pop(key, None)
+        return len(stale_keys)
+
+
+def _read_cached_runnable_verification(
+    *,
+    cache_key: str,
+    now_monotonic: float,
+) -> WorkflowRunnableVerification | None:
+    if not cache_key:
+        return None
+    with _RUNNABLE_CACHE_LOCK:
+        entry = _RUNNABLE_CACHE.get(cache_key)
+        if entry is None:
+            return None
+        if entry.expires_at_monotonic <= now_monotonic:
+            _RUNNABLE_CACHE.pop(cache_key, None)
+            return None
+        return entry.verification
+
+
+def _write_cached_runnable_verification(
+    *,
+    cache_key: str,
+    workflow_id: str,
+    definition_hash: str,
+    verification: WorkflowRunnableVerification,
+    now_monotonic: float,
+    ttl_seconds: float,
+) -> None:
+    if not cache_key:
+        return
+    if ttl_seconds <= 0.0:
+        return
+
+    max_entries = _read_runnable_cache_max_entries()
+    with _RUNNABLE_CACHE_LOCK:
+        _prune_runnable_cache_locked(now_monotonic, max_entries=max_entries)
+        _RUNNABLE_CACHE[cache_key] = _RunnableVerificationCacheEntry(
+            cache_key=cache_key,
+            workflow_id=workflow_id,
+            definition_hash=definition_hash,
+            created_at_monotonic=now_monotonic,
+            expires_at_monotonic=now_monotonic + ttl_seconds,
+            verification=verification,
+        )
+        _prune_runnable_cache_locked(now_monotonic, max_entries=max_entries)
+
+
+def _build_runnable_cache_key(
+    *,
+    workflow_id: str,
+    definition_identity: Mapping[str, Any] | None,
+    fallback_enabled: bool,
+    fallback_tool_names: Sequence[str],
+    feature_signature: Mapping[str, Any],
+) -> tuple[str | None, str]:
+    definition_hash = ""
+    if isinstance(definition_identity, Mapping):
+        definition_hash = str(definition_identity.get("definition_hash") or "").strip()
+    if not definition_hash:
+        definition_hash = "__missing_definition__"
+
+    payload = {
+        "schema_version": "workflow_runnable_cache_key.v1",
+        "workflow_id": workflow_id,
+        "definition_hash": definition_hash,
+        "fallback_enabled": bool(fallback_enabled),
+        "fallback_tool_hash": _stable_json_hash(
+            {"tools": sorted(str(name) for name in fallback_tool_names if str(name))}
+        ),
+        "feature_signature": dict(feature_signature),
+        "cache_generation": _current_runnable_cache_generation(),
+    }
+    return _stable_json_hash(payload), definition_hash
 
 
 @lru_cache(maxsize=1)
@@ -113,34 +432,73 @@ def _internal_mcp_method_names() -> frozenset[str]:
         return frozenset()
 
 
-def verify_workflow_runnable(workflow_id: str) -> WorkflowRunnableVerification:
-    """Evaluate whether a workflow is runnable in the current runtime context."""
+def _build_fail_closed_verification(
+    *,
+    workflow_id: str,
+    error_code: str,
+    additional_errors: Sequence[str] | None = None,
+    warnings: Sequence[str] | None = None,
+    definition_identity: Mapping[str, Any] | None = None,
+    telemetry: Mapping[str, Any] | None = None,
+) -> WorkflowRunnableVerification:
+    errors: list[str] = [error_code]
+    for item in additional_errors or ():
+        text = str(item or "").strip()
+        if text and text not in errors:
+            errors.append(text)
 
-    workflow_id = str(workflow_id or "").strip()
-    if not workflow_id:
-        return WorkflowRunnableVerification(
-            workflow_id="",
-            conceptual_representation_success=False,
-            executable_registration_success=False,
-            runnable_verification_success=False,
-            fallback_action_routing_enabled=False,
-            discovered_action_ids=(),
-            unsupported_action_ids=(),
-            integrity_issues=(),
-            warnings=(),
-            errors=("invalid_workflow_id",),
-        )
+    warning_items = _normalise_warning_items(list(warnings or ()))
+    contract_errors = list(errors)
 
-    graph, graph_warnings = build_workflow_process_graph(workflow_id)
-    warnings = _normalise_warning_items(graph_warnings)
-    conceptual_representation_success = isinstance(graph, dict)
-
-    registry = build_workflow_registry_read_only()
-    definition = registry.get(workflow_id)
-    registration = getattr(registry, "get_registration", lambda _wid: None)(workflow_id)
-    registration_source = (
-        str(getattr(registration, "source", "") or "").strip() if registration else "unknown"
+    return WorkflowRunnableVerification(
+        workflow_id=workflow_id,
+        conceptual_representation_success=False,
+        executable_registration_success=False,
+        runnable_verification_success=False,
+        fallback_action_routing_enabled=False,
+        discovered_action_ids=(),
+        unsupported_action_ids=(),
+        integrity_issues=(),
+        warnings=tuple(warning_items),
+        errors=tuple(contract_errors),
+        definition_identity=definition_identity,
+        contract_validation={"valid": False, "errors": list(contract_errors)},
+        verification_telemetry=dict(telemetry or {}),
     )
+
+
+def _verify_workflow_runnable_uncached(
+    *,
+    workflow_id: str,
+    definition: WorkflowDefinition | None,
+    registration_source: str,
+    fallback_enabled: bool,
+    fallback_tool_names: Sequence[str],
+    action_registry: Any,
+    cache_generation: int,
+    feature_signature: Mapping[str, Any],
+) -> WorkflowRunnableVerification:
+    uncached_started = perf_counter()
+    stage_timings_ms: dict[str, float] = {}
+
+    graph_started = perf_counter()
+    graph: Mapping[str, Any] | None = None
+    graph_warnings: Sequence[Any] = ()
+    graph_error: str | None = None
+    try:
+        graph, graph_warnings = build_workflow_process_graph(workflow_id)
+    except Exception as exc:  # pragma: no cover - defensive
+        graph_error = f"workflow_graph_build_failed:{type(exc).__name__}"
+        graph = None
+        graph_warnings = (graph_error,)
+    stage_timings_ms["graph_build_ms"] = round(
+        (perf_counter() - graph_started) * 1000.0,
+        3,
+    )
+    warnings = _normalise_warning_items(graph_warnings)
+    conceptual_representation_success = isinstance(graph, Mapping)
+
+    authoritative_started = perf_counter()
     authoritative_definition = None
     try:
         from ..vontology_loader import load_workflow_definition_from_vontology
@@ -148,15 +506,28 @@ def verify_workflow_runnable(workflow_id: str) -> WorkflowRunnableVerification:
         authoritative_definition = load_workflow_definition_from_vontology(workflow_id)
     except Exception:
         authoritative_definition = None
+    stage_timings_ms["authoritative_definition_load_ms"] = round(
+        (perf_counter() - authoritative_started) * 1000.0,
+        3,
+    )
+
+    identity_started = perf_counter()
     definition_identity = build_workflow_definition_identity(
         workflow_id=workflow_id,
         source=registration_source or "unknown",
         definition=definition,
         authoritative_definition=authoritative_definition,
     )
+    stage_timings_ms["definition_identity_ms"] = round(
+        (perf_counter() - identity_started) * 1000.0,
+        3,
+    )
     executable_registration_success = definition is not None
+
     if definition is None:
         error_items = ("workflow_definition_not_registered",)
+        if graph_error and graph_error not in error_items:
+            error_items = (*error_items, graph_error)
         return WorkflowRunnableVerification(
             workflow_id=workflow_id,
             conceptual_representation_success=conceptual_representation_success,
@@ -170,21 +541,36 @@ def verify_workflow_runnable(workflow_id: str) -> WorkflowRunnableVerification:
             errors=error_items,
             definition_identity=definition_identity,
             contract_validation={"valid": False, "errors": list(error_items)},
+            verification_telemetry={
+                "cache_hit": False,
+                "cache_generation": cache_generation,
+                "feature_signature": dict(feature_signature),
+                "timings_ms": {
+                    **stage_timings_ms,
+                    "uncached_total_ms": round(
+                        (perf_counter() - uncached_started) * 1000.0,
+                        3,
+                    ),
+                },
+            },
         )
 
-    integrity_issues = tuple(
-        detect_vacuous_workflow_steps(workflow_id=workflow_id, graph=graph)
+    integrity_started = perf_counter()
+    integrity_issues = (
+        tuple(detect_vacuous_workflow_steps(workflow_id=workflow_id, graph=graph))
+        if isinstance(graph, Mapping)
+        else ()
+    )
+    stage_timings_ms["integrity_check_ms"] = round(
+        (perf_counter() - integrity_started) * 1000.0,
+        3,
     )
     if integrity_issues:
         warnings.append("workflow_step_contract_integrity_issue")
-        # Keep concise error code at top level for compatibility with callers.
-        # Detailed context remains in integrity_issues.
 
-    action_registry = build_durable_action_registry()
-    fallback_enabled = action_registry.has_fallback_handler()
     action_ids = collect_workflow_action_ids(definition)
     supported_actions: set[str] = set()
-    fallback_tool_names = _internal_mcp_method_names() if fallback_enabled else frozenset()
+
     if fallback_enabled and not fallback_tool_names:
         warnings.append("internal_tool_catalogue_unavailable")
 
@@ -192,15 +578,20 @@ def verify_workflow_runnable(workflow_id: str) -> WorkflowRunnableVerification:
         if action_registry.has(action_id):
             supported_actions.add(action_id)
             continue
-        if fallback_enabled:
-            if not fallback_tool_names or action_id in fallback_tool_names:
-                supported_actions.add(action_id)
-                continue
+        if fallback_enabled and (not fallback_tool_names or action_id in fallback_tool_names):
+            supported_actions.add(action_id)
+
+    contract_started = perf_counter()
     contract_validation = validate_workflow_definition_contract(
         definition=definition,
         supported_action_ids=supported_actions,
         enforce_supported_actions=True,
     )
+    stage_timings_ms["contract_validation_ms"] = round(
+        (perf_counter() - contract_started) * 1000.0,
+        3,
+    )
+
     unsupported = [
         item
         for item in contract_validation.get("unsupported_action_ids", [])
@@ -211,17 +602,16 @@ def verify_workflow_runnable(workflow_id: str) -> WorkflowRunnableVerification:
         for code in contract_validation.get("errors", [])
         if isinstance(code, str) and code.strip()
     ]
-    if integrity_issues:
-        if "workflow_step_contract_integrity_issue" not in errors:
-            errors.append("workflow_step_contract_integrity_issue")
-
-    runnable_verification_success = len(errors) == 0
+    if integrity_issues and "workflow_step_contract_integrity_issue" not in errors:
+        errors.append("workflow_step_contract_integrity_issue")
+    if graph_error and graph_error not in errors:
+        errors.append(graph_error)
 
     return WorkflowRunnableVerification(
         workflow_id=workflow_id,
         conceptual_representation_success=conceptual_representation_success,
         executable_registration_success=executable_registration_success,
-        runnable_verification_success=runnable_verification_success,
+        runnable_verification_success=len(errors) == 0,
         fallback_action_routing_enabled=fallback_enabled,
         discovered_action_ids=action_ids,
         unsupported_action_ids=tuple(sorted(set(unsupported))),
@@ -230,7 +620,166 @@ def verify_workflow_runnable(workflow_id: str) -> WorkflowRunnableVerification:
         errors=tuple(errors),
         definition_identity=definition_identity,
         contract_validation=contract_validation,
+        verification_telemetry={
+            "cache_hit": False,
+            "cache_generation": cache_generation,
+            "feature_signature": dict(feature_signature),
+            "timings_ms": {
+                **stage_timings_ms,
+                "uncached_total_ms": round(
+                    (perf_counter() - uncached_started) * 1000.0,
+                    3,
+                ),
+            },
+        },
     )
+
+
+def verify_workflow_runnable(workflow_id: str) -> WorkflowRunnableVerification:
+    """Evaluate whether a workflow is runnable in the current runtime context."""
+
+    verify_started = perf_counter()
+    workflow_id = str(workflow_id or "").strip()
+    if not workflow_id:
+        return _build_fail_closed_verification(
+            workflow_id="",
+            error_code="invalid_workflow_id",
+            telemetry={
+                "cache_hit": False,
+                "reason": "invalid_workflow_id",
+                "timings_ms": {
+                    "total_ms": round((perf_counter() - verify_started) * 1000.0, 3),
+                },
+            },
+        )
+
+    try:
+        feature_signature = _build_runnable_feature_signature()
+        _invalidate_cache_if_feature_signature_changed(feature_signature)
+
+        prep_started = perf_counter()
+        registry = build_workflow_registry_read_only()
+        definition = registry.get(workflow_id)
+        registration = getattr(registry, "get_registration", lambda _wid: None)(workflow_id)
+        registration_source = (
+            str(getattr(registration, "source", "") or "").strip()
+            if registration
+            else "unknown"
+        )
+        definition_identity = build_workflow_definition_identity(
+            workflow_id=workflow_id,
+            source=registration_source or "unknown",
+            definition=definition,
+            authoritative_definition=None,
+        )
+
+        action_registry = build_durable_action_registry()
+        fallback_enabled = action_registry.has_fallback_handler()
+        fallback_tool_names = (
+            _internal_mcp_method_names() if fallback_enabled else frozenset()
+        )
+        prep_ms = round((perf_counter() - prep_started) * 1000.0, 3)
+
+        cache_lookup_started = perf_counter()
+        cache_key, definition_hash = _build_runnable_cache_key(
+            workflow_id=workflow_id,
+            definition_identity=definition_identity,
+            fallback_enabled=fallback_enabled,
+            fallback_tool_names=tuple(sorted(fallback_tool_names)),
+            feature_signature=feature_signature,
+        )
+        stale_evicted = _evict_stale_workflow_entries(
+            workflow_id=workflow_id,
+            definition_hash=definition_hash,
+        )
+        now_monotonic = monotonic()
+        cached = _read_cached_runnable_verification(
+            cache_key=cache_key or "",
+            now_monotonic=now_monotonic,
+        )
+        cache_lookup_ms = round((perf_counter() - cache_lookup_started) * 1000.0, 3)
+        cache_generation = _current_runnable_cache_generation()
+
+        if cached is not None:
+            existing_telemetry = (
+                dict(cached.verification_telemetry)
+                if isinstance(cached.verification_telemetry, Mapping)
+                else {}
+            )
+            merged_telemetry = {
+                **existing_telemetry,
+                "cache_hit": True,
+                "cache_generation": cache_generation,
+                "cache_stale_entries_evicted": stale_evicted,
+                "feature_signature": dict(feature_signature),
+                "timings_ms": {
+                    **dict(existing_telemetry.get("timings_ms") or {}),
+                    "cache_prepare_ms": prep_ms,
+                    "cache_lookup_ms": cache_lookup_ms,
+                    "total_ms": round((perf_counter() - verify_started) * 1000.0, 3),
+                },
+            }
+            return _with_verification_telemetry(cached, merged_telemetry)
+
+        verification = _verify_workflow_runnable_uncached(
+            workflow_id=workflow_id,
+            definition=definition,
+            registration_source=registration_source,
+            fallback_enabled=fallback_enabled,
+            fallback_tool_names=tuple(sorted(fallback_tool_names)),
+            action_registry=action_registry,
+            cache_generation=cache_generation,
+            feature_signature=feature_signature,
+        )
+
+        telemetry = (
+            dict(verification.verification_telemetry)
+            if isinstance(verification.verification_telemetry, Mapping)
+            else {}
+        )
+        merged_telemetry = {
+            **telemetry,
+            "cache_hit": False,
+            "cache_generation": cache_generation,
+            "cache_stale_entries_evicted": stale_evicted,
+            "feature_signature": dict(feature_signature),
+            "timings_ms": {
+                **dict(telemetry.get("timings_ms") or {}),
+                "cache_prepare_ms": prep_ms,
+                "cache_lookup_ms": cache_lookup_ms,
+                "total_ms": round((perf_counter() - verify_started) * 1000.0, 3),
+            },
+        }
+        verification_with_telemetry = _with_verification_telemetry(
+            verification,
+            merged_telemetry,
+        )
+
+        ttl_seconds = _read_runnable_cache_ttl_seconds()
+        _write_cached_runnable_verification(
+            cache_key=cache_key or "",
+            workflow_id=workflow_id,
+            definition_hash=definition_hash,
+            verification=verification_with_telemetry,
+            now_monotonic=now_monotonic,
+            ttl_seconds=ttl_seconds,
+        )
+        return verification_with_telemetry
+    except Exception as exc:  # pragma: no cover - defensive
+        return _build_fail_closed_verification(
+            workflow_id=workflow_id,
+            error_code="workflow_runnable_check_failed",
+            additional_errors=(f"{type(exc).__name__}",),
+            telemetry={
+                "cache_hit": False,
+                "reason": "verification_exception",
+                "exception_type": type(exc).__name__,
+                "exception": str(exc),
+                "timings_ms": {
+                    "total_ms": round((perf_counter() - verify_started) * 1000.0, 3),
+                },
+            },
+        )
 
 
 def _build_submission_verification_payload(
@@ -347,4 +896,5 @@ __all__ = [
     "WorkflowInstanceSubmissionResult",
     "verify_workflow_runnable",
     "submit_verified_workflow_instance",
+    "invalidate_workflow_runnable_verification_cache",
 ]

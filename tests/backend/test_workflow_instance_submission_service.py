@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import pytest
 from unittest.mock import MagicMock, patch
 
 from src.backend.workflows.durable.workflow_instance_submission_service import (
+    invalidate_workflow_runnable_verification_cache,
     verify_workflow_runnable,
 )
 from src.backend.workflows.engine import (
@@ -10,6 +12,13 @@ from src.backend.workflows.engine import (
     WorkflowDefinition,
     WorkflowStateSpec,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_runnable_cache_between_tests():
+    invalidate_workflow_runnable_verification_cache(reason="test_fixture_pre")
+    yield
+    invalidate_workflow_runnable_verification_cache(reason="test_fixture_post")
 
 
 def _make_definition(*, include_action: bool) -> WorkflowDefinition:
@@ -35,6 +44,9 @@ def _make_definition(*, include_action: bool) -> WorkflowDefinition:
 def _make_registry(definition: WorkflowDefinition | None) -> MagicMock:
     registry = MagicMock()
     registry.get.return_value = definition
+    registration = MagicMock()
+    registration.source = "vontology"
+    registry.get_registration.return_value = registration
     return registry
 
 
@@ -294,3 +306,101 @@ def test_verify_workflow_runnable_accepts_shared_conversation_actions_via_fallba
     assert verification.unsupported_action_ids == ()
     assert verification.contract_validation is not None
     assert verification.contract_validation.get("valid") is True
+
+
+def test_verify_workflow_runnable_caches_for_identical_definition() -> None:
+    graph = {
+        "workflow_id": "#V#candidate_workflow",
+        "initial_step": "#V#start",
+        "steps": [
+            {"step_id": "#V#start", "name": "Start", "invokes_action": "tool.initial"}
+        ],
+        "edges": [],
+        "warnings": [],
+    }
+    registry = _make_registry(_make_definition(include_action=True))
+    action_registry = _make_action_registry(supports_action=True)
+
+    invalidate_workflow_runnable_verification_cache(
+        reason="test_setup",
+        workflow_id="#V#candidate_workflow",
+    )
+
+    with patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_process_graph",
+        return_value=(graph, []),
+    ) as mock_graph, patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_registry_read_only",
+        return_value=registry,
+    ), patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.build_durable_action_registry",
+        return_value=action_registry,
+    ), patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service._internal_mcp_method_names",
+        return_value=frozenset(),
+    ):
+        first = verify_workflow_runnable("#V#candidate_workflow")
+        second = verify_workflow_runnable("#V#candidate_workflow")
+
+    assert first.runnable_verification_success is True
+    assert second.runnable_verification_success is True
+    assert mock_graph.call_count == 1
+    assert (first.verification_telemetry or {}).get("cache_hit") is False
+    assert (second.verification_telemetry or {}).get("cache_hit") is True
+
+
+def test_verify_workflow_runnable_cache_invalidation_forces_recompute() -> None:
+    graph = {
+        "workflow_id": "#V#candidate_workflow",
+        "initial_step": "#V#start",
+        "steps": [
+            {"step_id": "#V#start", "name": "Start", "invokes_action": "tool.initial"}
+        ],
+        "edges": [],
+        "warnings": [],
+    }
+    registry = _make_registry(_make_definition(include_action=True))
+    action_registry = _make_action_registry(supports_action=True)
+
+    invalidate_workflow_runnable_verification_cache(
+        reason="test_setup",
+        workflow_id="#V#candidate_workflow",
+    )
+
+    with patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_process_graph",
+        return_value=(graph, []),
+    ) as mock_graph, patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_registry_read_only",
+        return_value=registry,
+    ), patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.build_durable_action_registry",
+        return_value=action_registry,
+    ), patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service._internal_mcp_method_names",
+        return_value=frozenset(),
+    ):
+        verify_workflow_runnable("#V#candidate_workflow")
+        invalidate_workflow_runnable_verification_cache(
+            reason="test_invalidation",
+            workflow_id="#V#candidate_workflow",
+        )
+        second = verify_workflow_runnable("#V#candidate_workflow")
+
+    assert mock_graph.call_count == 2
+    assert (second.verification_telemetry or {}).get("cache_hit") is False
+
+
+def test_verify_workflow_runnable_fail_closed_on_registry_exception() -> None:
+    invalidate_workflow_runnable_verification_cache(
+        reason="test_setup",
+        workflow_id="#V#candidate_workflow",
+    )
+    with patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_registry_read_only",
+        side_effect=RuntimeError("registry unavailable"),
+    ):
+        verification = verify_workflow_runnable("#V#candidate_workflow")
+
+    assert verification.runnable_verification_success is False
+    assert "workflow_runnable_check_failed" in verification.errors

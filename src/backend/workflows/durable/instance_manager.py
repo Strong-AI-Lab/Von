@@ -1110,6 +1110,27 @@ class WorkflowInstanceManager:
         if coll is None:
             raise RuntimeError("Database unavailable for event binding persistence")
 
+        def _invalidate_verification_cache(binding_workflow_id: str) -> None:
+            # Keep verification cache invalidation centralised in the durable
+            # event-binding write path so all callers (MCP/routes/bootstrap)
+            # invalidate consistently.
+            try:
+                from .workflow_instance_submission_service import (
+                    invalidate_workflow_runnable_verification_cache,
+                )
+
+                invalidate_workflow_runnable_verification_cache(
+                    reason="event_binding_mutated",
+                    workflow_id=binding_workflow_id,
+                )
+            except Exception:
+                # Binding persistence must remain available even if cache
+                # invalidation is temporarily unavailable.
+                logger.debug(
+                    "[durable_workflow] Event binding cache invalidation skipped",
+                    exc_info=True,
+                )
+
         event_type_clean = str(event_type or "").strip()
         workflow_id_clean = str(workflow_id or "").strip()
         if not event_type_clean:
@@ -1158,7 +1179,9 @@ class WorkflowInstanceManager:
             updated_doc = coll.find_one({"binding_id": existing.binding_id})
             if updated_doc is None:
                 raise RuntimeError("binding_update_failed")
-            return EventWorkflowBinding.from_doc(updated_doc), False, True
+            updated_binding = EventWorkflowBinding.from_doc(updated_doc)
+            _invalidate_verification_cache(updated_binding.workflow_id)
+            return updated_binding, False, True
 
         binding = EventWorkflowBinding.create(
             event_type=event_type_clean,
@@ -1169,6 +1192,7 @@ class WorkflowInstanceManager:
         )
         try:
             coll.insert_one(binding.to_doc())
+            _invalidate_verification_cache(binding.workflow_id)
             return binding, True, False
         except DuplicateKeyError:
             # Concurrent upsert: re-read and apply deterministic conflict rules.
@@ -1200,7 +1224,9 @@ class WorkflowInstanceManager:
             updated_doc = coll.find_one({"binding_id": existing.binding_id})
             if updated_doc is None:
                 raise RuntimeError("binding_update_failed")
-            return EventWorkflowBinding.from_doc(updated_doc), False, True
+            updated_binding = EventWorkflowBinding.from_doc(updated_doc)
+            _invalidate_verification_cache(updated_binding.workflow_id)
+            return updated_binding, False, True
 
     def list_event_bindings(
         self,

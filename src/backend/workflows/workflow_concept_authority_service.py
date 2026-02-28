@@ -458,6 +458,30 @@ def _ensure_concept_exists(
     return created_doc, True, None
 
 
+def _invalidate_runnable_verification_for_workflow(
+    workflow_id: str,
+    *,
+    reason: str,
+) -> None:
+    workflow_id_clean = str(workflow_id or "").strip()
+    if not workflow_id_clean:
+        return
+    try:
+        from .durable.workflow_instance_submission_service import (
+            invalidate_workflow_runnable_verification_cache,
+        )
+
+        invalidate_workflow_runnable_verification_cache(
+            reason=reason,
+            workflow_id=workflow_id_clean,
+        )
+    except Exception:
+        logger.debug(
+            "workflow_authority: runnable verification cache invalidation skipped",
+            exc_info=True,
+        )
+
+
 def publish_canonical_chat_workflow_graphs(
     *,
     registry: WorkflowRegistry,
@@ -709,6 +733,10 @@ def publish_canonical_chat_workflow_graphs(
                 continue
 
             published.append(workflow_id)
+            _invalidate_runnable_verification_for_workflow(
+                workflow_id,
+                reason="workflow_graph_published",
+            )
 
     return {
         "counts": {
@@ -860,6 +888,10 @@ def bootstrap_workflow_concepts(
                     create_as_instance=True,
                 )
                 created.append(workflow_id)
+                _invalidate_runnable_verification_for_workflow(
+                    workflow_id,
+                    reason="workflow_concept_created",
+                )
             except Exception as exc:  # pragma: no cover - defensive
                 errors[workflow_id] = f"create_failed:{exc}"
             continue
@@ -882,6 +914,10 @@ def bootstrap_workflow_concepts(
             relationships["is_an_instance_of"] = merged_instance_of
             concept_service.update_concept(workflow_id, {"relationships": relationships})
             updated.append(workflow_id)
+            _invalidate_runnable_verification_for_workflow(
+                workflow_id,
+                reason="workflow_concept_updated",
+            )
         except Exception as exc:  # pragma: no cover - defensive
             errors[workflow_id] = f"type_enforcement_failed:{exc}"
 

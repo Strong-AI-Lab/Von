@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import logging
 import os
+from time import perf_counter
 from typing import Any
 
 from .feature_flags import (
@@ -713,6 +714,8 @@ def _launch_single_event_binding(
     inputs: dict[str, Any],
     event_payload: dict[str, Any],
 ) -> dict[str, Any]:
+    launch_checks_started = perf_counter()
+    launch_check_timings_ms: dict[str, float] = {}
     safe_event_id = str(event_id or "").strip()
     resolved_workflow_id = str(workflow_id or "").strip()
     namespace = _normalise_namespace_override(namespace_override) or _build_namespace(
@@ -736,11 +739,16 @@ def _launch_single_event_binding(
     }
 
     manager = get_instance_manager()
+    idempotency_lookup_started = perf_counter()
     existing_instance_id = _find_existing_instance_for_event(
         manager=manager,
         workflow_id=resolved_workflow_id,
         event_type=event_type,
         event_id=safe_event_id,
+    )
+    launch_check_timings_ms["idempotency_lookup_ms"] = round(
+        (perf_counter() - idempotency_lookup_started) * 1000.0,
+        3,
     )
     if isinstance(existing_instance_id, str) and existing_instance_id:
         logger.info(
@@ -761,11 +769,20 @@ def _launch_single_event_binding(
             "event_id": safe_event_id,
             "idempotency_key": event_idempotency_key,
             "idempotent_reused": True,
+            "launch_check_timings_ms": {
+                **launch_check_timings_ms,
+                "total_ms": round((perf_counter() - launch_checks_started) * 1000.0, 3),
+            },
         }
 
+    cadence_check_started = perf_counter()
     cadence_gate = _evaluate_workflow_launch_cadence(
         manager=manager,
         workflow_id=resolved_workflow_id,
+    )
+    launch_check_timings_ms["cadence_check_ms"] = round(
+        (perf_counter() - cadence_check_started) * 1000.0,
+        3,
     )
     if not bool(cadence_gate.get("allowed")):
         return {
@@ -789,8 +806,13 @@ def _launch_single_event_binding(
             "next_allowed_at": cadence_gate.get("next_allowed_at"),
             "latest_instance_id": cadence_gate.get("latest_instance_id"),
             "latest_instance_created_at": cadence_gate.get("latest_instance_created_at"),
+            "launch_check_timings_ms": {
+                **launch_check_timings_ms,
+                "total_ms": round((perf_counter() - launch_checks_started) * 1000.0, 3),
+            },
         }
 
+    instance_create_started = perf_counter()
     instance_id, created_new = manager.create_instance_for_event(
         resolved_workflow_id,
         user_id=(user_id or "anonymous"),
@@ -800,6 +822,10 @@ def _launch_single_event_binding(
         source_event_type=event_type,
         source_event_id=safe_event_id,
         inputs=payload_inputs,
+    )
+    launch_check_timings_ms["instance_create_ms"] = round(
+        (perf_counter() - instance_create_started) * 1000.0,
+        3,
     )
 
     logger.info(
@@ -831,6 +857,10 @@ def _launch_single_event_binding(
         "idempotent_reused": not created_new,
         "cadence_policy": cadence_gate.get("policy"),
         "cadence_policy_source": cadence_gate.get("policy_source"),
+        "launch_check_timings_ms": {
+            **launch_check_timings_ms,
+            "total_ms": round((perf_counter() - launch_checks_started) * 1000.0, 3),
+        },
     }
 
 

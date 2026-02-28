@@ -752,6 +752,29 @@ class TestWorkflowInstanceManager:
         assert len(listed) == 1
         assert listed[0].binding_id == binding.binding_id
 
+    def test_upsert_event_binding_invalidates_runnable_verification_cache(
+        self, monkeypatch
+    ) -> None:
+        manager = WorkflowInstanceManager()
+        invalidations: list[dict[str, Any]] = []
+
+        monkeypatch.setattr(
+            "src.backend.workflows.durable.workflow_instance_submission_service.invalidate_workflow_runnable_verification_cache",
+            lambda **kwargs: invalidations.append(dict(kwargs)) or {"success": True},
+        )
+
+        manager.upsert_event_binding(
+            event_type="type.created",
+            workflow_id="#V#salient_predicate_governance_workflow",
+            input_mapping={"type_concept_id": "event.concept_id"},
+            enabled=True,
+            actor="test_user",
+        )
+
+        assert invalidations
+        assert invalidations[-1].get("workflow_id") == "#V#salient_predicate_governance_workflow"
+        assert invalidations[-1].get("reason") == "event_binding_mutated"
+
     def test_upsert_event_binding_conflict_requires_replace(self) -> None:
         """Conflicting upsert should require replace_existing=True."""
         manager = WorkflowInstanceManager()

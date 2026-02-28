@@ -107,6 +107,12 @@ def test_launch_event_workflow_creates_instance_when_configured(
     assert result["reason"] == "created_new_instance"
     assert result["workflow_id"] == "#V#task_event_workflow"
     assert result["instance_id"] == "instance-123"
+    timings = result.get("launch_check_timings_ms")
+    assert isinstance(timings, dict)
+    assert "idempotency_lookup_ms" in timings
+    assert "cadence_check_ms" in timings
+    assert "instance_create_ms" in timings
+    assert "total_ms" in timings
 
     called_args = mock_manager.create_instance_for_event.call_args
     assert called_args is not None
@@ -146,6 +152,10 @@ def test_launch_event_workflow_reports_reused_idempotent_instance(
     assert result["outcome"] == "reused"
     assert result["reason"] == "idempotent_reuse"
     assert "hint" in result
+    timings = result.get("launch_check_timings_ms")
+    assert isinstance(timings, dict)
+    assert "idempotency_lookup_ms" in timings
+    assert "total_ms" in timings
     assert result["triggered_count"] == 0
     assert result["reused_count"] == 1
     assert result["success_count"] == 1
