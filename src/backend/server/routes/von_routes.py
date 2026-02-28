@@ -18,7 +18,11 @@ from pathlib import Path
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping, cast
-from src.workflows.onboarding_workflow import run_onboarding_workflow
+from ...workflows.durable.registry_factory import build_workflow_registry_read_only
+from ...workflows.durable.startup import get_instance_manager
+from ...workflows.durable.workflow_instance_submission_service import (
+    submit_verified_workflow_instance,
+)
 from ...languagemodels.llm_interface import get_llm_client, get_active_model_name
 from .settings_routes import get_all_settings_data
 from ...integrations.internal_mcp import ProgressTracker, ToolCallParsingError
@@ -88,6 +92,9 @@ _TOOL_PROGRESS_LOCK = threading.Lock()
 _TOOL_PROGRESS: dict[tuple[str, str], dict[str, Any]] = {}
 _TOOL_PROGRESS_TERMINAL_STATUSES = {"completed", "error", "cancelled"}
 _TOOL_PROGRESS_DIAGNOSTIC_EVENT_LIMIT = 80
+
+_ONBOARDING_WORKFLOW_IDS_ENV = "VON_NEW_MEMBER_ONBOARDING_WORKFLOW_IDS"
+_ONBOARDING_WORKFLOW_KEYWORDS = ("onboard", "onboarding")
 _TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT = 40
 _TURN_EXECUTION_DIAGNOSTICS_PROMPT_PREVIEW_LIMIT = 1000
 _DIAGNOSTIC_EXPORT_STRING_LIMIT = 2000
@@ -4320,22 +4327,134 @@ def _maybe_handle_rag_status_fastpath(
 
 @von_bp.route("/onboard_new_member", methods=["POST"])
 def onboard_new_member():
-    """Onboards a new lab member."""
-    data = request.get_json()
-    member_name = data.get("member_name")
+    """Start onboarding through the canonical durable workflow submission path."""
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid JSON body."}), 400
 
-    if not member_name:
+    member_name = data.get("member_name")
+    if not isinstance(member_name, str) or not member_name.strip():
         return jsonify({"error": "No member name provided."}), 400
+    member_name = member_name.strip()
 
     try:
-        run_onboarding_workflow(member_name)
+        max_retries = _coerce_onboarding_max_retries(data.get("max_retries", 3))
+    except ValueError:
+        return jsonify({"error": "max_retries must be an integer between 0 and 10."}), 400
+
+    inputs = _build_onboarding_inputs(member_name=member_name, request_payload=data)
+    workflow_candidates = _resolve_onboarding_workflow_candidates(data)
+    if not workflow_candidates:
         return (
-            jsonify({"message": f"Onboarding workflow started for {member_name}."}),
-            200,
+            jsonify(
+                {
+                    "error": "No onboarding workflows configured or discoverable.",
+                    "error_code": "onboarding_workflow_not_configured",
+                }
+            ),
+            400,
         )
-    except Exception as e:
-        print(f"Error during onboarding: {e}")  # Add server-side logging
-        return jsonify({"error": f"Error during onboarding: {str(e)}"}), 500
+
+    try:
+        user_concept_id = None
+        try:
+            from ...security.access_control import get_effective_user_concept_id
+
+            user_concept_id = get_effective_user_concept_id()
+        except Exception:
+            user_concept_id = session.get("user_concept_id")
+
+        window_session_id = request.headers.get("X-Von-Window-Session")
+        effective = get_effective_context(
+            window_session_id, dict(session), user_concept_id
+        )
+        namespace_resolution = _resolve_generate_namespace_context(
+            user_concept_id=user_concept_id,
+            effective_context=effective,
+            flask_session_snapshot=dict(session),
+        )
+
+        effective_org_id = _normalise_concept_id(
+            effective.get("organisation_id") if isinstance(effective, dict) else None
+        )
+        requested_org_id = _normalise_concept_id(data.get("org_id"))
+        org_id = effective_org_id or requested_org_id or "default"
+
+        user_id = (
+            _normalise_concept_id(user_concept_id)
+            or _normalise_concept_id(data.get("user_id"))
+            or _normalise_concept_id(session.get("user_concept_id"))
+            or "anonymous"
+        )
+
+        requested_namespace = data.get("namespace")
+        if not isinstance(requested_namespace, str) or not requested_namespace.strip():
+            requested_namespace = None
+        namespace = namespace_resolution.get("namespace") or requested_namespace
+        if not isinstance(namespace, str) or not namespace.strip():
+            if isinstance(user_id, str) and user_id.startswith("#V#"):
+                namespace = _derive_namespace_for_user_org(
+                    user_id, org_id if org_id != "default" else None
+                )
+            if not isinstance(namespace, str) or not namespace.strip():
+                namespace = f"{user_id}/{org_id}"
+
+        manager = get_instance_manager()
+        attempt_payloads: list[dict[str, Any]] = []
+        for workflow_id in workflow_candidates:
+            submission = submit_verified_workflow_instance(
+                manager=manager,
+                workflow_id=workflow_id,
+                user_id=user_id,
+                org_id=org_id,
+                namespace=namespace,
+                inputs=inputs,
+                max_retries=max_retries,
+            )
+            submission_payload = submission.to_dict()
+            attempt_payloads.append(submission_payload)
+            if submission.success:
+                return (
+                    jsonify(
+                        {
+                            "message": f"Onboarding workflow started for {member_name}.",
+                            "member_name": member_name,
+                            "selected_workflow_id": workflow_id,
+                            "candidate_workflow_ids": workflow_candidates,
+                            "attempt_count": len(attempt_payloads),
+                            **submission_payload,
+                        }
+                    ),
+                    200,
+                )
+
+        return (
+            jsonify(
+                {
+                    "error": "No runnable onboarding workflow is currently available.",
+                    "error_code": "onboarding_workflow_not_runnable",
+                    "member_name": member_name,
+                    "candidate_workflow_ids": workflow_candidates,
+                    "attempts": attempt_payloads,
+                }
+            ),
+            400,
+        )
+    except Exception as exc:
+        current_app.logger.exception(
+            "Failed to start onboarding workflow for member '%s': %s",
+            member_name,
+            exc,
+        )
+        return (
+            jsonify(
+                {
+                    "error": "Error during onboarding workflow submission.",
+                    "detail": str(exc),
+                }
+            ),
+            500,
+        )
 
 
 @von_bp.route("/update_model", methods=["POST"])
@@ -9822,6 +9941,86 @@ def chat_session_links():
     except Exception as e:
         print(f"Error updating chat session links: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+def _normalise_workflow_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if cleaned.startswith("#v#"):
+        cleaned = "#V#" + cleaned[3:]
+    elif not cleaned.startswith("#V#"):
+        cleaned = f"#V#{cleaned.lstrip('#')}"
+    return cleaned
+
+
+def _coerce_onboarding_max_retries(value: Any) -> int:
+    try:
+        retries = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid max_retries") from exc
+    if retries < 0 or retries > 10:
+        raise ValueError("invalid max_retries")
+    return retries
+
+
+def _build_onboarding_inputs(
+    *, member_name: str, request_payload: Mapping[str, Any]
+) -> dict[str, Any]:
+    raw_inputs = request_payload.get("inputs")
+    inputs = dict(raw_inputs) if isinstance(raw_inputs, Mapping) else {}
+    inputs.setdefault("member_name", member_name)
+    inputs.setdefault("new_member_name", member_name)
+    return inputs
+
+
+def _resolve_onboarding_workflow_candidates(
+    request_payload: Mapping[str, Any] | None,
+) -> list[str]:
+    payload = request_payload if isinstance(request_payload, Mapping) else {}
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def _add(candidate: Any) -> None:
+        normalised = _normalise_workflow_id(candidate)
+        if not normalised or normalised in seen:
+            return
+        seen.add(normalised)
+        candidates.append(normalised)
+
+    _add(payload.get("workflow_id"))
+
+    payload_workflow_ids = payload.get("workflow_ids")
+    if isinstance(payload_workflow_ids, list):
+        for candidate in payload_workflow_ids:
+            _add(candidate)
+
+    env_workflow_ids = os.getenv(_ONBOARDING_WORKFLOW_IDS_ENV, "")
+    if isinstance(env_workflow_ids, str) and env_workflow_ids.strip():
+        for candidate in env_workflow_ids.split(","):
+            _add(candidate)
+
+    # Discovery fallback avoids hard-coding workflow identifiers in route code.
+    try:
+        registry = build_workflow_registry_read_only()
+        registry_ids = sorted(
+            {
+                normalised
+                for workflow_id in registry.all_workflow_ids()
+                for normalised in [_normalise_workflow_id(workflow_id)]
+                if normalised
+            }
+        )
+        for workflow_id in registry_ids:
+            workflow_id_lc = workflow_id.lower()
+            if any(term in workflow_id_lc for term in _ONBOARDING_WORKFLOW_KEYWORDS):
+                _add(workflow_id)
+    except Exception:
+        pass
+
+    return candidates
 
 
 def _normalise_concept_id(value: str | None) -> str | None:
