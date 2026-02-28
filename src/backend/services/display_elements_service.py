@@ -17,6 +17,7 @@ ALLOWED_DISPLAY_ELEMENT_TYPES = frozenset(
     {
         "calendar_view",
         "document_view",
+        "hierarchy_view",
         "text_block",
         "json_block",
         "kanban_view",
@@ -32,6 +33,7 @@ OPTIONAL_PAYLOAD_TITLE_ELEMENT_TYPES = frozenset(
     {
         "calendar_view",
         "document_view",
+        "hierarchy_view",
         "kanban_view",
         "relation_graph_view",
         "table",
@@ -46,6 +48,12 @@ RELATION_TRUTH_STATE_GROUP_STATUSES = frozenset(
 RELATION_GRAPH_ALLOWED_DIRECTIONS = frozenset({"directed", "undirected"})
 RELATION_GRAPH_MAX_NODES = 200
 RELATION_GRAPH_MAX_EDGES = 400
+HIERARCHY_MAX_NODES = 200
+HIERARCHY_MAX_EDGES = 400
+HIERARCHY_EDGE_BRANCH_KINDS = frozenset(
+    {"type_hierarchy", "instance_hierarchy", "organisational_hierarchy", "custom"}
+)
+HIERARCHY_MAX_DEPTH = 12
 CALENDAR_ALLOWED_GRANULARITIES = frozenset({"month", "week", "day"})
 DOCUMENT_SECTION_EXCERPT_MAX_CHARS = 700
 DOCUMENT_SECTION_DIFF_SUMMARY_MAX_CHARS = 280
@@ -1050,6 +1058,173 @@ def validate_turn_display_elements(
                     errors.append(
                         f"{label}.payload.focus_node_id must reference a declared node"
                     )
+        elif element_type == "hierarchy_view":
+            nodes = payload.get("nodes")
+            if not isinstance(nodes, list) or not nodes:
+                errors.append(f"{label}.payload.nodes must be a non-empty list")
+                nodes = []
+            if isinstance(nodes, list) and len(nodes) > HIERARCHY_MAX_NODES:
+                errors.append(
+                    f"{label}.payload.nodes exceeds max size {HIERARCHY_MAX_NODES}"
+                )
+
+            valid_node_ids: set[str] = set()
+            for node_index, node in enumerate(nodes):
+                node_label = f"{label}.payload.nodes[{node_index}]"
+                if not isinstance(node, Mapping):
+                    errors.append(f"{node_label} must be a mapping")
+                    continue
+
+                node_id = node.get("node_id")
+                if not isinstance(node_id, str) or not node_id.strip():
+                    errors.append(f"{node_label}.node_id must be a non-empty string")
+                    continue
+                if node_id in valid_node_ids:
+                    errors.append(f"{node_label}.node_id must be unique")
+                    continue
+                valid_node_ids.add(node_id)
+
+                display_label = node.get("label")
+                if not isinstance(display_label, str) or not display_label.strip():
+                    errors.append(f"{node_label}.label must be a non-empty string")
+
+                node_kind = node.get("node_kind")
+                if node_kind is not None and (
+                    not isinstance(node_kind, str) or not node_kind.strip()
+                ):
+                    errors.append(
+                        f"{node_label}.node_kind must be a non-empty string when provided"
+                    )
+
+                for count_key in ("parent_count", "child_count"):
+                    count_value = node.get(count_key)
+                    if count_value is None:
+                        continue
+                    if isinstance(count_value, bool) or not isinstance(count_value, int):
+                        errors.append(
+                            f"{node_label}.{count_key} must be a non-negative integer when provided"
+                        )
+                        continue
+                    if count_value < 0:
+                        errors.append(
+                            f"{node_label}.{count_key} must be a non-negative integer when provided"
+                        )
+
+            edges = payload.get("edges")
+            if not isinstance(edges, list):
+                errors.append(f"{label}.payload.edges must be a list")
+                edges = []
+            if isinstance(edges, list) and len(edges) > HIERARCHY_MAX_EDGES:
+                errors.append(
+                    f"{label}.payload.edges exceeds max size {HIERARCHY_MAX_EDGES}"
+                )
+
+            seen_edge_ids: set[str] = set()
+            for edge_index, edge in enumerate(edges):
+                edge_label = f"{label}.payload.edges[{edge_index}]"
+                if not isinstance(edge, Mapping):
+                    errors.append(f"{edge_label} must be a mapping")
+                    continue
+
+                edge_id = edge.get("edge_id")
+                if not isinstance(edge_id, str) or not edge_id.strip():
+                    errors.append(f"{edge_label}.edge_id must be a non-empty string")
+                elif edge_id in seen_edge_ids:
+                    errors.append(f"{edge_label}.edge_id must be unique")
+                else:
+                    seen_edge_ids.add(edge_id)
+
+                parent_node_id = edge.get("parent_node_id")
+                if not isinstance(parent_node_id, str) or not parent_node_id.strip():
+                    errors.append(
+                        f"{edge_label}.parent_node_id must be a non-empty string"
+                    )
+                elif valid_node_ids and parent_node_id not in valid_node_ids:
+                    errors.append(
+                        f"{edge_label}.parent_node_id must reference a declared node"
+                    )
+
+                child_node_id = edge.get("child_node_id")
+                if not isinstance(child_node_id, str) or not child_node_id.strip():
+                    errors.append(
+                        f"{edge_label}.child_node_id must be a non-empty string"
+                    )
+                elif valid_node_ids and child_node_id not in valid_node_ids:
+                    errors.append(
+                        f"{edge_label}.child_node_id must reference a declared node"
+                    )
+
+                predicate = edge.get("predicate")
+                if predicate is not None and (
+                    not isinstance(predicate, str) or not predicate.strip()
+                ):
+                    errors.append(
+                        f"{edge_label}.predicate must be a non-empty string when provided"
+                    )
+
+                branch_kind = edge.get("branch_kind")
+                if branch_kind is not None:
+                    if (
+                        not isinstance(branch_kind, str)
+                        or branch_kind.strip() not in HIERARCHY_EDGE_BRANCH_KINDS
+                    ):
+                        errors.append(
+                            f"{edge_label}.branch_kind must be one of {sorted(HIERARCHY_EDGE_BRANCH_KINDS)} when provided"
+                        )
+
+            focus_node_id = payload.get("focus_node_id")
+            if focus_node_id is not None:
+                if not isinstance(focus_node_id, str) or not focus_node_id.strip():
+                    errors.append(
+                        f"{label}.payload.focus_node_id must be a non-empty string when provided"
+                    )
+                elif valid_node_ids and focus_node_id not in valid_node_ids:
+                    errors.append(
+                        f"{label}.payload.focus_node_id must reference a declared node"
+                    )
+
+            root_node_ids = payload.get("root_node_ids")
+            if root_node_ids is not None:
+                if not isinstance(root_node_ids, list):
+                    errors.append(f"{label}.payload.root_node_ids must be a list")
+                else:
+                    for root_index, root_node_id in enumerate(root_node_ids):
+                        root_label = f"{label}.payload.root_node_ids[{root_index}]"
+                        if (
+                            not isinstance(root_node_id, str)
+                            or not root_node_id.strip()
+                        ):
+                            errors.append(
+                                f"{root_label} must be a non-empty string"
+                            )
+                            continue
+                        if valid_node_ids and root_node_id not in valid_node_ids:
+                            errors.append(
+                                f"{root_label} must reference a declared node"
+                            )
+
+            expansion = payload.get("expansion")
+            if expansion is not None:
+                if not isinstance(expansion, Mapping):
+                    errors.append(f"{label}.payload.expansion must be a mapping")
+                else:
+                    for key in ("show_parents", "show_children", "show_siblings"):
+                        flag = expansion.get(key)
+                        if flag is not None and not isinstance(flag, bool):
+                            errors.append(
+                                f"{label}.payload.expansion.{key} must be a boolean when provided"
+                            )
+
+                    max_depth = expansion.get("max_depth")
+                    if max_depth is not None:
+                        if isinstance(max_depth, bool) or not isinstance(max_depth, int):
+                            errors.append(
+                                f"{label}.payload.expansion.max_depth must be an integer between 1 and {HIERARCHY_MAX_DEPTH} when provided"
+                            )
+                        elif max_depth < 1 or max_depth > HIERARCHY_MAX_DEPTH:
+                            errors.append(
+                                f"{label}.payload.expansion.max_depth must be an integer between 1 and {HIERARCHY_MAX_DEPTH} when provided"
+                            )
         elif element_type == "timeline":
             items = payload.get("items")
             if not isinstance(items, list) or not items:
@@ -2353,6 +2528,86 @@ def _normalise_supplied_screen_relation_graph_views(
     return normalised, dropped_count
 
 
+def _normalise_supplied_screen_hierarchy_views(
+    screen_hierarchy_elements: Sequence[Mapping[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Normalise externally supplied screen hierarchy specs."""
+    if (
+        not isinstance(screen_hierarchy_elements, Sequence)
+        or isinstance(screen_hierarchy_elements, (str, bytes, bytearray))
+    ):
+        return [], 0
+
+    normalised: list[dict[str, Any]] = []
+    dropped_count = 0
+
+    for index, raw_spec in enumerate(screen_hierarchy_elements, start=1):
+        if not isinstance(raw_spec, Mapping):
+            dropped_count += 1
+            continue
+
+        payload: Mapping[str, Any] | None = None
+        metadata = raw_spec
+        wrapped_payload = raw_spec.get("payload")
+        if isinstance(wrapped_payload, Mapping):
+            payload = wrapped_payload
+        elif "nodes" in raw_spec and "edges" in raw_spec:
+            payload = raw_spec
+
+        if not isinstance(payload, Mapping):
+            dropped_count += 1
+            continue
+
+        intent = _normalise_text(metadata.get("intent")) or "hierarchy_view"
+        constraints = metadata.get("constraints")
+        if not isinstance(constraints, Mapping):
+            constraints = {
+                "supports_neighbourhood_toggle": True,
+                "supports_focus_navigation": True,
+            }
+        provenance = metadata.get("provenance")
+        if not isinstance(provenance, Mapping):
+            provenance = {}
+        canonical_payload = _with_optional_payload_title(payload, metadata=metadata)
+
+        is_valid, _errors = validate_turn_display_elements(
+            {
+                "schema_version": DISPLAY_ELEMENT_SCHEMA_VERSION,
+                "elements": [
+                    {
+                        "element_id": f"screen_structured_hierarchy_view_probe_{index}",
+                        "element_type": "hierarchy_view",
+                        "channel": "screen",
+                        "order": 42,
+                        "intent": intent,
+                        "payload": dict(canonical_payload),
+                        "constraints": dict(constraints),
+                        "provenance": dict(provenance),
+                    }
+                ],
+                "reason_codes": [],
+            }
+        )
+        if not is_valid:
+            dropped_count += 1
+            continue
+
+        normalised.append(
+            {
+                "element_id": _normalise_text(metadata.get("element_id")),
+                "order": metadata.get("order")
+                if isinstance(metadata.get("order"), int)
+                else None,
+                "intent": intent,
+                "payload": dict(canonical_payload),
+                "constraints": dict(constraints),
+                "provenance": dict(provenance),
+            }
+        )
+
+    return normalised, dropped_count
+
+
 def _normalise_supplied_screen_relation_truth_states(
     screen_relation_truth_state_elements: Sequence[Mapping[str, Any]] | None,
 ) -> tuple[list[dict[str, Any]], int]:
@@ -2447,6 +2702,7 @@ def build_turn_display_elements(
     screen_document_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_kanban_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_timeline_elements: Sequence[Mapping[str, Any]] | None = None,
+    screen_hierarchy_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_relation_graph_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_relation_truth_state_elements: Sequence[Mapping[str, Any]] | None = None,
     supplemental_reason_codes: Sequence[str] | None = None,
@@ -2625,6 +2881,14 @@ def build_turn_display_elements(
         reason_codes.append("screen_structured_timelines_supplied")
     if supplied_timelines_dropped:
         reason_codes.append("screen_structured_timelines_invalid_dropped")
+
+    supplied_screen_hierarchy_views, supplied_hierarchy_views_dropped = (
+        _normalise_supplied_screen_hierarchy_views(screen_hierarchy_elements)
+    )
+    if supplied_screen_hierarchy_views:
+        reason_codes.append("screen_structured_hierarchy_views_supplied")
+    if supplied_hierarchy_views_dropped:
+        reason_codes.append("screen_structured_hierarchy_views_invalid_dropped")
 
     supplied_screen_relation_graph_views, supplied_relation_graph_views_dropped = (
         _normalise_supplied_screen_relation_graph_views(
@@ -2817,6 +3081,27 @@ def build_turn_display_elements(
             }
         )
 
+    hierarchy_specs: list[dict[str, Any]] = []
+    for index, spec in enumerate(supplied_screen_hierarchy_views, start=1):
+        provenance = dict(spec.get("provenance") or {})
+        provenance.setdefault("source", "screen_structured_hierarchy_view")
+        provenance.setdefault("hierarchy_index", index)
+        hierarchy_specs.append(
+            {
+                "element_id": spec.get("element_id")
+                or f"screen_structured_hierarchy_view_{index}",
+                "order": spec.get("order"),
+                "intent": spec.get("intent") or "hierarchy_view",
+                "payload": spec.get("payload") or {},
+                "constraints": spec.get("constraints")
+                or {
+                    "supports_neighbourhood_toggle": True,
+                    "supports_focus_navigation": True,
+                },
+                "provenance": provenance,
+            }
+        )
+
     relation_graph_specs: list[dict[str, Any]] = []
     for index, spec in enumerate(supplied_screen_relation_graph_views, start=1):
         provenance = dict(spec.get("provenance") or {})
@@ -2870,6 +3155,7 @@ def build_turn_display_elements(
             *document_specs,
             *kanban_specs,
             *timeline_specs,
+            *hierarchy_specs,
             *relation_graph_specs,
             *relation_truth_state_specs,
         ]
@@ -3058,6 +3344,30 @@ def build_turn_display_elements(
             {
                 "element_id": element_id,
                 "element_type": "relation_graph_view",
+                "channel": "screen",
+                "order": int(order),
+                "intent": str(spec["intent"]),
+                "payload": dict(spec["payload"]),
+                "constraints": dict(spec["constraints"]),
+                "provenance": dict(spec["provenance"]),
+            }
+        )
+
+    next_hierarchy_order = 42
+    for spec in hierarchy_specs:
+        order = spec.get("order") if isinstance(spec.get("order"), int) else None
+        if order is None:
+            while next_hierarchy_order in used_orders:
+                next_hierarchy_order += 1
+            order = next_hierarchy_order
+            used_orders.add(order)
+            next_hierarchy_order += 1
+
+        element_id = _next_unique_element_id(str(spec["element_id"]), used_ids)
+        elements.append(
+            {
+                "element_id": element_id,
+                "element_type": "hierarchy_view",
                 "channel": "screen",
                 "order": int(order),
                 "intent": str(spec["intent"]),

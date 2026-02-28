@@ -2210,6 +2210,9 @@ const DOCUMENT_SECTION_DIFF_SUMMARY_MAX_CHARS = 280;
 const DOCUMENT_EXCERPT_TRUNCATION_MARKER = ' ... [truncated]';
 const RELATION_GRAPH_MAX_NODES = 120;
 const RELATION_GRAPH_MAX_EDGES = 240;
+const HIERARCHY_MAX_NODES = 180;
+const HIERARCHY_MAX_EDGES = 360;
+const HIERARCHY_MAX_DEPTH = 10;
 const RELATION_TRUTH_STATE_MAX_GROUPS = 50;
 const RELATION_TRUTH_STATE_MAX_ASSERTIONS_PER_GROUP = 200;
 const RELATION_TRUTH_STATE_FALLBACK_MAX_LINES = 300;
@@ -3663,6 +3666,221 @@ function resolveRelationGraphDisplayElements(debugData) {
     return relationGraphs;
 }
 
+function normaliseHierarchyBranchKind(value) {
+    const branchKind = typeof value === 'string' ? value.trim().toLowerCase() : '';
+    if (
+        branchKind === 'type_hierarchy'
+        || branchKind === 'instance_hierarchy'
+        || branchKind === 'organisational_hierarchy'
+    ) {
+        return branchKind;
+    }
+    return 'custom';
+}
+
+function normaliseHierarchyDisplayElement(element) {
+    if (!element || typeof element !== 'object') {
+        return null;
+    }
+    if (String(element.element_type || '').trim() !== 'hierarchy_view') {
+        return null;
+    }
+
+    const payload = element.payload;
+    if (!payload || typeof payload !== 'object') {
+        return null;
+    }
+
+    const rawNodes = Array.isArray(payload.nodes) ? payload.nodes : [];
+    const nodeMap = new Map();
+    for (const rawNode of rawNodes) {
+        if (!rawNode || typeof rawNode !== 'object') {
+            continue;
+        }
+        const nodeId = typeof rawNode.node_id === 'string' ? rawNode.node_id.trim() : '';
+        if (!nodeId || nodeMap.has(nodeId)) {
+            continue;
+        }
+        const label = typeof rawNode.label === 'string' && rawNode.label.trim()
+            ? rawNode.label.trim()
+            : nodeId;
+        const nodeKind = normaliseRelationGraphNodeKind(rawNode.node_kind || rawNode.kind);
+        const parentCountRaw = Number(rawNode.parent_count);
+        const childCountRaw = Number(rawNode.child_count);
+        nodeMap.set(nodeId, {
+            node_id: nodeId,
+            label,
+            node_kind: nodeKind,
+            parent_count: Number.isInteger(parentCountRaw) && parentCountRaw >= 0
+                ? parentCountRaw
+                : null,
+            child_count: Number.isInteger(childCountRaw) && childCountRaw >= 0
+                ? childCountRaw
+                : null
+        });
+        if (nodeMap.size >= HIERARCHY_MAX_NODES) {
+            break;
+        }
+    }
+
+    if (!nodeMap.size) {
+        return null;
+    }
+
+    const classifyPredicateBranchKind = (predicate) => {
+        const cleaned = typeof predicate === 'string'
+            ? predicate.trim().toLowerCase()
+            : '';
+        if (!cleaned) {
+            return 'custom';
+        }
+        const compact = cleaned.replace(/[^a-z0-9]+/g, '_');
+        if (
+            compact.includes('is_a_type_of')
+            || compact.includes('type_of')
+            || compact.includes('isatypeof')
+        ) {
+            return 'type_hierarchy';
+        }
+        if (compact.includes('instance_of') || compact.includes('is_an_instance_of')) {
+            return 'instance_hierarchy';
+        }
+        if (compact.includes('organis') || compact.includes('organiz')) {
+            return 'organisational_hierarchy';
+        }
+        return 'custom';
+    };
+
+    const rawEdges = Array.isArray(payload.edges) ? payload.edges : [];
+    const edges = [];
+    const seenEdgeKeys = new Set();
+    for (let index = 0; index < rawEdges.length; index += 1) {
+        const rawEdge = rawEdges[index];
+        if (!rawEdge || typeof rawEdge !== 'object') {
+            continue;
+        }
+        const parentNodeId = typeof rawEdge.parent_node_id === 'string'
+            ? rawEdge.parent_node_id.trim()
+            : (typeof rawEdge.source === 'string' ? rawEdge.source.trim() : '');
+        const childNodeId = typeof rawEdge.child_node_id === 'string'
+            ? rawEdge.child_node_id.trim()
+            : (typeof rawEdge.target === 'string' ? rawEdge.target.trim() : '');
+        if (!parentNodeId || !childNodeId || parentNodeId === childNodeId) {
+            continue;
+        }
+        if (!nodeMap.has(parentNodeId) || !nodeMap.has(childNodeId)) {
+            continue;
+        }
+
+        const predicate = typeof rawEdge.predicate === 'string' && rawEdge.predicate.trim()
+            ? rawEdge.predicate.trim()
+            : '';
+        const branchKind = rawEdge.branch_kind
+            ? normaliseHierarchyBranchKind(rawEdge.branch_kind)
+            : classifyPredicateBranchKind(predicate);
+        const edgeKey = `${parentNodeId}|${childNodeId}|${predicate}|${branchKind}`;
+        if (seenEdgeKeys.has(edgeKey)) {
+            continue;
+        }
+        seenEdgeKeys.add(edgeKey);
+
+        edges.push({
+            edge_id: typeof rawEdge.edge_id === 'string' && rawEdge.edge_id.trim()
+                ? rawEdge.edge_id.trim()
+                : `hierarchy_edge_${edges.length + 1}`,
+            parent_node_id: parentNodeId,
+            child_node_id: childNodeId,
+            predicate,
+            branch_kind: branchKind
+        });
+        if (edges.length >= HIERARCHY_MAX_EDGES) {
+            break;
+        }
+    }
+
+    if (!edges.length && nodeMap.size > 1) {
+        return null;
+    }
+
+    const focusNodeId = typeof payload.focus_node_id === 'string' && payload.focus_node_id.trim() && nodeMap.has(payload.focus_node_id.trim())
+        ? payload.focus_node_id.trim()
+        : '';
+
+    const rootNodeIds = [];
+    const seenRootNodeIds = new Set();
+    const rawRootNodeIds = Array.isArray(payload.root_node_ids) ? payload.root_node_ids : [];
+    for (const rawRootNodeId of rawRootNodeIds) {
+        const rootNodeId = typeof rawRootNodeId === 'string' ? rawRootNodeId.trim() : '';
+        if (!rootNodeId || seenRootNodeIds.has(rootNodeId) || !nodeMap.has(rootNodeId)) {
+            continue;
+        }
+        seenRootNodeIds.add(rootNodeId);
+        rootNodeIds.push(rootNodeId);
+    }
+    if (!rootNodeIds.length && edges.length > 0) {
+        const parentIds = new Set(edges.map((edge) => edge.parent_node_id));
+        const childIds = new Set(edges.map((edge) => edge.child_node_id));
+        const derivedRoots = Array.from(parentIds).filter((nodeId) => !childIds.has(nodeId));
+        derivedRoots.sort((left, right) => String(left).localeCompare(String(right)));
+        for (const rootNodeId of derivedRoots) {
+            if (seenRootNodeIds.has(rootNodeId)) {
+                continue;
+            }
+            seenRootNodeIds.add(rootNodeId);
+            rootNodeIds.push(rootNodeId);
+        }
+    }
+    if (!rootNodeIds.length && focusNodeId) {
+        rootNodeIds.push(focusNodeId);
+    }
+
+    const rawExpansion = payload.expansion;
+    const expansion = {
+        show_parents: typeof rawExpansion?.show_parents === 'boolean'
+            ? rawExpansion.show_parents
+            : true,
+        show_children: typeof rawExpansion?.show_children === 'boolean'
+            ? rawExpansion.show_children
+            : true,
+        show_siblings: typeof rawExpansion?.show_siblings === 'boolean'
+            ? rawExpansion.show_siblings
+            : true,
+        max_depth: Number.isInteger(Number(rawExpansion?.max_depth))
+            && Number(rawExpansion.max_depth) >= 1
+            && Number(rawExpansion.max_depth) <= HIERARCHY_MAX_DEPTH
+            ? Number(rawExpansion.max_depth)
+            : 4
+    };
+
+    return {
+        element_id: typeof element.element_id === 'string' ? element.element_id.trim() : null,
+        title: normaliseOptionalDisplayElementTitle(payload.title),
+        nodes: Array.from(nodeMap.values()),
+        edges,
+        focus_node_id: focusNodeId,
+        root_node_ids: rootNodeIds,
+        expansion,
+        truncated: rawNodes.length > nodeMap.size || rawEdges.length > edges.length
+    };
+}
+
+function resolveHierarchyDisplayElements(debugData) {
+    const contract = normaliseDisplayElementsContract(debugData?.display_elements);
+    if (!contract) {
+        return [];
+    }
+
+    const hierarchyElements = [];
+    for (const element of contract.elements) {
+        const hierarchyElement = normaliseHierarchyDisplayElement(element);
+        if (!hierarchyElement) {
+            continue;
+        }
+        hierarchyElements.push(hierarchyElement);
+    }
+    return hierarchyElements;
+}
+
 function normaliseRelationTruthStateStatus(value) {
     const status = typeof value === 'string' ? value.trim().toLowerCase() : '';
     if (status === 'asserted' || status === 'missing_expected' || status === 'uncertain') {
@@ -4201,6 +4419,416 @@ function buildRelationGraphScene(graphElement) {
     return section;
 }
 
+function buildHierarchyNodeElement(node) {
+    if (!node || typeof node !== 'object') {
+        return null;
+    }
+    const nodeId = typeof node.node_id === 'string' ? node.node_id.trim() : '';
+    if (!nodeId) {
+        return null;
+    }
+    const label = typeof node.label === 'string' && node.label.trim()
+        ? node.label.trim()
+        : nodeId;
+
+    const conceptId = _normalisePotentialConceptId(nodeId);
+    if (conceptId) {
+        const cartouche = createVontologyCartouche(conceptId, {
+            title: 'Open concept tab',
+            name: label,
+            kind: node.node_kind
+        });
+        cartouche.classList.add('chat-display-elements-hierarchy-node-cartouche');
+        cartouche.title = `${label} (${nodeId})`;
+        return cartouche;
+    }
+
+    const textNode = document.createElement('span');
+    textNode.className = 'chat-display-elements-hierarchy-node-text';
+    textNode.textContent = label;
+    textNode.title = nodeId;
+    return textNode;
+}
+
+function buildHierarchyScene(hierarchyElement) {
+    const section = document.createElement('div');
+    section.className = 'chat-display-elements-hierarchy-scene-wrap';
+
+    const nodeById = new Map();
+    for (const node of hierarchyElement.nodes) {
+        if (!node || typeof node !== 'object') {
+            continue;
+        }
+        const nodeId = typeof node.node_id === 'string' ? node.node_id.trim() : '';
+        if (!nodeId || nodeById.has(nodeId)) {
+            continue;
+        }
+        nodeById.set(nodeId, node);
+    }
+
+    const childrenByParent = new Map();
+    const parentsByChild = new Map();
+    const predicateByPair = new Map();
+    for (const edge of hierarchyElement.edges) {
+        if (!edge || typeof edge !== 'object') {
+            continue;
+        }
+        const parentNodeId = typeof edge.parent_node_id === 'string'
+            ? edge.parent_node_id.trim()
+            : '';
+        const childNodeId = typeof edge.child_node_id === 'string'
+            ? edge.child_node_id.trim()
+            : '';
+        if (!parentNodeId || !childNodeId || !nodeById.has(parentNodeId) || !nodeById.has(childNodeId)) {
+            continue;
+        }
+
+        if (!childrenByParent.has(parentNodeId)) {
+            childrenByParent.set(parentNodeId, new Set());
+        }
+        childrenByParent.get(parentNodeId).add(childNodeId);
+
+        if (!parentsByChild.has(childNodeId)) {
+            parentsByChild.set(childNodeId, new Set());
+        }
+        parentsByChild.get(childNodeId).add(parentNodeId);
+
+        const pairKey = `${parentNodeId}|${childNodeId}`;
+        if (!predicateByPair.has(pairKey)) {
+            predicateByPair.set(pairKey, new Set());
+        }
+        const predicate = typeof edge.predicate === 'string' ? edge.predicate.trim() : '';
+        if (predicate) {
+            predicateByPair.get(pairKey).add(predicate);
+        }
+    }
+
+    const sortNodeIds = (nodeIds) => {
+        return [...nodeIds].sort((left, right) => {
+            const leftNode = nodeById.get(left);
+            const rightNode = nodeById.get(right);
+            const leftLabel = typeof leftNode?.label === 'string' && leftNode.label.trim()
+                ? leftNode.label.trim()
+                : left;
+            const rightLabel = typeof rightNode?.label === 'string' && rightNode.label.trim()
+                ? rightNode.label.trim()
+                : right;
+            return `${leftLabel}|${left}`.localeCompare(`${rightLabel}|${right}`);
+        });
+    };
+
+    const focusNodeId = (
+        typeof hierarchyElement.focus_node_id === 'string'
+        && hierarchyElement.focus_node_id.trim()
+        && nodeById.has(hierarchyElement.focus_node_id.trim())
+    )
+        ? hierarchyElement.focus_node_id.trim()
+        : (
+            Array.isArray(hierarchyElement.root_node_ids)
+            && hierarchyElement.root_node_ids.length
+            && nodeById.has(hierarchyElement.root_node_ids[0])
+        )
+            ? hierarchyElement.root_node_ids[0]
+            : (hierarchyElement.nodes[0]?.node_id || '');
+
+    const rootNodeIds = [];
+    const seenRoots = new Set();
+    const explicitRoots = Array.isArray(hierarchyElement.root_node_ids)
+        ? hierarchyElement.root_node_ids
+        : [];
+    for (const rootNodeId of explicitRoots) {
+        const candidateRoot = typeof rootNodeId === 'string' ? rootNodeId.trim() : '';
+        if (!candidateRoot || seenRoots.has(candidateRoot) || !nodeById.has(candidateRoot)) {
+            continue;
+        }
+        seenRoots.add(candidateRoot);
+        rootNodeIds.push(candidateRoot);
+    }
+    if (!rootNodeIds.length) {
+        const parentIds = new Set();
+        const childIds = new Set();
+        for (const edge of hierarchyElement.edges) {
+            parentIds.add(edge.parent_node_id);
+            childIds.add(edge.child_node_id);
+        }
+        for (const parentNodeId of sortNodeIds(parentIds)) {
+            if (childIds.has(parentNodeId) || !nodeById.has(parentNodeId)) {
+                continue;
+            }
+            rootNodeIds.push(parentNodeId);
+        }
+    }
+    if (!rootNodeIds.length && focusNodeId) {
+        rootNodeIds.push(focusNodeId);
+    }
+
+    const focusAncestors = new Set();
+    if (focusNodeId) {
+        const queue = [focusNodeId];
+        while (queue.length > 0) {
+            const currentNodeId = queue.shift();
+            if (focusAncestors.has(currentNodeId)) {
+                continue;
+            }
+            focusAncestors.add(currentNodeId);
+            const parents = parentsByChild.get(currentNodeId);
+            if (!parents) {
+                continue;
+            }
+            for (const parentNodeId of parents) {
+                if (!focusAncestors.has(parentNodeId)) {
+                    queue.push(parentNodeId);
+                }
+            }
+        }
+    }
+
+    const renderNodeBadge = (node) => {
+        const badges = [];
+        if (Number.isInteger(node?.parent_count) && node.parent_count > 0) {
+            badges.push(`${node.parent_count} parent${node.parent_count === 1 ? '' : 's'}`);
+        }
+        if (Number.isInteger(node?.child_count) && node.child_count > 0) {
+            badges.push(`${node.child_count} child${node.child_count === 1 ? '' : 'ren'}`);
+        }
+        if (!badges.length) {
+            return null;
+        }
+        const badge = document.createElement('span');
+        badge.className = 'chat-display-elements-hierarchy-node-badge';
+        badge.textContent = badges.join(' · ');
+        return badge;
+    };
+
+    const renderNodeRow = (nodeId, { isFocus = false, relationHint = '' } = {}) => {
+        const node = nodeById.get(nodeId);
+        if (!node) {
+            return null;
+        }
+
+        const row = document.createElement('div');
+        row.className = `chat-display-elements-hierarchy-node-row${isFocus ? ' is-focus' : ''}`;
+
+        const nodeElement = buildHierarchyNodeElement(node);
+        if (!nodeElement) {
+            return null;
+        }
+        row.appendChild(nodeElement);
+
+        const badge = renderNodeBadge(node);
+        if (badge) {
+            row.appendChild(badge);
+        }
+
+        if (relationHint) {
+            const relation = document.createElement('span');
+            relation.className = 'chat-display-elements-hierarchy-relation-hint';
+            relation.textContent = relationHint;
+            row.appendChild(relation);
+        }
+
+        if (isFocus) {
+            const focusTag = document.createElement('span');
+            focusTag.className = 'chat-display-elements-hierarchy-focus-tag';
+            focusTag.textContent = 'Focus';
+            row.appendChild(focusTag);
+        }
+        return row;
+    };
+
+    const expansion = hierarchyElement.expansion || {};
+    const expansionMaxDepth = Number.isInteger(expansion.max_depth)
+        ? Math.max(1, Math.min(expansion.max_depth, HIERARCHY_MAX_DEPTH))
+        : 4;
+    const showParents = expansion.show_parents !== false;
+    const showChildren = expansion.show_children !== false;
+    const showSiblings = expansion.show_siblings !== false;
+
+    const neighbourhood = document.createElement('div');
+    neighbourhood.className = 'chat-display-elements-hierarchy-neighbourhood';
+
+    const buildNeighbourhoodPanel = (title, nodeIds, openByDefault, relationHintFactory = null) => {
+        if (!nodeIds.length) {
+            return null;
+        }
+        const details = document.createElement('details');
+        details.className = 'chat-display-elements-hierarchy-neighbourhood-panel';
+        details.open = openByDefault;
+
+        const summary = document.createElement('summary');
+        summary.className = 'chat-display-elements-hierarchy-neighbourhood-summary';
+        summary.textContent = `${title} (${nodeIds.length})`;
+        details.appendChild(summary);
+
+        const list = document.createElement('div');
+        list.className = 'chat-display-elements-hierarchy-neighbourhood-list';
+        for (const nodeId of nodeIds) {
+            const relationHint = typeof relationHintFactory === 'function'
+                ? relationHintFactory(nodeId)
+                : '';
+            const row = renderNodeRow(nodeId, { relationHint });
+            if (row) {
+                list.appendChild(row);
+            }
+        }
+        details.appendChild(list);
+        return details;
+    };
+
+    if (focusNodeId && nodeById.has(focusNodeId)) {
+        const focusHeader = document.createElement('div');
+        focusHeader.className = 'chat-display-elements-hierarchy-focus';
+        const focusRow = renderNodeRow(focusNodeId, { isFocus: true });
+        if (focusRow) {
+            focusHeader.appendChild(focusRow);
+            neighbourhood.appendChild(focusHeader);
+        }
+
+        const parentNodeIds = sortNodeIds(parentsByChild.get(focusNodeId) || []);
+        const childNodeIds = sortNodeIds(childrenByParent.get(focusNodeId) || []);
+        const siblingIdSet = new Set();
+        for (const parentNodeId of parentNodeIds) {
+            const siblingCandidates = childrenByParent.get(parentNodeId);
+            if (!siblingCandidates) {
+                continue;
+            }
+            for (const siblingNodeId of siblingCandidates) {
+                if (siblingNodeId !== focusNodeId) {
+                    siblingIdSet.add(siblingNodeId);
+                }
+            }
+        }
+        const siblingNodeIds = sortNodeIds(siblingIdSet);
+
+        const parentsPanel = buildNeighbourhoodPanel(
+            'Parents',
+            parentNodeIds,
+            showParents,
+            (nodeId) => {
+                const predicates = predicateByPair.get(`${nodeId}|${focusNodeId}`) || [];
+                return [...predicates].join(', ');
+            }
+        );
+        if (parentsPanel) {
+            neighbourhood.appendChild(parentsPanel);
+        }
+
+        const siblingsPanel = buildNeighbourhoodPanel(
+            'Siblings',
+            siblingNodeIds,
+            showSiblings
+        );
+        if (siblingsPanel) {
+            neighbourhood.appendChild(siblingsPanel);
+        }
+
+        const childrenPanel = buildNeighbourhoodPanel(
+            'Children',
+            childNodeIds,
+            showChildren,
+            (nodeId) => {
+                const predicates = predicateByPair.get(`${focusNodeId}|${nodeId}`) || [];
+                return [...predicates].join(', ');
+            }
+        );
+        if (childrenPanel) {
+            neighbourhood.appendChild(childrenPanel);
+        }
+    }
+
+    if (neighbourhood.childElementCount > 0) {
+        section.appendChild(neighbourhood);
+    }
+
+    const treeWrap = document.createElement('div');
+    treeWrap.className = 'chat-display-elements-hierarchy-tree-wrap';
+
+    const treeHeading = document.createElement('div');
+    treeHeading.className = 'chat-display-elements-hierarchy-tree-heading';
+    treeHeading.textContent = 'Hierarchy tree';
+    treeWrap.appendChild(treeHeading);
+
+    const renderTreeList = (nodeIds, depth, ancestry = new Set()) => {
+        if (!nodeIds.length || depth > expansionMaxDepth) {
+            return null;
+        }
+        const list = document.createElement('ul');
+        list.className = 'chat-display-elements-hierarchy-tree-list';
+
+        const sortedNodeIds = sortNodeIds(nodeIds);
+        for (const nodeId of sortedNodeIds) {
+            if (!nodeById.has(nodeId)) {
+                continue;
+            }
+            const item = document.createElement('li');
+            item.className = 'chat-display-elements-hierarchy-tree-item';
+
+            const row = renderNodeRow(nodeId, {
+                isFocus: !!focusNodeId && nodeId === focusNodeId
+            });
+            if (row) {
+                item.appendChild(row);
+            }
+
+            const childCandidates = childrenByParent.get(nodeId) || new Set();
+            const childNodeIds = [];
+            for (const childNodeId of childCandidates) {
+                if (ancestry.has(childNodeId)) {
+                    continue;
+                }
+                childNodeIds.push(childNodeId);
+            }
+
+            if (childNodeIds.length > 0 && depth < expansionMaxDepth) {
+                const childDetails = document.createElement('details');
+                childDetails.className = 'chat-display-elements-hierarchy-tree-subtree';
+                childDetails.open = (
+                    showChildren
+                    && (depth < 1 || nodeId === focusNodeId || focusAncestors.has(nodeId))
+                );
+
+                const childSummary = document.createElement('summary');
+                childSummary.className = 'chat-display-elements-hierarchy-tree-subtree-summary';
+                childSummary.textContent = `Children (${childNodeIds.length})`;
+                childDetails.appendChild(childSummary);
+
+                const nextAncestry = new Set(ancestry);
+                nextAncestry.add(nodeId);
+                const childList = renderTreeList(childNodeIds, depth + 1, nextAncestry);
+                if (childList) {
+                    childDetails.appendChild(childList);
+                }
+
+                item.appendChild(childDetails);
+            } else if (childNodeIds.length > 0 && depth >= expansionMaxDepth) {
+                const capNotice = document.createElement('div');
+                capNotice.className = 'chat-display-elements-hierarchy-depth-cap';
+                capNotice.textContent = `Depth limit reached (${expansionMaxDepth})`;
+                item.appendChild(capNotice);
+            }
+
+            list.appendChild(item);
+        }
+        return list;
+    };
+
+    const treeRoots = rootNodeIds.length > 0 ? rootNodeIds : sortNodeIds(nodeById.keys());
+    const treeList = renderTreeList(treeRoots, 0, new Set());
+    if (treeList) {
+        treeWrap.appendChild(treeList);
+    }
+    section.appendChild(treeWrap);
+
+    if (hierarchyElement.truncated) {
+        const truncationNotice = document.createElement('div');
+        truncationNotice.className = 'chat-display-elements-hierarchy-truncation';
+        truncationNotice.textContent = 'Hierarchy truncated to keep rendering responsive.';
+        section.appendChild(truncationNotice);
+    }
+
+    return section;
+}
+
 function renderTableDisplayElementsIntoContainer(container, debugData) {
     if (!container || typeof container.querySelectorAll !== 'function') {
         return;
@@ -4226,6 +4854,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
     const timelineElements = resolveTimelineDisplayElements(debugData);
     const calendarElements = resolveCalendarDisplayElements(debugData);
     const documentElements = resolveDocumentDisplayElements(debugData);
+    const hierarchyElements = resolveHierarchyDisplayElements(debugData);
     const relationGraphElements = resolveRelationGraphDisplayElements(debugData);
     let relationTruthStateElements = resolveRelationTruthStateDisplayElements(debugData);
     let relationTruthStateSource = relationTruthStateElements.length ? 'structured' : 'none';
@@ -4255,6 +4884,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
         && !timelineElements.length
         && !calendarElements.length
         && !documentElements.length
+        && !hierarchyElements.length
         && !relationGraphElements.length
         && !relationTruthStateElements.length
     ) {
@@ -5154,6 +5784,44 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
         root.appendChild(section);
     });
 
+    hierarchyElements.forEach((hierarchyElement, hierarchyIndex) => {
+        const section = document.createElement('section');
+        section.className = 'chat-display-elements-hierarchy-section';
+        section.style.cssText = (
+            tableElements.length > 0
+            || workflowElements.length > 0
+            || taskViewElements.length > 0
+            || kanbanElements.length > 0
+            || timelineElements.length > 0
+            || calendarElements.length > 0
+            || documentElements.length > 0
+            || hierarchyIndex > 0
+        ) ? 'margin-top: 10px;' : '';
+
+        const title = document.createElement('div');
+        title.className = 'chat-display-elements-hierarchy-title';
+        title.textContent = resolveDisplayElementSectionTitle(
+            hierarchyElement.title,
+            'Hierarchy view',
+            hierarchyIndex,
+            hierarchyElements.length
+        );
+        title.style.cssText = 'font-weight: 600; font-size: 0.85em; color: #2f4f6f; margin-bottom: 6px;';
+        section.appendChild(title);
+
+        const summary = document.createElement('div');
+        summary.className = 'chat-display-elements-hierarchy-summary';
+        summary.textContent = `${hierarchyElement.nodes.length} node${hierarchyElement.nodes.length === 1 ? '' : 's'}, ${hierarchyElement.edges.length} relation${hierarchyElement.edges.length === 1 ? '' : 's'}`;
+        if (hierarchyElement.truncated) {
+            summary.textContent += ' (truncated)';
+        }
+        summary.style.cssText = 'font-size: 0.78em; color: #5a6b7b; margin-bottom: 6px;';
+        section.appendChild(summary);
+
+        section.appendChild(buildHierarchyScene(hierarchyElement));
+        root.appendChild(section);
+    });
+
     relationGraphElements.forEach((relationGraphElement, relationGraphIndex) => {
         const section = document.createElement('section');
         section.className = 'chat-display-elements-relation-graph-section';
@@ -5165,6 +5833,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
             || timelineElements.length > 0
             || calendarElements.length > 0
             || documentElements.length > 0
+            || hierarchyElements.length > 0
             || relationGraphIndex > 0
         ) ? 'margin-top: 10px;' : '';
 
@@ -5201,6 +5870,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
             || taskViewElements.length > 0
             || kanbanElements.length > 0
             || timelineElements.length > 0
+            || hierarchyElements.length > 0
             || relationGraphElements.length > 0
             || calendarElements.length > 0
             || documentElements.length > 0
@@ -5450,6 +6120,7 @@ function extractRenderPlanSourceSummary(
     screenTimelineElements,
     screenCalendarElements,
     screenDocumentElements,
+    screenHierarchyElements,
     screenRelationGraphElements
 ) {
     const sourceTools = [];
@@ -5535,6 +6206,12 @@ function extractRenderPlanSourceSummary(
         }
         addProvenance(documentElement.provenance);
     }
+    for (const hierarchyElement of screenHierarchyElements) {
+        if (!hierarchyElement || typeof hierarchyElement !== 'object') {
+            continue;
+        }
+        addProvenance(hierarchyElement.provenance);
+    }
     for (const relationGraphElement of screenRelationGraphElements) {
         if (!relationGraphElement || typeof relationGraphElement !== 'object') {
             continue;
@@ -5588,6 +6265,9 @@ function buildRenderPlanMetadataSummary(renderPlan) {
     const screenDocumentElements = Array.isArray(renderPlan.screen_document_elements)
         ? renderPlan.screen_document_elements.filter(item => item && typeof item === 'object')
         : [];
+    const screenHierarchyElements = Array.isArray(renderPlan.screen_hierarchy_elements)
+        ? renderPlan.screen_hierarchy_elements.filter(item => item && typeof item === 'object')
+        : [];
     const screenRelationGraphElements = Array.isArray(renderPlan.screen_relation_graph_elements)
         ? renderPlan.screen_relation_graph_elements.filter(item => item && typeof item === 'object')
         : [];
@@ -5600,6 +6280,7 @@ function buildRenderPlanMetadataSummary(renderPlan) {
         screenTimelineElements,
         screenCalendarElements,
         screenDocumentElements,
+        screenHierarchyElements,
         screenRelationGraphElements
     );
 
@@ -5632,6 +6313,7 @@ function buildRenderPlanMetadataSummary(renderPlan) {
         screen_timeline_element_count: screenTimelineElements.length,
         screen_calendar_element_count: screenCalendarElements.length,
         screen_document_element_count: screenDocumentElements.length,
+        screen_hierarchy_element_count: screenHierarchyElements.length,
         screen_relation_graph_element_count: screenRelationGraphElements.length,
         unsupported_selected_renderer_types: unsupportedRendererTypes,
         resolver_suggestions: resolverSuggestions
@@ -5699,6 +6381,7 @@ function buildRenderPlanSummaryHtml(renderPlanSummary) {
     addScalar('Screen timeline elements', renderPlanSummary.screen_timeline_element_count);
     addScalar('Screen calendar elements', renderPlanSummary.screen_calendar_element_count);
     addScalar('Screen document elements', renderPlanSummary.screen_document_element_count);
+    addScalar('Screen hierarchy elements', renderPlanSummary.screen_hierarchy_element_count);
     addScalar('Screen relation graph elements', renderPlanSummary.screen_relation_graph_element_count);
     addList('Source tools', renderPlanSummary.source_tools);
     addList('Record families', renderPlanSummary.record_families);

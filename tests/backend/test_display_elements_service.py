@@ -897,6 +897,123 @@ def test_build_turn_display_elements_drops_invalid_relation_graph_elements() -> 
     assert contract["validation"]["valid"] is True
 
 
+def test_build_turn_display_elements_includes_supplied_hierarchy_elements() -> None:
+    contract = build_turn_display_elements(
+        response_text="Hierarchy response",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Hierarchy response",
+            "spoken": None,
+        },
+        screen_hierarchy_elements=[
+            {
+                "element_id": "screen_hierarchy_view",
+                "intent": "hierarchy_view",
+                "payload": {
+                    "title": "Meeting hierarchy",
+                    "nodes": [
+                        {
+                            "node_id": "#V#meeting",
+                            "label": "Meeting",
+                            "node_kind": "type",
+                        },
+                        {
+                            "node_id": "#V#reading_group_meeting",
+                            "label": "Reading group meeting",
+                            "node_kind": "type",
+                        },
+                        {
+                            "node_id": "#V#sail_reading_group_meeting",
+                            "label": "SAIL reading group meeting",
+                            "node_kind": "type",
+                        },
+                    ],
+                    "edges": [
+                        {
+                            "edge_id": "hierarchy_edge_1",
+                            "parent_node_id": "#V#meeting",
+                            "child_node_id": "#V#reading_group_meeting",
+                            "predicate": "#V#is_a_type_of",
+                            "branch_kind": "type_hierarchy",
+                        },
+                        {
+                            "edge_id": "hierarchy_edge_2",
+                            "parent_node_id": "#V#reading_group_meeting",
+                            "child_node_id": "#V#sail_reading_group_meeting",
+                            "predicate": "#V#is_a_type_of",
+                            "branch_kind": "type_hierarchy",
+                        },
+                    ],
+                    "focus_node_id": "#V#sail_reading_group_meeting",
+                    "root_node_ids": ["#V#meeting"],
+                    "expansion": {
+                        "show_parents": True,
+                        "show_children": True,
+                        "show_siblings": True,
+                        "max_depth": 4,
+                    },
+                },
+            }
+        ],
+    )
+
+    hierarchy_elements = [
+        element
+        for element in contract["elements"]
+        if element["element_type"] == "hierarchy_view"
+    ]
+    assert len(hierarchy_elements) == 1
+    hierarchy_element = hierarchy_elements[0]
+    assert hierarchy_element["element_id"] == "screen_hierarchy_view"
+    assert hierarchy_element["payload"]["nodes"][0]["node_id"] == "#V#meeting"
+    assert (
+        hierarchy_element["payload"]["edges"][0]["parent_node_id"] == "#V#meeting"
+    )
+    assert "screen_structured_hierarchy_views_supplied" in contract["reason_codes"]
+    assert contract["validation"]["valid"] is True
+
+
+def test_build_turn_display_elements_drops_invalid_hierarchy_elements() -> None:
+    contract = build_turn_display_elements(
+        response_text="Hierarchy response",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Hierarchy response",
+            "spoken": None,
+        },
+        screen_hierarchy_elements=[
+            {
+                "payload": {
+                    "nodes": [
+                        {
+                            "node_id": "#V#meeting",
+                            "label": "Meeting",
+                            "node_kind": "type",
+                        }
+                    ],
+                    "edges": [
+                        {
+                            "edge_id": "hierarchy_edge_1",
+                            "parent_node_id": "#V#meeting",
+                            "child_node_id": "#V#missing_node",
+                            "predicate": "#V#is_a_type_of",
+                        }
+                    ],
+                }
+            }
+        ],
+    )
+
+    hierarchy_elements = [
+        element
+        for element in contract["elements"]
+        if element["element_type"] == "hierarchy_view"
+    ]
+    assert hierarchy_elements == []
+    assert "screen_structured_hierarchy_views_invalid_dropped" in contract["reason_codes"]
+    assert contract["validation"]["valid"] is True
+
+
 def test_build_turn_display_elements_includes_supplied_relation_truth_state_elements() -> None:
     contract = build_turn_display_elements(
         response_text="Truth state summary",
@@ -1289,6 +1406,54 @@ def test_validate_turn_display_elements_rejects_invalid_relation_graph_shape() -
     assert any("target must reference a declared node" in message for message in errors)
     assert any("direction must be one of" in message for message in errors)
     assert any("focus_node_id must reference a declared node" in message for message in errors)
+
+
+def test_validate_turn_display_elements_rejects_invalid_hierarchy_shape() -> None:
+    valid, errors = validate_turn_display_elements(
+        {
+            "schema_version": "turn_display_elements_v1",
+            "elements": [
+                {
+                    "element_id": "screen_hierarchy_view",
+                    "element_type": "hierarchy_view",
+                    "channel": "screen",
+                    "order": 42,
+                    "intent": "hierarchy_view",
+                    "payload": {
+                        "nodes": [
+                            {
+                                "node_id": "#V#reading_group_meeting",
+                                "label": "Reading group meeting",
+                            }
+                        ],
+                        "edges": [
+                            {
+                                "edge_id": "hierarchy_edge_1",
+                                "parent_node_id": "#V#missing_parent",
+                                "child_node_id": "#V#reading_group_meeting",
+                                "predicate": "#V#is_a_type_of",
+                                "branch_kind": "unknown_branch",
+                            }
+                        ],
+                        "focus_node_id": "#V#missing_focus",
+                        "expansion": {
+                            "show_children": "yes",
+                            "max_depth": 999,
+                        },
+                    },
+                    "provenance": {"source": "test"},
+                }
+            ],
+            "reason_codes": [],
+        }
+    )
+
+    assert valid is False
+    assert any("parent_node_id must reference a declared node" in message for message in errors)
+    assert any("branch_kind must be one of" in message for message in errors)
+    assert any("focus_node_id must reference a declared node" in message for message in errors)
+    assert any("show_children must be a boolean" in message for message in errors)
+    assert any("max_depth must be an integer between 1 and 12" in message for message in errors)
 
 
 def test_validate_turn_display_elements_rejects_invalid_relation_truth_state_shape() -> None:
@@ -1706,6 +1871,33 @@ def test_build_turn_display_elements_preserves_optional_payload_titles() -> None
                 }
             }
         ],
+        screen_hierarchy_elements=[
+            {
+                "payload": {
+                    "title": "Meeting hierarchy",
+                    "nodes": [
+                        {
+                            "node_id": "#V#meeting",
+                            "label": "Meeting",
+                            "node_kind": "type",
+                        },
+                        {
+                            "node_id": "#V#reading_group_meeting",
+                            "label": "Reading group meeting",
+                            "node_kind": "type",
+                        },
+                    ],
+                    "edges": [
+                        {
+                            "edge_id": "hierarchy_edge_1",
+                            "parent_node_id": "#V#meeting",
+                            "child_node_id": "#V#reading_group_meeting",
+                            "predicate": "#V#is_a_type_of",
+                        }
+                    ],
+                }
+            }
+        ],
         screen_relation_graph_elements=[
             {
                 "payload": {
@@ -1746,6 +1938,7 @@ def test_build_turn_display_elements_preserves_optional_payload_titles() -> None
             "timeline",
             "calendar_view",
             "document_view",
+            "hierarchy_view",
             "relation_graph_view",
         }
     }
@@ -1757,6 +1950,7 @@ def test_build_turn_display_elements_preserves_optional_payload_titles() -> None
     assert payload_title_by_type["timeline"] == "Timeline of changes"
     assert payload_title_by_type["calendar_view"] == "Calendar schedule"
     assert payload_title_by_type["document_view"] == "Document excerpts"
+    assert payload_title_by_type["hierarchy_view"] == "Meeting hierarchy"
     assert payload_title_by_type["relation_graph_view"] == "Relation network"
     assert contract["validation"]["valid"] is True
 

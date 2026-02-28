@@ -18612,6 +18612,236 @@ class InternalMCPChatOrchestrator:
                 }
             ]
 
+        def _extract_renderer_screen_hierarchy_elements(
+            *,
+            tool_messages: Sequence[Mapping[str, Any]] = (),
+            focus_concept_id: Any = None,
+        ) -> list[dict[str, Any]]:
+            """Derive hierarchy payloads from relation graph tool outputs."""
+
+            relation_graph_elements = _extract_renderer_screen_relation_graph_elements(
+                tool_messages=tool_messages,
+                focus_concept_id=focus_concept_id,
+            )
+            if not relation_graph_elements:
+                return []
+
+            graph_element = relation_graph_elements[0]
+            payload = (
+                cast(Mapping[str, Any], graph_element.get("payload"))
+                if isinstance(graph_element.get("payload"), Mapping)
+                else {}
+            )
+            raw_nodes = _mapping_list(payload.get("nodes"), limit=360)
+            raw_edges = _mapping_list(payload.get("edges"), limit=720)
+            if not raw_nodes or not raw_edges:
+                return []
+
+            def _coerce_text(value: Any) -> str | None:
+                if isinstance(value, str):
+                    cleaned = value.strip()
+                    return cleaned or None
+                if value is None:
+                    return None
+                cleaned = str(value).strip()
+                return cleaned or None
+
+            node_by_id: dict[str, dict[str, Any]] = {}
+            for raw_node in raw_nodes:
+                node_id = _coerce_text(
+                    _first_text(
+                        raw_node.get("node_id"),
+                        raw_node.get("concept_id"),
+                        raw_node.get("id"),
+                    )
+                )
+                if not node_id or node_id in node_by_id:
+                    continue
+                label = _coerce_text(
+                    _first_text(raw_node.get("label"), raw_node.get("name"), node_id)
+                ) or node_id
+                node_kind = _coerce_text(
+                    _first_text(raw_node.get("node_kind"), raw_node.get("kind"))
+                )
+                node_entry: dict[str, Any] = {"node_id": node_id, "label": label}
+                if node_kind:
+                    node_entry["node_kind"] = node_kind.lower()
+                node_by_id[node_id] = node_entry
+
+            if len(node_by_id) < 2:
+                return []
+
+            def _classify_branch_kind(predicate_value: str) -> tuple[str, bool]:
+                predicate = predicate_value.strip().lower()
+                compact_predicate = re.sub(r"[^a-z0-9]+", "_", predicate).strip("_")
+                if compact_predicate in {
+                    "is_a_type_of",
+                    "isa_type_of",
+                    "type_of",
+                    "isatypeof",
+                }:
+                    return "type_hierarchy", True
+                if compact_predicate in {
+                    "is_an_instance_of",
+                    "instance_of",
+                    "isaninstanceof",
+                }:
+                    return "instance_hierarchy", True
+                if "organis" in compact_predicate or "organiz" in compact_predicate:
+                    return "organisational_hierarchy", False
+                return "custom", False
+
+            hierarchy_edges: list[dict[str, Any]] = []
+            seen_edge_keys: set[tuple[str, str, str]] = set()
+            parent_counts: dict[str, int] = {}
+            child_counts: dict[str, int] = {}
+            has_explicit_hierarchy_predicates = False
+
+            for raw_edge in raw_edges:
+                source_id = _coerce_text(
+                    _first_text(
+                        raw_edge.get("source"),
+                        raw_edge.get("source_node_id"),
+                        raw_edge.get("from"),
+                    )
+                )
+                target_id = _coerce_text(
+                    _first_text(
+                        raw_edge.get("target"),
+                        raw_edge.get("target_node_id"),
+                        raw_edge.get("to"),
+                    )
+                )
+                predicate = _coerce_text(
+                    _first_text(raw_edge.get("predicate"), raw_edge.get("label"))
+                )
+                if not source_id or not target_id or not predicate:
+                    continue
+                if source_id not in node_by_id or target_id not in node_by_id:
+                    continue
+
+                branch_kind, parent_is_target = _classify_branch_kind(predicate)
+                if branch_kind in {"type_hierarchy", "instance_hierarchy"}:
+                    has_explicit_hierarchy_predicates = True
+
+                parent_node_id = target_id if parent_is_target else source_id
+                child_node_id = source_id if parent_is_target else target_id
+                if parent_node_id == child_node_id:
+                    continue
+
+                edge_key = (parent_node_id, child_node_id, predicate)
+                if edge_key in seen_edge_keys:
+                    continue
+                seen_edge_keys.add(edge_key)
+
+                hierarchy_edges.append(
+                    {
+                        "edge_id": f"hierarchy_edge_{len(hierarchy_edges) + 1}",
+                        "parent_node_id": parent_node_id,
+                        "child_node_id": child_node_id,
+                        "predicate": predicate,
+                        "branch_kind": branch_kind,
+                    }
+                )
+                parent_counts[child_node_id] = parent_counts.get(child_node_id, 0) + 1
+                child_counts[parent_node_id] = child_counts.get(parent_node_id, 0) + 1
+
+            if not hierarchy_edges:
+                return []
+
+            focus_node_id = _coerce_text(payload.get("focus_node_id"))
+            if focus_node_id not in node_by_id:
+                focus_node_id = None
+
+            parent_nodes = {edge["parent_node_id"] for edge in hierarchy_edges}
+            child_nodes = {edge["child_node_id"] for edge in hierarchy_edges}
+            root_node_ids = sorted(parent_nodes - child_nodes)
+            if not root_node_ids and focus_node_id:
+                root_node_ids = [focus_node_id]
+            elif not root_node_ids:
+                root_node_ids = [sorted(node_by_id.keys())[0]]
+
+            ordered_node_ids = sorted(node_by_id.keys())
+            if focus_node_id:
+                ordered_node_ids = [focus_node_id] + [
+                    node_id for node_id in ordered_node_ids if node_id != focus_node_id
+                ]
+
+            ordered_nodes: list[dict[str, Any]] = []
+            for node_id in ordered_node_ids:
+                node_entry = dict(node_by_id[node_id])
+                if parent_counts.get(node_id):
+                    node_entry["parent_count"] = int(parent_counts[node_id])
+                if child_counts.get(node_id):
+                    node_entry["child_count"] = int(child_counts[node_id])
+                ordered_nodes.append(node_entry)
+
+            ordered_edges = sorted(
+                hierarchy_edges,
+                key=lambda edge: (
+                    str(edge.get("parent_node_id") or ""),
+                    str(edge.get("child_node_id") or ""),
+                    str(edge.get("predicate") or ""),
+                ),
+            )
+            for index, edge in enumerate(ordered_edges, start=1):
+                edge["edge_id"] = f"hierarchy_edge_{index}"
+
+            hierarchy_payload: dict[str, Any] = {
+                "nodes": ordered_nodes,
+                "edges": ordered_edges,
+                "root_node_ids": root_node_ids[:40],
+                "expansion": {
+                    "show_parents": True,
+                    "show_children": True,
+                    "show_siblings": True,
+                    "max_depth": 4,
+                },
+            }
+            if focus_node_id:
+                hierarchy_payload["focus_node_id"] = focus_node_id
+
+            relation_graph_title = _coerce_text(payload.get("title"))
+            if relation_graph_title:
+                if "hierarchy" in relation_graph_title.lower():
+                    hierarchy_payload["title"] = relation_graph_title
+                else:
+                    hierarchy_payload["title"] = f"{relation_graph_title} hierarchy"
+
+            relation_graph_provenance = (
+                cast(Mapping[str, Any], graph_element.get("provenance"))
+                if isinstance(graph_element.get("provenance"), Mapping)
+                else {}
+            )
+            provenance: dict[str, Any] = {
+                "source": "tool_result_hierarchy_view",
+                "record_family": "hierarchy",
+                "derived_from": "relation_graph",
+                "has_explicit_hierarchy_predicates": has_explicit_hierarchy_predicates,
+            }
+            source_tools = relation_graph_provenance.get("source_tools")
+            if isinstance(source_tools, list):
+                provenance["source_tools"] = [
+                    str(item).strip()
+                    for item in source_tools
+                    if isinstance(item, str) and item.strip()
+                ]
+            provenance["node_count"] = len(ordered_nodes)
+            provenance["edge_count"] = len(ordered_edges)
+
+            return [
+                {
+                    "element_id": "screen_hierarchy_view",
+                    "intent": "hierarchy_view",
+                    "payload": hierarchy_payload,
+                    "constraints": {
+                        "supports_neighbourhood_toggle": True,
+                        "supports_focus_navigation": True,
+                    },
+                    "provenance": provenance,
+                }
+            ]
+
         def _build_renderer_request_payload(
             screen_text: Any,
             *,
@@ -18695,11 +18925,14 @@ class InternalMCPChatOrchestrator:
             "citation": ("document_view",),
             "document": ("document_view",),
             "document_view": ("document_view",),
+            "hierarchy": ("hierarchy_view",),
+            "hierarchy_view": ("hierarchy_view",),
             "kanban": ("kanban_view",),
             "kanban_view": ("kanban_view",),
             "graph": ("relation_graph_view",),
             "relation_graph": ("relation_graph_view",),
             "relation_graph_view": ("relation_graph_view",),
+            "tree": ("hierarchy_view",),
             "task": ("task_view",),
             "task_view": ("task_view",),
             "timeline": ("timeline",),
@@ -18777,6 +19010,7 @@ class InternalMCPChatOrchestrator:
             include_document_elements = "document_view" in selected_families
             include_kanban_elements = "kanban_view" in selected_families
             include_timeline_elements = "timeline" in selected_families
+            include_hierarchy_elements = "hierarchy_view" in selected_families
             include_relation_graph_elements = "relation_graph_view" in selected_families
             decision["screen_element_mapping_mode"] = mapping_mode
             decision["screen_element_reason_codes"] = list(reason_codes)
@@ -18789,6 +19023,7 @@ class InternalMCPChatOrchestrator:
                 "document_view": include_document_elements,
                 "kanban_view": include_kanban_elements,
                 "timeline": include_timeline_elements,
+                "hierarchy_view": include_hierarchy_elements,
                 "relation_graph_view": include_relation_graph_elements,
             }
             if unsupported_renderer_types:
@@ -18868,6 +19103,19 @@ class InternalMCPChatOrchestrator:
                     decision["screen_timeline_elements"] = screen_timeline_elements
                     decision["screen_timeline_element_count"] = len(
                         screen_timeline_elements
+                    )
+
+            if include_hierarchy_elements:
+                screen_hierarchy_elements = _extract_renderer_screen_hierarchy_elements(
+                    tool_messages=tool_messages,
+                    focus_concept_id=decision.get(
+                        "request_payload_selected_concept_id"
+                    ),
+                )
+                if screen_hierarchy_elements:
+                    decision["screen_hierarchy_elements"] = screen_hierarchy_elements
+                    decision["screen_hierarchy_element_count"] = len(
+                        screen_hierarchy_elements
                     )
 
             if include_relation_graph_elements:

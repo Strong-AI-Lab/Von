@@ -3008,6 +3008,39 @@ def _extract_screen_relation_graph_elements_from_render_plan(
     return relation_graph_elements
 
 
+def _extract_screen_hierarchy_elements_from_render_plan(
+    render_plan: dict[str, Any] | None,
+    *,
+    screen_element_targets: dict[str, bool] | None = None,
+) -> list[dict[str, Any]]:
+    """Extract display-contract hierarchy specs from renderer plan diagnostics."""
+    if not isinstance(render_plan, dict):
+        return []
+    if isinstance(screen_element_targets, dict) and not bool(
+        screen_element_targets.get("hierarchy_view", True)
+    ):
+        return []
+
+    hierarchy_elements: list[dict[str, Any]] = []
+
+    def _append_hierarchy_specs(raw_value: Any) -> None:
+        if isinstance(raw_value, list):
+            for item in raw_value:
+                if isinstance(item, dict):
+                    hierarchy_elements.append(dict(item))
+        elif isinstance(raw_value, dict):
+            hierarchy_elements.append(dict(raw_value))
+
+    _append_hierarchy_specs(render_plan.get("screen_hierarchy_elements"))
+    _append_hierarchy_specs(render_plan.get("screen_hierarchy_payloads"))
+
+    single_hierarchy = render_plan.get("screen_hierarchy_element")
+    if isinstance(single_hierarchy, dict):
+        hierarchy_elements.append(dict(single_hierarchy))
+
+    return hierarchy_elements
+
+
 def _extract_screen_relation_truth_state_elements_from_render_plan(
     render_plan: dict[str, Any] | None,
     *,
@@ -3057,6 +3090,7 @@ def _extract_screen_element_targets_from_render_plan(
         "document_view": True,
         "kanban_view": True,
         "timeline": True,
+        "hierarchy_view": True,
         "relation_graph_view": True,
         "relation_truth_state": True,
     }
@@ -3075,6 +3109,7 @@ def _extract_screen_element_targets_from_render_plan(
         "document_view": bool(raw_targets.get("document_view", True)),
         "kanban_view": bool(raw_targets.get("kanban_view", True)),
         "timeline": bool(raw_targets.get("timeline", True)),
+        "hierarchy_view": bool(raw_targets.get("hierarchy_view", True)),
         "relation_graph_view": bool(
             raw_targets.get("relation_graph_view", True)
         ),
@@ -6926,6 +6961,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             render_plan_for_display,
             screen_element_targets=screen_element_targets,
         )
+        screen_hierarchy_elements = _extract_screen_hierarchy_elements_from_render_plan(
+            render_plan_for_display,
+            screen_element_targets=screen_element_targets,
+        )
         screen_relation_graph_elements = (
             _extract_screen_relation_graph_elements_from_render_plan(
                 render_plan_for_display,
@@ -6950,6 +6989,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             screen_document_elements=screen_document_elements,
             screen_kanban_elements=screen_kanban_elements,
             screen_timeline_elements=screen_timeline_elements,
+            screen_hierarchy_elements=screen_hierarchy_elements,
             screen_relation_graph_elements=screen_relation_graph_elements,
             screen_relation_truth_state_elements=screen_relation_truth_state_elements,
             supplemental_reason_codes=screen_element_reason_codes,

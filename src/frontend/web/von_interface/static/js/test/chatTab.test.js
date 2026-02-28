@@ -1500,6 +1500,93 @@ describe('relation graph display elements', () => {
     });
 });
 
+describe('hierarchy display elements', () => {
+    beforeEach(() => {
+        const { createVontologyCartouche } = require('../utils/textDecorator.js');
+        createVontologyCartouche.mockClear();
+    });
+
+    test('renders hierarchy with focus neighbourhood panels for parents, siblings and children', () => {
+        const container = document.createElement('div');
+        const debugData = {
+            display_elements: {
+                schema_version: 'turn_display_elements_v1',
+                elements: [
+                    {
+                        element_id: 'screen_hierarchy_view',
+                        element_type: 'hierarchy_view',
+                        channel: 'screen',
+                        order: 42,
+                        intent: 'hierarchy_view',
+                        payload: {
+                            title: 'Meeting hierarchy',
+                            nodes: [
+                                { node_id: '#V#meeting', label: 'Meeting', node_kind: 'type' },
+                                { node_id: '#V#reading_group_meeting', label: 'Reading group meeting', node_kind: 'type' },
+                                { node_id: '#V#naoi_reading_group_meeting', label: 'NAOI reading group meeting', node_kind: 'type' },
+                                { node_id: '#V#sail_reading_group_meeting', label: 'SAIL reading group meeting', node_kind: 'type' },
+                                { node_id: '#V#other_reading_group_meeting', label: 'Other reading group meeting', node_kind: 'type' }
+                            ],
+                            edges: [
+                                {
+                                    edge_id: 'hierarchy_edge_1',
+                                    parent_node_id: '#V#meeting',
+                                    child_node_id: '#V#reading_group_meeting',
+                                    predicate: '#V#is_a_type_of',
+                                    branch_kind: 'type_hierarchy'
+                                },
+                                {
+                                    edge_id: 'hierarchy_edge_2',
+                                    parent_node_id: '#V#reading_group_meeting',
+                                    child_node_id: '#V#naoi_reading_group_meeting',
+                                    predicate: '#V#is_a_type_of',
+                                    branch_kind: 'type_hierarchy'
+                                },
+                                {
+                                    edge_id: 'hierarchy_edge_3',
+                                    parent_node_id: '#V#reading_group_meeting',
+                                    child_node_id: '#V#other_reading_group_meeting',
+                                    predicate: '#V#is_a_type_of',
+                                    branch_kind: 'type_hierarchy'
+                                },
+                                {
+                                    edge_id: 'hierarchy_edge_4',
+                                    parent_node_id: '#V#naoi_reading_group_meeting',
+                                    child_node_id: '#V#sail_reading_group_meeting',
+                                    predicate: '#V#is_a_type_of',
+                                    branch_kind: 'type_hierarchy'
+                                }
+                            ],
+                            focus_node_id: '#V#naoi_reading_group_meeting',
+                            root_node_ids: ['#V#meeting'],
+                            expansion: {
+                                show_parents: true,
+                                show_children: true,
+                                show_siblings: true,
+                                max_depth: 4
+                            }
+                        },
+                        provenance: { source: 'test' }
+                    }
+                ]
+            }
+        };
+
+        __testOnly_renderDisplayElementsIntoContainer(container, debugData);
+
+        const section = container.querySelector('.chat-display-elements-hierarchy-section');
+        expect(section).not.toBeNull();
+        expect(section.textContent).toContain('Meeting hierarchy');
+        expect(section.textContent).toContain('Parents (1)');
+        expect(section.textContent).toContain('Siblings (1)');
+        expect(section.textContent).toContain('Children (1)');
+        expect(section.textContent).toContain('Hierarchy tree');
+
+        const { createVontologyCartouche } = require('../utils/textDecorator.js');
+        expect(createVontologyCartouche).toHaveBeenCalled();
+    });
+});
+
 describe('chat insert prompt button behaviour', () => {
     beforeEach(() => {
         document.body.innerHTML = `
@@ -2109,6 +2196,39 @@ describe('LLM debug popup metadata (internal MCP caps + usage)', () => {
             screen_relation_graph_element_count: 1,
             source_tools: ['get_predicate_extent'],
             record_families: ['relation_graph']
+        });
+    });
+
+    test('includes hierarchy render plan provenance counts when present', () => {
+        const metadata = __testOnly_buildLlmDebugMetadata({
+            model: 'gpt-test',
+            messages: [],
+            render_plan: {
+                enabled: true,
+                attempted: true,
+                success: true,
+                reason: 'resolved',
+                selected_renderer_ids: ['#V#renderer_hierarchy'],
+                selected_renderer_types: ['hierarchy'],
+                screen_element_families: ['hierarchy_view'],
+                screen_hierarchy_elements: [
+                    {
+                        element_id: 'screen_hierarchy_view',
+                        provenance: {
+                            source_tools: ['fetch_concept'],
+                            record_family: 'hierarchy'
+                        }
+                    }
+                ]
+            }
+        });
+
+        expect(metadata.render_plan).toMatchObject({
+            selected_renderer_types: ['hierarchy'],
+            screen_element_families: ['hierarchy_view'],
+            screen_hierarchy_element_count: 1,
+            source_tools: ['fetch_concept'],
+            record_families: ['hierarchy']
         });
     });
 
