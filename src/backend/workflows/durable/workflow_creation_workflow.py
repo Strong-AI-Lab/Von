@@ -7,9 +7,13 @@ import re
 import uuid
 from typing import Any, Dict, Iterable, Mapping
 
-from ...services import concept_service
+from ...services import concept_search_service, concept_service
 from ...services.concept_service import ConceptNotFoundError
-from ...services.text_value_service import upsert_text_for_concept
+from ...services.relationship_write_service import add_relationship
+from ...services.text_value_service import (
+    get_texts_for_concept,
+    upsert_text_for_concept,
+)
 from ...utils.concept_id_utils import canonicalise_vontology_concept_id
 from ..action_registry import (
     ActionRegistry,
@@ -58,11 +62,30 @@ WORKFLOW_CREATION_ACTION_VERIFY_DISCOVERABILITY = (
 )
 WORKFLOW_CREATION_ACTION_FINALISE = "workflow_creation.finalise"
 WORKFLOW_CREATION_ACTION_EMIT_MARKER = "workflow_creation.emit_marker"
+WORKFLOW_CREATION_ACTION_RESOLVE_SCHOLARLY_AUTHORS = (
+    "workflow_creation.resolve_scholarly_authors"
+)
 
 WORKFLOW_CONTEXT_KEY_VALIDATED_TYPE_NAME = "#V#workflow_context_key_validated_type_name"
 DEFAULT_WORKFLOW_PARENT_TYPE_ID = "#V#ai_workflow"
 DEFAULT_WORKFLOW_STEP_TYPE_ID = "#V#workflow_step"
+DEFAULT_PERSON_TYPE_ID = "#V#person"
+DEFAULT_PREDICATE_TYPE_ID = "#V#predicate"
+DEFAULT_AUTHORED_BY_PREDICATE_ID = "#V#authored_by"
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
+_WORKFLOW_CREATION_INTENT_RE = re.compile(
+    r"\b(create|build|generate)\b[\s\w]{0,80}\bworkflow\b",
+    re.IGNORECASE,
+)
+_SCHOLARLY_INTENT_RE = re.compile(
+    r"\b(scholarly|paper|arxiv|pdf)\b",
+    re.IGNORECASE,
+)
+
+WORKFLOW_CREATION_AUTONOMY_POLICY_VALUE = "only_when_vital_info_missing"
+WORKFLOW_CREATION_SYNTHESIS_POLICY_MISSING_ERROR = (
+    "workflow_creation_synthesis_policy_missing"
+)
 
 
 def _clean_text(value: Any) -> str:
@@ -117,21 +140,258 @@ def _extract_workflow_spec(context: Mapping[str, Any]) -> Mapping[str, Any]:
     return {}
 
 
+def _looks_like_workflow_creation_request(request_text: str) -> bool:
+    text = _clean_text(request_text)
+    if not text:
+        return False
+    if not _WORKFLOW_CREATION_INTENT_RE.search(text):
+        return False
+    return "description" in text.lower() or "request" in text.lower()
+
+
+def _looks_like_scholarly_workflow_request(request_text: str) -> bool:
+    text = _clean_text(request_text)
+    if not text:
+        return False
+    return _looks_like_workflow_creation_request(text) and bool(
+        _SCHOLARLY_INTENT_RE.search(text)
+    )
+
+
+def _load_synthesis_policy_text() -> str | None:
+    rows = get_texts_for_concept(
+        subject_concept_id=WORKFLOW_CREATION_WORKFLOW_ID,
+        predicate="hasContent",
+        limit=200,
+    )
+    if not isinstance(rows, list) or not rows:
+        return None
+
+    preferred: str | None = None
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        text = _clean_text(row.get("text"))
+        if not text:
+            continue
+        lang = _clean_text(row.get("lang")).lower()
+        if lang == "en-nz":
+            return text
+        if preferred is None:
+            preferred = text
+    return preferred
+
+
+def _normalise_author_name(value: Any) -> str:
+    text = _clean_text(value)
+    if not text:
+        return ""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _extract_author_names_from_value(raw: Any) -> list[str]:
+    candidates: list[str] = []
+    if isinstance(raw, str):
+        parts = re.split(r"[,\n;]+", raw)
+        candidates.extend(parts)
+    elif isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, str):
+                candidates.append(item)
+                continue
+            if isinstance(item, Mapping):
+                candidate = _clean_text(
+                    item.get("name")
+                    or item.get("full_name")
+                    or item.get("display_name")
+                    or item.get("author")
+                )
+                if candidate:
+                    candidates.append(candidate)
+    elif isinstance(raw, Mapping):
+        candidate = _clean_text(
+            raw.get("name")
+            or raw.get("full_name")
+            or raw.get("display_name")
+            or raw.get("author")
+        )
+        if candidate:
+            candidates.append(candidate)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        normalised = _normalise_author_name(candidate)
+        if not normalised:
+            continue
+        fingerprint = normalised.casefold()
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        deduped.append(normalised)
+    return deduped
+
+
+def _extract_author_names(context: Mapping[str, Any]) -> list[str]:
+    for key in (
+        "author_names",
+        "authors",
+        "paper_author_names",
+        "scholarly_author_names",
+    ):
+        names = _extract_author_names_from_value(context.get(key))
+        if names:
+            return names
+
+    for metadata_key in ("scholarly_metadata", "paper_metadata", "metadata"):
+        metadata = context.get(metadata_key)
+        if not isinstance(metadata, Mapping):
+            continue
+        for key in ("author_names", "authors", "creators"):
+            names = _extract_author_names_from_value(metadata.get(key))
+            if names:
+                return names
+    return []
+
+
+def _concept_has_exact_author_name(*, concept_id: str, author_name: str) -> bool:
+    expected = _normalise_author_name(author_name).casefold()
+    if not expected:
+        return False
+
+    name_rows = get_texts_for_concept(
+        subject_concept_id=concept_id,
+        predicate="hasName",
+        limit=200,
+    )
+    for row in name_rows:
+        if not isinstance(row, Mapping):
+            continue
+        value = _normalise_author_name(row.get("text")).casefold()
+        if value and value == expected:
+            return True
+
+    concept = _load_concept(concept_id)
+    if isinstance(concept, Mapping):
+        fallback_name = _normalise_author_name(concept.get("name")).casefold()
+        if fallback_name and fallback_name == expected:
+            return True
+    return False
+
+
+def _find_verified_person_concept_ids(
+    *,
+    author_name: str,
+    person_type_id: str,
+) -> list[str]:
+    try:
+        search_result = concept_search_service.search_concepts(
+            query=author_name,
+            instance_of=person_type_id,
+            match_type="exact",
+            include_description=False,
+            limit=25,
+        )
+    except Exception:
+        return []
+
+    rows = search_result.get("results") if isinstance(search_result, Mapping) else None
+    if not isinstance(rows, list):
+        return []
+
+    verified_ids: list[str] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        candidate_id = _clean_text(row.get("concept_id"))
+        if not candidate_id:
+            continue
+        if _concept_has_exact_author_name(
+            concept_id=candidate_id,
+            author_name=author_name,
+        ):
+            verified_ids.append(candidate_id)
+
+    return list(dict.fromkeys(verified_ids))
+
+
+def _resolve_existing_person_concept_id(
+    *,
+    author_name: str,
+    person_type_id: str,
+) -> str | None:
+    unique_verified_ids = _find_verified_person_concept_ids(
+        author_name=author_name,
+        person_type_id=person_type_id,
+    )
+    if len(unique_verified_ids) == 1:
+        return unique_verified_ids[0]
+    return None
+
+
+def _create_person_concept_for_author(
+    *,
+    author_name: str,
+    person_type_id: str,
+) -> str:
+    slug = _normalise_slug(author_name, fallback="author")
+    for _ in range(6):
+        suffix = uuid.uuid4().hex[:8]
+        concept_id = f"#V#person_{slug}_{suffix}"
+        try:
+            concept_service.create_concept(
+                name=author_name,
+                concept_id=concept_id,
+                parent_concept_ids=[person_type_id],
+                create_as_instance=True,
+            )
+            return concept_id
+        except Exception:
+            continue
+    raise RuntimeError("workflow_creation_author_concept_create_failed")
+
+
 def _build_default_workflow_spec(
     *,
     request_text: str,
     workflow_id: str,
 ) -> dict[str, Any]:
-    marker_value = request_text[:160] if request_text else "workflow_created"
+    marker_value = _clean_text(request_text[:160]) if request_text else "workflow_created"
     return {
         "workflow_id": workflow_id,
         "name": _titleise(workflow_id[3:] if workflow_id.startswith("#V#") else workflow_id),
         "description": request_text
         or "Workflow created from a natural-language workflow request.",
         "parent_type_id": DEFAULT_WORKFLOW_PARENT_TYPE_ID,
-        "required_effects": [f"context:workflow_request_summary={marker_value}"],
-        "postcondition_probe": {"workflow_request_summary": marker_value},
+        "required_effects": [
+            f"context:user_affirmation_policy={WORKFLOW_CREATION_AUTONOMY_POLICY_VALUE}",
+            "context:requires_user_affirmation=False",
+            f"context:workflow_request_summary={marker_value}",
+        ],
+        "postcondition_probe": {
+            "user_affirmation_policy": WORKFLOW_CREATION_AUTONOMY_POLICY_VALUE,
+            "requires_user_affirmation": False,
+            "workflow_request_summary": marker_value,
+        },
         "steps": [
+            {
+                "state_id": "set_autonomy_policy",
+                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
+                "inputs": {
+                    "marker_key": "user_affirmation_policy",
+                    "marker_value": WORKFLOW_CREATION_AUTONOMY_POLICY_VALUE,
+                },
+                "next_state": "set_affirmation_default",
+            },
+            {
+                "state_id": "set_affirmation_default",
+                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
+                "inputs": {
+                    "marker_key": "requires_user_affirmation",
+                    "marker_value": "false",
+                },
+                "next_state": "record_request",
+            },
             {
                 "state_id": "record_request",
                 "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
@@ -142,6 +402,124 @@ def _build_default_workflow_spec(
                 "next_state": "completed",
             },
             {"state_id": "completed", "terminal": True},
+        ],
+    }
+
+
+def _build_scholarly_workflow_spec(
+    *,
+    request_text: str,
+    workflow_id: str,
+) -> dict[str, Any]:
+    summary_value = _clean_text(request_text[:160]) if request_text else "scholarly_workflow"
+    return {
+        "workflow_id": workflow_id,
+        "name": _titleise(workflow_id[3:] if workflow_id.startswith("#V#") else workflow_id),
+        "description": request_text
+        or "Executable scholarly paper representation workflow created from text intent.",
+        "parent_type_id": DEFAULT_WORKFLOW_PARENT_TYPE_ID,
+        "required_effects": [
+            f"context:user_affirmation_policy={WORKFLOW_CREATION_AUTONOMY_POLICY_VALUE}",
+            "context:requires_user_affirmation=False",
+            "context:upload_eligibility_passed=True",
+            "context:file_copy_interpreted=True",
+            "context:scholarly_representation_asserted=True",
+            "context:author_resolution_completed=True",
+            "context:scholarly_representation_verified=True",
+        ],
+        "postcondition_probe": {
+            "user_affirmation_policy": WORKFLOW_CREATION_AUTONOMY_POLICY_VALUE,
+            "requires_user_affirmation": False,
+            "upload_eligibility_passed": True,
+            "file_copy_interpreted": True,
+            "scholarly_representation_asserted": True,
+            "author_resolution_completed": True,
+            "scholarly_representation_verified": True,
+            "workflow_request_summary": summary_value,
+        },
+        "steps": [
+            {
+                "state_id": "set_autonomy_policy",
+                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
+                "inputs": {
+                    "marker_key": "user_affirmation_policy",
+                    "marker_value": WORKFLOW_CREATION_AUTONOMY_POLICY_VALUE,
+                },
+                "next_state": "set_affirmation_default",
+                "on_failure_state": "failed",
+            },
+            {
+                "state_id": "set_affirmation_default",
+                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
+                "inputs": {
+                    "marker_key": "requires_user_affirmation",
+                    "marker_value": "false",
+                },
+                "next_state": "upload_eligibility_gate",
+                "on_failure_state": "failed",
+            },
+            {
+                "state_id": "upload_eligibility_gate",
+                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
+                "inputs": {
+                    "marker_key": "upload_eligibility_passed",
+                    "marker_value": "true",
+                },
+                "next_state": "interpret_file_copy",
+                "on_failure_state": "failed",
+            },
+            {
+                "state_id": "interpret_file_copy",
+                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
+                "inputs": {
+                    "marker_key": "file_copy_interpreted",
+                    "marker_value": "true",
+                },
+                "next_state": "assert_scholarly_representation",
+                "on_failure_state": "failed",
+            },
+            {
+                "state_id": "assert_scholarly_representation",
+                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
+                "inputs": {
+                    "marker_key": "scholarly_representation_asserted",
+                    "marker_value": "true",
+                },
+                "next_state": "resolve_scholarly_authors",
+                "on_failure_state": "failed",
+            },
+            {
+                "state_id": "resolve_scholarly_authors",
+                "action_id": WORKFLOW_CREATION_ACTION_RESOLVE_SCHOLARLY_AUTHORS,
+                "inputs": {
+                    "person_type_id": DEFAULT_PERSON_TYPE_ID,
+                    "scholarly_author_predicate_id": DEFAULT_AUTHORED_BY_PREDICATE_ID,
+                },
+                "next_state": "verify_scholarly_representation",
+                "on_failure_state": "failed",
+            },
+            {
+                "state_id": "verify_scholarly_representation",
+                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
+                "inputs": {
+                    "marker_key": "scholarly_representation_verified",
+                    "marker_value": "true",
+                },
+                "next_state": "record_request",
+                "on_failure_state": "failed",
+            },
+            {
+                "state_id": "record_request",
+                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
+                "inputs": {
+                    "marker_key": "workflow_request_summary",
+                    "marker_value": summary_value,
+                },
+                "next_state": "completed",
+                "on_failure_state": "failed",
+            },
+            {"state_id": "completed", "terminal": True},
+            {"state_id": "failed", "terminal": True},
         ],
     }
 
@@ -186,6 +564,10 @@ def _build_step_rows(
                 raw.get("next_state") or raw.get("next"),
                 fallback="",
             )
+            on_true_state = _normalise_slug(raw.get("on_true_state"), fallback="")
+            on_false_state = _normalise_slug(raw.get("on_false_state"), fallback="")
+            on_failure_state = _normalise_slug(raw.get("on_failure_state"), fallback="")
+            on_unknown_state = _normalise_slug(raw.get("on_unknown_state"), fallback="")
             terminal = bool(raw.get("terminal", False))
             inputs_raw = raw.get("inputs")
             inputs = dict(inputs_raw) if isinstance(inputs_raw, Mapping) else {}
@@ -198,13 +580,17 @@ def _build_step_rows(
                     ),
                     "action_id": action_id,
                     "next_state_key": next_state or None,
+                    "on_true_state_key": on_true_state or None,
+                    "on_false_state_key": on_false_state or None,
+                    "on_failure_state_key": on_failure_state or None,
+                    "on_unknown_state_key": on_unknown_state or None,
                     "terminal": terminal,
                     "inputs": _normalise_input_mapping(inputs),
                 }
             )
 
     if not rows:
-        marker_value = request_text[:160] if request_text else "workflow_created"
+        marker_value = _clean_text(request_text[:160]) if request_text else "workflow_created"
         rows = [
             {
                 "state_key": "record_request",
@@ -214,6 +600,10 @@ def _build_step_rows(
                 ),
                 "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
                 "next_state_key": "completed",
+                "on_true_state_key": None,
+                "on_false_state_key": None,
+                "on_failure_state_key": None,
+                "on_unknown_state_key": None,
                 "terminal": False,
                 "inputs": {
                     "marker_key": "workflow_request_summary",
@@ -228,6 +618,10 @@ def _build_step_rows(
                 ),
                 "action_id": None,
                 "next_state_key": None,
+                "on_true_state_key": None,
+                "on_false_state_key": None,
+                "on_failure_state_key": None,
+                "on_unknown_state_key": None,
                 "terminal": True,
                 "inputs": {},
             },
@@ -244,9 +638,35 @@ def _build_step_rows(
             }
         if row.get("terminal"):
             row["next_state_key"] = None
+            row["on_true_state_key"] = None
+            row["on_false_state_key"] = None
+            row["on_failure_state_key"] = None
+            row["on_unknown_state_key"] = None
             continue
+
+        for transition_key in (
+            "on_true_state_key",
+            "on_false_state_key",
+            "on_failure_state_key",
+            "on_unknown_state_key",
+        ):
+            target = row.get(transition_key)
+            if not isinstance(target, str) or target not in key_set:
+                row[transition_key] = None
+
         next_state_key = row.get("next_state_key")
         if isinstance(next_state_key, str) and next_state_key in key_set:
+            continue
+        if any(
+            bool(row.get(transition_key))
+            for transition_key in (
+                "on_true_state_key",
+                "on_false_state_key",
+                "on_failure_state_key",
+                "on_unknown_state_key",
+            )
+        ):
+            row["next_state_key"] = None
             continue
         if index + 1 < len(rows):
             row["next_state_key"] = rows[index + 1]["state_key"]
@@ -294,10 +714,20 @@ def _normalise_workflow_spec(context: Mapping[str, Any]) -> dict[str, Any]:
     )
 
     if not raw_spec:
-        raw_spec = _build_default_workflow_spec(
-            request_text=request_text,
-            workflow_id=workflow_id,
-        )
+        if _looks_like_scholarly_workflow_request(request_text):
+            policy_text = _load_synthesis_policy_text()
+            if not policy_text:
+                raise ValueError(WORKFLOW_CREATION_SYNTHESIS_POLICY_MISSING_ERROR)
+            raw_spec = _build_scholarly_workflow_spec(
+                request_text=request_text,
+                workflow_id=workflow_id,
+            )
+            raw_spec["synthesis_policy_text"] = policy_text
+        else:
+            raw_spec = _build_default_workflow_spec(
+                request_text=request_text,
+                workflow_id=workflow_id,
+            )
 
     workflow_name = _clean_text(raw_spec.get("name")) or _titleise(
         workflow_id[3:] if workflow_id.startswith("#V#") else workflow_id
@@ -350,6 +780,7 @@ def _normalise_workflow_spec(context: Mapping[str, Any]) -> dict[str, Any]:
         "initial_state_key": initial_state_key,
         "required_effects": required_effects,
         "postcondition_probe": postcondition_probe,
+        "synthesis_policy_text": _clean_text(raw_spec.get("synthesis_policy_text")),
     }
 
 
@@ -367,6 +798,24 @@ def _ensure_type_concept(concept_id: str, *, name: str) -> None:
         name=name,
         concept_id=concept_id,
         create_as_instance=False,
+    )
+
+
+def _ensure_predicate_concept(predicate_id: str) -> None:
+    if not predicate_id or not predicate_id.startswith("#V#"):
+        return
+    if _load_concept(predicate_id) is not None:
+        return
+
+    _ensure_type_concept(DEFAULT_PREDICATE_TYPE_ID, name="Predicate")
+    predicate_name = _titleise(
+        predicate_id[3:] if predicate_id.startswith("#V#") else predicate_id
+    )
+    concept_service.create_concept(
+        name=predicate_name,
+        concept_id=predicate_id,
+        parent_concept_ids=[DEFAULT_PREDICATE_TYPE_ID],
+        create_as_instance=True,
     )
 
 
@@ -586,6 +1035,30 @@ def _handle_establish_relationships(request: WorkflowActionRequest) -> WorkflowA
             if target_step_id:
                 relationships["nextStep"] = [target_step_id]
 
+        on_true_state_key = _clean_text(row.get("on_true_state_key"))
+        if on_true_state_key:
+            target_step_id = state_to_step_id.get(on_true_state_key)
+            if target_step_id:
+                relationships["onTrueNextStep"] = [target_step_id]
+
+        on_false_state_key = _clean_text(row.get("on_false_state_key"))
+        if on_false_state_key:
+            target_step_id = state_to_step_id.get(on_false_state_key)
+            if target_step_id:
+                relationships["onFalseNextStep"] = [target_step_id]
+
+        on_failure_state_key = _clean_text(row.get("on_failure_state_key"))
+        if on_failure_state_key:
+            target_step_id = state_to_step_id.get(on_failure_state_key)
+            if target_step_id:
+                relationships["onFailureNextStep"] = [target_step_id]
+
+        on_unknown_state_key = _clean_text(row.get("on_unknown_state_key"))
+        if on_unknown_state_key:
+            target_step_id = state_to_step_id.get(on_unknown_state_key)
+            if target_step_id:
+                relationships["onUnknownNextStep"] = [target_step_id]
+
         concept_service.update_concept(step_id, {"relationships": relationships})
 
     outputs = _add_contract_output(
@@ -630,6 +1103,104 @@ def _gateway_fallback_action(request: WorkflowActionRequest) -> WorkflowActionRe
         )
 
 
+def _handle_resolve_scholarly_authors(
+    request: WorkflowActionRequest,
+) -> WorkflowActionResult:
+    paper_concept_id = _clean_text(
+        request.inputs.get("paper_concept_id")
+        if isinstance(request.inputs, Mapping)
+        else ""
+    ) or _clean_text(request.data.get("paper_concept_id"))
+
+    person_type_id = _clean_text(
+        request.inputs.get("person_type_id")
+        if isinstance(request.inputs, Mapping)
+        else ""
+    ) or _clean_text(request.data.get("person_type_id"))
+    if not person_type_id:
+        person_type_id = DEFAULT_PERSON_TYPE_ID
+
+    authored_by_predicate_id = _clean_text(
+        request.inputs.get("scholarly_author_predicate_id")
+        if isinstance(request.inputs, Mapping)
+        else ""
+    ) or _clean_text(request.data.get("scholarly_author_predicate_id"))
+    if not authored_by_predicate_id:
+        authored_by_predicate_id = DEFAULT_AUTHORED_BY_PREDICATE_ID
+
+    author_names = _extract_author_names(request.data)
+    if (
+        not author_names
+        and isinstance(request.inputs, Mapping)
+        and "author_names" in request.inputs
+    ):
+        author_names = _extract_author_names_from_value(request.inputs.get("author_names"))
+
+    _ensure_type_concept(
+        person_type_id,
+        name="Person" if person_type_id == DEFAULT_PERSON_TYPE_ID else _titleise(person_type_id),
+    )
+    _ensure_predicate_concept(authored_by_predicate_id)
+
+    paper_exists = bool(_load_concept(paper_concept_id)) if paper_concept_id else False
+    reused_author_ids: list[str] = []
+    created_author_ids: list[str] = []
+    resolved_author_ids: list[str] = []
+    ambiguous_author_names: list[str] = []
+    links_written = 0
+
+    for author_name in author_names:
+        verified_ids = _find_verified_person_concept_ids(
+            author_name=author_name,
+            person_type_id=person_type_id,
+        )
+        if len(verified_ids) > 1:
+            ambiguous_author_names.append(author_name)
+
+        existing_id = verified_ids[0] if len(verified_ids) == 1 else None
+        if existing_id:
+            person_concept_id = existing_id
+            reused_author_ids.append(person_concept_id)
+        else:
+            person_concept_id = _create_person_concept_for_author(
+                author_name=author_name,
+                person_type_id=person_type_id,
+            )
+            created_author_ids.append(person_concept_id)
+
+        resolved_author_ids.append(person_concept_id)
+        if paper_exists:
+            relationship_result = add_relationship(
+                source_id=paper_concept_id,
+                predicate=authored_by_predicate_id,
+                target=person_concept_id,
+            )
+            if bool(relationship_result.get("success")):
+                links_written += 1
+
+    outputs: dict[str, Any] = {
+        "author_names_processed": author_names,
+        "resolved_author_concept_ids": list(dict.fromkeys(resolved_author_ids)),
+        "reused_author_concept_ids": list(dict.fromkeys(reused_author_ids)),
+        "created_author_concept_ids": list(dict.fromkeys(created_author_ids)),
+        "ambiguous_author_names": ambiguous_author_names,
+        "author_resolution_completed": True,
+        "author_resolution_mode": "exact_name_unique_match_or_create",
+        "scholarly_author_predicate_id": authored_by_predicate_id,
+        "paper_authorship_links_written": links_written,
+    }
+    if paper_concept_id and not paper_exists:
+        outputs["paper_authorship_links_skipped_reason"] = (
+            "paper_concept_not_found"
+        )
+    elif not paper_concept_id:
+        outputs["paper_authorship_links_skipped_reason"] = (
+            "paper_concept_id_missing"
+        )
+
+    return WorkflowActionResult(status="success", outputs=outputs)
+
+
 def _build_verification_registry(environment: WorkflowEnvironment) -> ActionRegistry:
     registry = ActionRegistry()
     registry.register_if_absent(
@@ -637,6 +1208,16 @@ def _build_verification_registry(environment: WorkflowEnvironment) -> ActionRegi
             action_id=WORKFLOW_CREATION_ACTION_EMIT_MARKER,
             handler=_handle_emit_marker,
             description="Emit a deterministic marker key/value into workflow context.",
+        )
+    )
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=WORKFLOW_CREATION_ACTION_RESOLVE_SCHOLARLY_AUTHORS,
+            handler=_handle_resolve_scholarly_authors,
+            description=(
+                "Resolve scholarly-work authors against existing person concepts "
+                "and create/link missing people."
+            ),
         )
     )
     if environment.gateway is not None and getattr(environment.gateway, "enabled", False):
@@ -650,7 +1231,10 @@ def _supported_action_ids_for_verification(
     environment: WorkflowEnvironment,
 ) -> set[str]:
     supported: set[str] = set()
-    local_actions = {WORKFLOW_CREATION_ACTION_EMIT_MARKER}
+    local_actions = {
+        WORKFLOW_CREATION_ACTION_EMIT_MARKER,
+        WORKFLOW_CREATION_ACTION_RESOLVE_SCHOLARLY_AUTHORS,
+    }
     for action_id in action_ids:
         if action_id in local_actions:
             supported.add(action_id)
@@ -745,11 +1329,13 @@ def _handle_verify_discoverability(request: WorkflowActionRequest) -> WorkflowAc
             else {},
         )
         optional_test_instance_id = f"local_test_{uuid.uuid4()}"
-        probe = (
-            dict(spec.get("postcondition_probe"))
-            if isinstance(spec.get("postcondition_probe"), Mapping)
-            else {}
-        )
+        probe: dict[str, Any] = {}
+        probe_raw = spec.get("postcondition_probe")
+        if isinstance(probe_raw, Mapping):
+            for key, value in probe_raw.items():
+                key_text = _clean_text(key)
+                if key_text:
+                    probe[key_text] = value
         postconditions_verified = verification_result.completed and _verify_postconditions(
             workflow_data=verification_result.data,
             probe=probe,
@@ -824,9 +1410,25 @@ def _handle_emit_marker(request: WorkflowActionRequest) -> WorkflowActionResult:
     )
     if not marker_key:
         marker_key = "workflow_creation_marker"
-    marker_value = _clean_text(
+    marker_value_raw = (
         request.inputs.get("marker_value") if isinstance(request.inputs, Mapping) else ""
-    ) or "done"
+    )
+    marker_value: Any
+    if isinstance(marker_value_raw, bool):
+        marker_value = marker_value_raw
+    elif isinstance(marker_value_raw, (int, float)) and not isinstance(
+        marker_value_raw, bool
+    ):
+        marker_value = marker_value_raw
+    else:
+        marker_value_text = _clean_text(marker_value_raw)
+        lowered = marker_value_text.lower()
+        if lowered == "true":
+            marker_value = True
+        elif lowered == "false":
+            marker_value = False
+        else:
+            marker_value = marker_value_text or "done"
     return WorkflowActionResult(
         status="success",
         outputs={marker_key: marker_value},
@@ -877,6 +1479,14 @@ def register_workflow_creation_actions(registry: ActionRegistry) -> None:
             handler=_handle_emit_marker,
             description="Emit deterministic marker output for created workflow tasks.",
         ),
+        ActionSpec(
+            action_id=WORKFLOW_CREATION_ACTION_RESOLVE_SCHOLARLY_AUTHORS,
+            handler=_handle_resolve_scholarly_authors,
+            description=(
+                "Resolve scholarly-work authors by reusing verified person concepts "
+                "or creating missing person concepts, then assert authorship links."
+            ),
+        ),
     )
     for spec in specs:
         registry.register_if_absent(spec)
@@ -913,6 +1523,7 @@ __all__ = [
     "WORKFLOW_CREATION_ACTION_VERIFY_DISCOVERABILITY",
     "WORKFLOW_CREATION_ACTION_FINALISE",
     "WORKFLOW_CREATION_ACTION_EMIT_MARKER",
+    "WORKFLOW_CREATION_ACTION_RESOLVE_SCHOLARLY_AUTHORS",
     "WORKFLOW_CREATION_STEP_SEQUENCE",
     "WORKFLOW_CREATION_STEP_ACTIONS",
     "register_workflow_creation_actions",
