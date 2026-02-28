@@ -22,15 +22,16 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 16. When in doubt, run tests or re-run tests without requiring user confirmation, but start with a **targeted impacted set** (touched modules + real call-path tests) and only expand to broader suites when risk or failures indicate.
 17. In the case that multiple tests are failing, carefully consider the possibility that the tests are based on a design assumption that no longer holds. Tests are not definitional here, they are diagnostic, and should be changed (carefully) if they are not diagnostic for the current design. Do not allow tests to be a barrier to generality and good factoring.
 18. If you think you've finished implementing a Jira task, read the task and its epic and subtask context again and check.
-19. **DRY first**: Create central helpers FIRST, then replace all usages. See "DRY refactoring discipline" in Workflow section.
-20. **Comment for evolution**: Add comments that guide future modifications. See "Self-Documenting, Evolvable Code" section.
-21. **Proactive hygiene**: Periodically review touched files and their neighbours for inconsistency, duplication, and drift. Fix proactively.
-22. In docs/examples for secret env vars, use explicit placeholders like `<YOUR-CLIENT-SECRET-HERE>` and avoid token-like sample strings that can trigger secret scanners.
-23. **Workflow-first behaviours**: strongly prefer Vontology workflows (definitions, instances, event bindings, schedules) to drive Von behaviour instead of adding specialised orchestration code. Add bespoke code only when workflow primitives cannot express the behaviour, and document the gap in Jira.
-24. **Policy over task wording**: if a Jira issue suggests implementation in specialised orchestration code but the behaviour can be expressed as a Vontology workflow, enforce workflow-first policy and reinterpret/revise the task accordingly. In these cases, limit code changes to missing tools/validators/telemetry needed by the workflow, and add a Jira comment documenting the reinterpretation.
-25. If you are reasonably confident task implementation is complete, proactively merge and close the task (commit/push, create PR, merge to `main`, and transition Jira) unless the user explicitly asks to hold.
-26. **Definition of fully complete Jira task**: implementation committed and pushed, PR created, PR merged to `main`, and Jira transitioned/commented accordingly.
-27. **Fail closed when Vontology is unavailable for Vontology-governed behaviour**: do not silently fall back to in-code prompts, stale context reuse, or heuristic hacks. If required Vontology prompts/workflow data cannot be resolved, no-op that transformation and emit a clear user-visible and telemetry-visible reason.
+19. Before finalising a task, review nearby recent commits/issues for related progress and adjust scope to stay aligned; always run targeted regression checks for the touched behaviour so no avoidable regressions are introduced.
+20. **DRY first**: Create central helpers FIRST, then replace all usages. See "DRY refactoring discipline" in Workflow section.
+21. **Comment for evolution**: Add comments that guide future modifications. See "Self-Documenting, Evolvable Code" section.
+22. **Proactive hygiene**: Periodically review touched files and their neighbours for inconsistency, duplication, and drift. Fix proactively.
+23. In docs/examples for secret env vars, use explicit placeholders like `<YOUR-CLIENT-SECRET-HERE>` and avoid token-like sample strings that can trigger secret scanners.
+24. **Workflow-first behaviours**: strongly prefer Vontology workflows (definitions, instances, event bindings, schedules) to drive Von behaviour instead of adding specialised orchestration code. Add bespoke code only when workflow primitives cannot express the behaviour, and document the gap in Jira.
+25. **Policy over task wording**: if a Jira issue suggests implementation in specialised orchestration code but the behaviour can be expressed as a Vontology workflow, enforce workflow-first policy and reinterpret/revise the task accordingly. In these cases, limit code changes to missing tools/validators/telemetry needed by the workflow, and add a Jira comment documenting the reinterpretation.
+26. If you are reasonably confident task implementation is complete, proactively merge and close the task (commit/push, create PR, merge to `main`, and transition Jira) unless the user explicitly asks to hold.
+27. **Definition of fully complete Jira task**: implementation committed and pushed, PR created, PR merged to `main`, and Jira transitioned/commented accordingly.
+28. **Fail closed when Vontology is unavailable for Vontology-governed behaviour**: do not silently fall back to in-code prompts, stale context reuse, or heuristic hacks. If required Vontology prompts/workflow data cannot be resolved, no-op that transformation and emit a clear user-visible and telemetry-visible reason.
 
 ## Core AI-Focused Documents
 - `docs/AINotes.md`: short-term memory and tactical log.

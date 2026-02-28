@@ -1,4 +1,5 @@
 import {
+    buildDescriptionMetadataRows,
     deriveRelationshipExtentQuery,
     getRelationshipConfidenceScore,
     sortRelationshipExtentRows,
@@ -61,6 +62,25 @@ describe('dynamicTabs uncertain relationship helpers', () => {
         ];
         const sorted = sortRelationshipExtentRows(rows, 'confidence_desc');
         expect(sorted.map((row) => row.relation_id)).toEqual(['c', 'b', 'a']);
+    });
+
+    test('buildDescriptionMetadataRows surfaces structured provenance and confidence', () => {
+        const rows = buildDescriptionMetadataRows({
+            context: {
+                confidence_score: 0.83,
+                parent_concept_id: '#V#process'
+            },
+            provenance: {
+                source: 'relation_elicitation',
+                attribution: '#V#michael_witbrock',
+                timestamp: '2026-03-01T00:00:00Z'
+            },
+            relation_updated_at: '2026-03-01T01:00:00Z'
+        });
+        const labels = rows.map((row) => row.label);
+        expect(labels).toEqual(expect.arrayContaining(['Source', 'Attribution', 'Parent', 'Confidence', 'Updated']));
+        const confidenceRow = rows.find((row) => row.label === 'Confidence');
+        expect(confidenceRow?.value).toBe('83%');
     });
 });
 

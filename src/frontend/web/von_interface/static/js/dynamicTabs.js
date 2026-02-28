@@ -3420,6 +3420,70 @@ function escapeHtml(s) {
         .replace(/'/g, '&#039;');
 }
 
+function normaliseDescriptionConfidence(rawValue) {
+    const value = Number(rawValue);
+    if (!Number.isFinite(value)) return null;
+    if (value > 1 && value <= 100) return Math.max(0, Math.min(1, value / 100));
+    return Math.max(0, Math.min(1, value));
+}
+
+function normaliseDescriptionTimestamp(rawValue) {
+    if (typeof rawValue !== 'string') return null;
+    const token = rawValue.trim();
+    if (!token) return null;
+    const parsed = new Date(token);
+    if (Number.isNaN(parsed.getTime())) return token;
+    return parsed.toLocaleString();
+}
+
+export function buildDescriptionMetadataRows(record = {}) {
+    const context = (record && typeof record.context === 'object' && record.context)
+        ? record.context
+        : {};
+    const provenance = (record && typeof record.provenance === 'object' && record.provenance)
+        ? record.provenance
+        : {};
+
+    const rows = [];
+    const pushRow = (label, value) => {
+        const text = (value || '').toString().trim();
+        if (!text) return;
+        rows.push({ label, value: text });
+    };
+
+    const source = provenance.source || provenance.source_label || context.source || '';
+    pushRow('Source', source);
+    pushRow('Attribution', provenance.attribution || context.attribution || '');
+    pushRow('Parent', context.parent_concept_id || context.selected_parent || context.parent || '');
+
+    const confidence = normaliseDescriptionConfidence(
+        context.confidence_score
+            ?? context.confidence
+            ?? provenance.confidence_score
+            ?? provenance.confidence
+    );
+    if (typeof confidence === 'number') {
+        pushRow('Confidence', `${Math.round(confidence * 100)}%`);
+    }
+
+    const timestampCandidates = [
+        record.relation_updated_at,
+        record.text_value_updated_at,
+        provenance.last_edited_at,
+        provenance.timestamp,
+        provenance.upstream_timestamp,
+    ];
+    for (const candidate of timestampCandidates) {
+        const formatted = normaliseDescriptionTimestamp(candidate);
+        if (formatted) {
+            pushRow('Updated', formatted);
+            break;
+        }
+    }
+
+    return rows;
+}
+
 // Helper: show description for Type tabs and attach edit/save/cancel
 async function populateTypeDescription(conceptId, suffix) {
     try {
@@ -3438,6 +3502,35 @@ async function populateTypeDescription(conceptId, suffix) {
         const saveBtn = document.getElementById(`typeEditDescriptionSave_${suffix}`);
         const cancelBtn = document.getElementById(`typeEditDescriptionCancel_${suffix}`);
         const statusEl = document.getElementById(`typeDescriptionStatus_${suffix}`);
+        const ensureDescriptionMetadataContainer = () => {
+            let meta = document.getElementById(`typeDescriptionMetadata_${suffix}`);
+            if (meta) return meta;
+            if (!display || !display.parentNode) return null;
+            meta = document.createElement('div');
+            meta.id = `typeDescriptionMetadata_${suffix}`;
+            meta.className = 'description-metadata-panel hidden';
+            meta.setAttribute('aria-label', 'Description metadata');
+            if (display.nextSibling) {
+                display.parentNode.insertBefore(meta, display.nextSibling);
+            } else {
+                display.parentNode.appendChild(meta);
+            }
+            return meta;
+        };
+        const metadataEl = ensureDescriptionMetadataContainer();
+        const renderDescriptionMetadata = (record) => {
+            if (!metadataEl) return;
+            const rows = buildDescriptionMetadataRows(record);
+            if (!rows.length) {
+                metadataEl.classList.add('hidden');
+                metadataEl.innerHTML = '';
+                return;
+            }
+            metadataEl.classList.remove('hidden');
+            metadataEl.innerHTML = rows
+                .map((row) => `<span class="description-metadata-pill"><strong>${escapeHtml(row.label)}:</strong> ${escapeHtml(row.value)}</span>`)
+                .join('');
+        };
         // Capture missing buttons before potential reconstruction (so we can force rebind if we add them)
         const preMissingButtons = [];
         ['Copy', ...(annotationEnabled ? ['Annotate'] : []), 'Edit', 'Delete'].forEach(kind => {
@@ -3580,6 +3673,7 @@ async function populateTypeDescription(conceptId, suffix) {
                 relationId = null;
                 display.innerHTML = '<i>No description available.</i>';
                 textarea.value = '';
+                renderDescriptionMetadata(null);
             };
             try {
                 const primaryUrl = `/api/concepts/${encodedId}/texts?predicate=hasDescription&limit=1`;
@@ -3590,6 +3684,7 @@ async function populateTypeDescription(conceptId, suffix) {
                     relationId = desc.relation_id || null;
                     applyRawDescription(desc.text || '');
                     textarea.value = desc.text || '';
+                    renderDescriptionMetadata(desc);
                     console.debug('[dynamicTabs] Description loaded (primary API)', { conceptId, relationId });
                     return;
                 }
@@ -3606,6 +3701,7 @@ async function populateTypeDescription(conceptId, suffix) {
                         relationId = found.relation_id || null;
                         applyRawDescription(found.text || '');
                         textarea.value = found.text || '';
+                        renderDescriptionMetadata(found);
                         console.debug('[dynamicTabs] Description loaded (relations list fallback)', { conceptId, relationId });
                         return;
                     }
@@ -3621,6 +3717,7 @@ async function populateTypeDescription(conceptId, suffix) {
                         applyRawDescription(conceptDescription);
                         textarea.value = conceptDescription;
                         relationId = null;
+                        renderDescriptionMetadata(null);
                         console.debug('[dynamicTabs] Description loaded (concept endpoint canonical fallback)', { conceptId });
                         return;
                     }
@@ -3636,6 +3733,7 @@ async function populateTypeDescription(conceptId, suffix) {
                         applyRawDescription(legacyRaw);
                         textarea.value = legacyRaw || '';
                         relationId = null;
+                        renderDescriptionMetadata(null);
                         console.debug('[dynamicTabs] Description loaded (legacy node_content raw text)', { conceptId });
                         return;
                     }
@@ -3649,6 +3747,7 @@ async function populateTypeDescription(conceptId, suffix) {
                         applyRawDescription(plain);
                         textarea.value = plain;
                         relationId = null;
+                        renderDescriptionMetadata(null);
                         console.debug('[dynamicTabs] Description loaded (legacy node_content html->plain)', { conceptId });
                         return;
                     }
@@ -3773,8 +3872,7 @@ async function populateTypeDescription(conceptId, suffix) {
                 // JVNAUTOSCI-570 regression fix: use dedicated dual-write description endpoint
                 const ok = await updateConceptDescription(conceptId, rawText);
                 if (!ok) throw new Error('Failed to persist description');
-
-                applyRawDescription(rawText);
+                await loadDescription();
                 statusEl.textContent = 'Saved';
                 textarea.classList.add('hidden');
                 display.classList.remove('hidden');
@@ -3867,9 +3965,7 @@ async function populateTypeDescription(conceptId, suffix) {
                         throw new Error(data.error || data.message || `HTTP ${resp.status}`);
                     }
                     if (data.description) {
-                        applyRawDescription(data.description);
-                        textarea.value = data.description;
-                        relationId = null; // Relation ID will be updated on next load
+                        await loadDescription();
                         statusEl.textContent = data.was_generated ? 'Description generated!' : 'Description loaded';
                     } else {
                         statusEl.textContent = 'No description generated';

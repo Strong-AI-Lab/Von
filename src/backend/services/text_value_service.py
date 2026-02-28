@@ -29,6 +29,14 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _iso_utc(value: Any) -> str | None:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
 def _invalidate_stats_for_predicate_change(predicate: str | None) -> None:
     """Best-effort stats invalidation for ontology predicate extent changes."""
 
@@ -370,6 +378,11 @@ def get_texts_for_concept(
                 "predicate": r.get("predicate"),
                 "relation_id": str(r.get("_id")) if r.get("_id") else None,
                 "context": r.get("context", {}),
+                "provenance": tv.get("provenance", {}),
+                "text_value_created_at": _iso_utc(tv.get("created_at")),
+                "text_value_updated_at": _iso_utc(tv.get("updated_at")),
+                "relation_created_at": _iso_utc(r.get("created_at")),
+                "relation_updated_at": _iso_utc(r.get("updated_at")),
             }
         )
         if len(results) >= limit:

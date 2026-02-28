@@ -8810,6 +8810,29 @@ html body .names-list-container .name-cartouche .name-delete-button:disabled:hov
     border-color: #106ebe;
 }
 
+.description-metadata-panel {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 6px 0 0 0;
+}
+
+.description-metadata-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    border-radius: 999px;
+    padding: 2px 8px;
+    font-size: 0.75rem;
+    line-height: 1.2;
+    background: #eef2ff;
+    color: #312e81;
+}
+
+.description-metadata-pill strong {
+    font-weight: 600;
+}
+
 .text-relations-modal.anchored .raw-json-dialog {
     pointer-events: auto;
     width: min(640px, 70vw);
