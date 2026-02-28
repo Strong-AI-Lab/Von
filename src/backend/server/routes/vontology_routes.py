@@ -194,6 +194,12 @@ def _expand_relation_payload_entry_for_extent(
         return []
 
     relation_kind = str(relation.get("relation_kind") or "binary").strip().lower()
+    is_asserted = bool(relation.get("is_asserted", True))
+    relation_state = str(
+        relation.get("relation_state") or ("asserted" if is_asserted else "uncertain")
+    ).strip().lower()
+    raw_uncertainty = relation.get("uncertainty")
+    uncertainty_payload = dict(raw_uncertainty) if isinstance(raw_uncertainty, dict) else None
     source_preview = relation.get("source_preview")
     updated_at = None
     if isinstance(source_preview, dict):
@@ -202,6 +208,7 @@ def _expand_relation_payload_entry_for_extent(
             updated_at = candidate.strip()
 
     rows: list[dict[str, Any]] = []
+    row_source = "uncertain_assertions" if relation_state == "uncertain" else None
     if relation_kind == "text":
         text_payload = relation.get("text_value")
         text_value = None
@@ -226,7 +233,7 @@ def _expand_relation_payload_entry_for_extent(
                     relation.get("relation_id")
                     or f"text::{source_concept_id}::{predicate_id}"
                 ),
-                "source": "text_relations",
+                "source": row_source or "text_relations",
                 "relation_kind": "text",
                 "role": "arg1",
                 "predicate_id": predicate_id,
@@ -238,7 +245,9 @@ def _expand_relation_payload_entry_for_extent(
                 "source_concept_id": source_concept_id,
                 "target_value": text_value,
                 "updated_at": updated_at,
-                "is_asserted": True,
+                "is_asserted": is_asserted,
+                "relation_state": relation_state,
+                "uncertainty": uncertainty_payload,
             }
         )
         return rows
@@ -259,7 +268,7 @@ def _expand_relation_payload_entry_for_extent(
         rows.append(
             {
                 "relation_id": f"{relation.get('relation_id') or 'struct'}::{target_index}",
-                "source": "structured",
+                "source": row_source or "structured",
                 "relation_kind": "binary",
                 "role": role,
                 "predicate_id": predicate_id,
@@ -271,7 +280,9 @@ def _expand_relation_payload_entry_for_extent(
                 "source_concept_id": source_concept_id,
                 "target_value": target_value,
                 "updated_at": updated_at,
-                "is_asserted": True,
+                "is_asserted": is_asserted,
+                "relation_state": relation_state,
+                "uncertainty": uncertainty_payload,
             }
         )
     return rows
@@ -3339,16 +3350,47 @@ def get_relationships_extent_route():
         )
 
     source_filter = str(request.args.get("source") or "").strip().lower()
-    if source_filter and source_filter not in {"structured", "text_relations"}:
+    if source_filter and source_filter not in {
+        "structured",
+        "text_relations",
+        "uncertain_assertions",
+    }:
         return (
             jsonify(
                 {
                     "success": False,
-                    "error": "Invalid source filter. Use one of: structured, text_relations.",
+                    "error": "Invalid source filter. Use one of: structured, text_relations, uncertain_assertions.",
                 }
             ),
             400,
         )
+
+    uncertainty_mode = (
+        str(request.args.get("uncertainty_mode") or "").strip().lower() or None
+    )
+    if uncertainty_mode and uncertainty_mode not in {
+        "asserted_only",
+        "uncertain_only",
+        "include_uncertain",
+    }:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "Invalid uncertainty_mode. Use one of: asserted_only, uncertain_only, include_uncertain.",
+                }
+            ),
+            400,
+        )
+    include_uncertain_raw = (
+        str(request.args.get("include_uncertain") or "").strip().lower()
+    )
+    include_uncertain = include_uncertain_raw in {"1", "true", "yes", "on"}
+    uncertainty_statuses: list[str] = []
+    for raw in request.args.getlist("uncertainty_status"):
+        token = str(raw or "").strip().lower()
+        if token:
+            uncertainty_statuses.append(token)
 
     requested_predicate = _canonicalise_relationship_predicate(
         request.args.get("predicate")
@@ -3416,6 +3458,9 @@ def get_relationships_extent_route():
             limit=_RELATIONSHIP_EXTENT_MAX_LIMIT,
             offset=0,
             include_concept_preview=True,
+            include_uncertain=include_uncertain,
+            uncertainty_mode=uncertainty_mode,
+            uncertainty_statuses=uncertainty_statuses or None,
         )
         for relation in base_payload.get("relations", []):
             rows.extend(
@@ -3493,6 +3538,7 @@ def get_relationships_extent_route():
                         "target_value": target_value,
                         "updated_at": updated_at,
                         "is_asserted": True,
+                        "relation_state": "asserted",
                     }
                 )
 

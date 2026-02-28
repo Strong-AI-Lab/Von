@@ -379,6 +379,63 @@ def test_relationship_extent_route_includes_incoming_dynamic_arg2_rows(
     assert rows[0]["arg2_value"] == "#V#focus"
 
 
+def test_relationship_extent_route_supports_uncertain_filters(app_client, monkeypatch):
+    _, client = app_client
+
+    captured_kwargs = {}
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.ConceptsRepository.find_one",
+        lambda *a, **k: {"concept_id": "#V#focus", "relationships": {}},
+    )
+
+    def _fake_build_payload(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return {
+            "relations": [
+                {
+                    "relation_id": "uncertain::#V#focus::u1",
+                    "source_concept_id": "#V#focus",
+                    "predicate_id": "#V#related_to",
+                    "relation_kind": "binary",
+                    "target_values": ["#V#candidate"],
+                    "matched_argument_indexes": [1],
+                    "is_asserted": False,
+                    "relation_state": "uncertain",
+                    "uncertainty": {
+                        "assertion_id": "u1",
+                        "status": "proposed",
+                        "confidence_score": 0.77,
+                        "provenance": {"source": "unit_test"},
+                    },
+                }
+            ]
+        }
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.build_concept_relations_payload",
+        _fake_build_payload,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.ConceptsRepository.aggregate",
+        lambda *a, **k: [],
+    )
+
+    resp = client.get(
+        "/vontology/api/vontology/relationships/extent?"
+        "concept_id=%23V%23focus&uncertainty_mode=uncertain_only&source=uncertain_assertions"
+    )
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    rows = payload.get("rows") or []
+    assert len(rows) == 1
+    assert rows[0]["source"] == "uncertain_assertions"
+    assert rows[0]["relation_state"] == "uncertain"
+    assert rows[0]["is_asserted"] is False
+    assert rows[0]["uncertainty"]["assertion_id"] == "u1"
+    assert captured_kwargs.get("uncertainty_mode") == "uncertain_only"
+
+
 def test_upsert_name_for_virtual_code_predicate_concept(app_client, monkeypatch):
     _, client = app_client
 
