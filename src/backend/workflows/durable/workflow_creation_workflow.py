@@ -65,13 +65,27 @@ WORKFLOW_CREATION_ACTION_EMIT_MARKER = "workflow_creation.emit_marker"
 WORKFLOW_CREATION_ACTION_RESOLVE_SCHOLARLY_AUTHORS = (
     "workflow_creation.resolve_scholarly_authors"
 )
+WORKFLOW_CREATION_ACTION_RESOLVE_PHD_STUDENT_CANDIDATE = (
+    "workflow_creation.resolve_phd_student_candidate"
+)
+WORKFLOW_CREATION_ACTION_ASSERT_PHD_STUDENT_RELATIONSHIPS = (
+    "workflow_creation.assert_phd_student_relationships"
+)
+WORKFLOW_CREATION_ACTION_GROUND_PHD_STUDENT_TEXT = (
+    "workflow_creation.ground_phd_student_text"
+)
 
 WORKFLOW_CONTEXT_KEY_VALIDATED_TYPE_NAME = "#V#workflow_context_key_validated_type_name"
 DEFAULT_WORKFLOW_PARENT_TYPE_ID = "#V#ai_workflow"
 DEFAULT_WORKFLOW_STEP_TYPE_ID = "#V#workflow_step"
 DEFAULT_PERSON_TYPE_ID = "#V#person"
+DEFAULT_STUDENT_TYPE_ID = "#V#student"
+DEFAULT_PHD_STUDENT_TYPE_ID = "#V#phd_student"
+DEFAULT_RESEARCH_TOPIC_TYPE_ID = "#V#research_topic"
 DEFAULT_PREDICATE_TYPE_ID = "#V#predicate"
 DEFAULT_AUTHORED_BY_PREDICATE_ID = "#V#authored_by"
+DEFAULT_SUPERVISED_BY_PREDICATE_ID = "#V#supervised_by"
+DEFAULT_RESEARCHES_PREDICATE_ID = "#V#researches"
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _WORKFLOW_CREATION_INTENT_RE = re.compile(
     r"\b(create|build|generate)\b[\s\w]{0,80}\bworkflow\b",
@@ -79,6 +93,10 @@ _WORKFLOW_CREATION_INTENT_RE = re.compile(
 )
 _SCHOLARLY_INTENT_RE = re.compile(
     r"\b(scholarly|paper|arxiv|pdf)\b",
+    re.IGNORECASE,
+)
+_PHD_STUDENT_INTENT_RE = re.compile(
+    r"\b(phd|doctoral|doctorate|student|supervisor|advisor)\b",
     re.IGNORECASE,
 )
 
@@ -158,6 +176,18 @@ def _looks_like_scholarly_workflow_request(request_text: str) -> bool:
     )
 
 
+def _looks_like_phd_student_workflow_request(request_text: str) -> bool:
+    text = _clean_text(request_text)
+    if not text:
+        return False
+    if not _looks_like_workflow_creation_request(text):
+        return False
+    lowered = text.lower()
+    if "student" not in lowered:
+        return False
+    return bool(_PHD_STUDENT_INTENT_RE.search(text))
+
+
 def _load_synthesis_policy_text() -> str | None:
     rows = get_texts_for_concept(
         subject_concept_id=WORKFLOW_CREATION_WORKFLOW_ID,
@@ -182,14 +212,14 @@ def _load_synthesis_policy_text() -> str | None:
     return preferred
 
 
-def _normalise_author_name(value: Any) -> str:
+def _normalise_person_name(value: Any) -> str:
     text = _clean_text(value)
     if not text:
         return ""
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _extract_author_names_from_value(raw: Any) -> list[str]:
+def _extract_person_names_from_value(raw: Any) -> list[str]:
     candidates: list[str] = []
     if isinstance(raw, str):
         parts = re.split(r"[,\n;]+", raw)
@@ -221,7 +251,7 @@ def _extract_author_names_from_value(raw: Any) -> list[str]:
     deduped: list[str] = []
     seen: set[str] = set()
     for candidate in candidates:
-        normalised = _normalise_author_name(candidate)
+        normalised = _normalise_person_name(candidate)
         if not normalised:
             continue
         fingerprint = normalised.casefold()
@@ -239,7 +269,7 @@ def _extract_author_names(context: Mapping[str, Any]) -> list[str]:
         "paper_author_names",
         "scholarly_author_names",
     ):
-        names = _extract_author_names_from_value(context.get(key))
+        names = _extract_person_names_from_value(context.get(key))
         if names:
             return names
 
@@ -248,14 +278,109 @@ def _extract_author_names(context: Mapping[str, Any]) -> list[str]:
         if not isinstance(metadata, Mapping):
             continue
         for key in ("author_names", "authors", "creators"):
-            names = _extract_author_names_from_value(metadata.get(key))
+            names = _extract_person_names_from_value(metadata.get(key))
             if names:
                 return names
     return []
 
 
-def _concept_has_exact_author_name(*, concept_id: str, author_name: str) -> bool:
-    expected = _normalise_author_name(author_name).casefold()
+def _extract_labeled_value(*, source_text: str, labels: tuple[str, ...]) -> str:
+    text = _clean_text(source_text)
+    if not text:
+        return ""
+    for label in labels:
+        pattern = re.compile(
+            rf"(?im)^\s*{re.escape(label)}\s*:\s*(.+)$",
+        )
+        match = pattern.search(text)
+        if match:
+            return _clean_text(match.group(1))
+    return ""
+
+
+def _extract_phd_student_profile(context: Mapping[str, Any]) -> dict[str, Any]:
+    source_text = _clean_text(
+        context.get("phd_student_description")
+        or context.get("student_description")
+        or context.get("student_profile_text")
+        or context.get("source_text")
+        or context.get("description")
+        or context.get("text")
+    )
+    if not source_text:
+        source_text = _extract_request_text(context)
+
+    student_name = _clean_text(
+        context.get("phd_student_name")
+        or context.get("student_name")
+        or context.get("name")
+    )
+    if not student_name:
+        student_name = _extract_labeled_value(
+            source_text=source_text,
+            labels=(
+                "phd student name",
+                "doctoral student name",
+                "student name",
+                "student",
+                "name",
+            ),
+        )
+    student_name = _normalise_person_name(student_name)
+
+    supervisor_names = _extract_person_names_from_value(
+        context.get("supervisor_names")
+        or context.get("supervisors")
+        or context.get("advisor_names")
+        or context.get("advisors")
+    )
+    if not supervisor_names:
+        supervisor_text = _extract_labeled_value(
+            source_text=source_text,
+            labels=("supervisors", "supervisor", "advisors", "advisor"),
+        )
+        if supervisor_text:
+            supervisor_names = _extract_person_names_from_value(supervisor_text)
+
+    research_topic = _clean_text(
+        context.get("research_topic")
+        or context.get("research_area")
+        or context.get("topic")
+    )
+    if not research_topic:
+        research_topic = _extract_labeled_value(
+            source_text=source_text,
+            labels=(
+                "research topic",
+                "research area",
+                "research focus",
+                "topic",
+            ),
+        )
+    research_topic = _clean_text(research_topic)
+
+    institution = _clean_text(
+        context.get("institution")
+        or context.get("university")
+        or context.get("department")
+    )
+    if not institution:
+        institution = _extract_labeled_value(
+            source_text=source_text,
+            labels=("institution", "university", "department"),
+        )
+
+    return {
+        "student_name": student_name,
+        "supervisor_names": supervisor_names,
+        "research_topic": research_topic,
+        "institution": institution,
+        "source_text": source_text,
+    }
+
+
+def _concept_has_exact_name(*, concept_id: str, concept_name: str) -> bool:
+    expected = _normalise_person_name(concept_name).casefold()
     if not expected:
         return False
 
@@ -267,27 +392,27 @@ def _concept_has_exact_author_name(*, concept_id: str, author_name: str) -> bool
     for row in name_rows:
         if not isinstance(row, Mapping):
             continue
-        value = _normalise_author_name(row.get("text")).casefold()
+        value = _normalise_person_name(row.get("text")).casefold()
         if value and value == expected:
             return True
 
     concept = _load_concept(concept_id)
     if isinstance(concept, Mapping):
-        fallback_name = _normalise_author_name(concept.get("name")).casefold()
+        fallback_name = _normalise_person_name(concept.get("name")).casefold()
         if fallback_name and fallback_name == expected:
             return True
     return False
 
 
-def _find_verified_person_concept_ids(
+def _find_verified_named_instance_concept_ids(
     *,
-    author_name: str,
-    person_type_id: str,
+    concept_name: str,
+    instance_of_type_id: str,
 ) -> list[str]:
     try:
         search_result = concept_search_service.search_concepts(
-            query=author_name,
-            instance_of=person_type_id,
+            query=concept_name,
+            instance_of=instance_of_type_id,
             match_type="exact",
             include_description=False,
             limit=25,
@@ -306,22 +431,29 @@ def _find_verified_person_concept_ids(
         candidate_id = _clean_text(row.get("concept_id"))
         if not candidate_id:
             continue
-        if _concept_has_exact_author_name(
+        if _concept_has_exact_name(
             concept_id=candidate_id,
-            author_name=author_name,
+            concept_name=concept_name,
         ):
             verified_ids.append(candidate_id)
 
     return list(dict.fromkeys(verified_ids))
 
 
+def _find_verified_person_concept_ids(*, person_name: str, person_type_id: str) -> list[str]:
+    return _find_verified_named_instance_concept_ids(
+        concept_name=person_name,
+        instance_of_type_id=person_type_id,
+    )
+
+
 def _resolve_existing_person_concept_id(
     *,
-    author_name: str,
+    person_name: str,
     person_type_id: str,
 ) -> str | None:
     unique_verified_ids = _find_verified_person_concept_ids(
-        author_name=author_name,
+        person_name=person_name,
         person_type_id=person_type_id,
     )
     if len(unique_verified_ids) == 1:
@@ -329,18 +461,18 @@ def _resolve_existing_person_concept_id(
     return None
 
 
-def _create_person_concept_for_author(
+def _create_person_concept(
     *,
-    author_name: str,
+    person_name: str,
     person_type_id: str,
 ) -> str:
-    slug = _normalise_slug(author_name, fallback="author")
+    slug = _normalise_slug(person_name, fallback="person")
     for _ in range(6):
         suffix = uuid.uuid4().hex[:8]
         concept_id = f"#V#person_{slug}_{suffix}"
         try:
             concept_service.create_concept(
-                name=author_name,
+                name=person_name,
                 concept_id=concept_id,
                 parent_concept_ids=[person_type_id],
                 create_as_instance=True,
@@ -348,7 +480,51 @@ def _create_person_concept_for_author(
             return concept_id
         except Exception:
             continue
-    raise RuntimeError("workflow_creation_author_concept_create_failed")
+    raise RuntimeError("workflow_creation_person_concept_create_failed")
+
+
+def _create_research_topic_concept(
+    *,
+    research_topic: str,
+    research_topic_type_id: str,
+) -> str:
+    slug = _normalise_slug(research_topic, fallback="research_topic")
+    for _ in range(6):
+        suffix = uuid.uuid4().hex[:8]
+        concept_id = f"#V#research_topic_{slug}_{suffix}"
+        try:
+            concept_service.create_concept(
+                name=research_topic,
+                concept_id=concept_id,
+                parent_concept_ids=[research_topic_type_id],
+                create_as_instance=True,
+            )
+            return concept_id
+        except Exception:
+            continue
+    raise RuntimeError("workflow_creation_research_topic_concept_create_failed")
+
+
+def _resolve_or_create_research_topic_concept_id(
+    *,
+    research_topic: str,
+    research_topic_type_id: str,
+) -> tuple[str, bool]:
+    verified_ids = _find_verified_named_instance_concept_ids(
+        concept_name=research_topic,
+        instance_of_type_id=research_topic_type_id,
+    )
+    if len(verified_ids) > 1:
+        raise RuntimeError("workflow_creation_research_topic_ambiguous")
+    if len(verified_ids) == 1:
+        return verified_ids[0], True
+    return (
+        _create_research_topic_concept(
+            research_topic=research_topic,
+            research_topic_type_id=research_topic_type_id,
+        ),
+        False,
+    )
 
 
 def _build_default_workflow_spec(
@@ -503,6 +679,120 @@ def _build_scholarly_workflow_spec(
                 "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
                 "inputs": {
                     "marker_key": "scholarly_representation_verified",
+                    "marker_value": "true",
+                },
+                "next_state": "record_request",
+                "on_failure_state": "failed",
+            },
+            {
+                "state_id": "record_request",
+                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
+                "inputs": {
+                    "marker_key": "workflow_request_summary",
+                    "marker_value": summary_value,
+                },
+                "next_state": "completed",
+                "on_failure_state": "failed",
+            },
+            {"state_id": "completed", "terminal": True},
+            {"state_id": "failed", "terminal": True},
+        ],
+    }
+
+
+def _build_phd_student_workflow_spec(
+    *,
+    request_text: str,
+    workflow_id: str,
+) -> dict[str, Any]:
+    summary_value = _clean_text(request_text[:160]) if request_text else "phd_student_workflow"
+    return {
+        "workflow_id": workflow_id,
+        "name": _titleise(workflow_id[3:] if workflow_id.startswith("#V#") else workflow_id),
+        "description": request_text
+        or "Executable PhD-student representation workflow created from text intent.",
+        "parent_type_id": DEFAULT_WORKFLOW_PARENT_TYPE_ID,
+        "required_effects": [
+            f"context:user_affirmation_policy={WORKFLOW_CREATION_AUTONOMY_POLICY_VALUE}",
+            "context:requires_user_affirmation=False",
+            "context:phd_student_candidate_resolved=True",
+            "context:phd_student_relationships_asserted=True",
+            "context:phd_student_text_grounded=True",
+            "context:phd_student_representation_verified=True",
+        ],
+        "postcondition_probe": {
+            "user_affirmation_policy": WORKFLOW_CREATION_AUTONOMY_POLICY_VALUE,
+            "requires_user_affirmation": False,
+            "phd_student_candidate_resolved": True,
+            "phd_student_relationships_asserted": True,
+            "phd_student_text_grounded": True,
+            "phd_student_representation_verified": True,
+            "workflow_request_summary": summary_value,
+        },
+        "verification_inputs": {
+            "phd_student_description": (
+                "Student Name: Verification Student\n"
+                "Supervisors: Verification Supervisor\n"
+                "Research Topic: Verification Topic\n"
+                "Institution: Verification University"
+            )
+        },
+        "steps": [
+            {
+                "state_id": "set_autonomy_policy",
+                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
+                "inputs": {
+                    "marker_key": "user_affirmation_policy",
+                    "marker_value": WORKFLOW_CREATION_AUTONOMY_POLICY_VALUE,
+                },
+                "next_state": "set_affirmation_default",
+                "on_failure_state": "failed",
+            },
+            {
+                "state_id": "set_affirmation_default",
+                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
+                "inputs": {
+                    "marker_key": "requires_user_affirmation",
+                    "marker_value": "false",
+                },
+                "next_state": "resolve_phd_student_candidate",
+                "on_failure_state": "failed",
+            },
+            {
+                "state_id": "resolve_phd_student_candidate",
+                "action_id": WORKFLOW_CREATION_ACTION_RESOLVE_PHD_STUDENT_CANDIDATE,
+                "inputs": {
+                    "person_type_id": DEFAULT_PERSON_TYPE_ID,
+                },
+                "next_state": "assert_phd_student_relationships",
+                "on_failure_state": "failed",
+            },
+            {
+                "state_id": "assert_phd_student_relationships",
+                "action_id": WORKFLOW_CREATION_ACTION_ASSERT_PHD_STUDENT_RELATIONSHIPS,
+                "inputs": {
+                    "person_type_id": DEFAULT_PERSON_TYPE_ID,
+                    "student_type_id": DEFAULT_STUDENT_TYPE_ID,
+                    "phd_student_type_id": DEFAULT_PHD_STUDENT_TYPE_ID,
+                    "research_topic_type_id": DEFAULT_RESEARCH_TOPIC_TYPE_ID,
+                    "supervised_by_predicate_id": DEFAULT_SUPERVISED_BY_PREDICATE_ID,
+                    "researches_predicate_id": DEFAULT_RESEARCHES_PREDICATE_ID,
+                },
+                "next_state": "ground_phd_student_text",
+                "on_failure_state": "failed",
+            },
+            {
+                "state_id": "ground_phd_student_text",
+                "action_id": WORKFLOW_CREATION_ACTION_GROUND_PHD_STUDENT_TEXT,
+                "inputs": {},
+                "next_state": "verify_phd_student_representation",
+                "on_failure_state": "failed",
+            },
+            {
+                "state_id": "verify_phd_student_representation",
+                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
+                "inputs": {
+                    "marker_key": "phd_student_representation_verified",
                     "marker_value": "true",
                 },
                 "next_state": "record_request",
@@ -714,7 +1004,16 @@ def _normalise_workflow_spec(context: Mapping[str, Any]) -> dict[str, Any]:
     )
 
     if not raw_spec:
-        if _looks_like_scholarly_workflow_request(request_text):
+        if _looks_like_phd_student_workflow_request(request_text):
+            policy_text = _load_synthesis_policy_text()
+            if not policy_text:
+                raise ValueError(WORKFLOW_CREATION_SYNTHESIS_POLICY_MISSING_ERROR)
+            raw_spec = _build_phd_student_workflow_spec(
+                request_text=request_text,
+                workflow_id=workflow_id,
+            )
+            raw_spec["synthesis_policy_text"] = policy_text
+        elif _looks_like_scholarly_workflow_request(request_text):
             policy_text = _load_synthesis_policy_text()
             if not policy_text:
                 raise ValueError(WORKFLOW_CREATION_SYNTHESIS_POLICY_MISSING_ERROR)
@@ -770,6 +1069,15 @@ def _normalise_workflow_spec(context: Mapping[str, Any]) -> dict[str, Any]:
             f"context:{key}={value}" for key, value in sorted(postcondition_probe.items())
         ]
 
+    verification_inputs_raw = raw_spec.get("verification_inputs")
+    verification_inputs: dict[str, Any] = {}
+    if isinstance(verification_inputs_raw, Mapping):
+        verification_inputs = {
+            str(key): value
+            for key, value in verification_inputs_raw.items()
+            if isinstance(key, str)
+        }
+
     return {
         "workflow_id": workflow_id,
         "workflow_name": workflow_name,
@@ -780,6 +1088,7 @@ def _normalise_workflow_spec(context: Mapping[str, Any]) -> dict[str, Any]:
         "initial_state_key": initial_state_key,
         "required_effects": required_effects,
         "postcondition_probe": postcondition_probe,
+        "verification_inputs": verification_inputs,
         "synthesis_policy_text": _clean_text(raw_spec.get("synthesis_policy_text")),
     }
 
@@ -1134,7 +1443,7 @@ def _handle_resolve_scholarly_authors(
         and isinstance(request.inputs, Mapping)
         and "author_names" in request.inputs
     ):
-        author_names = _extract_author_names_from_value(request.inputs.get("author_names"))
+        author_names = _extract_person_names_from_value(request.inputs.get("author_names"))
 
     _ensure_type_concept(
         person_type_id,
@@ -1151,7 +1460,7 @@ def _handle_resolve_scholarly_authors(
 
     for author_name in author_names:
         verified_ids = _find_verified_person_concept_ids(
-            author_name=author_name,
+            person_name=author_name,
             person_type_id=person_type_id,
         )
         if len(verified_ids) > 1:
@@ -1162,8 +1471,8 @@ def _handle_resolve_scholarly_authors(
             person_concept_id = existing_id
             reused_author_ids.append(person_concept_id)
         else:
-            person_concept_id = _create_person_concept_for_author(
-                author_name=author_name,
+            person_concept_id = _create_person_concept(
+                person_name=author_name,
                 person_type_id=person_type_id,
             )
             created_author_ids.append(person_concept_id)
@@ -1201,6 +1510,402 @@ def _handle_resolve_scholarly_authors(
     return WorkflowActionResult(status="success", outputs=outputs)
 
 
+def _handle_resolve_phd_student_candidate(
+    request: WorkflowActionRequest,
+) -> WorkflowActionResult:
+    person_type_id = _clean_text(
+        request.inputs.get("person_type_id") if isinstance(request.inputs, Mapping) else ""
+    ) or _clean_text(request.data.get("person_type_id"))
+    if not person_type_id:
+        person_type_id = DEFAULT_PERSON_TYPE_ID
+    _ensure_type_concept(
+        person_type_id,
+        name="Person" if person_type_id == DEFAULT_PERSON_TYPE_ID else _titleise(person_type_id),
+    )
+
+    merged_context = dict(request.data)
+    if isinstance(request.inputs, Mapping):
+        for key, value in request.inputs.items():
+            if key not in merged_context:
+                merged_context[key] = value
+
+    profile = _extract_phd_student_profile(merged_context)
+    student_name = _normalise_person_name(profile.get("student_name"))
+    if not student_name:
+        return WorkflowActionResult(
+            status="failed",
+            error="phd_student_candidate_name_missing:expected_phd_student_name_or_description",
+            outputs={
+                "phd_student_candidate_resolved": False,
+                "phd_student_failure_diagnostics": {
+                    "error_code": "phd_student_candidate_name_missing",
+                    "reason": "No PhD student name could be resolved from workflow inputs.",
+                    "expected_fields": [
+                        "phd_student_name",
+                        "student_name",
+                        "phd_student_description",
+                    ],
+                },
+            },
+        )
+
+    verified_ids = _find_verified_person_concept_ids(
+        person_name=student_name,
+        person_type_id=person_type_id,
+    )
+    if len(verified_ids) > 1:
+        return WorkflowActionResult(
+            status="failed",
+            error=(
+                f"phd_student_candidate_ambiguous:{student_name}:"
+                f"{','.join(verified_ids)}"
+            ),
+            outputs={
+                "phd_student_candidate_resolved": False,
+                "phd_student_name": student_name,
+                "phd_student_ambiguous_candidate_ids": verified_ids,
+                "phd_student_failure_diagnostics": {
+                    "error_code": "phd_student_candidate_ambiguous",
+                    "reason": "Multiple existing person concepts match the requested PhD student name.",
+                    "student_name": student_name,
+                    "ambiguous_candidate_ids": verified_ids,
+                    "resolution_hint": (
+                        "Provide phd_student_concept_id or a more specific student name."
+                    ),
+                },
+            },
+        )
+
+    reused_existing = len(verified_ids) == 1
+    student_concept_id = (
+        verified_ids[0]
+        if reused_existing
+        else _create_person_concept(
+            person_name=student_name,
+            person_type_id=person_type_id,
+        )
+    )
+    return WorkflowActionResult(
+        status="success",
+        outputs={
+            "phd_student_candidate_resolved": True,
+            "phd_student_name": student_name,
+            "phd_student_concept_id": student_concept_id,
+            "phd_student_candidate_reused": reused_existing,
+            "supervisor_names": list(profile.get("supervisor_names") or []),
+            "research_topic": _clean_text(profile.get("research_topic")),
+            "institution": _clean_text(profile.get("institution")),
+            "phd_student_source_text": _clean_text(profile.get("source_text")),
+            "phd_student_resolution_mode": "exact_name_unique_match_or_create",
+        },
+    )
+
+
+def _handle_assert_phd_student_relationships(
+    request: WorkflowActionRequest,
+) -> WorkflowActionResult:
+    student_concept_id = _clean_text(request.data.get("phd_student_concept_id"))
+    student_name = _normalise_person_name(request.data.get("phd_student_name"))
+    if not student_concept_id:
+        return WorkflowActionResult(
+            status="failed",
+            error="phd_student_relationships_missing_student_concept_id",
+            outputs={
+                "phd_student_relationships_asserted": False,
+                "phd_student_failure_diagnostics": {
+                    "error_code": "phd_student_relationships_missing_student_concept_id",
+                    "reason": "PhD student relationship assertion requires phd_student_concept_id.",
+                },
+            },
+        )
+
+    person_type_id = _clean_text(
+        request.inputs.get("person_type_id") if isinstance(request.inputs, Mapping) else ""
+    ) or _clean_text(request.data.get("person_type_id"))
+    if not person_type_id:
+        person_type_id = DEFAULT_PERSON_TYPE_ID
+
+    student_type_id = _clean_text(
+        request.inputs.get("student_type_id") if isinstance(request.inputs, Mapping) else ""
+    ) or _clean_text(request.data.get("student_type_id"))
+    if not student_type_id:
+        student_type_id = DEFAULT_STUDENT_TYPE_ID
+
+    phd_student_type_id = _clean_text(
+        request.inputs.get("phd_student_type_id")
+        if isinstance(request.inputs, Mapping)
+        else ""
+    ) or _clean_text(request.data.get("phd_student_type_id"))
+    if not phd_student_type_id:
+        phd_student_type_id = DEFAULT_PHD_STUDENT_TYPE_ID
+
+    research_topic_type_id = _clean_text(
+        request.inputs.get("research_topic_type_id")
+        if isinstance(request.inputs, Mapping)
+        else ""
+    ) or _clean_text(request.data.get("research_topic_type_id"))
+    if not research_topic_type_id:
+        research_topic_type_id = DEFAULT_RESEARCH_TOPIC_TYPE_ID
+
+    supervised_by_predicate_id = _clean_text(
+        request.inputs.get("supervised_by_predicate_id")
+        if isinstance(request.inputs, Mapping)
+        else ""
+    ) or _clean_text(request.data.get("supervised_by_predicate_id"))
+    if not supervised_by_predicate_id:
+        supervised_by_predicate_id = DEFAULT_SUPERVISED_BY_PREDICATE_ID
+
+    researches_predicate_id = _clean_text(
+        request.inputs.get("researches_predicate_id")
+        if isinstance(request.inputs, Mapping)
+        else ""
+    ) or _clean_text(request.data.get("researches_predicate_id"))
+    if not researches_predicate_id:
+        researches_predicate_id = DEFAULT_RESEARCHES_PREDICATE_ID
+
+    _ensure_type_concept(
+        person_type_id,
+        name="Person" if person_type_id == DEFAULT_PERSON_TYPE_ID else _titleise(person_type_id),
+    )
+    _ensure_type_concept(
+        student_type_id,
+        name="Student" if student_type_id == DEFAULT_STUDENT_TYPE_ID else _titleise(student_type_id),
+    )
+    _ensure_type_concept(
+        phd_student_type_id,
+        name=(
+            "PhD Student"
+            if phd_student_type_id == DEFAULT_PHD_STUDENT_TYPE_ID
+            else _titleise(phd_student_type_id)
+        ),
+    )
+    _ensure_type_concept(
+        research_topic_type_id,
+        name=(
+            "Research Topic"
+            if research_topic_type_id == DEFAULT_RESEARCH_TOPIC_TYPE_ID
+            else _titleise(research_topic_type_id)
+        ),
+    )
+    _ensure_predicate_concept(supervised_by_predicate_id)
+    _ensure_predicate_concept(researches_predicate_id)
+
+    student_display_name = student_name or _titleise(student_concept_id)
+    _ensure_instance_concept(
+        concept_id=student_concept_id,
+        name=student_display_name,
+        parent_type_id=person_type_id,
+    )
+    _ensure_instance_concept(
+        concept_id=student_concept_id,
+        name=student_display_name,
+        parent_type_id=student_type_id,
+    )
+    _ensure_instance_concept(
+        concept_id=student_concept_id,
+        name=student_display_name,
+        parent_type_id=phd_student_type_id,
+    )
+
+    supervisor_names = _extract_person_names_from_value(request.data.get("supervisor_names"))
+    if not supervisor_names and isinstance(request.inputs, Mapping):
+        supervisor_names = _extract_person_names_from_value(
+            request.inputs.get("supervisor_names")
+        )
+    supervisor_matches: dict[str, list[str]] = {}
+    ambiguous_supervisor_names: list[str] = []
+    for supervisor_name in supervisor_names:
+        matches = _find_verified_person_concept_ids(
+            person_name=supervisor_name,
+            person_type_id=person_type_id,
+        )
+        supervisor_matches[supervisor_name] = matches
+        if len(matches) > 1:
+            ambiguous_supervisor_names.append(supervisor_name)
+    if ambiguous_supervisor_names:
+        return WorkflowActionResult(
+            status="failed",
+            error=(
+                "phd_student_supervisor_ambiguous:"
+                + ";".join(
+                    f"{name}=>{','.join(supervisor_matches.get(name) or [])}"
+                    for name in ambiguous_supervisor_names
+                )
+            ),
+            outputs={
+                "phd_student_relationships_asserted": False,
+                "phd_student_supervisor_ambiguities": ambiguous_supervisor_names,
+                "phd_student_failure_diagnostics": {
+                    "error_code": "phd_student_supervisor_ambiguous",
+                    "reason": (
+                        "Supervisor resolution returned multiple matching person concepts."
+                    ),
+                    "ambiguous_supervisors": ambiguous_supervisor_names,
+                    "matches_by_supervisor": {
+                        key: value for key, value in supervisor_matches.items() if len(value) > 1
+                    },
+                    "resolution_hint": (
+                        "Provide explicit supervisor concept IDs or unique supervisor names."
+                    ),
+                },
+            },
+        )
+
+    reused_supervisor_ids: list[str] = []
+    created_supervisor_ids: list[str] = []
+    supervisor_concept_ids: list[str] = []
+    supervisor_links_written = 0
+    for supervisor_name in supervisor_names:
+        matches = supervisor_matches.get(supervisor_name) or []
+        supervisor_concept_id = (
+            matches[0]
+            if len(matches) == 1
+            else _create_person_concept(
+                person_name=supervisor_name,
+                person_type_id=person_type_id,
+            )
+        )
+        if len(matches) == 1:
+            reused_supervisor_ids.append(supervisor_concept_id)
+        else:
+            created_supervisor_ids.append(supervisor_concept_id)
+        supervisor_concept_ids.append(supervisor_concept_id)
+        relation_result = add_relationship(
+            source_id=student_concept_id,
+            predicate=supervised_by_predicate_id,
+            target=supervisor_concept_id,
+        )
+        if bool(relation_result.get("success")):
+            supervisor_links_written += 1
+
+    research_topic = _clean_text(request.data.get("research_topic"))
+    research_topic_concept_id = ""
+    research_topic_reused_existing = False
+    research_topic_link_written = False
+    if research_topic:
+        try:
+            (
+                research_topic_concept_id,
+                research_topic_reused_existing,
+            ) = _resolve_or_create_research_topic_concept_id(
+                research_topic=research_topic,
+                research_topic_type_id=research_topic_type_id,
+            )
+        except RuntimeError:
+            return WorkflowActionResult(
+                status="failed",
+                error=f"phd_student_research_topic_ambiguous:{research_topic}",
+                outputs={
+                    "phd_student_relationships_asserted": False,
+                    "phd_student_failure_diagnostics": {
+                        "error_code": "phd_student_research_topic_ambiguous",
+                        "reason": (
+                            "Research topic name matched multiple existing topic concepts."
+                        ),
+                        "research_topic": research_topic,
+                        "resolution_hint": (
+                            "Provide a unique research topic concept ID in the workflow input."
+                        ),
+                    },
+                },
+            )
+
+        relation_result = add_relationship(
+            source_id=student_concept_id,
+            predicate=researches_predicate_id,
+            target=research_topic_concept_id,
+        )
+        research_topic_link_written = bool(relation_result.get("success"))
+
+    return WorkflowActionResult(
+        status="success",
+        outputs={
+            "phd_student_relationships_asserted": True,
+            "phd_student_concept_id": student_concept_id,
+            "phd_student_supervisor_concept_ids": list(dict.fromkeys(supervisor_concept_ids)),
+            "phd_student_supervisor_links_written": supervisor_links_written,
+            "reused_supervisor_concept_ids": list(dict.fromkeys(reused_supervisor_ids)),
+            "created_supervisor_concept_ids": list(dict.fromkeys(created_supervisor_ids)),
+            "research_topic": research_topic,
+            "phd_student_research_topic_concept_id": research_topic_concept_id or None,
+            "phd_student_research_topic_reused_existing": research_topic_reused_existing,
+            "phd_student_research_topic_link_written": research_topic_link_written,
+            "phd_student_supervised_by_predicate_id": supervised_by_predicate_id,
+            "phd_student_researches_predicate_id": researches_predicate_id,
+        },
+    )
+
+
+def _handle_ground_phd_student_text(request: WorkflowActionRequest) -> WorkflowActionResult:
+    student_concept_id = _clean_text(request.data.get("phd_student_concept_id"))
+    source_text = _clean_text(
+        request.data.get("phd_student_source_text")
+        or request.data.get("student_description")
+        or request.data.get("phd_student_description")
+        or request.data.get("source_text")
+    )
+    if not source_text:
+        source_text = _extract_request_text(request.data)
+
+    if not student_concept_id:
+        return WorkflowActionResult(
+            status="failed",
+            error="phd_student_text_grounding_missing_student_concept_id",
+            outputs={
+                "phd_student_text_grounded": False,
+                "phd_student_failure_diagnostics": {
+                    "error_code": "phd_student_text_grounding_missing_student_concept_id",
+                    "reason": "Text grounding requires phd_student_concept_id.",
+                },
+            },
+        )
+    if not source_text:
+        return WorkflowActionResult(
+            status="failed",
+            error="phd_student_text_source_missing:expected_source_text_or_description",
+            outputs={
+                "phd_student_text_grounded": False,
+                "phd_student_failure_diagnostics": {
+                    "error_code": "phd_student_text_source_missing",
+                    "reason": "No source text was provided for PhD student representation grounding.",
+                    "expected_fields": [
+                        "phd_student_source_text",
+                        "phd_student_description",
+                        "student_description",
+                    ],
+                },
+            },
+        )
+
+    upsert_text_for_concept(
+        subject_concept_id=student_concept_id,
+        predicate="hasDescription",
+        text=source_text,
+        lang="en-NZ",
+    )
+    provenance_payload = {
+        "source": "text_driven_workflow_creation",
+        "workflow": WORKFLOW_CREATION_WORKFLOW_ID,
+        "institution": _clean_text(request.data.get("institution")),
+        "research_topic": _clean_text(request.data.get("research_topic")),
+    }
+    upsert_text_for_concept(
+        subject_concept_id=student_concept_id,
+        predicate="hasNote",
+        text=json.dumps(provenance_payload, sort_keys=True, ensure_ascii=True),
+        lang="en-NZ",
+    )
+    return WorkflowActionResult(
+        status="success",
+        outputs={
+            "phd_student_text_grounded": True,
+            "phd_student_concept_id": student_concept_id,
+            "phd_student_grounding_text_length": len(source_text),
+            "phd_student_grounding_provenance": provenance_payload,
+        },
+    )
+
+
 def _build_verification_registry(environment: WorkflowEnvironment) -> ActionRegistry:
     registry = ActionRegistry()
     registry.register_if_absent(
@@ -1220,6 +1925,35 @@ def _build_verification_registry(environment: WorkflowEnvironment) -> ActionRegi
             ),
         )
     )
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=WORKFLOW_CREATION_ACTION_RESOLVE_PHD_STUDENT_CANDIDATE,
+            handler=_handle_resolve_phd_student_candidate,
+            description=(
+                "Resolve a PhD-student candidate concept from text/profile data "
+                "with fail-closed ambiguity diagnostics."
+            ),
+        )
+    )
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=WORKFLOW_CREATION_ACTION_ASSERT_PHD_STUDENT_RELATIONSHIPS,
+            handler=_handle_assert_phd_student_relationships,
+            description=(
+                "Assert core person/student/research relationships for the resolved "
+                "PhD student concept."
+            ),
+        )
+    )
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=WORKFLOW_CREATION_ACTION_GROUND_PHD_STUDENT_TEXT,
+            handler=_handle_ground_phd_student_text,
+            description=(
+                "Ground source text and provenance on the resolved PhD student concept."
+            ),
+        )
+    )
     if environment.gateway is not None and getattr(environment.gateway, "enabled", False):
         registry.set_fallback_handler(_gateway_fallback_action)
     return registry
@@ -1234,6 +1968,9 @@ def _supported_action_ids_for_verification(
     local_actions = {
         WORKFLOW_CREATION_ACTION_EMIT_MARKER,
         WORKFLOW_CREATION_ACTION_RESOLVE_SCHOLARLY_AUTHORS,
+        WORKFLOW_CREATION_ACTION_RESOLVE_PHD_STUDENT_CANDIDATE,
+        WORKFLOW_CREATION_ACTION_ASSERT_PHD_STUDENT_RELATIONSHIPS,
+        WORKFLOW_CREATION_ACTION_GROUND_PHD_STUDENT_TEXT,
     }
     for action_id in action_ids:
         if action_id in local_actions:
@@ -1313,6 +2050,9 @@ def _handle_verify_discoverability(request: WorkflowActionRequest) -> WorkflowAc
     if structural_validation_passed:
         verification_registry = _build_verification_registry(request.environment)
         executor = WorkflowExecutor(registry=verification_registry, max_transitions=40)
+        verification_inputs_raw = request.data.get("test_run_inputs")
+        if not isinstance(verification_inputs_raw, Mapping):
+            verification_inputs_raw = spec.get("verification_inputs")
         verification_result = executor.run(
             definition,
             environment=WorkflowEnvironment(
@@ -1324,8 +2064,8 @@ def _handle_verify_discoverability(request: WorkflowActionRequest) -> WorkflowAc
                 max_tool_invocations=request.environment.max_tool_invocations,
                 default_gmail_profile=request.environment.default_gmail_profile,
             ),
-            data=dict(request.data.get("test_run_inputs") or {})
-            if isinstance(request.data.get("test_run_inputs"), Mapping)
+            data=dict(verification_inputs_raw or {})
+            if isinstance(verification_inputs_raw, Mapping)
             else {},
         )
         optional_test_instance_id = f"local_test_{uuid.uuid4()}"
@@ -1487,6 +2227,29 @@ def register_workflow_creation_actions(registry: ActionRegistry) -> None:
                 "or creating missing person concepts, then assert authorship links."
             ),
         ),
+        ActionSpec(
+            action_id=WORKFLOW_CREATION_ACTION_RESOLVE_PHD_STUDENT_CANDIDATE,
+            handler=_handle_resolve_phd_student_candidate,
+            description=(
+                "Resolve a PhD-student candidate concept from text/profile data "
+                "with fail-closed ambiguity diagnostics."
+            ),
+        ),
+        ActionSpec(
+            action_id=WORKFLOW_CREATION_ACTION_ASSERT_PHD_STUDENT_RELATIONSHIPS,
+            handler=_handle_assert_phd_student_relationships,
+            description=(
+                "Assert core person/student/research relationships for the resolved "
+                "PhD student concept."
+            ),
+        ),
+        ActionSpec(
+            action_id=WORKFLOW_CREATION_ACTION_GROUND_PHD_STUDENT_TEXT,
+            handler=_handle_ground_phd_student_text,
+            description=(
+                "Ground source text and provenance on the resolved PhD student concept."
+            ),
+        ),
     )
     for spec in specs:
         registry.register_if_absent(spec)
@@ -1524,6 +2287,9 @@ __all__ = [
     "WORKFLOW_CREATION_ACTION_FINALISE",
     "WORKFLOW_CREATION_ACTION_EMIT_MARKER",
     "WORKFLOW_CREATION_ACTION_RESOLVE_SCHOLARLY_AUTHORS",
+    "WORKFLOW_CREATION_ACTION_RESOLVE_PHD_STUDENT_CANDIDATE",
+    "WORKFLOW_CREATION_ACTION_ASSERT_PHD_STUDENT_RELATIONSHIPS",
+    "WORKFLOW_CREATION_ACTION_GROUND_PHD_STUDENT_TEXT",
     "WORKFLOW_CREATION_STEP_SEQUENCE",
     "WORKFLOW_CREATION_STEP_ACTIONS",
     "register_workflow_creation_actions",

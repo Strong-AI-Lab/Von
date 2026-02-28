@@ -9,7 +9,10 @@ import pytest
 
 from src.backend.db.mongo_client import get_db
 from src.backend.services import concept_service
-from src.backend.services.text_value_service import upsert_text_for_concept
+from src.backend.services.text_value_service import (
+    get_texts_for_concept,
+    upsert_text_for_concept,
+)
 from src.backend.services.workflow_discovery_service import (
     EXECUTABILITY_EXECUTABLE_NOW,
     WORKFLOW_CREATION_WORKFLOW_ID as DISCOVERY_WORKFLOW_CREATION_WORKFLOW_ID,
@@ -28,6 +31,9 @@ from src.backend.workflows.durable.workflow_creation_workflow import (
     WORKFLOW_CREATION_ACTION_ESTABLISH_RELATIONSHIPS,
     WORKFLOW_CREATION_ACTION_FINALISE,
     WORKFLOW_CREATION_ACTION_IDENTIFY_NEED,
+    WORKFLOW_CREATION_ACTION_GROUND_PHD_STUDENT_TEXT,
+    WORKFLOW_CREATION_ACTION_ASSERT_PHD_STUDENT_RELATIONSHIPS,
+    WORKFLOW_CREATION_ACTION_RESOLVE_PHD_STUDENT_CANDIDATE,
     WORKFLOW_CREATION_ACTION_VERIFY_DISCOVERABILITY,
     WORKFLOW_CREATION_STEP_SEQUENCE,
     WORKFLOW_CREATION_WORKFLOW_ID,
@@ -48,6 +54,13 @@ SCHOLARLY_WORKFLOW_REQUEST_PROMPT = (
     "representation verification steps. Run autonomously by default and only ask "
     "the user when vital required information cannot be obtained from tools, "
     "existing ontology context, or uploaded content."
+)
+
+PHD_STUDENT_WORKFLOW_REQUEST_PROMPT = (
+    "Create a workflow from this description request: represent a PhD student from "
+    "text description in Vontology. Include candidate concept resolution/reuse, "
+    "core person/student/research relationship assertions, text grounding with "
+    "provenance, and fail-closed ambiguity diagnostics."
 )
 
 
@@ -525,3 +538,203 @@ def test_text_only_scholarly_request_synthesises_non_blocking_workflow() -> None
     authored_by_ids = ((paper_doc.get("relationships") or {}).get("#V#authored_by") or [])
     assert "#V#person_jane_doe_existing" in authored_by_ids
     assert created_author_id in authored_by_ids
+
+
+def test_text_only_phd_student_request_routes_create_execute_end_to_end() -> None:
+    _seed_workflow_creation_graph_without_actions()
+
+    pre = load_workflow_definition_from_vontology(WORKFLOW_CREATION_WORKFLOW_ID)
+    assert pre is not None
+    registry_for_publish = WorkflowRegistry()
+    registry_for_publish.register(
+        WorkflowRegistration(
+            workflow_id=WORKFLOW_CREATION_WORKFLOW_ID,
+            definition=pre,
+            purpose="text-only phd student synthesis",
+            source="vontology",
+        )
+    )
+    authority_service.publish_canonical_chat_workflow_graphs(registry=registry_for_publish)
+    _seed_workflow_creation_synthesis_policy()
+
+    query = PHD_STUDENT_WORKFLOW_REQUEST_PROMPT
+    with (
+        patch(
+            "src.backend.services.workflow_discovery_service._search_workflows_semantic",
+            return_value=[],
+        ),
+        patch(
+            "src.backend.services.workflow_discovery_service._search_workflows_vontology",
+            return_value=[],
+        ),
+        patch(
+            "src.backend.services.workflow_discovery_service._enrich_workflow_matches",
+            side_effect=lambda matches: matches,
+        ),
+        patch(
+            "src.backend.services.workflow_discovery_service._classify_workflow_concept_executability",
+            side_effect=lambda concept_id: (
+                (True, EXECUTABILITY_EXECUTABLE_NOW, None)
+                if concept_id == DISCOVERY_WORKFLOW_CREATION_WORKFLOW_ID
+                else (False, "graph_incomplete", "not_used")
+            ),
+        ),
+    ):
+        wrapped = discover_workflows_for_turn(query, max_results=5)
+        assert wrapped is not None
+        routing_ids = [match.get("concept_id") for match in wrapped.get("matches", [])]
+        assert DISCOVERY_WORKFLOW_CREATION_WORKFLOW_ID in routing_ids
+
+    action_registry = build_durable_action_registry()
+    env = WorkflowEnvironment(llm_client=None, user_namespace="#V#test_user")
+    workflow_creation_definition = load_workflow_definition_from_vontology(
+        WORKFLOW_CREATION_WORKFLOW_ID
+    )
+    assert workflow_creation_definition is not None
+
+    generated_workflow_id = "#V#integration_phd_student_representation_workflow"
+    run_result = WorkflowExecutor(registry=action_registry, max_transitions=40).run(
+        workflow_creation_definition,
+        environment=env,
+        data={
+            "prompt": query,
+            "target_workflow_id": generated_workflow_id,
+        },
+    )
+    assert run_result.completed is True
+    assert run_result.data.get("postconditions_verified") is True
+    assert run_result.data.get("required_effects_declared") is True
+
+    generated_definition = load_workflow_definition_from_vontology(generated_workflow_id)
+    assert generated_definition is not None
+    action_ids = set(collect_workflow_action_ids(generated_definition))
+    assert "request_user_input" not in action_ids
+    assert WORKFLOW_CREATION_ACTION_EMIT_MARKER in action_ids
+    assert WORKFLOW_CREATION_ACTION_RESOLVE_PHD_STUDENT_CANDIDATE in action_ids
+    assert WORKFLOW_CREATION_ACTION_ASSERT_PHD_STUDENT_RELATIONSHIPS in action_ids
+    assert WORKFLOW_CREATION_ACTION_GROUND_PHD_STUDENT_TEXT in action_ids
+
+    _ensure_type("#V#person", "Person")
+    concept_service.create_concept(
+        name="Grace Hopper",
+        concept_id="#V#person_grace_hopper_existing",
+        parent_concept_ids=["#V#person"],
+        create_as_instance=True,
+    )
+
+    student_description = (
+        "Student Name: Alex Example\n"
+        "Supervisors: Grace Hopper\n"
+        "Research Topic: Neuro-Symbolic Systems\n"
+        "Institution: University of Auckland"
+    )
+    generated_run = WorkflowExecutor(registry=action_registry, max_transitions=40).run(
+        generated_definition,
+        environment=env,
+        data={"phd_student_description": student_description},
+    )
+    assert generated_run.completed is True
+    assert generated_run.data.get("phd_student_candidate_resolved") is True
+    assert generated_run.data.get("phd_student_relationships_asserted") is True
+    assert generated_run.data.get("phd_student_text_grounded") is True
+    assert generated_run.data.get("phd_student_representation_verified") is True
+
+    student_concept_id = str(generated_run.data.get("phd_student_concept_id") or "")
+    assert student_concept_id
+    student_doc = concept_service.get_concept_by_concept_id(student_concept_id)
+    assert student_doc is not None
+    student_types = ((student_doc.get("relationships") or {}).get("is_an_instance_of") or [])
+    assert "#V#person" in student_types
+    assert "#V#student" in student_types
+    assert "#V#phd_student" in student_types
+
+    supervised_by_ids = ((student_doc.get("relationships") or {}).get("#V#supervised_by") or [])
+    assert "#V#person_grace_hopper_existing" in supervised_by_ids
+    research_topic_ids = ((student_doc.get("relationships") or {}).get("#V#researches") or [])
+    assert len(research_topic_ids) == 1
+
+    description_rows = get_texts_for_concept(
+        subject_concept_id=student_concept_id,
+        predicate="hasDescription",
+        limit=50,
+    )
+    description_values = [str(row.get("text") or "") for row in description_rows]
+    assert student_description in description_values
+
+    note_rows = get_texts_for_concept(
+        subject_concept_id=student_concept_id,
+        predicate="hasNote",
+        limit=50,
+    )
+    note_values = [str(row.get("text") or "") for row in note_rows]
+    assert any("text_driven_workflow_creation" in value for value in note_values)
+
+
+def test_generated_phd_student_workflow_fails_closed_for_ambiguous_student() -> None:
+    _seed_workflow_creation_graph_without_actions()
+
+    pre = load_workflow_definition_from_vontology(WORKFLOW_CREATION_WORKFLOW_ID)
+    assert pre is not None
+    registry_for_publish = WorkflowRegistry()
+    registry_for_publish.register(
+        WorkflowRegistration(
+            workflow_id=WORKFLOW_CREATION_WORKFLOW_ID,
+            definition=pre,
+            purpose="text-only phd student ambiguity",
+            source="vontology",
+        )
+    )
+    authority_service.publish_canonical_chat_workflow_graphs(registry=registry_for_publish)
+    _seed_workflow_creation_synthesis_policy()
+
+    action_registry = build_durable_action_registry()
+    env = WorkflowEnvironment(llm_client=None, user_namespace="#V#test_user")
+    workflow_creation_definition = load_workflow_definition_from_vontology(
+        WORKFLOW_CREATION_WORKFLOW_ID
+    )
+    assert workflow_creation_definition is not None
+
+    generated_workflow_id = "#V#integration_phd_student_ambiguity_workflow"
+    creation_run = WorkflowExecutor(registry=action_registry, max_transitions=40).run(
+        workflow_creation_definition,
+        environment=env,
+        data={
+            "prompt": PHD_STUDENT_WORKFLOW_REQUEST_PROMPT,
+            "target_workflow_id": generated_workflow_id,
+        },
+    )
+    assert creation_run.completed is True
+    generated_definition = load_workflow_definition_from_vontology(generated_workflow_id)
+    assert generated_definition is not None
+
+    _ensure_type("#V#person", "Person")
+    concept_service.create_concept(
+        name="Pat Lee",
+        concept_id="#V#person_pat_lee_a",
+        parent_concept_ids=["#V#person"],
+        create_as_instance=True,
+    )
+    concept_service.create_concept(
+        name="Pat Lee",
+        concept_id="#V#person_pat_lee_b",
+        parent_concept_ids=["#V#person"],
+        create_as_instance=True,
+    )
+
+    generated_run = WorkflowExecutor(registry=action_registry, max_transitions=40).run(
+        generated_definition,
+        environment=env,
+        data={
+            "phd_student_description": (
+                "Student Name: Pat Lee\n"
+                "Research Topic: Symbolic Learning Systems"
+            )
+        },
+    )
+    assert generated_run.completed is True
+    assert "failed" in str(generated_run.final_state or "").lower()
+    failure_error = str(generated_run.data.get("last_action_error") or "")
+    assert "phd_student_candidate_ambiguous" in failure_error
+    assert "Pat Lee" in failure_error
+    assert "#V#person_pat_lee_a" in failure_error
+    assert "#V#person_pat_lee_b" in failure_error
