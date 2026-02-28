@@ -29,12 +29,16 @@ class RelationElicitationService:
         instance_id: str,
         *,
         include_reverse_subtypes: bool = True,
+        include_hypothesized: bool = False,
     ) -> List[str]:
         """Return unfilled suggested or salient predicates for an individual.
 
         Traverses direct and ancestor types (forward is_a_type_of + reverse has_subtype) and
         unions values of both "suggested_relations_for_type" and "#V#salient_binary_predicate_for_type".
-        Filters out predicates already present as relationship keys or hypothesized relations.
+        Filters out predicates already present as relationship keys.
+        By default, predicates already present in hypothesized_relations are also
+        excluded; set include_hypothesized=True when downstream workflows need to
+        process high-confidence hypotheses for auto-apply.
         """
         instance_concept = concept_service.get_concept_by_id(instance_id)
         if not instance_concept:
@@ -111,7 +115,8 @@ class RelationElicitationService:
         return [
             c
             for c in candidate_predicates
-            if c not in existing_relations and c not in existing_hypothesized
+            if c not in existing_relations
+            and (include_hypothesized or c not in existing_hypothesized)
         ]
 
     def generate_question_for_elicit(
@@ -163,6 +168,8 @@ class RelationElicitationService:
             "value": extracted_value.strip(),
             "confidence_score": 0.85,
             "source_interaction_id": "interaction_abc_123",
+            "source": "llm_extraction",
+            "evidence_count": 1,
         }
         update_payload = {"hypothesized_relations": {predicate: [hypothesis]}}
         concept_service.update_concept(instance_id, update_payload)

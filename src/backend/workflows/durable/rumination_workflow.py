@@ -26,6 +26,8 @@ JIRA: JVNAUTOSCI-923
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import hashlib
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -56,6 +58,7 @@ DEFAULT_RELATION_MAX_PREDICATES_PER_CONCEPT = 4
 DEFAULT_RELATION_AUTO_APPLY_CONFIDENCE_THRESHOLD = 0.95
 DEFAULT_RELATION_DETAIL_LIMIT = 80
 DEFAULT_RELATION_QUESTION_LIMIT = 50
+RELATION_AUTO_APPLY_POLICY_VERSION = "relation_auto_apply_policy.v1"
 RELATION_PRIORITY_KEYWORDS: tuple[str, ...] = (
     "owner",
     "affiliation",
@@ -68,6 +71,25 @@ RELATION_PRIORITY_KEYWORDS: tuple[str, ...] = (
     "task",
     "member",
 )
+DEFAULT_RELATION_CLASS_THRESHOLDS: dict[str, float] = {
+    "ownership": 0.98,
+    "affiliation": 0.96,
+    "project": 0.96,
+    "deadline": 0.97,
+    "paper_link": 0.95,
+    "supervision": 0.97,
+    "dependency": 0.98,
+    "membership": 0.96,
+    "generic": DEFAULT_RELATION_AUTO_APPLY_CONFIDENCE_THRESHOLD,
+}
+DEFAULT_RELATION_SOURCE_ADJUSTMENTS: dict[str, float] = {
+    "human_validated": 0.08,
+    "user_confirmed": 0.06,
+    "explicit_user_input": 0.05,
+    "llm_extraction": 0.0,
+    "heuristic_inference": -0.05,
+    "unknown": 0.0,
+}
 
 # Gap dimensions the orchestrator checks, in priority order.
 # Each entry: (gap_name, predicate_to_check, enrichment_predicate, prompt_concept_id_or_none)
@@ -352,6 +374,7 @@ def _list_relation_gap_candidates(
         missing_predicates = service.get_elicitation_opportunities(
             concept_id,
             include_reverse_subtypes=False,
+            include_hypothesized=True,
         )
         if not missing_predicates:
             continue
@@ -403,37 +426,101 @@ def _resolve_relation_auto_apply_candidate(
     instance_doc: dict[str, Any],
     predicate: str,
     confidence_threshold: float,
-) -> dict[str, Any] | None:
-    """Resolve a safe auto-apply target from hypothesised relations."""
+    task: dict[str, Any],
+    ctx: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve an auto-apply candidate and return eligibility diagnostics."""
     if not isinstance(predicate, str) or not predicate.startswith("#V#"):
-        return None
+        return {"status": "ineligible", "reason": "invalid_predicate"}
 
     relationships = instance_doc.get("relationships") or {}
     if isinstance(relationships, dict) and relationships.get(predicate):
-        return None
+        return {"status": "ineligible", "reason": "already_present"}
 
     hypotheses = (instance_doc.get("hypothesized_relations") or {}).get(predicate)
     if isinstance(hypotheses, dict):
         hypotheses = [hypotheses]
     if not isinstance(hypotheses, list) or not hypotheses:
-        return None
+        return {"status": "ineligible", "reason": "no_hypothesis"}
 
-    candidates: list[tuple[float, str]] = []
-    for hypothesis in hypotheses:
+    policy = _resolve_relation_auto_apply_policy(
+        predicate=predicate,
+        confidence_threshold=confidence_threshold,
+        task=task,
+        ctx=ctx,
+    )
+    effective_threshold = float(policy["effective_threshold"])
+    min_evidence_count = int(policy["min_evidence_count"])
+
+    candidates: list[dict[str, Any]] = []
+    last_failure_reason = "no_eligible_hypothesis"
+    last_failure_details: dict[str, Any] = {}
+    for idx, hypothesis in enumerate(hypotheses):
         if not isinstance(hypothesis, dict):
+            last_failure_reason = "invalid_hypothesis_payload"
             continue
         target_id = hypothesis.get("value")
         if not isinstance(target_id, str) or not target_id.startswith("#V#"):
+            last_failure_reason = "invalid_hypothesis_target"
             continue
-        confidence = _coerce_float(hypothesis.get("confidence_score"), default=0.0)
-        if confidence < confidence_threshold:
+        raw_confidence = _coerce_float(hypothesis.get("confidence_score"), default=0.0)
+        source = str(hypothesis.get("source") or "unknown").strip().lower() or "unknown"
+        evidence_count = _coerce_int(
+            hypothesis.get("evidence_count"),
+            default=len(hypothesis.get("evidence") or [])
+            if isinstance(hypothesis.get("evidence"), list)
+            else 1,
+        )
+        if evidence_count < min_evidence_count:
+            last_failure_reason = "insufficient_evidence"
+            last_failure_details = {
+                "evidence_count": evidence_count,
+                "required_min_evidence_count": min_evidence_count,
+            }
             continue
-        candidates.append((confidence, target_id))
+        confidence = _calibrate_hypothesis_confidence(
+            hypothesis=hypothesis,
+            source=source,
+            base_confidence=raw_confidence,
+            policy=policy,
+        )
+        if confidence < effective_threshold:
+            last_failure_reason = "below_confidence_threshold"
+            last_failure_details = {
+                "confidence_score": confidence,
+                "raw_confidence_score": raw_confidence,
+                "effective_threshold": effective_threshold,
+            }
+            continue
+        candidates.append(
+            {
+                "target_id": target_id,
+                "confidence_score": confidence,
+                "raw_confidence_score": raw_confidence,
+                "source": source,
+                "hypothesis_id": _resolve_hypothesis_id(
+                    hypothesis=hypothesis,
+                    predicate=predicate,
+                    target_id=target_id,
+                    fallback_index=idx,
+                ),
+                "evidence_count": evidence_count,
+            }
+        )
     if not candidates:
-        return None
+        result = {
+            "status": "ineligible",
+            "reason": last_failure_reason,
+            "effective_threshold": effective_threshold,
+            "policy_version": policy["policy_version"],
+        }
+        if last_failure_details:
+            result["reason_details"] = last_failure_details
+        return result
 
-    candidates.sort(key=lambda item: (-item[0], item[1]))
-    confidence, target_id = candidates[0]
+    candidates.sort(key=lambda item: (-float(item["confidence_score"]), str(item["target_id"])))
+    selected = candidates[0]
+    target_id = str(selected["target_id"])
 
     from ...db.repositories.concepts_repository import ConceptsRepository
 
@@ -441,13 +528,193 @@ def _resolve_relation_auto_apply_candidate(
         {"concept_id": target_id}, projection={"concept_id": 1}
     )
     if not target_exists:
-        return None
+        return {
+            "status": "ineligible",
+            "reason": "target_not_found",
+            "target_id": target_id,
+            "effective_threshold": effective_threshold,
+            "policy_version": policy["policy_version"],
+        }
 
     return {
+        "status": "eligible",
         "target_id": target_id,
-        "confidence_score": confidence,
-        "source": "hypothesized_relation",
+        "confidence_score": float(selected["confidence_score"]),
+        "raw_confidence_score": float(selected["raw_confidence_score"]),
+        "source": str(selected["source"]),
+        "hypothesis_id": str(selected["hypothesis_id"]),
+        "evidence_count": int(selected["evidence_count"]),
+        "required_min_evidence_count": min_evidence_count,
+        "effective_threshold": effective_threshold,
+        "policy_version": policy["policy_version"],
     }
+
+
+def _coerce_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _resolve_hypothesis_id(
+    *,
+    hypothesis: dict[str, Any],
+    predicate: str,
+    target_id: str,
+    fallback_index: int,
+) -> str:
+    raw = hypothesis.get("hypothesis_id") or hypothesis.get("id")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    source_marker = str(
+        hypothesis.get("source_interaction_id")
+        or hypothesis.get("source")
+        or "unknown_source"
+    ).strip()
+    digest_seed = f"{predicate}|{target_id}|{source_marker}|{fallback_index}"
+    digest = hashlib.sha1(digest_seed.encode("utf-8")).hexdigest()[:16]
+    return f"hyp_{digest}"
+
+
+def _classify_relation_predicate(predicate: str) -> str:
+    lowered = str(predicate or "").lower()
+    if any(k in lowered for k in ("owner",)):
+        return "ownership"
+    if any(k in lowered for k in ("affiliation",)):
+        return "affiliation"
+    if any(k in lowered for k in ("project",)):
+        return "project"
+    if any(k in lowered for k in ("deadline", "milestone")):
+        return "deadline"
+    if any(k in lowered for k in ("paper", "author")):
+        return "paper_link"
+    if any(k in lowered for k in ("supervis",)):
+        return "supervision"
+    if any(k in lowered for k in ("depend",)):
+        return "dependency"
+    if any(k in lowered for k in ("member", "membership")):
+        return "membership"
+    return "generic"
+
+
+def _resolve_relation_auto_apply_policy(
+    *,
+    predicate: str,
+    confidence_threshold: float,
+    task: dict[str, Any],
+    ctx: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve auto-apply policy from defaults plus optional context overrides."""
+    policy_input_raw = ctx.get("relation_auto_apply_policy")
+    policy_input: dict[str, Any]
+    if isinstance(policy_input_raw, dict):
+        policy_input = dict(policy_input_raw)
+    else:
+        policy_input = {}
+
+    task_policy = task.get("auto_apply_policy")
+    if isinstance(task_policy, dict):
+        merged_policy = dict(policy_input)
+        merged_policy.update(task_policy)
+        policy_input = merged_policy
+
+    predicate_class = _classify_relation_predicate(predicate)
+    class_thresholds = dict(DEFAULT_RELATION_CLASS_THRESHOLDS)
+    class_thresholds_raw = policy_input.get("class_thresholds")
+    if isinstance(class_thresholds_raw, dict):
+        class_thresholds.update(class_thresholds_raw)
+    predicate_thresholds_raw = policy_input.get("predicate_thresholds")
+    predicate_thresholds = (
+        predicate_thresholds_raw if isinstance(predicate_thresholds_raw, dict) else {}
+    )
+    default_threshold = _coerce_float(
+        policy_input.get("default_threshold"),
+        default=confidence_threshold,
+    )
+    class_threshold = _coerce_float(
+        class_thresholds.get(predicate_class),
+        default=default_threshold,
+    )
+    predicate_threshold = _coerce_float(
+        predicate_thresholds.get(predicate),
+        default=class_threshold,
+    )
+
+    min_evidence_count_default = _coerce_int(
+        policy_input.get("min_evidence_count"),
+        default=1,
+    )
+    min_evidence_by_predicate_raw = policy_input.get("min_evidence_by_predicate")
+    min_evidence_by_predicate = (
+        min_evidence_by_predicate_raw
+        if isinstance(min_evidence_by_predicate_raw, dict)
+        else {}
+    )
+    min_evidence_count = _coerce_int(
+        min_evidence_by_predicate.get(predicate),
+        default=min_evidence_count_default,
+    )
+
+    source_adjustments = dict(DEFAULT_RELATION_SOURCE_ADJUSTMENTS)
+    source_adjustments_raw = policy_input.get("source_adjustments")
+    if isinstance(source_adjustments_raw, dict):
+        source_adjustments.update(source_adjustments_raw)
+
+    policy_version = str(
+        policy_input.get("policy_version")
+        or ctx.get("relation_auto_apply_policy_version")
+        or RELATION_AUTO_APPLY_POLICY_VERSION
+    ).strip() or RELATION_AUTO_APPLY_POLICY_VERSION
+
+    return {
+        "policy_version": policy_version,
+        "predicate_class": predicate_class,
+        "effective_threshold": predicate_threshold,
+        "min_evidence_count": max(0, min_evidence_count),
+        "source_adjustments": source_adjustments,
+    }
+
+
+def _calibrate_hypothesis_confidence(
+    *,
+    hypothesis: dict[str, Any],
+    source: str,
+    base_confidence: float,
+    policy: dict[str, Any],
+) -> float:
+    source_adjustments_raw = policy.get("source_adjustments")
+    source_adjustments = (
+        source_adjustments_raw if isinstance(source_adjustments_raw, dict) else {}
+    )
+    source_key = source if source in source_adjustments else "unknown"
+    adjustment = _coerce_float(source_adjustments.get(source_key), default=0.0)
+    calibrated = base_confidence + adjustment
+    return max(0.0, min(1.0, calibrated))
+
+
+def _record_relation_auto_apply_audit(
+    *,
+    source_id: str,
+    predicate: str,
+    target_id: str,
+    audit_payload: dict[str, Any],
+) -> None:
+    """Persist lightweight audit metadata for auto-applied relation assertions."""
+    from ...db.repositories.concepts_repository import ConceptsRepository
+
+    event = {
+        "event_type": "relation_auto_apply",
+        "applied_at_utc": datetime.now(timezone.utc).isoformat(),
+        "source_id": source_id,
+        "predicate": predicate,
+        "target_id": target_id,
+        **dict(audit_payload or {}),
+    }
+    ConceptsRepository.update_one(
+        {"concept_id": source_id},
+        {"$push": {"relationship_auto_apply_audit": {"$each": [event], "$slice": -200}}},
+    )
 
 
 def _build_relation_completion_question(
@@ -516,6 +783,7 @@ def _dispatch_relation_completion_task(
     deferred_relations = 0
     confirmed_relations = 0
     failed_relations = 0
+    deferral_reason_counts: dict[str, int] = {}
     proposal_details: list[dict[str, Any]] = []
     deferred_questions: list[dict[str, Any]] = []
 
@@ -553,11 +821,21 @@ def _dispatch_relation_completion_task(
                 instance_doc=instance_doc,
                 predicate=predicate,
                 confidence_threshold=confidence_threshold,
+                task=task,
+                ctx=ctx,
             )
-            if auto_candidate:
+            if auto_candidate.get("status") == "eligible":
                 detail["target_id"] = auto_candidate["target_id"]
                 detail["confidence_score"] = auto_candidate["confidence_score"]
+                detail["raw_confidence_score"] = auto_candidate["raw_confidence_score"]
                 detail["candidate_source"] = auto_candidate["source"]
+                detail["hypothesis_id"] = auto_candidate["hypothesis_id"]
+                detail["policy_version"] = auto_candidate["policy_version"]
+                detail["effective_threshold"] = auto_candidate["effective_threshold"]
+                detail["evidence_count"] = auto_candidate["evidence_count"]
+                detail["required_min_evidence_count"] = auto_candidate[
+                    "required_min_evidence_count"
+                ]
 
                 if dry_run:
                     detail["action"] = "would_auto_apply"
@@ -573,19 +851,57 @@ def _dispatch_relation_completion_task(
                             detail["action"] = "auto_applied"
                             auto_applied_relations += 1
                             confirmed_relations += 1
+                            try:
+                                _record_relation_auto_apply_audit(
+                                    source_id=concept_id,
+                                    predicate=predicate,
+                                    target_id=auto_candidate["target_id"],
+                                    audit_payload={
+                                        "hypothesis_id": auto_candidate["hypothesis_id"],
+                                        "confidence_score": auto_candidate["confidence_score"],
+                                        "raw_confidence_score": auto_candidate[
+                                            "raw_confidence_score"
+                                        ],
+                                        "policy_version": auto_candidate["policy_version"],
+                                        "effective_threshold": auto_candidate[
+                                            "effective_threshold"
+                                        ],
+                                        "candidate_source": auto_candidate["source"],
+                                        "evidence_count": auto_candidate["evidence_count"],
+                                    },
+                                )
+                            except Exception as audit_exc:
+                                detail["audit_error"] = str(audit_exc)
                         else:
                             detail["action"] = "deferred_after_apply_failure"
                             detail["error"] = result.get("error")
+                            detail["deferral_reason"] = "apply_write_failure"
                             deferred_relations += 1
                             failed_relations += 1
+                            deferral_reason_counts["apply_write_failure"] = (
+                                int(deferral_reason_counts.get("apply_write_failure", 0)) + 1
+                            )
                     except Exception as exc:
                         detail["action"] = "deferred_after_apply_exception"
                         detail["error"] = str(exc)
+                        detail["deferral_reason"] = "apply_write_exception"
                         deferred_relations += 1
                         failed_relations += 1
+                        deferral_reason_counts["apply_write_exception"] = (
+                            int(deferral_reason_counts.get("apply_write_exception", 0)) + 1
+                        )
             else:
+                deferral_reason = str(auto_candidate.get("reason") or "no_candidate")
                 detail["action"] = "deferred_question"
+                detail["deferral_reason"] = deferral_reason
+                if auto_candidate.get("reason_details"):
+                    detail["deferral_reason_details"] = dict(
+                        auto_candidate.get("reason_details") or {}
+                    )
                 deferred_relations += 1
+                deferral_reason_counts[deferral_reason] = (
+                    int(deferral_reason_counts.get(deferral_reason, 0)) + 1
+                )
                 if len(deferred_questions) < question_limit:
                     deferred_questions.append(
                         {
@@ -610,6 +926,7 @@ def _dispatch_relation_completion_task(
         "deferred_relations": deferred_relations,
         "confirmed_relations": confirmed_relations,
         "failed_relations": failed_relations,
+        "deferral_reason_counts": deferral_reason_counts,
     }
 
     task_result = {
@@ -811,6 +1128,7 @@ def _handle_plan_enrichment(request: WorkflowActionRequest) -> WorkflowActionRes
                     "deferred_relations": 0,
                     "confirmed_relations": 0,
                     "failed_relations": 0,
+                    "deferral_reason_counts": {},
                 },
                 "relation_changes": [],
                 "relation_questions": [],
@@ -881,6 +1199,16 @@ def _handle_dispatch_enrichment(request: WorkflowActionRequest) -> WorkflowActio
                 relation_metrics[metric_key] = int(relation_metrics.get(metric_key, 0)) + int(
                     task_metrics.get(metric_key, 0)
                 )
+            current_reasons = relation_metrics.get("deferral_reason_counts")
+            if not isinstance(current_reasons, dict):
+                current_reasons = {}
+            task_reasons = task_metrics.get("deferral_reason_counts")
+            if isinstance(task_reasons, dict):
+                for reason, count in task_reasons.items():
+                    current_reasons[str(reason)] = int(current_reasons.get(str(reason), 0)) + int(
+                        count
+                    )
+            relation_metrics["deferral_reason_counts"] = current_reasons
 
             relation_changes.extend(relation_task_result.get("proposal_details") or [])
             relation_questions.extend(

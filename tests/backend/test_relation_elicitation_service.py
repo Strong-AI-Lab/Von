@@ -50,6 +50,35 @@ class TestRelationElicitationService(unittest.TestCase):
         mock_get_by_id.assert_called_once_with(instance_id)
         mock_get_by_concept_id.assert_called_once_with(type_id)
 
+    @patch("src.backend.services.concept_service.get_concept_by_concept_id")
+    @patch("src.backend.services.concept_service.get_concept_by_id")
+    def test_get_elicitation_opportunities_including_hypotheses(
+        self, mock_get_by_id, mock_get_by_concept_id
+    ):
+        instance_id = "instance_123"
+        type_id = "#V#Person"
+        mock_get_by_id.return_value = {
+            "concept_id": instance_id,
+            "relationships": {"is_an_instance_of": [type_id]},
+            "hypothesized_relations": {
+                "hypothesized_relation": [{"value": "#V#x", "confidence_score": 0.99}]
+            },
+        }
+        mock_get_by_concept_id.return_value = {
+            "concept_id": type_id,
+            "relationships": {
+                "suggested_relations_for_type": ["hypothesized_relation", "new_opportunity"]
+            },
+        }
+
+        service = RelationElicitationService()
+        opportunities = service.get_elicitation_opportunities(
+            instance_id,
+            include_hypothesized=True,
+        )
+
+        self.assertEqual(opportunities, ["hypothesized_relation", "new_opportunity"])
+
 
 if __name__ == "__main__":
     unittest.main()

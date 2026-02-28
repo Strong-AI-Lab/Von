@@ -652,6 +652,204 @@ class TestRuminationRelationCompletionHelpers:
         assert result["proposal_details"][0]["action"] == "would_auto_apply"
         mock_add_relationship.assert_not_called()
 
+    def test_dispatch_relation_completion_defers_below_threshold(self) -> None:
+        from src.backend.workflows.durable.rumination_workflow import (
+            _dispatch_relation_completion_task,
+        )
+
+        instance_doc = {
+            "concept_id": "#V#alice",
+            "relationships": {},
+            "hypothesized_relations": {
+                "#V#has_affiliation": [
+                    {
+                        "value": "#V#strong_ai_lab",
+                        "confidence_score": 0.9,
+                        "source": "llm_extraction",
+                        "evidence_count": 2,
+                    }
+                ]
+            },
+            "name": "Alice",
+        }
+
+        def _fake_find_one(query, projection=None):
+            cid = (query or {}).get("concept_id")
+            if cid == "#V#alice":
+                return instance_doc
+            if cid == "#V#strong_ai_lab":
+                return {"concept_id": "#V#strong_ai_lab"}
+            return None
+
+        with patch(
+            "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
+            side_effect=_fake_find_one,
+        ):
+            result = _dispatch_relation_completion_task(
+                task={
+                    "gap_name": "missing_relations",
+                    "predicate": "__relation_completion__",
+                    "allocation": 1,
+                    "auto_apply_confidence_threshold": 0.95,
+                },
+                ctx={
+                    "dry_run": True,
+                    "relation_gap_candidates": [
+                        {
+                            "concept_id": "#V#alice",
+                            "missing_predicates": ["#V#has_affiliation"],
+                        }
+                    ],
+                },
+            )
+
+        detail = result["proposal_details"][0]
+        assert detail["action"] == "deferred_question"
+        assert detail["deferral_reason"] == "below_confidence_threshold"
+        assert result["metrics"]["deferred_relations"] == 1
+        assert (
+            result["metrics"]["deferral_reason_counts"]["below_confidence_threshold"]
+            == 1
+        )
+
+    def test_dispatch_relation_completion_apply_mode_writes_and_audits(self) -> None:
+        from src.backend.workflows.durable.rumination_workflow import (
+            _dispatch_relation_completion_task,
+        )
+
+        instance_doc = {
+            "concept_id": "#V#alice",
+            "relationships": {},
+            "hypothesized_relations": {
+                "#V#has_affiliation": [
+                    {
+                        "id": "h-1",
+                        "value": "#V#strong_ai_lab",
+                        "confidence_score": 0.99,
+                        "source": "human_validated",
+                        "evidence_count": 3,
+                    }
+                ]
+            },
+            "name": "Alice",
+        }
+
+        def _fake_find_one(query, projection=None):
+            cid = (query or {}).get("concept_id")
+            if cid == "#V#alice":
+                return instance_doc
+            if cid == "#V#strong_ai_lab":
+                return {"concept_id": "#V#strong_ai_lab"}
+            return None
+
+        with (
+            patch(
+                "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
+                side_effect=_fake_find_one,
+            ),
+            patch(
+                "src.backend.services.relationship_write_service.add_relationship",
+                return_value={"success": True},
+            ) as mock_add,
+            patch(
+                "src.backend.db.repositories.concepts_repository.ConceptsRepository.update_one"
+            ) as mock_update_one,
+        ):
+            result = _dispatch_relation_completion_task(
+                task={
+                    "gap_name": "missing_relations",
+                    "predicate": "__relation_completion__",
+                    "allocation": 1,
+                    "auto_apply_confidence_threshold": 0.95,
+                },
+                ctx={
+                    "dry_run": False,
+                    "relation_gap_candidates": [
+                        {
+                            "concept_id": "#V#alice",
+                            "missing_predicates": ["#V#has_affiliation"],
+                        }
+                    ],
+                },
+            )
+
+        metrics = result["metrics"]
+        assert metrics["auto_applied_relations"] == 1
+        assert metrics["confirmed_relations"] == 1
+        assert metrics["failed_relations"] == 0
+        detail = result["proposal_details"][0]
+        assert detail["action"] == "auto_applied"
+        assert detail["hypothesis_id"] == "h-1"
+        assert "policy_version" in detail
+        mock_add.assert_called_once_with(
+            "#V#alice",
+            "#V#has_affiliation",
+            "#V#strong_ai_lab",
+        )
+        assert mock_update_one.call_count >= 1
+
+    def test_dispatch_relation_completion_apply_mode_persists_relationship(self) -> None:
+        from src.backend.db.repositories.concepts_repository import ConceptsRepository
+        from src.backend.workflows.durable.rumination_workflow import (
+            _dispatch_relation_completion_task,
+        )
+
+        ConceptsRepository.delete_many({"concept_id": {"$in": ["#V#alice", "#V#strong_ai_lab"]}})
+        ConceptsRepository.insert_one(
+            {
+                "concept_id": "#V#alice",
+                "relationships": {},
+                "hypothesized_relations": {
+                    "#V#related_to": [
+                        {
+                            "id": "hyp-real-1",
+                            "value": "#V#strong_ai_lab",
+                            "confidence_score": 0.99,
+                            "source": "human_validated",
+                            "evidence_count": 2,
+                        }
+                    ]
+                },
+            }
+        )
+        ConceptsRepository.insert_one(
+            {
+                "concept_id": "#V#strong_ai_lab",
+                "relationships": {},
+            }
+        )
+
+        result = _dispatch_relation_completion_task(
+            task={
+                "gap_name": "missing_relations",
+                "predicate": "__relation_completion__",
+                "allocation": 1,
+                "auto_apply_confidence_threshold": 0.95,
+            },
+            ctx={
+                "dry_run": False,
+                "relation_gap_candidates": [
+                    {
+                        "concept_id": "#V#alice",
+                        "missing_predicates": ["#V#related_to"],
+                    }
+                ],
+            },
+        )
+
+        metrics = result["metrics"]
+        assert metrics["auto_applied_relations"] == 1
+        assert metrics["confirmed_relations"] == 1
+
+        source_doc = ConceptsRepository.find_one({"concept_id": "#V#alice"})
+        relationships = (source_doc or {}).get("relationships") or {}
+        assert "#V#strong_ai_lab" in (relationships.get("related_to") or [])
+
+        audit_log = (source_doc or {}).get("relationship_auto_apply_audit") or []
+        assert isinstance(audit_log, list) and len(audit_log) > 0
+        assert audit_log[-1]["hypothesis_id"] == "hyp-real-1"
+        assert audit_log[-1]["policy_version"] == "relation_auto_apply_policy.v1"
+
 
 class TestRuminationRegistration:
     """Test registration in the unified registry."""
