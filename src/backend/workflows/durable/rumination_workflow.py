@@ -351,6 +351,7 @@ def _list_relation_gap_candidates(
         "names": 1,
         "relationships": 1,
         "hypothesized_relations": 1,
+        "uncertain_relationship_assertions": 1,
     }
     if candidate_concept_ids:
         concept_docs = ConceptsRepository.find(
@@ -437,10 +438,39 @@ def _resolve_relation_auto_apply_candidate(
     if isinstance(relationships, dict) and relationships.get(predicate):
         return {"status": "ineligible", "reason": "already_present"}
 
-    hypotheses = (instance_doc.get("hypothesized_relations") or {}).get(predicate)
-    if isinstance(hypotheses, dict):
-        hypotheses = [hypotheses]
-    if not isinstance(hypotheses, list) or not hypotheses:
+    from ...services.uncertain_relationship_service import (
+        ACTIVE_UNCERTAIN_RELATIONSHIP_STATUSES,
+        list_uncertain_relationship_assertions,
+    )
+
+    source_id = str(instance_doc.get("concept_id") or "").strip()
+    canonical_assertions = list_uncertain_relationship_assertions(
+        source_id=source_id,
+        predicate=predicate,
+        statuses=tuple(ACTIVE_UNCERTAIN_RELATIONSHIP_STATUSES),
+        include_legacy=True,
+        source_doc=instance_doc,
+    )
+    canonical_hypotheses: list[dict[str, Any]] = []
+    for assertion in canonical_assertions:
+        if not isinstance(assertion, dict):
+            continue
+        canonical_hypotheses.append(
+            {
+                "hypothesis_id": assertion.get("assertion_id"),
+                "id": assertion.get("assertion_id"),
+                "value": assertion.get("target"),
+                "confidence_score": assertion.get("confidence_score"),
+                "source": (assertion.get("provenance") or {}).get("source"),
+                "source_interaction_id": (assertion.get("provenance") or {}).get(
+                    "source_interaction_id"
+                ),
+                "evidence_count": assertion.get("evidence_count"),
+            }
+        )
+
+    hypotheses_list: list[Any] = list(canonical_hypotheses)
+    if not hypotheses_list:
         return {"status": "ineligible", "reason": "no_hypothesis"}
 
     policy = _resolve_relation_auto_apply_policy(
@@ -455,7 +485,7 @@ def _resolve_relation_auto_apply_candidate(
     candidates: list[dict[str, Any]] = []
     last_failure_reason = "no_eligible_hypothesis"
     last_failure_details: dict[str, Any] = {}
-    for idx, hypothesis in enumerate(hypotheses):
+    for idx, hypothesis in enumerate(hypotheses_list):
         if not isinstance(hypothesis, dict):
             last_failure_reason = "invalid_hypothesis_payload"
             continue
@@ -800,6 +830,7 @@ def _dispatch_relation_completion_task(
                 "names": 1,
                 "relationships": 1,
                 "hypothesized_relations": 1,
+                "uncertain_relationship_assertions": 1,
             },
         )
         if not instance_doc:
