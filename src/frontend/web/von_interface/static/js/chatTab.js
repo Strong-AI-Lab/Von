@@ -578,8 +578,9 @@ const TOOL_USE_SETTING_REFRESH_COOLDOWN_MS = 30_000;
 const THINKING_STATUS_ACTIVE = 'active';
 const THINKING_STATUS_WAITING = 'waiting';
 const THINKING_STATUS_STALLED = 'stalled';
-const THINKING_CARD_TOGGLE_LABEL_EXPANDED = 'Collapse';
-const THINKING_CARD_TOGGLE_LABEL_COLLAPSED = 'Expand';
+const THINKING_CARD_TOGGLE_ARIA_LABEL_EXPANDED = 'Collapse thinking details';
+const THINKING_CARD_TOGGLE_ARIA_LABEL_COLLAPSED = 'Expand thinking details';
+const THINKING_ACTIVITY_LOW_LEVEL_EVENT_KINDS = new Set(['llm_call_chunk', 'heartbeat']);
 const THINKING_TERMINAL_PROGRESS_STATUSES = new Set([
     'completed',
     'done',
@@ -816,13 +817,11 @@ function syncThinkingCardExpandedStateToDom(request = getThinkingCardDisplayRequ
     if (toggleButton) {
         toggleButton.setAttribute('aria-expanded', expanded ? 'true' : 'false');
         if (expanded) {
-            toggleButton.textContent = THINKING_CARD_TOGGLE_LABEL_EXPANDED;
-            toggleButton.setAttribute('aria-label', 'Collapse thinking details');
-            toggleButton.title = 'Collapse thinking details';
+            toggleButton.setAttribute('aria-label', THINKING_CARD_TOGGLE_ARIA_LABEL_EXPANDED);
+            toggleButton.title = THINKING_CARD_TOGGLE_ARIA_LABEL_EXPANDED;
         } else {
-            toggleButton.textContent = THINKING_CARD_TOGGLE_LABEL_COLLAPSED;
-            toggleButton.setAttribute('aria-label', 'Expand thinking details');
-            toggleButton.title = 'Expand thinking details';
+            toggleButton.setAttribute('aria-label', THINKING_CARD_TOGGLE_ARIA_LABEL_COLLAPSED);
+            toggleButton.title = THINKING_CARD_TOGGLE_ARIA_LABEL_COLLAPSED;
         }
     }
 }
@@ -868,6 +867,9 @@ function createThinkingCardHistorySnapshot(request) {
     const latestProgress = (request.latestProgress && typeof request.latestProgress === 'object')
         ? { ...request.latestProgress }
         : null;
+    const activityHistory = Array.isArray(request.activityHistory)
+        ? request.activityHistory.map((entry) => ({ ...entry }))
+        : [];
     const toolHistory = Array.isArray(request.toolUseProgressHistory)
         ? request.toolUseProgressHistory.map((entry) => ({ ...entry }))
         : [];
@@ -887,6 +889,7 @@ function createThinkingCardHistorySnapshot(request) {
     );
 
     return {
+        activityHistory,
         toolUseProgressHistory: toolHistory,
         workflowDiscovery,
         latestProgress,
@@ -1191,6 +1194,14 @@ export function __testOnly_setUnambiguousTimestampTooltip(element, value, prefix
     setUnambiguousTimestampTooltip(element, value, prefix);
 }
 
+export function __testOnly_normaliseThinkingActivityHistory(diagnosticEvents = []) {
+    return normaliseThinkingActivityHistory(diagnosticEvents);
+}
+
+export function __testOnly_renderThinkingCardBodyHTML(request = null) {
+    return renderThinkingCardBodyHTML(request);
+}
+
 function updateThinkingCardStatusBadge(progress) {
     const badgeEl = document.getElementById('thinkingCardStatusBadge');
     if (!badgeEl) {
@@ -1332,6 +1343,268 @@ function recordToolUseHistory(request, progress) {
     history.push({ tool, workflowTask, batchSize, phase, resultSummary, success: isSuccess ? true : (isFail ? false : null) });
 }
 
+function normaliseThinkingActivityString(value) {
+    return (typeof value === 'string') ? value.trim() : '';
+}
+
+function formatThinkingActivityFallbackLabel(value) {
+    const raw = normaliseThinkingActivityString(value);
+    if (!raw) {
+        return '';
+    }
+    return raw
+        .replace(/_/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/^\w/, (c) => c.toUpperCase());
+}
+
+function deriveThinkingActivityState(status, eventKind) {
+    const statusLower = normaliseThinkingActivityString(status).toLowerCase();
+    const kindLower = normaliseThinkingActivityString(eventKind).toLowerCase();
+
+    if (statusLower === 'error' || statusLower === 'failed' || statusLower === 'tool_failed' || statusLower === 'tool_blocked' || kindLower === 'error') {
+        return 'failure';
+    }
+
+    if (
+        statusLower === 'completed'
+        || statusLower === 'done'
+        || statusLower === 'tool_invoked'
+        || statusLower === 'workflow_discovery_complete'
+        || statusLower === 'llm_call_end'
+        || statusLower === 'retry_end'
+        || statusLower === 'orchestrator_end'
+    ) {
+        return 'success';
+    }
+
+    return 'pending';
+}
+
+function buildThinkingActivityLabelAndDetail(entry) {
+    const status = normaliseThinkingActivityString(entry.status).toLowerCase();
+    const stageLabel = normaliseThinkingActivityString(entry.stage_label) || normaliseThinkingActivityString(entry.phase_label);
+    const stage = normaliseThinkingActivityString(entry.stage) || normaliseThinkingActivityString(entry.phase);
+    const tool = normaliseThinkingActivityString(entry.tool);
+    const workflowTask = normaliseThinkingActivityString(entry.workflow_task);
+    const subtask = normaliseThinkingActivityString(entry.subtask);
+    const model = normaliseThinkingActivityString(entry.model);
+    const provider = normaliseThinkingActivityString(entry.provider);
+    const resultSummary = normaliseThinkingActivityString(entry.result_summary);
+    const error = normaliseThinkingActivityString(entry.error);
+    const batchSize = Number.isFinite(entry.batch_size) ? Number(entry.batch_size) : null;
+
+    const stageText = stageLabel || formatThinkingActivityFallbackLabel(stage);
+    const toolName = tool || workflowTask || subtask;
+    const modelText = [model, provider].filter(Boolean).join(' · ');
+    const detailParts = [];
+    let label = '';
+
+    if (status === 'phase_transition') {
+        label = stageText || 'Phase transition';
+        if (stage && stageText.toLowerCase() !== stage.toLowerCase()) {
+            detailParts.push(formatThinkingActivityFallbackLabel(stage));
+        }
+    } else if (status === 'workflow_discovery') {
+        label = 'Searching workflows';
+    } else if (status === 'workflow_discovery_complete') {
+        label = 'Found workflows';
+    } else if (status === 'orchestrator_start') {
+        label = 'Starting orchestrator';
+    } else if (status === 'orchestrator_end') {
+        label = 'Finished orchestrator';
+    } else if (status === 'llm_call_start') {
+        label = 'Starting LLM call';
+        if (modelText) {
+            detailParts.push(modelText);
+        }
+    } else if (status === 'llm_call_chunk') {
+        label = 'Streaming LLM output';
+        if (modelText) {
+            detailParts.push(modelText);
+        }
+    } else if (status === 'llm_call_end') {
+        label = 'Completed LLM call';
+        if (modelText) {
+            detailParts.push(modelText);
+        }
+    } else if (status === 'tool_call_start') {
+        label = toolName ? `Starting ${toolName}` : 'Starting tool call';
+    } else if (status === 'tool_invoked') {
+        label = toolName ? `${toolName} completed` : 'Tool call completed';
+    } else if (status === 'tool_failed') {
+        label = toolName ? `${toolName} failed` : 'Tool call failed';
+    } else if (status === 'tool_blocked') {
+        label = toolName ? `${toolName} blocked` : 'Tool call blocked';
+    } else if (status === 'retry_start') {
+        label = 'Retrying step';
+        if (subtask) {
+            detailParts.push(subtask);
+        }
+    } else if (status === 'retry_end') {
+        label = 'Retry completed';
+        if (subtask) {
+            detailParts.push(subtask);
+        }
+    } else if (status === 'heartbeat') {
+        label = 'Waiting for updates';
+        if (stageText) {
+            detailParts.push(stageText);
+        }
+    } else if (status === 'completed' || status === 'done') {
+        label = 'Turn completed';
+    } else if (status === 'error' || status === 'failed') {
+        label = 'Turn failed';
+    } else if (toolName) {
+        label = toolName;
+    } else if (stageText) {
+        label = stageText;
+    } else if (stage) {
+        label = formatThinkingActivityFallbackLabel(stage);
+    } else if (entry.status) {
+        label = formatThinkingActivityFallbackLabel(entry.status);
+    } else if (entry.event_kind) {
+        label = formatThinkingActivityFallbackLabel(entry.event_kind);
+    } else {
+        label = 'Activity update';
+    }
+
+    if (batchSize !== null) {
+        detailParts.push(`batch ${batchSize}`);
+    }
+    if (resultSummary) {
+        detailParts.push(resultSummary);
+    } else if (error) {
+        detailParts.push(error);
+    }
+
+    return {
+        label,
+        detail: detailParts.join(' · ')
+    };
+}
+
+function buildThinkingActivityGroupingKey(entry) {
+    const status = normaliseThinkingActivityString(entry.status).toLowerCase();
+    const eventKind = normaliseThinkingActivityString(entry.eventKind).toLowerCase();
+    const stage = normaliseThinkingActivityString(entry.stage).toLowerCase();
+    const subtask = normaliseThinkingActivityString(entry.subtask).toLowerCase();
+    const model = normaliseThinkingActivityString(entry.model).toLowerCase();
+    return `${status}::${eventKind}::${stage}::${subtask}::${model}`;
+}
+
+function normaliseThinkingActivityHistory(diagnosticEvents) {
+    if (!Array.isArray(diagnosticEvents) || diagnosticEvents.length === 0) {
+        return [];
+    }
+
+    const normalised = [];
+
+    for (const rawEntry of diagnosticEvents) {
+        if (!rawEntry || typeof rawEntry !== 'object') {
+            continue;
+        }
+
+        const status = normaliseThinkingActivityString(rawEntry.status);
+        const eventKind = normaliseThinkingActivityString(rawEntry.event_kind);
+        const stage = normaliseThinkingActivityString(rawEntry.stage) || normaliseThinkingActivityString(rawEntry.phase);
+        const subtask = normaliseThinkingActivityString(rawEntry.subtask)
+            || normaliseThinkingActivityString(rawEntry.tool)
+            || normaliseThinkingActivityString(rawEntry.workflow_task);
+        const model = normaliseThinkingActivityString(rawEntry.model);
+        const sequenceNo = Number.isFinite(rawEntry.sequence_no) ? Number(rawEntry.sequence_no) : null;
+        const atUtc = normaliseThinkingActivityString(rawEntry.at_utc);
+        const state = deriveThinkingActivityState(status, eventKind);
+        const isLowLevel = THINKING_ACTIVITY_LOW_LEVEL_EVENT_KINDS.has(eventKind.toLowerCase()) || status.toLowerCase() === 'heartbeat';
+        const labelAndDetail = buildThinkingActivityLabelAndDetail(rawEntry);
+
+        const entry = {
+            sequenceNo,
+            atUtc,
+            stage,
+            status,
+            eventKind,
+            label: labelAndDetail.label,
+            detail: labelAndDetail.detail,
+            state,
+            isLowLevel,
+            groupCount: 1,
+            subtask,
+            model
+        };
+
+        if (isLowLevel && normalised.length > 0) {
+            const previous = normalised[normalised.length - 1];
+            const groupingKey = buildThinkingActivityGroupingKey(entry);
+            if (previous.isLowLevel && previous.groupingKey === groupingKey) {
+                previous.groupCount = Number(previous.groupCount || 1) + 1;
+                if (sequenceNo !== null) {
+                    previous.sequenceNo = sequenceNo;
+                }
+                if (atUtc) {
+                    previous.atUtc = atUtc;
+                }
+                if (entry.detail) {
+                    previous.detail = entry.detail;
+                }
+                continue;
+            }
+            entry.groupingKey = groupingKey;
+        } else if (isLowLevel) {
+            entry.groupingKey = buildThinkingActivityGroupingKey(entry);
+        }
+
+        normalised.push(entry);
+    }
+
+    return normalised.map(({ groupingKey: _groupingKey, ...entry }) => entry);
+}
+
+function renderThinkingActivityHistoryHTML(request) {
+    if (!request || typeof request !== 'object') {
+        return '';
+    }
+
+    const activityHistory = Array.isArray(request.activityHistory) ? request.activityHistory : [];
+    if (activityHistory.length === 0) {
+        return '';
+    }
+
+    const items = [];
+    for (const entry of activityHistory) {
+        if (!entry || typeof entry !== 'object') {
+            continue;
+        }
+
+        const label = normaliseThinkingActivityString(entry.label);
+        if (!label) {
+            continue;
+        }
+
+        const statusClass = (entry.state === 'success' || entry.state === 'failure') ? entry.state : 'pending';
+        const statusIcon = statusClass === 'success' ? '✓' : (statusClass === 'failure' ? '✗' : '');
+        const detailParts = [];
+        if (Number.isFinite(entry.groupCount) && Number(entry.groupCount) > 1) {
+            detailParts.push(`${Number(entry.groupCount)} updates`);
+        }
+        if (normaliseThinkingActivityString(entry.detail)) {
+            detailParts.push(normaliseThinkingActivityString(entry.detail));
+        }
+        const detailLabel = detailParts.length > 0
+            ? `<span class="thinking-card-tool-result">${escapeHtml(detailParts.join(' · '))}</span>`
+            : '';
+
+        const rowClass = entry.isLowLevel ? 'thinking-card-tool thinking-card-activity is-low-level' : 'thinking-card-tool thinking-card-activity';
+        items.push(`<div class="${rowClass}">
+            <span class="thinking-card-tool-status ${statusClass}">${statusIcon}</span>
+            <span class="thinking-card-tool-name">${escapeHtml(label)}</span>${detailLabel}
+        </div>`);
+    }
+
+    return items.join('');
+}
+
 function formatThinkingDuration(elapsedMs) {
     const ms = Number.isFinite(elapsedMs) ? Math.max(0, Number(elapsedMs)) : 0;
     const totalSeconds = Math.floor(ms / 1000);
@@ -1428,7 +1701,8 @@ function renderWorkflowDiscoveryHTML(workflows) {
  * JVNAUTOSCI-1076: Combines tool history with workflow suggestions.
  */
 function renderThinkingCardBodyHTML(request) {
-    const toolHistoryHtml = renderToolHistoryHTML(request);
+    const activityHistoryHtml = renderThinkingActivityHistoryHTML(request);
+    const toolHistoryHtml = activityHistoryHtml || renderToolHistoryHTML(request);
     const workflowHtml = request?.workflowDiscovery?.matches
         ? renderWorkflowDiscoveryHTML(request.workflowDiscovery.matches)
         : '';
@@ -1638,6 +1912,10 @@ function startToolUseProgressPolling(request) {
             setLoadingIndicatorText(formatToolUseProgressText(progress, request));
             updateThinkingCardMeta(request, progress);
             recordToolUseHistory(request, progress);
+            request.activityHistory = normaliseThinkingActivityHistory(progress?.diagnostic_events);
+            if (request.activityHistory.length > 80) {
+                request.activityHistory = request.activityHistory.slice(-80);
+            }
 
             // JVNAUTOSCI-1076: Capture workflow discovery from progress
             if (progress.workflow_discovery && progress.workflow_discovery.matches) {
@@ -14888,6 +15166,7 @@ function buildThinkingDiagnosticsPayload(request) {
         elapsed_ms: elapsedMs,
         prompt_preview: typeof request.promptRaw === 'string' ? request.promptRaw.slice(0, 1000) : null,
         latest_progress: request.latestProgress || null,
+        activity_history: Array.isArray(request.activityHistory) ? request.activityHistory.slice(-40) : [],
         progress_events: Array.isArray(request.progressEvents) ? request.progressEvents.slice(-40) : [],
         phase_history: Array.isArray(request.phaseHistory) ? request.phaseHistory.slice(-40) : [],
         tool_history: Array.isArray(request.toolUseProgressHistory) ? request.toolUseProgressHistory.slice(-40) : [],
@@ -15424,6 +15703,7 @@ async function handleSendPrompt(options = {}) {
         aborted: false,
         clientRequestId,
         thinkingStartedAtMs: Date.now(),
+        activityHistory: [],
         toolUseProgressHistory: [],
         latestProgress: null,
         progressEvents: [],

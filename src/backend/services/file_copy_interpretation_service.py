@@ -69,12 +69,17 @@ def extract_image_metadata(data_bytes: bytes) -> dict[str, Any]:
             image_for_palette = image.convert("RGB")
             # Quantise to keep palette extraction fast and deterministic.
             palette_image = image_for_palette.quantize(colors=8, method=2)
-            palette_data = [int(pixel) for pixel in palette_image.getdata()]
+            palette_data: list[int] = []
+            for pixel in palette_image.getdata():
+                if isinstance(pixel, (int, float)):
+                    palette_data.append(int(pixel))
             palette_counts = Counter(palette_data)
             palette = palette_image.getpalette() or []
             dominant_colours: list[list[int]] = []
-            for index, _count in palette_counts.most_common(3):
-                base = int(index) * 3
+            for index_raw, _count in palette_counts.most_common(3):
+                if not isinstance(index_raw, (int, float)):
+                    continue
+                base = int(index_raw) * 3
                 if base + 2 < len(palette):
                     dominant_colours.append(
                         [int(palette[base]), int(palette[base + 1]), int(palette[base + 2])]
