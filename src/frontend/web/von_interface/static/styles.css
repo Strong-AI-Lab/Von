@@ -10428,6 +10428,36 @@ body.settings-body {
     margin-bottom: 16px;
 }
 
+.relationships-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: flex-end;
+    margin-bottom: 10px;
+}
+
+.relationships-toolbar-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 170px;
+}
+
+.relationships-toolbar-group label {
+    font-size: 0.85rem;
+    color: #334155;
+    font-weight: 600;
+}
+
+.relationships-toolbar-select {
+    min-height: 32px;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 0.9rem;
+    background: #ffffff;
+}
+
 .predicate-extent-table {
     width: 100%;
     border-collapse: collapse;
@@ -10486,6 +10516,63 @@ body.settings-body {
 
 .predicate-extent-table td.source-structured {
     color: #28a745;
+}
+
+.relationship-state-badge {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 999px;
+    padding: 2px 8px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    line-height: 1.2;
+}
+
+.relationship-state-badge.state-asserted {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.relationship-state-badge.state-uncertain {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.relationship-confidence-cell,
+.relationship-provenance-cell {
+    font-size: 0.85rem;
+    color: #334155;
+}
+
+.relationship-action-button {
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 0.75rem;
+    line-height: 1.1;
+    cursor: pointer;
+    margin-right: 4px;
+}
+
+.relationship-action-confirm {
+    background: #e0f2fe;
+    color: #075985;
+}
+
+.relationship-action-reject {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.relationship-action-readonly {
+    font-size: 0.75rem;
+    color: #64748b;
+}
+
+@media (max-width: 640px) {
+    .relationships-toolbar-group {
+        min-width: 100%;
+    }
 }
 
 .predicate-extent-add-row td {

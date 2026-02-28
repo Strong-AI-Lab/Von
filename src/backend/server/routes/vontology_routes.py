@@ -3613,6 +3613,114 @@ def get_relationships_extent_route():
         )
 
 
+@vontology_bp.route("/relationships/uncertain/promote", methods=["POST"])
+def promote_uncertain_relationship_route():
+    """Promote an uncertain relationship assertion into an asserted relation."""
+    data = request.get_json(silent=True) or {}
+    source_id = str(data.get("source_id") or "").strip()
+    assertion_id = str(data.get("assertion_id") or "").strip()
+    operator = str(data.get("operator") or "ui").strip() or "ui"
+
+    if not source_id:
+        return jsonify({"success": False, "error": "Missing 'source_id'."}), 400
+    if not assertion_id:
+        return jsonify({"success": False, "error": "Missing 'assertion_id'."}), 400
+
+    try:
+        from ...services.uncertain_relationship_service import (
+            promote_uncertain_relationship_assertion,
+        )
+
+        result = promote_uncertain_relationship_assertion(
+            source_id=source_id,
+            assertion_id=assertion_id,
+            operator=operator,
+        )
+        if bool(result.get("success")):
+            return jsonify(result), 200
+
+        error = str(result.get("error") or "promotion_failed")
+        status_code = 400
+        if error in {"source_not_found", "assertion_not_found"}:
+            status_code = 404
+        elif error in {"assertion_not_promotable"}:
+            status_code = 409
+        return jsonify(result), status_code
+    except Exception as exc:
+        current_app.logger.error(
+            "Error promoting uncertain assertion source_id=%s assertion_id=%s: %s",
+            source_id,
+            assertion_id,
+            exc,
+            exc_info=True,
+        )
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "Failed to promote uncertain relationship due to an internal server error.",
+                }
+            ),
+            500,
+        )
+
+
+@vontology_bp.route("/relationships/uncertain/reject", methods=["POST"])
+def reject_uncertain_relationship_route():
+    """Reject an uncertain relationship assertion with an operator reason."""
+    data = request.get_json(silent=True) or {}
+    source_id = str(data.get("source_id") or "").strip()
+    assertion_id = str(data.get("assertion_id") or "").strip()
+    reason = str(data.get("reason") or "").strip()
+    operator = str(data.get("operator") or "ui").strip() or "ui"
+
+    if not source_id:
+        return jsonify({"success": False, "error": "Missing 'source_id'."}), 400
+    if not assertion_id:
+        return jsonify({"success": False, "error": "Missing 'assertion_id'."}), 400
+    if not reason:
+        return jsonify({"success": False, "error": "Missing 'reason'."}), 400
+
+    try:
+        from ...services.uncertain_relationship_service import (
+            reject_uncertain_relationship_assertion,
+        )
+
+        result = reject_uncertain_relationship_assertion(
+            source_id=source_id,
+            assertion_id=assertion_id,
+            reason=reason,
+            operator=operator,
+        )
+        if bool(result.get("success")):
+            return jsonify(result), 200
+
+        error = str(result.get("error") or "rejection_failed")
+        status_code = 400
+        if error in {"source_not_found", "assertion_not_found"}:
+            status_code = 404
+        elif error in {"assertion_already_promoted"}:
+            status_code = 409
+        return jsonify(result), status_code
+    except Exception as exc:
+        current_app.logger.error(
+            "Error rejecting uncertain assertion source_id=%s assertion_id=%s: %s",
+            source_id,
+            assertion_id,
+            exc,
+            exc_info=True,
+        )
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "Failed to reject uncertain relationship due to an internal server error.",
+                }
+            ),
+            500,
+        )
+
+
 @vontology_bp.route("/relationships/add", methods=["POST"])
 def add_relationship_route():
     """

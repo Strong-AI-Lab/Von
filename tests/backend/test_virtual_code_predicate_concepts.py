@@ -436,6 +436,43 @@ def test_relationship_extent_route_supports_uncertain_filters(app_client, monkey
     assert captured_kwargs.get("uncertainty_mode") == "uncertain_only"
 
 
+def test_uncertain_relationship_promote_route_returns_success_payload(
+    app_client, monkeypatch
+):
+    _, client = app_client
+
+    monkeypatch.setattr(
+        "src.backend.services.uncertain_relationship_service.promote_uncertain_relationship_assertion",
+        lambda **kwargs: {
+            "success": True,
+            "assertion": {"assertion_id": kwargs.get("assertion_id"), "status": "promoted"},
+            "write_result": {"success": True},
+        },
+    )
+
+    resp = client.post(
+        "/vontology/api/vontology/relationships/uncertain/promote",
+        json={"source_id": "#V#focus", "assertion_id": "u1", "operator": "unit_test"},
+    )
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload.get("success") is True
+    assert payload.get("assertion", {}).get("status") == "promoted"
+
+
+def test_uncertain_relationship_reject_route_requires_reason(app_client):
+    _, client = app_client
+
+    resp = client.post(
+        "/vontology/api/vontology/relationships/uncertain/reject",
+        json={"source_id": "#V#focus", "assertion_id": "u1"},
+    )
+    assert resp.status_code == 400
+    payload = resp.get_json()
+    assert payload.get("success") is False
+    assert "reason" in (payload.get("error") or "").lower()
+
+
 def test_upsert_name_for_virtual_code_predicate_concept(app_client, monkeypatch):
     _, client = app_client
 
