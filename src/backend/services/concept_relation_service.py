@@ -25,6 +25,19 @@ _ARG_INDEX_SUBJECT = 1  # Align with example payloads (1-based indexing)
 _ARG_INDEX_FIRST_OBJECT = 2
 _DEFAULT_LIMIT = 200
 _MAX_LIMIT = 500
+_UNCERTAINTY_MODE_ASSERTED_ONLY = "asserted_only"
+_UNCERTAINTY_MODE_UNCERTAIN_ONLY = "uncertain_only"
+_UNCERTAINTY_MODE_INCLUDE_UNCERTAIN = "include_uncertain"
+
+_UNCERTAINTY_RETRIEVAL_STATS: Dict[str, int] = {
+    "payload_calls_total": 0,
+    "find_calls_total": 0,
+    "asserted_only_calls": 0,
+    "uncertain_only_calls": 0,
+    "include_uncertain_calls": 0,
+    "uncertain_rows_returned": 0,
+    "uncertainty_mode_errors": 0,
+}
 
 
 @dataclass
@@ -36,6 +49,9 @@ class RelationOptions:
     limit: Optional[int] = None
     offset: Optional[int] = None
     include_concept_preview: bool = True
+    include_uncertain: bool = False
+    uncertainty_mode: Optional[str] = None
+    uncertainty_statuses: Optional[Sequence[str]] = None
 
 
 def build_concept_relations_payload(
@@ -48,6 +64,9 @@ def build_concept_relations_payload(
     limit: Optional[int] = None,
     offset: Optional[int] = None,
     include_concept_preview: bool = True,
+    include_uncertain: bool = False,
+    uncertainty_mode: Optional[str] = None,
+    uncertainty_statuses: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     """Return a structured payload capturing relations connected to ``concept``.
 
@@ -84,6 +103,12 @@ def build_concept_relations_payload(
             key for key in predicate_allow_list if isinstance(key, str)
         )
     include_text_relations = bool(include_text_relations_arg1)
+    mode_value, include_asserted_rows, include_uncertain_rows = _resolve_uncertainty_mode(
+        uncertainty_mode=uncertainty_mode,
+        include_uncertain=include_uncertain,
+    )
+    status_filter = _normalise_uncertainty_statuses(uncertainty_statuses)
+    _record_uncertainty_mode_usage(mode_value)
     snippet_mode = (
         str(include_text_relations_arg1).strip().lower()
         if isinstance(include_text_relations_arg1, str)
@@ -113,7 +138,7 @@ def build_concept_relations_payload(
             return
         results.append(entry)
 
-    if include_relations_arg1:
+    if include_asserted_rows and include_relations_arg1:
         relationships = (concept.get("relationships") or {}) if concept else {}
         _collect_structural_relations_for_subject(
             concept_id=concept_id,
@@ -124,7 +149,7 @@ def build_concept_relations_payload(
             consumer=_record,
         )
 
-    if include_relations_any_arg:
+    if include_asserted_rows and include_relations_any_arg:
         _collect_structural_relations_for_targets(
             concept_id=concept_id,
             predicate_allowed=_predicate_allowed,
@@ -134,7 +159,7 @@ def build_concept_relations_payload(
             consumer=_record,
         )
 
-    if include_text_relations:
+    if include_asserted_rows and include_text_relations:
         _collect_text_relations_for_subject(
             concept_id=concept_id,
             predicate_allowed=_predicate_allowed,
@@ -142,6 +167,28 @@ def build_concept_relations_payload(
             preview_cache=preview_cache,
             snippet_mode=snippet_mode,
             consumer=_record,
+        )
+
+    if include_uncertain_rows:
+        uncertain_total = _collect_uncertain_relations_for_subject(
+            concept_id=concept_id,
+            predicate_allowed=_predicate_allowed,
+            include_preview=include_concept_preview,
+            preview_cache=preview_cache,
+            consumer=_record,
+            status_filter=status_filter,
+        )
+        if include_relations_any_arg:
+            uncertain_total += _collect_uncertain_relations_for_targets(
+                concept_id=concept_id,
+                predicate_allowed=_predicate_allowed,
+                include_preview=include_concept_preview,
+                preview_cache=preview_cache,
+                consumer=_record,
+                status_filter=status_filter,
+            )
+        _UNCERTAINTY_RETRIEVAL_STATS["uncertain_rows_returned"] += max(
+            0, int(uncertain_total)
         )
 
     paging = {
@@ -155,6 +202,11 @@ def build_concept_relations_payload(
         "relations_found": total_matches,
         "relations": results,
         "paging": paging,
+        "uncertainty_diagnostics": {
+            "mode": mode_value,
+            "include_uncertain": include_uncertain_rows,
+            "statuses": status_filter or None,
+        },
     }
 
 
@@ -170,6 +222,9 @@ def find_relations_with_argument(
     limit: Optional[int] = None,
     offset: Optional[int] = None,
     sort_by: Optional[str] = None,
+    include_uncertain: bool = False,
+    uncertainty_mode: Optional[str] = None,
+    uncertainty_statuses: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     """Find relation hits where ``concept_id`` appears in any argument position.
 
@@ -195,6 +250,13 @@ def find_relations_with_argument(
 
     include_structural = relation_filter in {"any", "binary"}
     include_text = relation_filter in {"any", "text"}
+    mode_value, include_asserted_rows, include_uncertain_rows = _resolve_uncertainty_mode(
+        uncertainty_mode=uncertainty_mode,
+        include_uncertain=include_uncertain,
+    )
+    status_filter = _normalise_uncertainty_statuses(uncertainty_statuses)
+    _record_uncertainty_mode_usage(mode_value)
+    _UNCERTAINTY_RETRIEVAL_STATS["find_calls_total"] += 1
     include_arg1 = argument_filter in (None, _ARG_INDEX_SUBJECT)
     include_arg2_or_later = argument_filter is None or argument_filter >= _ARG_INDEX_FIRST_OBJECT
 
@@ -206,7 +268,7 @@ def find_relations_with_argument(
         {"concept_id": 1, "name": 1, "relationships": 1, "updated_at": 1},
     )
 
-    if include_structural and subject_doc:
+    if include_asserted_rows and include_structural and subject_doc:
         relationships = (subject_doc.get("relationships") or {}) if subject_doc else {}
         source_updated_at = _isoformat(subject_doc.get("updated_at")) if subject_doc else None
         for predicate_id, raw_targets in relationships.items():
@@ -253,10 +315,12 @@ def find_relations_with_argument(
                             exclude={resolved_concept_id},
                         ),
                         "score": 1.0,
+                        "is_asserted": True,
+                        "relation_state": "asserted",
                     }
                 )
 
-    if include_structural and include_arg2_or_later:
+    if include_asserted_rows and include_structural and include_arg2_or_later:
         incoming_pipeline = [
             {"$match": {"relationships": {"$type": "object"}}},
             {
@@ -327,10 +391,12 @@ def find_relations_with_argument(
                             exclude={resolved_concept_id},
                         ),
                         "score": 1.0,
+                        "is_asserted": True,
+                        "relation_state": "asserted",
                     }
                 )
 
-    if include_text and include_arg1:
+    if include_asserted_rows and include_text and include_arg1:
         source_preview = _resolve_concept_preview(
             resolved_concept_id,
             include_concept_preview,
@@ -362,6 +428,8 @@ def find_relations_with_argument(
                 "access_granted": source_preview is not None or not include_concept_preview,
                 "follow_up_actions": [],
                 "score": 1.0,
+                "is_asserted": True,
+                "relation_state": "asserted",
             }
             snippet = _make_argument_match_snippet(
                 text=text_value,
@@ -372,7 +440,7 @@ def find_relations_with_argument(
                 hit["text_snippet"] = snippet
             hits.append(hit)
 
-    if include_text and include_arg2_or_later:
+    if include_asserted_rows and include_text and include_arg2_or_later:
         escaped = re.escape(resolved_concept_id)
         text_values = list(
             TextValuesRepository.find(
@@ -434,6 +502,8 @@ def find_relations_with_argument(
                         exclude={resolved_concept_id},
                     ),
                     "score": _compute_text_match_score(text_value, resolved_concept_id),
+                    "is_asserted": True,
+                    "relation_state": "asserted",
                 }
                 if include_concept_preview:
                     hit["target_concept_preview"] = _resolve_concept_preview(
@@ -444,6 +514,31 @@ def find_relations_with_argument(
                 if snippet:
                     hit["text_snippet"] = snippet
                 hits.append(hit)
+
+    if include_uncertain_rows:
+        hits.extend(
+            _collect_uncertain_argument_hits_for_subject(
+                concept_id=resolved_concept_id,
+                argument_filter=argument_filter,
+                relation_filter=relation_filter,
+                predicate_terms=predicate_terms,
+                include_concept_preview=include_concept_preview,
+                preview_cache=preview_cache,
+                status_filter=status_filter,
+            )
+        )
+        if include_arg2_or_later:
+            hits.extend(
+                _collect_uncertain_argument_hits_for_targets(
+                    concept_id=resolved_concept_id,
+                    argument_filter=argument_filter,
+                    relation_filter=relation_filter,
+                    predicate_terms=predicate_terms,
+                    include_concept_preview=include_concept_preview,
+                    preview_cache=preview_cache,
+                    status_filter=status_filter,
+                )
+            )
 
     deduped_hits = _dedupe_argument_hits(hits)
     sorted_hits = _sort_argument_hits(deduped_hits, sort_by)
@@ -459,6 +554,11 @@ def find_relations_with_argument(
             "offset": resolved_offset,
             "returned": len(paged_hits),
             "total_available": len(sorted_hits),
+        },
+        "uncertainty_diagnostics": {
+            "mode": mode_value,
+            "include_uncertain": include_uncertain_rows,
+            "statuses": status_filter or None,
         },
     }
 
@@ -603,6 +703,8 @@ def _collect_text_relations_for_subject(
             },
             "follow_up_actions": [],
             "access_granted": True,
+            "is_asserted": True,
+            "relation_state": "asserted",
         }
         if include_preview:
             entry["source_preview"] = _resolve_concept_preview(
@@ -636,6 +738,8 @@ def _make_structural_entry(
         "target_values": targets,
         "follow_up_actions": [],
         "access_granted": True,
+        "is_asserted": True,
+        "relation_state": "asserted",
     }
     if include_preview and source_id:
         entry["source_preview"] = _resolve_concept_preview(
@@ -760,6 +864,368 @@ def _normalise_relation_kind_filter(raw: Optional[str]) -> str:
     if value == "text":
         return "text"
     raise ValueError("relation_kind must be one of: any, binary, text")
+
+
+def _resolve_uncertainty_mode(
+    *,
+    uncertainty_mode: Optional[str],
+    include_uncertain: bool,
+) -> Tuple[str, bool, bool]:
+    if uncertainty_mode is None:
+        mode = (
+            _UNCERTAINTY_MODE_INCLUDE_UNCERTAIN
+            if include_uncertain
+            else _UNCERTAINTY_MODE_ASSERTED_ONLY
+        )
+    else:
+        mode = str(uncertainty_mode).strip().lower()
+        if mode in {"combined", "all"}:
+            mode = _UNCERTAINTY_MODE_INCLUDE_UNCERTAIN
+    if mode not in {
+        _UNCERTAINTY_MODE_ASSERTED_ONLY,
+        _UNCERTAINTY_MODE_UNCERTAIN_ONLY,
+        _UNCERTAINTY_MODE_INCLUDE_UNCERTAIN,
+    }:
+        _UNCERTAINTY_RETRIEVAL_STATS["uncertainty_mode_errors"] += 1
+        raise ValueError(
+            "uncertainty_mode must be one of: asserted_only, uncertain_only, include_uncertain"
+        )
+    if mode == _UNCERTAINTY_MODE_ASSERTED_ONLY:
+        return mode, True, False
+    if mode == _UNCERTAINTY_MODE_UNCERTAIN_ONLY:
+        return mode, False, True
+    return mode, True, True
+
+
+def _normalise_uncertainty_statuses(
+    raw_statuses: Optional[Sequence[str]],
+) -> List[str]:
+    if raw_statuses is None:
+        return []
+    if isinstance(raw_statuses, str):
+        candidates: Sequence[Any] = [raw_statuses]
+    else:
+        candidates = raw_statuses
+    out: List[str] = []
+    for item in candidates:
+        token = str(item or "").strip().lower()
+        if not token:
+            continue
+        out.append(token)
+    # stable dedupe
+    return list(dict.fromkeys(out))
+
+
+def _record_uncertainty_mode_usage(mode: str) -> None:
+    _UNCERTAINTY_RETRIEVAL_STATS["payload_calls_total"] += 1
+    if mode == _UNCERTAINTY_MODE_ASSERTED_ONLY:
+        _UNCERTAINTY_RETRIEVAL_STATS["asserted_only_calls"] += 1
+    elif mode == _UNCERTAINTY_MODE_UNCERTAIN_ONLY:
+        _UNCERTAINTY_RETRIEVAL_STATS["uncertain_only_calls"] += 1
+    elif mode == _UNCERTAINTY_MODE_INCLUDE_UNCERTAIN:
+        _UNCERTAINTY_RETRIEVAL_STATS["include_uncertain_calls"] += 1
+
+
+def _coerce_uncertainty_entry(assertion: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "assertion_id": assertion.get("assertion_id"),
+        "status": assertion.get("status"),
+        "confidence_score": assertion.get("confidence_score"),
+        "provenance": assertion.get("provenance") or {},
+        "created_at_utc": assertion.get("created_at_utc"),
+        "updated_at_utc": assertion.get("updated_at_utc"),
+        "target_kind": assertion.get("target_kind"),
+    }
+
+
+def _collect_uncertain_relations_for_subject(
+    *,
+    concept_id: str,
+    predicate_allowed,
+    include_preview: bool,
+    preview_cache: Dict[str, Optional[Dict[str, Any]]],
+    consumer,
+    status_filter: Sequence[str],
+) -> int:
+    from .uncertain_relationship_service import list_uncertain_relationship_assertions
+
+    assertions = list_uncertain_relationship_assertions(
+        source_id=concept_id,
+        statuses=status_filter or None,
+        include_legacy=True,
+    )
+    emitted = 0
+    source_preview = (
+        _resolve_concept_preview(concept_id, include_preview, preview_cache)
+        if include_preview
+        else None
+    )
+    for assertion in assertions:
+        predicate_id = assertion.get("predicate")
+        if not predicate_allowed(predicate_id):
+            continue
+        target_value = assertion.get("target")
+        if target_value is None:
+            continue
+        target_text = str(target_value)
+        target_kind = str(assertion.get("target_kind") or "")
+        is_text = target_kind == "text" or not target_text.startswith("#V#")
+        entry: RelationValue = {
+            "relation_id": f"uncertain::{concept_id}::{assertion.get('assertion_id')}",
+            "source_concept_id": concept_id,
+            "predicate_id": predicate_id,
+            "relation_kind": "text" if is_text else "binary",
+            "matched_argument_indexes": [_ARG_INDEX_SUBJECT],
+            "target_values": [target_text],
+            "follow_up_actions": _build_follow_up_actions(
+                [target_text] if target_text.startswith("#V#") else [],
+                exclude={concept_id},
+            ),
+            "access_granted": source_preview is not None or not include_preview,
+            "is_asserted": False,
+            "relation_state": "uncertain",
+            "uncertainty": _coerce_uncertainty_entry(assertion),
+        }
+        if include_preview:
+            entry["source_preview"] = source_preview
+            if target_text.startswith("#V#"):
+                preview = _resolve_concept_preview(target_text, True, preview_cache)
+                if preview is not None:
+                    entry["target_previews"] = {target_text: preview}
+        if is_text:
+            entry["text_value"] = {
+                "text": target_text,
+                "lang": None,
+                "text_value_id": None,
+                "context": {
+                    "uncertainty_assertion_id": assertion.get("assertion_id"),
+                    "uncertainty_status": assertion.get("status"),
+                },
+            }
+        consumer(entry)
+        emitted += 1
+    return emitted
+
+
+def _collect_uncertain_relations_for_targets(
+    *,
+    concept_id: str,
+    predicate_allowed,
+    include_preview: bool,
+    preview_cache: Dict[str, Optional[Dict[str, Any]]],
+    consumer,
+    status_filter: Sequence[str],
+) -> int:
+    query: Dict[str, Any] = {"uncertain_relationship_assertions.target": concept_id}
+    if status_filter:
+        query["uncertain_relationship_assertions.status"] = {"$in": list(status_filter)}
+    cursor = ConceptsRepository.find(
+        query,
+        projection={
+            "concept_id": 1,
+            "uncertain_relationship_assertions": 1,
+        },
+    )
+    emitted = 0
+    target_preview = (
+        _resolve_concept_preview(concept_id, include_preview, preview_cache)
+        if include_preview
+        else None
+    )
+    for source_doc in cursor:
+        source_id = source_doc.get("concept_id")
+        if not isinstance(source_id, str) or not source_id.strip():
+            continue
+        source_id = source_id.strip()
+        assertions = source_doc.get("uncertain_relationship_assertions")
+        if not isinstance(assertions, list):
+            continue
+        source_preview = (
+            _resolve_concept_preview(source_id, include_preview, preview_cache)
+            if include_preview
+            else None
+        )
+        for assertion in assertions:
+            if not isinstance(assertion, dict):
+                continue
+            if str(assertion.get("target") or "") != concept_id:
+                continue
+            status_value = str(assertion.get("status") or "").strip().lower()
+            if status_filter and status_value not in status_filter:
+                continue
+            predicate_id = assertion.get("predicate")
+            if not predicate_allowed(predicate_id):
+                continue
+            entry: RelationValue = {
+                "relation_id": f"uncertain::{source_id}::{assertion.get('assertion_id')}::incoming",
+                "source_concept_id": source_id,
+                "predicate_id": predicate_id,
+                "relation_kind": "binary",
+                "matched_argument_indexes": [_ARG_INDEX_FIRST_OBJECT],
+                "target_values": [concept_id],
+                "follow_up_actions": _build_follow_up_actions(
+                    [source_id], exclude={concept_id}
+                ),
+                "access_granted": source_preview is not None or not include_preview,
+                "is_asserted": False,
+                "relation_state": "uncertain",
+                "uncertainty": _coerce_uncertainty_entry(assertion),
+            }
+            if include_preview:
+                entry["source_preview"] = source_preview
+                if target_preview is not None:
+                    entry["target_previews"] = {concept_id: target_preview}
+            consumer(entry)
+            emitted += 1
+    return emitted
+
+
+def _collect_uncertain_argument_hits_for_subject(
+    *,
+    concept_id: str,
+    argument_filter: Optional[int],
+    relation_filter: str,
+    predicate_terms: Sequence[str],
+    include_concept_preview: bool,
+    preview_cache: Dict[str, Optional[Dict[str, Any]]],
+    status_filter: Sequence[str],
+) -> List[Dict[str, Any]]:
+    from .uncertain_relationship_service import list_uncertain_relationship_assertions
+
+    assertions = list_uncertain_relationship_assertions(
+        source_id=concept_id,
+        statuses=status_filter or None,
+        include_legacy=True,
+    )
+    source_preview = _resolve_concept_preview(
+        concept_id,
+        include_concept_preview,
+        preview_cache,
+    )
+    hits: List[Dict[str, Any]] = []
+    for assertion in assertions:
+        predicate_id = assertion.get("predicate")
+        if not _predicate_matches_terms(predicate_id, predicate_terms):
+            continue
+        target_value = str(assertion.get("target") or "")
+        if not target_value:
+            continue
+        target_kind = str(assertion.get("target_kind") or "")
+        is_text = target_kind == "text" or not target_value.startswith("#V#")
+        if relation_filter == "binary" and is_text:
+            continue
+        if relation_filter == "text" and not is_text:
+            continue
+        matched_indexes = [_ARG_INDEX_SUBJECT]
+        if target_value == concept_id and not is_text:
+            matched_indexes.append(_ARG_INDEX_FIRST_OBJECT)
+        if not _argument_indexes_match(matched_indexes, argument_filter):
+            continue
+        hit: Dict[str, Any] = {
+            "source_concept_id": concept_id,
+            "predicate_concept_id": predicate_id,
+            "relation_kind": "text" if is_text else "binary",
+            "argument_indexes": matched_indexes,
+            "target_value": target_value,
+            "relation_metadata": {
+                "relation_id": f"uncertain::{concept_id}::{assertion.get('assertion_id')}",
+                "updated_at": assertion.get("updated_at_utc"),
+                "match_type": "uncertain_assertion",
+            },
+            "access_granted": source_preview is not None or not include_concept_preview,
+            "follow_up_actions": _build_follow_up_actions(
+                [target_value] if target_value.startswith("#V#") else [],
+                exclude={concept_id},
+            ),
+            "score": float(assertion.get("confidence_score") or 0.0),
+            "is_asserted": False,
+            "relation_state": "uncertain",
+            "uncertainty": _coerce_uncertainty_entry(assertion),
+        }
+        if include_concept_preview and target_value.startswith("#V#"):
+            hit["target_concept_preview"] = _resolve_concept_preview(
+                target_value,
+                True,
+                preview_cache,
+            )
+        hits.append(hit)
+    return hits
+
+
+def _collect_uncertain_argument_hits_for_targets(
+    *,
+    concept_id: str,
+    argument_filter: Optional[int],
+    relation_filter: str,
+    predicate_terms: Sequence[str],
+    include_concept_preview: bool,
+    preview_cache: Dict[str, Optional[Dict[str, Any]]],
+    status_filter: Sequence[str],
+) -> List[Dict[str, Any]]:
+    if relation_filter == "text":
+        return []
+    if not _argument_indexes_match([_ARG_INDEX_FIRST_OBJECT], argument_filter):
+        return []
+    query: Dict[str, Any] = {"uncertain_relationship_assertions.target": concept_id}
+    if status_filter:
+        query["uncertain_relationship_assertions.status"] = {"$in": list(status_filter)}
+    cursor = ConceptsRepository.find(
+        query,
+        projection={"concept_id": 1, "uncertain_relationship_assertions": 1},
+    )
+    target_preview = _resolve_concept_preview(
+        concept_id,
+        include_concept_preview,
+        preview_cache,
+    )
+    hits: List[Dict[str, Any]] = []
+    for doc in cursor:
+        source_id = doc.get("concept_id")
+        if not isinstance(source_id, str) or not source_id.strip():
+            continue
+        source_id = source_id.strip()
+        assertions = doc.get("uncertain_relationship_assertions")
+        if not isinstance(assertions, list):
+            continue
+        source_preview = _resolve_concept_preview(
+            source_id, include_concept_preview, preview_cache
+        )
+        for assertion in assertions:
+            if not isinstance(assertion, dict):
+                continue
+            if str(assertion.get("target") or "") != concept_id:
+                continue
+            if status_filter:
+                token = str(assertion.get("status") or "").strip().lower()
+                if token not in status_filter:
+                    continue
+            predicate_id = assertion.get("predicate")
+            if not _predicate_matches_terms(predicate_id, predicate_terms):
+                continue
+            hit: Dict[str, Any] = {
+                "source_concept_id": source_id,
+                "predicate_concept_id": predicate_id,
+                "relation_kind": "binary",
+                "argument_indexes": [_ARG_INDEX_FIRST_OBJECT],
+                "target_value": concept_id,
+                "relation_metadata": {
+                    "relation_id": f"uncertain::{source_id}::{assertion.get('assertion_id')}::incoming",
+                    "updated_at": assertion.get("updated_at_utc"),
+                    "match_type": "uncertain_assertion",
+                },
+                "access_granted": source_preview is not None or not include_concept_preview,
+                "follow_up_actions": _build_follow_up_actions(
+                    [source_id], exclude={concept_id}
+                ),
+                "score": float(assertion.get("confidence_score") or 0.0),
+                "is_asserted": False,
+                "relation_state": "uncertain",
+                "uncertainty": _coerce_uncertainty_entry(assertion),
+            }
+            if include_concept_preview:
+                hit["target_concept_preview"] = target_preview
+            hits.append(hit)
+    return hits
 
 
 def _normalise_predicate_terms(

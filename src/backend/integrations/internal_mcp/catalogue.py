@@ -121,6 +121,9 @@ def _get_concept_by_concept_id(**kwargs):
     limit = kwargs.get("limit")
     offset = kwargs.get("offset")
     include_concept_preview = kwargs.get("include_concept_preview", True)
+    include_uncertain = bool(kwargs.get("include_uncertain", False))
+    uncertainty_mode = kwargs.get("uncertainty_mode")
+    uncertainty_statuses = kwargs.get("uncertainty_statuses")
 
     if any(
         [include_relations_arg1, include_relations_any_arg, include_text_relations_arg1]
@@ -134,6 +137,9 @@ def _get_concept_by_concept_id(**kwargs):
             limit=limit,
             offset=offset,
             include_concept_preview=include_concept_preview,
+            include_uncertain=include_uncertain,
+            uncertainty_mode=uncertainty_mode,
+            uncertainty_statuses=uncertainty_statuses,
         )
         concept["relations"] = relations_payload
 
@@ -158,6 +164,9 @@ def _find_relations_with_argument(**kwargs):
         limit=kwargs.get("limit"),
         offset=kwargs.get("offset"),
         sort_by=kwargs.get("sort_by"),
+        include_uncertain=bool(kwargs.get("include_uncertain", False)),
+        uncertainty_mode=kwargs.get("uncertainty_mode"),
+        uncertainty_statuses=kwargs.get("uncertainty_statuses"),
     )
 
 
@@ -4538,13 +4547,18 @@ def _concept_fetch_input_schema() -> Schema:
             "limit": (int,),
             "offset": (int,),
             "include_concept_preview": (bool,),
+            "include_uncertain": (bool, type(None)),
+            "uncertainty_mode": (str, type(None)),
+            "uncertainty_statuses": (list, type(None)),
         },
         allow_unknown=True,
         description=(
             "get_concept_by_concept_id input: concept_id (required), plus optional"
             " flags to include structural/text relations (include_relations_arg1,"
             " include_relations_any_arg, include_text_relations_arg1), predicate"
-            " filtering, paging (limit/offset), and concept preview toggling."
+            " filtering, paging (limit/offset), concept preview toggling, and"
+            " uncertainty retrieval controls (include_uncertain, uncertainty_mode,"
+            " uncertainty_statuses)."
         ),
     )
 
@@ -4923,6 +4937,9 @@ def _find_relations_with_argument_input_schema() -> Schema:
             "limit": (int, type(None)),
             "offset": (int, type(None)),
             "sort_by": (str, type(None)),
+            "include_uncertain": (bool, type(None)),
+            "uncertainty_mode": (str, type(None)),
+            "uncertainty_statuses": (list, type(None)),
             "namespace": (str, type(None)),
         },
         allow_unknown=True,
@@ -4931,7 +4948,8 @@ def _find_relations_with_argument_input_schema() -> Schema:
             "(int or 'any'), predicate_filter (list of predicate IDs or substrings), "
             "relation_kind ('any'|'binary'|'text'), scope (optional), include_text_snippets "
             "(bool), include_concept_preview (bool), paging (limit/offset), sort_by, "
-            "and optional namespace passthrough."
+            "uncertainty retrieval controls (include_uncertain, uncertainty_mode,"
+            " uncertainty_statuses), and optional namespace passthrough."
         ),
     )
 
@@ -4950,7 +4968,7 @@ def _find_relations_with_argument_output_schema() -> Schema:
             "find_relations_with_argument output: concept_id, total_hits, hits[] "
             "(source_concept_id, predicate_concept_id, relation_kind, argument_indexes, "
             "target_value, optional previews/snippets, relation_metadata, access_granted, "
-            "follow_up_actions, score), and paging metadata."
+            "follow_up_actions, score, optional uncertainty metadata), and paging metadata."
         ),
     )
 

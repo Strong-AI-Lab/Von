@@ -1323,6 +1323,9 @@ async def _handle_fetch_concept(arguments: dict[str, Any]) -> list[TextContent]:
         limit = arguments.get("limit")
         offset = arguments.get("offset")
         include_concept_preview = arguments.get("include_concept_preview", True)
+        include_uncertain = bool(arguments.get("include_uncertain", False))
+        uncertainty_mode = arguments.get("uncertainty_mode")
+        uncertainty_statuses = arguments.get("uncertainty_statuses")
 
         if predicate_filter is not None and not isinstance(predicate_filter, list):
             if isinstance(predicate_filter, (tuple, set)):
@@ -1346,6 +1349,9 @@ async def _handle_fetch_concept(arguments: dict[str, Any]) -> list[TextContent]:
                 limit=limit,
                 offset=offset,
                 include_concept_preview=include_concept_preview,
+                include_uncertain=include_uncertain,
+                uncertainty_mode=uncertainty_mode,
+                uncertainty_statuses=uncertainty_statuses,
             )
             concept["relations"] = relations_payload
         return [_json_text(concept)]
@@ -1388,6 +1394,9 @@ async def _handle_find_relations_with_argument(
             limit=arguments.get("limit"),
             offset=arguments.get("offset"),
             sort_by=arguments.get("sort_by"),
+            include_uncertain=bool(arguments.get("include_uncertain", False)),
+            uncertainty_mode=arguments.get("uncertainty_mode"),
+            uncertainty_statuses=arguments.get("uncertainty_statuses"),
         )
         return [_json_text(payload)]
     except Exception as exc:
