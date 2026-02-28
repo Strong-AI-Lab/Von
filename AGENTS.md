@@ -32,6 +32,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 26. If you are reasonably confident task implementation is complete, proactively merge and close the task (commit/push, create PR, merge to `main`, and transition Jira) unless the user explicitly asks to hold.
 27. **Definition of fully complete Jira task**: implementation committed and pushed, PR created, PR merged to `main`, and Jira transitioned/commented accordingly.
 28. **Fail closed when Vontology is unavailable for Vontology-governed behaviour**: do not silently fall back to in-code prompts, stale context reuse, or heuristic hacks. If required Vontology prompts/workflow data cannot be resolved, no-op that transformation and emit a clear user-visible and telemetry-visible reason.
+29. **Minimal-imposition principle**: exhaust existing context/data/search first; ask humans only when necessary, and then only for concise, low-effort, high-value inputs they are likely to know without extra work.
 
 ## Core AI-Focused Documents
 - `docs/AINotes.md`: short-term memory and tactical log.
@@ -48,6 +49,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 - **Test through the real call path**: When modifying MCP tool handlers, don't just test the handler function directly—also test through the gateway layer (`InternalMCPGateway.invoke()`). Early-return error paths may bypass output schema validation, and handlers may produce response shapes that don't match expected schemas. If a tool has an `output_schema`, verify error responses work end-to-end.
 - Prefer lightweight telemetry where practical (timings, counters, and error summaries) to support UX and future introspection.
 - When fixing reliability issues, prefer **systemic, general fixes** over point fixes: update shared pipelines, validators, and policies so that behaviour remains stable across model changes and configuration drift.
+- For question-generation or elicitation flows, apply the minimal-imposition principle explicitly in prompts/fallbacks: avoid broad requests, and prefer one focused ask only when machine-side retrieval cannot close the gap.
 - **DRY refactoring discipline** (CRITICAL — WET code is unacceptable):
 	1. **Search first, always**: Before writing ANY function that might exist elsewhere, run `grep_search` or `semantic_search`. This is not optional.
 	2. **3-strike rule**: If you're about to write similar code for the 3rd time, STOP. Do not proceed. Create a central helper first.

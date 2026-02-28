@@ -2521,6 +2521,67 @@ def resume_interaction_session(
 
 # src/backend/services/concept_service.py  (keep it in the same module)
 
+PERSON_TYPE_CONCEPT_ID = "#V#person"
+MINIMAL_IMPOSITION_QUESTION_TASK_INSTRUCTION = (
+    "Task: Use existing context and available data/search first. "
+    "Only ask the human if their input is genuinely needed, likely known without extra work, "
+    "and materially improves the concept. "
+    "When asking, ask one concise, low-effort, high-value question. "
+    "Avoid broad or unrewarding requests. "
+    "Respond with ONLY the question."
+)
+
+
+def _normalise_concept_id_list(raw_value: Any) -> List[str]:
+    """Normalise relation payloads that may be either a string or list of strings."""
+    if isinstance(raw_value, str):
+        cleaned = raw_value.strip()
+        return [cleaned] if cleaned else []
+    if isinstance(raw_value, list):
+        normalised: List[str] = []
+        for item in raw_value:
+            if isinstance(item, str):
+                cleaned_item = item.strip()
+                if cleaned_item:
+                    normalised.append(cleaned_item)
+        return normalised
+    return []
+
+
+def _is_person_instance_concept(concept: Dict[str, Any]) -> bool:
+    """Return True when the concept is an instance of #V#person."""
+    relationships = concept.get("relationships")
+    if not isinstance(relationships, dict):
+        return False
+
+    instance_of_ids = _normalise_concept_id_list(
+        relationships.get("is_an_instance_of")
+    )
+    return PERSON_TYPE_CONCEPT_ID in instance_of_ids
+
+
+def _build_default_concept_question_template() -> str:
+    """Central default template for concept follow-up prompts."""
+    return (
+        "{user_org_context}"
+        "{concept_context}"
+        "Context: Interaction with an concept of type '{concept_type}'.\n"
+        "concept name: {concept_name}\n"
+        "concept's current notes: {concept_notes}\n"
+        "{history_section}"
+        "{answer_section}"
+        f"{MINIMAL_IMPOSITION_QUESTION_TASK_INSTRUCTION}"
+    )
+
+
+def _build_minimal_imposition_fallback_question(concept_name: str) -> str:
+    """Fallback question that requests only minimal, high-value user effort."""
+    safe_name = (concept_name or "").strip() or "this concept"
+    return (
+        "If you can answer from memory, what is one quick, high-value correction "
+        f"or missing fact about {safe_name}?"
+    )
+
 
 def generate_concept_question(
     *,  # all-keyword args ⇒ easier to read
@@ -2537,13 +2598,14 @@ def generate_concept_question(
     - Falls back to a default template if none exists and **persists it** once
     """
     # ---------- gather basics ----------
-    concept_id = str(concept.get("id") or concept.get("_id"))
-    concept_id = (
+    concept_id = str(
         concept.get("concept_id")
         or (concept.get("vontology_path") or [THING_PRIMARY_ID])[-1]
     )
     notes = get_concept_notes(concept) or "No information recorded yet."
-    name = concept.get("name", "this concept")
+    name = get_concept_display_name_with_names_fallback(concept) or concept.get(
+        "name", "this concept"
+    )
 
     # ---------- fetch or create template ----------
     template: str | None = None
@@ -2594,18 +2656,8 @@ def generate_concept_question(
         logger.warning(f"Could not retrieve user/organization context: {e}")
 
     if template is None:
-        # one default covers both initial & follow-up (place-holders allow omission)
-        template = (
-            "{user_org_context}"
-            "{concept_context}"
-            "Context: Interaction with an concept of type '{concept_type}'.\n"
-            "concept name: {concept_name}\n"
-            "concept's current notes: {concept_notes}\n"
-            "{history_section}"
-            "{answer_section}"
-            "Task: Formulate a question that deepens knowledge about this concept. "
-            "Respond with ONLY the question."
-        )
+        # One default covers both initial and follow-up prompts.
+        template = _build_default_concept_question_template()
         # save once
     if vontology_node and not is_thing_id(concept_id):
         try:
@@ -2617,7 +2669,7 @@ def generate_concept_question(
             logger.error(f"Unable to persist default template on {concept_id}: {e}")
 
     # ---------- person / pronoun logic ----------
-    is_person = concept_id == "#V#person"
+    is_person_instance = _is_person_instance_concept(concept)
     current_user_concept_id = None
     is_current_user = False
     try:
@@ -2625,14 +2677,17 @@ def generate_concept_question(
 
         if has_request_context():
             current_user_concept_id = session.get("user_concept_id")
-            is_current_user = is_person and (current_user_concept_id == concept_id)
+            is_current_user = (
+                isinstance(current_user_concept_id, str)
+                and current_user_concept_id == concept_id
+            )
         else:
             # Outside request (e.g. unit tests) – treat as not current user
             is_current_user = False
     except Exception:
         is_current_user = False
 
-    if is_person and not is_current_user:
+    if is_person_instance and not is_current_user:
         template += "\nNote: Do not refer to {concept_name} as 'you'."
     elif is_current_user:
         template += "\nNote: Second-person pronouns are allowed for the current user."
@@ -2661,17 +2716,7 @@ def generate_concept_question(
 
     # Ensure template is a string and not empty; provide a default if needed
     if template is None or not isinstance(template, str) or not template.strip():
-        template = (
-            "{user_org_context}"
-            "{concept_context}"
-            "Context: Interaction with an concept of type '{concept_type}'.\n"
-            "concept name: {concept_name}\n"
-            "concept's current notes: {concept_notes}\n"
-            "{history_section}"
-            "{answer_section}"
-            "Task: Formulate a question that deepens knowledge about this concept. "
-            "Respond with ONLY the question."
-        )
+        template = _build_default_concept_question_template()
 
     try:
         filled = template.format(
@@ -4050,17 +4095,20 @@ def generate_initial_question(
         initial_question = ""
 
     # ------------------------------------------------------------------ 4. fallback & return
-    if not initial_question:
-        initial_question = f"What would you like to tell me about {concept.get('name', 'this concept')}?"
-
     from ..vontology.utils_vontology import get_concept_display_name_with_names_fallback
+    display_name = get_concept_display_name_with_names_fallback(concept)
+    if not display_name:
+        display_name = concept.get("name", "this concept")
+
+    if not initial_question:
+        initial_question = _build_minimal_imposition_fallback_question(display_name)
 
     return {
         "question": initial_question,
         "status": "success",
         "concept": {
             "_id": str(concept.get("_id", concept_id)),
-            "name": get_concept_display_name_with_names_fallback(concept),
+            "name": display_name,
             "notes": get_concept_notes(enhanced_concept)
             or "",  # Use enhanced concept with combined notes
             "concept_id": concept.get("concept_id"),

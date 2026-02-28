@@ -200,6 +200,28 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             ),
         )
 
+        # Ensure long-running identity-resolution maintenance keeps running
+        # without manual schedule setup.
+        try:
+            from ..services.identity_resolution_schedule_bootstrap_service import (
+                ensure_identity_resolution_background_schedule,
+            )
+
+            identity_schedule_report = (
+                ensure_identity_resolution_background_schedule()
+            )
+            result["identity_resolution_schedule_bootstrap"] = identity_schedule_report
+            if not bool(identity_schedule_report.get("success", False)):
+                app_logger.warning(
+                    "[durable_workflows] identity schedule bootstrap failed: %s",
+                    identity_schedule_report,
+                )
+        except Exception as schedule_exc:
+            app_logger.warning(
+                "[durable_workflows] identity schedule bootstrap error: %s",
+                schedule_exc,
+            )
+
         # Log status
         status = get_system_status()
         app_logger.info(

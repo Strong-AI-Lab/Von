@@ -4664,7 +4664,7 @@ footer {
     /* Force display with higher specificity */
 }
 
-/* People Tab: Ensure follow-up question wraps and doesn't overflow */
+/* Concept interaction panel: ensure follow-up question wraps and does not overflow */
 #followUpQuestion {
     word-break: break-word;
     overflow-wrap: anywhere;
