@@ -1313,6 +1313,99 @@ def test_generate_respects_renderer_screen_element_targets(monkeypatch):
     assert not relation_graph_elements
 
 
+def test_generate_includes_hierarchy_view_from_render_plan(monkeypatch):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    render_plan = {
+        "enabled": True,
+        "reason": "resolved",
+        "render_mode": "screen_only",
+        "should_narrate": False,
+        "screen_element_targets": {
+            "table": False,
+            "workflow_view": False,
+            "task_view": False,
+            "calendar_view": False,
+            "chart_view": False,
+            "location_view": False,
+            "document_view": False,
+            "kanban_view": False,
+            "timeline": False,
+            "hierarchy_view": True,
+            "relation_graph_view": False,
+        },
+        "screen_hierarchy_elements": [
+            {
+                "element_id": "screen_hierarchy_view",
+                "intent": "hierarchy_view",
+                "payload": {
+                    "nodes": [
+                        {
+                            "node_id": "#V#document",
+                            "label": "#V#document",
+                            "node_kind": "concept",
+                        },
+                        {
+                            "node_id": "#V#meeting_document",
+                            "label": "#V#meeting_document",
+                            "node_kind": "concept",
+                        },
+                    ],
+                    "edges": [
+                        {
+                            "edge_id": "hierarchy_edge_1",
+                            "parent_node_id": "#V#document",
+                            "child_node_id": "#V#meeting_document",
+                            "predicate": "taxonomy_parent_of",
+                            "branch_kind": "type_hierarchy",
+                        }
+                    ],
+                    "root_node_ids": ["#V#document"],
+                    "expansion": {
+                        "show_parents": True,
+                        "show_children": True,
+                        "show_siblings": True,
+                        "max_depth": 4,
+                    },
+                },
+                "provenance": {"source": "test_render_plan"},
+            }
+        ],
+    }
+    orchestrator_result = OrchestratorResult(
+        response_text="Taxonomy summary",
+        extra_messages=(),
+        tool_invocations=(),
+        aux_llm_calls=(),
+        render_plan=render_plan,
+    )
+    app = _make_app(monkeypatch, _StubOrchestrator(orchestrator_result))
+
+    client = app.test_client()
+    response = client.post("/von/generate", json={"prompt": "Show taxonomy"})
+    assert response.status_code == 200
+    body = response.get_json()
+    assert isinstance(body, dict)
+    display_elements = body.get("display_elements")
+    assert isinstance(display_elements, dict)
+    reason_codes = display_elements.get("reason_codes", [])
+    assert "screen_structured_hierarchy_views_supplied" in reason_codes
+
+    hierarchy_elements = [
+        element
+        for element in display_elements.get("elements", [])
+        if isinstance(element, dict) and element.get("element_type") == "hierarchy_view"
+    ]
+    assert len(hierarchy_elements) == 1
+    payload = hierarchy_elements[0].get("payload", {})
+    assert payload.get("root_node_ids") == ["#V#document"]
+    edges = payload.get("edges")
+    assert isinstance(edges, list)
+    assert len(edges) == 1
+    assert edges[0].get("parent_node_id") == "#V#document"
+    assert edges[0].get("child_node_id") == "#V#meeting_document"
+
+
 def test_task_result_includes_render_plan_when_present(monkeypatch):
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
 

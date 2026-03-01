@@ -17638,6 +17638,7 @@ class InternalMCPChatOrchestrator:
             return rows
 
         _renderer_concept_id_pattern = re.compile(r"^#V#[A-Za-z0-9._-]+$")
+        _renderer_concept_id_search_pattern = re.compile(r"#V#[A-Za-z0-9._-]+")
         _renderer_jira_issue_pattern = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
 
         def _collect_renderer_task_links(*values: Any) -> list[dict[str, str]]:
@@ -20557,6 +20558,217 @@ class InternalMCPChatOrchestrator:
                 }
             ]
 
+        def _extract_renderer_screen_hierarchy_elements_from_screen_text(
+            *,
+            screen_text: Any,
+            focus_concept_id: Any = None,
+        ) -> list[dict[str, Any]]:
+            """Derive hierarchy payloads from taxonomy-style screen text."""
+
+            if not isinstance(screen_text, str):
+                return []
+            if not screen_text.strip():
+                return []
+
+            max_lines = 480
+            max_nodes = 200
+            max_edges = 400
+
+            def _coerce_text(value: Any) -> str | None:
+                if isinstance(value, str):
+                    cleaned = value.strip()
+                    return cleaned or None
+                if value is None:
+                    return None
+                cleaned = str(value).strip()
+                return cleaned or None
+
+            def _estimate_depth(prefix: str) -> int:
+                normalised = prefix.replace("\t", "    ")
+                for char in ("│", "├", "└", "─", "╰", "╭", "╮", "╯", "|"):
+                    normalised = normalised.replace(char, " ")
+                # Remove markdown/list tree punctuation that should not affect depth.
+                normalised = re.sub(r"[-*+`>]+", " ", normalised)
+                normalised = re.sub(r"\d+\.\s*", " ", normalised)
+                normalised = re.sub(r"[^ ]", " ", normalised)
+                return max(0, len(normalised) // 4)
+
+            node_rows: list[dict[str, Any]] = []
+            has_tree_connectors = False
+            for line_no, raw_line in enumerate(screen_text.splitlines()[:max_lines], start=1):
+                if not isinstance(raw_line, str) or not raw_line.strip():
+                    continue
+                match = _renderer_concept_id_search_pattern.search(raw_line)
+                if not match:
+                    continue
+
+                node_id = _coerce_text(match.group(0))
+                if not node_id or not _renderer_concept_id_pattern.match(node_id):
+                    continue
+
+                prefix = raw_line[: match.start()]
+                if any(connector in prefix for connector in ("│", "├", "└", "─", "|")):
+                    has_tree_connectors = True
+
+                depth = _estimate_depth(prefix)
+                node_rows.append(
+                    {
+                        "node_id": node_id,
+                        "depth": depth,
+                        "line_no": line_no,
+                    }
+                )
+                if len(node_rows) >= max_nodes * 3:
+                    break
+
+            if len(node_rows) < 2:
+                return []
+            if not has_tree_connectors and not any(
+                isinstance(row.get("depth"), int) and row.get("depth", 0) > 0
+                for row in node_rows
+            ):
+                return []
+
+            ordered_node_ids: list[str] = []
+            seen_node_ids: set[str] = set()
+            edges: list[dict[str, Any]] = []
+            seen_edge_pairs: set[tuple[str, str]] = set()
+            stack_by_depth: list[str] = []
+
+            for row in node_rows:
+                node_id = _coerce_text(row.get("node_id"))
+                if not node_id:
+                    continue
+
+                if node_id not in seen_node_ids:
+                    seen_node_ids.add(node_id)
+                    ordered_node_ids.append(node_id)
+
+                raw_depth = row.get("depth")
+                depth = int(raw_depth) if isinstance(raw_depth, int) and raw_depth >= 0 else 0
+                effective_depth = min(depth, len(stack_by_depth) + 1)
+
+                if effective_depth > 0 and stack_by_depth:
+                    parent_index = min(effective_depth - 1, len(stack_by_depth) - 1)
+                    parent_node_id = stack_by_depth[parent_index]
+                    edge_key = (parent_node_id, node_id)
+                    if (
+                        parent_node_id != node_id
+                        and edge_key not in seen_edge_pairs
+                        and len(edges) < max_edges
+                    ):
+                        seen_edge_pairs.add(edge_key)
+                        edges.append(
+                            {
+                                "edge_id": f"hierarchy_edge_{len(edges) + 1}",
+                                "parent_node_id": parent_node_id,
+                                "child_node_id": node_id,
+                                "predicate": "taxonomy_parent_of",
+                                "branch_kind": "type_hierarchy",
+                            }
+                        )
+
+                if effective_depth < len(stack_by_depth):
+                    stack_by_depth = stack_by_depth[:effective_depth]
+                if effective_depth == len(stack_by_depth):
+                    stack_by_depth.append(node_id)
+                else:
+                    stack_by_depth[effective_depth] = node_id
+                    stack_by_depth = stack_by_depth[: effective_depth + 1]
+
+                if len(ordered_node_ids) >= max_nodes:
+                    break
+
+            if len(ordered_node_ids) < 2 or not edges:
+                return []
+
+            parent_counts: dict[str, int] = {}
+            child_counts: dict[str, int] = {}
+            for edge in edges:
+                parent_node_id = _coerce_text(edge.get("parent_node_id"))
+                child_node_id = _coerce_text(edge.get("child_node_id"))
+                if not parent_node_id or not child_node_id:
+                    continue
+                parent_counts[child_node_id] = parent_counts.get(child_node_id, 0) + 1
+                child_counts[parent_node_id] = child_counts.get(parent_node_id, 0) + 1
+
+            focus_node_id = _coerce_text(focus_concept_id)
+            if focus_node_id not in seen_node_ids:
+                focus_node_id = None
+
+            root_node_ids = sorted(
+                {
+                    _coerce_text(edge.get("parent_node_id")) or ""
+                    for edge in edges
+                    if _coerce_text(edge.get("parent_node_id"))
+                }
+                - {
+                    _coerce_text(edge.get("child_node_id")) or ""
+                    for edge in edges
+                    if _coerce_text(edge.get("child_node_id"))
+                }
+            )
+            root_node_ids = [node_id for node_id in root_node_ids if node_id]
+            if not root_node_ids:
+                root_node_ids = [ordered_node_ids[0]]
+
+            if focus_node_id:
+                ordered_node_ids = [focus_node_id] + [
+                    node_id for node_id in ordered_node_ids if node_id != focus_node_id
+                ]
+
+            ordered_nodes: list[dict[str, Any]] = []
+            for node_id in ordered_node_ids:
+                node_entry: dict[str, Any] = {
+                    "node_id": node_id,
+                    "label": node_id,
+                    "node_kind": "concept",
+                }
+                if parent_counts.get(node_id):
+                    node_entry["parent_count"] = int(parent_counts[node_id])
+                if child_counts.get(node_id):
+                    node_entry["child_count"] = int(child_counts[node_id])
+                ordered_nodes.append(node_entry)
+
+            for index, edge in enumerate(edges, start=1):
+                edge["edge_id"] = f"hierarchy_edge_{index}"
+
+            payload: dict[str, Any] = {
+                "nodes": ordered_nodes,
+                "edges": edges,
+                "root_node_ids": root_node_ids[:40],
+                "expansion": {
+                    "show_parents": True,
+                    "show_children": True,
+                    "show_siblings": True,
+                    "max_depth": 4,
+                },
+            }
+            if focus_node_id:
+                payload["focus_node_id"] = focus_node_id
+
+            provenance: dict[str, Any] = {
+                "source": "screen_text_taxonomy_hierarchy_view",
+                "record_family": "hierarchy",
+                "derived_from": "screen_text",
+                "parser": "concept_id_tree",
+                "node_count": len(ordered_nodes),
+                "edge_count": len(edges),
+            }
+
+            return [
+                {
+                    "element_id": "screen_text_hierarchy_view",
+                    "intent": "hierarchy_view",
+                    "payload": payload,
+                    "constraints": {
+                        "supports_neighbourhood_toggle": True,
+                        "supports_focus_navigation": True,
+                    },
+                    "provenance": provenance,
+                }
+            ]
+
         def _build_renderer_request_payload(
             screen_text: Any,
             *,
@@ -20725,6 +20937,7 @@ class InternalMCPChatOrchestrator:
         def _apply_screen_element_mapping(
             decision: dict[str, Any],
             *,
+            screen_text: Any,
             tool_messages: Sequence[Mapping[str, Any]],
             resolver_attempted: bool,
             resolver_success: bool,
@@ -20819,21 +21032,6 @@ class InternalMCPChatOrchestrator:
             include_hierarchy_elements = "hierarchy_view" in selected_families
             include_relation_graph_elements = "relation_graph_view" in selected_families
             decision["screen_element_mapping_mode"] = mapping_mode
-            decision["screen_element_reason_codes"] = list(reason_codes)
-            decision["screen_element_families"] = sorted(selected_families)
-            decision["screen_element_targets"] = {
-                "table": include_table_elements,
-                "workflow_view": include_workflow_elements,
-                "task_view": include_task_view_elements,
-                "calendar_view": include_calendar_elements,
-                "chart_view": include_chart_elements,
-                "location_view": include_location_elements,
-                "document_view": include_document_elements,
-                "kanban_view": include_kanban_elements,
-                "timeline": include_timeline_elements,
-                "hierarchy_view": include_hierarchy_elements,
-                "relation_graph_view": include_relation_graph_elements,
-            }
             if unsupported_renderer_types:
                 decision["unsupported_selected_renderer_types"] = list(
                     unsupported_renderer_types
@@ -20933,6 +21131,7 @@ class InternalMCPChatOrchestrator:
                         screen_timeline_elements
                     )
 
+            screen_hierarchy_elements: list[dict[str, Any]] = []
             if include_hierarchy_elements:
                 screen_hierarchy_elements = _extract_renderer_screen_hierarchy_elements(
                     tool_messages=tool_messages,
@@ -20940,11 +21139,30 @@ class InternalMCPChatOrchestrator:
                         "request_payload_selected_concept_id"
                     ),
                 )
-                if screen_hierarchy_elements:
-                    decision["screen_hierarchy_elements"] = screen_hierarchy_elements
-                    decision["screen_hierarchy_element_count"] = len(
-                        screen_hierarchy_elements
+
+            if not screen_hierarchy_elements:
+                screen_hierarchy_elements = (
+                    _extract_renderer_screen_hierarchy_elements_from_screen_text(
+                        screen_text=screen_text,
+                        focus_concept_id=decision.get(
+                            "request_payload_selected_concept_id"
+                        ),
                     )
+                )
+                if screen_hierarchy_elements:
+                    include_hierarchy_elements = True
+                    selected_families.add("hierarchy_view")
+                    taxonomy_reason_code = (
+                        "renderer_screen_elements:taxonomy_hierarchy_from_screen_text"
+                    )
+                    if taxonomy_reason_code not in reason_codes:
+                        reason_codes.append(taxonomy_reason_code)
+
+            if screen_hierarchy_elements:
+                decision["screen_hierarchy_elements"] = screen_hierarchy_elements
+                decision["screen_hierarchy_element_count"] = len(
+                    screen_hierarchy_elements
+                )
 
             if include_relation_graph_elements:
                 screen_relation_graph_elements = (
@@ -20962,6 +21180,22 @@ class InternalMCPChatOrchestrator:
                     decision["screen_relation_graph_element_count"] = len(
                         screen_relation_graph_elements
                     )
+
+            decision["screen_element_reason_codes"] = list(reason_codes)
+            decision["screen_element_families"] = sorted(selected_families)
+            decision["screen_element_targets"] = {
+                "table": include_table_elements,
+                "workflow_view": include_workflow_elements,
+                "task_view": include_task_view_elements,
+                "calendar_view": include_calendar_elements,
+                "chart_view": include_chart_elements,
+                "location_view": include_location_elements,
+                "document_view": include_document_elements,
+                "kanban_view": include_kanban_elements,
+                "timeline": include_timeline_elements,
+                "hierarchy_view": include_hierarchy_elements,
+                "relation_graph_view": include_relation_graph_elements,
+            }
 
         def _resolve_renderer_render_plan(
             screen_text: Any,
@@ -20999,6 +21233,7 @@ class InternalMCPChatOrchestrator:
                 decision["reason"] = "feature_flag_disabled"
                 _apply_screen_element_mapping(
                     decision,
+                    screen_text=screen_text,
                     tool_messages=tool_messages,
                     resolver_attempted=False,
                     resolver_success=False,
@@ -21010,6 +21245,7 @@ class InternalMCPChatOrchestrator:
                 decision["reason"] = "renderer_definition_ids_missing"
                 _apply_screen_element_mapping(
                     decision,
+                    screen_text=screen_text,
                     tool_messages=tool_messages,
                     resolver_attempted=False,
                     resolver_success=False,
@@ -21056,6 +21292,7 @@ class InternalMCPChatOrchestrator:
                 decision["error"] = str(exc)
                 _apply_screen_element_mapping(
                     decision,
+                    screen_text=screen_text,
                     tool_messages=tool_messages,
                     resolver_attempted=True,
                     resolver_success=False,
@@ -21075,6 +21312,7 @@ class InternalMCPChatOrchestrator:
                 decision["reason"] = "invalid_tool_payload"
                 _apply_screen_element_mapping(
                     decision,
+                    screen_text=screen_text,
                     tool_messages=tool_messages,
                     resolver_attempted=True,
                     resolver_success=False,
@@ -21105,6 +21343,7 @@ class InternalMCPChatOrchestrator:
                     ]
                 _apply_screen_element_mapping(
                     decision,
+                    screen_text=screen_text,
                     tool_messages=tool_messages,
                     resolver_attempted=True,
                     resolver_success=False,
@@ -21194,6 +21433,7 @@ class InternalMCPChatOrchestrator:
             )
             _apply_screen_element_mapping(
                 decision,
+                screen_text=screen_text,
                 tool_messages=tool_messages,
                 resolver_attempted=True,
                 resolver_success=True,
