@@ -693,6 +693,14 @@ class InternalMCPChatOrchestrator:
     }
     _HIGH_IMPACT_REVIEW_REASON = "high_impact_kb_write_requires_human_review"
     _HIGH_IMPACT_NAMESPACE_REASON = "high_impact_kb_write_requires_namespace"
+    _WRITE_INTENT_SESSION_MEMORY_TTL_SECONDS = 900
+    _WRITE_INTENT_SESSION_MEMORY_MAX_SESSIONS = 256
+    _WRITE_INTENT_SESSION_MEMORY_FOLLOW_UP_TURNS = 2
+    _WRITE_CONTINUATION_PROMPT_PATTERN = re.compile(
+        r"^\s*(yes|yep|yeah|ok|okay|sure|do it|go ahead|proceed|continue|"
+        r"please do|sounds good|make it so)\b",
+        flags=re.IGNORECASE,
+    )
 
     def __init__(
         self,
@@ -771,6 +779,10 @@ class InternalMCPChatOrchestrator:
         # This keeps topic/predicate context available for short follow-up turns
         # even when prompts become underspecified ("continue", "now do affiliations").
         self._preflight_session_memory: dict[str, dict[str, Any]] = {}
+        # Session-scoped carry-over for write intent/approval context.
+        # This supports short continuation prompts ("yes", "do it") while
+        # staying bounded by TTL + turn count + compatibility checks.
+        self._write_intent_session_memory: dict[str, dict[str, Any]] = {}
 
         # Workflow model policy cache (single policy instance).
         self._workflow_model_policy_cache: dict[str, Any] = {}
@@ -10653,6 +10665,309 @@ class InternalMCPChatOrchestrator:
         for key, _entry in oldest_first[:excess]:
             self._preflight_session_memory.pop(key, None)
 
+    @staticmethod
+    def _normalise_write_tool_names(
+        tool_names: Sequence[str] | None,
+    ) -> list[str]:
+        if not isinstance(tool_names, Sequence) or isinstance(
+            tool_names, (str, bytes, bytearray)
+        ):
+            return []
+        normalised: list[str] = []
+        seen: set[str] = set()
+        for item in tool_names:
+            if not isinstance(item, str):
+                continue
+            cleaned = item.strip()
+            if not cleaned:
+                continue
+            lowered = cleaned.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            normalised.append(cleaned)
+        return normalised
+
+    @classmethod
+    def _is_write_continuation_prompt(cls, prompt: str) -> bool:
+        if not isinstance(prompt, str):
+            return False
+        cleaned = prompt.strip()
+        if not cleaned:
+            return False
+        if len(cleaned) > 80:
+            return False
+        return bool(cls._WRITE_CONTINUATION_PROMPT_PATTERN.search(cleaned.lower()))
+
+    def _prune_write_intent_session_memory(self, now: float) -> None:
+        if not self._write_intent_session_memory:
+            return
+
+        def _coerce_timestamp(value: Any) -> float | None:
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                stripped = value.strip()
+                if not stripped:
+                    return None
+                try:
+                    return float(stripped)
+                except Exception:
+                    return None
+            return None
+
+        expired_keys: list[str] = []
+        for key, entry in self._write_intent_session_memory.items():
+            if not isinstance(entry, Mapping):
+                expired_keys.append(key)
+                continue
+            timestamp = _coerce_timestamp(entry.get("timestamp"))
+            if timestamp is None:
+                age_seconds = self._WRITE_INTENT_SESSION_MEMORY_TTL_SECONDS + 1
+            else:
+                age_seconds = now - timestamp
+            if age_seconds > self._WRITE_INTENT_SESSION_MEMORY_TTL_SECONDS:
+                expired_keys.append(key)
+
+        for key in expired_keys:
+            self._write_intent_session_memory.pop(key, None)
+
+        excess = (
+            len(self._write_intent_session_memory)
+            - self._WRITE_INTENT_SESSION_MEMORY_MAX_SESSIONS
+        )
+        if excess <= 0:
+            return
+
+        oldest_first = sorted(
+            self._write_intent_session_memory.items(),
+            key=lambda item: _coerce_timestamp((item[1] or {}).get("timestamp")) or 0.0,
+        )
+        for key, _entry in oldest_first[:excess]:
+            self._write_intent_session_memory.pop(key, None)
+
+    def _rehydrate_write_intent_session_memory(
+        self,
+        *,
+        prompt: str,
+        recent_user_prompts: list[str] | None,
+        requested_write_tools: Sequence[str] | None,
+        conversation_session_id: str | None,
+    ) -> tuple[list[str], Mapping[str, Any] | None]:
+        cleaned_recent = [
+            str(item).strip()
+            for item in (recent_user_prompts or [])
+            if isinstance(item, str) and str(item).strip()
+        ]
+
+        session_key = self._normalise_preflight_session_key(conversation_session_id)
+        if not session_key:
+            return cleaned_recent, None
+
+        now = time.time()
+        self._prune_write_intent_session_memory(now)
+        memory_entry = self._write_intent_session_memory.get(session_key)
+        if not isinstance(memory_entry, Mapping):
+            return cleaned_recent, None
+
+        remaining_before = self._coerce_non_negative_int(
+            memory_entry.get("follow_up_turns_remaining"),
+            default=0,
+            max_value=32,
+        )
+        if remaining_before <= 0:
+            self._write_intent_session_memory.pop(session_key, None)
+            return cleaned_recent, {
+                "type": "write_intent_session_memory",
+                "stage": "rehydrate",
+                "reused": False,
+                "reason": "memory_exhausted",
+            }
+
+        stored_tools = {
+            tool.lower()
+            for tool in self._normalise_write_tool_names(
+                cast(Sequence[str] | None, memory_entry.get("write_tools"))
+            )
+        }
+        requested_tools = {
+            tool.lower()
+            for tool in self._normalise_write_tool_names(requested_write_tools)
+        }
+        if requested_tools and stored_tools and requested_tools.isdisjoint(stored_tools):
+            return cleaned_recent, {
+                "type": "write_intent_session_memory",
+                "stage": "rehydrate",
+                "reused": False,
+                "reason": "context_mismatch_requested_tools",
+            }
+
+        if not self._is_write_continuation_prompt(prompt):
+            return cleaned_recent, {
+                "type": "write_intent_session_memory",
+                "stage": "rehydrate",
+                "reused": False,
+                "reason": "prompt_not_continuation",
+            }
+
+        additions: list[str] = []
+        seen_recent = {item.lower() for item in cleaned_recent}
+
+        anchor_prompt = memory_entry.get("intent_anchor_prompt")
+        if isinstance(anchor_prompt, str) and anchor_prompt.strip():
+            candidate = anchor_prompt.strip()
+            if candidate.lower() not in seen_recent:
+                additions.append(candidate)
+                seen_recent.add(candidate.lower())
+
+        high_impact_approval_from_continuation = False
+        if bool(memory_entry.get("has_high_impact_tools")):
+            synthetic_approval_prompt = (
+                "Approved Vontology mutation continuation for the current context."
+            )
+            if synthetic_approval_prompt.lower() not in seen_recent:
+                additions.append(synthetic_approval_prompt)
+                seen_recent.add(synthetic_approval_prompt.lower())
+            high_impact_approval_from_continuation = True
+
+        cleaned_recent.extend(additions)
+        remaining_after = max(0, remaining_before - 1)
+        updated_entry = dict(memory_entry)
+        updated_entry["timestamp"] = now
+        updated_entry["last_used_at"] = now
+        updated_entry["follow_up_turns_remaining"] = remaining_after
+        self._write_intent_session_memory[session_key] = updated_entry
+
+        return cleaned_recent, {
+            "type": "write_intent_session_memory",
+            "stage": "rehydrate",
+            "reused": bool(additions),
+            "reason": "rehydrated" if additions else "no_additions_required",
+            "added_prompts": len(additions),
+            "remaining_before": remaining_before,
+            "remaining_after": remaining_after,
+            "high_impact_approval_from_continuation": high_impact_approval_from_continuation,
+        }
+
+    def _persist_write_intent_session_memory(
+        self,
+        *,
+        prompt: str,
+        recent_user_prompts: list[str] | None,
+        requested_write_tools: Sequence[str] | None,
+        allowed_write_tools: Sequence[str] | None,
+        write_policy_reason: str | None,
+        conversation_session_id: str | None,
+    ) -> Mapping[str, Any] | None:
+        session_key = self._normalise_preflight_session_key(conversation_session_id)
+        if not session_key:
+            return None
+
+        now = time.time()
+        self._prune_write_intent_session_memory(now)
+        existing_entry = self._write_intent_session_memory.get(session_key)
+        existing_mapping = (
+            cast(Mapping[str, Any], existing_entry)
+            if isinstance(existing_entry, Mapping)
+            else {}
+        )
+
+        policy_reason = str(write_policy_reason or "").strip()
+        explicit_or_recent_reason = policy_reason in {
+            "explicit_vontology_mutation_request",
+            "recent_vontology_mutation_request",
+            "explicit_artefact_download_request",
+            "recent_artefact_download_request",
+        }
+        if not explicit_or_recent_reason:
+            return {
+                "type": "write_intent_session_memory",
+                "stage": "persist",
+                "updated": False,
+                "reason": "policy_reason_not_eligible",
+                "write_policy_reason": policy_reason,
+            }
+
+        requested_tools = self._normalise_write_tool_names(requested_write_tools)
+        allowed_tools = self._normalise_write_tool_names(allowed_write_tools)
+        fallback_tools = self._normalise_write_tool_names(
+            cast(Sequence[str] | None, existing_mapping.get("write_tools"))
+        )
+        tools_to_store = allowed_tools or requested_tools or fallback_tools
+        if not tools_to_store:
+            return {
+                "type": "write_intent_session_memory",
+                "stage": "persist",
+                "updated": False,
+                "reason": "no_write_tools_to_store",
+                "write_policy_reason": policy_reason,
+            }
+
+        continuation_prompt = self._is_write_continuation_prompt(prompt)
+        anchor_prompt = (
+            prompt.strip() if isinstance(prompt, str) and prompt.strip() else ""
+        )
+        existing_anchor = existing_mapping.get("intent_anchor_prompt")
+        if continuation_prompt and isinstance(existing_anchor, str) and existing_anchor.strip():
+            anchor_prompt = existing_anchor.strip()
+        if not anchor_prompt and isinstance(existing_anchor, str) and existing_anchor.strip():
+            anchor_prompt = existing_anchor.strip()
+        if not anchor_prompt:
+            for item in reversed(recent_user_prompts or []):
+                if not isinstance(item, str):
+                    continue
+                cleaned = item.strip()
+                if not cleaned:
+                    continue
+                if self._is_write_continuation_prompt(cleaned):
+                    continue
+                anchor_prompt = cleaned
+                break
+
+        has_high_impact_tools = any(
+            is_high_impact_vontology_write_tool(tool_name) for tool_name in tools_to_store
+        )
+        approval_detected = prompt_grants_high_impact_kb_write_approval(
+            prompt=prompt,
+            recent_user_prompts=[
+                str(item).strip()
+                for item in (recent_user_prompts or [])
+                if isinstance(item, str) and str(item).strip()
+            ],
+        )
+        # A bounded continuation prompt ("yes", "do it") should carry approval
+        # only when a compatible high-impact write intent was already established.
+        if continuation_prompt and has_high_impact_tools and policy_reason.startswith(
+            "recent_"
+        ):
+            approval_detected = True
+        high_impact_approved = bool(existing_mapping.get("high_impact_approved")) or bool(
+            approval_detected
+        )
+
+        self._write_intent_session_memory[session_key] = {
+            "timestamp": now,
+            "last_updated_at": now,
+            "follow_up_turns_remaining": int(
+                self._WRITE_INTENT_SESSION_MEMORY_FOLLOW_UP_TURNS
+            ),
+            "intent_anchor_prompt": anchor_prompt,
+            "write_tools": tools_to_store,
+            "has_high_impact_tools": has_high_impact_tools,
+            "high_impact_approved": high_impact_approved,
+            "write_policy_reason": policy_reason,
+        }
+
+        return {
+            "type": "write_intent_session_memory",
+            "stage": "persist",
+            "updated": True,
+            "write_policy_reason": policy_reason,
+            "write_tool_count": len(tools_to_store),
+            "has_high_impact_tools": has_high_impact_tools,
+            "high_impact_approved": high_impact_approved,
+        }
+
     def _get_topic_vocabulary_cache_key(self, keywords: list[str]) -> str:
         """Generate a cache key from topic keywords."""
         if not keywords:
@@ -16408,13 +16723,35 @@ class InternalMCPChatOrchestrator:
             },
             key=lambda value: value.lower(),
         )
+        recent_user_prompts_for_write = list(recent_user_prompts or [])
+        write_intent_rehydrate_telemetry: Mapping[str, Any] | None = None
+        if write_tool_candidates_for_routing:
+            (
+                recent_user_prompts_for_write,
+                write_intent_rehydrate_telemetry,
+            ) = self._rehydrate_write_intent_session_memory(
+                prompt=prompt,
+                recent_user_prompts=recent_user_prompts_for_write,
+                requested_write_tools=write_tool_candidates_for_routing,
+                conversation_session_id=conversation_session_id,
+            )
+            recent_user_prompts = list(recent_user_prompts_for_write)
+            if (
+                isinstance(write_intent_rehydrate_telemetry, Mapping)
+                and isinstance(aux_llm_calls, list)
+            ):
+                try:
+                    aux_llm_calls.append(dict(write_intent_rehydrate_telemetry))
+                except Exception:
+                    pass
+
         write_routing_policy_reason = "no_write_tools_available"
         mutative_intent_requires_tool_routing = False
         if write_tool_candidates_for_routing:
             write_routing_policy_decision = compute_allowed_write_tools(
                 prompt=prompt,
                 requested_tools=write_tool_candidates_for_routing,
-                recent_user_prompts=recent_user_prompts or None,
+                recent_user_prompts=recent_user_prompts_for_write or None,
             )
             write_routing_policy_reason = str(
                 write_routing_policy_decision.reason or ""
@@ -16422,6 +16759,22 @@ class InternalMCPChatOrchestrator:
             mutative_intent_requires_tool_routing = bool(
                 write_routing_policy_decision.allowed_tools
             ) and not prompt_explicitly_denies_write(prompt)
+            write_intent_persist_telemetry = self._persist_write_intent_session_memory(
+                prompt=prompt,
+                recent_user_prompts=recent_user_prompts_for_write,
+                requested_write_tools=write_tool_candidates_for_routing,
+                allowed_write_tools=sorted(write_routing_policy_decision.allowed_tools),
+                write_policy_reason=write_routing_policy_reason,
+                conversation_session_id=conversation_session_id,
+            )
+            if (
+                isinstance(write_intent_persist_telemetry, Mapping)
+                and isinstance(aux_llm_calls, list)
+            ):
+                try:
+                    aux_llm_calls.append(dict(write_intent_persist_telemetry))
+                except Exception:
+                    pass
 
         def _workflow_action_ids(workflow_id: str | None) -> set[str]:
             if not isinstance(workflow_id, str) or not workflow_id.strip():

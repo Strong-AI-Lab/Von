@@ -2898,6 +2898,112 @@ def test_plain_response_overridden_to_tool_pipeline_for_mutative_intent(monkeypa
     assert "workflow_selector_override" in aux_types
 
 
+def test_write_intent_memory_rehydrates_for_same_session_continuation(monkeypatch):
+    """Continuation prompts should inherit prior write intent in the same session."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    monkeypatch.setattr(
+        orchestrator._gateway,
+        "describe_methods",
+        lambda: {"add_relationship": {"category": "write"}},
+    )
+
+    first = orchestrator.run(
+        prompt="Create a concept link in Vontology.",
+        context=[],
+        llm_client=_CapturingLLM(
+            [
+                "plain_response",
+                "First tool-calling turn.",
+            ]
+        ),
+        model=None,
+        user_namespace="#V#user",
+        conversation_session_id="session-1328-same",
+    )
+    assert first.workflow_routing is not None
+    assert first.workflow_routing.verdict == "tool_seeking"
+    assert first.workflow_routing.source == "selector_override"
+
+    second = orchestrator.run(
+        prompt="Yes, do it.",
+        context=[],
+        llm_client=_CapturingLLM(
+            [
+                "plain_response",
+                "Continuation turn.",
+            ]
+        ),
+        model=None,
+        user_namespace="#V#user",
+        conversation_session_id="session-1328-same",
+    )
+    assert second.workflow_routing is not None
+    assert second.workflow_routing.verdict == "tool_seeking"
+    assert second.workflow_routing.source == "selector_override"
+
+    rehydrate_entry = next(
+        (
+            entry
+            for entry in second.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "write_intent_session_memory"
+            and entry.get("stage") == "rehydrate"
+        ),
+        None,
+    )
+    assert rehydrate_entry is not None
+    assert rehydrate_entry.get("reused") is True
+
+
+def test_write_intent_memory_rejects_cross_session_continuation(monkeypatch):
+    """Continuation prompts must not reuse write intent across different sessions."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    monkeypatch.setattr(
+        orchestrator._gateway,
+        "describe_methods",
+        lambda: {"add_relationship": {"category": "write"}},
+    )
+
+    first = orchestrator.run(
+        prompt="Create a concept link in Vontology.",
+        context=[],
+        llm_client=_CapturingLLM(
+            [
+                "plain_response",
+                "First tool-calling turn.",
+            ]
+        ),
+        model=None,
+        user_namespace="#V#user",
+        conversation_session_id="session-1328-a",
+    )
+    assert first.workflow_routing is not None
+    assert first.workflow_routing.verdict == "tool_seeking"
+    assert first.workflow_routing.source == "selector_override"
+
+    second = orchestrator.run(
+        prompt="Yes, do it.",
+        context=[],
+        llm_client=_CapturingLLM(
+            [
+                "plain_response",
+                "Plain response only.",
+            ]
+        ),
+        model=None,
+        user_namespace="#V#user",
+        conversation_session_id="session-1328-b",
+    )
+    assert second.workflow_routing is not None
+    assert second.workflow_routing.verdict == "plain_response"
+    assert second.workflow_routing.source == "selector"
+
+    aux_types = [
+        entry.get("type") for entry in second.aux_llm_calls if isinstance(entry, dict)
+    ]
+    assert "workflow_selector_override" not in aux_types
+
+
 # ---------------------------------------------------------------------------
 # JVNAUTOSCI-825: Routing info on tool-calling path.
 # ---------------------------------------------------------------------------
