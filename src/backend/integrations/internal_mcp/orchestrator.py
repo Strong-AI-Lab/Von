@@ -3724,6 +3724,31 @@ class InternalMCPChatOrchestrator:
         check_cancellation = data.get("check_cancellation")
         max_tool_invocations = env.max_tool_invocations or 8
         batch_cap = max(1, int(getattr(self, "_tool_batch_cap", 4)))
+        aux_llm_calls = data.get("aux_llm_calls")
+        continuation_context_reused = bool(data.get("write_intent_context_reused", False))
+
+        def _record_write_gate_decision(
+            *,
+            tool_name: str,
+            allowed: bool,
+            reason: str | None,
+            stage: str = "execution",
+        ) -> None:
+            if not isinstance(aux_llm_calls, list):
+                return
+            gate_state = self._classify_write_gate_state(allowed=allowed, reason=reason)
+            payload: dict[str, Any] = {
+                "type": "write_policy_gate",
+                "stage": stage,
+                "tool": tool_name,
+                "gate_state": gate_state,
+                "reason": str(reason or "").strip(),
+                "continuation_context_reused": continuation_context_reused,
+            }
+            try:
+                aux_llm_calls.append(payload)
+            except Exception:
+                pass
 
         # Emit tool_execute phase.
         emit_phase_transition = data.get("emit_phase_transition")
@@ -3845,6 +3870,15 @@ class InternalMCPChatOrchestrator:
                 )
 
             if tool_category == "write" and tool_name not in allowed_write_tools:
+                _record_write_gate_decision(
+                    tool_name=tool_name,
+                    allowed=False,
+                    reason=(
+                        write_policy_reason
+                        if isinstance(write_policy_reason, str)
+                        else None
+                    ),
+                )
                 message = self._build_blocked_write_message(
                     tool_name=tool_name,
                     reason=write_policy_reason if isinstance(write_policy_reason, str) else None,
@@ -3894,6 +3928,11 @@ class InternalMCPChatOrchestrator:
                 )
 
             if tool_category == "write" and high_impact_guard_reason:
+                _record_write_gate_decision(
+                    tool_name=tool_name,
+                    allowed=False,
+                    reason=high_impact_guard_reason,
+                )
                 message = self._build_blocked_write_message(
                     tool_name=tool_name,
                     reason=high_impact_guard_reason,
@@ -3936,6 +3975,16 @@ class InternalMCPChatOrchestrator:
                 continue
 
             try:
+                if tool_category == "write":
+                    _record_write_gate_decision(
+                        tool_name=tool_name,
+                        allowed=True,
+                        reason=(
+                            write_policy_reason
+                            if isinstance(write_policy_reason, str)
+                            else "allowed"
+                        ),
+                    )
                 payload_before_invoke = dict(payload)
                 schema = self._tool_schema_for_name(tool_name, method_catalogue)
                 self._apply_payload_defaults(
@@ -9197,6 +9246,29 @@ class InternalMCPChatOrchestrator:
             f"Blocked write tool {tool_name!r}: the user request appears read-only. "
             "If you intended to perform a write, restate the request explicitly."
         )
+
+    @staticmethod
+    def _classify_write_gate_state(
+        *,
+        allowed: bool,
+        reason: str | None,
+    ) -> str:
+        if allowed:
+            return "confirmed"
+
+        lowered_reason = str(reason or "").strip().lower()
+        if lowered_reason in {
+            "no_explicit_write_intent_detected",
+            "recent_vontology_mutation_request_without_confirmation",
+            "workflow_unavailable",
+            "no_write_tools_available",
+        }:
+            return "pending"
+        if lowered_reason in {
+            "high_impact_kb_write_requires_human_review",
+        }:
+            return "pending"
+        return "denied"
 
     def _build_write_interaction_metadata(
         self,
@@ -16759,6 +16831,32 @@ class InternalMCPChatOrchestrator:
             mutative_intent_requires_tool_routing = bool(
                 write_routing_policy_decision.allowed_tools
             ) and not prompt_explicitly_denies_write(prompt)
+            write_gate_state = self._classify_write_gate_state(
+                allowed=bool(write_routing_policy_decision.allowed_tools),
+                reason=write_routing_policy_reason,
+            )
+            if isinstance(aux_llm_calls, list):
+                try:
+                    aux_llm_calls.append(
+                        {
+                            "type": "write_policy_gate",
+                            "stage": "routing",
+                            "gate_state": write_gate_state,
+                            "reason": write_routing_policy_reason,
+                            "requested_write_tools_count": len(
+                                write_tool_candidates_for_routing
+                            ),
+                            "allowed_write_tools_count": len(
+                                write_routing_policy_decision.allowed_tools
+                            ),
+                            "continuation_context_reused": bool(
+                                isinstance(write_intent_rehydrate_telemetry, Mapping)
+                                and write_intent_rehydrate_telemetry.get("reused")
+                            ),
+                        }
+                    )
+                except Exception:
+                    pass
             write_intent_persist_telemetry = self._persist_write_intent_session_memory(
                 prompt=prompt,
                 recent_user_prompts=recent_user_prompts_for_write,
@@ -20931,6 +21029,10 @@ class InternalMCPChatOrchestrator:
             "conversation_session_id": conversation_session_id,
             "turn_id": turn_id,
             "recent_user_prompts": recent_user_prompts,
+            "write_intent_context_reused": bool(
+                isinstance(write_intent_rehydrate_telemetry, Mapping)
+                and write_intent_rehydrate_telemetry.get("reused")
+            ),
             "gmail_profile": gmail_profile or self._default_gmail_profile,
             "workflow_discovery_result": workflow_discovery_result,
             "workflow_routing": routing_info_payload,
