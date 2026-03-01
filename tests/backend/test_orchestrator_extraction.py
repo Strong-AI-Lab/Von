@@ -34,6 +34,13 @@ class _DummyGateway:
         return Result()
 
 
+class _DisabledGateway(_DummyGateway):
+    enabled = False
+
+    def describe_methods(self):
+        return {}
+
+
 class _ExplicitPromptToolGateway(_DummyGateway):
     def describe_methods(self):
         return {
@@ -1375,6 +1382,133 @@ def test_run_applies_missing_tool_retry_budget_across_plan_and_backfill():
 
     # The fourth scripted response remains unused when no second retry occurs.
     assert len(llm.calls) == 3
+
+
+def test_missing_tool_call_retry_stops_on_no_progress_guard_with_safe_response():
+    repeated_response = "I will search the knowledge base now."
+    llm = _RecorderLLM([repeated_response])
+
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=_DummyGateway(),  # type: ignore[arg-type]
+        max_tool_invocations=1,
+    )
+
+    class _Env:
+        def __init__(self, llm_client):
+            self.llm_client = llm_client
+            self.model = "primary-model"
+            self.user_namespace = "#V#user"
+
+    class _Request:
+        def __init__(self, data, environment):
+            self.data = data
+            self.environment = environment
+            self.trace = None
+
+    request = _Request(
+        data={
+            "response_text": repeated_response,
+            "user_prompt": "",
+            "augmented_context": [],
+            "missing_tool_call_retry_attempts": 0,
+            "missing_tool_call_retry_budget": 3,
+            "missing_tool_call_assessment": {"path": "legacy"},
+            "aux_llm_calls": [],
+            "missing_prompt_tools": [],
+            "missing_prompt_fetch_concept_ids": [],
+            "required_prompt_create_type_name": None,
+            "extract_tool_calls_fn": orchestrator._extract_tool_calls,
+        },
+        environment=_Env(llm),
+    )
+
+    result = orchestrator._action_missing_tool_call_retry(request)
+
+    assert (
+        result.outputs.get("response_text")
+        == "I couldn't execute the requested tool action because repeated "
+        "recovery produced no executable tool call."
+    )
+    assert result.outputs.get("missing_tool_call_retry_suppressed") is True
+    assert (
+        result.outputs.get("missing_tool_call_retry_stop_reason")
+        == "no_state_change_guard_triggered"
+    )
+    assert (
+        result.outputs.get("missing_tool_call_recovery_outcome")
+        == "no_state_change_guard_triggered"
+    )
+    assert len(llm.calls) == 1
+
+    aux_entries = request.data.get("aux_llm_calls")
+    assert isinstance(aux_entries, list)
+    retry_guard_entries = [
+        entry
+        for entry in aux_entries
+        if isinstance(entry, dict)
+        and entry.get("type") == "missing_tool_call_retry"
+        and entry.get("stage") == "skipped"
+        and entry.get("mechanism") == "no_progress_guard"
+    ]
+    assert retry_guard_entries
+    assert (
+        retry_guard_entries[-1].get("stop_reason")
+        == "no_state_change_guard_triggered"
+    )
+
+
+def test_run_gateway_disabled_sanitises_internal_action_marker_response():
+    llm = _RecorderLLM(["<action>call_tool</action>"])
+
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=_DisabledGateway(),  # type: ignore[arg-type]
+        max_tool_invocations=1,
+    )
+
+    result = orchestrator.run(
+        prompt="Please search for test",
+        context=None,
+        llm_client=llm,
+        model="primary-model",
+        user_namespace="#V#user",
+    )
+
+    assert len(result.tool_invocations) == 0
+    assert (
+        result.response_text
+        == "I couldn't execute the requested tool action because no executable "
+        "tool call was produced."
+    )
+
+    sanitised_entries = [
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict) and entry.get("type") == "action_output_sanitised"
+    ]
+    assert sanitised_entries
+    assert sanitised_entries[-1].get("reason") == "xml_action_marker"
+    assert sanitised_entries[-1].get("source_stage") == "run.gateway_disabled"
+
+
+def test_sanitise_user_visible_action_output_rewrites_action_json_and_logs_reason():
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    aux_log: list[Mapping[str, Any]] = []
+
+    safe_text = orchestrator._sanitise_user_visible_action_output(
+        '{"action":"call_tool","tool":"test","payload":{}}',
+        aux_log=aux_log,
+        source_stage="unit_test",
+    )
+
+    assert (
+        safe_text
+        == "I couldn't execute the requested tool action because no executable "
+        "tool call was produced."
+    )
+    assert aux_log
+    assert aux_log[0].get("type") == "action_output_sanitised"
+    assert aux_log[0].get("reason") == "json_action_payload"
+    assert aux_log[0].get("source_stage") == "unit_test"
 
 
 def test_run_appends_completion_claim_validation_for_unverified_claims():

@@ -1455,6 +1455,13 @@ class InternalMCPChatOrchestrator:
 
         retry_needed = bool(assessment.retry_reason) and retries_remaining_before > 0
         retry_suppressed = bool(assessment.retry_reason) and not retry_needed
+        recovery_outcome = (
+            "retry_needed"
+            if retry_needed
+            else "retry_suppressed"
+            if retry_suppressed
+            else "no_retry_required"
+        )
         if retry_suppressed:
             try:
                 aux_log.append(
@@ -1479,6 +1486,7 @@ class InternalMCPChatOrchestrator:
             "missing_tool_call_retry_budget": retry_budget,
             "missing_tool_call_retry_remaining": retries_remaining_before,
             "missing_tool_call_retry_suppressed": retry_suppressed,
+            "missing_tool_call_recovery_outcome": recovery_outcome,
             "tool_call_parse_error": data.get("tool_call_parse_error"),
             "result": retry_needed,
         }
@@ -1822,6 +1830,11 @@ class InternalMCPChatOrchestrator:
         data["missing_tool_call_retry_budget"] = retry_budget
 
         if retries_remaining_before <= 0:
+            budget_exhausted_response = self._sanitise_user_visible_action_output(
+                data.get("response_text"),
+                aux_log=aux_log if isinstance(aux_log, list) else None,
+                source_stage="missing_tool_call.retry",
+            )
             if emit_progress_cb is not None:
                 emit_progress_cb(
                     {
@@ -1852,7 +1865,7 @@ class InternalMCPChatOrchestrator:
                 pass
             return WorkflowActionResult(
                 outputs={
-                    "response_text": data.get("response_text"),
+                    "response_text": budget_exhausted_response,
                     "tool_calls": data.get("tool_calls"),
                     "missing_tool_call_retry_success": False,
                     "tool_call_parse_error": data.get("tool_call_parse_error"),
@@ -1860,6 +1873,8 @@ class InternalMCPChatOrchestrator:
                     "missing_tool_call_retry_budget": retry_budget,
                     "missing_tool_call_retry_remaining": 0,
                     "missing_tool_call_retry_suppressed": True,
+                    "missing_tool_call_retry_stop_reason": "retry_budget_exhausted",
+                    "missing_tool_call_recovery_outcome": "retry_budget_exhausted",
                     "result": False,
                 },
                 duration_ms=0.0,
@@ -1950,6 +1965,8 @@ class InternalMCPChatOrchestrator:
                     "missing_tool_call_retry_budget": retry_budget,
                     "missing_tool_call_retry_remaining": retries_remaining_after,
                     "missing_tool_call_retry_suppressed": False,
+                    "missing_tool_call_retry_stop_reason": None,
+                    "missing_tool_call_recovery_outcome": "retry_succeeded_forced",
                     "result": True,
                 },
                 duration_ms=0.0,
@@ -2080,15 +2097,80 @@ class InternalMCPChatOrchestrator:
             parse_error = exc
 
         success = bool(retry_calls)
+        retry_response_text = (
+            retry_response if isinstance(retry_response, str) else str(retry_response or "")
+        )
+        prior_response_clean = (
+            prior_response_text.strip()
+            if isinstance(prior_response_text, str)
+            else ""
+        )
+        retry_response_clean = retry_response_text.strip()
+        no_state_change_guard_triggered = (
+            not success
+            and parse_error is None
+            and bool(prior_response_clean)
+            and retry_response_clean == prior_response_clean
+        )
+        retry_stop_reason: str | None = None
+        retry_suppressed = False
+        if no_state_change_guard_triggered:
+            retry_stop_reason = "no_state_change_guard_triggered"
+            retry_suppressed = True
+            retry_attempts = max(retry_attempts, retry_budget)
+            retries_remaining_after = 0
+            data["missing_tool_call_retry_attempts"] = retry_attempts
+            try:
+                aux_log.append(
+                    {
+                        "type": "missing_tool_call_retry",
+                        "path": calling_path,
+                        "mechanism": "no_progress_guard",
+                        "stage": "skipped",
+                        "retry_reason": data.get("missing_tool_call_retry_reason") or "",
+                        "retry_attempts": retry_attempts,
+                        "retry_budget": retry_budget,
+                        "retries_remaining": retries_remaining_after,
+                        "stop_reason": retry_stop_reason,
+                    }
+                )
+            except Exception:
+                pass
+
+        if no_state_change_guard_triggered:
+            response_text_output = (
+                "I couldn't execute the requested tool action because repeated "
+                "recovery produced no executable tool call."
+            )
+        elif success:
+            response_text_output = retry_response_text
+        else:
+            response_text_output = self._sanitise_user_visible_action_output(
+                retry_response_text,
+                aux_log=aux_log if isinstance(aux_log, list) else None,
+                source_stage="missing_tool_call.retry",
+            )
+        recovery_outcome = (
+            "retry_succeeded"
+            if success
+            else retry_stop_reason
+            if retry_stop_reason
+            else "retry_failed_parse_error"
+            if parse_error is not None
+            else "retry_failed_no_tool_call"
+        )
+
         outputs = {
-            "response_text": retry_response,
+            "response_text": response_text_output,
             "tool_calls": retry_calls,
             "missing_tool_call_retry_success": success,
             "tool_call_parse_error": parse_error or data.get("tool_call_parse_error"),
             "missing_tool_call_retry_attempts": retry_attempts,
             "missing_tool_call_retry_budget": retry_budget,
             "missing_tool_call_retry_remaining": retries_remaining_after,
-            "missing_tool_call_retry_suppressed": False,
+            "missing_tool_call_retry_suppressed": retry_suppressed,
+            "missing_tool_call_retry_stop_reason": retry_stop_reason,
+            "missing_tool_call_recovery_outcome": recovery_outcome,
             "result": success,
         }
 
@@ -2103,6 +2185,8 @@ class InternalMCPChatOrchestrator:
                     "success": bool(success),
                     "duration_ms": int(duration_ms),
                     "tool_calls_found": bool(retry_calls),
+                    "suppressed": retry_suppressed,
+                    "stop_reason": retry_stop_reason,
                 }
             )
 
@@ -3281,6 +3365,16 @@ class InternalMCPChatOrchestrator:
         missing_tool_call_retry_suppressed = bool(
             data.get("missing_tool_call_retry_suppressed")
         )
+        missing_tool_call_retry_stop_reason = (
+            str(data.get("missing_tool_call_retry_stop_reason")).strip()
+            if isinstance(data.get("missing_tool_call_retry_stop_reason"), str)
+            else None
+        )
+        missing_tool_call_recovery_outcome = (
+            str(data.get("missing_tool_call_recovery_outcome")).strip()
+            if isinstance(data.get("missing_tool_call_recovery_outcome"), str)
+            else None
+        )
         method_catalogue_for_requirements = data.get("method_catalogue")
         if not isinstance(method_catalogue_for_requirements, Mapping):
             try:
@@ -3486,6 +3580,18 @@ class InternalMCPChatOrchestrator:
                 missing_tool_call_retry_suppressed = bool(
                     recovery_data.get("missing_tool_call_retry_suppressed")
                 )
+                missing_tool_call_retry_stop_reason = (
+                    str(recovery_data.get("missing_tool_call_retry_stop_reason")).strip()
+                    if isinstance(
+                        recovery_data.get("missing_tool_call_retry_stop_reason"), str
+                    )
+                    else None
+                )
+                missing_tool_call_recovery_outcome = (
+                    str(recovery_data.get("missing_tool_call_recovery_outcome")).strip()
+                    if isinstance(recovery_data.get("missing_tool_call_recovery_outcome"), str)
+                    else None
+                )
                 has_valid_tool_call = bool(tool_calls)
 
         data["missing_tool_call_retry_attempts"] = missing_tool_call_retry_attempts
@@ -3493,6 +3599,8 @@ class InternalMCPChatOrchestrator:
         data["missing_tool_call_retry_suppressed"] = (
             missing_tool_call_retry_suppressed
         )
+        data["missing_tool_call_retry_stop_reason"] = missing_tool_call_retry_stop_reason
+        data["missing_tool_call_recovery_outcome"] = missing_tool_call_recovery_outcome
         missing_tool_call_retry_remaining = max(
             0, missing_tool_call_retry_budget - missing_tool_call_retry_attempts
         )
@@ -3511,6 +3619,8 @@ class InternalMCPChatOrchestrator:
                     "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
                     "missing_tool_call_retry_remaining": missing_tool_call_retry_remaining,
                     "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
+                    "missing_tool_call_retry_stop_reason": missing_tool_call_retry_stop_reason,
+                    "missing_tool_call_recovery_outcome": missing_tool_call_recovery_outcome,
                     "result": True,
                 }
             )
@@ -3529,21 +3639,28 @@ class InternalMCPChatOrchestrator:
                         "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
                         "missing_tool_call_retry_remaining": missing_tool_call_retry_remaining,
                         "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
+                        "missing_tool_call_retry_stop_reason": missing_tool_call_retry_stop_reason,
+                        "missing_tool_call_recovery_outcome": missing_tool_call_recovery_outcome,
                         "result": False,
                     }
                 )
 
+        safe_direct_response = self._sanitise_user_visible_action_output(
+            response if isinstance(response, str) else str(response),
+            aux_log=aux_llm_calls if isinstance(aux_llm_calls, list) else None,
+            source_stage="tool_calling.plan",
+        )
         return WorkflowActionResult(
             outputs={
                 "tool_calls_present": False,
                 "direct_response": True,
-                "final_response": (
-                    response if isinstance(response, str) else str(response)
-                ),
+                "final_response": safe_direct_response,
                 "missing_tool_call_retry_attempts": missing_tool_call_retry_attempts,
                 "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
                 "missing_tool_call_retry_remaining": missing_tool_call_retry_remaining,
                 "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
+                "missing_tool_call_retry_stop_reason": missing_tool_call_retry_stop_reason,
+                "missing_tool_call_recovery_outcome": missing_tool_call_recovery_outcome,
                 "result": False,
             }
         )
@@ -4171,6 +4288,16 @@ class InternalMCPChatOrchestrator:
         missing_tool_call_retry_suppressed = bool(
             data.get("missing_tool_call_retry_suppressed")
         )
+        missing_tool_call_retry_stop_reason = (
+            str(data.get("missing_tool_call_retry_stop_reason")).strip()
+            if isinstance(data.get("missing_tool_call_retry_stop_reason"), str)
+            else None
+        )
+        missing_tool_call_recovery_outcome = (
+            str(data.get("missing_tool_call_recovery_outcome")).strip()
+            if isinstance(data.get("missing_tool_call_recovery_outcome"), str)
+            else None
+        )
 
         # If there are overflow tool calls from batch capping, return them
         # directly as chained calls (no summariser LLM call needed).
@@ -4191,6 +4318,8 @@ class InternalMCPChatOrchestrator:
                         - missing_tool_call_retry_attempts,
                     ),
                     "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
+                    "missing_tool_call_retry_stop_reason": missing_tool_call_retry_stop_reason,
+                    "missing_tool_call_recovery_outcome": missing_tool_call_recovery_outcome,
                     "result": True,
                 }
             )
@@ -4238,6 +4367,8 @@ class InternalMCPChatOrchestrator:
                             - missing_tool_call_retry_attempts,
                         ),
                         "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
+                        "missing_tool_call_retry_stop_reason": missing_tool_call_retry_stop_reason,
+                        "missing_tool_call_recovery_outcome": missing_tool_call_recovery_outcome,
                         "result": True,
                     }
                 )
@@ -4428,6 +4559,20 @@ class InternalMCPChatOrchestrator:
                     missing_tool_call_retry_suppressed = bool(
                         recovery_data.get("missing_tool_call_retry_suppressed")
                     )
+                    missing_tool_call_retry_stop_reason = (
+                        str(recovery_data.get("missing_tool_call_retry_stop_reason")).strip()
+                        if isinstance(
+                            recovery_data.get("missing_tool_call_retry_stop_reason"), str
+                        )
+                        else None
+                    )
+                    missing_tool_call_recovery_outcome = (
+                        str(recovery_data.get("missing_tool_call_recovery_outcome")).strip()
+                        if isinstance(
+                            recovery_data.get("missing_tool_call_recovery_outcome"), str
+                        )
+                        else None
+                    )
                     data["missing_tool_call_retry_attempts"] = (
                         missing_tool_call_retry_attempts
                     )
@@ -4436,6 +4581,12 @@ class InternalMCPChatOrchestrator:
                     )
                     data["missing_tool_call_retry_suppressed"] = (
                         missing_tool_call_retry_suppressed
+                    )
+                    data["missing_tool_call_retry_stop_reason"] = (
+                        missing_tool_call_retry_stop_reason
+                    )
+                    data["missing_tool_call_recovery_outcome"] = (
+                        missing_tool_call_recovery_outcome
                     )
                     if recovered_calls:
                         return WorkflowActionResult(
@@ -4454,6 +4605,8 @@ class InternalMCPChatOrchestrator:
                                     - missing_tool_call_retry_attempts,
                                 ),
                                 "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
+                                "missing_tool_call_retry_stop_reason": missing_tool_call_retry_stop_reason,
+                                "missing_tool_call_recovery_outcome": missing_tool_call_recovery_outcome,
                                 "result": True,
                             }
                         )
@@ -4479,6 +4632,8 @@ class InternalMCPChatOrchestrator:
                                     - missing_tool_call_retry_attempts,
                                 ),
                                 "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
+                                "missing_tool_call_retry_stop_reason": missing_tool_call_retry_stop_reason,
+                                "missing_tool_call_recovery_outcome": missing_tool_call_recovery_outcome,
                                 "result": False,
                             }
                         )
@@ -4510,12 +4665,17 @@ class InternalMCPChatOrchestrator:
                     }
                 )
 
+        safe_final_response = self._sanitise_user_visible_action_output(
+            current_response,
+            aux_log=aux_llm_calls if isinstance(aux_llm_calls, list) else None,
+            source_stage="tool_calling.backfill",
+        )
         return WorkflowActionResult(
             outputs={
                 "more_tool_calls": False,
                 "tool_calls_present": False,
-                "final_response": current_response,
-                "current_response": current_response,
+                "final_response": safe_final_response,
+                "current_response": safe_final_response,
                 "missing_tool_call_retry_attempts": missing_tool_call_retry_attempts,
                 "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
                 "missing_tool_call_retry_remaining": max(
@@ -4523,6 +4683,8 @@ class InternalMCPChatOrchestrator:
                     missing_tool_call_retry_budget - missing_tool_call_retry_attempts,
                 ),
                 "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
+                "missing_tool_call_retry_stop_reason": missing_tool_call_retry_stop_reason,
+                "missing_tool_call_recovery_outcome": missing_tool_call_recovery_outcome,
                 "result": False,
             }
         )
@@ -6985,6 +7147,55 @@ class InternalMCPChatOrchestrator:
                 return True
 
         return False
+
+    def _sanitise_user_visible_action_output(
+        self,
+        response_text: Any,
+        *,
+        aux_log: list[Any] | None = None,
+        source_stage: str | None = None,
+    ) -> str:
+        """Prevent internal action syntax leaking into user-visible responses."""
+
+        text = response_text if isinstance(response_text, str) else str(response_text or "")
+        stripped = text.strip()
+        if not stripped:
+            return text
+
+        reason: str | None = None
+        if self._is_json_action_response(stripped):
+            reason = "json_action_payload"
+        elif self._contains_fenced_tool_call_json(stripped):
+            reason = "fenced_tool_call_payload"
+        elif re.search(r"(?is)<\s*/?\s*action\b", stripped):
+            reason = "xml_action_marker"
+        elif (
+            (stripped.startswith("{") or stripped.startswith("["))
+            and re.search(r'"action"\s*:\s*"call_tool"', stripped)
+            and re.search(r'"tool"\s*:\s*"', stripped)
+        ):
+            reason = "inline_action_marker"
+
+        if not reason:
+            return text
+
+        safe_text = (
+            "I couldn't execute the requested tool action because no executable "
+            "tool call was produced."
+        )
+        if isinstance(aux_log, list):
+            try:
+                aux_log.append(
+                    {
+                        "type": "action_output_sanitised",
+                        "reason": reason,
+                        "source_stage": source_stage or "",
+                        "original_preview": stripped[:240],
+                    }
+                )
+            except Exception:
+                pass
+        return safe_text
 
     def _first_relationship_value(
         self, concept: Mapping[str, Any] | None, predicate: str
@@ -16800,7 +17011,11 @@ class InternalMCPChatOrchestrator:
                     )
                     _persist_trace(status="completed")
                     return result
-            response_text = response if isinstance(response, str) else str(response)
+            response_text = self._sanitise_user_visible_action_output(
+                response if isinstance(response, str) else str(response),
+                aux_log=aux_llm_calls if isinstance(aux_llm_calls, list) else None,
+                source_stage="run.gateway_disabled",
+            )
             response_text = _maybe_apply_critic(response_text)
             response_text = _maybe_append_completion_claim_validation(response_text)
             result = OrchestratorResult(
@@ -21078,7 +21293,11 @@ class InternalMCPChatOrchestrator:
                         )
                     }
                 )
-            response_text = response if isinstance(response, str) else str(response)
+            response_text = self._sanitise_user_visible_action_output(
+                response if isinstance(response, str) else str(response),
+                aux_log=aux_llm_calls if isinstance(aux_llm_calls, list) else None,
+                source_stage="run.plain_response",
+            )
             response_text = _maybe_apply_critic(response_text)
             response_text = _maybe_append_completion_claim_validation(response_text)
             result = OrchestratorResult(
@@ -21137,6 +21356,11 @@ class InternalMCPChatOrchestrator:
                             f"Workflow {selected_workflow_id_text} completed "
                             f"(state: {wf_result.final_state})."
                         )
+                    wf_response = self._sanitise_user_visible_action_output(
+                        wf_response,
+                        aux_log=aux_llm_calls if isinstance(aux_llm_calls, list) else None,
+                        source_stage="run.custom_workflow",
+                    )
                     wf_response = _maybe_append_completion_claim_validation(wf_response)
                     aux_llm_calls.append(
                         {
@@ -21355,6 +21579,11 @@ class InternalMCPChatOrchestrator:
             final_response_text,
             tool_invocations_for_validation=tuple(invocations),
             tool_messages_for_validation=tuple(tool_messages),
+        )
+        final_response_text = self._sanitise_user_visible_action_output(
+            final_response_text,
+            aux_log=aux_llm_calls if isinstance(aux_llm_calls, list) else None,
+            source_stage="run.tool_workflow_final",
         )
 
         gate_requires_follow_up = bool(
