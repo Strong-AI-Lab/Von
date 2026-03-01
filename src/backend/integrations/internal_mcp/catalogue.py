@@ -7083,6 +7083,154 @@ def _format_turn_execution_rate(numerator: int, denominator: int) -> float:
     return round((float(numerator) / float(denominator)) * 100.0, 2)
 
 
+def _build_turn_execution_benchmark_signals(
+    *,
+    metrics: Mapping[str, Any],
+    baseline_unresolved_follow_up_rate_pct: Any,
+    regression_tolerance_pct: Any,
+    regression_assessment: Mapping[str, Any] | None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    def _signal_status(passed: bool | None) -> str:
+        if passed is True:
+            return "pass"
+        if passed is False:
+            return "fail"
+        return "not_evaluated"
+
+    def _add_signal(
+        *,
+        signal_id: str,
+        dimension: str,
+        title: str,
+        passed: bool | None,
+        details: Mapping[str, Any],
+    ) -> None:
+        signals.append(
+            {
+                "signal_id": signal_id,
+                "dimension": dimension,
+                "title": title,
+                "status": _signal_status(passed),
+                "passed": passed,
+                "details": dict(details),
+            }
+        )
+
+    selection_metrics_raw = metrics.get("selection_metrics")
+    selection_metrics = (
+        selection_metrics_raw if isinstance(selection_metrics_raw, Mapping) else {}
+    )
+    gate_metrics_raw = metrics.get("gate_metrics")
+    gate_metrics = gate_metrics_raw if isinstance(gate_metrics_raw, Mapping) else {}
+    retry_metrics_raw = metrics.get("retry_metrics")
+    retry_metrics = retry_metrics_raw if isinstance(retry_metrics_raw, Mapping) else {}
+    user_metrics_raw = metrics.get("user_imposition_metrics")
+    user_metrics = user_metrics_raw if isinstance(user_metrics_raw, Mapping) else {}
+
+    signals: list[dict[str, Any]] = []
+
+    likely_failure_plain_response_count = int(
+        selection_metrics.get("likely_failure_plain_response_count") or 0
+    )
+    _add_signal(
+        signal_id="workflow_selection_prefers_tool_path",
+        dimension="workflow_selection",
+        title="Likely-failure turns avoid plain-response workflows",
+        passed=likely_failure_plain_response_count == 0,
+        details={
+            "observed_plain_response_count": likely_failure_plain_response_count,
+            "expected_plain_response_count": 0,
+        },
+    )
+
+    false_success_count = int(gate_metrics.get("false_success_count") or 0)
+    _add_signal(
+        signal_id="completion_gate_false_success_guard",
+        dimension="gate_outcomes",
+        title="Completion gate reports zero false-success outcomes",
+        passed=false_success_count == 0,
+        details={
+            "observed_false_success_count": false_success_count,
+            "expected_false_success_count": 0,
+        },
+    )
+
+    follow_up_count = int(retry_metrics.get("follow_up_count") or 0)
+    follow_up_with_retry_signal_count = int(
+        retry_metrics.get("follow_up_with_retry_signal_count") or 0
+    )
+    retry_guard_passed = (
+        True
+        if follow_up_count <= 0
+        else follow_up_with_retry_signal_count >= follow_up_count
+    )
+    _add_signal(
+        signal_id="retry_guardrail_signals_recorded",
+        dimension="retries",
+        title="Follow-up turns carry retry/stop telemetry signals",
+        passed=retry_guard_passed,
+        details={
+            "follow_up_count": follow_up_count,
+            "follow_up_with_retry_signal_count": follow_up_with_retry_signal_count,
+        },
+    )
+
+    follow_up_rate_pct = _safe_float_or_none(user_metrics.get("follow_up_turn_rate_pct"))
+    baseline_follow_up_rate_pct = _safe_float_or_none(
+        baseline_unresolved_follow_up_rate_pct
+    )
+    tolerance = _safe_float_or_none(regression_tolerance_pct)
+    if tolerance is None or tolerance < 0:
+        tolerance = 0.0
+    if follow_up_rate_pct is None or baseline_follow_up_rate_pct is None:
+        user_imposition_passed = None
+        max_follow_up_rate_pct = None
+    else:
+        max_follow_up_rate_pct = round(baseline_follow_up_rate_pct + tolerance, 2)
+        user_imposition_passed = follow_up_rate_pct <= max_follow_up_rate_pct
+    _add_signal(
+        signal_id="user_imposition_rate_vs_baseline",
+        dimension="user_imposition",
+        title="Follow-up burden does not exceed baseline tolerance",
+        passed=user_imposition_passed,
+        details={
+            "observed_follow_up_turn_rate_pct": follow_up_rate_pct,
+            "max_follow_up_turn_rate_pct": max_follow_up_rate_pct,
+            "baseline_follow_up_turn_rate_pct": baseline_follow_up_rate_pct,
+            "regression_tolerance_pct": round(tolerance, 2),
+        },
+    )
+
+    baseline_provided = bool(
+        regression_assessment.get("baseline_provided", False)
+        if isinstance(regression_assessment, Mapping)
+        else False
+    )
+    if baseline_provided:
+        regression_detected = bool(
+            regression_assessment.get("regression_detected", False)
+            if isinstance(regression_assessment, Mapping)
+            else False
+        )
+        _add_signal(
+            signal_id="overall_regression_assessment",
+            dimension="benchmark",
+            title="Overall benchmark metrics stay within baseline tolerance",
+            passed=not regression_detected,
+            details={"regression_detected": regression_detected},
+        )
+
+    summary = {
+        "pass_count": sum(1 for signal in signals if signal.get("status") == "pass"),
+        "fail_count": sum(1 for signal in signals if signal.get("status") == "fail"),
+        "not_evaluated_count": sum(
+            1 for signal in signals if signal.get("status") == "not_evaluated"
+        ),
+        "total_count": len(signals),
+    }
+    return signals, summary
+
+
 def _turn_execution_build_benchmark(**kwargs):
     include_completed = bool(kwargs.get("include_completed", True))
     max_cases_raw = kwargs.get("max_cases")
@@ -7156,6 +7304,49 @@ def _turn_execution_build_benchmark(**kwargs):
     unresolved_follow_up_count = sum(
         1 for item in sorted_items if bool(item.get("requires_follow_up", False))
     )
+    safe_completion_count = sum(
+        1 for item in sorted_items if bool(item.get("safe_to_claim_completion", False))
+    )
+    likely_failure_plain_response_count = sum(
+        1
+        for item in likely_items
+        if str(item.get("selected_workflow_id") or "").strip()
+        in {"#V#chat_assistant_workflow", "#V#plain_response_workflow"}
+    )
+    likely_failure_tool_workflow_count = sum(
+        1
+        for item in likely_items
+        if str(item.get("selected_workflow_id") or "").strip()
+        == "#V#tool_calling_workflow"
+    )
+    bounded_loop_stop_reasons = {
+        "attempt_budget_exhausted",
+        "elapsed_budget_exhausted",
+        "no_progress_guard_triggered",
+        "stall_latency_budget_exhausted",
+    }
+    follow_up_with_retry_signal_count = 0
+    bounded_retry_stop_count = 0
+    stall_latency_stop_count = 0
+    escalation_signal_count = 0
+    for item in sorted_items:
+        if not bool(item.get("requires_follow_up", False)):
+            continue
+        loop_attempts = _coerce_int_or_none(item.get("loop_attempts")) or 0
+        repeat_iteration = bool(item.get("repeat_iteration", False))
+        loop_stop_reason = (
+            str(item.get("loop_stop_reason")).strip()
+            if isinstance(item.get("loop_stop_reason"), str)
+            else ""
+        )
+        if repeat_iteration or loop_attempts > 0 or bool(loop_stop_reason):
+            follow_up_with_retry_signal_count += 1
+        if loop_stop_reason in bounded_loop_stop_reasons:
+            bounded_retry_stop_count += 1
+        if loop_stop_reason == "stall_latency_budget_exhausted":
+            stall_latency_stop_count += 1
+        if bool(item.get("escalation_signal", False)):
+            escalation_signal_count += 1
 
     failure_mode_counts: dict[str, int] = {}
     failure_mode_counts_raw = result.get("failure_mode_counts")
@@ -7195,6 +7386,43 @@ def _turn_execution_build_benchmark(**kwargs):
         "unresolved_follow_up_rate_pct": _format_turn_execution_rate(
             unresolved_follow_up_count, scanned_count
         ),
+        "selection_metrics": {
+            "likely_failure_tool_workflow_count": likely_failure_tool_workflow_count,
+            "likely_failure_plain_response_count": likely_failure_plain_response_count,
+            "likely_failure_tool_workflow_rate_pct": _format_turn_execution_rate(
+                likely_failure_tool_workflow_count, likely_failure_count
+            ),
+        },
+        "gate_metrics": {
+            "false_success_count": false_success_count,
+            "safe_completion_count": safe_completion_count,
+            "requires_follow_up_count": unresolved_follow_up_count,
+            "requires_follow_up_rate_pct": _format_turn_execution_rate(
+                unresolved_follow_up_count, scanned_count
+            ),
+        },
+        "retry_metrics": {
+            "follow_up_count": unresolved_follow_up_count,
+            "follow_up_with_retry_signal_count": follow_up_with_retry_signal_count,
+            "follow_up_with_retry_signal_rate_pct": _format_turn_execution_rate(
+                follow_up_with_retry_signal_count, unresolved_follow_up_count
+            ),
+            "bounded_retry_stop_count": bounded_retry_stop_count,
+            "bounded_retry_stop_rate_pct": _format_turn_execution_rate(
+                bounded_retry_stop_count, unresolved_follow_up_count
+            ),
+            "stall_latency_stop_count": stall_latency_stop_count,
+        },
+        "user_imposition_metrics": {
+            "follow_up_turn_count": unresolved_follow_up_count,
+            "follow_up_turn_rate_pct": _format_turn_execution_rate(
+                unresolved_follow_up_count, scanned_count
+            ),
+            "escalation_signal_count": escalation_signal_count,
+            "escalation_signal_rate_pct": _format_turn_execution_rate(
+                escalation_signal_count, unresolved_follow_up_count
+            ),
+        },
         "failure_mode_counts": failure_mode_counts,
         "decision_counts": (
             result.get("decision_counts")
@@ -7204,6 +7432,25 @@ def _turn_execution_build_benchmark(**kwargs):
         "workflow_counts": workflow_counts,
         "workflow_failure_counts": workflow_failure_counts,
     }
+    regression_assessment = _build_turn_execution_regression_assessment(
+        metrics=metrics_payload,
+        baseline_likely_failure_rate_pct=kwargs.get("baseline_likely_failure_rate_pct"),
+        baseline_false_success_rate_pct=kwargs.get("baseline_false_success_rate_pct"),
+        baseline_unresolved_follow_up_rate_pct=kwargs.get(
+            "baseline_unresolved_follow_up_rate_pct"
+        ),
+        regression_tolerance_pct=kwargs.get("regression_tolerance_pct"),
+    )
+    benchmark_signals, benchmark_signal_summary = (
+        _build_turn_execution_benchmark_signals(
+            metrics=metrics_payload,
+            baseline_unresolved_follow_up_rate_pct=kwargs.get(
+                "baseline_unresolved_follow_up_rate_pct"
+            ),
+            regression_tolerance_pct=kwargs.get("regression_tolerance_pct"),
+            regression_assessment=regression_assessment,
+        )
+    )
     payload = {
         "collection": "turn_execution_records",
         "benchmark_generated_at_utc": _utc_now_iso(),
@@ -7219,19 +7466,9 @@ def _turn_execution_build_benchmark(**kwargs):
             replay_cases,
             jira_base_url=jira_base_url,
         ),
-        "regression_assessment": _build_turn_execution_regression_assessment(
-            metrics=metrics_payload,
-            baseline_likely_failure_rate_pct=kwargs.get(
-                "baseline_likely_failure_rate_pct"
-            ),
-            baseline_false_success_rate_pct=kwargs.get(
-                "baseline_false_success_rate_pct"
-            ),
-            baseline_unresolved_follow_up_rate_pct=kwargs.get(
-                "baseline_unresolved_follow_up_rate_pct"
-            ),
-            regression_tolerance_pct=kwargs.get("regression_tolerance_pct"),
-        ),
+        "regression_assessment": regression_assessment,
+        "benchmark_signals": benchmark_signals,
+        "benchmark_signal_summary": benchmark_signal_summary,
         "capability_gaps": _derive_turn_execution_capability_gaps(
             sorted_items,
             failure_mode_counts=failure_mode_counts,
@@ -10608,11 +10845,34 @@ def _rag_list_indexed(**kwargs):
             )
         )
 
+        def _safe_text_optional(value: Any) -> str | None:
+            if not isinstance(value, str):
+                return None
+            cleaned = value.strip()
+            return cleaned or None
+
+        def _safe_int_optional(value: Any) -> int | None:
+            try:
+                return int(value)
+            except Exception:
+                return None
+
+        def _safe_bool_optional(value: Any) -> bool | None:
+            if isinstance(value, bool):
+                return value
+            return None
+
         items: list[dict[str, Any]] = []
         for doc in docs:
             completion_gate_raw = doc.get("completion_gate")
             completion_gate: dict[str, Any] = (
                 completion_gate_raw if isinstance(completion_gate_raw, dict) else {}
+            )
+            completion_gate_evidence_raw = completion_gate.get("evidence_payload")
+            completion_gate_evidence: dict[str, Any] = (
+                completion_gate_evidence_raw
+                if isinstance(completion_gate_evidence_raw, dict)
+                else {}
             )
             required_effects_raw = doc.get("required_effects")
             required_effects: list[Any] = (
@@ -10656,6 +10916,41 @@ def _rag_list_indexed(**kwargs):
                 for effect_id in blocking_effect_ids_raw:
                     if isinstance(effect_id, str) and effect_id.strip():
                         blocking_effect_ids.append(effect_id.strip())
+            repeat_iteration = _safe_bool_optional(
+                doc.get("completion_gate_repeat_iteration")
+            )
+            if repeat_iteration is None:
+                repeat_iteration = bool(
+                    completion_gate_evidence.get("repeat_iteration", False)
+                )
+
+            loop_attempts = _safe_int_optional(doc.get("completion_gate_loop_attempts"))
+            if loop_attempts is None:
+                loop_attempts = _safe_int_optional(
+                    completion_gate_evidence.get("loop_attempts")
+                )
+            if loop_attempts is None:
+                loop_attempts = 0
+
+            loop_stop_reason = _safe_text_optional(
+                doc.get("completion_gate_loop_stop_reason")
+            ) or _safe_text_optional(completion_gate_evidence.get("repeat_stop_reason"))
+
+            terminal_outcome = _safe_text_optional(
+                doc.get("completion_gate_terminal_outcome")
+            ) or _safe_text_optional(completion_gate_evidence.get("terminal_outcome"))
+
+            escalation_signal = _safe_bool_optional(
+                doc.get("completion_gate_escalation_signal")
+            )
+            if escalation_signal is None:
+                escalation_signal = bool(
+                    completion_gate_evidence.get("escalation_signal", False)
+                )
+
+            escalation_reason = _safe_text_optional(
+                doc.get("completion_gate_escalation_reason")
+            ) or _safe_text_optional(completion_gate_evidence.get("escalation_reason"))
             rag_indexing_state = _build_turn_execution_rag_indexing_state(
                 chat_session_id=doc.get("session_id"),
                 state_by_chat_session_id=rag_indexing_state_map,
@@ -10690,6 +10985,12 @@ def _rag_list_indexed(**kwargs):
                     "completion_claim_validated": final_response_payload.get(
                         "completion_claim_validated"
                     ),
+                    "repeat_iteration": repeat_iteration,
+                    "loop_attempts": loop_attempts,
+                    "loop_stop_reason": loop_stop_reason,
+                    "terminal_outcome": terminal_outcome,
+                    "escalation_signal": escalation_signal,
+                    "escalation_reason": escalation_reason,
                     "critic_summary": critic_summary,
                     "rag_indexing_state": rag_indexing_state,
                     "item_kind": "turn_execution_record",

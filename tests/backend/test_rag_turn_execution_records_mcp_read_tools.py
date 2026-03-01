@@ -151,6 +151,116 @@ class _DB:
         return self._collections[key]
 
 
+def _build_gateway():
+    from src.backend.integrations.internal_mcp import build_default_catalogue
+    from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
+    from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
+
+    return InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+
+
+def _build_hesitancy_trace_docs() -> list[dict[str, Any]]:
+    return [
+        {
+            "request_id": "req-hes-1",
+            "session_id": "chat-hes-1",
+            "namespace": "#V#user@org",
+            "created_at_utc": "2026-02-20T00:00:00Z",
+            "completion_gate": {
+                "decision": "escalation_required",
+                "decision_reason": "Required mutation was not executed.",
+                "safe_to_claim_completion": False,
+                "requires_follow_up": True,
+                "blocking_effect_ids": ["effect_1"],
+                "evidence_payload": {
+                    "terminal_outcome": "retrying",
+                    "repeat_iteration": True,
+                },
+            },
+            "completion_gate_repeat_iteration": True,
+            "completion_gate_loop_attempts": 1,
+            "workflow_selection": {
+                "selected_workflow_id": "#V#tool_calling_workflow",
+                "selector_verdict": "tool_seeking",
+            },
+            "required_effects": [{"effect_id": "effect_1", "status": "not_executed"}],
+            "prompt": {"preview": "JVNAUTOSCI-1326 hesitancy trace turn 1"},
+            "critic": {"summary": {"not_verified_count": 1}},
+            "final_response": {
+                "completion_claim_detected": True,
+                "completion_claim_validated": False,
+            },
+        },
+        {
+            "request_id": "req-hes-2",
+            "session_id": "chat-hes-1",
+            "namespace": "#V#user@org",
+            "created_at_utc": "2026-02-20T00:00:15Z",
+            "completion_gate": {
+                "decision": "partial",
+                "decision_reason": "Mutation execution observed but verification is inconclusive.",
+                "safe_to_claim_completion": False,
+                "requires_follow_up": True,
+                "blocking_effect_ids": ["effect_2"],
+                "evidence_payload": {
+                    "terminal_outcome": "stall_latency_budget_exhausted",
+                    "repeat_iteration": False,
+                    "repeat_stop_reason": "stall_latency_budget_exhausted",
+                    "escalation_signal": True,
+                    "escalation_reason": "stall_latency_budget_exhausted",
+                },
+            },
+            "completion_gate_repeat_iteration": False,
+            "completion_gate_loop_attempts": 2,
+            "completion_gate_loop_stop_reason": "stall_latency_budget_exhausted",
+            "completion_gate_escalation_signal": True,
+            "completion_gate_escalation_reason": "stall_latency_budget_exhausted",
+            "workflow_selection": {
+                "selected_workflow_id": "#V#tool_calling_workflow",
+                "selector_verdict": "tool_seeking",
+            },
+            "required_effects": [{"effect_id": "effect_2", "status": "satisfied"}],
+            "prompt": {"preview": "JVNAUTOSCI-1326 hesitancy trace turn 2"},
+            "critic": {"summary": {"inconclusive_count": 1}},
+            "final_response": {
+                "completion_claim_detected": True,
+                "completion_claim_validated": False,
+            },
+        },
+        {
+            "request_id": "req-hes-3",
+            "session_id": "chat-hes-1",
+            "namespace": "#V#user@org",
+            "created_at_utc": "2026-02-20T00:00:35Z",
+            "completion_gate": {
+                "decision": "completed",
+                "decision_reason": "No blocking effect detected.",
+                "safe_to_claim_completion": True,
+                "requires_follow_up": False,
+                "blocking_effect_ids": [],
+                "evidence_payload": {"terminal_outcome": "completed"},
+            },
+            "completion_gate_repeat_iteration": False,
+            "completion_gate_loop_attempts": 0,
+            "workflow_selection": {
+                "selected_workflow_id": "#V#tool_calling_workflow",
+                "selector_verdict": "tool_seeking",
+            },
+            "required_effects": [],
+            "prompt": {"preview": "JVNAUTOSCI-1326 hesitancy trace turn 3"},
+            "critic": {"summary": {"not_verified_count": 0}},
+            "final_response": {
+                "completion_claim_detected": True,
+                "completion_claim_validated": True,
+            },
+        },
+    ]
+
+
 def test_rag_list_indexed_supports_turn_execution_records(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue as cat
 
@@ -821,6 +931,131 @@ def test_turn_execution_build_benchmark_reports_gap_when_no_records(monkeypatch)
     capability_gaps = result.get("capability_gaps")
     assert isinstance(capability_gaps, list)
     assert any(gap.get("gap_id") == "no_turn_execution_records" for gap in capability_gaps)
+
+
+def test_turn_execution_build_benchmark_hesitancy_trace_gateway_e2e(monkeypatch):
+    docs = _build_hesitancy_trace_docs()
+    coll = _TurnExecutionCollection(docs)
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        lambda: _DB({"turn_execution_records": coll}),
+    )
+
+    gateway = _build_gateway()
+    payload = gateway.invoke(
+        "turn_execution_build_benchmark",
+        {
+            "namespace": "#V#user@org",
+            "limit": 20,
+            "offset": 0,
+            "max_cases": 5,
+            "include_completed": True,
+            "baseline_unresolved_follow_up_rate_pct": 70.0,
+            "regression_tolerance_pct": 1.0,
+        },
+    ).payload
+
+    assert payload["success"] is True
+    metrics = payload.get("metrics")
+    assert isinstance(metrics, dict)
+    assert metrics.get("scanned_count") == 3
+    assert metrics.get("likely_failure_count") == 2
+    assert metrics.get("unresolved_follow_up_count") == 2
+
+    selection_metrics = metrics.get("selection_metrics")
+    assert isinstance(selection_metrics, dict)
+    assert selection_metrics.get("likely_failure_tool_workflow_count") == 2
+    assert selection_metrics.get("likely_failure_plain_response_count") == 0
+    assert selection_metrics.get("likely_failure_tool_workflow_rate_pct") == 100.0
+
+    gate_metrics = metrics.get("gate_metrics")
+    assert isinstance(gate_metrics, dict)
+    assert gate_metrics.get("false_success_count") == 0
+    assert gate_metrics.get("requires_follow_up_count") == 2
+
+    retry_metrics = metrics.get("retry_metrics")
+    assert isinstance(retry_metrics, dict)
+    assert retry_metrics.get("follow_up_count") == 2
+    assert retry_metrics.get("follow_up_with_retry_signal_count") == 2
+    assert retry_metrics.get("bounded_retry_stop_count") == 1
+    assert retry_metrics.get("stall_latency_stop_count") == 1
+
+    user_imposition_metrics = metrics.get("user_imposition_metrics")
+    assert isinstance(user_imposition_metrics, dict)
+    assert user_imposition_metrics.get("follow_up_turn_count") == 2
+    assert user_imposition_metrics.get("follow_up_turn_rate_pct") == 66.67
+    assert user_imposition_metrics.get("escalation_signal_count") == 1
+
+    signals = payload.get("benchmark_signals")
+    assert isinstance(signals, list)
+    signal_by_id = {
+        signal.get("signal_id"): signal
+        for signal in signals
+        if isinstance(signal, dict)
+    }
+    assert signal_by_id["workflow_selection_prefers_tool_path"]["status"] == "pass"
+    assert signal_by_id["completion_gate_false_success_guard"]["status"] == "pass"
+    assert signal_by_id["retry_guardrail_signals_recorded"]["status"] == "pass"
+    assert signal_by_id["user_imposition_rate_vs_baseline"]["status"] == "pass"
+
+    summary = payload.get("benchmark_signal_summary")
+    assert isinstance(summary, dict)
+    assert summary.get("fail_count") == 0
+    assert summary.get("pass_count", 0) >= 4
+
+    replay_cases = payload.get("replay_cases")
+    assert isinstance(replay_cases, list)
+    assert replay_cases
+    triage = replay_cases[0].get("triage")
+    assert isinstance(triage, dict)
+    assert "JVNAUTOSCI-1326" in triage.get("jira_issue_keys", [])
+
+
+def test_turn_execution_build_benchmark_hesitancy_signals_detect_plain_response_regression(
+    monkeypatch,
+):
+    docs = _build_hesitancy_trace_docs()
+    docs[0]["workflow_selection"] = {
+        "selected_workflow_id": "#V#chat_assistant_workflow",
+        "selector_verdict": "plain_response",
+    }
+
+    coll = _TurnExecutionCollection(docs)
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        lambda: _DB({"turn_execution_records": coll}),
+    )
+
+    gateway = _build_gateway()
+    payload = gateway.invoke(
+        "turn_execution_build_benchmark",
+        {
+            "namespace": "#V#user@org",
+            "limit": 20,
+            "offset": 0,
+            "max_cases": 5,
+            "include_completed": True,
+            "baseline_unresolved_follow_up_rate_pct": 70.0,
+            "regression_tolerance_pct": 1.0,
+        },
+    ).payload
+
+    assert payload["success"] is True
+    signals = payload.get("benchmark_signals")
+    assert isinstance(signals, list)
+    signal_by_id = {
+        signal.get("signal_id"): signal
+        for signal in signals
+        if isinstance(signal, dict)
+    }
+    assert signal_by_id["workflow_selection_prefers_tool_path"]["status"] == "fail"
+    details = signal_by_id["workflow_selection_prefers_tool_path"].get("details")
+    assert isinstance(details, dict)
+    assert details.get("observed_plain_response_count") == 1
+
+    summary = payload.get("benchmark_signal_summary")
+    assert isinstance(summary, dict)
+    assert summary.get("fail_count", 0) >= 1
 
 
 def test_turn_execution_backfill_wrapper_returns_provenance(monkeypatch):
