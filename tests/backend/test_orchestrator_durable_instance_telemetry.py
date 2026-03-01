@@ -8,6 +8,11 @@ import pytest
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
 )
+from src.backend.workflows import (
+    WorkflowDefinition,
+    WorkflowStateSpec,
+)
+from src.backend.workflows.workflow_registry import WorkflowRegistration
 
 
 class _DummyGateway:
@@ -264,3 +269,66 @@ def test_execute_workflow_marks_durable_instance_failed_on_exception(
     assert failed_call["instance_id"] == "wf-inst-1"
     assert failed_call.get("error_step") == "workflow_exception"
     assert "exception:boom" in str(failed_call.get("error"))
+
+
+def test_execute_workflow_materialises_terminal_effect_evidence_on_gateway_path(
+    monkeypatch,
+) -> None:
+    orchestrator = _build_orchestrator()
+    fake_manager = _FakeWorkflowInstanceManager()
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: fake_manager,
+    )
+
+    workflow_id = "#V#terminal_effect_gateway_workflow"
+    terminal_effect_id = (
+        "#V#workflow_effect_terminal_effect_gateway_workflow_done_terminal"
+    )
+    definition = WorkflowDefinition(
+        workflow_id=workflow_id,
+        initial_state="done",
+        states={
+            "done": WorkflowStateSpec(
+                state_id="done",
+                terminal=True,
+                metadata={"effects": [terminal_effect_id]},
+            )
+        },
+    )
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=workflow_id,
+            definition=definition,
+            source="test",
+        )
+    )
+
+    result = orchestrator.execute_workflow(
+        workflow_id,
+        data={
+            "prompt": "Run terminal metadata workflow.",
+            "user_concept_id": "#V#user",
+            "org_concept_id": "#V#org",
+            "conversation_session_id": "chat-terminal",
+            "turn_id": "turn-terminal",
+            "workflow_episode_source": "chat_turn_workflow",
+            "workflow_episode_stage": "tool_calling",
+        },
+        llm_client=object(),
+        model="test-model",
+        user_namespace="#V#user@org",
+        conversation_session_id="chat-terminal",
+        turn_id="turn-terminal",
+        episode_source="chat_turn_workflow",
+    )
+
+    assert result is not None
+    assert result.completed is True
+    assert result.error is None
+    assert result.data.get(terminal_effect_id) is True
+    assert fake_manager.mark_completed_calls
+    outputs = fake_manager.mark_completed_calls[0].get("outputs")
+    assert isinstance(outputs, dict)
+    assert outputs.get("completed") is True
