@@ -1,29 +1,7 @@
+import { triggerBlobDownload } from './utils/fileSave.js';
+
 // Import/Export Tab functionality
 let operationHistory = [];
-
-// Helper: detect jsdom test environment
-function isJSDOM() {
-  try {
-    return typeof navigator !== 'undefined' && /jsdom/i.test(navigator.userAgent || '');
-  } catch {
-    return false;
-  }
-}
-
-// Helper: safely trigger a file download, avoiding jsdom navigation errors in tests
-function safeDownloadBlob(blob, filename) {
-  const url = window.URL.createObjectURL(blob);
-  if (!isJSDOM()) {
-    const a = document.createElement('a');
-    a.href = url;
-    if (filename) a.download = filename;
-    // Append and click only in real browser
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-  }
-  window.URL.revokeObjectURL(url);
-}
 
 export function initializeImportExportTab() {
   console.log('Initializing Import/Export tab...');
@@ -156,7 +134,7 @@ async function exportDirectOntology(button, statusElement) {
 
     // Create download
     const blob = await response.blob();
-    safeDownloadBlob(blob, filename);
+    triggerBlobDownload(blob, filename);
 
     showDirectOntologyStatus(statusElement, `✅ Successfully exported complete ontology as ${filename}`, false);
     addToHistory('Direct Ontology Export', `Successfully exported as ${filename}`, 'success');
@@ -669,7 +647,7 @@ async function exportVontology(statusElement, isPreview = false) {
     } else {
       // For actual export, handle as blob for download
       const blob = await response.blob();
-      safeDownloadBlob(blob, `vontology_export_${new Date().toISOString().split('T')[0]}.json`);
+      triggerBlobDownload(blob, `vontology_export_${new Date().toISOString().split('T')[0]}.json`);
 
       const message = 'Vontology exported successfully!';
       updateStatus(statusElement, message, 'success');
@@ -834,7 +812,7 @@ async function exportEntities(statusElement, isPreview = false) {
         const conceptName = conceptFilter.replace('#V#', '').replace(/[^a-zA-Z0-9]/g, '_');
         filename = `concepts_export_${conceptName}_${new Date().toISOString().split('T')[0]}.json`;
       }
-      safeDownloadBlob(blob, filename);
+      triggerBlobDownload(blob, filename);
 
       const message = `Concepts exported successfully! ${result.total_count || 0} concepts downloaded.`;
       updateStatus(statusElement, message, 'success');

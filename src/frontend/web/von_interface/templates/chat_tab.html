@@ -6,25 +6,27 @@
       <h2 class="main-title">Talk to Von Neumarkt</h2>
       <div class="chat-header-controls" role="group" aria-label="Conversation tools">
         <button id="taskPanelToggleBtn" class="chat-export-btn" type="button"
-          title="View and manage tasks" aria-label="Tasks">
+          title="Open tasks panel" aria-label="Tasks" data-keep-title="true">
           <span class="btn-icon">📋</span>
           <span id="taskCountBadge" class="task-count-badge hidden" aria-hidden="true"></span>
         </button>
         <button id="inviteConversationBtn" class="chat-export-btn" type="button"
-          title="Invite someone to this conversation" aria-label="Invite to conversation">
+          title="Invite people to this conversation" aria-label="Invite to conversation" data-keep-title="true">
           <span class="btn-icon">👥</span>
         </button>
-        <button id="incomingInvitesBtn" class="chat-export-btn" type="button" title="View conversation invites"
-          aria-label="View conversation invites">
+        <button id="incomingInvitesBtn" class="chat-export-btn" type="button"
+          title="View incoming conversation invites" aria-label="View conversation invites" data-keep-title="true">
           <span class="btn-icon">📨</span>
           <span id="incomingInvitesBadge" class="invite-badge hidden" aria-hidden="true"></span>
         </button>
         <button id="exportConversationMarkdownBtn" class="chat-export-btn" type="button"
-          title="Copy conversation as Markdown formatted transcript" aria-label="Export conversation as Markdown">
+          title="Copy conversation transcript as Markdown" aria-label="Export conversation as Markdown"
+          data-keep-title="true">
           <span class="btn-icon">MD</span>
         </button>
         <button id="exportConversationJsonBtn" class="chat-export-btn" type="button"
-          title="Copy full conversation debug JSON to clipboard" aria-label="Export conversation as JSON">
+          title="Save full conversation telemetry as JSON file" aria-label="Save conversation telemetry as JSON"
+          data-keep-title="true">
           <span class="btn-icon">{}</span>
         </button>
       </div>
