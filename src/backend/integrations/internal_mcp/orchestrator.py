@@ -752,6 +752,13 @@ class InternalMCPChatOrchestrator:
             min_value=0,
             max_value=10,
         )
+        self._completion_gate_loop_stall_max_elapsed_ms = self._coerce_int(
+            None,
+            env_var="VON_COMPLETION_GATE_LOOP_STALL_MAX_ELAPSED_MS",
+            default=10_000,
+            min_value=500,
+            max_value=600_000,
+        )
         self._default_gmail_profile = default_gmail_profile
 
         # Optional progress callback for UI telemetry (JVNAUTOSCI-942).
@@ -4958,14 +4965,40 @@ class InternalMCPChatOrchestrator:
             if isinstance(loop_last_blocking_signature_raw, str)
             else ""
         )
+        current_monotonic = time.monotonic()
         loop_started_monotonic_raw = data.get("completion_gate_loop_started_monotonic")
         if isinstance(loop_started_monotonic_raw, (int, float)):
             loop_started_monotonic = float(loop_started_monotonic_raw)
         else:
-            loop_started_monotonic = time.monotonic()
+            loop_started_monotonic = current_monotonic
         loop_elapsed_ms = max(
             0,
-            int((time.monotonic() - loop_started_monotonic) * 1000),
+            int((current_monotonic - loop_started_monotonic) * 1000),
+        )
+        loop_stall_started_monotonic_raw = data.get(
+            "completion_gate_loop_stall_started_monotonic"
+        )
+        loop_stall_started_monotonic = (
+            float(loop_stall_started_monotonic_raw)
+            if isinstance(loop_stall_started_monotonic_raw, (int, float))
+            else None
+        )
+        loop_stall_events = self._coerce_non_negative_int(
+            data.get("completion_gate_loop_stall_events"),
+            default=0,
+            max_value=100,
+        )
+        loop_stall_max_elapsed_ms = self._coerce_non_negative_int(
+            data.get("completion_gate_loop_stall_max_elapsed_ms"),
+            default=int(
+                getattr(self, "_completion_gate_loop_stall_max_elapsed_ms", 10_000)
+            ),
+            max_value=600_000,
+        )
+        loop_stall_elapsed_ms = self._coerce_non_negative_int(
+            data.get("completion_gate_loop_stall_elapsed_ms"),
+            default=0,
+            max_value=600_000,
         )
 
         final_response = data.get("final_response")
@@ -5028,10 +5061,22 @@ class InternalMCPChatOrchestrator:
             bool(loop_last_blocking_signature)
             and loop_last_blocking_signature == blocking_signature
         )
-        if requires_follow_up and (not progress_observed) and same_blocking_signature:
+        stalled_checkpoint = (
+            requires_follow_up and (not progress_observed) and same_blocking_signature
+        )
+        if stalled_checkpoint:
             loop_no_progress_streak += 1
+            if loop_stall_started_monotonic is None:
+                loop_stall_started_monotonic = current_monotonic
+            loop_stall_events += 1
+            loop_stall_elapsed_ms = max(
+                0,
+                int((current_monotonic - loop_stall_started_monotonic) * 1000),
+            )
         else:
             loop_no_progress_streak = 0
+            loop_stall_started_monotonic = None
+            loop_stall_elapsed_ms = 0
 
         repeat_iteration = False
         repeat_stop_reason: str | None = None
@@ -5042,6 +5087,11 @@ class InternalMCPChatOrchestrator:
                 repeat_stop_reason = "attempt_budget_exhausted"
             elif loop_elapsed_ms >= loop_max_elapsed_ms:
                 repeat_stop_reason = "elapsed_budget_exhausted"
+            elif (
+                loop_stall_max_elapsed_ms > 0
+                and loop_stall_elapsed_ms >= loop_stall_max_elapsed_ms
+            ):
+                repeat_stop_reason = "stall_latency_budget_exhausted"
             elif (
                 loop_no_progress_limit > 0
                 and loop_attempts > 0
@@ -5075,6 +5125,20 @@ class InternalMCPChatOrchestrator:
             terminal_outcome = repeat_stop_reason
         elif requires_follow_up:
             terminal_outcome = "follow_up_required"
+        escalation_signal = bool(requires_follow_up and not repeat_iteration and repeat_stop_reason)
+        escalation_reason = repeat_stop_reason if escalation_signal else None
+        if escalation_signal:
+            escalation_line = (
+                f"Escalation trigger: {repeat_stop_reason}. "
+                f"Loop attempts {loop_attempts}/{loop_max_attempts}; "
+                f"loop elapsed {loop_elapsed_ms}ms/{loop_max_elapsed_ms}ms; "
+                f"stall elapsed {loop_stall_elapsed_ms}ms/{loop_stall_max_elapsed_ms}ms."
+            )
+            if isinstance(final_response, str) and final_response.strip():
+                if "Escalation trigger:" not in final_response:
+                    final_response = f"{final_response.rstrip()}\n\n{escalation_line}"
+            else:
+                final_response = escalation_line
 
         completion_gate_evidence_payload: dict[str, Any] = dict(record_evidence_payload)
         completion_gate_evidence_payload.update(
@@ -5095,6 +5159,11 @@ class InternalMCPChatOrchestrator:
                 "repeat_iteration": repeat_iteration,
                 "repeat_stop_reason": repeat_stop_reason,
                 "loop_retry_reason": loop_retry_reason,
+                "loop_stall_events": loop_stall_events,
+                "loop_stall_elapsed_ms": loop_stall_elapsed_ms,
+                "loop_stall_max_elapsed_ms": loop_stall_max_elapsed_ms,
+                "escalation_signal": escalation_signal,
+                "escalation_reason": escalation_reason,
             }
         )
 
@@ -5230,6 +5299,11 @@ class InternalMCPChatOrchestrator:
                         "loop_max_elapsed_ms": loop_max_elapsed_ms,
                         "loop_no_progress_streak": loop_no_progress_streak,
                         "loop_no_progress_limit": loop_no_progress_limit,
+                        "loop_stall_events": loop_stall_events,
+                        "loop_stall_elapsed_ms": loop_stall_elapsed_ms,
+                        "loop_stall_max_elapsed_ms": loop_stall_max_elapsed_ms,
+                        "escalation_signal": escalation_signal,
+                        "escalation_reason": escalation_reason,
                         "loop_retry_reason": loop_retry_reason,
                         "workflow_introspection_autotrigger": introspection_autotrigger,
                     }
@@ -5259,8 +5333,14 @@ class InternalMCPChatOrchestrator:
                 "completion_gate_loop_started_monotonic": loop_started_monotonic,
                 "completion_gate_loop_no_progress_streak": loop_no_progress_streak,
                 "completion_gate_loop_no_progress_limit": loop_no_progress_limit,
+                "completion_gate_loop_stall_events": loop_stall_events,
+                "completion_gate_loop_stall_elapsed_ms": loop_stall_elapsed_ms,
+                "completion_gate_loop_stall_max_elapsed_ms": loop_stall_max_elapsed_ms,
+                "completion_gate_loop_stall_started_monotonic": loop_stall_started_monotonic,
                 "completion_gate_loop_last_invocation_count": invocation_count,
                 "completion_gate_loop_last_blocking_signature": blocking_signature,
+                "completion_gate_escalation_signal": escalation_signal,
+                "completion_gate_escalation_reason": escalation_reason,
                 "workflow_introspection_autotrigger": introspection_autotrigger,
                 "result": requires_follow_up,
             }
@@ -15722,6 +15802,22 @@ class InternalMCPChatOrchestrator:
                     "loop_no_progress_limit": int(
                         workflow_data.get("completion_gate_loop_no_progress_limit") or 0
                     ),
+                    "loop_stall_events": int(
+                        workflow_data.get("completion_gate_loop_stall_events") or 0
+                    ),
+                    "loop_stall_elapsed_ms": int(
+                        workflow_data.get("completion_gate_loop_stall_elapsed_ms") or 0
+                    ),
+                    "loop_stall_max_elapsed_ms": int(
+                        workflow_data.get("completion_gate_loop_stall_max_elapsed_ms")
+                        or 0
+                    ),
+                    "escalation_signal": bool(
+                        workflow_data.get("completion_gate_escalation_signal", False)
+                    ),
+                    "escalation_reason": _safe_scalar_text(
+                        workflow_data.get("completion_gate_escalation_reason")
+                    ),
                 },
                 "terminal": {
                     "completed": bool(completed),
@@ -15872,6 +15968,12 @@ class InternalMCPChatOrchestrator:
                 "completion_gate_loop_max_elapsed_ms",
                 "completion_gate_loop_no_progress_streak",
                 "completion_gate_loop_no_progress_limit",
+                "completion_gate_loop_stall_events",
+                "completion_gate_loop_stall_elapsed_ms",
+                "completion_gate_loop_stall_max_elapsed_ms",
+                "completion_gate_loop_stall_started_monotonic",
+                "completion_gate_escalation_signal",
+                "completion_gate_escalation_reason",
                 "completion_gate_unresolved_preconditions",
                 "completion_gate_evidence_payload",
             ):
@@ -21514,8 +21616,16 @@ class InternalMCPChatOrchestrator:
             "completion_gate_loop_no_progress_limit": int(
                 self._completion_gate_loop_no_progress_limit
             ),
+            "completion_gate_loop_stall_events": 0,
+            "completion_gate_loop_stall_elapsed_ms": 0,
+            "completion_gate_loop_stall_max_elapsed_ms": int(
+                self._completion_gate_loop_stall_max_elapsed_ms
+            ),
+            "completion_gate_loop_stall_started_monotonic": None,
             "completion_gate_loop_last_invocation_count": 0,
             "completion_gate_loop_last_blocking_signature": "",
+            "completion_gate_escalation_signal": False,
+            "completion_gate_escalation_reason": None,
         }
 
         tc_result = self.execute_workflow(
