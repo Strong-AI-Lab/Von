@@ -112,6 +112,7 @@ from src.backend.integrations.internal_mcp.catalogue import _jira_link_issue
 from src.backend.integrations.internal_mcp.catalogue import _jira_search
 from src.backend.integrations.internal_mcp.catalogue import _jira_transition_issue
 from src.backend.integrations.internal_mcp.catalogue import _jira_update_issue
+from src.backend.integrations.internal_mcp.catalogue import _list_recent_screenshots
 from src.backend.integrations.internal_mcp.catalogue import _remove_relationship
 from src.backend.integrations.internal_mcp.catalogue import _preview_remove_relationship
 from src.backend.integrations.internal_mcp.catalogue import _remove_relationships_bulk
@@ -2592,6 +2593,20 @@ async def _handle_jira_get_auth_config(arguments: dict[str, Any]) -> list[TextCo
     )
 
 
+async def _handle_list_recent_screenshots(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _list_recent_screenshots,
+        arguments,
+        tool_family_label="Files",
+        suggestions=[
+            "Check screenshot directory availability",
+            "Install Pillow for clipboard image matching support",
+        ],
+    )
+
+
 async def _handle_workflow_list_definitions(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
@@ -2999,6 +3014,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "jira_delete_issue_link": _handle_jira_delete_issue_link,
     "jira_get_myself": _handle_jira_get_myself,
     "jira_get_auth_config": _handle_jira_get_auth_config,
+    "list_recent_screenshots": _handle_list_recent_screenshots,
     "renderer_resolve_applicability": _handle_renderer_resolve_applicability,
     "upsert_renderer_profile": _handle_upsert_renderer_profile,
     "workflow_list_definitions": _handle_workflow_list_definitions,

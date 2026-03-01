@@ -418,13 +418,31 @@
                     },
                     "include_concept_preview": {
                         "type": "boolean"
+                    },
+                    "include_uncertain": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "uncertainty_mode": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "uncertainty_statuses": {
+                        "type": [
+                            "array",
+                            "null"
+                        ]
                     }
                 },
                 "required": [
                     "concept_id"
                 ],
                 "additionalProperties": true,
-                "description": "get_concept_by_concept_id input: concept_id (required), plus optional flags to include structural/text relations (include_relations_arg1, include_relations_any_arg, include_text_relations_arg1), predicate filtering, paging (limit/offset), and concept preview toggling."
+                "description": "get_concept_by_concept_id input: concept_id (required), plus optional flags to include structural/text relations (include_relations_arg1, include_relations_any_arg, include_text_relations_arg1), predicate filtering, paging (limit/offset), concept preview toggling, and uncertainty retrieval controls (include_uncertain, uncertainty_mode, uncertainty_statuses)."
             }
         },
         {
@@ -565,6 +583,24 @@
                             "null"
                         ]
                     },
+                    "include_uncertain": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "uncertainty_mode": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "uncertainty_statuses": {
+                        "type": [
+                            "array",
+                            "null"
+                        ]
+                    },
                     "namespace": {
                         "type": [
                             "string",
@@ -576,7 +612,7 @@
                     "concept_id"
                 ],
                 "additionalProperties": true,
-                "description": "find_relations_with_argument input: concept_id (required), argument_index (int or 'any'), predicate_filter (list of predicate IDs or substrings), relation_kind ('any'|'binary'|'text'), scope (optional), include_text_snippets (bool), include_concept_preview (bool), paging (limit/offset), sort_by, and optional namespace passthrough."
+                "description": "find_relations_with_argument input: concept_id (required), argument_index (int or 'any'), predicate_filter (list of predicate IDs or substrings), relation_kind ('any'|'binary'|'text'), scope (optional), include_text_snippets (bool), include_concept_preview (bool), paging (limit/offset), sort_by, uncertainty retrieval controls (include_uncertain, uncertainty_mode, uncertainty_statuses), and optional namespace passthrough."
             }
         },
         {
@@ -1278,6 +1314,67 @@
                 "required": [
                     "user_concept_id"
                 ]
+            }
+        },
+        {
+            "name": "list_recent_screenshots",
+            "description": "List recent screenshot files from local machine folders and optionally match against clipboard image content. Supports optional base64 payload inclusion for direct jira_add_attachment calls.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "lookback_hours": {
+                        "type": [
+                            "integer",
+                            "number",
+                            "null"
+                        ]
+                    },
+                    "paths": {
+                        "type": [
+                            "array",
+                            "null"
+                        ]
+                    },
+                    "match_clipboard": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "include_base64": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "max_base64_bytes": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "max_scan_files": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "list_recent_screenshots input: optionally configure limit/lookback_hours, custom paths, clipboard matching, and base64 inclusion for attachment workflows."
             }
         },
         {
