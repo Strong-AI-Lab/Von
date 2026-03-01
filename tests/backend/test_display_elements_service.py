@@ -670,6 +670,86 @@ def test_build_turn_display_elements_drops_invalid_supplied_calendar_views() -> 
     assert contract["validation"]["valid"] is True
 
 
+def test_build_turn_display_elements_includes_supplied_chart_views() -> None:
+    contract = build_turn_display_elements(
+        response_text="Chart response",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Chart response",
+            "spoken": None,
+        },
+        screen_chart_elements=[
+            {
+                "element_id": "screen_chart_view",
+                "intent": "structured_chart_view",
+                "payload": {
+                    "title": "Task trend",
+                    "chart_type": "line",
+                    "x_axis": "Week",
+                    "y_axis": "Count",
+                    "series": [
+                        {
+                            "series_id": "open_tasks",
+                            "label": "Open tasks",
+                            "points": [
+                                {"x": "2026-02-17", "y": 8},
+                                {"x": "2026-02-24", "y": 6},
+                            ],
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+
+    chart_elements = [
+        element
+        for element in contract["elements"]
+        if element["element_type"] == "chart_view"
+    ]
+    assert len(chart_elements) == 1
+    chart_element = chart_elements[0]
+    assert chart_element["element_id"] == "screen_chart_view"
+    assert chart_element["payload"]["chart_type"] == "line"
+    assert chart_element["payload"]["series"][0]["points"][1]["y"] == 6
+    assert "screen_structured_chart_views_supplied" in contract["reason_codes"]
+    assert contract["validation"]["valid"] is True
+
+
+def test_build_turn_display_elements_drops_invalid_supplied_chart_views() -> None:
+    contract = build_turn_display_elements(
+        response_text="Chart response",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Chart response",
+            "spoken": None,
+        },
+        screen_chart_elements=[
+            {
+                "payload": {
+                    "chart_type": "line",
+                    "series": [
+                        {
+                            "series_id": "broken_series",
+                            "label": "Broken",
+                            "points": [{"x": "2026-02-17"}],
+                        }
+                    ],
+                }
+            }
+        ],
+    )
+
+    chart_elements = [
+        element
+        for element in contract["elements"]
+        if element["element_type"] == "chart_view"
+    ]
+    assert chart_elements == []
+    assert "screen_structured_chart_views_invalid_dropped" in contract["reason_codes"]
+    assert contract["validation"]["valid"] is True
+
+
 def test_build_turn_display_elements_includes_supplied_location_views() -> None:
     contract = build_turn_display_elements(
         response_text="Location response",
@@ -1349,6 +1429,41 @@ def test_validate_turn_display_elements_rejects_calendar_item_without_title() ->
     assert any("default_granularity must be one of" in message for message in errors)
 
 
+def test_validate_turn_display_elements_rejects_invalid_chart_view_shape() -> None:
+    valid, errors = validate_turn_display_elements(
+        {
+            "schema_version": "turn_display_elements_v1",
+            "elements": [
+                {
+                    "element_id": "screen_chart_view",
+                    "element_type": "chart_view",
+                    "channel": "screen",
+                    "order": 37,
+                    "intent": "structured_chart_view",
+                    "payload": {
+                        "chart_type": "pie",
+                        "series": [
+                            {
+                                "series_id": "alpha",
+                                "label": "Alpha",
+                                "points": [{"x": "2026-02-17"}],
+                            }
+                        ],
+                        "stacked": "yes",
+                    },
+                    "provenance": {"source": "test"},
+                }
+            ],
+            "reason_codes": [],
+        }
+    )
+
+    assert valid is False
+    assert any(".payload.chart_type must be one of" in message for message in errors)
+    assert any(".points[0].y must be a finite number" in message for message in errors)
+    assert any(".payload.stacked must be a boolean" in message for message in errors)
+
+
 def test_validate_turn_display_elements_rejects_invalid_location_view_shape() -> None:
     valid, errors = validate_turn_display_elements(
         {
@@ -1978,6 +2093,24 @@ def test_build_turn_display_elements_preserves_optional_payload_titles() -> None
                 }
             }
         ],
+        screen_chart_elements=[
+            {
+                "payload": {
+                    "title": "Task trend",
+                    "chart_type": "line",
+                    "series": [
+                        {
+                            "series_id": "open_tasks",
+                            "label": "Open tasks",
+                            "points": [
+                                {"x": "2026-02-17", "y": 8},
+                                {"x": "2026-02-24", "y": 6},
+                            ],
+                        }
+                    ],
+                }
+            }
+        ],
         screen_location_elements=[
             {
                 "payload": {
@@ -2080,6 +2213,7 @@ def test_build_turn_display_elements_preserves_optional_payload_titles() -> None
             "kanban_view",
             "timeline",
             "calendar_view",
+            "chart_view",
             "location_view",
             "document_view",
             "hierarchy_view",
@@ -2093,6 +2227,7 @@ def test_build_turn_display_elements_preserves_optional_payload_titles() -> None
     assert payload_title_by_type["kanban_view"] == "Kanban backlog"
     assert payload_title_by_type["timeline"] == "Timeline of changes"
     assert payload_title_by_type["calendar_view"] == "Calendar schedule"
+    assert payload_title_by_type["chart_view"] == "Task trend"
     assert payload_title_by_type["location_view"] == "Location markers"
     assert payload_title_by_type["document_view"] == "Document excerpts"
     assert payload_title_by_type["hierarchy_view"] == "Meeting hierarchy"

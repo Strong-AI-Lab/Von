@@ -948,6 +948,7 @@ def test_renderer_selection_gates_screen_element_families(monkeypatch):
         "workflow_view": True,
         "task_view": False,
         "calendar_view": False,
+        "chart_view": False,
         "location_view": False,
         "document_view": False,
         "kanban_view": False,
@@ -961,6 +962,102 @@ def test_renderer_selection_gates_screen_element_families(monkeypatch):
         "renderer_screen_elements:selected_renderer_types"
         in result.render_plan.get("screen_element_reason_codes", [])
     )
+
+
+def test_renderer_selection_uses_profile_screen_families_for_custom_renderer_type(
+    monkeypatch,
+):
+    """Profile-declared screen families should work even for unknown renderer types."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    monkeypatch.setenv("VON_RENDERER_APPLICABILITY_ROUTING_ENABLE", "1")
+    monkeypatch.setenv(
+        "VON_RENDERER_APPLICABILITY_DEFINITION_IDS",
+        "#V#custom_metric_renderer",
+    )
+
+    def _invoke(tool_name: str, _payload: Mapping[str, Any]):
+        if tool_name != "renderer_resolve_applicability":
+            raise AssertionError(f"Unexpected tool invocation: {tool_name}")
+        return _InvokeResult(
+            {
+                "success": True,
+                "selected_renderers": [
+                    {
+                        "renderer_id": "#V#custom_metric_renderer",
+                        "renderer_type": "custom_metric_renderer",
+                        "modalities": ["visual"],
+                        "screen_element_families": ["chart_view"],
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
+
+    class _WorkflowResult:
+        def __init__(self):
+            self.data = {
+                "final_response": "Chart summary.",
+                "tool_messages": [
+                    {
+                        "role": "tool",
+                        "content": json.dumps(
+                            {
+                                "tool": "task_list",
+                                "status": "ok",
+                                "duration_ms": 2.0,
+                                "payload": {
+                                    "tasks": [
+                                        {"task_concept_id": "#V#task_alpha", "status": "todo"},
+                                        {"task_concept_id": "#V#task_beta", "status": "done"},
+                                    ]
+                                },
+                            }
+                        ),
+                    }
+                ],
+                "invocations": [],
+                "iteration_count": 1,
+            }
+            self.final_state = "completed"
+            self.completed = True
+
+    def _execute_workflow(workflow_id: str, **_kwargs: Any):
+        if workflow_id != TOOL_CALLING_WORKFLOW_ID:
+            raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+        return _WorkflowResult()
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    llm = _CapturingLLM(["tool_seeking"])
+    result = orchestrator.run(
+        prompt="Show metrics chart",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert isinstance(result.render_plan, dict)
+    assert result.render_plan.get("screen_element_targets") == {
+        "table": False,
+        "workflow_view": False,
+        "task_view": False,
+        "calendar_view": False,
+        "chart_view": True,
+        "location_view": False,
+        "document_view": False,
+        "kanban_view": False,
+        "timeline": False,
+        "hierarchy_view": False,
+        "relation_graph_view": False,
+    }
+    assert result.render_plan.get("screen_chart_element_count") == 1
+    assert (
+        "renderer_screen_elements:selected_renderer_profiles"
+        in result.render_plan.get("screen_element_reason_codes", [])
+    )
+    assert "unsupported_selected_renderer_types" not in result.render_plan
 
 
 def test_renderer_selection_emits_timeline_elements_for_timeline_renderer(monkeypatch):
@@ -1049,6 +1146,7 @@ def test_renderer_selection_emits_timeline_elements_for_timeline_renderer(monkey
         "workflow_view": False,
         "task_view": False,
         "calendar_view": False,
+        "chart_view": False,
         "location_view": False,
         "document_view": False,
         "kanban_view": False,
@@ -1152,6 +1250,7 @@ def test_renderer_selection_emits_calendar_elements_for_calendar_renderer(monkey
         "workflow_view": False,
         "task_view": False,
         "calendar_view": True,
+        "chart_view": False,
         "location_view": False,
         "document_view": False,
         "kanban_view": False,
@@ -1175,6 +1274,131 @@ def test_renderer_selection_emits_calendar_elements_for_calendar_renderer(monkey
     assert items[0]["title"] == "Alpha task"
     assert items[0]["all_day"] is True
     assert items[0]["task_links"][0]["target_id"] == "#V#task_alpha"
+
+
+def test_renderer_selection_emits_chart_elements_for_chart_renderer(monkeypatch):
+    """Chart renderer selection should emit chart display elements only."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    monkeypatch.setenv("VON_RENDERER_APPLICABILITY_ROUTING_ENABLE", "1")
+    monkeypatch.setenv(
+        "VON_RENDERER_APPLICABILITY_DEFINITION_IDS",
+        "#V#chart_renderer,#V#workflow_renderer,#V#table_renderer",
+    )
+
+    def _invoke(tool_name: str, _payload: Mapping[str, Any]):
+        if tool_name != "renderer_resolve_applicability":
+            raise AssertionError(f"Unexpected tool invocation: {tool_name}")
+        return _InvokeResult(
+            {
+                "success": True,
+                "selected_renderers": [
+                    {
+                        "renderer_id": "#V#chart_renderer",
+                        "renderer_type": "chart",
+                        "modalities": ["visual"],
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
+
+    class _WorkflowResult:
+        def __init__(self):
+            self.data = {
+                "final_response": "Chart summary.",
+                "tool_messages": [
+                    {
+                        "role": "tool",
+                        "content": json.dumps(
+                            {
+                                "tool": "task_list",
+                                "status": "ok",
+                                "duration_ms": 2.4,
+                                "payload": {
+                                    "tasks": [
+                                        {
+                                            "task_concept_id": "#V#task_alpha",
+                                            "title": "Alpha task",
+                                            "status": "pending",
+                                        },
+                                        {
+                                            "task_concept_id": "#V#task_beta",
+                                            "title": "Beta task",
+                                            "status": "done",
+                                        },
+                                        {
+                                            "task_concept_id": "#V#task_gamma",
+                                            "title": "Gamma task",
+                                            "status": "pending",
+                                        },
+                                    ]
+                                },
+                            }
+                        ),
+                    }
+                ],
+                "invocations": [],
+                "iteration_count": 1,
+            }
+            self.final_state = "completed"
+            self.completed = True
+
+    def _execute_workflow(workflow_id: str, **_kwargs: Any):
+        if workflow_id != TOOL_CALLING_WORKFLOW_ID:
+            raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+        return _WorkflowResult()
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    llm = _CapturingLLM(["tool_seeking"])
+    result = orchestrator.run(
+        prompt="Show chart",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert isinstance(result.render_plan, dict)
+    assert result.render_plan.get("screen_element_mapping_mode") == "selected_renderer_types"
+    assert result.render_plan.get("screen_element_targets") == {
+        "table": False,
+        "workflow_view": False,
+        "task_view": False,
+        "calendar_view": False,
+        "chart_view": True,
+        "location_view": False,
+        "document_view": False,
+        "kanban_view": False,
+        "timeline": False,
+        "hierarchy_view": False,
+        "relation_graph_view": False,
+    }
+    assert "screen_table_record_sets" not in result.render_plan
+    assert "screen_workflow_elements" not in result.render_plan
+    assert "screen_task_view_elements" not in result.render_plan
+    assert "screen_timeline_elements" not in result.render_plan
+    assert result.render_plan.get("screen_chart_element_count") == 1
+
+    chart_elements = result.render_plan.get("screen_chart_elements")
+    assert isinstance(chart_elements, list)
+    assert len(chart_elements) == 1
+    payload = chart_elements[0].get("payload", {})
+    assert payload.get("chart_type") == "bar"
+    assert payload.get("x_axis") == "Task status"
+    series = payload.get("series")
+    assert isinstance(series, list)
+    assert series[0]["series_id"] == "task_status_counts"
+    points = series[0].get("points")
+    assert isinstance(points, list)
+    point_by_status = {
+        str(point.get("x")): point.get("y")
+        for point in points
+        if isinstance(point, Mapping)
+    }
+    assert point_by_status["pending"] == 2
+    assert point_by_status["done"] == 1
 
 
 def test_renderer_selection_emits_location_elements_for_location_renderer(monkeypatch):
@@ -1268,6 +1492,7 @@ def test_renderer_selection_emits_location_elements_for_location_renderer(monkey
         "workflow_view": False,
         "task_view": False,
         "calendar_view": False,
+        "chart_view": False,
         "location_view": True,
         "document_view": False,
         "kanban_view": False,
@@ -1379,6 +1604,7 @@ def test_renderer_selection_emits_document_elements_for_document_renderer(monkey
         "workflow_view": False,
         "task_view": False,
         "calendar_view": False,
+        "chart_view": False,
         "location_view": False,
         "document_view": True,
         "kanban_view": False,
@@ -1486,6 +1712,7 @@ def test_renderer_selection_emits_task_view_elements_for_task_renderer(monkeypat
         "workflow_view": False,
         "task_view": True,
         "calendar_view": False,
+        "chart_view": False,
         "location_view": False,
         "document_view": False,
         "kanban_view": False,
@@ -1601,6 +1828,7 @@ def test_renderer_selection_emits_kanban_elements_for_kanban_renderer(monkeypatc
         "workflow_view": False,
         "task_view": False,
         "calendar_view": False,
+        "chart_view": False,
         "location_view": False,
         "document_view": False,
         "kanban_view": True,
@@ -1716,6 +1944,7 @@ def test_renderer_selection_emits_relation_graph_elements_for_graph_renderer(mon
         "workflow_view": False,
         "task_view": False,
         "calendar_view": False,
+        "chart_view": False,
         "location_view": False,
         "document_view": False,
         "kanban_view": False,
@@ -1821,6 +2050,7 @@ def test_renderer_selection_fallback_when_no_types_selected(monkeypatch):
         "workflow_view": True,
         "task_view": False,
         "calendar_view": False,
+        "chart_view": False,
         "location_view": False,
         "document_view": False,
         "kanban_view": False,
@@ -2747,4 +2977,6 @@ def test_no_routing_info_when_selector_disabled(monkeypatch):
     )
 
     assert result.workflow_routing is None
+
+
 

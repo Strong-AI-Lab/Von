@@ -1366,6 +1366,70 @@ describe('calendar display elements', () => {
     });
 });
 
+describe('chart display elements', () => {
+    test('renders structured chart view with svg and readable legend', () => {
+        const container = document.createElement('div');
+        const debugData = {
+            display_elements: {
+                schema_version: 'turn_display_elements_v1',
+                elements: [
+                    {
+                        element_id: 'screen_chart_view',
+                        element_type: 'chart_view',
+                        channel: 'screen',
+                        order: 37,
+                        intent: 'structured_chart_view',
+                        payload: {
+                            title: 'Task trend',
+                            chart_type: 'line',
+                            x_axis: 'Week',
+                            y_axis: 'Count',
+                            legend: true,
+                            series: [
+                                {
+                                    series_id: 'open_tasks',
+                                    label: 'Open tasks',
+                                    points: [
+                                        { x: '2026-02-17', y: 8 },
+                                        { x: '2026-02-24', y: 6 }
+                                    ]
+                                },
+                                {
+                                    series_id: 'closed_tasks',
+                                    label: 'Closed tasks',
+                                    points: [
+                                        { x: '2026-02-17', y: 2 },
+                                        { x: '2026-02-24', y: 4 }
+                                    ]
+                                }
+                            ]
+                        },
+                        provenance: { source: 'test' }
+                    }
+                ]
+            }
+        };
+
+        __testOnly_renderDisplayElementsIntoContainer(container, debugData);
+
+        const section = container.querySelector('.chat-display-elements-chart-section');
+        expect(section).not.toBeNull();
+        expect(section.textContent).toContain('Task trend');
+        expect(section.textContent).toContain('Open tasks');
+        expect(section.textContent).toContain('Closed tasks');
+
+        const svg = section.querySelector('.chat-display-elements-chart-svg');
+        expect(svg).not.toBeNull();
+        expect(svg.getAttribute('viewBox')).toContain('0 0');
+
+        const legendItems = section.querySelectorAll('.chat-display-elements-chart-legend-item');
+        expect(legendItems.length).toBe(2);
+
+        const fallbackRows = section.querySelectorAll('.chat-display-elements-chart-fallback-list li');
+        expect(fallbackRows.length).toBe(2);
+    });
+});
+
 describe('location display elements', () => {
     test('renders location map markers with address fallback and task links', () => {
         const container = document.createElement('div');
@@ -2227,6 +2291,39 @@ describe('LLM debug popup metadata (internal MCP caps + usage)', () => {
             screen_location_element_count: 1,
             source_tools: ['task_list'],
             record_families: ['location_points']
+        });
+    });
+
+    test('includes chart render plan provenance counts when present', () => {
+        const metadata = __testOnly_buildLlmDebugMetadata({
+            model: 'gpt-test',
+            messages: [],
+            render_plan: {
+                enabled: true,
+                attempted: true,
+                success: true,
+                reason: 'resolved',
+                selected_renderer_ids: ['#V#renderer_chart'],
+                selected_renderer_types: ['chart'],
+                screen_element_families: ['chart_view'],
+                screen_chart_elements: [
+                    {
+                        element_id: 'screen_chart_view',
+                        provenance: {
+                            source_tools: ['task_list'],
+                            record_family: 'chart_series'
+                        }
+                    }
+                ]
+            }
+        });
+
+        expect(metadata.render_plan).toMatchObject({
+            selected_renderer_types: ['chart'],
+            screen_element_families: ['chart_view'],
+            screen_chart_element_count: 1,
+            source_tools: ['task_list'],
+            record_families: ['chart_series']
         });
     });
 

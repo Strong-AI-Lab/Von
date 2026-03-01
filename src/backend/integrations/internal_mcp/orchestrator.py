@@ -17811,6 +17811,445 @@ class InternalMCPChatOrchestrator:
                 }
             ]
 
+        def _extract_renderer_screen_chart_elements(
+            *,
+            tool_messages: Sequence[Mapping[str, Any]] = (),
+        ) -> list[dict[str, Any]]:
+            """Derive chart-view payloads from explicit series and distribution-style tool outputs."""
+
+            max_series = 20
+            max_points_per_series = 240
+            max_total_points = 1200
+            allowed_chart_types = {"line", "bar", "area", "scatter"}
+
+            source_tools: list[str] = []
+            seen_source_tools: set[str] = set()
+
+            def _register_source_tool(tool_name: str) -> None:
+                if tool_name in seen_source_tools:
+                    return
+                seen_source_tools.add(tool_name)
+                source_tools.append(tool_name)
+
+            def _normalise_number(value: Any) -> float | None:
+                if isinstance(value, bool):
+                    return None
+                if isinstance(value, (int, float)):
+                    number = float(value)
+                elif isinstance(value, str):
+                    cleaned = value.strip()
+                    if not cleaned:
+                        return None
+                    try:
+                        number = float(cleaned)
+                    except ValueError:
+                        return None
+                else:
+                    return None
+                if number != number or number in (float("inf"), float("-inf")):
+                    return None
+                return number
+
+            def _normalise_x_value(value: Any) -> str | float | int | None:
+                if isinstance(value, bool):
+                    return None
+                if isinstance(value, int):
+                    return value
+                if isinstance(value, float):
+                    if value != value or value in (float("inf"), float("-inf")):
+                        return None
+                    return round(value, 6)
+                if isinstance(value, str):
+                    cleaned = value.strip()
+                    return cleaned or None
+                return None
+
+            def _normalise_chart_type(value: Any) -> str | None:
+                candidate = _first_text(value)
+                if not candidate:
+                    return None
+                token = candidate.strip().lower()
+                alias_map = {
+                    "timeseries": "line",
+                    "time_series": "line",
+                    "trend": "line",
+                    "histogram": "bar",
+                    "distribution": "bar",
+                }
+                token = alias_map.get(token, token)
+                return token if token in allowed_chart_types else None
+
+            def _normalise_point(raw_point: Any) -> dict[str, Any] | None:
+                point_mapping: Mapping[str, Any] | None = (
+                    cast(Mapping[str, Any], raw_point)
+                    if isinstance(raw_point, Mapping)
+                    else None
+                )
+
+                x_raw: Any = None
+                y_raw: Any = None
+                point_meta: Mapping[str, Any] | None = None
+
+                if point_mapping is not None:
+                    x_raw = (
+                        point_mapping.get("x")
+                        if point_mapping.get("x") is not None
+                        else _first_text(
+                            point_mapping.get("timestamp"),
+                            point_mapping.get("date"),
+                            point_mapping.get("bucket"),
+                            point_mapping.get("label"),
+                            point_mapping.get("name"),
+                            point_mapping.get("category"),
+                        )
+                    )
+                    y_raw = (
+                        point_mapping.get("y")
+                        if point_mapping.get("y") is not None
+                        else (
+                            point_mapping.get("value")
+                            if point_mapping.get("value") is not None
+                            else (
+                                point_mapping.get("count")
+                                if point_mapping.get("count") is not None
+                                else point_mapping.get("total")
+                            )
+                        )
+                    )
+                    if isinstance(point_mapping.get("meta"), Mapping):
+                        point_meta = cast(Mapping[str, Any], point_mapping.get("meta"))
+                elif isinstance(raw_point, Sequence) and not isinstance(
+                    raw_point, (str, bytes, bytearray)
+                ):
+                    if len(raw_point) >= 2:
+                        x_raw = raw_point[0]
+                        y_raw = raw_point[1]
+                else:
+                    return None
+
+                x_value = _normalise_x_value(x_raw)
+                y_value = _normalise_number(y_raw)
+                if x_value is None or y_value is None:
+                    return None
+
+                point: dict[str, Any] = {
+                    "x": x_value,
+                    "y": round(y_value, 6),
+                }
+                if point_meta is not None:
+                    point["meta"] = dict(point_meta)
+                if point_mapping is not None:
+                    task_links = _collect_renderer_task_links(point_mapping)
+                    if task_links:
+                        point["task_links"] = task_links
+                return point
+
+            def _normalise_series_entries(
+                raw_series: Any,
+                *,
+                source_tool: str,
+            ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any]]:
+                if isinstance(raw_series, Sequence) and not isinstance(
+                    raw_series, (str, bytes, bytearray)
+                ):
+                    series_candidates = list(raw_series)
+                elif isinstance(raw_series, Mapping):
+                    series_candidates = [raw_series]
+                else:
+                    return [], None, {}
+
+                series_entries: list[dict[str, Any]] = []
+                seen_series_ids: set[str] = set()
+                total_points = 0
+                chart_type: str | None = None
+                axis_metadata: dict[str, Any] = {}
+
+                for index, raw_series_entry in enumerate(series_candidates, start=1):
+                    if len(series_entries) >= max_series:
+                        break
+                    if not isinstance(raw_series_entry, Mapping):
+                        continue
+
+                    if chart_type is None:
+                        chart_type = _normalise_chart_type(
+                            raw_series_entry.get("chart_type")
+                        )
+                    if not axis_metadata:
+                        axis_metadata = {
+                            "x_axis": _first_text(
+                                raw_series_entry.get("x_axis"),
+                                raw_series_entry.get("x_label"),
+                            ),
+                            "y_axis": _first_text(
+                                raw_series_entry.get("y_axis"),
+                                raw_series_entry.get("y_label"),
+                            ),
+                            "units": _first_text(
+                                raw_series_entry.get("units"),
+                                raw_series_entry.get("unit"),
+                            ),
+                            "stacked": (
+                                raw_series_entry.get("stacked")
+                                if isinstance(raw_series_entry.get("stacked"), bool)
+                                else None
+                            ),
+                            "legend": (
+                                raw_series_entry.get("legend")
+                                if isinstance(raw_series_entry.get("legend"), bool)
+                                else None
+                            ),
+                        }
+
+                    series_id = _first_text(
+                        raw_series_entry.get("series_id"),
+                        raw_series_entry.get("id"),
+                        raw_series_entry.get("key"),
+                        raw_series_entry.get("metric"),
+                        raw_series_entry.get("name"),
+                    ) or f"{source_tool}_series_{index}"
+                    if series_id in seen_series_ids:
+                        continue
+
+                    series_label = _first_text(
+                        raw_series_entry.get("label"),
+                        raw_series_entry.get("name"),
+                        raw_series_entry.get("metric"),
+                    ) or series_id
+
+                    raw_points = raw_series_entry.get("points")
+                    if not isinstance(raw_points, Sequence) or isinstance(
+                        raw_points, (str, bytes, bytearray)
+                    ):
+                        raw_points = raw_series_entry.get("data")
+                    if not isinstance(raw_points, Sequence) or isinstance(
+                        raw_points, (str, bytes, bytearray)
+                    ):
+                        raw_points = raw_series_entry.get("values")
+                    if not isinstance(raw_points, Sequence) or isinstance(
+                        raw_points, (str, bytes, bytearray)
+                    ):
+                        raw_points = []
+
+                    points: list[dict[str, Any]] = []
+                    for raw_point in raw_points:
+                        if total_points >= max_total_points:
+                            break
+                        if len(points) >= max_points_per_series:
+                            break
+                        point = _normalise_point(raw_point)
+                        if not point:
+                            continue
+                        points.append(point)
+                        total_points += 1
+
+                    if not points:
+                        continue
+
+                    series_entry: dict[str, Any] = {
+                        "series_id": series_id,
+                        "label": series_label,
+                        "points": points,
+                    }
+                    task_links = _collect_renderer_task_links(raw_series_entry)
+                    if task_links:
+                        series_entry["task_links"] = task_links
+
+                    seen_series_ids.add(series_id)
+                    series_entries.append(series_entry)
+
+                return series_entries, chart_type, axis_metadata
+
+            def _build_distribution_series(
+                *,
+                source_tool: str,
+                distribution: Mapping[str, Any],
+                series_label: str = "Count",
+            ) -> list[dict[str, Any]]:
+                points: list[dict[str, Any]] = []
+                for bucket, raw_value in distribution.items():
+                    bucket_label = _first_text(bucket)
+                    bucket_value = _normalise_number(raw_value)
+                    if not bucket_label or bucket_value is None:
+                        continue
+                    points.append({"x": bucket_label, "y": round(bucket_value, 6)})
+                    if len(points) >= max_points_per_series:
+                        break
+                if not points:
+                    return []
+                return [
+                    {
+                        "series_id": f"{source_tool}_distribution",
+                        "label": series_label,
+                        "points": points,
+                    }
+                ]
+
+            tool_payloads = list(_iter_renderer_tool_result_payloads(tool_messages))
+            if not tool_payloads:
+                return []
+
+            extracted_payload: dict[str, Any] | None = None
+            for tool_name, payload in tool_payloads:
+                candidate_series_collections: list[Any] = []
+                if isinstance(payload.get("series"), Mapping):
+                    candidate_series_collections.append(payload.get("series"))
+                elif isinstance(payload.get("series"), Sequence) and not isinstance(
+                    payload.get("series"),
+                    (str, bytes, bytearray),
+                ):
+                    candidate_series_collections.append(payload.get("series"))
+                for collection_key in ("charts", "chart_series", "timeseries", "time_series"):
+                    collection = payload.get(collection_key)
+                    if isinstance(collection, Mapping):
+                        candidate_series_collections.append(collection)
+                    elif isinstance(collection, Sequence) and not isinstance(
+                        collection, (str, bytes, bytearray)
+                    ):
+                        candidate_series_collections.append(collection)
+                if isinstance(payload.get("points"), Sequence) and not isinstance(
+                    payload.get("points"),
+                    (str, bytes, bytearray),
+                ):
+                    candidate_series_collections.append([payload])
+                if isinstance(payload.get("data"), Sequence) and not isinstance(
+                    payload.get("data"),
+                    (str, bytes, bytearray),
+                ):
+                    candidate_series_collections.append([payload])
+
+                for candidate_collection in candidate_series_collections:
+                    series_entries, chart_type, axis_metadata = _normalise_series_entries(
+                        candidate_collection,
+                        source_tool=tool_name,
+                    )
+                    if not series_entries:
+                        continue
+
+                    resolved_chart_type = (
+                        chart_type
+                        or _normalise_chart_type(payload.get("chart_type"))
+                        or "line"
+                    )
+                    extracted_payload = {
+                        "chart_type": resolved_chart_type,
+                        "series": series_entries,
+                        "legend": True if len(series_entries) > 1 else False,
+                    }
+                    resolved_x_axis = axis_metadata.get("x_axis") or _first_text(
+                        payload.get("x_axis"),
+                        payload.get("x_label"),
+                    )
+                    if resolved_x_axis:
+                        extracted_payload["x_axis"] = resolved_x_axis
+                    resolved_y_axis = axis_metadata.get("y_axis") or _first_text(
+                        payload.get("y_axis"),
+                        payload.get("y_label"),
+                    )
+                    if resolved_y_axis:
+                        extracted_payload["y_axis"] = resolved_y_axis
+                    resolved_units = axis_metadata.get("units") or _first_text(
+                        payload.get("units"),
+                        payload.get("unit"),
+                    )
+                    if resolved_units:
+                        extracted_payload["units"] = resolved_units
+                    if isinstance(axis_metadata.get("stacked"), bool):
+                        extracted_payload["stacked"] = axis_metadata["stacked"]
+                    elif isinstance(payload.get("stacked"), bool):
+                        extracted_payload["stacked"] = payload.get("stacked")
+                    if isinstance(axis_metadata.get("legend"), bool):
+                        extracted_payload["legend"] = axis_metadata["legend"]
+                    elif isinstance(payload.get("legend"), bool):
+                        extracted_payload["legend"] = payload.get("legend")
+
+                    _register_source_tool(tool_name)
+                    break
+                if extracted_payload is not None:
+                    break
+
+            if extracted_payload is None:
+                for tool_name, payload in tool_payloads:
+                    distribution_mapping: Mapping[str, Any] | None = None
+                    if isinstance(payload.get("status_counts"), Mapping):
+                        distribution_mapping = cast(
+                            Mapping[str, Any], payload.get("status_counts")
+                        )
+                    elif isinstance(payload.get("counts"), Mapping):
+                        distribution_mapping = cast(
+                            Mapping[str, Any], payload.get("counts")
+                        )
+                    elif isinstance(payload.get("distribution"), Mapping):
+                        distribution_mapping = cast(
+                            Mapping[str, Any], payload.get("distribution")
+                        )
+                    if distribution_mapping is None:
+                        continue
+
+                    series_entries = _build_distribution_series(
+                        source_tool=tool_name,
+                        distribution=distribution_mapping,
+                    )
+                    if not series_entries:
+                        continue
+                    extracted_payload = {
+                        "chart_type": "bar",
+                        "x_axis": "Category",
+                        "y_axis": "Count",
+                        "series": series_entries,
+                        "legend": False,
+                    }
+                    _register_source_tool(tool_name)
+                    break
+
+            if extracted_payload is None:
+                task_entries, task_source_tools = _extract_renderer_task_entries(
+                    tool_messages=tool_messages,
+                    limit=max_total_points,
+                )
+                status_counts: dict[str, int] = {}
+                for task_entry in task_entries:
+                    status = _first_text(task_entry.get("status")) or "unknown"
+                    status_counts[status] = status_counts.get(status, 0) + 1
+                if status_counts:
+                    extracted_payload = {
+                        "chart_type": "bar",
+                        "x_axis": "Task status",
+                        "y_axis": "Count",
+                        "series": [
+                            {
+                                "series_id": "task_status_counts",
+                                "label": "Tasks",
+                                "points": [
+                                    {"x": status, "y": count}
+                                    for status, count in sorted(status_counts.items())
+                                ],
+                            }
+                        ],
+                        "legend": False,
+                    }
+                    for source_tool in task_source_tools:
+                        _register_source_tool(source_tool)
+
+            if extracted_payload is None:
+                return []
+
+            return [
+                {
+                    "element_id": "screen_chart_view",
+                    "intent": "structured_chart_view",
+                    "payload": extracted_payload,
+                    "constraints": {
+                        "supports_legend_toggle": True,
+                        "supports_series_comparison": True,
+                    },
+                    "provenance": {
+                        "source": "tool_result_chart_view",
+                        "source_tools": source_tools,
+                        "record_family": "chart_series",
+                    },
+                }
+            ]
+
         def _extract_renderer_screen_location_elements(
             *,
             tool_messages: Sequence[Mapping[str, Any]] = (),
@@ -19182,11 +19621,17 @@ class InternalMCPChatOrchestrator:
             }
             return request_payload, diagnostics
 
-        _RENDERER_SCREEN_ELEMENT_FAMILY_MAP: dict[str, tuple[str, ...]] = {
+        # Legacy renderer-type mapping fallback retained for profiles that do
+        # not yet publish explicit screen-element families in Vontology.
+        _LEGACY_RENDERER_TYPE_SCREEN_ELEMENT_FAMILY_MAP: dict[
+            str, tuple[str, ...]
+        ] = {
             "table": ("table",),
             "tabular": ("table",),
             "calendar": ("calendar_view",),
             "calendar_view": ("calendar_view",),
+            "chart": ("chart_view",),
+            "chart_view": ("chart_view",),
             "citation": ("document_view",),
             "document": ("document_view",),
             "document_view": ("document_view",),
@@ -19208,6 +19653,21 @@ class InternalMCPChatOrchestrator:
             "workflow": ("workflow_view",),
             "workflow_view": ("workflow_view",),
         }
+        _ALLOWED_SCREEN_ELEMENT_FAMILIES: frozenset[str] = frozenset(
+            {
+                "table",
+                "workflow_view",
+                "task_view",
+                "calendar_view",
+                "chart_view",
+                "location_view",
+                "document_view",
+                "kanban_view",
+                "timeline",
+                "hierarchy_view",
+                "relation_graph_view",
+            }
+        )
         _LEGACY_SCREEN_ELEMENT_FAMILIES: frozenset[str] = frozenset(
             {"table", "workflow_view"}
         )
@@ -19223,6 +19683,34 @@ class InternalMCPChatOrchestrator:
                 normalised.append(renderer_type)
             return normalised
 
+        def _normalise_selected_screen_element_families(raw_values: Any) -> list[str]:
+            if isinstance(raw_values, str):
+                values: Sequence[Any] = [raw_values]
+            elif isinstance(raw_values, Sequence) and not isinstance(
+                raw_values, (str, bytes, bytearray)
+            ):
+                values = raw_values
+            else:
+                return []
+
+            normalised: list[str] = []
+            for raw_value in values:
+                if not isinstance(raw_value, str):
+                    continue
+                family = raw_value.strip().lower()
+                if not family:
+                    continue
+                mapped = _LEGACY_RENDERER_TYPE_SCREEN_ELEMENT_FAMILY_MAP.get(
+                    family, (family,)
+                )
+                for candidate in mapped:
+                    if candidate not in _ALLOWED_SCREEN_ELEMENT_FAMILIES:
+                        continue
+                    if candidate in normalised:
+                        continue
+                    normalised.append(candidate)
+            return normalised
+
         def _apply_screen_element_mapping(
             decision: dict[str, Any],
             *,
@@ -19230,6 +19718,7 @@ class InternalMCPChatOrchestrator:
             resolver_attempted: bool,
             resolver_success: bool,
             selected_renderer_types: Sequence[str],
+            selected_renderer_entries: Sequence[Mapping[str, Any]] = (),
         ) -> None:
             renderer_types = _normalise_selected_renderer_types(selected_renderer_types)
             selected_families: set[str] = set()
@@ -19254,15 +19743,50 @@ class InternalMCPChatOrchestrator:
                 )
             else:
                 mapping_mode = "selected_renderer_types"
-                reason_codes.append("renderer_screen_elements:selected_renderer_types")
-                for renderer_type in renderer_types:
-                    mapped_families = _RENDERER_SCREEN_ELEMENT_FAMILY_MAP.get(
+                profile_mapping_used = False
+                legacy_type_mapping_used = False
+
+                entry_rows = (
+                    selected_renderer_entries
+                    if selected_renderer_entries
+                    else tuple({"renderer_type": item} for item in renderer_types)
+                )
+
+                for entry in entry_rows:
+                    if not isinstance(entry, Mapping):
+                        continue
+                    renderer_type_raw = entry.get("renderer_type")
+                    renderer_type = (
+                        str(renderer_type_raw).strip().lower()
+                        if isinstance(renderer_type_raw, str)
+                        else ""
+                    )
+                    profile_families = _normalise_selected_screen_element_families(
+                        entry.get("screen_element_families")
+                    )
+                    if profile_families:
+                        profile_mapping_used = True
+                        selected_families.update(profile_families)
+                        continue
+                    if not renderer_type:
+                        continue
+                    mapped_families = _LEGACY_RENDERER_TYPE_SCREEN_ELEMENT_FAMILY_MAP.get(
                         renderer_type
                     )
-                    if not mapped_families:
+                    if mapped_families:
+                        legacy_type_mapping_used = True
+                        selected_families.update(mapped_families)
+                    elif renderer_type not in unsupported_renderer_types:
                         unsupported_renderer_types.append(renderer_type)
-                        continue
-                    selected_families.update(mapped_families)
+
+                if profile_mapping_used:
+                    reason_codes.append(
+                        "renderer_screen_elements:selected_renderer_profiles"
+                    )
+                if legacy_type_mapping_used:
+                    reason_codes.append(
+                        "renderer_screen_elements:selected_renderer_types"
+                    )
                 if unsupported_renderer_types:
                     reason_codes.append(
                         "renderer_screen_elements:unsupported_renderer_types"
@@ -19276,6 +19800,7 @@ class InternalMCPChatOrchestrator:
             include_workflow_elements = "workflow_view" in selected_families
             include_task_view_elements = "task_view" in selected_families
             include_calendar_elements = "calendar_view" in selected_families
+            include_chart_elements = "chart_view" in selected_families
             include_location_elements = "location_view" in selected_families
             include_document_elements = "document_view" in selected_families
             include_kanban_elements = "kanban_view" in selected_families
@@ -19290,6 +19815,7 @@ class InternalMCPChatOrchestrator:
                 "workflow_view": include_workflow_elements,
                 "task_view": include_task_view_elements,
                 "calendar_view": include_calendar_elements,
+                "chart_view": include_chart_elements,
                 "location_view": include_location_elements,
                 "document_view": include_document_elements,
                 "kanban_view": include_kanban_elements,
@@ -19342,6 +19868,16 @@ class InternalMCPChatOrchestrator:
                     decision["screen_calendar_elements"] = screen_calendar_elements
                     decision["screen_calendar_element_count"] = len(
                         screen_calendar_elements
+                    )
+
+            if include_chart_elements:
+                screen_chart_elements = _extract_renderer_screen_chart_elements(
+                    tool_messages=tool_messages
+                )
+                if screen_chart_elements:
+                    decision["screen_chart_elements"] = screen_chart_elements
+                    decision["screen_chart_element_count"] = len(
+                        screen_chart_elements
                     )
 
             if include_location_elements:
@@ -19573,6 +20109,8 @@ class InternalMCPChatOrchestrator:
             selected_renderer_ids: list[str] = []
             selected_renderer_types: list[str] = []
             selected_modalities: list[str] = []
+            selected_renderer_screen_families: list[str] = []
+            selected_renderer_entries_for_mapping: list[dict[str, Any]] = []
             narration_selected = False
             for item in selected_renderers:
                 if not isinstance(item, Mapping):
@@ -19587,6 +20125,15 @@ class InternalMCPChatOrchestrator:
                     selected_renderer_types.append(renderer_type)
                 if renderer_type == "narration":
                     narration_selected = True
+
+                profile_screen_families = (
+                    _normalise_selected_screen_element_families(
+                        item.get("screen_element_families")
+                    )
+                )
+                for family in profile_screen_families:
+                    if family not in selected_renderer_screen_families:
+                        selected_renderer_screen_families.append(family)
 
                 modalities_raw = item.get("modalities")
                 modalities_iter: list[str] = []
@@ -19606,6 +20153,14 @@ class InternalMCPChatOrchestrator:
                     if normalised not in selected_modalities:
                         selected_modalities.append(normalised)
 
+                selected_renderer_entries_for_mapping.append(
+                    {
+                        "renderer_id": renderer_id,
+                        "renderer_type": renderer_type,
+                        "screen_element_families": list(profile_screen_families),
+                    }
+                )
+
             diagnostics_obj = result_payload.get("diagnostics")
             if isinstance(diagnostics_obj, Mapping):
                 selection_rationale = diagnostics_obj.get("selection_rationale")
@@ -19623,12 +20178,16 @@ class InternalMCPChatOrchestrator:
             decision["selected_renderer_ids"] = selected_renderer_ids
             decision["selected_renderer_types"] = selected_renderer_types
             decision["selected_modalities"] = selected_modalities
+            decision["selected_renderer_screen_element_families"] = (
+                selected_renderer_screen_families
+            )
             _apply_screen_element_mapping(
                 decision,
                 tool_messages=tool_messages,
                 resolver_attempted=True,
                 resolver_success=True,
                 selected_renderer_types=selected_renderer_types,
+                selected_renderer_entries=selected_renderer_entries_for_mapping,
             )
             aux_llm_calls.append(dict(decision))
             return dict(decision)

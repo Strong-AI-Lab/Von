@@ -25,7 +25,7 @@ def test_load_renderer_definitions_from_concept_ids_parses_profile_json(
         lambda concept_id, predicate=None, limit=50: [
             {
                 "predicate": predicate,
-                "text": '{"renderer_type":"timeline","modalities":["visual"],"priority":80}',
+                "text": '{"renderer_type":"timeline","modalities":["visual"],"priority":80,"screen_element_families":["timeline"]}',
             }
         ]
         if predicate == "#V#has_renderer_profile_json"
@@ -39,6 +39,7 @@ def test_load_renderer_definitions_from_concept_ids_parses_profile_json(
     assert len(definitions) == 1
     assert definitions[0]["renderer_id"] == "#V#timeline_renderer"
     assert definitions[0]["renderer_type"] == "timeline"
+    assert definitions[0]["screen_element_families"] == ["timeline"]
     assert diagnostics["loaded_concept_ids"] == ["#V#timeline_renderer"]
     assert diagnostics["loaded_definition_count"] == 1
 
@@ -147,12 +148,14 @@ def test_upsert_renderer_profile_validates_and_persists_singleton_text(
             "modalities": ["visual"],
             "applies_to_object_kinds": ["concept"],
             "priority": 90,
+            "screen_element_families": ["timeline"],
         },
     )
 
     assert result["success"] is True
     assert result["renderer_concept_id"] == "#V#timeline_renderer"
     assert result["renderer_profile"]["renderer_id"] == "#V#timeline_renderer"
+    assert result["renderer_profile"]["screen_element_families"] == ["timeline"]
     assert result["text_relation"]["kept_relation_id"] == "rel_1"
 
 

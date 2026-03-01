@@ -37,6 +37,7 @@ _CANONICAL_RENDERER_PROFILE_BLUEPRINTS: tuple[dict[str, Any], ...] = (
         "required_context_tags": ["workflow:tool_calling"],
         "priority": 90,
         "fallback_renderer_ids": ["#V#table_renderer"],
+        "screen_element_families": ["timeline"],
     },
     {
         "renderer_id": "#V#workflow_renderer",
@@ -46,6 +47,7 @@ _CANONICAL_RENDERER_PROFILE_BLUEPRINTS: tuple[dict[str, Any], ...] = (
         "required_context_tags": ["workflow:tool_calling"],
         "priority": 80,
         "fallback_renderer_ids": ["#V#table_renderer"],
+        "screen_element_families": ["workflow_view"],
     },
     {
         "renderer_id": "#V#table_renderer",
@@ -53,6 +55,7 @@ _CANONICAL_RENDERER_PROFILE_BLUEPRINTS: tuple[dict[str, Any], ...] = (
         "modalities": ["visual"],
         "applies_to_object_kinds": ["concept", "transient_microtheory"],
         "priority": 60,
+        "screen_element_families": ["table"],
     },
     {
         "renderer_id": "#V#narration_renderer",
@@ -61,6 +64,7 @@ _CANONICAL_RENDERER_PROFILE_BLUEPRINTS: tuple[dict[str, Any], ...] = (
         "applies_to_object_kinds": ["concept", "transient_microtheory"],
         "required_context_tags": ["presenter_mode"],
         "priority": 95,
+        "screen_element_families": [],
     },
 )
 _CANONICAL_RENDERER_PROFILE_BY_ID: dict[str, dict[str, Any]] = {
@@ -202,6 +206,7 @@ def _serialise_renderer_profile(profile: RendererProfile) -> dict[str, Any]:
         "minimum_confidence": profile.minimum_confidence,
         "priority": profile.priority,
         "fallback_renderer_ids": list(profile.fallback_renderer_ids),
+        "screen_element_families": list(profile.screen_element_families),
     }
 
 

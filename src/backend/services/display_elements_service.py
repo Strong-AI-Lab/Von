@@ -17,6 +17,7 @@ DISPLAY_ELEMENT_SCHEMA_VERSION = "turn_display_elements_v1"
 ALLOWED_DISPLAY_ELEMENT_TYPES = frozenset(
     {
         "calendar_view",
+        "chart_view",
         "document_view",
         "hierarchy_view",
         "location_view",
@@ -34,6 +35,7 @@ ALLOWED_DISPLAY_ELEMENT_TYPES = frozenset(
 OPTIONAL_PAYLOAD_TITLE_ELEMENT_TYPES = frozenset(
     {
         "calendar_view",
+        "chart_view",
         "document_view",
         "hierarchy_view",
         "location_view",
@@ -58,6 +60,10 @@ HIERARCHY_EDGE_BRANCH_KINDS = frozenset(
 )
 HIERARCHY_MAX_DEPTH = 12
 CALENDAR_ALLOWED_GRANULARITIES = frozenset({"month", "week", "day"})
+CHART_ALLOWED_TYPES = frozenset({"line", "bar", "area", "scatter"})
+CHART_MAX_SERIES = 20
+CHART_MAX_POINTS_PER_SERIES = 240
+CHART_MAX_TOTAL_POINTS = 1200
 LOCATION_MAX_POINTS = 240
 LOCATION_LATITUDE_MIN = -90.0
 LOCATION_LATITUDE_MAX = 90.0
@@ -1255,6 +1261,132 @@ def validate_turn_display_elements(
                             errors.append(
                                 f"{label}.payload.expansion.max_depth must be an integer between 1 and {HIERARCHY_MAX_DEPTH} when provided"
                             )
+        elif element_type == "chart_view":
+            chart_type_raw = payload.get("chart_type")
+            if not isinstance(chart_type_raw, str) or not chart_type_raw.strip():
+                errors.append(
+                    f"{label}.payload.chart_type must be one of {sorted(CHART_ALLOWED_TYPES)}"
+                )
+            else:
+                chart_type = chart_type_raw.strip().lower()
+                if chart_type not in CHART_ALLOWED_TYPES:
+                    errors.append(
+                        f"{label}.payload.chart_type must be one of {sorted(CHART_ALLOWED_TYPES)}"
+                    )
+
+            series = payload.get("series")
+            if not isinstance(series, list) or not series:
+                errors.append(f"{label}.payload.series must be a non-empty list")
+                series = []
+            if isinstance(series, list) and len(series) > CHART_MAX_SERIES:
+                errors.append(
+                    f"{label}.payload.series exceeds max size {CHART_MAX_SERIES}"
+                )
+
+            seen_series_ids: set[str] = set()
+            total_points = 0
+            for series_index, series_entry in enumerate(series):
+                series_label = f"{label}.payload.series[{series_index}]"
+                if not isinstance(series_entry, Mapping):
+                    errors.append(f"{series_label} must be a mapping")
+                    continue
+
+                series_id = series_entry.get("series_id")
+                if not isinstance(series_id, str) or not series_id.strip():
+                    errors.append(
+                        f"{series_label}.series_id must be a non-empty string"
+                    )
+                elif series_id in seen_series_ids:
+                    errors.append(f"{series_label}.series_id must be unique")
+                else:
+                    seen_series_ids.add(series_id)
+
+                series_name = series_entry.get("label")
+                if not isinstance(series_name, str) or not series_name.strip():
+                    errors.append(f"{series_label}.label must be a non-empty string")
+
+                points = series_entry.get("points")
+                if not isinstance(points, list) or not points:
+                    errors.append(f"{series_label}.points must be a non-empty list")
+                    points = []
+                if isinstance(points, list) and len(points) > CHART_MAX_POINTS_PER_SERIES:
+                    errors.append(
+                        f"{series_label}.points exceeds max size {CHART_MAX_POINTS_PER_SERIES}"
+                    )
+
+                total_points += len(points)
+                for point_index, point in enumerate(points):
+                    point_label = f"{series_label}.points[{point_index}]"
+                    if not isinstance(point, Mapping):
+                        errors.append(f"{point_label} must be a mapping")
+                        continue
+
+                    x_value = point.get("x")
+                    x_is_valid = (
+                        isinstance(x_value, str)
+                        and bool(x_value.strip())
+                    ) or (
+                        isinstance(x_value, (int, float))
+                        and not isinstance(x_value, bool)
+                        and not math.isnan(float(x_value))
+                        and not math.isinf(float(x_value))
+                    )
+                    if not x_is_valid:
+                        errors.append(
+                            f"{point_label}.x must be a non-empty string or finite number"
+                        )
+
+                    y_value = _normalise_float(point.get("y"))
+                    if y_value is None:
+                        errors.append(
+                            f"{point_label}.y must be a finite number"
+                        )
+
+                    point_meta = point.get("meta")
+                    if point_meta is not None and not isinstance(point_meta, Mapping):
+                        errors.append(
+                            f"{point_label}.meta must be a mapping when provided"
+                        )
+
+                    _validate_task_links(
+                        links=point.get("task_links"),
+                        label=f"{point_label}.task_links",
+                        errors=errors,
+                    )
+
+                _validate_task_links(
+                    links=series_entry.get("task_links"),
+                    label=f"{series_label}.task_links",
+                    errors=errors,
+                )
+
+            if total_points > CHART_MAX_TOTAL_POINTS:
+                errors.append(
+                    f"{label}.payload.series total points exceeds max size {CHART_MAX_TOTAL_POINTS}"
+                )
+
+            for axis_key in ("x_axis", "y_axis", "units"):
+                axis_value = payload.get(axis_key)
+                if axis_value is not None and (
+                    not isinstance(axis_value, str) or not axis_value.strip()
+                ):
+                    errors.append(
+                        f"{label}.payload.{axis_key} must be a non-empty string when provided"
+                    )
+
+            stacked = payload.get("stacked")
+            if stacked is not None and not isinstance(stacked, bool):
+                errors.append(f"{label}.payload.stacked must be a boolean when provided")
+
+            legend = payload.get("legend")
+            if legend is not None and not isinstance(legend, bool):
+                errors.append(f"{label}.payload.legend must be a boolean when provided")
+
+            _validate_task_links(
+                links=payload.get("task_links"),
+                label=f"{label}.payload.task_links",
+                errors=errors,
+            )
         elif element_type == "location_view":
             points = payload.get("points")
             if not isinstance(points, list) or not points:
@@ -2253,6 +2385,89 @@ def _normalise_supplied_screen_calendar_views(
     return normalised, dropped_count
 
 
+def _normalise_supplied_screen_chart_views(
+    screen_chart_elements: Sequence[Mapping[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Normalise externally supplied screen chart-view specs."""
+    if (
+        not isinstance(screen_chart_elements, Sequence)
+        or isinstance(screen_chart_elements, (str, bytes, bytearray))
+    ):
+        return [], 0
+
+    normalised: list[dict[str, Any]] = []
+    dropped_count = 0
+
+    for index, raw_spec in enumerate(screen_chart_elements, start=1):
+        if not isinstance(raw_spec, Mapping):
+            dropped_count += 1
+            continue
+
+        payload: Mapping[str, Any] | None = None
+        metadata = raw_spec
+        wrapped_payload = raw_spec.get("payload")
+        if isinstance(wrapped_payload, Mapping):
+            payload = wrapped_payload
+        elif "chart_type" in raw_spec and "series" in raw_spec:
+            payload = raw_spec
+
+        if not isinstance(payload, Mapping):
+            dropped_count += 1
+            continue
+
+        intent = (
+            _normalise_text(metadata.get("intent"))
+            or "structured_chart_view"
+        )
+        constraints = metadata.get("constraints")
+        if not isinstance(constraints, Mapping):
+            constraints = {
+                "supports_legend_toggle": True,
+                "supports_series_comparison": True,
+            }
+        provenance = metadata.get("provenance")
+        if not isinstance(provenance, Mapping):
+            provenance = {}
+        canonical_payload = _with_optional_payload_title(payload, metadata=metadata)
+
+        is_valid, _errors = validate_turn_display_elements(
+            {
+                "schema_version": DISPLAY_ELEMENT_SCHEMA_VERSION,
+                "elements": [
+                    {
+                        "element_id": f"screen_structured_chart_view_probe_{index}",
+                        "element_type": "chart_view",
+                        "channel": "screen",
+                        "order": 37,
+                        "intent": intent,
+                        "payload": dict(canonical_payload),
+                        "constraints": dict(constraints),
+                        "provenance": dict(provenance),
+                    }
+                ],
+                "reason_codes": [],
+            }
+        )
+        if not is_valid:
+            dropped_count += 1
+            continue
+
+        normalised.append(
+            {
+                "element_id": _normalise_text(metadata.get("element_id")),
+                "order": metadata.get("order")
+                if isinstance(metadata.get("order"), int)
+                else None,
+                "intent": intent,
+                "payload": dict(canonical_payload),
+                "constraints": dict(constraints),
+                "provenance": dict(provenance),
+            }
+        )
+
+    return normalised, dropped_count
+
+
 def _normalise_supplied_screen_location_views(
     screen_location_elements: Sequence[Mapping[str, Any]] | None,
 ) -> tuple[list[dict[str, Any]], int]:
@@ -2970,6 +3185,7 @@ def build_turn_display_elements(
     screen_workflow_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_task_view_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_calendar_elements: Sequence[Mapping[str, Any]] | None = None,
+    screen_chart_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_location_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_document_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_kanban_elements: Sequence[Mapping[str, Any]] | None = None,
@@ -3129,6 +3345,14 @@ def build_turn_display_elements(
         reason_codes.append("screen_structured_calendar_views_supplied")
     if supplied_calendar_views_dropped:
         reason_codes.append("screen_structured_calendar_views_invalid_dropped")
+
+    supplied_screen_chart_views, supplied_chart_views_dropped = (
+        _normalise_supplied_screen_chart_views(screen_chart_elements)
+    )
+    if supplied_screen_chart_views:
+        reason_codes.append("screen_structured_chart_views_supplied")
+    if supplied_chart_views_dropped:
+        reason_codes.append("screen_structured_chart_views_invalid_dropped")
 
     supplied_screen_location_views, supplied_location_views_dropped = (
         _normalise_supplied_screen_location_views(screen_location_elements)
@@ -3297,6 +3521,27 @@ def build_turn_display_elements(
             }
         )
 
+    chart_specs: list[dict[str, Any]] = []
+    for index, spec in enumerate(supplied_screen_chart_views, start=1):
+        provenance = dict(spec.get("provenance") or {})
+        provenance.setdefault("source", "screen_structured_chart_view")
+        provenance.setdefault("chart_view_index", index)
+        chart_specs.append(
+            {
+                "element_id": spec.get("element_id")
+                or f"screen_structured_chart_view_{index}",
+                "order": spec.get("order"),
+                "intent": spec.get("intent") or "structured_chart_view",
+                "payload": spec.get("payload") or {},
+                "constraints": spec.get("constraints")
+                or {
+                    "supports_legend_toggle": True,
+                    "supports_series_comparison": True,
+                },
+                "provenance": provenance,
+            }
+        )
+
     location_specs: list[dict[str, Any]] = []
     for index, spec in enumerate(supplied_screen_location_views, start=1):
         provenance = dict(spec.get("provenance") or {})
@@ -3453,6 +3698,7 @@ def build_turn_display_elements(
             *table_specs,
             *workflow_specs,
             *task_view_specs,
+            *chart_specs,
             *calendar_specs,
             *location_specs,
             *document_specs,
@@ -3503,6 +3749,30 @@ def build_turn_display_elements(
             {
                 "element_id": element_id,
                 "element_type": "timeline",
+                "channel": "screen",
+                "order": int(order),
+                "intent": str(spec["intent"]),
+                "payload": dict(spec["payload"]),
+                "constraints": dict(spec["constraints"]),
+                "provenance": dict(spec["provenance"]),
+            }
+        )
+
+    next_chart_order = 37
+    for spec in chart_specs:
+        order = spec.get("order") if isinstance(spec.get("order"), int) else None
+        if order is None:
+            while next_chart_order in used_orders:
+                next_chart_order += 1
+            order = next_chart_order
+            used_orders.add(order)
+            next_chart_order += 1
+
+        element_id = _next_unique_element_id(str(spec["element_id"]), used_ids)
+        elements.append(
+            {
+                "element_id": element_id,
+                "element_type": "chart_view",
                 "channel": "screen",
                 "order": int(order),
                 "intent": str(spec["intent"]),

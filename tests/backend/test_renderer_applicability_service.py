@@ -18,6 +18,7 @@ def test_resolver_selects_highest_priority_concept_renderer() -> None:
                 "applies_to_concept_type_ids": ["#V#task"],
                 "required_predicates": ["#V#has_start_time"],
                 "priority": 90,
+                "screen_element_families": ["timeline"],
             }
         ),
         RendererProfile.from_mapping(
@@ -29,6 +30,7 @@ def test_resolver_selects_highest_priority_concept_renderer() -> None:
                 "applies_to_concept_type_ids": ["#V#task"],
                 "required_predicates": ["#V#has_due_time"],
                 "priority": 60,
+                "screen_element_families": ["table"],
             }
         ),
     )
@@ -50,6 +52,7 @@ def test_resolver_selects_highest_priority_concept_renderer() -> None:
     assert not result.interpreted_as_transient_microtheory
     assert len(result.selected_renderers) == 1
     assert result.selected_renderers[0].renderer_id == "#V#timeline_renderer"
+    assert result.selected_renderers[0].screen_element_families == ("timeline",)
     assert all(item.applicable for item in result.candidate_evaluations)
 
 
@@ -96,6 +99,7 @@ def test_resolver_supports_multimodal_selection_with_fallbacks() -> None:
                 "applies_to_object_kinds": ["concept"],
                 "priority": 100,
                 "fallback_renderer_ids": ["#V#chart_visual_renderer"],
+                "screen_element_families": ["table"],
             }
         ),
         RendererProfile.from_mapping(
@@ -106,6 +110,7 @@ def test_resolver_supports_multimodal_selection_with_fallbacks() -> None:
                 "applies_to_object_kinds": ["concept"],
                 "priority": 90,
                 "fallback_renderer_ids": ["#V#text_summary_renderer"],
+                "screen_element_families": [],
             }
         ),
         RendererProfile.from_mapping(
@@ -115,6 +120,7 @@ def test_resolver_supports_multimodal_selection_with_fallbacks() -> None:
                 "modalities": ["textual"],
                 "applies_to_object_kinds": ["concept"],
                 "priority": 50,
+                "screen_element_families": [],
             }
         ),
         RendererProfile.from_mapping(
@@ -124,6 +130,7 @@ def test_resolver_supports_multimodal_selection_with_fallbacks() -> None:
                 "modalities": ["visual"],
                 "applies_to_object_kinds": ["concept"],
                 "priority": 40,
+                "screen_element_families": ["chart_view"],
             }
         ),
     )
@@ -144,6 +151,20 @@ def test_resolver_supports_multimodal_selection_with_fallbacks() -> None:
     assert selected_ids == ["#V#table_visual_renderer", "#V#narration_renderer"]
     assert result.selected_renderers[0].fallback_renderer_ids == ("#V#chart_visual_renderer",)
     assert result.selected_renderers[1].fallback_renderer_ids == ("#V#text_summary_renderer",)
+    assert result.selected_renderers[0].screen_element_families == ("table",)
+
+
+def test_renderer_profile_normalises_screen_element_family_aliases() -> None:
+    profile = RendererProfile.from_mapping(
+        {
+            "renderer_id": "#V#chart_visual_renderer",
+            "renderer_type": "custom_chart_renderer",
+            "modalities": ["visual"],
+            "applies_to_object_kinds": ["concept"],
+            "screen_element_families": ["chart", "chart_view", "unknown"],
+        }
+    )
+    assert profile.screen_element_families == ("chart_view",)
 
 
 def test_resolver_exposes_rejection_reasons_when_no_renderer_applies() -> None:

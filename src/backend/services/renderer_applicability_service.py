@@ -25,6 +25,50 @@ _DEFAULT_OBJECT_KINDS = (
     OBJECT_KIND_TRANSIENT_MICROTHEORY,
 )
 
+_SCREEN_ELEMENT_FAMILY_ALIASES: dict[str, str] = {
+    "table": "table",
+    "tabular": "table",
+    "workflow": "workflow_view",
+    "workflow_view": "workflow_view",
+    "task": "task_view",
+    "task_view": "task_view",
+    "calendar": "calendar_view",
+    "calendar_view": "calendar_view",
+    "chart": "chart_view",
+    "chart_view": "chart_view",
+    "location": "location_view",
+    "location_view": "location_view",
+    "geo": "location_view",
+    "map": "location_view",
+    "document": "document_view",
+    "document_view": "document_view",
+    "citation": "document_view",
+    "kanban": "kanban_view",
+    "kanban_view": "kanban_view",
+    "timeline": "timeline",
+    "hierarchy": "hierarchy_view",
+    "hierarchy_view": "hierarchy_view",
+    "tree": "hierarchy_view",
+    "relation_graph": "relation_graph_view",
+    "relation_graph_view": "relation_graph_view",
+    "graph": "relation_graph_view",
+}
+_ALLOWED_SCREEN_ELEMENT_FAMILIES: frozenset[str] = frozenset(
+    {
+        "table",
+        "workflow_view",
+        "task_view",
+        "calendar_view",
+        "chart_view",
+        "location_view",
+        "document_view",
+        "kanban_view",
+        "timeline",
+        "hierarchy_view",
+        "relation_graph_view",
+    }
+)
+
 
 def _normalise_strings(values: Sequence[Any] | None) -> tuple[str, ...]:
     if not values:
@@ -65,6 +109,27 @@ def _coerce_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _normalise_screen_element_families(values: Any) -> tuple[str, ...]:
+    raw_values = _coerce_sequence_values(values)
+    if not raw_values:
+        return ()
+
+    normalised: list[str] = []
+    seen: set[str] = set()
+    for raw_value in raw_values:
+        text = str(raw_value or "").strip().lower()
+        if not text:
+            continue
+        mapped = _SCREEN_ELEMENT_FAMILY_ALIASES.get(text, text)
+        if mapped not in _ALLOWED_SCREEN_ELEMENT_FAMILIES:
+            continue
+        if mapped in seen:
+            continue
+        seen.add(mapped)
+        normalised.append(mapped)
+    return tuple(normalised)
 
 
 @dataclass(frozen=True)
@@ -138,6 +203,7 @@ class RendererProfile:
     minimum_confidence: float | None
     priority: int
     fallback_renderer_ids: tuple[str, ...]
+    screen_element_families: tuple[str, ...]
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> RendererProfile:
@@ -186,6 +252,9 @@ class RendererProfile:
             priority=priority,
             fallback_renderer_ids=_normalise_strings(
                 _coerce_sequence_values(raw.get("fallback_renderer_ids"))
+            ),
+            screen_element_families=_normalise_screen_element_families(
+                raw.get("screen_element_families")
             ),
         )
 
@@ -258,6 +327,7 @@ class RendererSelection:
     modalities: tuple[str, ...]
     selection_reason: str
     fallback_renderer_ids: tuple[str, ...]
+    screen_element_families: tuple[str, ...]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -266,6 +336,7 @@ class RendererSelection:
             "modalities": list(self.modalities),
             "selection_reason": self.selection_reason,
             "fallback_renderer_ids": list(self.fallback_renderer_ids),
+            "screen_element_families": list(self.screen_element_families),
         }
 
 
@@ -367,6 +438,7 @@ def _select_renderers(
                         modalities=profile.modalities,
                         selection_reason=f"highest_priority_for_modality:{modality}",
                         fallback_renderer_ids=(),
+                        screen_element_families=profile.screen_element_families,
                     )
                 )
                 selected_ids.add(profile.renderer_id)
@@ -381,6 +453,7 @@ def _select_renderers(
                 modalities=primary.modalities,
                 selection_reason="highest_priority_applicable_renderer",
                 fallback_renderer_ids=(),
+                screen_element_families=primary.screen_element_families,
             )
         )
         selected_ids.add(primary.renderer_id)
@@ -409,6 +482,7 @@ def _select_renderers(
                 modalities=item.modalities,
                 selection_reason=item.selection_reason,
                 fallback_renderer_ids=tuple(fallback_ids),
+                screen_element_families=profile.screen_element_families,
             )
         )
     return tuple(enriched)

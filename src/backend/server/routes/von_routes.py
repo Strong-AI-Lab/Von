@@ -2876,6 +2876,39 @@ def _extract_screen_calendar_elements_from_render_plan(
     return calendar_elements
 
 
+def _extract_screen_chart_elements_from_render_plan(
+    render_plan: dict[str, Any] | None,
+    *,
+    screen_element_targets: dict[str, bool] | None = None,
+) -> list[dict[str, Any]]:
+    """Extract display-contract chart_view specs from renderer plan diagnostics."""
+    if not isinstance(render_plan, dict):
+        return []
+    if isinstance(screen_element_targets, dict) and not bool(
+        screen_element_targets.get("chart_view", True)
+    ):
+        return []
+
+    chart_elements: list[dict[str, Any]] = []
+
+    def _append_chart_specs(raw_value: Any) -> None:
+        if isinstance(raw_value, list):
+            for item in raw_value:
+                if isinstance(item, dict):
+                    chart_elements.append(dict(item))
+        elif isinstance(raw_value, dict):
+            chart_elements.append(dict(raw_value))
+
+    _append_chart_specs(render_plan.get("screen_chart_elements"))
+    _append_chart_specs(render_plan.get("screen_chart_payloads"))
+
+    single_chart = render_plan.get("screen_chart_element")
+    if isinstance(single_chart, dict):
+        chart_elements.append(dict(single_chart))
+
+    return chart_elements
+
+
 def _extract_screen_document_elements_from_render_plan(
     render_plan: dict[str, Any] | None,
     *,
@@ -3120,6 +3153,7 @@ def _extract_screen_element_targets_from_render_plan(
         "workflow_view": True,
         "task_view": True,
         "calendar_view": True,
+        "chart_view": True,
         "location_view": True,
         "document_view": True,
         "kanban_view": True,
@@ -3140,6 +3174,7 @@ def _extract_screen_element_targets_from_render_plan(
         "workflow_view": bool(raw_targets.get("workflow_view", True)),
         "task_view": bool(raw_targets.get("task_view", True)),
         "calendar_view": bool(raw_targets.get("calendar_view", True)),
+        "chart_view": bool(raw_targets.get("chart_view", True)),
         "location_view": bool(raw_targets.get("location_view", True)),
         "document_view": bool(raw_targets.get("document_view", True)),
         "kanban_view": bool(raw_targets.get("kanban_view", True)),
@@ -6984,6 +7019,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             render_plan_for_display,
             screen_element_targets=screen_element_targets,
         )
+        screen_chart_elements = _extract_screen_chart_elements_from_render_plan(
+            render_plan_for_display,
+            screen_element_targets=screen_element_targets,
+        )
         screen_location_elements = _extract_screen_location_elements_from_render_plan(
             render_plan_for_display,
             screen_element_targets=screen_element_targets,
@@ -7025,6 +7064,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             screen_workflow_elements=screen_workflow_elements,
             screen_task_view_elements=screen_task_view_elements,
             screen_calendar_elements=screen_calendar_elements,
+            screen_chart_elements=screen_chart_elements,
             screen_location_elements=screen_location_elements,
             screen_document_elements=screen_document_elements,
             screen_kanban_elements=screen_kanban_elements,

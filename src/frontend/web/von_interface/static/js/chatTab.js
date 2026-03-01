@@ -22,6 +22,7 @@ import {
     copyTextWithClipboardFallback,
     resetCopyJsonButtonPreCopyState
 } from './utils/copyJsonButtonState.js';
+import { saveJsonTextViaDialog } from './utils/fileSave.js';
 import {
     CHAT_HISTORY_RECENT_LIMIT_STORAGE_KEY,
     CHAT_HISTORY_RECENT_WINDOW_DAYS_STORAGE_KEY,
@@ -2203,6 +2204,10 @@ const KANBAN_MAX_COLUMNS = 30;
 const KANBAN_MAX_CARDS = 200;
 const TIMELINE_MAX_ITEMS = 200;
 const CALENDAR_MAX_ITEMS = 240;
+const CHART_ALLOWED_TYPES = new Set(['line', 'bar', 'area', 'scatter']);
+const CHART_MAX_SERIES = 20;
+const CHART_MAX_POINTS_PER_SERIES = 240;
+const CHART_MAX_TOTAL_POINTS = 1200;
 const LOCATION_MAX_POINTS = 200;
 const LOCATION_LATITUDE_MIN = -90;
 const LOCATION_LATITUDE_MAX = 90;
@@ -3324,6 +3329,179 @@ function resolveCalendarDisplayElements(debugData) {
         calendarViews.push(calendarElement);
     }
     return calendarViews;
+}
+
+function normaliseChartType(value) {
+    if (typeof value !== 'string') {
+        return null;
+    }
+    const token = value.trim().toLowerCase();
+    if (!token || !CHART_ALLOWED_TYPES.has(token)) {
+        return null;
+    }
+    return token;
+}
+
+function normaliseChartAxisLabel(value) {
+    if (typeof value !== 'string') {
+        return '';
+    }
+    return value.trim();
+}
+
+function normaliseChartXValue(value) {
+    if (typeof value === 'number') {
+        if (!Number.isFinite(value)) {
+            return null;
+        }
+        return value;
+    }
+    if (typeof value === 'string') {
+        const cleaned = value.trim();
+        if (!cleaned) {
+            return null;
+        }
+        const numeric = Number(cleaned);
+        if (Number.isFinite(numeric) && /^-?\d+(\.\d+)?$/.test(cleaned)) {
+            return numeric;
+        }
+        return cleaned;
+    }
+    return null;
+}
+
+function normaliseChartDisplayElement(element) {
+    if (!element || typeof element !== 'object') {
+        return null;
+    }
+    if (String(element.element_type || '').trim() !== 'chart_view') {
+        return null;
+    }
+
+    const payload = element.payload;
+    if (!payload || typeof payload !== 'object') {
+        return null;
+    }
+
+    const chartType = normaliseChartType(payload.chart_type);
+    if (!chartType) {
+        return null;
+    }
+
+    const rawSeries = Array.isArray(payload.series) ? payload.series : [];
+    const series = [];
+    let totalPoints = 0;
+    const seenSeriesIds = new Set();
+    for (let seriesIndex = 0; seriesIndex < rawSeries.length; seriesIndex += 1) {
+        if (series.length >= CHART_MAX_SERIES || totalPoints >= CHART_MAX_TOTAL_POINTS) {
+            break;
+        }
+
+        const rawSeriesEntry = rawSeries[seriesIndex];
+        if (!rawSeriesEntry || typeof rawSeriesEntry !== 'object') {
+            continue;
+        }
+        const seriesId = typeof rawSeriesEntry.series_id === 'string' && rawSeriesEntry.series_id.trim()
+            ? rawSeriesEntry.series_id.trim()
+            : `series_${seriesIndex + 1}`;
+        if (seenSeriesIds.has(seriesId)) {
+            continue;
+        }
+
+        const label = typeof rawSeriesEntry.label === 'string' && rawSeriesEntry.label.trim()
+            ? rawSeriesEntry.label.trim()
+            : seriesId;
+        const rawPoints = Array.isArray(rawSeriesEntry.points) ? rawSeriesEntry.points : [];
+        const points = [];
+        for (let pointIndex = 0; pointIndex < rawPoints.length; pointIndex += 1) {
+            if (points.length >= CHART_MAX_POINTS_PER_SERIES || totalPoints >= CHART_MAX_TOTAL_POINTS) {
+                break;
+            }
+            const rawPoint = rawPoints[pointIndex];
+            if (!rawPoint || typeof rawPoint !== 'object') {
+                continue;
+            }
+            const xValue = normaliseChartXValue(rawPoint.x);
+            const yValue = Number(rawPoint.y);
+            if (xValue === null || !Number.isFinite(yValue)) {
+                continue;
+            }
+            const point = {
+                x: xValue,
+                y: yValue
+            };
+            if (rawPoint.meta && typeof rawPoint.meta === 'object') {
+                point.meta = rawPoint.meta;
+            }
+            const rawTaskLinks = Array.isArray(rawPoint.task_links) ? rawPoint.task_links : [];
+            const taskLinks = rawTaskLinks
+                .map((link) => normaliseWorkflowTaskLink(link))
+                .filter(Boolean);
+            if (taskLinks.length) {
+                point.task_links = taskLinks;
+            }
+            points.push(point);
+            totalPoints += 1;
+        }
+        if (!points.length) {
+            continue;
+        }
+
+        const rawTaskLinks = Array.isArray(rawSeriesEntry.task_links) ? rawSeriesEntry.task_links : [];
+        const taskLinks = rawTaskLinks
+            .map((link) => normaliseWorkflowTaskLink(link))
+            .filter(Boolean);
+
+        series.push({
+            series_id: seriesId,
+            label,
+            points,
+            task_links: taskLinks
+        });
+        seenSeriesIds.add(seriesId);
+    }
+
+    if (!series.length) {
+        return null;
+    }
+
+    const rawTaskLinks = Array.isArray(payload.task_links) ? payload.task_links : [];
+    const taskLinks = rawTaskLinks
+        .map((link) => normaliseWorkflowTaskLink(link))
+        .filter(Boolean);
+
+    const stacked = typeof payload.stacked === 'boolean' ? payload.stacked : false;
+    const legend = typeof payload.legend === 'boolean' ? payload.legend : (series.length > 1);
+
+    return {
+        element_id: typeof element.element_id === 'string' ? element.element_id.trim() : null,
+        title: normaliseOptionalDisplayElementTitle(payload.title),
+        chart_type: chartType,
+        x_axis: normaliseChartAxisLabel(payload.x_axis),
+        y_axis: normaliseChartAxisLabel(payload.y_axis),
+        units: normaliseChartAxisLabel(payload.units),
+        stacked,
+        legend,
+        series,
+        task_links: taskLinks
+    };
+}
+
+function resolveChartDisplayElements(debugData) {
+    const contract = normaliseDisplayElementsContract(debugData?.display_elements);
+    if (!contract) {
+        return [];
+    }
+
+    const chartViews = [];
+    for (const element of contract.elements) {
+        const chartElement = normaliseChartDisplayElement(element);
+        if (!chartElement) {
+            continue;
+        }
+        chartViews.push(chartElement);
+    }
+    return chartViews;
 }
 
 function normaliseLocationCoordinate(value, minValue, maxValue) {
@@ -5035,6 +5213,478 @@ function buildHierarchyScene(hierarchyElement) {
     return section;
 }
 
+const CHART_SERIES_COLOURS = [
+    '#1f4f7a',
+    '#0f766e',
+    '#7c3aed',
+    '#b45309',
+    '#be123c',
+    '#047857',
+    '#4c1d95',
+    '#0f766e'
+];
+
+function formatChartTickValue(value) {
+    if (!Number.isFinite(value)) {
+        return '';
+    }
+    const absoluteValue = Math.abs(value);
+    if (absoluteValue >= 1000) {
+        return `${(value / 1000).toFixed(1)}k`;
+    }
+    if (absoluteValue >= 100) {
+        return value.toFixed(0);
+    }
+    if (absoluteValue >= 10) {
+        return value.toFixed(1);
+    }
+    return value.toFixed(2).replace(/\.?0+$/, '');
+}
+
+function toChartPointKey(xValue) {
+    if (typeof xValue === 'number' && Number.isFinite(xValue)) {
+        return `n:${xValue}`;
+    }
+    return `s:${String(xValue)}`;
+}
+
+function createChartSectionElement(chartElement, chartIndex, chartTotal) {
+    if (!chartElement || typeof chartElement !== 'object') {
+        return null;
+    }
+
+    const section = document.createElement('section');
+    section.className = 'chat-display-elements-chart-section';
+
+    const title = document.createElement('div');
+    title.className = 'chat-display-elements-chart-title';
+    title.textContent = resolveDisplayElementSectionTitle(
+        chartElement.title,
+        'Chart view',
+        chartIndex,
+        chartTotal
+    );
+    title.style.cssText = 'font-weight: 600; font-size: 0.85em; color: #2f4f6f; margin-bottom: 6px;';
+    section.appendChild(title);
+
+    const summary = document.createElement('div');
+    summary.className = 'chat-display-elements-chart-summary';
+    const pointCount = chartElement.series.reduce((total, seriesEntry) => (
+        total + (Array.isArray(seriesEntry.points) ? seriesEntry.points.length : 0)
+    ), 0);
+    summary.textContent = `${chartElement.chart_type} chart · ${chartElement.series.length} series · ${pointCount} points`;
+    summary.style.cssText = 'font-size: 0.78em; color: #5a6b7b; margin-bottom: 6px;';
+    section.appendChild(summary);
+
+    const plotWrap = document.createElement('div');
+    plotWrap.className = 'chat-display-elements-chart-plot-wrap';
+    plotWrap.style.cssText = 'border: 1px solid #dce3ea; border-radius: 6px; background: #fff; padding: 8px;';
+    section.appendChild(plotWrap);
+
+    const width = 680;
+    const height = 260;
+    const margin = {
+        top: 12,
+        right: 16,
+        bottom: 42,
+        left: 54
+    };
+    const innerWidth = width - margin.left - margin.right;
+    const innerHeight = height - margin.top - margin.bottom;
+
+    const allPoints = [];
+    for (const seriesEntry of chartElement.series) {
+        for (const point of seriesEntry.points) {
+            allPoints.push(point);
+        }
+    }
+    if (allPoints.length === 0) {
+        return section;
+    }
+
+    const allNumericX = allPoints.every((point) => (
+        typeof point.x === 'number' && Number.isFinite(point.x)
+    ));
+    const categoryKeys = [];
+    const categoryLabelByKey = new Map();
+    const categoryIndexByKey = new Map();
+    const registerCategory = (xValue) => {
+        const key = toChartPointKey(xValue);
+        if (categoryIndexByKey.has(key)) {
+            return key;
+        }
+        categoryIndexByKey.set(key, categoryKeys.length);
+        categoryKeys.push(key);
+        categoryLabelByKey.set(key, String(xValue));
+        return key;
+    };
+
+    if (!allNumericX || chartElement.chart_type === 'bar') {
+        for (const point of allPoints) {
+            registerCategory(point.x);
+        }
+    }
+
+    let xMin = 0;
+    let xMax = 1;
+    if (allNumericX) {
+        xMin = Math.min(...allPoints.map((point) => Number(point.x)));
+        xMax = Math.max(...allPoints.map((point) => Number(point.x)));
+        if (xMin === xMax) {
+            xMin -= 0.5;
+            xMax += 0.5;
+        }
+    }
+
+    const resolveX = (xValue) => {
+        if (allNumericX && chartElement.chart_type !== 'bar') {
+            const numeric = Number(xValue);
+            if (!Number.isFinite(numeric)) {
+                return margin.left;
+            }
+            return margin.left + ((numeric - xMin) / (xMax - xMin)) * innerWidth;
+        }
+        const key = registerCategory(xValue);
+        const index = categoryIndexByKey.get(key) || 0;
+        const step = innerWidth / Math.max(categoryKeys.length, 1);
+        return margin.left + ((index + 0.5) * step);
+    };
+
+    const resolveXFromCategoryKey = (categoryKey) => {
+        const key = typeof categoryKey === 'string' ? categoryKey : toChartPointKey(categoryKey);
+        const index = categoryIndexByKey.get(key) || 0;
+        const step = innerWidth / Math.max(categoryKeys.length, 1);
+        return margin.left + ((index + 0.5) * step);
+    };
+
+    const yValues = [];
+    if (chartElement.chart_type === 'bar' && chartElement.stacked) {
+        const categoryTotals = new Map();
+        for (const seriesEntry of chartElement.series) {
+            for (const point of seriesEntry.points) {
+                const key = registerCategory(point.x);
+                const current = categoryTotals.get(key) || 0;
+                categoryTotals.set(key, current + Number(point.y));
+            }
+        }
+        for (const total of categoryTotals.values()) {
+            yValues.push(Number(total));
+        }
+    } else {
+        for (const point of allPoints) {
+            yValues.push(Number(point.y));
+        }
+    }
+    let yMin = Math.min(...yValues);
+    let yMax = Math.max(...yValues);
+    if (chartElement.chart_type === 'bar' || chartElement.chart_type === 'area') {
+        yMin = Math.min(0, yMin);
+        yMax = Math.max(0, yMax);
+    }
+    if (!Number.isFinite(yMin) || !Number.isFinite(yMax)) {
+        yMin = 0;
+        yMax = 1;
+    }
+    if (yMin === yMax) {
+        yMin -= 0.5;
+        yMax += 0.5;
+    }
+    const resolveY = (value) => (
+        margin.top + ((yMax - Number(value)) / (yMax - yMin)) * innerHeight
+    );
+
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'chat-display-elements-chart-svg');
+    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    svg.setAttribute('width', '100%');
+    svg.setAttribute('height', String(height));
+    svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+    svg.style.display = 'block';
+    plotWrap.appendChild(svg);
+
+    const axisColour = '#9aa8b6';
+    const axisGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    svg.appendChild(axisGroup);
+
+    const xAxis = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    xAxis.setAttribute('x1', String(margin.left));
+    xAxis.setAttribute('y1', String(margin.top + innerHeight));
+    xAxis.setAttribute('x2', String(margin.left + innerWidth));
+    xAxis.setAttribute('y2', String(margin.top + innerHeight));
+    xAxis.setAttribute('stroke', axisColour);
+    axisGroup.appendChild(xAxis);
+
+    const yAxis = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    yAxis.setAttribute('x1', String(margin.left));
+    yAxis.setAttribute('y1', String(margin.top));
+    yAxis.setAttribute('x2', String(margin.left));
+    yAxis.setAttribute('y2', String(margin.top + innerHeight));
+    yAxis.setAttribute('stroke', axisColour);
+    axisGroup.appendChild(yAxis);
+
+    const gridTickCount = 4;
+    for (let tickIndex = 0; tickIndex <= gridTickCount; tickIndex += 1) {
+        const ratio = tickIndex / gridTickCount;
+        const yValue = yMin + ((yMax - yMin) * (1 - ratio));
+        const y = margin.top + (ratio * innerHeight);
+
+        const grid = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        grid.setAttribute('x1', String(margin.left));
+        grid.setAttribute('y1', String(y));
+        grid.setAttribute('x2', String(margin.left + innerWidth));
+        grid.setAttribute('y2', String(y));
+        grid.setAttribute('stroke', '#edf2f7');
+        svg.appendChild(grid);
+
+        const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        label.setAttribute('x', String(margin.left - 8));
+        label.setAttribute('y', String(y + 3));
+        label.setAttribute('text-anchor', 'end');
+        label.setAttribute('font-size', '10');
+        label.setAttribute('fill', '#5a6b7b');
+        label.textContent = formatChartTickValue(yValue);
+        svg.appendChild(label);
+    }
+
+    if (!allNumericX || chartElement.chart_type === 'bar') {
+        const maxXTicks = 12;
+        const step = Math.max(1, Math.ceil(categoryKeys.length / maxXTicks));
+        for (let index = 0; index < categoryKeys.length; index += step) {
+            const key = categoryKeys[index];
+            const labelText = categoryLabelByKey.get(key) || key;
+            const x = resolveXFromCategoryKey(key);
+            const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            label.setAttribute('x', String(x));
+            label.setAttribute('y', String(margin.top + innerHeight + 15));
+            label.setAttribute('text-anchor', 'middle');
+            label.setAttribute('font-size', '10');
+            label.setAttribute('fill', '#5a6b7b');
+            label.textContent = labelText;
+            svg.appendChild(label);
+        }
+    } else {
+        const minLabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        minLabel.setAttribute('x', String(margin.left));
+        minLabel.setAttribute('y', String(margin.top + innerHeight + 15));
+        minLabel.setAttribute('text-anchor', 'start');
+        minLabel.setAttribute('font-size', '10');
+        minLabel.setAttribute('fill', '#5a6b7b');
+        minLabel.textContent = formatChartTickValue(xMin);
+        svg.appendChild(minLabel);
+
+        const maxLabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        maxLabel.setAttribute('x', String(margin.left + innerWidth));
+        maxLabel.setAttribute('y', String(margin.top + innerHeight + 15));
+        maxLabel.setAttribute('text-anchor', 'end');
+        maxLabel.setAttribute('font-size', '10');
+        maxLabel.setAttribute('fill', '#5a6b7b');
+        maxLabel.textContent = formatChartTickValue(xMax);
+        svg.appendChild(maxLabel);
+    }
+
+    const seriesPointLookup = chartElement.series.map((seriesEntry) => {
+        const map = new Map();
+        for (const point of seriesEntry.points) {
+            map.set(toChartPointKey(point.x), point);
+        }
+        return map;
+    });
+
+    const baselineY = resolveY(Math.max(0, yMin));
+    if (chartElement.chart_type === 'bar') {
+        const categoryStep = innerWidth / Math.max(categoryKeys.length, 1);
+        if (chartElement.stacked) {
+            const runningByCategory = new Map();
+            for (let seriesIndex = 0; seriesIndex < chartElement.series.length; seriesIndex += 1) {
+                const seriesEntry = chartElement.series[seriesIndex];
+                const colour = CHART_SERIES_COLOURS[seriesIndex % CHART_SERIES_COLOURS.length];
+                const pointLookup = seriesPointLookup[seriesIndex];
+                for (const key of categoryKeys) {
+                    const point = pointLookup.get(key);
+                    if (!point) {
+                        continue;
+                    }
+                    const previous = runningByCategory.get(key) || 0;
+                    const next = previous + Number(point.y);
+                    const yTop = resolveY(Math.max(previous, next));
+                    const yBottom = resolveY(Math.min(previous, next));
+                    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+                    const xCentre = resolveXFromCategoryKey(key);
+                    rect.setAttribute('x', String(xCentre - (categoryStep * 0.31)));
+                    rect.setAttribute('y', String(yTop));
+                    rect.setAttribute('width', String(categoryStep * 0.62));
+                    rect.setAttribute('height', String(Math.max(1, yBottom - yTop)));
+                    rect.setAttribute('fill', colour);
+                    rect.setAttribute('opacity', '0.86');
+                    svg.appendChild(rect);
+                    runningByCategory.set(key, next);
+                }
+            }
+        } else {
+            const groupWidth = categoryStep * 0.72;
+            const barWidth = groupWidth / Math.max(chartElement.series.length, 1);
+            for (let seriesIndex = 0; seriesIndex < chartElement.series.length; seriesIndex += 1) {
+                const seriesEntry = chartElement.series[seriesIndex];
+                const colour = CHART_SERIES_COLOURS[seriesIndex % CHART_SERIES_COLOURS.length];
+                const pointLookup = seriesPointLookup[seriesIndex];
+                for (const key of categoryKeys) {
+                    const point = pointLookup.get(key);
+                    if (!point) {
+                        continue;
+                    }
+                    const xCentre = resolveXFromCategoryKey(key);
+                    const x = (xCentre - (groupWidth / 2)) + (seriesIndex * barWidth);
+                    const y = resolveY(Number(point.y));
+                    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+                    rect.setAttribute('x', String(x));
+                    rect.setAttribute('y', String(Math.min(y, baselineY)));
+                    rect.setAttribute('width', String(Math.max(1, barWidth - 1)));
+                    rect.setAttribute('height', String(Math.max(1, Math.abs(baselineY - y))));
+                    rect.setAttribute('fill', colour);
+                    rect.setAttribute('opacity', '0.86');
+                    svg.appendChild(rect);
+                }
+            }
+        }
+    } else {
+        for (let seriesIndex = 0; seriesIndex < chartElement.series.length; seriesIndex += 1) {
+            const seriesEntry = chartElement.series[seriesIndex];
+            const colour = CHART_SERIES_COLOURS[seriesIndex % CHART_SERIES_COLOURS.length];
+            const coords = seriesEntry.points
+                .map((point) => ({
+                    point,
+                    x: resolveX(point.x),
+                    y: resolveY(Number(point.y))
+                }))
+                .sort((left, right) => left.x - right.x);
+
+            if (coords.length >= 2 && (chartElement.chart_type === 'line' || chartElement.chart_type === 'area')) {
+                const linePath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                const pathText = coords.map((coord, index) => (
+                    `${index === 0 ? 'M' : 'L'} ${coord.x.toFixed(3)} ${coord.y.toFixed(3)}`
+                )).join(' ');
+                linePath.setAttribute('d', pathText);
+                linePath.setAttribute('fill', 'none');
+                linePath.setAttribute('stroke', colour);
+                linePath.setAttribute('stroke-width', '2');
+                svg.appendChild(linePath);
+
+                if (chartElement.chart_type === 'area') {
+                    const areaPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                    const first = coords[0];
+                    const last = coords[coords.length - 1];
+                    const areaSegments = [
+                        `M ${first.x.toFixed(3)} ${baselineY.toFixed(3)}`,
+                        ...coords.map((coord) => `L ${coord.x.toFixed(3)} ${coord.y.toFixed(3)}`),
+                        `L ${last.x.toFixed(3)} ${baselineY.toFixed(3)}`,
+                        'Z'
+                    ];
+                    areaPath.setAttribute('d', areaSegments.join(' '));
+                    areaPath.setAttribute('fill', colour);
+                    areaPath.setAttribute('opacity', '0.18');
+                    svg.appendChild(areaPath);
+                }
+            }
+
+            for (const coord of coords) {
+                const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                dot.setAttribute('cx', String(coord.x));
+                dot.setAttribute('cy', String(coord.y));
+                dot.setAttribute('r', chartElement.chart_type === 'scatter' ? '3.4' : '2.6');
+                dot.setAttribute('fill', colour);
+                svg.appendChild(dot);
+            }
+        }
+    }
+
+    const axisMeta = [];
+    if (chartElement.x_axis) {
+        axisMeta.push(`X: ${chartElement.x_axis}`);
+    }
+    if (chartElement.y_axis) {
+        axisMeta.push(`Y: ${chartElement.y_axis}`);
+    }
+    if (chartElement.units) {
+        axisMeta.push(`Units: ${chartElement.units}`);
+    }
+    if (axisMeta.length > 0) {
+        const axisLabel = document.createElement('div');
+        axisLabel.className = 'chat-display-elements-chart-axis-meta';
+        axisLabel.textContent = axisMeta.join(' · ');
+        axisLabel.style.cssText = 'margin-top: 6px; font-size: 0.76em; color: #4b5563;';
+        plotWrap.appendChild(axisLabel);
+    }
+
+    if (chartElement.legend) {
+        const legend = document.createElement('div');
+        legend.className = 'chat-display-elements-chart-legend';
+        legend.style.cssText = 'display: flex; flex-wrap: wrap; gap: 8px 12px; margin-top: 7px;';
+        chartElement.series.forEach((seriesEntry, seriesIndex) => {
+            const item = document.createElement('div');
+            item.className = 'chat-display-elements-chart-legend-item';
+            item.style.cssText = 'display: inline-flex; align-items: center; gap: 6px; font-size: 0.76em; color: #334155;';
+
+            const swatch = document.createElement('span');
+            swatch.style.cssText = `display: inline-block; width: 10px; height: 10px; border-radius: 2px; background: ${CHART_SERIES_COLOURS[seriesIndex % CHART_SERIES_COLOURS.length]};`;
+            item.appendChild(swatch);
+
+            const text = document.createElement('span');
+            text.textContent = seriesEntry.label;
+            item.appendChild(text);
+            legend.appendChild(item);
+        });
+        plotWrap.appendChild(legend);
+    }
+
+    const fallback = document.createElement('ul');
+    fallback.className = 'chat-display-elements-chart-fallback-list';
+    fallback.style.cssText = 'margin: 8px 0 0; padding-left: 18px; font-size: 0.77em; color: #334155;';
+    chartElement.series.forEach((seriesEntry) => {
+        const li = document.createElement('li');
+        const preview = seriesEntry.points
+            .slice(0, 4)
+            .map((point) => `${point.x}:${formatChartTickValue(Number(point.y))}`)
+            .join(', ');
+        li.textContent = `${seriesEntry.label}: ${preview}${seriesEntry.points.length > 4 ? ', ...' : ''}`;
+        fallback.appendChild(li);
+    });
+    section.appendChild(fallback);
+
+    const collectedTaskLinks = [];
+    const seenTaskLinkKeys = new Set();
+    const collectTaskLinks = (links) => {
+        if (!Array.isArray(links)) {
+            return;
+        }
+        for (const link of links) {
+            const normalised = normaliseWorkflowTaskLink(link);
+            if (!normalised) {
+                continue;
+            }
+            const key = `${normalised.target_id}|${normalised.href || ''}|${normalised.label || ''}`;
+            if (seenTaskLinkKeys.has(key)) {
+                continue;
+            }
+            seenTaskLinkKeys.add(key);
+            collectedTaskLinks.push(normalised);
+        }
+    };
+    collectTaskLinks(chartElement.task_links);
+    chartElement.series.forEach((seriesEntry) => {
+        collectTaskLinks(seriesEntry.task_links);
+        seriesEntry.points.forEach((point) => {
+            collectTaskLinks(point.task_links);
+        });
+    });
+    appendTaskLinksToCard(
+        section,
+        collectedTaskLinks,
+        'chat-display-elements-chart-links'
+    );
+
+    return section;
+}
+
 function renderTableDisplayElementsIntoContainer(container, debugData) {
     if (!container || typeof container.querySelectorAll !== 'function') {
         return;
@@ -5059,6 +5709,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
     const kanbanElements = resolveKanbanDisplayElements(debugData);
     const timelineElements = resolveTimelineDisplayElements(debugData);
     const calendarElements = resolveCalendarDisplayElements(debugData);
+    const chartElements = resolveChartDisplayElements(debugData);
     const locationElements = resolveLocationDisplayElements(debugData);
     const documentElements = resolveDocumentDisplayElements(debugData);
     const hierarchyElements = resolveHierarchyDisplayElements(debugData);
@@ -5090,6 +5741,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
         && !kanbanElements.length
         && !timelineElements.length
         && !calendarElements.length
+        && !chartElements.length
         && !locationElements.length
         && !documentElements.length
         && !hierarchyElements.length
@@ -5842,6 +6494,27 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
         root.appendChild(section);
     });
 
+    chartElements.forEach((chartElement, chartIndex) => {
+        const section = createChartSectionElement(
+            chartElement,
+            chartIndex,
+            chartElements.length
+        );
+        if (!section) {
+            return;
+        }
+        section.style.cssText = (
+            tableElements.length > 0
+            || workflowElements.length > 0
+            || taskViewElements.length > 0
+            || kanbanElements.length > 0
+            || timelineElements.length > 0
+            || calendarElements.length > 0
+            || chartIndex > 0
+        ) ? 'margin-top: 10px;' : '';
+        root.appendChild(section);
+    });
+
     locationElements.forEach((locationElement, locationIndex) => {
         const section = document.createElement('section');
         section.className = 'chat-display-elements-location-section';
@@ -5852,6 +6525,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
             || kanbanElements.length > 0
             || timelineElements.length > 0
             || calendarElements.length > 0
+            || chartElements.length > 0
             || locationIndex > 0
         ) ? 'margin-top: 10px;' : '';
 
@@ -5987,6 +6661,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
             || kanbanElements.length > 0
             || timelineElements.length > 0
             || calendarElements.length > 0
+            || chartElements.length > 0
             || locationElements.length > 0
             || documentIndex > 0
         ) ? 'margin-top: 10px;' : '';
@@ -6138,6 +6813,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
             || kanbanElements.length > 0
             || timelineElements.length > 0
             || calendarElements.length > 0
+            || chartElements.length > 0
             || locationElements.length > 0
             || documentElements.length > 0
             || hierarchyIndex > 0
@@ -6177,6 +6853,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
             || kanbanElements.length > 0
             || timelineElements.length > 0
             || calendarElements.length > 0
+            || chartElements.length > 0
             || locationElements.length > 0
             || documentElements.length > 0
             || hierarchyElements.length > 0
@@ -6219,6 +6896,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
             || hierarchyElements.length > 0
             || relationGraphElements.length > 0
             || calendarElements.length > 0
+            || chartElements.length > 0
             || locationElements.length > 0
             || documentElements.length > 0
             || relationIndex > 0
@@ -6466,6 +7144,7 @@ function extractRenderPlanSourceSummary(
     screenKanbanElements,
     screenTimelineElements,
     screenCalendarElements,
+    screenChartElements,
     screenLocationElements,
     screenDocumentElements,
     screenHierarchyElements,
@@ -6548,6 +7227,12 @@ function extractRenderPlanSourceSummary(
         }
         addProvenance(calendarElement.provenance);
     }
+    for (const chartElement of screenChartElements) {
+        if (!chartElement || typeof chartElement !== 'object') {
+            continue;
+        }
+        addProvenance(chartElement.provenance);
+    }
     for (const locationElement of screenLocationElements) {
         if (!locationElement || typeof locationElement !== 'object') {
             continue;
@@ -6616,6 +7301,9 @@ function buildRenderPlanMetadataSummary(renderPlan) {
     const screenCalendarElements = Array.isArray(renderPlan.screen_calendar_elements)
         ? renderPlan.screen_calendar_elements.filter(item => item && typeof item === 'object')
         : [];
+    const screenChartElements = Array.isArray(renderPlan.screen_chart_elements)
+        ? renderPlan.screen_chart_elements.filter(item => item && typeof item === 'object')
+        : [];
     const screenLocationElements = Array.isArray(renderPlan.screen_location_elements)
         ? renderPlan.screen_location_elements.filter(item => item && typeof item === 'object')
         : [];
@@ -6636,6 +7324,7 @@ function buildRenderPlanMetadataSummary(renderPlan) {
         screenKanbanElements,
         screenTimelineElements,
         screenCalendarElements,
+        screenChartElements,
         screenLocationElements,
         screenDocumentElements,
         screenHierarchyElements,
@@ -6670,6 +7359,7 @@ function buildRenderPlanMetadataSummary(renderPlan) {
         screen_kanban_element_count: screenKanbanElements.length,
         screen_timeline_element_count: screenTimelineElements.length,
         screen_calendar_element_count: screenCalendarElements.length,
+        screen_chart_element_count: screenChartElements.length,
         screen_location_element_count: screenLocationElements.length,
         screen_document_element_count: screenDocumentElements.length,
         screen_hierarchy_element_count: screenHierarchyElements.length,
@@ -6739,6 +7429,7 @@ function buildRenderPlanSummaryHtml(renderPlanSummary) {
     addScalar('Screen kanban elements', renderPlanSummary.screen_kanban_element_count);
     addScalar('Screen timeline elements', renderPlanSummary.screen_timeline_element_count);
     addScalar('Screen calendar elements', renderPlanSummary.screen_calendar_element_count);
+    addScalar('Screen chart elements', renderPlanSummary.screen_chart_element_count);
     addScalar('Screen location elements', renderPlanSummary.screen_location_element_count);
     addScalar('Screen document elements', renderPlanSummary.screen_document_element_count);
     addScalar('Screen hierarchy elements', renderPlanSummary.screen_hierarchy_element_count);
@@ -18089,7 +18780,12 @@ async function showLlmDebugPopup(turnId, options = {}) {
 }
 
 // Handle export full conversation JSON
-function handleExportConversationJson() {
+function buildConversationTelemetryExportFilename() {
+    const timestamp = new Date().toISOString().replace(/:/g, '-').replace(/\.\d{3}Z$/, 'Z');
+    return `von_conversation_telemetry_${timestamp}.json`;
+}
+
+async function handleExportConversationJson() {
     const button = document.getElementById('exportConversationJsonBtn');
     if (!button) return;
     const originalContent = button.innerHTML;
@@ -18141,33 +18837,30 @@ function handleExportConversationJson() {
     // Convert to JSON string
     const jsonString = JSON.stringify(conversationData, null, 2);
 
-    const markSuccess = (message) => {
-        console.log(message, conversationData.turns.length, 'turns');
-        indicateClipboardResult(button, originalContent, true);
-    };
+    try {
+        const result = await saveJsonTextViaDialog(jsonString, {
+            suggestedName: buildConversationTelemetryExportFilename()
+        });
 
-    const markFailure = (message, err) => {
-        console.error(message, err);
-        indicateClipboardResult(button, originalContent, false);
-    };
-
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(jsonString)
-            .then(() => {
-                markSuccess('[chatTab] Exported conversation JSON to clipboard:');
-            })
-            .catch((err) => {
-                console.error('[chatTab] Failed to copy conversation JSON via clipboard API:', err);
-                if (copyTextFallback(jsonString)) {
-                    markSuccess('[chatTab] Exported conversation JSON (fallback):');
-                } else {
-                    markFailure('[chatTab] Failed to copy conversation JSON (fallback):', err);
-                }
+        if (result?.saved) {
+            console.log('[chatTab] Saved conversation telemetry JSON:', {
+                turns: conversationData.turns.length,
+                method: result.method,
+                filename: result.filename
             });
-    } else if (copyTextFallback(jsonString)) {
-        markSuccess('[chatTab] Exported conversation JSON (fallback):');
-    } else {
-        markFailure('[chatTab] Clipboard export unavailable and fallback failed:', new Error('Clipboard unsupported'));
+            indicateClipboardResult(button, originalContent, true);
+            return;
+        }
+
+        if (result?.cancelled) {
+            return;
+        }
+
+        console.error('[chatTab] Failed to save conversation telemetry JSON:', result?.error);
+        indicateClipboardResult(button, originalContent, false);
+    } catch (error) {
+        console.error('[chatTab] Unexpected error while saving conversation telemetry JSON:', error);
+        indicateClipboardResult(button, originalContent, false);
     }
 }
 
