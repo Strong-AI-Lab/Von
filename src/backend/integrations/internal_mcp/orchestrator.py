@@ -4668,12 +4668,89 @@ class InternalMCPChatOrchestrator:
             decision_reason = ""
         decision_reason = decision_reason.strip()
 
-        blocking_effect_ids_raw = completion_gate_payload.get("blocking_effect_ids")
-        blocking_effect_ids: list[str] = []
-        if isinstance(blocking_effect_ids_raw, list):
-            for item in blocking_effect_ids_raw:
-                if isinstance(item, str) and item.strip():
-                    blocking_effect_ids.append(item.strip())
+        def _normalise_string_list(raw_values: Any) -> list[str]:
+            normalised: list[str] = []
+            if not isinstance(raw_values, list):
+                return normalised
+            for item in raw_values:
+                if not isinstance(item, str):
+                    continue
+                cleaned = item.strip()
+                if cleaned:
+                    normalised.append(cleaned)
+            return normalised
+
+        blocking_effect_ids = _normalise_string_list(
+            completion_gate_payload.get("blocking_effect_ids")
+        )
+        blocking_failure_codes = _normalise_string_list(
+            completion_gate_payload.get("blocking_failure_codes")
+        )
+
+        record_evidence_payload_raw = completion_gate_payload.get("evidence_payload")
+        record_evidence_payload: dict[str, Any] = (
+            dict(record_evidence_payload_raw)
+            if isinstance(record_evidence_payload_raw, Mapping)
+            else {}
+        )
+
+        unresolved_preconditions: list[dict[str, Any]] = []
+        unresolved_preconditions_raw = record_evidence_payload.get("unresolved_preconditions")
+        if isinstance(unresolved_preconditions_raw, list):
+            for item in unresolved_preconditions_raw:
+                if not isinstance(item, Mapping):
+                    continue
+                unresolved_preconditions.append(
+                    {
+                        "effect_id": str(item.get("effect_id") or "").strip() or None,
+                        "effect_type": str(item.get("effect_type") or "").strip() or None,
+                        "status": str(item.get("status") or "").strip() or None,
+                        "status_reason": str(item.get("status_reason") or "").strip() or None,
+                        "failure_codes": _normalise_string_list(item.get("failure_codes")),
+                    }
+                )
+
+        if not unresolved_preconditions:
+            required_effects_raw = record.get("required_effects")
+            required_effects = (
+                required_effects_raw if isinstance(required_effects_raw, list) else []
+            )
+            for effect in required_effects:
+                if not isinstance(effect, Mapping):
+                    continue
+                effect_status = str(effect.get("status") or "").strip()
+                if effect_status not in {"not_satisfied", "not_executed"}:
+                    continue
+                failure_codes = _normalise_string_list(effect.get("failure_codes"))
+                single_failure_code = str(effect.get("failure_code") or "").strip()
+                if single_failure_code and single_failure_code not in failure_codes:
+                    failure_codes.append(single_failure_code)
+                unresolved_preconditions.append(
+                    {
+                        "effect_id": str(effect.get("effect_id") or "").strip() or None,
+                        "effect_type": str(effect.get("effect_type") or "").strip() or None,
+                        "status": effect_status,
+                        "status_reason": str(effect.get("status_reason") or "").strip()
+                        or None,
+                        "failure_codes": failure_codes,
+                    }
+                )
+
+        postcondition_summary = record_evidence_payload.get("postcondition_summary")
+        if not isinstance(postcondition_summary, Mapping):
+            critic_payload_raw = record.get("critic")
+            critic_payload = (
+                critic_payload_raw if isinstance(critic_payload_raw, Mapping) else {}
+            )
+            summary_raw = critic_payload.get("summary")
+            postcondition_summary = summary_raw if isinstance(summary_raw, Mapping) else {}
+        if not blocking_failure_codes:
+            for unresolved in unresolved_preconditions:
+                if not isinstance(unresolved, Mapping):
+                    continue
+                for code in _normalise_string_list(unresolved.get("failure_codes")):
+                    if code not in blocking_failure_codes:
+                        blocking_failure_codes.append(code)
 
         safe_to_claim_completion = bool(
             completion_gate_payload.get("safe_to_claim_completion", True)
@@ -4752,6 +4829,28 @@ class InternalMCPChatOrchestrator:
                 status_line = (
                     f"{status_line} Blocking effect IDs: {', '.join(blocking_effect_ids)}."
                 )
+            if unresolved_preconditions:
+                unresolved_reasons: list[str] = []
+                unresolved_failure_codes: list[str] = []
+                for unresolved in unresolved_preconditions:
+                    if not isinstance(unresolved, Mapping):
+                        continue
+                    reason = unresolved.get("status_reason")
+                    if isinstance(reason, str) and reason.strip():
+                        unresolved_reasons.append(reason.strip())
+                    for code in _normalise_string_list(unresolved.get("failure_codes")):
+                        if code not in unresolved_failure_codes:
+                            unresolved_failure_codes.append(code)
+                if unresolved_reasons:
+                    status_line = (
+                        f"{status_line} Unresolved preconditions: "
+                        f"{'; '.join(unresolved_reasons[:2])}."
+                    )
+                if unresolved_failure_codes:
+                    status_line = (
+                        f"{status_line} Failure codes: "
+                        f"{', '.join(unresolved_failure_codes[:3])}."
+                    )
 
             if isinstance(final_response, str) and final_response.strip():
                 if "Execution status:" not in final_response:
@@ -4806,6 +4905,36 @@ class InternalMCPChatOrchestrator:
             # bounded retry context, then clear the marker.
             safe_to_claim_completion = False
             requires_follow_up = True
+
+        terminal_outcome = "completed"
+        if repeat_iteration:
+            terminal_outcome = "retrying"
+        elif requires_follow_up and repeat_stop_reason:
+            terminal_outcome = repeat_stop_reason
+        elif requires_follow_up:
+            terminal_outcome = "follow_up_required"
+
+        completion_gate_evidence_payload: dict[str, Any] = dict(record_evidence_payload)
+        completion_gate_evidence_payload.update(
+            {
+                "decision": decision,
+                "decision_reason": decision_reason,
+                "safe_to_claim_completion": safe_to_claim_completion,
+                "requires_follow_up": requires_follow_up,
+                "blocking_effect_ids": list(blocking_effect_ids),
+                "blocking_failure_codes": list(blocking_failure_codes),
+                "unresolved_preconditions": unresolved_preconditions,
+                "postcondition_summary": (
+                    dict(postcondition_summary)
+                    if isinstance(postcondition_summary, Mapping)
+                    else {}
+                ),
+                "terminal_outcome": terminal_outcome,
+                "repeat_iteration": repeat_iteration,
+                "repeat_stop_reason": repeat_stop_reason,
+                "loop_retry_reason": loop_retry_reason,
+            }
+        )
 
         introspection_autotrigger: dict[str, Any] | None = None
         autotrigger_enabled = os.getenv(
@@ -4927,6 +5056,10 @@ class InternalMCPChatOrchestrator:
                         "safe_to_claim_completion": safe_to_claim_completion,
                         "requires_follow_up": requires_follow_up,
                         "blocking_effect_ids": list(blocking_effect_ids),
+                        "blocking_failure_codes": list(blocking_failure_codes),
+                        "unresolved_preconditions": unresolved_preconditions,
+                        "terminal_outcome": terminal_outcome,
+                        "evidence_payload": completion_gate_evidence_payload,
                         "repeat_iteration": repeat_iteration,
                         "repeat_stop_reason": repeat_stop_reason,
                         "loop_attempts": loop_attempts,
@@ -4948,8 +5081,12 @@ class InternalMCPChatOrchestrator:
                 "completion_gate_decision": decision,
                 "completion_gate_decision_reason": decision_reason,
                 "completion_gate_blocking_effect_ids": list(blocking_effect_ids),
+                "completion_gate_blocking_failure_codes": list(blocking_failure_codes),
                 "completion_gate_safe_to_claim_completion": safe_to_claim_completion,
                 "completion_gate_requires_follow_up": requires_follow_up,
+                "completion_gate_unresolved_preconditions": unresolved_preconditions,
+                "completion_gate_evidence_payload": completion_gate_evidence_payload,
+                "completion_gate_terminal_outcome": terminal_outcome,
                 "completion_gate_repeat_iteration": repeat_iteration,
                 "completion_gate_loop_retry_reason": loop_retry_reason,
                 "completion_gate_loop_stop_reason": repeat_stop_reason,
@@ -15173,6 +15310,71 @@ class InternalMCPChatOrchestrator:
                     if item_text:
                         blocking_effect_ids.append(item_text)
 
+            blocking_failure_codes_raw = workflow_data.get(
+                "completion_gate_blocking_failure_codes"
+            )
+            if not isinstance(blocking_failure_codes_raw, list):
+                blocking_failure_codes_raw = completion_gate.get("blocking_failure_codes")
+            blocking_failure_codes: list[str] = []
+            if isinstance(blocking_failure_codes_raw, list):
+                for item in blocking_failure_codes_raw:
+                    item_text = _safe_scalar_text(item)
+                    if item_text:
+                        blocking_failure_codes.append(item_text)
+
+            completion_gate_evidence_payload_raw = workflow_data.get(
+                "completion_gate_evidence_payload"
+            )
+            if not isinstance(completion_gate_evidence_payload_raw, Mapping):
+                completion_gate_evidence_payload_raw = completion_gate.get("evidence_payload")
+            completion_gate_evidence_payload = (
+                _safe_mapping_snapshot(
+                    completion_gate_evidence_payload_raw, max_depth=3, max_items=40
+                )
+                if isinstance(completion_gate_evidence_payload_raw, Mapping)
+                else None
+            )
+
+            unresolved_preconditions_raw = workflow_data.get(
+                "completion_gate_unresolved_preconditions"
+            )
+            if not isinstance(unresolved_preconditions_raw, list):
+                evidence_payload_raw = completion_gate.get("evidence_payload")
+                if isinstance(evidence_payload_raw, Mapping):
+                    unresolved_preconditions_raw = evidence_payload_raw.get(
+                        "unresolved_preconditions"
+                    )
+            unresolved_preconditions: list[dict[str, Any]] = []
+            if isinstance(unresolved_preconditions_raw, list):
+                for item in unresolved_preconditions_raw:
+                    if not isinstance(item, Mapping):
+                        continue
+                    snapshot = _safe_mapping_snapshot(item, max_depth=2, max_items=20)
+                    if isinstance(snapshot, dict):
+                        unresolved_preconditions.append(snapshot)
+
+            completion_gate_terminal_outcome = _safe_scalar_text(
+                workflow_data.get("completion_gate_terminal_outcome")
+            )
+            if not completion_gate_terminal_outcome and isinstance(
+                completion_gate_evidence_payload_raw, Mapping
+            ):
+                completion_gate_terminal_outcome = _safe_scalar_text(
+                    completion_gate_evidence_payload_raw.get("terminal_outcome")
+                )
+            repeat_iteration = bool(
+                workflow_data.get("completion_gate_repeat_iteration", False)
+            )
+            if not completion_gate_terminal_outcome:
+                if repeat_iteration:
+                    completion_gate_terminal_outcome = "retrying"
+                elif requires_follow_up:
+                    completion_gate_terminal_outcome = _safe_scalar_text(
+                        workflow_data.get("completion_gate_loop_stop_reason")
+                    ) or "follow_up_required"
+                else:
+                    completion_gate_terminal_outcome = "completed"
+
             check_instances: list[dict[str, Any]] = []
             for check in postcondition_checks:
                 observed_payload = check.get("observed")
@@ -15282,9 +15484,11 @@ class InternalMCPChatOrchestrator:
                     "safe_to_claim_completion": safe_to_claim_completion,
                     "requires_follow_up": requires_follow_up,
                     "blocking_effect_ids": blocking_effect_ids,
-                    "repeat_iteration": bool(
-                        workflow_data.get("completion_gate_repeat_iteration", False)
-                    ),
+                    "blocking_failure_codes": blocking_failure_codes,
+                    "unresolved_preconditions": unresolved_preconditions,
+                    "evidence_payload": completion_gate_evidence_payload,
+                    "terminal_outcome": completion_gate_terminal_outcome,
+                    "repeat_iteration": repeat_iteration,
                     "loop_stop_reason": _safe_scalar_text(
                         workflow_data.get("completion_gate_loop_stop_reason")
                     ),
@@ -15443,16 +15647,22 @@ class InternalMCPChatOrchestrator:
             for key in (
                 "completion_gate_decision",
                 "completion_gate_decision_reason",
+                "completion_gate_blocking_effect_ids",
+                "completion_gate_blocking_failure_codes",
                 "completion_gate_requires_follow_up",
                 "completion_gate_safe_to_claim_completion",
+                "completion_gate_terminal_outcome",
                 "completion_gate_repeat_iteration",
                 "completion_gate_loop_stop_reason",
+                "completion_gate_loop_retry_reason",
                 "completion_gate_loop_attempts",
                 "completion_gate_loop_max_attempts",
                 "completion_gate_loop_elapsed_ms",
                 "completion_gate_loop_max_elapsed_ms",
                 "completion_gate_loop_no_progress_streak",
                 "completion_gate_loop_no_progress_limit",
+                "completion_gate_unresolved_preconditions",
+                "completion_gate_evidence_payload",
             ):
                 if key in workflow_data:
                     payload[key] = workflow_data.get(key)
