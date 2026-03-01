@@ -91,6 +91,57 @@ _READ_ONLY_JIRA_TOOLS = {
     "jira_search",
 }
 
+_VERIFICATION_READ_TOOL_NAMES = {
+    "count",
+    "fetch_concept",
+    "fetch_concept_content",
+    "find_concepts_by_name",
+    "find_relations_with_argument",
+    "find_subconcepts",
+    "get_context",
+    "get_file_contents",
+    "get_paper_metadata",
+    "get_task",
+    "get_team_members",
+    "get_teams",
+    "get_text_relations",
+    "get_text_relations_summary",
+    "get_tree",
+    "issue_read",
+    "jira_get_issue",
+    "jira_get_myself",
+    "jira_get_transitions",
+    "jira_search",
+    "list_my_tasks",
+    "list_pull_requests",
+    "resolve_concept_by_name",
+    "search_code",
+    "search_concepts",
+    "search_issues",
+    "search_pull_requests",
+    "search_repositories",
+    "search_users",
+    "search_knowledge_base",
+    "vontology_concept_search",
+    "workflow_get_instance",
+    "workflow_get_schedule",
+    "workflow_list_definitions",
+    "workflow_list_event_bindings",
+    "workflow_list_instances",
+    "workflow_list_schedules",
+}
+
+_VERIFICATION_READ_TOOL_PREFIXES = (
+    "count_",
+    "fetch_",
+    "find_",
+    "get_",
+    "list_",
+    "read_",
+    "resolve_",
+    "search_",
+)
+
 _MUTATION_INTENT_TERMS = (
     "add",
     "added",
@@ -350,6 +401,24 @@ def _is_write_tool(tool_name: str | None) -> bool:
     return False
 
 
+def _is_verification_read_tool(tool_name: str | None) -> bool:
+    if not isinstance(tool_name, str):
+        return False
+    cleaned = tool_name.strip()
+    if not cleaned:
+        return False
+    lowered = cleaned.lower()
+    if lowered.startswith("__"):
+        return False
+    if _is_write_tool(cleaned):
+        return False
+    if lowered in _VERIFICATION_READ_TOOL_NAMES:
+        return True
+    return any(
+        lowered.startswith(prefix) for prefix in _VERIFICATION_READ_TOOL_PREFIXES
+    )
+
+
 def _extract_workflow_ids(raw_items: Any) -> list[str]:
     if not isinstance(raw_items, list):
         return []
@@ -463,12 +532,20 @@ def _extract_completion_claim_signals(
 
 def _summarise_tool_invocations(
     tool_invocations: Sequence[Mapping[str, Any]] | None,
-) -> tuple[list[dict[str, Any]], list[str], list[str], list[str], list[str]]:
+) -> tuple[
+    list[dict[str, Any]],
+    list[str],
+    list[str],
+    list[str],
+    list[str],
+    list[str],
+]:
     serialised: list[dict[str, Any]] = []
     successful_tools: list[str] = []
     failed_tools: list[str] = []
     blocked_tools: list[str] = []
     successful_write_tools: list[str] = []
+    successful_verification_tools: list[str] = []
 
     for invocation in tool_invocations or ():
         if not isinstance(invocation, Mapping):
@@ -524,6 +601,10 @@ def _summarise_tool_invocations(
                 name.lower() for name in successful_write_tools
             }:
                 successful_write_tools.append(tool_name)
+            if _is_verification_read_tool(tool_name) and lowered not in {
+                name.lower() for name in successful_verification_tools
+            }:
+                successful_verification_tools.append(tool_name)
         elif status == "blocked":
             if lowered not in {name.lower() for name in blocked_tools}:
                 blocked_tools.append(tool_name)
@@ -537,6 +618,7 @@ def _summarise_tool_invocations(
         failed_tools,
         blocked_tools,
         successful_write_tools,
+        successful_verification_tools,
     )
 
 
@@ -803,6 +885,7 @@ def _build_postcondition_checks(
     *,
     required_effects: Sequence[Mapping[str, Any]],
     successful_write_tools: Sequence[str],
+    successful_verification_tools: Sequence[str],
 ) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     for effect in required_effects:
@@ -813,27 +896,42 @@ def _build_postcondition_checks(
             if effect_status == "satisfied":
                 check_status = "verified"
                 evidence = "Required tool execution was observed."
+                verification_mode = "execution_observed"
             elif effect_status in {"not_satisfied", "not_executed"}:
                 check_status = "not_verified"
                 evidence = (
                     _safe_str(effect.get("status_reason"))
                     or "Required tool execution was not observed."
                 )
+                verification_mode = "execution_missing"
             else:
                 check_status = "inconclusive"
                 evidence = "Tool execution verification outcome is inconclusive."
+                verification_mode = "execution_inconclusive"
         else:
             if effect_status == "satisfied" and successful_write_tools:
-                check_status = "inconclusive"
-                evidence = (
-                    "Write tool invocation succeeded but explicit state re-query was not run."
-                )
+                if successful_verification_tools:
+                    check_status = "verified"
+                    evidence = (
+                        "Observed postcondition verification read/check tool(s): "
+                        + ", ".join(successful_verification_tools[:3])
+                    )
+                    verification_mode = "state_requery_observed"
+                else:
+                    check_status = "inconclusive"
+                    evidence = (
+                        "Write tool invocation succeeded but explicit state "
+                        "re-query/check tool invocation was not observed."
+                    )
+                    verification_mode = "state_requery_missing"
             elif effect_status in {"not_satisfied", "not_executed"}:
                 check_status = "not_verified"
                 evidence = "Required mutation effect is unresolved."
+                verification_mode = "state_requery_blocked"
             else:
                 check_status = "inconclusive"
                 evidence = "Mutation verification outcome is inconclusive."
+                verification_mode = "state_requery_inconclusive"
 
         checks.append(
             {
@@ -848,10 +946,14 @@ def _build_postcondition_checks(
                 "check_payload": {},
                 "observed": {
                     "successful_write_tools": list(successful_write_tools),
+                    "successful_verification_tools": list(
+                        successful_verification_tools
+                    ),
                     "effect_status": effect_status,
                     "effect_type": effect_type,
                 },
                 "status": check_status,
+                "verification_mode": verification_mode,
                 "evidence": evidence,
                 "error": None,
             }
@@ -913,10 +1015,45 @@ def _derive_completion_gate(
                 unresolved_failure_codes.append(single_failure_code)
 
     unresolved_check_ids: list[str] = []
+    verified_check_effect_ids: list[str] = []
+    unresolved_postcondition_checks: list[dict[str, Any]] = []
     for check in postcondition_checks:
         check_status = _safe_str(check.get("status")) or ""
+        check_effect_id = _safe_str(check.get("effect_id")) or "effect_1"
+        if check_status == "verified":
+            verified_check_effect_ids.append(check_effect_id)
+            continue
         if check_status in {"not_verified", "inconclusive", "error"}:
-            unresolved_check_ids.append(_safe_str(check.get("effect_id")) or "effect_1")
+            unresolved_check_ids.append(check_effect_id)
+            unresolved_postcondition_checks.append(
+                {
+                    "effect_id": check_effect_id,
+                    "check_id": _safe_str(check.get("check_id")),
+                    "check_type": _safe_str(check.get("check_type")),
+                    "status": check_status,
+                    "verification_mode": _safe_str(check.get("verification_mode")),
+                    "evidence": _safe_str(check.get("evidence")),
+                }
+            )
+
+    unresolved_preconditions: list[dict[str, Any]] = []
+    for effect in required_effects:
+        effect_status = _safe_str(effect.get("status")) or ""
+        if effect_status not in {"not_satisfied", "not_executed"}:
+            continue
+        failure_codes = _normalise_failure_codes(effect.get("failure_codes"))
+        single_failure_code = _safe_str(effect.get("failure_code"))
+        if single_failure_code and single_failure_code not in failure_codes:
+            failure_codes.append(single_failure_code)
+        unresolved_preconditions.append(
+            {
+                "effect_id": _safe_str(effect.get("effect_id")) or "effect_1",
+                "effect_type": _safe_str(effect.get("effect_type")) or "kb_mutation",
+                "status": effect_status,
+                "status_reason": _safe_str(effect.get("status_reason")),
+                "failure_codes": failure_codes,
+            }
+        )
 
     if unresolved_effect_ids:
         blocking_effect_ids = sorted(set(unresolved_effect_ids))
@@ -952,6 +1089,23 @@ def _derive_completion_gate(
         )
 
     safe_to_claim = decision == "completed"
+    evidence_payload = {
+        "evaluation_basis": "required_effects_and_postcondition_checks",
+        "required_effect_count": len(required_effects),
+        "postcondition_check_count": len(postcondition_checks),
+        "postcondition_summary": _summarise_check_counts(postcondition_checks),
+        "verified_effect_ids": sorted(set(verified_check_effect_ids)),
+        "unresolved_effect_ids": sorted(set(unresolved_check_ids)),
+        "unresolved_preconditions": unresolved_preconditions,
+        "unresolved_postcondition_checks": unresolved_postcondition_checks,
+        "completion_outcome": (
+            "success"
+            if decision == "completed"
+            else "inconclusive"
+            if decision == "partial"
+            else "failure"
+        ),
+    }
     return {
         "workflow_id": "#V#turn_completion_gate_workflow",
         "decision": decision,
@@ -960,6 +1114,7 @@ def _derive_completion_gate(
         "blocking_failure_codes": blocking_failure_codes,
         "safe_to_claim_completion": safe_to_claim,
         "requires_follow_up": not safe_to_claim,
+        "evidence_payload": evidence_payload,
     }
 
 
@@ -1002,6 +1157,7 @@ def build_turn_execution_record(
         failed_tools,
         blocked_tools,
         successful_write_tools,
+        successful_verification_tools,
     ) = _summarise_tool_invocations(tool_invocations)
     execution_summary = _summarise_tool_execution_context(
         workflow_routing=workflow_routing,
@@ -1033,6 +1189,7 @@ def build_turn_execution_record(
     postcondition_checks = _build_postcondition_checks(
         required_effects=required_effects,
         successful_write_tools=successful_write_tools,
+        successful_verification_tools=successful_verification_tools,
     )
     critic_summary = _summarise_check_counts(postcondition_checks)
 

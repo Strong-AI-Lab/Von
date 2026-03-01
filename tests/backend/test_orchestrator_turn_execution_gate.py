@@ -105,6 +105,12 @@ def test_turn_execution_critic_detects_unresolved_kb_mutation() -> None:
     assert isinstance(completion_gate, dict)
     assert completion_gate.get("decision") == "escalation_required"
     assert completion_gate.get("safe_to_claim_completion") is False
+    evidence_payload = completion_gate.get("evidence_payload")
+    assert isinstance(evidence_payload, dict)
+    assert evidence_payload.get("completion_outcome") == "failure"
+    unresolved_preconditions = evidence_payload.get("unresolved_preconditions")
+    assert isinstance(unresolved_preconditions, list)
+    assert unresolved_preconditions
 
     assert any(
         entry.get("type") == "turn_execution_critic"
@@ -140,6 +146,51 @@ def test_turn_execution_critic_prefers_explicit_actor_concept_id() -> None:
     assert record.get("actor_concept_id") == "#V#github_copilot_instance"
 
 
+def test_turn_execution_critic_prefers_concrete_verification_reads() -> None:
+    orchestrator = _build_orchestrator()
+    request = _build_request(
+        action_id="turn_execution.critic",
+        data={
+            "prompt": "Please add this relation to the knowledge base.",
+            "final_response": "Response recorded.",
+            "invocations": [
+                {"tool": "add_relationship", "payload": {"status": "ok"}},
+                {"tool": "fetch_concept", "payload": {"status": "ok"}},
+            ],
+            "aux_llm_calls": [],
+            "turn_id": "req-turn-critic-verified",
+            "conversation_session_id": "session-critic-verified",
+            "workflow_discovery_result": None,
+            "workflow_routing": {
+                "workflow_id": "#V#tool_calling_workflow",
+                "verdict": "tool_seeking",
+            },
+        },
+    )
+
+    result = orchestrator._action_turn_execution_critic(request)
+    assert result.ok
+    record = result.outputs.get("turn_execution_record")
+    assert isinstance(record, dict)
+
+    postcondition_checks = record.get("postcondition_checks")
+    assert isinstance(postcondition_checks, list)
+    assert postcondition_checks
+    check = postcondition_checks[0]
+    assert check.get("status") == "verified"
+    assert check.get("verification_mode") == "state_requery_observed"
+    observed = check.get("observed")
+    assert isinstance(observed, dict)
+    assert "fetch_concept" in list(observed.get("successful_verification_tools") or [])
+
+    completion_gate = record.get("completion_gate")
+    assert isinstance(completion_gate, dict)
+    assert completion_gate.get("decision") == "completed"
+    evidence_payload = completion_gate.get("evidence_payload")
+    assert isinstance(evidence_payload, dict)
+    assert evidence_payload.get("completion_outcome") == "success"
+
+
 def test_turn_completion_gate_appends_execution_status_for_unresolved_effect() -> None:
     orchestrator = _build_orchestrator()
     aux_llm_calls: list[dict[str, Any]] = []
@@ -155,6 +206,21 @@ def test_turn_completion_gate_appends_execution_status_for_unresolved_effect() -
                     "safe_to_claim_completion": False,
                     "requires_follow_up": True,
                     "blocking_effect_ids": ["effect_1"],
+                    "blocking_failure_codes": ["worker_unavailable_zero_execution"],
+                    "evidence_payload": {
+                        "unresolved_preconditions": [
+                            {
+                                "effect_id": "effect_1",
+                                "effect_type": "tool_execution",
+                                "status": "not_executed",
+                                "status_reason": (
+                                    "Tool execution was blocked while workers "
+                                    "were unavailable."
+                                ),
+                                "failure_codes": ["worker_unavailable_zero_execution"],
+                            }
+                        ]
+                    },
                 }
             },
         },
@@ -166,11 +232,24 @@ def test_turn_completion_gate_appends_execution_status_for_unresolved_effect() -
     assert result.outputs.get("completion_gate_decision") == "escalation_required"
     assert result.outputs.get("completion_gate_safe_to_claim_completion") is False
     assert result.outputs.get("completion_gate_requires_follow_up") is True
+    assert result.outputs.get("completion_gate_terminal_outcome") == "retrying"
+    assert result.outputs.get("completion_gate_blocking_failure_codes") == [
+        "worker_unavailable_zero_execution"
+    ]
+    unresolved_preconditions = result.outputs.get("completion_gate_unresolved_preconditions")
+    assert isinstance(unresolved_preconditions, list)
+    assert unresolved_preconditions
 
     final_response = result.outputs.get("final_response")
     assert isinstance(final_response, str)
     assert "Execution status:" in final_response
     assert "Blocking effect IDs: effect_1." in final_response
+    assert "Unresolved preconditions:" in final_response
+    assert "Failure codes: worker_unavailable_zero_execution." in final_response
+
+    evidence_payload = result.outputs.get("completion_gate_evidence_payload")
+    assert isinstance(evidence_payload, dict)
+    assert evidence_payload.get("terminal_outcome") == "retrying"
 
     assert any(
         entry.get("type") == "turn_completion_gate"
@@ -345,6 +424,10 @@ def test_turn_completion_gate_requests_repeat_when_budget_available() -> None:
     assert result.outputs.get("completion_gate_loop_attempts") == 1
     assert result.outputs.get("completion_gate_loop_stop_reason") is None
     assert result.outputs.get("completion_gate_requires_follow_up") is True
+    assert result.outputs.get("completion_gate_terminal_outcome") == "retrying"
+    evidence_payload = result.outputs.get("completion_gate_evidence_payload")
+    assert isinstance(evidence_payload, dict)
+    assert evidence_payload.get("terminal_outcome") == "retrying"
 
 
 def test_turn_completion_gate_stops_repeat_when_attempt_budget_exhausted() -> None:
@@ -380,6 +463,13 @@ def test_turn_completion_gate_stops_repeat_when_attempt_budget_exhausted() -> No
         result.outputs.get("completion_gate_loop_stop_reason")
         == "attempt_budget_exhausted"
     )
+    assert (
+        result.outputs.get("completion_gate_terminal_outcome")
+        == "attempt_budget_exhausted"
+    )
+    evidence_payload = result.outputs.get("completion_gate_evidence_payload")
+    assert isinstance(evidence_payload, dict)
+    assert evidence_payload.get("terminal_outcome") == "attempt_budget_exhausted"
 
 
 def test_turn_completion_gate_stops_repeat_when_no_progress_guard_triggers() -> None:
@@ -413,6 +503,10 @@ def test_turn_completion_gate_stops_repeat_when_no_progress_guard_triggers() -> 
     assert result.outputs.get("completion_gate_repeat_iteration") is False
     assert (
         result.outputs.get("completion_gate_loop_stop_reason")
+        == "no_progress_guard_triggered"
+    )
+    assert (
+        result.outputs.get("completion_gate_terminal_outcome")
         == "no_progress_guard_triggered"
     )
 
