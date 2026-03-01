@@ -795,6 +795,13 @@ function getThinkingCardDisplayRequest() {
     return activeChatRequest || lastFinishedThinkingCard;
 }
 
+function shouldDisableThinkingCardToggle(request) {
+    if (!request || typeof request !== 'object') {
+        return false;
+    }
+    return request === activeChatRequest && !isTerminalThinkingProgress(request.latestProgress);
+}
+
 function syncThinkingCardExpandedStateToDom(request = getThinkingCardDisplayRequest()) {
     const wrapper = document.getElementById('thinkingCardWrapper');
     const detailEl = getLoadingIndicatorDetailEl();
@@ -816,6 +823,7 @@ function syncThinkingCardExpandedStateToDom(request = getThinkingCardDisplayRequ
     }
 
     if (toggleButton) {
+        toggleButton.disabled = shouldDisableThinkingCardToggle(request);
         toggleButton.setAttribute('aria-expanded', expanded ? 'true' : 'false');
         if (expanded) {
             toggleButton.setAttribute('aria-label', THINKING_CARD_TOGGLE_ARIA_LABEL_EXPANDED);
@@ -848,8 +856,7 @@ function toggleThinkingCardExpanded(request = getThinkingCardDisplayRequest()) {
         return;
     }
 
-    const isActiveTurnRequest = request === activeChatRequest;
-    if (isActiveTurnRequest && !isTerminalThinkingProgress(request.latestProgress)) {
+    if (shouldDisableThinkingCardToggle(request)) {
         applyThinkingCardDisplayStateUpdate(request, {
             type: 'manual_set',
             expanded: true
@@ -1133,6 +1140,31 @@ function formatLastActivityText(progress) {
     return `Last activity ${formatThinkingDuration(safeIdleMs)} ago`;
 }
 
+function resolveThinkingEtaMs(progress) {
+    if (!progress || typeof progress !== 'object') {
+        return null;
+    }
+    if (Number.isFinite(progress.eta_ms)) {
+        return Math.max(0, Number(progress.eta_ms));
+    }
+    if (Number.isFinite(progress.eta_seconds)) {
+        return Math.max(0, Number(progress.eta_seconds) * 1000);
+    }
+    return null;
+}
+
+function formatThinkingEtaText(progress) {
+    const etaMs = resolveThinkingEtaMs(progress);
+    if (!Number.isFinite(etaMs)) {
+        return null;
+    }
+    if (etaMs < 1000) {
+        return 'ETA <1s';
+    }
+    const roundedMs = Math.ceil(etaMs / 1000) * 1000;
+    return `ETA ~${formatThinkingDuration(roundedMs)}`;
+}
+
 function buildThinkingProgressPresentation(progress, request = null) {
     const livenessState = normaliseThinkingLivenessState(progress);
     const livenessLabel = thinkingLivenessLabel(livenessState);
@@ -1185,6 +1217,10 @@ function buildThinkingProgressPresentation(progress, request = null) {
 
 export function __testOnly_buildThinkingProgressPresentation(progress, request = null) {
     return buildThinkingProgressPresentation(progress, request);
+}
+
+export function __testOnly_formatThinkingEtaText(progress) {
+    return formatThinkingEtaText(progress);
 }
 
 export function __testOnly_formatAbsoluteTimestamp(value) {
@@ -1258,6 +1294,11 @@ function updateThinkingCardMeta(request, progress) {
         : null;
     if (done !== null && cap !== null && cap > 0) {
         bits.push(`${done}/${cap} tools`);
+    }
+
+    const etaText = formatThinkingEtaText(effectiveProgress);
+    if (etaText) {
+        bits.push(etaText);
     }
 
     const lastActivityText = formatLastActivityText(effectiveProgress);
@@ -16795,7 +16836,7 @@ function setThinkingState(isThinking, request = activeChatRequest, options = {})
 
     if (toggleButton) {
         toggleButton.setAttribute('aria-hidden', (isThinking || preserveFinishedCard) ? 'false' : 'true');
-        toggleButton.disabled = isThinking;
+        toggleButton.disabled = shouldDisableThinkingCardToggle(request);
     }
 
     if (abortButton) {

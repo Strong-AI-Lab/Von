@@ -379,3 +379,38 @@ def test_terminal_progress_payload_reflects_completion_gate_follow_up() -> None:
     assert payload["completion_gate_requires_follow_up"] is True
     assert payload["completion_gate_safe_to_claim_completion"] is False
     assert payload["orchestrator_status"] == "follow_up_required"
+
+
+def test_response_finalising_payload_is_non_terminal_with_eta() -> None:
+    payload = von_routes._build_response_finalising_tool_progress_payload(
+        request_id="req-finalise",
+        eta_ms=1750,
+    )
+    assert payload["request_id"] == "req-finalise"
+    assert payload["status"] == "phase_transition"
+    assert payload["stage"] == "response_finalising"
+    assert payload["phase"] == "response_finalising"
+    assert payload["phase_label"] == "Finalising response"
+    assert payload["workflow_task"] == "response_finalising"
+    assert payload["eta_ms"] == 1750
+
+
+def test_response_finalising_eta_estimate_is_bounded() -> None:
+    baseline = von_routes._estimate_response_finalising_eta_ms(
+        response_text=None,
+        tool_message_count=0,
+        persist_history=False,
+    )
+    assert 800 <= baseline <= 12_000
+
+    elevated = von_routes._estimate_response_finalising_eta_ms(
+        response_text="x" * 20_000,
+        tool_message_count=400,
+        persist_history=True,
+    )
+    assert 800 <= elevated <= 12_000
+    assert elevated >= baseline
+
+
+def test_default_stage_label_includes_response_finalising() -> None:
+    assert von_routes._default_stage_label("response_finalising") == "Finalising response"

@@ -91,6 +91,7 @@ _TOOL_PROGRESS_TTL_SEC = 10 * 60
 _TOOL_PROGRESS_LOCK = threading.Lock()
 _TOOL_PROGRESS: dict[tuple[str, str], dict[str, Any]] = {}
 _TOOL_PROGRESS_TERMINAL_STATUSES = {"completed", "error", "cancelled"}
+_TOOL_PROGRESS_TERMINAL_PHASES = {"completed", "failed", "error", "cancelled", "terminated"}
 _TOOL_PROGRESS_DIAGNOSTIC_EVENT_LIMIT = 80
 
 _ONBOARDING_WORKFLOW_IDS_ENV = "VON_NEW_MEMBER_ONBOARDING_WORKFLOW_IDS"
@@ -207,6 +208,7 @@ def _default_stage_label(stage: str) -> str:
         "screen_backfill": "Generating response",
         "narration": "Generating narration",
         "buttonify": "Generating quick replies",
+        "response_finalising": "Finalising response",
         "tool_recovery": "Recovering tool call",
         "orchestrator_start": "Starting orchestrator",
         "orchestrator_end": "Finishing orchestrator",
@@ -288,6 +290,8 @@ def _classify_progress_cause(stage: str, status: str) -> str:
     stage_lower = stage.lower()
     status_lower = status.lower()
 
+    if "finalis" in stage_lower:
+        return "post_processing"
     if "tool" in stage_lower or status_lower.startswith("tool_"):
         return "tool_timeout"
     if "llm" in stage_lower or status_lower.startswith("llm_"):
@@ -2363,6 +2367,38 @@ def _build_terminal_tool_progress_payload(
         if isinstance(blocking_effect_ids, list):
             payload["completion_gate_blocking_effect_ids"] = list(blocking_effect_ids)
     return payload
+
+
+def _estimate_response_finalising_eta_ms(
+    *,
+    response_text: str | None,
+    tool_message_count: int,
+    persist_history: bool,
+) -> int:
+    """Return a bounded best-effort ETA for post-orchestrator finalisation."""
+    eta_ms = 900
+    eta_ms += min(900, max(0, int(tool_message_count)) * 120)
+    response_chars = len(response_text.strip()) if isinstance(response_text, str) else 0
+    eta_ms += min(1400, max(0, response_chars // 12))
+    if persist_history:
+        eta_ms += 800
+    return max(800, min(eta_ms, 12_000))
+
+
+def _build_response_finalising_tool_progress_payload(
+    *,
+    request_id: str,
+    eta_ms: int,
+) -> dict[str, Any]:
+    return {
+        "status": "phase_transition",
+        "stage": "response_finalising",
+        "phase": "response_finalising",
+        "phase_label": "Finalising response",
+        "request_id": request_id,
+        "workflow_task": "response_finalising",
+        "eta_ms": max(0, int(eta_ms)),
+    }
 
 
 def _finalise_llm_debug_info(
@@ -7475,17 +7511,18 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             applied_tool_batch_cap = None
 
         if show_tool_use_progress:
-            final_progress_payload = _build_terminal_tool_progress_payload(
+            response_finalising_payload = _build_response_finalising_tool_progress_payload(
                 request_id=request_id,
-                aux_calls=auxiliary_llm_calls,
-            )
-            _stop_tool_progress_heartbeat(
-                progress_heartbeat_stop_event, progress_heartbeat_thread
+                eta_ms=_estimate_response_finalising_eta_ms(
+                    response_text=response_text,
+                    tool_message_count=len(tool_messages),
+                    persist_history=bool(history_user_id),
+                ),
             )
             _set_tool_progress(
                 progress_scope_key,
                 request_id,
-                final_progress_payload,
+                response_finalising_payload,
             )
 
         tool_progress_snapshot = _snapshot_tool_progress_for_request(
@@ -7644,6 +7681,20 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         current_app.config["CONTEXT"] = _limit_context_size(
             current_app.config["CONTEXT"], max_messages=20
         )
+
+        if show_tool_use_progress:
+            final_progress_payload = _build_terminal_tool_progress_payload(
+                request_id=request_id,
+                aux_calls=auxiliary_llm_calls,
+            )
+            _stop_tool_progress_heartbeat(
+                progress_heartbeat_stop_event, progress_heartbeat_thread
+            )
+            _set_tool_progress(
+                progress_scope_key,
+                request_id,
+                final_progress_payload,
+            )
 
         return jsonify(
             {
