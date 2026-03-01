@@ -2203,6 +2203,13 @@ const KANBAN_MAX_COLUMNS = 30;
 const KANBAN_MAX_CARDS = 200;
 const TIMELINE_MAX_ITEMS = 200;
 const CALENDAR_MAX_ITEMS = 240;
+const LOCATION_MAX_POINTS = 200;
+const LOCATION_LATITUDE_MIN = -90;
+const LOCATION_LATITUDE_MAX = 90;
+const LOCATION_LONGITUDE_MIN = -180;
+const LOCATION_LONGITUDE_MAX = 180;
+const LOCATION_VIEWPORT_MIN_ZOOM = 1;
+const LOCATION_VIEWPORT_MAX_ZOOM = 20;
 const DOCUMENT_MAX_DOCUMENTS = 12;
 const DOCUMENT_MAX_SECTIONS_PER_DOCUMENT = 12;
 const DOCUMENT_SECTION_EXCERPT_MAX_CHARS = 700;
@@ -3317,6 +3324,205 @@ function resolveCalendarDisplayElements(debugData) {
         calendarViews.push(calendarElement);
     }
     return calendarViews;
+}
+
+function normaliseLocationCoordinate(value, minValue, maxValue) {
+    if (typeof value === 'number') {
+        if (!Number.isFinite(value)) {
+            return null;
+        }
+        if (value < minValue || value > maxValue) {
+            return null;
+        }
+        return value;
+    }
+    if (typeof value === 'string') {
+        const cleaned = value.trim();
+        if (!cleaned) {
+            return null;
+        }
+        const parsed = Number(cleaned);
+        if (!Number.isFinite(parsed)) {
+            return null;
+        }
+        if (parsed < minValue || parsed > maxValue) {
+            return null;
+        }
+        return parsed;
+    }
+    return null;
+}
+
+function formatLocationCoordinate(value) {
+    if (!Number.isFinite(value)) {
+        return '';
+    }
+    return Number(value).toFixed(5);
+}
+
+function buildExternalLocationMapHref(point) {
+    if (!point || typeof point !== 'object') {
+        return '';
+    }
+    const latitude = Number(point.latitude);
+    const longitude = Number(point.longitude);
+    if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
+        const zoom = Number.isInteger(point.zoom) ? point.zoom : 13;
+        return `https://www.openstreetmap.org/?mlat=${encodeURIComponent(String(latitude))}&mlon=${encodeURIComponent(String(longitude))}#map=${encodeURIComponent(String(zoom))}/${encodeURIComponent(String(latitude))}/${encodeURIComponent(String(longitude))}`;
+    }
+    const address = typeof point.address === 'string' ? point.address.trim() : '';
+    if (address) {
+        return `https://www.openstreetmap.org/search?query=${encodeURIComponent(address)}`;
+    }
+    return '';
+}
+
+function normaliseLocationDisplayElement(element) {
+    if (!element || typeof element !== 'object') {
+        return null;
+    }
+    if (String(element.element_type || '').trim() !== 'location_view') {
+        return null;
+    }
+
+    const payload = element.payload;
+    if (!payload || typeof payload !== 'object') {
+        return null;
+    }
+
+    const rawPoints = Array.isArray(payload.points) ? payload.points : [];
+    const points = [];
+    const seenPointIds = new Set();
+    for (let index = 0; index < rawPoints.length; index += 1) {
+        const point = rawPoints[index];
+        if (!point || typeof point !== 'object') {
+            continue;
+        }
+        const pointIdRaw = typeof point.point_id === 'string' && point.point_id.trim()
+            ? point.point_id.trim()
+            : `location_point_${index + 1}`;
+        if (seenPointIds.has(pointIdRaw)) {
+            continue;
+        }
+
+        const label = typeof point.label === 'string' && point.label.trim()
+            ? point.label.trim()
+            : pointIdRaw;
+
+        const latitude = normaliseLocationCoordinate(
+            point.latitude,
+            LOCATION_LATITUDE_MIN,
+            LOCATION_LATITUDE_MAX
+        );
+        const longitude = normaliseLocationCoordinate(
+            point.longitude,
+            LOCATION_LONGITUDE_MIN,
+            LOCATION_LONGITUDE_MAX
+        );
+        const hasCoordinates = latitude !== null && longitude !== null;
+        if ((latitude === null) !== (longitude === null)) {
+            continue;
+        }
+
+        const address = typeof point.address === 'string' && point.address.trim()
+            ? point.address.trim()
+            : '';
+        if (!hasCoordinates && !address) {
+            continue;
+        }
+
+        const description = typeof point.description === 'string' && point.description.trim()
+            ? point.description.trim()
+            : '';
+        const confidenceRaw = Number(point.confidence);
+        const confidence = Number.isFinite(confidenceRaw) && confidenceRaw >= 0 && confidenceRaw <= 1
+            ? confidenceRaw
+            : null;
+        const rawTaskLinks = Array.isArray(point.task_links) ? point.task_links : [];
+        const taskLinks = rawTaskLinks
+            .map((link) => normaliseWorkflowTaskLink(link))
+            .filter(Boolean);
+
+        const normalisedPoint = {
+            point_id: pointIdRaw,
+            label,
+            latitude,
+            longitude,
+            address,
+            description,
+            confidence,
+            task_links: taskLinks
+        };
+        normalisedPoint.map_href = buildExternalLocationMapHref(normalisedPoint);
+        seenPointIds.add(pointIdRaw);
+        points.push(normalisedPoint);
+        if (points.length >= LOCATION_MAX_POINTS) {
+            break;
+        }
+    }
+
+    if (!points.length) {
+        return null;
+    }
+
+    const rawViewport = payload.viewport && typeof payload.viewport === 'object'
+        ? payload.viewport
+        : null;
+    let viewport = null;
+    if (rawViewport) {
+        const centreLat = normaliseLocationCoordinate(
+            rawViewport.centre_lat ?? rawViewport.center_lat,
+            LOCATION_LATITUDE_MIN,
+            LOCATION_LATITUDE_MAX
+        );
+        const centreLon = normaliseLocationCoordinate(
+            rawViewport.centre_lon ?? rawViewport.center_lon,
+            LOCATION_LONGITUDE_MIN,
+            LOCATION_LONGITUDE_MAX
+        );
+        const zoomRaw = Number(rawViewport.zoom);
+        const zoom = Number.isInteger(zoomRaw)
+            && zoomRaw >= LOCATION_VIEWPORT_MIN_ZOOM
+            && zoomRaw <= LOCATION_VIEWPORT_MAX_ZOOM
+            ? zoomRaw
+            : null;
+        if (centreLat !== null && centreLon !== null) {
+            viewport = {
+                centre_lat: centreLat,
+                centre_lon: centreLon,
+                zoom: zoom ?? 12
+            };
+        }
+    }
+
+    const mapProviderHint = typeof payload.map_provider_hint === 'string' && payload.map_provider_hint.trim()
+        ? payload.map_provider_hint.trim()
+        : '';
+
+    return {
+        element_id: typeof element.element_id === 'string' ? element.element_id.trim() : null,
+        title: normaliseOptionalDisplayElementTitle(payload.title),
+        map_provider_hint: mapProviderHint,
+        viewport,
+        points
+    };
+}
+
+function resolveLocationDisplayElements(debugData) {
+    const contract = normaliseDisplayElementsContract(debugData?.display_elements);
+    if (!contract) {
+        return [];
+    }
+
+    const locationViews = [];
+    for (const element of contract.elements) {
+        const locationElement = normaliseLocationDisplayElement(element);
+        if (!locationElement) {
+            continue;
+        }
+        locationViews.push(locationElement);
+    }
+    return locationViews;
 }
 
 function truncateDocumentSectionText(value, maxChars) {
@@ -4853,6 +5059,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
     const kanbanElements = resolveKanbanDisplayElements(debugData);
     const timelineElements = resolveTimelineDisplayElements(debugData);
     const calendarElements = resolveCalendarDisplayElements(debugData);
+    const locationElements = resolveLocationDisplayElements(debugData);
     const documentElements = resolveDocumentDisplayElements(debugData);
     const hierarchyElements = resolveHierarchyDisplayElements(debugData);
     const relationGraphElements = resolveRelationGraphDisplayElements(debugData);
@@ -4883,6 +5090,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
         && !kanbanElements.length
         && !timelineElements.length
         && !calendarElements.length
+        && !locationElements.length
         && !documentElements.length
         && !hierarchyElements.length
         && !relationGraphElements.length
@@ -5634,6 +5842,141 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
         root.appendChild(section);
     });
 
+    locationElements.forEach((locationElement, locationIndex) => {
+        const section = document.createElement('section');
+        section.className = 'chat-display-elements-location-section';
+        section.style.cssText = (
+            tableElements.length > 0
+            || workflowElements.length > 0
+            || taskViewElements.length > 0
+            || kanbanElements.length > 0
+            || timelineElements.length > 0
+            || calendarElements.length > 0
+            || locationIndex > 0
+        ) ? 'margin-top: 10px;' : '';
+
+        const title = document.createElement('div');
+        title.className = 'chat-display-elements-location-title';
+        title.textContent = resolveDisplayElementSectionTitle(
+            locationElement.title,
+            'Location view',
+            locationIndex,
+            locationElements.length
+        );
+        title.style.cssText = 'font-weight: 600; font-size: 0.85em; color: #2f4f6f; margin-bottom: 6px;';
+        section.appendChild(title);
+
+        const pointsWithCoordinates = locationElement.points.filter((point) => (
+            Number.isFinite(point.latitude) && Number.isFinite(point.longitude)
+        ));
+        const summary = document.createElement('div');
+        summary.className = 'chat-display-elements-location-summary';
+        summary.textContent = `${locationElement.points.length} location${locationElement.points.length === 1 ? '' : 's'} · ${pointsWithCoordinates.length} with coordinates`;
+        summary.style.cssText = 'font-size: 0.78em; color: #5a6b7b; margin-bottom: 6px;';
+        section.appendChild(summary);
+
+        const mapPanel = document.createElement('div');
+        mapPanel.className = 'chat-display-elements-location-map';
+        mapPanel.style.cssText = 'position: relative; min-height: 180px; border: 1px solid #dce3ea; border-radius: 6px; background: linear-gradient(180deg, #f8fbff 0%, #eef5fb 100%); overflow: hidden; margin-bottom: 8px;';
+
+        if (pointsWithCoordinates.length > 0) {
+            let latMin = Number.POSITIVE_INFINITY;
+            let latMax = Number.NEGATIVE_INFINITY;
+            let lonMin = Number.POSITIVE_INFINITY;
+            let lonMax = Number.NEGATIVE_INFINITY;
+            pointsWithCoordinates.forEach((point) => {
+                latMin = Math.min(latMin, Number(point.latitude));
+                latMax = Math.max(latMax, Number(point.latitude));
+                lonMin = Math.min(lonMin, Number(point.longitude));
+                lonMax = Math.max(lonMax, Number(point.longitude));
+            });
+            const latSpan = Math.max(0.001, latMax - latMin);
+            const lonSpan = Math.max(0.001, lonMax - lonMin);
+
+            const markerCap = Math.min(pointsWithCoordinates.length, 80);
+            for (let index = 0; index < markerCap; index += 1) {
+                const point = pointsWithCoordinates[index];
+                const lat = Number(point.latitude);
+                const lon = Number(point.longitude);
+                const marker = document.createElement('div');
+                marker.className = 'chat-display-elements-location-map-marker';
+                const x = ((lon - lonMin) / lonSpan) * 100;
+                const y = ((latMax - lat) / latSpan) * 100;
+                marker.style.cssText = `position: absolute; left: ${Math.max(2, Math.min(98, x)).toFixed(2)}%; top: ${Math.max(4, Math.min(96, y)).toFixed(2)}%; transform: translate(-50%, -50%); background: #1f4f7a; color: #fff; border-radius: 999px; min-width: 18px; height: 18px; padding: 0 5px; display: inline-flex; align-items: center; justify-content: center; font-size: 0.68em; font-weight: 600; box-shadow: 0 1px 3px rgba(18, 40, 66, 0.25);`;
+                marker.textContent = String(index + 1);
+                marker.title = `${point.label} (${formatLocationCoordinate(lat)}, ${formatLocationCoordinate(lon)})`;
+                mapPanel.appendChild(marker);
+            }
+        } else {
+            const fallback = document.createElement('div');
+            fallback.className = 'chat-display-elements-location-map-fallback';
+            fallback.style.cssText = 'padding: 10px; font-size: 0.78em; color: #5a6b7b;';
+            fallback.textContent = 'No coordinates available; showing address-based list.';
+            mapPanel.appendChild(fallback);
+        }
+        section.appendChild(mapPanel);
+
+        const list = document.createElement('div');
+        list.className = 'chat-display-elements-location-list';
+        list.style.cssText = 'display: grid; gap: 8px;';
+
+        locationElement.points.forEach((point) => {
+            const card = document.createElement('article');
+            card.className = 'chat-display-elements-location-point';
+            card.style.cssText = 'border: 1px solid #dce3ea; border-radius: 6px; background: #f8fbff; padding: 8px;';
+
+            const name = document.createElement('div');
+            name.className = 'chat-display-elements-location-point-title';
+            name.textContent = point.label;
+            name.style.cssText = 'font-size: 0.82em; font-weight: 600; color: #1f3d5a;';
+            card.appendChild(name);
+
+            const details = [];
+            if (Number.isFinite(point.latitude) && Number.isFinite(point.longitude)) {
+                details.push(`Lat/Lon: ${formatLocationCoordinate(point.latitude)}, ${formatLocationCoordinate(point.longitude)}`);
+            }
+            if (point.address) {
+                details.push(point.address);
+            }
+            if (point.description) {
+                details.push(point.description);
+            }
+            if (Number.isFinite(point.confidence)) {
+                details.push(`Confidence: ${(Number(point.confidence) * 100).toFixed(0)}%`);
+            }
+            if (details.length) {
+                const meta = document.createElement('div');
+                meta.className = 'chat-display-elements-location-point-meta';
+                meta.textContent = details.join(' · ');
+                meta.style.cssText = 'margin-top: 4px; font-size: 0.78em; color: #44576a;';
+                card.appendChild(meta);
+            }
+
+            const mapHref = typeof point.map_href === 'string' ? point.map_href.trim() : '';
+            if (mapHref) {
+                const mapLink = document.createElement('a');
+                mapLink.href = mapHref;
+                mapLink.target = '_blank';
+                mapLink.rel = 'noopener noreferrer';
+                mapLink.className = 'chat-display-elements-location-map-link';
+                mapLink.textContent = 'Open map';
+                mapLink.style.cssText = 'display: inline-block; margin-top: 6px; font-size: 0.76em; color: #1f4f7a;';
+                card.appendChild(mapLink);
+            }
+
+            appendTaskLinksToCard(
+                card,
+                point.task_links,
+                'chat-display-elements-location-point-links'
+            );
+
+            list.appendChild(card);
+        });
+
+        section.appendChild(list);
+        root.appendChild(section);
+    });
+
     documentElements.forEach((documentElement, documentIndex) => {
         const section = document.createElement('section');
         section.className = 'chat-display-elements-document-section';
@@ -5644,6 +5987,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
             || kanbanElements.length > 0
             || timelineElements.length > 0
             || calendarElements.length > 0
+            || locationElements.length > 0
             || documentIndex > 0
         ) ? 'margin-top: 10px;' : '';
 
@@ -5794,6 +6138,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
             || kanbanElements.length > 0
             || timelineElements.length > 0
             || calendarElements.length > 0
+            || locationElements.length > 0
             || documentElements.length > 0
             || hierarchyIndex > 0
         ) ? 'margin-top: 10px;' : '';
@@ -5832,6 +6177,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
             || kanbanElements.length > 0
             || timelineElements.length > 0
             || calendarElements.length > 0
+            || locationElements.length > 0
             || documentElements.length > 0
             || hierarchyElements.length > 0
             || relationGraphIndex > 0
@@ -5873,6 +6219,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
             || hierarchyElements.length > 0
             || relationGraphElements.length > 0
             || calendarElements.length > 0
+            || locationElements.length > 0
             || documentElements.length > 0
             || relationIndex > 0
         ) ? 'margin-top: 10px;' : '';
@@ -6119,6 +6466,7 @@ function extractRenderPlanSourceSummary(
     screenKanbanElements,
     screenTimelineElements,
     screenCalendarElements,
+    screenLocationElements,
     screenDocumentElements,
     screenHierarchyElements,
     screenRelationGraphElements
@@ -6200,6 +6548,12 @@ function extractRenderPlanSourceSummary(
         }
         addProvenance(calendarElement.provenance);
     }
+    for (const locationElement of screenLocationElements) {
+        if (!locationElement || typeof locationElement !== 'object') {
+            continue;
+        }
+        addProvenance(locationElement.provenance);
+    }
     for (const documentElement of screenDocumentElements) {
         if (!documentElement || typeof documentElement !== 'object') {
             continue;
@@ -6262,6 +6616,9 @@ function buildRenderPlanMetadataSummary(renderPlan) {
     const screenCalendarElements = Array.isArray(renderPlan.screen_calendar_elements)
         ? renderPlan.screen_calendar_elements.filter(item => item && typeof item === 'object')
         : [];
+    const screenLocationElements = Array.isArray(renderPlan.screen_location_elements)
+        ? renderPlan.screen_location_elements.filter(item => item && typeof item === 'object')
+        : [];
     const screenDocumentElements = Array.isArray(renderPlan.screen_document_elements)
         ? renderPlan.screen_document_elements.filter(item => item && typeof item === 'object')
         : [];
@@ -6279,6 +6636,7 @@ function buildRenderPlanMetadataSummary(renderPlan) {
         screenKanbanElements,
         screenTimelineElements,
         screenCalendarElements,
+        screenLocationElements,
         screenDocumentElements,
         screenHierarchyElements,
         screenRelationGraphElements
@@ -6312,6 +6670,7 @@ function buildRenderPlanMetadataSummary(renderPlan) {
         screen_kanban_element_count: screenKanbanElements.length,
         screen_timeline_element_count: screenTimelineElements.length,
         screen_calendar_element_count: screenCalendarElements.length,
+        screen_location_element_count: screenLocationElements.length,
         screen_document_element_count: screenDocumentElements.length,
         screen_hierarchy_element_count: screenHierarchyElements.length,
         screen_relation_graph_element_count: screenRelationGraphElements.length,
@@ -6380,6 +6739,7 @@ function buildRenderPlanSummaryHtml(renderPlanSummary) {
     addScalar('Screen kanban elements', renderPlanSummary.screen_kanban_element_count);
     addScalar('Screen timeline elements', renderPlanSummary.screen_timeline_element_count);
     addScalar('Screen calendar elements', renderPlanSummary.screen_calendar_element_count);
+    addScalar('Screen location elements', renderPlanSummary.screen_location_element_count);
     addScalar('Screen document elements', renderPlanSummary.screen_document_element_count);
     addScalar('Screen hierarchy elements', renderPlanSummary.screen_hierarchy_element_count);
     addScalar('Screen relation graph elements', renderPlanSummary.screen_relation_graph_element_count);

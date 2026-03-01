@@ -670,6 +670,91 @@ def test_build_turn_display_elements_drops_invalid_supplied_calendar_views() -> 
     assert contract["validation"]["valid"] is True
 
 
+def test_build_turn_display_elements_includes_supplied_location_views() -> None:
+    contract = build_turn_display_elements(
+        response_text="Location response",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Location response",
+            "spoken": None,
+        },
+        screen_location_elements=[
+            {
+                "element_id": "screen_location_view",
+                "intent": "structured_location_view",
+                "payload": {
+                    "title": "Meeting locations",
+                    "points": [
+                        {
+                            "point_id": "#V#meeting_location_1",
+                            "label": "AUT city campus",
+                            "latitude": -36.8509,
+                            "longitude": 174.7676,
+                            "address": "55 Wellesley Street East, Auckland",
+                        },
+                        {
+                            "point_id": "#V#meeting_location_2",
+                            "label": "Remote participant",
+                            "address": "Wellington, New Zealand",
+                        },
+                    ],
+                    "viewport": {
+                        "centre_lat": -36.8509,
+                        "centre_lon": 174.7676,
+                        "zoom": 11,
+                    },
+                },
+            }
+        ],
+    )
+
+    location_elements = [
+        element
+        for element in contract["elements"]
+        if element["element_type"] == "location_view"
+    ]
+    assert len(location_elements) == 1
+    location_element = location_elements[0]
+    assert location_element["element_id"] == "screen_location_view"
+    assert location_element["payload"]["points"][0]["latitude"] == -36.8509
+    assert location_element["payload"]["points"][1]["address"] == "Wellington, New Zealand"
+    assert "screen_structured_location_views_supplied" in contract["reason_codes"]
+    assert contract["validation"]["valid"] is True
+
+
+def test_build_turn_display_elements_drops_invalid_supplied_location_views() -> None:
+    contract = build_turn_display_elements(
+        response_text="Location response",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Location response",
+            "spoken": None,
+        },
+        screen_location_elements=[
+            {
+                "payload": {
+                    "points": [
+                        {
+                            "point_id": "bad_point",
+                            "label": "Missing anchors",
+                            "latitude": -36.85,
+                        }
+                    ]
+                }
+            }
+        ],
+    )
+
+    location_elements = [
+        element
+        for element in contract["elements"]
+        if element["element_type"] == "location_view"
+    ]
+    assert location_elements == []
+    assert "screen_structured_location_views_invalid_dropped" in contract["reason_codes"]
+    assert contract["validation"]["valid"] is True
+
+
 def test_build_turn_display_elements_includes_supplied_document_views() -> None:
     contract = build_turn_display_elements(
         response_text="Document response",
@@ -1264,6 +1349,49 @@ def test_validate_turn_display_elements_rejects_calendar_item_without_title() ->
     assert any("default_granularity must be one of" in message for message in errors)
 
 
+def test_validate_turn_display_elements_rejects_invalid_location_view_shape() -> None:
+    valid, errors = validate_turn_display_elements(
+        {
+            "schema_version": "turn_display_elements_v1",
+            "elements": [
+                {
+                    "element_id": "screen_location_view",
+                    "element_type": "location_view",
+                    "channel": "screen",
+                    "order": 39,
+                    "intent": "structured_location_view",
+                    "payload": {
+                        "points": [
+                            {
+                                "point_id": "point_1",
+                                "label": "Invalid coordinate",
+                                "latitude": 123.0,
+                                "longitude": 174.7,
+                            },
+                            {
+                                "point_id": "point_2",
+                                "label": "Missing anchors",
+                            },
+                        ],
+                        "viewport": {
+                            "centre_lat": -36.8,
+                            "zoom": 99,
+                        },
+                    },
+                    "provenance": {"source": "test"},
+                }
+            ],
+            "reason_codes": [],
+        }
+    )
+
+    assert valid is False
+    assert any(".latitude must be between -90 and 90" in message for message in errors)
+    assert any("must provide at least one spatial anchor" in message for message in errors)
+    assert any("must provide both centre_lat and centre_lon" in message for message in errors)
+    assert any(".viewport.zoom must be an integer between 1 and 20" in message for message in errors)
+
+
 def test_validate_turn_display_elements_rejects_invalid_document_view_shape() -> None:
     valid, errors = validate_turn_display_elements(
         {
@@ -1850,6 +1978,21 @@ def test_build_turn_display_elements_preserves_optional_payload_titles() -> None
                 }
             }
         ],
+        screen_location_elements=[
+            {
+                "payload": {
+                    "title": "Location markers",
+                    "points": [
+                        {
+                            "point_id": "location_1",
+                            "label": "Auckland office",
+                            "latitude": -36.8509,
+                            "longitude": 174.7676,
+                        }
+                    ],
+                }
+            }
+        ],
         screen_document_elements=[
             {
                 "payload": {
@@ -1937,6 +2080,7 @@ def test_build_turn_display_elements_preserves_optional_payload_titles() -> None
             "kanban_view",
             "timeline",
             "calendar_view",
+            "location_view",
             "document_view",
             "hierarchy_view",
             "relation_graph_view",
@@ -1949,6 +2093,7 @@ def test_build_turn_display_elements_preserves_optional_payload_titles() -> None
     assert payload_title_by_type["kanban_view"] == "Kanban backlog"
     assert payload_title_by_type["timeline"] == "Timeline of changes"
     assert payload_title_by_type["calendar_view"] == "Calendar schedule"
+    assert payload_title_by_type["location_view"] == "Location markers"
     assert payload_title_by_type["document_view"] == "Document excerpts"
     assert payload_title_by_type["hierarchy_view"] == "Meeting hierarchy"
     assert payload_title_by_type["relation_graph_view"] == "Relation network"

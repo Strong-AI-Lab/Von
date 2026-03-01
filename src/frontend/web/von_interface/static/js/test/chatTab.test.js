@@ -1366,6 +1366,70 @@ describe('calendar display elements', () => {
     });
 });
 
+describe('location display elements', () => {
+    test('renders location map markers with address fallback and task links', () => {
+        const container = document.createElement('div');
+        const debugData = {
+            display_elements: {
+                schema_version: 'turn_display_elements_v1',
+                elements: [
+                    {
+                        element_id: 'screen_location_view',
+                        element_type: 'location_view',
+                        channel: 'screen',
+                        order: 39,
+                        intent: 'structured_location_view',
+                        payload: {
+                            title: 'Meeting locations',
+                            points: [
+                                {
+                                    point_id: '#V#task_alpha',
+                                    label: 'AUT city campus',
+                                    latitude: -36.8509,
+                                    longitude: 174.7676,
+                                    address: '55 Wellesley Street East, Auckland',
+                                    task_links: [
+                                        {
+                                            link_type: 'von_task',
+                                            target_id: '#V#task_alpha',
+                                            label: '#V#task_alpha'
+                                        }
+                                    ]
+                                },
+                                {
+                                    point_id: '#V#task_beta',
+                                    label: 'Remote participant',
+                                    address: 'Wellington, New Zealand'
+                                }
+                            ]
+                        },
+                        provenance: { source: 'test' }
+                    }
+                ]
+            }
+        };
+
+        __testOnly_renderDisplayElementsIntoContainer(container, debugData);
+
+        const section = container.querySelector('.chat-display-elements-location-section');
+        expect(section).not.toBeNull();
+        expect(section.textContent).toContain('Meeting locations');
+        expect(section.textContent).toContain('AUT city campus');
+        expect(section.textContent).toContain('Wellington, New Zealand');
+
+        const markers = container.querySelectorAll('.chat-display-elements-location-map-marker');
+        expect(markers.length).toBe(1);
+
+        const mapLinks = section.querySelectorAll('.chat-display-elements-location-map-link');
+        expect(mapLinks.length).toBeGreaterThanOrEqual(1);
+        expect(mapLinks[0].href).toContain('openstreetmap.org');
+
+        const conceptButton = section.querySelector('.chat-display-elements-concept-link');
+        expect(conceptButton).not.toBeNull();
+        expect(conceptButton.dataset.conceptId).toBe('#V#task_alpha');
+    });
+});
+
 describe('document display elements', () => {
     test('renders collapsible document cards with section excerpts and citations', () => {
         const container = document.createElement('div');
@@ -2130,6 +2194,39 @@ describe('LLM debug popup metadata (internal MCP caps + usage)', () => {
             screen_calendar_element_count: 1,
             source_tools: ['task_list', 'workflow_list_instances'],
             record_families: ['calendar_items']
+        });
+    });
+
+    test('includes location render plan provenance counts when present', () => {
+        const metadata = __testOnly_buildLlmDebugMetadata({
+            model: 'gpt-test',
+            messages: [],
+            render_plan: {
+                enabled: true,
+                attempted: true,
+                success: true,
+                reason: 'resolved',
+                selected_renderer_ids: ['#V#renderer_location'],
+                selected_renderer_types: ['location'],
+                screen_element_families: ['location_view'],
+                screen_location_elements: [
+                    {
+                        element_id: 'screen_location_view',
+                        provenance: {
+                            source_tools: ['task_list'],
+                            record_family: 'location_points'
+                        }
+                    }
+                ]
+            }
+        });
+
+        expect(metadata.render_plan).toMatchObject({
+            selected_renderer_types: ['location'],
+            screen_element_families: ['location_view'],
+            screen_location_element_count: 1,
+            source_tools: ['task_list'],
+            record_families: ['location_points']
         });
     });
 

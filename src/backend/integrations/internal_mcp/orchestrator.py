@@ -17811,6 +17811,271 @@ class InternalMCPChatOrchestrator:
                 }
             ]
 
+        def _extract_renderer_screen_location_elements(
+            *,
+            tool_messages: Sequence[Mapping[str, Any]] = (),
+        ) -> list[dict[str, Any]]:
+            """Derive location-view payloads from tool outputs with map fallback metadata."""
+
+            max_points = 200
+            latitude_min = -90.0
+            latitude_max = 90.0
+            longitude_min = -180.0
+            longitude_max = 180.0
+
+            source_tools: list[str] = []
+            seen_source_tools: set[str] = set()
+            points: list[dict[str, Any]] = []
+            seen_point_ids: set[str] = set()
+
+            def _register_source_tool(tool_name: str) -> None:
+                if tool_name in seen_source_tools:
+                    return
+                seen_source_tools.add(tool_name)
+                source_tools.append(tool_name)
+
+            def _normalise_number(value: Any) -> float | None:
+                if isinstance(value, bool):
+                    return None
+                if isinstance(value, (int, float)):
+                    number = float(value)
+                elif isinstance(value, str):
+                    cleaned = value.strip()
+                    if not cleaned:
+                        return None
+                    try:
+                        number = float(cleaned)
+                    except ValueError:
+                        return None
+                else:
+                    return None
+                if number != number or number in (float("inf"), float("-inf")):
+                    return None
+                return number
+
+            def _extract_lat_lon(row: Mapping[str, Any]) -> tuple[float, float] | None:
+                candidate_pairs: list[tuple[Any, Any]] = [
+                    (row.get("latitude"), row.get("longitude")),
+                    (row.get("lat"), row.get("lon")),
+                    (row.get("lat"), row.get("lng")),
+                    (row.get("lat"), row.get("long")),
+                    (row.get("y"), row.get("x")),
+                ]
+
+                for nested_key in ("location", "geo", "geolocation", "coordinates", "coord", "position"):
+                    nested = row.get(nested_key)
+                    if isinstance(nested, Mapping):
+                        candidate_pairs.extend(
+                            [
+                                (nested.get("latitude"), nested.get("longitude")),
+                                (nested.get("lat"), nested.get("lon")),
+                                (nested.get("lat"), nested.get("lng")),
+                                (nested.get("lat"), nested.get("long")),
+                            ]
+                        )
+
+                for raw_lat, raw_lon in candidate_pairs:
+                    latitude = _normalise_number(raw_lat)
+                    longitude = _normalise_number(raw_lon)
+                    if latitude is None or longitude is None:
+                        continue
+                    if latitude < latitude_min or latitude > latitude_max:
+                        continue
+                    if longitude < longitude_min or longitude > longitude_max:
+                        continue
+                    return (round(latitude, 6), round(longitude, 6))
+                return None
+
+            def _extract_address_text(value: Any) -> str | None:
+                if isinstance(value, str):
+                    cleaned = value.strip()
+                    return cleaned or None
+                if isinstance(value, Mapping):
+                    parts = [
+                        _first_text(
+                            value.get("line1"),
+                            value.get("address_line_1"),
+                            value.get("street"),
+                        ),
+                        _first_text(value.get("line2"), value.get("address_line_2")),
+                        _first_text(value.get("city"), value.get("suburb"), value.get("town")),
+                        _first_text(value.get("state"), value.get("region")),
+                        _first_text(value.get("postcode"), value.get("postal_code"), value.get("zip")),
+                        _first_text(value.get("country")),
+                    ]
+                    joined = ", ".join(part for part in parts if isinstance(part, str) and part)
+                    return joined or None
+                return None
+
+            def _extract_address(row: Mapping[str, Any]) -> str | None:
+                direct_fields = (
+                    row.get("address"),
+                    row.get("formatted_address"),
+                    row.get("location_name"),
+                    row.get("venue"),
+                    row.get("place"),
+                )
+                for field in direct_fields:
+                    address = _extract_address_text(field)
+                    if address:
+                        return address
+
+                for nested_key in ("location", "geo", "details"):
+                    nested = row.get(nested_key)
+                    if not isinstance(nested, Mapping):
+                        continue
+                    for nested_field in (
+                        nested.get("address"),
+                        nested.get("formatted_address"),
+                        nested.get("location_name"),
+                        nested.get("venue"),
+                        nested.get("place"),
+                    ):
+                        address = _extract_address_text(nested_field)
+                        if address:
+                            return address
+                return None
+
+            def _iter_candidate_rows(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+                rows: list[Mapping[str, Any]] = []
+                for key in ("locations", "results", "tasks", "items", "records"):
+                    rows.extend(_mapping_list(payload.get(key), limit=max_points * 3))
+
+                contains_location_fields = any(
+                    key in payload
+                    for key in (
+                        "latitude",
+                        "longitude",
+                        "lat",
+                        "lon",
+                        "lng",
+                        "long",
+                        "address",
+                        "formatted_address",
+                        "location",
+                        "coordinates",
+                    )
+                )
+                if contains_location_fields:
+                    rows.append(payload)
+                return rows[: max_points * 4]
+
+            for tool_name, payload in _iter_renderer_tool_result_payloads(tool_messages):
+                candidate_rows = _iter_candidate_rows(payload)
+                if not candidate_rows:
+                    continue
+                _register_source_tool(tool_name)
+
+                for row_index, row in enumerate(candidate_rows, start=1):
+                    if len(points) >= max_points:
+                        break
+
+                    lat_lon = _extract_lat_lon(row)
+                    address = _extract_address(row)
+                    if lat_lon is None and not address:
+                        continue
+
+                    point_id = _first_text(
+                        row.get("point_id"),
+                        row.get("location_id"),
+                        row.get("id"),
+                        row.get("task_concept_id"),
+                        row.get("task_id"),
+                        row.get("concept_id"),
+                    ) or f"{tool_name}_location_{row_index}"
+
+                    if point_id in seen_point_ids:
+                        continue
+                    seen_point_ids.add(point_id)
+
+                    label = _first_text(
+                        row.get("label"),
+                        row.get("title"),
+                        row.get("name"),
+                        row.get("task_title"),
+                        row.get("location_name"),
+                        row.get("venue"),
+                        row.get("place"),
+                    ) or point_id
+
+                    point: dict[str, Any] = {
+                        "point_id": point_id,
+                        "label": label,
+                    }
+                    if lat_lon is not None:
+                        point["latitude"] = lat_lon[0]
+                        point["longitude"] = lat_lon[1]
+                    if address:
+                        point["address"] = address
+
+                    description = _first_text(
+                        row.get("description"),
+                        row.get("summary"),
+                        row.get("details"),
+                        row.get("comment"),
+                        row.get("message"),
+                    )
+                    if description:
+                        point["description"] = description
+
+                    confidence = _normalise_number(
+                        row.get("confidence") if row.get("confidence") is not None else row.get("score")
+                    )
+                    if confidence is not None and 0.0 <= confidence <= 1.0:
+                        point["confidence"] = round(confidence, 4)
+
+                    task_links = _collect_renderer_task_links(row)
+                    if task_links:
+                        point["task_links"] = task_links
+
+                    points.append(point)
+                if len(points) >= max_points:
+                    break
+
+            if not points:
+                return []
+
+            location_payload: dict[str, Any] = {
+                "points": points[:max_points],
+                "map_provider_hint": "openstreetmap_fallback",
+            }
+
+            coordinates: list[tuple[float, float]] = []
+            for point in points:
+                raw_latitude = point.get("latitude")
+                raw_longitude = point.get("longitude")
+                if not isinstance(raw_latitude, (int, float)) or not isinstance(
+                    raw_longitude, (int, float)
+                ):
+                    continue
+                coordinates.append((float(raw_latitude), float(raw_longitude)))
+            if coordinates:
+                centre_lat = sum(lat for lat, _ in coordinates) / len(coordinates)
+                centre_lon = sum(lon for _, lon in coordinates) / len(coordinates)
+                location_payload["viewport"] = {
+                    "centre_lat": round(centre_lat, 6),
+                    "centre_lon": round(centre_lon, 6),
+                    "zoom": 12 if len(coordinates) == 1 else (9 if len(coordinates) <= 3 else 6),
+                }
+
+            return [
+                {
+                    "element_id": "screen_location_view",
+                    "intent": "structured_location_view",
+                    "payload": location_payload,
+                    "constraints": {
+                        "supports_geospatial_plot": True,
+                        "supports_address_fallback": True,
+                        "supports_external_map_links": True,
+                    },
+                    "provenance": {
+                        "source": "tool_result_location_view",
+                        "source_tools": source_tools,
+                        "record_family": "location_points",
+                    },
+                }
+            ]
+
         def _extract_renderer_screen_document_elements(
             *,
             tool_messages: Sequence[Mapping[str, Any]] = (),
@@ -18925,10 +19190,14 @@ class InternalMCPChatOrchestrator:
             "citation": ("document_view",),
             "document": ("document_view",),
             "document_view": ("document_view",),
+            "geo": ("location_view",),
             "hierarchy": ("hierarchy_view",),
             "hierarchy_view": ("hierarchy_view",),
             "kanban": ("kanban_view",),
             "kanban_view": ("kanban_view",),
+            "location": ("location_view",),
+            "location_view": ("location_view",),
+            "map": ("location_view",),
             "graph": ("relation_graph_view",),
             "relation_graph": ("relation_graph_view",),
             "relation_graph_view": ("relation_graph_view",),
@@ -19007,6 +19276,7 @@ class InternalMCPChatOrchestrator:
             include_workflow_elements = "workflow_view" in selected_families
             include_task_view_elements = "task_view" in selected_families
             include_calendar_elements = "calendar_view" in selected_families
+            include_location_elements = "location_view" in selected_families
             include_document_elements = "document_view" in selected_families
             include_kanban_elements = "kanban_view" in selected_families
             include_timeline_elements = "timeline" in selected_families
@@ -19020,6 +19290,7 @@ class InternalMCPChatOrchestrator:
                 "workflow_view": include_workflow_elements,
                 "task_view": include_task_view_elements,
                 "calendar_view": include_calendar_elements,
+                "location_view": include_location_elements,
                 "document_view": include_document_elements,
                 "kanban_view": include_kanban_elements,
                 "timeline": include_timeline_elements,
@@ -19071,6 +19342,16 @@ class InternalMCPChatOrchestrator:
                     decision["screen_calendar_elements"] = screen_calendar_elements
                     decision["screen_calendar_element_count"] = len(
                         screen_calendar_elements
+                    )
+
+            if include_location_elements:
+                screen_location_elements = _extract_renderer_screen_location_elements(
+                    tool_messages=tool_messages
+                )
+                if screen_location_elements:
+                    decision["screen_location_elements"] = screen_location_elements
+                    decision["screen_location_element_count"] = len(
+                        screen_location_elements
                     )
 
             if include_document_elements:

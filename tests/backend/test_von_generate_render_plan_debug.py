@@ -545,6 +545,84 @@ def test_generate_builds_calendar_from_render_plan_elements(monkeypatch):
     assert calendar_item["all_day"] is True
 
 
+def test_generate_builds_location_view_from_render_plan_elements(monkeypatch):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    render_plan = {
+        "enabled": True,
+        "reason": "resolved",
+        "render_mode": "screen_only",
+        "should_narrate": False,
+        "screen_location_elements": [
+            {
+                "element_id": "screen_location_view",
+                "intent": "structured_location_view",
+                "payload": {
+                    "points": [
+                        {
+                            "point_id": "#V#task_alpha",
+                            "label": "Alpha task",
+                            "latitude": -36.8485,
+                            "longitude": 174.7633,
+                            "address": "Auckland, New Zealand",
+                            "task_links": [
+                                {
+                                    "link_type": "von_task",
+                                    "target_id": "#V#task_alpha",
+                                }
+                            ],
+                        },
+                        {
+                            "point_id": "#V#task_beta",
+                            "label": "Beta task",
+                            "address": "Wellington, New Zealand",
+                        },
+                    ],
+                    "viewport": {
+                        "centre_lat": -41.2865,
+                        "centre_lon": 174.7762,
+                        "zoom": 7,
+                    },
+                },
+                "provenance": {"source": "test_render_plan"},
+            }
+        ],
+    }
+    orchestrator_result = OrchestratorResult(
+        response_text="Location summary",
+        extra_messages=(),
+        tool_invocations=(),
+        aux_llm_calls=(),
+        render_plan=render_plan,
+    )
+    app = _make_app(monkeypatch, _StubOrchestrator(orchestrator_result))
+
+    client = app.test_client()
+    response = client.post("/von/generate", json={"prompt": "Show locations"})
+    assert response.status_code == 200
+    body = response.get_json()
+    assert isinstance(body, dict)
+    display_elements = body.get("display_elements")
+    assert isinstance(display_elements, dict)
+    assert display_elements.get("validation", {}).get("valid") is True
+    assert "screen_structured_location_views_supplied" in display_elements.get(
+        "reason_codes", []
+    )
+
+    location_elements = [
+        element
+        for element in display_elements.get("elements", [])
+        if isinstance(element, dict) and element.get("element_type") == "location_view"
+    ]
+    assert len(location_elements) == 1
+    points = location_elements[0].get("payload", {}).get("points", [])
+    assert isinstance(points, list)
+    assert points[0]["point_id"] == "#V#task_alpha"
+    assert points[0]["latitude"] == -36.8485
+    assert points[0]["longitude"] == 174.7633
+    assert points[1]["address"] == "Wellington, New Zealand"
+
+
 def test_generate_builds_document_view_from_render_plan_elements(monkeypatch):
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
 
@@ -918,9 +996,11 @@ def test_generate_respects_renderer_screen_element_targets(monkeypatch):
             "workflow_view": True,
             "task_view": False,
             "calendar_view": False,
+            "location_view": False,
             "document_view": False,
             "kanban_view": False,
             "timeline": False,
+            "hierarchy_view": False,
             "relation_graph_view": False,
         },
         "screen_element_reason_codes": [

@@ -6,6 +6,7 @@ display elements so rendering decisions are explicit and inspectable.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Mapping, Sequence
 import re
 
@@ -18,6 +19,7 @@ ALLOWED_DISPLAY_ELEMENT_TYPES = frozenset(
         "calendar_view",
         "document_view",
         "hierarchy_view",
+        "location_view",
         "text_block",
         "json_block",
         "kanban_view",
@@ -34,6 +36,7 @@ OPTIONAL_PAYLOAD_TITLE_ELEMENT_TYPES = frozenset(
         "calendar_view",
         "document_view",
         "hierarchy_view",
+        "location_view",
         "kanban_view",
         "relation_graph_view",
         "table",
@@ -55,6 +58,13 @@ HIERARCHY_EDGE_BRANCH_KINDS = frozenset(
 )
 HIERARCHY_MAX_DEPTH = 12
 CALENDAR_ALLOWED_GRANULARITIES = frozenset({"month", "week", "day"})
+LOCATION_MAX_POINTS = 240
+LOCATION_LATITUDE_MIN = -90.0
+LOCATION_LATITUDE_MAX = 90.0
+LOCATION_LONGITUDE_MIN = -180.0
+LOCATION_LONGITUDE_MAX = 180.0
+LOCATION_VIEWPORT_MIN_ZOOM = 1
+LOCATION_VIEWPORT_MAX_ZOOM = 20
 DOCUMENT_SECTION_EXCERPT_MAX_CHARS = 700
 DOCUMENT_SECTION_DIFF_SUMMARY_MAX_CHARS = 280
 DOCUMENT_EXCERPT_TRUNCATION_MARKER = " ... [truncated]"
@@ -93,6 +103,26 @@ def _normalise_relation_extent_column_token(value: object) -> str:
     if not text:
         return ""
     return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+
+def _normalise_float(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        try:
+            number = float(cleaned)
+        except ValueError:
+            return None
+    else:
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
 
 
 def _resolve_optional_payload_title(
@@ -1225,6 +1255,163 @@ def validate_turn_display_elements(
                             errors.append(
                                 f"{label}.payload.expansion.max_depth must be an integer between 1 and {HIERARCHY_MAX_DEPTH} when provided"
                             )
+        elif element_type == "location_view":
+            points = payload.get("points")
+            if not isinstance(points, list) or not points:
+                errors.append(f"{label}.payload.points must be a non-empty list")
+                points = []
+            if isinstance(points, list) and len(points) > LOCATION_MAX_POINTS:
+                errors.append(
+                    f"{label}.payload.points exceeds max size {LOCATION_MAX_POINTS}"
+                )
+
+            seen_point_ids: set[str] = set()
+            for point_index, point in enumerate(points):
+                point_label = f"{label}.payload.points[{point_index}]"
+                if not isinstance(point, Mapping):
+                    errors.append(f"{point_label} must be a mapping")
+                    continue
+
+                point_id = point.get("point_id")
+                if not isinstance(point_id, str) or not point_id.strip():
+                    errors.append(f"{point_label}.point_id must be a non-empty string")
+                elif point_id in seen_point_ids:
+                    errors.append(f"{point_label}.point_id must be unique")
+                else:
+                    seen_point_ids.add(point_id)
+
+                display_label = point.get("label")
+                if not isinstance(display_label, str) or not display_label.strip():
+                    errors.append(f"{point_label}.label must be a non-empty string")
+
+                latitude = _normalise_float(point.get("latitude"))
+                longitude = _normalise_float(point.get("longitude"))
+                has_coordinates = latitude is not None and longitude is not None
+                has_partial_coordinates = (latitude is None) != (longitude is None)
+                if has_partial_coordinates:
+                    errors.append(
+                        f"{point_label} must provide both latitude and longitude when either coordinate is present"
+                    )
+                if latitude is not None and (
+                    latitude < LOCATION_LATITUDE_MIN
+                    or latitude > LOCATION_LATITUDE_MAX
+                ):
+                    errors.append(
+                        f"{point_label}.latitude must be between {LOCATION_LATITUDE_MIN:g} and {LOCATION_LATITUDE_MAX:g}"
+                    )
+                if longitude is not None and (
+                    longitude < LOCATION_LONGITUDE_MIN
+                    or longitude > LOCATION_LONGITUDE_MAX
+                ):
+                    errors.append(
+                        f"{point_label}.longitude must be between {LOCATION_LONGITUDE_MIN:g} and {LOCATION_LONGITUDE_MAX:g}"
+                    )
+
+                address = point.get("address")
+                has_address = isinstance(address, str) and bool(address.strip())
+                if address is not None and not has_address:
+                    errors.append(
+                        f"{point_label}.address must be a non-empty string when provided"
+                    )
+                if not has_coordinates and not has_address:
+                    errors.append(
+                        f"{point_label} must provide at least one spatial anchor (coordinates or address)"
+                    )
+
+                description = point.get("description")
+                if description is not None and (
+                    not isinstance(description, str) or not description.strip()
+                ):
+                    errors.append(
+                        f"{point_label}.description must be a non-empty string when provided"
+                    )
+
+                confidence = point.get("confidence")
+                if confidence is not None:
+                    confidence_value = _normalise_float(confidence)
+                    if confidence_value is None:
+                        errors.append(
+                            f"{point_label}.confidence must be numeric when provided"
+                        )
+                    elif confidence_value < 0.0 or confidence_value > 1.0:
+                        errors.append(
+                            f"{point_label}.confidence must be between 0 and 1 when provided"
+                        )
+
+                _validate_task_links(
+                    links=point.get("task_links"),
+                    label=f"{point_label}.task_links",
+                    errors=errors,
+                )
+
+            viewport = payload.get("viewport")
+            if viewport is not None:
+                if not isinstance(viewport, Mapping):
+                    errors.append(f"{label}.payload.viewport must be a mapping")
+                else:
+                    centre_lat_raw = (
+                        viewport.get("centre_lat")
+                        if "centre_lat" in viewport
+                        else viewport.get("center_lat")
+                    )
+                    centre_lon_raw = (
+                        viewport.get("centre_lon")
+                        if "centre_lon" in viewport
+                        else viewport.get("center_lon")
+                    )
+                    centre_lat = _normalise_float(centre_lat_raw)
+                    centre_lon = _normalise_float(centre_lon_raw)
+                    has_centre_lat = centre_lat_raw is not None
+                    has_centre_lon = centre_lon_raw is not None
+                    has_partial_centre = has_centre_lat != has_centre_lon
+                    if has_partial_centre:
+                        errors.append(
+                            f"{label}.payload.viewport must provide both centre_lat and centre_lon when either is present"
+                        )
+                    if has_centre_lat and centre_lat is None:
+                        errors.append(
+                            f"{label}.payload.viewport.centre_lat must be numeric when provided"
+                        )
+                    if has_centre_lon and centre_lon is None:
+                        errors.append(
+                            f"{label}.payload.viewport.centre_lon must be numeric when provided"
+                        )
+                    if centre_lat is not None and (
+                        centre_lat < LOCATION_LATITUDE_MIN
+                        or centre_lat > LOCATION_LATITUDE_MAX
+                    ):
+                        errors.append(
+                            f"{label}.payload.viewport.centre_lat must be between {LOCATION_LATITUDE_MIN:g} and {LOCATION_LATITUDE_MAX:g} when provided"
+                        )
+                    if centre_lon is not None and (
+                        centre_lon < LOCATION_LONGITUDE_MIN
+                        or centre_lon > LOCATION_LONGITUDE_MAX
+                    ):
+                        errors.append(
+                            f"{label}.payload.viewport.centre_lon must be between {LOCATION_LONGITUDE_MIN:g} and {LOCATION_LONGITUDE_MAX:g} when provided"
+                        )
+
+                    zoom = viewport.get("zoom")
+                    if zoom is not None:
+                        if isinstance(zoom, bool) or not isinstance(zoom, int):
+                            errors.append(
+                                f"{label}.payload.viewport.zoom must be an integer between {LOCATION_VIEWPORT_MIN_ZOOM} and {LOCATION_VIEWPORT_MAX_ZOOM} when provided"
+                            )
+                        elif (
+                            zoom < LOCATION_VIEWPORT_MIN_ZOOM
+                            or zoom > LOCATION_VIEWPORT_MAX_ZOOM
+                        ):
+                            errors.append(
+                                f"{label}.payload.viewport.zoom must be an integer between {LOCATION_VIEWPORT_MIN_ZOOM} and {LOCATION_VIEWPORT_MAX_ZOOM} when provided"
+                            )
+
+            map_provider_hint = payload.get("map_provider_hint")
+            if map_provider_hint is not None and (
+                not isinstance(map_provider_hint, str) or not map_provider_hint.strip()
+            ):
+                errors.append(
+                    f"{label}.payload.map_provider_hint must be a non-empty string when provided"
+                )
         elif element_type == "timeline":
             items = payload.get("items")
             if not isinstance(items, list) or not items:
@@ -2066,6 +2253,90 @@ def _normalise_supplied_screen_calendar_views(
     return normalised, dropped_count
 
 
+def _normalise_supplied_screen_location_views(
+    screen_location_elements: Sequence[Mapping[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Normalise externally supplied screen location-view specs."""
+    if (
+        not isinstance(screen_location_elements, Sequence)
+        or isinstance(screen_location_elements, (str, bytes, bytearray))
+    ):
+        return [], 0
+
+    normalised: list[dict[str, Any]] = []
+    dropped_count = 0
+
+    for index, raw_spec in enumerate(screen_location_elements, start=1):
+        if not isinstance(raw_spec, Mapping):
+            dropped_count += 1
+            continue
+
+        payload: Mapping[str, Any] | None = None
+        metadata = raw_spec
+        wrapped_payload = raw_spec.get("payload")
+        if isinstance(wrapped_payload, Mapping):
+            payload = wrapped_payload
+        elif "points" in raw_spec:
+            payload = raw_spec
+
+        if not isinstance(payload, Mapping):
+            dropped_count += 1
+            continue
+
+        intent = (
+            _normalise_text(metadata.get("intent"))
+            or "structured_location_view"
+        )
+        constraints = metadata.get("constraints")
+        if not isinstance(constraints, Mapping):
+            constraints = {
+                "supports_geospatial_plot": True,
+                "supports_address_fallback": True,
+                "supports_external_map_links": True,
+            }
+        provenance = metadata.get("provenance")
+        if not isinstance(provenance, Mapping):
+            provenance = {}
+        canonical_payload = _with_optional_payload_title(payload, metadata=metadata)
+
+        is_valid, _errors = validate_turn_display_elements(
+            {
+                "schema_version": DISPLAY_ELEMENT_SCHEMA_VERSION,
+                "elements": [
+                    {
+                        "element_id": f"screen_structured_location_view_probe_{index}",
+                        "element_type": "location_view",
+                        "channel": "screen",
+                        "order": 39,
+                        "intent": intent,
+                        "payload": dict(canonical_payload),
+                        "constraints": dict(constraints),
+                        "provenance": dict(provenance),
+                    }
+                ],
+                "reason_codes": [],
+            }
+        )
+        if not is_valid:
+            dropped_count += 1
+            continue
+
+        normalised.append(
+            {
+                "element_id": _normalise_text(metadata.get("element_id")),
+                "order": metadata.get("order")
+                if isinstance(metadata.get("order"), int)
+                else None,
+                "intent": intent,
+                "payload": dict(canonical_payload),
+                "constraints": dict(constraints),
+                "provenance": dict(provenance),
+            }
+        )
+
+    return normalised, dropped_count
+
+
 def _normalise_supplied_screen_document_views(
     screen_document_elements: Sequence[Mapping[str, Any]] | None,
 ) -> tuple[list[dict[str, Any]], int]:
@@ -2699,6 +2970,7 @@ def build_turn_display_elements(
     screen_workflow_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_task_view_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_calendar_elements: Sequence[Mapping[str, Any]] | None = None,
+    screen_location_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_document_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_kanban_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_timeline_elements: Sequence[Mapping[str, Any]] | None = None,
@@ -2857,6 +3129,14 @@ def build_turn_display_elements(
         reason_codes.append("screen_structured_calendar_views_supplied")
     if supplied_calendar_views_dropped:
         reason_codes.append("screen_structured_calendar_views_invalid_dropped")
+
+    supplied_screen_location_views, supplied_location_views_dropped = (
+        _normalise_supplied_screen_location_views(screen_location_elements)
+    )
+    if supplied_screen_location_views:
+        reason_codes.append("screen_structured_location_views_supplied")
+    if supplied_location_views_dropped:
+        reason_codes.append("screen_structured_location_views_invalid_dropped")
 
     supplied_screen_document_views, supplied_document_views_dropped = (
         _normalise_supplied_screen_document_views(screen_document_elements)
@@ -3017,6 +3297,28 @@ def build_turn_display_elements(
             }
         )
 
+    location_specs: list[dict[str, Any]] = []
+    for index, spec in enumerate(supplied_screen_location_views, start=1):
+        provenance = dict(spec.get("provenance") or {})
+        provenance.setdefault("source", "screen_structured_location_view")
+        provenance.setdefault("location_view_index", index)
+        location_specs.append(
+            {
+                "element_id": spec.get("element_id")
+                or f"screen_structured_location_view_{index}",
+                "order": spec.get("order"),
+                "intent": spec.get("intent") or "structured_location_view",
+                "payload": spec.get("payload") or {},
+                "constraints": spec.get("constraints")
+                or {
+                    "supports_geospatial_plot": True,
+                    "supports_address_fallback": True,
+                    "supports_external_map_links": True,
+                },
+                "provenance": provenance,
+            }
+        )
+
     document_specs: list[dict[str, Any]] = []
     for index, spec in enumerate(supplied_screen_document_views, start=1):
         provenance = dict(spec.get("provenance") or {})
@@ -3152,6 +3454,7 @@ def build_turn_display_elements(
             *workflow_specs,
             *task_view_specs,
             *calendar_specs,
+            *location_specs,
             *document_specs,
             *kanban_specs,
             *timeline_specs,
@@ -3224,6 +3527,30 @@ def build_turn_display_elements(
             {
                 "element_id": element_id,
                 "element_type": "calendar_view",
+                "channel": "screen",
+                "order": int(order),
+                "intent": str(spec["intent"]),
+                "payload": dict(spec["payload"]),
+                "constraints": dict(spec["constraints"]),
+                "provenance": dict(spec["provenance"]),
+            }
+        )
+
+    next_location_order = 39
+    for spec in location_specs:
+        order = spec.get("order") if isinstance(spec.get("order"), int) else None
+        if order is None:
+            while next_location_order in used_orders:
+                next_location_order += 1
+            order = next_location_order
+            used_orders.add(order)
+            next_location_order += 1
+
+        element_id = _next_unique_element_id(str(spec["element_id"]), used_ids)
+        elements.append(
+            {
+                "element_id": element_id,
+                "element_type": "location_view",
                 "channel": "screen",
                 "order": int(order),
                 "intent": str(spec["intent"]),

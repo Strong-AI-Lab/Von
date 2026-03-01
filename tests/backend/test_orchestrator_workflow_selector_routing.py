@@ -948,9 +948,11 @@ def test_renderer_selection_gates_screen_element_families(monkeypatch):
         "workflow_view": True,
         "task_view": False,
         "calendar_view": False,
+        "location_view": False,
         "document_view": False,
         "kanban_view": False,
         "timeline": False,
+        "hierarchy_view": False,
         "relation_graph_view": False,
     }
     assert "screen_table_record_sets" not in result.render_plan
@@ -1047,9 +1049,11 @@ def test_renderer_selection_emits_timeline_elements_for_timeline_renderer(monkey
         "workflow_view": False,
         "task_view": False,
         "calendar_view": False,
+        "location_view": False,
         "document_view": False,
         "kanban_view": False,
         "timeline": True,
+        "hierarchy_view": False,
         "relation_graph_view": False,
     }
     assert "screen_table_record_sets" not in result.render_plan
@@ -1148,9 +1152,11 @@ def test_renderer_selection_emits_calendar_elements_for_calendar_renderer(monkey
         "workflow_view": False,
         "task_view": False,
         "calendar_view": True,
+        "location_view": False,
         "document_view": False,
         "kanban_view": False,
         "timeline": False,
+        "hierarchy_view": False,
         "relation_graph_view": False,
     }
     assert "screen_table_record_sets" not in result.render_plan
@@ -1169,6 +1175,125 @@ def test_renderer_selection_emits_calendar_elements_for_calendar_renderer(monkey
     assert items[0]["title"] == "Alpha task"
     assert items[0]["all_day"] is True
     assert items[0]["task_links"][0]["target_id"] == "#V#task_alpha"
+
+
+def test_renderer_selection_emits_location_elements_for_location_renderer(monkeypatch):
+    """Location renderer selection should emit location display elements only."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    monkeypatch.setenv("VON_RENDERER_APPLICABILITY_ROUTING_ENABLE", "1")
+    monkeypatch.setenv(
+        "VON_RENDERER_APPLICABILITY_DEFINITION_IDS",
+        "#V#location_renderer,#V#workflow_renderer,#V#table_renderer",
+    )
+
+    def _invoke(tool_name: str, _payload: Mapping[str, Any]):
+        if tool_name != "renderer_resolve_applicability":
+            raise AssertionError(f"Unexpected tool invocation: {tool_name}")
+        return _InvokeResult(
+            {
+                "success": True,
+                "selected_renderers": [
+                    {
+                        "renderer_id": "#V#location_renderer",
+                        "renderer_type": "location",
+                        "modalities": ["visual"],
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
+
+    class _WorkflowResult:
+        def __init__(self):
+            self.data = {
+                "final_response": "Location summary.",
+                "tool_messages": [
+                    {
+                        "role": "tool",
+                        "content": json.dumps(
+                            {
+                                "tool": "task_list",
+                                "status": "ok",
+                                "duration_ms": 2.1,
+                                "payload": {
+                                    "tasks": [
+                                        {
+                                            "task_concept_id": "#V#task_alpha",
+                                            "title": "Alpha task",
+                                            "location": {
+                                                "lat": -36.8485,
+                                                "lng": 174.7633,
+                                                "address": "Auckland, New Zealand",
+                                            },
+                                            "jira_issue_key": "JVNAUTOSCI-1178",
+                                        },
+                                        {
+                                            "task_concept_id": "#V#task_beta",
+                                            "title": "Beta task",
+                                            "address": "Wellington, New Zealand",
+                                        },
+                                    ]
+                                },
+                            }
+                        ),
+                    }
+                ],
+                "invocations": [],
+                "iteration_count": 1,
+            }
+            self.final_state = "completed"
+            self.completed = True
+
+    def _execute_workflow(workflow_id: str, **_kwargs: Any):
+        if workflow_id != TOOL_CALLING_WORKFLOW_ID:
+            raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+        return _WorkflowResult()
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    llm = _CapturingLLM(["tool_seeking"])
+    result = orchestrator.run(
+        prompt="Show locations",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert isinstance(result.render_plan, dict)
+    assert result.render_plan.get("screen_element_mapping_mode") == "selected_renderer_types"
+    assert result.render_plan.get("screen_element_targets") == {
+        "table": False,
+        "workflow_view": False,
+        "task_view": False,
+        "calendar_view": False,
+        "location_view": True,
+        "document_view": False,
+        "kanban_view": False,
+        "timeline": False,
+        "hierarchy_view": False,
+        "relation_graph_view": False,
+    }
+    assert "screen_table_record_sets" not in result.render_plan
+    assert "screen_workflow_elements" not in result.render_plan
+    assert "screen_task_view_elements" not in result.render_plan
+    assert "screen_timeline_elements" not in result.render_plan
+    assert result.render_plan.get("screen_location_element_count") == 1
+
+    location_elements = result.render_plan.get("screen_location_elements")
+    assert isinstance(location_elements, list)
+    assert len(location_elements) == 1
+    payload = location_elements[0].get("payload", {})
+    points = payload.get("points")
+    assert isinstance(points, list)
+    assert len(points) == 2
+    assert points[0]["point_id"] == "#V#task_alpha"
+    assert points[0]["latitude"] == -36.8485
+    assert points[0]["longitude"] == 174.7633
+    assert points[0]["address"] == "Auckland, New Zealand"
+    assert points[0]["task_links"][0]["target_id"] == "#V#task_alpha"
+    assert payload.get("viewport", {}).get("centre_lat") is not None
 
 
 def test_renderer_selection_emits_document_elements_for_document_renderer(monkeypatch):
@@ -1254,9 +1379,11 @@ def test_renderer_selection_emits_document_elements_for_document_renderer(monkey
         "workflow_view": False,
         "task_view": False,
         "calendar_view": False,
+        "location_view": False,
         "document_view": True,
         "kanban_view": False,
         "timeline": False,
+        "hierarchy_view": False,
         "relation_graph_view": False,
     }
     assert "screen_table_record_sets" not in result.render_plan
@@ -1359,9 +1486,11 @@ def test_renderer_selection_emits_task_view_elements_for_task_renderer(monkeypat
         "workflow_view": False,
         "task_view": True,
         "calendar_view": False,
+        "location_view": False,
         "document_view": False,
         "kanban_view": False,
         "timeline": False,
+        "hierarchy_view": False,
         "relation_graph_view": False,
     }
     assert "screen_table_record_sets" not in result.render_plan
@@ -1472,9 +1601,11 @@ def test_renderer_selection_emits_kanban_elements_for_kanban_renderer(monkeypatc
         "workflow_view": False,
         "task_view": False,
         "calendar_view": False,
+        "location_view": False,
         "document_view": False,
         "kanban_view": True,
         "timeline": False,
+        "hierarchy_view": False,
         "relation_graph_view": False,
     }
     assert "screen_table_record_sets" not in result.render_plan
@@ -1585,9 +1716,11 @@ def test_renderer_selection_emits_relation_graph_elements_for_graph_renderer(mon
         "workflow_view": False,
         "task_view": False,
         "calendar_view": False,
+        "location_view": False,
         "document_view": False,
         "kanban_view": False,
         "timeline": False,
+        "hierarchy_view": False,
         "relation_graph_view": True,
     }
     assert "screen_table_record_sets" not in result.render_plan
@@ -1688,9 +1821,11 @@ def test_renderer_selection_fallback_when_no_types_selected(monkeypatch):
         "workflow_view": True,
         "task_view": False,
         "calendar_view": False,
+        "location_view": False,
         "document_view": False,
         "kanban_view": False,
         "timeline": False,
+        "hierarchy_view": False,
         "relation_graph_view": False,
     }
     assert result.render_plan.get("screen_table_record_set_count") == 1
@@ -2612,3 +2747,4 @@ def test_no_routing_info_when_selector_disabled(monkeypatch):
     )
 
     assert result.workflow_routing is None
+
