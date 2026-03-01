@@ -155,6 +155,67 @@ def test_metadata_validation_blocks_missing_write_variable() -> None:
     )
 
 
+def test_metadata_validation_materialises_terminal_effect_evidence() -> None:
+    workflow_id = "#V#terminal_effect_validation"
+    terminal_effect_id = "#V#workflow_effect_terminal_effect_validation_done_terminal"
+    definition = WorkflowDefinition(
+        workflow_id=workflow_id,
+        initial_state="done",
+        states={
+            "done": WorkflowStateSpec(
+                state_id="done",
+                terminal=True,
+                metadata={"effects": [terminal_effect_id]},
+            )
+        },
+    )
+    executor = WorkflowExecutor(registry=ActionRegistry(), max_transitions=5)
+
+    result = executor.run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={},
+    )
+
+    assert result.completed is True
+    assert result.error is None
+    assert result.data.get(terminal_effect_id) is True
+    assert result.data.get("workflow_effect_terminal_effect_validation_done_terminal") is True
+
+    events = result.data.get("workflow_terminal_effect_events")
+    assert isinstance(events, list)
+    assert events
+    assert events[-1].get("status") == "terminal_effect_materialised"
+    assert events[-1].get("symbol") == terminal_effect_id
+
+
+def test_metadata_validation_terminal_effect_materialisation_is_not_over_broad() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#terminal_effect_validation_non_terminal_symbol",
+        initial_state="done",
+        states={
+            "done": WorkflowStateSpec(
+                state_id="done",
+                terminal=True,
+                metadata={"effects": ["#V#workflow_effect_missing_terminal_suffix"]},
+            )
+        },
+    )
+    executor = WorkflowExecutor(registry=ActionRegistry(), max_transitions=5)
+
+    result = executor.run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={},
+    )
+
+    assert result.completed is False
+    assert result.error is not None
+    assert result.error.startswith(
+        "metadata_validation_failed:metadata_effect_unsatisfied:done:"
+    )
+
+
 def test_metadata_validation_warn_mode_records_failure_without_blocking(
     monkeypatch,
 ) -> None:

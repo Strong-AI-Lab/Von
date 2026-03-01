@@ -43,6 +43,8 @@ _NESTED_CONTEXT_KEYS: tuple[str, ...] = (
 )
 WORKFLOW_TOOL_OUTPUT_MAPPING_EVENTS_KEY = "workflow_tool_output_mapping_events"
 LAST_WORKFLOW_TOOL_OUTPUT_MAPPING_EVENT_KEY = "last_workflow_tool_output_mapping_event"
+WORKFLOW_TERMINAL_EFFECT_EVENTS_KEY = "workflow_terminal_effect_events"
+LAST_WORKFLOW_TERMINAL_EFFECT_EVENT_KEY = "last_workflow_terminal_effect_event"
 
 
 def _extract_context_binding_symbol(value: Any) -> str | None:
@@ -253,6 +255,87 @@ def apply_tool_output_context_mappings(
             context[WORKFLOW_TOOL_OUTPUT_MAPPING_EVENTS_KEY] = existing
         existing.extend(events)
         context[LAST_WORKFLOW_TOOL_OUTPUT_MAPPING_EVENT_KEY] = events[-1]
+
+    return events
+
+
+def _normalise_metadata_symbols(value: Any) -> List[str]:
+    if isinstance(value, str):
+        candidate = value.strip()
+        return [candidate] if candidate else []
+    if not isinstance(value, list):
+        return []
+    symbols: List[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        candidate = item.strip()
+        if candidate:
+            symbols.append(candidate)
+    return symbols
+
+
+def _looks_like_terminal_effect_symbol(symbol: str) -> bool:
+    token = str(symbol or "").strip().lower()
+    if token.startswith("#v#"):
+        token = token[3:]
+    return token.endswith("_terminal") or token.endswith(":terminal")
+
+
+def materialise_terminal_effect_context(
+    *,
+    context: Dict[str, Any],
+    state_spec: WorkflowStateSpec,
+    state_id: str,
+) -> List[Dict[str, Any]]:
+    """Materialise terminal-effect evidence into context before validation.
+
+    Vontology-authored workflows can declare synthetic terminal effects
+    (e.g., ``#V#workflow_effect_<workflow>_<state>_terminal``) on terminal
+    states. These effects are execution-boundary evidence rather than outputs
+    from a concrete action, so the engine materialises them deterministically
+    before post-action metadata validation.
+    """
+
+    metadata = state_spec.metadata if isinstance(state_spec.metadata, Mapping) else {}
+    effect_symbols = [
+        symbol
+        for symbol in _normalise_metadata_symbols(metadata.get("effects"))
+        if _looks_like_terminal_effect_symbol(symbol)
+    ]
+    if not effect_symbols:
+        return []
+
+    context["workflow_terminal"] = True
+    context["workflow_terminal_state"] = state_id
+
+    events: List[Dict[str, Any]] = []
+    for symbol in effect_symbols:
+        was_present = bool(context.get(symbol))
+        context[symbol] = True
+        alias = symbol[3:] if symbol.startswith("#V#") else symbol
+        alias_was_present = bool(context.get(alias)) if alias else False
+        if alias:
+            context[alias] = True
+
+        events.append(
+            {
+                "status": "terminal_effect_materialised",
+                "state_id": state_id,
+                "symbol": symbol,
+                "alias": alias if alias else None,
+                "already_present": was_present,
+                "alias_already_present": alias_was_present,
+                "applied": (not was_present) or (bool(alias) and not alias_was_present),
+            }
+        )
+
+    existing_events = context.get(WORKFLOW_TERMINAL_EFFECT_EVENTS_KEY)
+    if not isinstance(existing_events, list):
+        existing_events = []
+        context[WORKFLOW_TERMINAL_EFFECT_EVENTS_KEY] = existing_events
+    existing_events.extend(events)
+    context[LAST_WORKFLOW_TERMINAL_EFFECT_EVENT_KEY] = events[-1]
 
     return events
 
@@ -677,6 +760,13 @@ class WorkflowExecutor:
                         final_state=current_state,
                         error=unknown_error,
                     )
+
+            if current_state in termination_states:
+                materialise_terminal_effect_context(
+                    context=context,
+                    state_spec=state_spec,
+                    state_id=current_state,
+                )
 
             if state_has_unknown_route and bool(context.get("last_action_unknown")):
                 post_validation = skipped_metadata_validation(
