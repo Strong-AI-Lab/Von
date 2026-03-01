@@ -2860,6 +2860,44 @@ def test_plain_response_has_routing_info(monkeypatch):
     assert result.workflow_routing.source == "selector"
 
 
+def test_plain_response_overridden_to_tool_pipeline_for_mutative_intent(monkeypatch):
+    """Mutative intent should force tool-calling even when selector says plain response."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+
+    # Write-policy checks in orchestrator should only keep this on the
+    # tool-calling path when mutative intent is explicitly requested.
+    monkeypatch.setattr(
+        orchestrator._gateway,
+        "describe_methods",
+        lambda: {"add_relationship": {"category": "write"}},
+    )
+
+    llm = _CapturingLLM(
+        [
+            "plain_response",  # selector verdict
+            "I can create that relationship in the knowledge base.",  # tool-calling planner
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt="Create a concept link in Vontology.",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.verdict == "tool_seeking"
+    assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
+    assert result.workflow_routing.source == "selector_override"
+
+    aux_types = [
+        entry.get("type") for entry in result.aux_llm_calls if isinstance(entry, dict)
+    ]
+    assert "workflow_selector_override" in aux_types
+
+
 # ---------------------------------------------------------------------------
 # JVNAUTOSCI-825: Routing info on tool-calling path.
 # ---------------------------------------------------------------------------

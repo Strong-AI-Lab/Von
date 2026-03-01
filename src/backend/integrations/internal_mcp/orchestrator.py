@@ -100,7 +100,7 @@ class WorkflowRoutingInfo:
     prompt_id: str | None
     discovered_workflow_ids: tuple[str, ...]
     routing_duration_ms: float | None = None
-    source: str = "selector"  # "selector" | "default" | "presenter_mode"
+    source: str = "selector"  # "selector" | "selector_override" | "default" | "presenter_mode"
 
 
 @dataclass(frozen=True)
@@ -16389,6 +16389,39 @@ class InternalMCPChatOrchestrator:
             and selected_workflow_id_text
             and selected_workflow_id_text.lower() == selector_verdict
         )
+        method_catalogue_for_routing: Mapping[str, Any] = {}
+        describe_methods_for_routing = getattr(self._gateway, "describe_methods", None)
+        if callable(describe_methods_for_routing):
+            try:
+                described_methods = describe_methods_for_routing()
+                if isinstance(described_methods, Mapping):
+                    method_catalogue_for_routing = described_methods
+            except Exception:
+                method_catalogue_for_routing = {}
+        write_tool_candidates_for_routing = sorted(
+            {
+                str(tool_name).strip()
+                for tool_name in method_catalogue_for_routing.keys()
+                if isinstance(tool_name, str)
+                and str(tool_name).strip()
+                and self._is_write_tool(str(tool_name).strip(), method_catalogue_for_routing)
+            },
+            key=lambda value: value.lower(),
+        )
+        write_routing_policy_reason = "no_write_tools_available"
+        mutative_intent_requires_tool_routing = False
+        if write_tool_candidates_for_routing:
+            write_routing_policy_decision = compute_allowed_write_tools(
+                prompt=prompt,
+                requested_tools=write_tool_candidates_for_routing,
+                recent_user_prompts=recent_user_prompts or None,
+            )
+            write_routing_policy_reason = str(
+                write_routing_policy_decision.reason or ""
+            ).strip()
+            mutative_intent_requires_tool_routing = bool(
+                write_routing_policy_decision.allowed_tools
+            ) and not prompt_explicitly_denies_write(prompt)
 
         def _workflow_action_ids(workflow_id: str | None) -> set[str]:
             if not isinstance(workflow_id, str) or not workflow_id.strip():
@@ -20303,6 +20336,41 @@ class InternalMCPChatOrchestrator:
         #   2. custom_workflow — execute selected discovered workflow
         #   3. tool_pipeline   — execute registry workflow matching tool contract
         # ----------------------------------------------------------------
+        if selector_verdict == "plain_response" and mutative_intent_requires_tool_routing:
+            excluded_workflow_ids = sorted(
+                {
+                    CHAT_ASSISTANT_WORKFLOW_ID,
+                    selected_workflow_id_text or CHAT_ASSISTANT_WORKFLOW_ID,
+                }
+            )
+            selected_workflow_id = TOOL_CALLING_WORKFLOW_ID
+            selected_workflow_id_text = TOOL_CALLING_WORKFLOW_ID
+            selector_verdict = "tool_seeking"
+            selector_requests_narration = False
+            selector_requests_custom_workflow = False
+            if isinstance(routing_info, WorkflowRoutingInfo):
+                routing_info = WorkflowRoutingInfo(
+                    workflow_id=TOOL_CALLING_WORKFLOW_ID,
+                    verdict="tool_seeking",
+                    prompt_id=routing_info.prompt_id,
+                    discovered_workflow_ids=routing_info.discovered_workflow_ids,
+                    routing_duration_ms=routing_info.routing_duration_ms,
+                    source="selector_override",
+                )
+            override_payload: dict[str, Any] = {
+                "type": "workflow_selector_override",
+                "reason": "mutative_intent_requires_tool_pipeline",
+                "selected_workflow_id": TOOL_CALLING_WORKFLOW_ID,
+                "excluded_workflow_ids": excluded_workflow_ids,
+                "excluded_selector_verdicts": ["plain_response"],
+                "write_policy_reason": write_routing_policy_reason,
+                "write_tool_candidate_count": len(write_tool_candidates_for_routing),
+                "write_tool_candidates": write_tool_candidates_for_routing[:12],
+            }
+            aux_llm_calls.append(override_payload)
+            if trace_enabled and trace is not None:
+                trace.metadata["workflow_selector_override"] = dict(override_payload)
+
         selected_uses_tool_pipeline_contract = _workflow_matches_action_contract(
             selected_workflow_id_text,
             required_action_ids=_TOOL_PIPELINE_ACTION_IDS,
