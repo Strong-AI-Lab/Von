@@ -2953,6 +2953,19 @@ def test_write_intent_memory_rehydrates_for_same_session_continuation(monkeypatc
     )
     assert rehydrate_entry is not None
     assert rehydrate_entry.get("reused") is True
+    gate_entry = next(
+        (
+            entry
+            for entry in second.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "write_policy_gate"
+            and entry.get("stage") == "routing"
+        ),
+        None,
+    )
+    assert gate_entry is not None
+    assert gate_entry.get("gate_state") == "confirmed"
+    assert gate_entry.get("continuation_context_reused") is True
 
 
 def test_write_intent_memory_rejects_cross_session_continuation(monkeypatch):
@@ -3002,6 +3015,20 @@ def test_write_intent_memory_rejects_cross_session_continuation(monkeypatch):
         entry.get("type") for entry in second.aux_llm_calls if isinstance(entry, dict)
     ]
     assert "workflow_selector_override" not in aux_types
+    gate_entry = next(
+        (
+            entry
+            for entry in second.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "write_policy_gate"
+            and entry.get("stage") == "routing"
+        ),
+        None,
+    )
+    assert gate_entry is not None
+    assert gate_entry.get("gate_state") == "pending"
+    assert gate_entry.get("reason") == "no_explicit_write_intent_detected"
+    assert gate_entry.get("continuation_context_reused") is False
 
 
 # ---------------------------------------------------------------------------
