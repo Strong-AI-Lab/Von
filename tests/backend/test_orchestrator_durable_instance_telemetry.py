@@ -99,7 +99,15 @@ def test_execute_workflow_persists_completed_durable_instance_with_turn_summary(
             "completion_gate_decision_reason": "Required mutation was not executed.",
             "completion_gate_requires_follow_up": True,
             "completion_gate_safe_to_claim_completion": False,
+            "completion_gate_escalation_signal": True,
+            "completion_gate_escalation_reason": "no_progress_guard_triggered",
             "critic_summary": {"not_verified_count": 1},
+            "completion_gate_loop_stall_events": 3,
+            "completion_gate_loop_stall_elapsed_ms": 1_250,
+            "completion_gate_loop_stall_max_elapsed_ms": 1_000,
+            "completion_gate_loop_no_progress_streak": 2,
+            "completion_gate_loop_no_progress_limit": 2,
+            "completion_gate_loop_stop_reason": "no_progress_guard_triggered",
             "workflow_routing": {
                 "workflow_id": "#V#tool_calling_workflow",
                 "verdict": "tool_seeking",
@@ -185,6 +193,11 @@ def test_execute_workflow_persists_completed_durable_instance_with_turn_summary(
     assert isinstance(outputs, dict)
     assert outputs.get("completed") is True
     assert outputs.get("completion_gate_decision") == "escalation_required"
+    assert outputs.get("completion_gate_escalation_signal") is True
+    assert outputs.get("completion_gate_escalation_reason") == "no_progress_guard_triggered"
+    assert outputs.get("completion_gate_loop_stall_events") == 3
+    assert outputs.get("completion_gate_loop_stall_elapsed_ms") == 1_250
+    assert outputs.get("completion_gate_loop_stall_max_elapsed_ms") == 1_000
     turn_execution = outputs.get("turn_execution")
     assert isinstance(turn_execution, dict)
     assert turn_execution.get("request_id") == "req-123"
@@ -209,6 +222,11 @@ def test_execute_workflow_persists_completed_durable_instance_with_turn_summary(
     assert isinstance(completion_state, dict)
     assert completion_state.get("decision") == "escalation_required"
     assert completion_state.get("requires_follow_up") is True
+    assert completion_state.get("escalation_signal") is True
+    assert completion_state.get("escalation_reason") == "no_progress_guard_triggered"
+    assert completion_state.get("loop_stall_events") == 3
+    assert completion_state.get("loop_stall_elapsed_ms") == 1_250
+    assert completion_state.get("loop_stall_max_elapsed_ms") == 1_000
 
 
 def test_execute_workflow_marks_durable_instance_failed_on_exception(
