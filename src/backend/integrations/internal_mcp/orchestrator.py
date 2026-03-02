@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import time
+import requests
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import (
@@ -2696,6 +2697,12 @@ class InternalMCPChatOrchestrator:
             user_concept_id = request.data.get("user_concept_id")
             org_concept_id = request.data.get("org_concept_id")
             llm_calls_log = request.data.get("llm_calls_log")
+            emit_progress_raw = request.data.get("emit_progress")
+            emit_progress_cb: Callable[[Mapping[str, Any]], None] | None = (
+                cast(Callable[[Mapping[str, Any]], None], emit_progress_raw)
+                if callable(emit_progress_raw)
+                else None
+            )
 
             if (
                 isinstance(policy_state, _WorkflowModelPolicyState)
@@ -2726,6 +2733,7 @@ class InternalMCPChatOrchestrator:
                             llm_calls_log=llm_calls_log,
                             aux_log=aux_llm_calls,
                             record_llm_call=cast(Callable[..., Any], record_llm_call),
+                            emit_progress=emit_progress_cb,
                         )
                     )
                 except Exception as exc:
@@ -2735,21 +2743,63 @@ class InternalMCPChatOrchestrator:
             if buttonify_response is None:
                 llm_start = time.perf_counter()
                 try:
+                    if callable(emit_progress_cb):
+                        emit_progress_cb(
+                            {
+                                "status": "llm_call_start",
+                                "stage": "buttonify",
+                                "model": buttonify_model_used,
+                            }
+                        )
                     buttonify_response = request.environment.llm_client.generate(
                         prompt=buttonify_prompt_text,
                         context=[],
                         model=buttonify_model_used,
                     )
+                    llm_duration_ms = (time.perf_counter() - llm_start) * 1000.0
+                    if callable(emit_progress_cb):
+                        emit_progress_cb(
+                            {
+                                "status": "llm_call_chunk",
+                                "stage": "buttonify",
+                                "model": buttonify_model_used,
+                                "chunks": 1,
+                                "duration_ms": int(llm_duration_ms),
+                            }
+                        )
+                        emit_progress_cb(
+                            {
+                                "status": "llm_call_end",
+                                "stage": "buttonify",
+                                "model": buttonify_model_used,
+                                "duration_ms": int(llm_duration_ms),
+                                "success": True,
+                                "error": None,
+                            }
+                        )
                     if callable(record_llm_call):
                         cast(Callable[..., Any], record_llm_call)(
                             call_type="llm.generate",
                             model_name=buttonify_model_used,
-                            duration_ms=(time.perf_counter() - llm_start) * 1000.0,
+                            duration_ms=llm_duration_ms,
                             usage=None,
                             note="Buttonify quick-reply extraction (workflow fallback).",
                             stage="buttonify",
                         )
                 except Exception as exc:
+                    llm_duration_ms = (time.perf_counter() - llm_start) * 1000.0
+                    if callable(emit_progress_cb):
+                        emit_progress_cb(
+                            {
+                                "status": "llm_call_end",
+                                "stage": "buttonify",
+                                "model": buttonify_model_used,
+                                "duration_ms": int(llm_duration_ms),
+                                "success": False,
+                                "error": str(exc),
+                                "error_class": type(exc).__name__,
+                            }
+                        )
                     buttonify_error_class = type(exc).__name__
                     buttonify_response = None
 
@@ -8247,6 +8297,79 @@ class InternalMCPChatOrchestrator:
             telemetry["error"] = str(exc)
             return default_client, default_model, telemetry
 
+    @staticmethod
+    def _normalise_ollama_probe_host(raw_host: Any) -> str:
+        host = str(raw_host).strip() if isinstance(raw_host, str) else ""
+        if not host:
+            host = str(os.environ.get("OLLAMA_HOST") or "").strip()
+        if not host:
+            return "http://localhost:11434"
+        if host.startswith(("http://", "https://")):
+            return host.rstrip("/")
+        if ":" in host:
+            return f"http://{host}".rstrip("/")
+        return f"http://{host}:11434"
+
+    def _probe_model_candidate_reachability(
+        self,
+        *,
+        telemetry: Mapping[str, Any],
+    ) -> Mapping[str, Any] | None:
+        """Fast-fail provider candidates that are immediately unreachable.
+
+        This currently probes Ollama connectivity because local-runtime outages
+        are common and can otherwise add avoidable fallback latency.
+        """
+
+        provider = str(telemetry.get("provider") or "").strip().lower()
+        if provider != "ollama":
+            return None
+        if os.environ.get("VON_INTERNAL_MCP_OLLAMA_PROBE_ENABLED", "1").lower() not in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            return None
+
+        timeout_ms = self._coerce_int(
+            None,
+            env_var="VON_INTERNAL_MCP_OLLAMA_PROBE_TIMEOUT_MS",
+            default=1200,
+            min_value=100,
+            max_value=10000,
+        )
+        host = self._normalise_ollama_probe_host(telemetry.get("host"))
+        probe_url = f"{host}/api/tags"
+
+        probe_start = time.perf_counter()
+        try:
+            response = requests.get(
+                probe_url,
+                headers={"Accept": "application/json"},
+                timeout=max(0.1, float(timeout_ms) / 1000.0),
+            )
+            response.raise_for_status()
+            return {
+                "provider": provider,
+                "host": host,
+                "probe_url": probe_url,
+                "probe_timeout_ms": int(timeout_ms),
+                "duration_ms": int((time.perf_counter() - probe_start) * 1000.0),
+                "reachable": True,
+            }
+        except Exception as exc:
+            return {
+                "provider": provider,
+                "host": host,
+                "probe_url": probe_url,
+                "probe_timeout_ms": int(timeout_ms),
+                "duration_ms": int((time.perf_counter() - probe_start) * 1000.0),
+                "reachable": False,
+                "error": str(exc),
+                "error_class": type(exc).__name__,
+            }
+
     def _run_llm_with_fallbacks(
         self,
         *,
@@ -8272,9 +8395,11 @@ class InternalMCPChatOrchestrator:
         )
 
         errors: list[Mapping[str, Any]] = []
+        fallback_attempts: list[Mapping[str, Any]] = []
         last_exception: Exception | None = None
+        total_candidates = len(candidates)
 
-        for candidate in candidates:
+        for attempt_no, candidate in enumerate(candidates, start=1):
             client, model_name, telemetry = self._create_client_for_candidate(
                 candidate,
                 default_client=default_client,
@@ -8282,6 +8407,18 @@ class InternalMCPChatOrchestrator:
                 user_concept_id=user_concept_id,
                 org_concept_id=org_concept_id,
             )
+            provider = (
+                str(telemetry.get("provider")).strip()
+                if isinstance(telemetry, Mapping) and telemetry.get("provider")
+                else None
+            )
+
+            attempt_meta: dict[str, Any] = {
+                "fallback_attempt_no": attempt_no,
+                "fallback_candidate_count": total_candidates,
+            }
+            if provider:
+                attempt_meta["provider"] = provider
 
             if callable(emit_progress):
                 emit_progress(
@@ -8292,8 +8429,76 @@ class InternalMCPChatOrchestrator:
                         "candidate": (
                             dict(telemetry) if isinstance(telemetry, Mapping) else None
                         ),
+                        **attempt_meta,
                     }
                 )
+
+            reachability = self._probe_model_candidate_reachability(
+                telemetry=telemetry,
+            )
+            if isinstance(reachability, Mapping) and (
+                reachability.get("reachable") is False
+            ):
+                duration_ms = int(
+                    max(0.0, float(reachability.get("duration_ms") or 0.0))
+                )
+                probe_error = str(
+                    reachability.get("error")
+                    or "Provider preflight probe failed."
+                )
+                probe_error_class = str(
+                    reachability.get("error_class") or "ProviderProbeError"
+                )
+                if callable(emit_progress):
+                    emit_progress(
+                        {
+                            "status": "llm_call_end",
+                            "stage": stage,
+                            "model": model_name,
+                            "duration_ms": duration_ms,
+                            "success": False,
+                            "error": probe_error,
+                            "error_class": probe_error_class,
+                            "failure_kind": "provider_unreachable",
+                            **attempt_meta,
+                        }
+                    )
+                record_llm_call(
+                    call_type="llm.generate",
+                    model_name=model_name,
+                    duration_ms=duration_ms,
+                    usage=None,
+                    note="candidate reachability probe failed; trying fallback",
+                    stage=stage,
+                    provider=provider,
+                    candidate=telemetry,
+                )
+                error_entry = {
+                    "candidate": telemetry,
+                    "model_resolved": model_name,
+                    "error": probe_error,
+                    "error_class": probe_error_class,
+                    "failure_kind": "provider_unreachable",
+                }
+                errors.append(error_entry)
+                fallback_attempts.append(
+                    {
+                        "attempt_no": attempt_no,
+                        "provider": provider,
+                        "model": model_name,
+                        "status": "failed",
+                        "error": probe_error,
+                        "error_class": probe_error_class,
+                        "failure_kind": "provider_unreachable",
+                        "duration_ms": duration_ms,
+                        "candidate": dict(telemetry)
+                        if isinstance(telemetry, Mapping)
+                        else None,
+                        "probe": dict(reachability),
+                    }
+                )
+                continue
+
             llm_start = time.perf_counter()
             try:
                 response = client.generate(
@@ -8310,6 +8515,7 @@ class InternalMCPChatOrchestrator:
                             "model": model_name,
                             "chunks": 1,
                             "duration_ms": int(duration_ms),
+                            **attempt_meta,
                         }
                     )
                     emit_progress(
@@ -8319,6 +8525,9 @@ class InternalMCPChatOrchestrator:
                             "model": model_name,
                             "duration_ms": int(duration_ms),
                             "success": True,
+                            "error": None,
+                            "fallback_used": bool(errors),
+                            **attempt_meta,
                         }
                     )
                 record_llm_call(
@@ -8335,6 +8544,18 @@ class InternalMCPChatOrchestrator:
                     ),
                     candidate=telemetry,
                 )
+                fallback_attempts.append(
+                    {
+                        "attempt_no": attempt_no,
+                        "provider": provider,
+                        "model": model_name,
+                        "status": "succeeded",
+                        "duration_ms": int(duration_ms),
+                        "candidate": dict(telemetry)
+                        if isinstance(telemetry, Mapping)
+                        else None,
+                    }
+                )
                 aux_log.append(
                     {
                         "type": "workflow_model_policy_stage",
@@ -8344,6 +8565,9 @@ class InternalMCPChatOrchestrator:
                             "model_resolved": model_name,
                         },
                         "fallback_used": bool(errors),
+                        "fallback_attempt_count": len(fallback_attempts),
+                        "fallback_attempts": list(fallback_attempts),
+                        "failure_count": len(errors),
                         "errors": list(errors),
                     }
                 )
@@ -8359,6 +8583,9 @@ class InternalMCPChatOrchestrator:
                             "duration_ms": int(duration_ms),
                             "success": False,
                             "error": str(exc),
+                            "error_class": type(exc).__name__,
+                            "failure_kind": "candidate_error",
+                            **attempt_meta,
                         }
                     )
                 record_llm_call(
@@ -8379,8 +8606,25 @@ class InternalMCPChatOrchestrator:
                     "candidate": telemetry,
                     "model_resolved": model_name,
                     "error": str(exc),
+                    "error_class": type(exc).__name__,
+                    "failure_kind": "candidate_error",
                 }
                 errors.append(error_entry)
+                fallback_attempts.append(
+                    {
+                        "attempt_no": attempt_no,
+                        "provider": provider,
+                        "model": model_name,
+                        "status": "failed",
+                        "error": str(exc),
+                        "error_class": type(exc).__name__,
+                        "failure_kind": "candidate_error",
+                        "duration_ms": int(duration_ms),
+                        "candidate": dict(telemetry)
+                        if isinstance(telemetry, Mapping)
+                        else None,
+                    }
+                )
                 last_exception = exc
                 continue
 
@@ -8391,6 +8635,9 @@ class InternalMCPChatOrchestrator:
                     "stage": stage,
                     "selected": None,
                     "fallback_used": True,
+                    "fallback_attempt_count": len(fallback_attempts),
+                    "fallback_attempts": list(fallback_attempts),
+                    "failure_count": len(errors),
                     "errors": list(errors),
                 }
             )
@@ -8428,9 +8675,11 @@ class InternalMCPChatOrchestrator:
         )
 
         errors: list[Mapping[str, Any]] = []
+        fallback_attempts: list[Mapping[str, Any]] = []
         last_exception: Exception | None = None
+        total_candidates = len(candidates)
 
-        for candidate in candidates:
+        for attempt_no, candidate in enumerate(candidates, start=1):
             client, model_name, telemetry = self._create_client_for_candidate(
                 candidate,
                 default_client=default_client,
@@ -8438,6 +8687,17 @@ class InternalMCPChatOrchestrator:
                 user_concept_id=user_concept_id,
                 org_concept_id=org_concept_id,
             )
+            provider = (
+                str(telemetry.get("provider")).strip()
+                if isinstance(telemetry, Mapping) and telemetry.get("provider")
+                else None
+            )
+            attempt_meta: dict[str, Any] = {
+                "fallback_attempt_no": attempt_no,
+                "fallback_candidate_count": total_candidates,
+            }
+            if provider:
+                attempt_meta["provider"] = provider
 
             supports_structured = (
                 hasattr(client, "generate_with_tools")
@@ -8445,11 +8705,27 @@ class InternalMCPChatOrchestrator:
                 and client._should_use_structured_calling()
             )
             if not supports_structured:
-                errors.append(
+                error_entry = {
+                    "candidate": telemetry,
+                    "model_resolved": model_name,
+                    "error": "structured_tool_calling_disabled",
+                    "error_class": "StructuredToolCallingDisabled",
+                    "failure_kind": "candidate_capability",
+                }
+                errors.append(error_entry)
+                fallback_attempts.append(
                     {
-                        "candidate": telemetry,
-                        "model_resolved": model_name,
+                        "attempt_no": attempt_no,
+                        "provider": provider,
+                        "model": model_name,
+                        "status": "failed",
                         "error": "structured_tool_calling_disabled",
+                        "error_class": "StructuredToolCallingDisabled",
+                        "failure_kind": "candidate_capability",
+                        "duration_ms": 0,
+                        "candidate": dict(telemetry)
+                        if isinstance(telemetry, Mapping)
+                        else None,
                     }
                 )
                 continue
@@ -8527,6 +8803,84 @@ class InternalMCPChatOrchestrator:
                     else "none",
                 )
 
+            reachability = self._probe_model_candidate_reachability(
+                telemetry=telemetry,
+            )
+            if isinstance(reachability, Mapping) and (
+                reachability.get("reachable") is False
+            ):
+                duration_ms = int(
+                    max(0.0, float(reachability.get("duration_ms") or 0.0))
+                )
+                probe_error = str(
+                    reachability.get("error")
+                    or "Provider preflight probe failed."
+                )
+                probe_error_class = str(
+                    reachability.get("error_class") or "ProviderProbeError"
+                )
+                if callable(emit_progress):
+                    emit_progress(
+                        {
+                            "status": "llm_call_start",
+                            "stage": stage,
+                            "model": model_name,
+                            "candidate": (
+                                dict(telemetry) if isinstance(telemetry, Mapping) else None
+                            ),
+                            **attempt_meta,
+                        }
+                    )
+                    emit_progress(
+                        {
+                            "status": "llm_call_end",
+                            "stage": stage,
+                            "model": model_name,
+                            "duration_ms": duration_ms,
+                            "success": False,
+                            "error": probe_error,
+                            "error_class": probe_error_class,
+                            "failure_kind": "provider_unreachable",
+                            **attempt_meta,
+                        }
+                    )
+                record_llm_call(
+                    call_type="llm.generate_with_tools",
+                    model_name=model_name,
+                    duration_ms=duration_ms,
+                    usage=None,
+                    note="candidate reachability probe failed; trying fallback",
+                    stage=stage,
+                    provider=provider,
+                    candidate=telemetry,
+                )
+                errors.append(
+                    {
+                        "candidate": telemetry,
+                        "model_resolved": model_name,
+                        "error": probe_error,
+                        "error_class": probe_error_class,
+                        "failure_kind": "provider_unreachable",
+                    }
+                )
+                fallback_attempts.append(
+                    {
+                        "attempt_no": attempt_no,
+                        "provider": provider,
+                        "model": model_name,
+                        "status": "failed",
+                        "error": probe_error,
+                        "error_class": probe_error_class,
+                        "failure_kind": "provider_unreachable",
+                        "duration_ms": duration_ms,
+                        "candidate": dict(telemetry)
+                        if isinstance(telemetry, Mapping)
+                        else None,
+                        "probe": dict(reachability),
+                    }
+                )
+                continue
+
             if callable(emit_progress):
                 emit_progress(
                     {
@@ -8536,6 +8890,7 @@ class InternalMCPChatOrchestrator:
                         "candidate": (
                             dict(telemetry) if isinstance(telemetry, Mapping) else None
                         ),
+                        **attempt_meta,
                     }
                 )
             llm_start = time.perf_counter()
@@ -8564,6 +8919,7 @@ class InternalMCPChatOrchestrator:
                             "chunks": 1,
                             "tokens_streamed": completion_tokens,
                             "duration_ms": int(duration_ms),
+                            **attempt_meta,
                         }
                     )
                     emit_progress(
@@ -8573,6 +8929,9 @@ class InternalMCPChatOrchestrator:
                             "model": model_name,
                             "duration_ms": int(duration_ms),
                             "success": True,
+                            "error": None,
+                            "fallback_used": bool(errors),
+                            **attempt_meta,
                         }
                     )
                 record_llm_call(
@@ -8596,6 +8955,18 @@ class InternalMCPChatOrchestrator:
                     ),
                     candidate=telemetry,
                 )
+                fallback_attempts.append(
+                    {
+                        "attempt_no": attempt_no,
+                        "provider": provider,
+                        "model": model_name,
+                        "status": "succeeded",
+                        "duration_ms": int(duration_ms),
+                        "candidate": dict(telemetry)
+                        if isinstance(telemetry, Mapping)
+                        else None,
+                    }
+                )
                 aux_log.append(
                     {
                         "type": "workflow_model_policy_stage",
@@ -8605,6 +8976,9 @@ class InternalMCPChatOrchestrator:
                             "model_resolved": model_name,
                         },
                         "fallback_used": bool(errors),
+                        "fallback_attempt_count": len(fallback_attempts),
+                        "fallback_attempts": list(fallback_attempts),
+                        "failure_count": len(errors),
                         "errors": list(errors),
                     }
                 )
@@ -8620,6 +8994,9 @@ class InternalMCPChatOrchestrator:
                             "duration_ms": int(duration_ms),
                             "success": False,
                             "error": str(exc),
+                            "error_class": type(exc).__name__,
+                            "failure_kind": "candidate_error",
+                            **attempt_meta,
                         }
                     )
                 record_llm_call(
@@ -8641,6 +9018,23 @@ class InternalMCPChatOrchestrator:
                         "candidate": telemetry,
                         "model_resolved": model_name,
                         "error": str(exc),
+                        "error_class": type(exc).__name__,
+                        "failure_kind": "candidate_error",
+                    }
+                )
+                fallback_attempts.append(
+                    {
+                        "attempt_no": attempt_no,
+                        "provider": provider,
+                        "model": model_name,
+                        "status": "failed",
+                        "error": str(exc),
+                        "error_class": type(exc).__name__,
+                        "failure_kind": "candidate_error",
+                        "duration_ms": int(duration_ms),
+                        "candidate": dict(telemetry)
+                        if isinstance(telemetry, Mapping)
+                        else None,
                     }
                 )
                 last_exception = exc
@@ -8653,6 +9047,9 @@ class InternalMCPChatOrchestrator:
                     "stage": stage,
                     "selected": None,
                     "fallback_used": True,
+                    "fallback_attempt_count": len(fallback_attempts),
+                    "fallback_attempts": list(fallback_attempts),
+                    "failure_count": len(errors),
                     "errors": list(errors),
                 }
             )
