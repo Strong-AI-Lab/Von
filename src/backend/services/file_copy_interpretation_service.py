@@ -17,6 +17,22 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_DOCX_MIME_TYPES: frozenset[str] = frozenset(
+    {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/msword",
+    }
+)
+
+_FILE_SUBTYPE_RULES: tuple[dict[str, Any], ...] = (
+    {
+        "rule_id": "docx_mime_or_extension",
+        "type_concept_id": "#V#msword_docx_computer_file_copy",
+        "mime_types": _DOCX_MIME_TYPES,
+        "extensions": (".docx",),
+    },
+)
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -27,6 +43,74 @@ def _normalise_optional_text(value: Any) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned or None
+
+
+def _normalise_content_type_token(value: Any) -> str | None:
+    content_type = _normalise_optional_text(value)
+    if not content_type:
+        return None
+    # MIME parameters are optional for detection; keep only the media type token.
+    token = content_type.split(";", 1)[0].strip().lower()
+    return token or None
+
+
+def _normalise_filename_extension(value: Any) -> str | None:
+    filename = _normalise_optional_text(value)
+    if not filename:
+        return None
+    _base, extension = os.path.splitext(filename.lower())
+    return extension or None
+
+
+def infer_uploaded_file_subtype(
+    *,
+    content_type: str | None,
+    original_filename: str | None,
+) -> dict[str, Any]:
+    """Infer a specific uploaded file-copy subtype when evidence is sufficient."""
+
+    content_type_token = _normalise_content_type_token(content_type)
+    extension = _normalise_filename_extension(original_filename)
+
+    for rule in _FILE_SUBTYPE_RULES:
+        mime_types = {
+            item.strip().lower()
+            for item in (rule.get("mime_types") or ())
+            if isinstance(item, str) and item.strip()
+        }
+        extensions = {
+            item.strip().lower()
+            for item in (rule.get("extensions") or ())
+            if isinstance(item, str) and item.strip()
+        }
+        mime_match = (
+            isinstance(content_type_token, str) and content_type_token in mime_types
+        )
+        extension_match = isinstance(extension, str) and extension in extensions
+        if not (mime_match or extension_match):
+            continue
+        matched_signals: list[str] = []
+        if mime_match:
+            matched_signals.append("mime_type")
+        if extension_match:
+            matched_signals.append("filename_extension")
+        return {
+            "determinable": True,
+            "type_concept_id": rule.get("type_concept_id"),
+            "rule_id": rule.get("rule_id"),
+            "matched_signals": matched_signals,
+            "content_type_token": content_type_token,
+            "filename_extension": extension,
+        }
+
+    return {
+        "determinable": False,
+        "type_concept_id": None,
+        "rule_id": None,
+        "matched_signals": [],
+        "content_type_token": content_type_token,
+        "filename_extension": extension,
+    }
 
 
 def is_image_file(*, content_type: str | None, filename: str | None) -> bool:

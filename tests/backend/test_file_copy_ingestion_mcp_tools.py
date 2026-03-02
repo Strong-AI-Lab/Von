@@ -147,6 +147,137 @@ def test_interpret_file_copy_persists_image_interpretation(monkeypatch):
     assert "#V#has_file_copy_interpretation_json" in written_predicates
 
 
+def test_interpret_file_copy_asserts_docx_subtype_when_determinable(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.catalogue._read_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "text": "DOCX body text",
+            "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "original_filename": "Reading Group(3).docx",
+            "size_bytes": 2048,
+            "byte_length": 2048,
+            "blob": {"backend": "local", "key": "uploads/user/hash/reading-group.docx"},
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.file_copy_interpretation_service.build_document_interpretation",
+        lambda **_kwargs: {
+            "kind": "document",
+            "description": "Document text extracted: DOCX body text",
+            "subject_tags": ["document"],
+            "content_text": "DOCX body text",
+            "content_length": 14,
+        },
+    )
+
+    relation_calls: list[dict[str, object]] = []
+    text_writes: list[dict[str, object]] = []
+
+    def _fake_add_relationship(**kwargs):
+        relation_calls.append(dict(kwargs))
+        return {"success": True, "forward_modified": True}
+
+    def _fake_upsert_singleton_text_relation(**kwargs):
+        text_writes.append(dict(kwargs))
+        return {"relation_id": f"rel-{len(text_writes)}"}
+
+    monkeypatch.setattr(
+        "src.backend.services.relationship_write_service.add_relationship",
+        _fake_add_relationship,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.upsert_singleton_text_relation",
+        _fake_upsert_singleton_text_relation,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.rag_text_relation_change_hook_service.maybe_sync_concept_text_relations_to_rag",
+        lambda **_kwargs: None,
+    )
+
+    result = cat._interpret_file_copy(
+        concept_id="#V#file_copy_docx_test",
+        namespace="#V#user@org",
+    )
+
+    assert result["success"] is True
+    assert result["file_kind"] == "document"
+    assert result["subtype_type_concept_id"] == "#V#msword_docx_computer_file_copy"
+    assert result["diagnostics"]["subtype_assertion_outcome"] == "subtype_added"
+    assert result["persisted_structural_relations"] == [
+        {
+            "predicate": "is_an_instance_of",
+            "target_id": "#V#msword_docx_computer_file_copy",
+            "modified": True,
+        }
+    ]
+    assert relation_calls == [
+        {
+            "source_id": "#V#file_copy_docx_test",
+            "predicate": "is_an_instance_of",
+            "target": "#V#msword_docx_computer_file_copy",
+        }
+    ]
+    assert "hasDescription" in [row["predicate"] for row in text_writes]
+
+
+def test_interpret_file_copy_reports_subtype_assertion_failure(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.catalogue._read_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "text": "DOCX body text",
+            "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "original_filename": "Reading Group(3).docx",
+            "size_bytes": 2048,
+            "byte_length": 2048,
+            "blob": {"backend": "local", "key": "uploads/user/hash/reading-group.docx"},
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.file_copy_interpretation_service.build_document_interpretation",
+        lambda **_kwargs: {
+            "kind": "document",
+            "description": "Document text extracted: DOCX body text",
+            "subject_tags": ["document"],
+            "content_text": "DOCX body text",
+            "content_length": 14,
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.relationship_write_service.add_relationship",
+        lambda **_kwargs: {
+            "success": False,
+            "error": "target_not_found",
+            "target_id": "#V#msword_docx_computer_file_copy",
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.upsert_singleton_text_relation",
+        lambda **_kwargs: {"relation_id": "rel-test"},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.rag_text_relation_change_hook_service.maybe_sync_concept_text_relations_to_rag",
+        lambda **_kwargs: None,
+    )
+
+    result = cat._interpret_file_copy(
+        concept_id="#V#file_copy_docx_test",
+        namespace="#V#user@org",
+    )
+
+    assert result["success"] is False
+    assert result["subtype_type_concept_id"] == "#V#msword_docx_computer_file_copy"
+    assert result["diagnostics"]["subtype_assertion_outcome"] == "subtype_assertion_failed"
+    assert result["persist_errors"]
+    assert result["persist_errors"][0]["predicate"] == "is_an_instance_of"
+    assert result["persist_errors"][0]["error"] == "target_not_found"
+
+
 def test_interpret_file_copy_supports_non_persist_mode(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue as cat
 

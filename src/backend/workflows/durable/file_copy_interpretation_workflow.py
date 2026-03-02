@@ -16,6 +16,16 @@ from ..engine import (
 from ..workflow_registry import WorkflowRegistration
 
 FILE_COPY_INTERPRETATION_WORKFLOW_ID = "#V#file_copy_interpretation_workflow"
+_FILE_COPY_CONTEXT_INPUTS = {
+    "concept_id": {
+        "$context_key": "concept_id",
+        "$mapping_concept_id": "#V#workflow_mapping_concept_id_to_concept_id_parameter",
+    },
+    "file_copy_concept_id": {
+        "$context_key": "file_copy_concept_id",
+        "$mapping_concept_id": "#V#workflow_mapping_file_copy_concept_id_to_file_copy_concept_id_parameter",
+    },
+}
 
 
 def build_file_copy_interpretation_workflow() -> WorkflowDefinition:
@@ -24,6 +34,7 @@ def build_file_copy_interpretation_workflow() -> WorkflowDefinition:
         actions=(
             WorkflowActionInvocation(
                 action_id="interpret_file_copy",
+                inputs=dict(_FILE_COPY_CONTEXT_INPUTS),
                 description=(
                     "Extract structured interpretation from a blob-backed "
                     "#V#computer_file_copy and persist canonical text relations."
@@ -49,6 +60,7 @@ def build_file_copy_interpretation_workflow() -> WorkflowDefinition:
         actions=(
             WorkflowActionInvocation(
                 action_id="index_file_copy",
+                inputs=dict(_FILE_COPY_CONTEXT_INPUTS),
                 description="Index extracted file-copy text into RAG for the namespace.",
             ),
         ),

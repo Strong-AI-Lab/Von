@@ -101,3 +101,65 @@ def test_file_copy_ingestion_tools_gateway_invoke(monkeypatch):
     ).payload
     assert interpreted.get("success") is True
     assert interpreted.get("file_kind") == "document"
+
+
+def test_interpret_file_copy_gateway_asserts_docx_subtype(monkeypatch):
+    gateway = _build_gateway()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.catalogue._read_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "text": "Gateway DOCX text",
+            "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "original_filename": "Gateway.docx",
+            "size_bytes": 64,
+            "byte_length": 64,
+            "blob": {"backend": "local", "key": "imports/user/hash/gateway.docx"},
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.file_copy_interpretation_service.build_document_interpretation",
+        lambda **_kwargs: {
+            "kind": "document",
+            "description": "Document text extracted: Gateway DOCX text",
+            "subject_tags": ["document"],
+            "content_text": "Gateway DOCX text",
+            "content_length": 17,
+        },
+    )
+
+    relation_calls: list[dict[str, object]] = []
+
+    def _fake_add_relationship(**kwargs):
+        relation_calls.append(dict(kwargs))
+        return {"success": True, "forward_modified": True}
+
+    monkeypatch.setattr(
+        "src.backend.services.relationship_write_service.add_relationship",
+        _fake_add_relationship,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.upsert_singleton_text_relation",
+        lambda **_kwargs: {"relation_id": "rel-gateway"},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.rag_text_relation_change_hook_service.maybe_sync_concept_text_relations_to_rag",
+        lambda **_kwargs: None,
+    )
+
+    interpreted = gateway.invoke(
+        "interpret_file_copy",
+        {"concept_id": "#V#imported_file_gateway", "namespace": "#V#user@org"},
+    ).payload
+
+    assert interpreted.get("success") is True
+    assert interpreted.get("subtype_type_concept_id") == "#V#msword_docx_computer_file_copy"
+    assert interpreted.get("diagnostics", {}).get("subtype_assertion_outcome") == "subtype_added"
+    assert relation_calls == [
+        {
+            "source_id": "#V#imported_file_gateway",
+            "predicate": "is_an_instance_of",
+            "target": "#V#msword_docx_computer_file_copy",
+        }
+    ]

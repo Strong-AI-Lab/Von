@@ -3178,11 +3178,13 @@ def _interpret_file_copy(**kwargs):
     from ...services.file_copy_interpretation_service import (
         build_document_interpretation,
         build_image_interpretation,
+        infer_uploaded_file_subtype,
         is_image_file,
     )
     from ...services.rag_text_relation_change_hook_service import (
         maybe_sync_concept_text_relations_to_rag,
     )
+    from ...services.relationship_write_service import add_relationship
     from ...services.text_value_service import upsert_singleton_text_relation
 
     concept_id = kwargs.get("concept_id") or kwargs.get("file_copy_concept_id")
@@ -3312,6 +3314,17 @@ def _interpret_file_copy(**kwargs):
         )
         else "document"
     )
+    subtype_detection = infer_uploaded_file_subtype(
+        content_type=content_type if isinstance(content_type, str) else None,
+        original_filename=(
+            original_filename if isinstance(original_filename, str) else None
+        ),
+    )
+    subtype_type_concept_id = (
+        subtype_detection.get("type_concept_id")
+        if isinstance(subtype_detection, dict)
+        else None
+    )
 
     interpretation: dict[str, Any]
     image_fetch_error: str | None = None
@@ -3382,8 +3395,51 @@ def _interpret_file_copy(**kwargs):
         content_for_persist = None
 
     persisted_relations: list[dict[str, Any]] = []
+    persisted_structural_relations: list[dict[str, Any]] = []
     persist_errors: list[dict[str, Any]] = []
+    subtype_assertion: dict[str, Any] | None = None
+    subtype_assertion_outcome = "not_attempted"
     if persist:
+        if isinstance(subtype_type_concept_id, str) and subtype_type_concept_id.strip():
+            with _with_namespace_actor_override(effective_namespace):
+                subtype_assertion = add_relationship(
+                    source_id=concept_id,
+                    predicate="is_an_instance_of",
+                    target=subtype_type_concept_id.strip(),
+                )
+            if not isinstance(subtype_assertion, dict):
+                subtype_assertion = {
+                    "success": False,
+                    "error": "unexpected_subtype_assertion_response_shape",
+                    "response_type": type(subtype_assertion).__name__,
+                }
+            if subtype_assertion.get("success") is True:
+                subtype_assertion_outcome = (
+                    "subtype_added"
+                    if bool(subtype_assertion.get("forward_modified"))
+                    else "subtype_already_present"
+                )
+                persisted_structural_relations.append(
+                    {
+                        "predicate": "is_an_instance_of",
+                        "target_id": subtype_type_concept_id.strip(),
+                        "modified": bool(subtype_assertion.get("forward_modified")),
+                    }
+                )
+            else:
+                subtype_assertion_outcome = "subtype_assertion_failed"
+                persist_errors.append(
+                    {
+                        "predicate": "is_an_instance_of",
+                        "target_id": subtype_type_concept_id.strip(),
+                        "error": subtype_assertion.get("error")
+                        or "subtype_assertion_failed",
+                        "details": subtype_assertion,
+                    }
+                )
+        else:
+            subtype_assertion_outcome = "subtype_not_determinable"
+
         writes: list[tuple[str, str | None]] = []
         if persist_description and isinstance(description, str) and description.strip():
             writes.append(("hasDescription", description.strip()))
@@ -3441,6 +3497,8 @@ def _interpret_file_copy(**kwargs):
                             "error": str(exc),
                         }
                     )
+    else:
+        subtype_assertion_outcome = "persist_disabled"
 
     content_text = extracted_text if isinstance(extracted_text, str) else None
     text_preview = None
@@ -3455,6 +3513,11 @@ def _interpret_file_copy(**kwargs):
         "success": len(persist_errors) == 0,
         "concept_id": concept_id,
         "file_kind": file_kind,
+        "subtype_type_concept_id": (
+            subtype_type_concept_id
+            if isinstance(subtype_type_concept_id, str) and subtype_type_concept_id.strip()
+            else None
+        ),
         "description": description,
         "content_type": content_type,
         "original_filename": original_filename,
@@ -3465,7 +3528,13 @@ def _interpret_file_copy(**kwargs):
         "interpretation": interpretation,
         "persisted": persist and len(persist_errors) == 0,
         "persisted_relations": persisted_relations,
+        "persisted_structural_relations": persisted_structural_relations,
         "persist_errors": persist_errors,
+        "diagnostics": {
+            "subtype_detection": subtype_detection,
+            "subtype_assertion_outcome": subtype_assertion_outcome,
+            "subtype_assertion": subtype_assertion,
+        },
         "namespace": effective_namespace,
         **ns_report,
         "read_result": {
@@ -6049,6 +6118,7 @@ def _interpret_file_copy_output_schema() -> Schema:
             "message": (str, type(None)),
             "concept_id": (str, type(None)),
             "file_kind": (str, type(None)),
+            "subtype_type_concept_id": (str, type(None)),
             "description": (str, type(None)),
             "content_type": (str, type(None)),
             "original_filename": (str, type(None)),
@@ -6059,7 +6129,9 @@ def _interpret_file_copy_output_schema() -> Schema:
             "interpretation": (dict, type(None)),
             "persisted": (bool, type(None)),
             "persisted_relations": (list, type(None)),
+            "persisted_structural_relations": (list, type(None)),
             "persist_errors": (list, type(None)),
+            "diagnostics": (dict, type(None)),
             "namespace": (str, type(None)),
             "read_result": (dict, type(None)),
             "image_fetch_error": (str, type(None)),

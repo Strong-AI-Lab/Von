@@ -126,6 +126,9 @@ _STEP_RELATIONSHIP_ALIAS_KEYS: tuple[str, ...] = tuple(
         (
             *WORKFLOW_GRAPH_PREDICATE_ALIASES["invokesAction"],
             *WORKFLOW_GRAPH_PREDICATE_ALIASES["workflowStepInvokesTool"],
+            *WORKFLOW_GRAPH_PREDICATE_ALIASES[
+                "workflowStepMapsContextKeyToToolParam"
+            ],
             *WORKFLOW_GRAPH_PREDICATE_ALIASES["nextStep"],
             *WORKFLOW_GRAPH_PREDICATE_ALIASES["onTrueNextStep"],
             *WORKFLOW_GRAPH_PREDICATE_ALIASES["onFalseNextStep"],
@@ -144,6 +147,7 @@ class _CanonicalStepPublicationSpec:
     state_id: str
     concept_id: str | None = None
     action_id: str | None = None
+    context_input_mappings: tuple[str, ...] = ()
     next_state: str | None = None
     on_true_state: str | None = None
     on_false_state: str | None = None
@@ -156,6 +160,12 @@ class _CanonicalStepPublicationSpec:
 class _CanonicalWorkflowPublicationSpec:
     initial_state: str
     steps: tuple[_CanonicalStepPublicationSpec, ...]
+
+
+_FILE_COPY_WORKFLOW_CONTEXT_INPUT_MAPPINGS: tuple[str, ...] = (
+    "#V#workflow_mapping_concept_id_to_concept_id_parameter",
+    "#V#workflow_mapping_file_copy_concept_id_to_file_copy_concept_id_parameter",
+)
 
 
 # Keep this mapping deterministic so publication is stable across runs.
@@ -327,12 +337,14 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
             _CanonicalStepPublicationSpec(
                 state_id="interpret",
                 action_id="interpret_file_copy",
+                context_input_mappings=_FILE_COPY_WORKFLOW_CONTEXT_INPUT_MAPPINGS,
                 on_true_state="index",
                 on_false_state="complete",
             ),
             _CanonicalStepPublicationSpec(
                 state_id="index",
                 action_id="index_file_copy",
+                context_input_mappings=_FILE_COPY_WORKFLOW_CONTEXT_INPUT_MAPPINGS,
                 next_state="complete",
             ),
             _CanonicalStepPublicationSpec(state_id="complete"),
@@ -642,6 +654,18 @@ def publish_canonical_chat_workflow_graphs(
                 step_relationships[_CANONICAL_GRAPH_PREDICATES["invokesAction"]] = [
                     step.action_id.strip()
                 ]
+            if step.context_input_mappings:
+                mapping_ids = [
+                    item.strip()
+                    for item in step.context_input_mappings
+                    if isinstance(item, str) and item.strip()
+                ]
+                if mapping_ids:
+                    step_relationships[
+                        _CANONICAL_GRAPH_PREDICATES[
+                            "workflowStepMapsContextKeyToToolParam"
+                        ]
+                    ] = mapping_ids
 
             if isinstance(step.next_state, str) and step.next_state.strip():
                 step_relationships[_CANONICAL_GRAPH_PREDICATES["nextStep"]] = [

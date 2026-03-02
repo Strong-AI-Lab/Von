@@ -243,6 +243,9 @@ def test_bootstrap_publishes_canonical_chat_graphs_with_loader_runtime_parity(
             assert tuple(action.action_id for action in loaded_state.actions) == tuple(
                 action.action_id for action in built_state.actions
             )
+            assert [dict(action.inputs) for action in loaded_state.actions] == [
+                dict(action.inputs) for action in built_state.actions
+            ]
             assert {transition.to_state for transition in loaded_state.transitions} == {
                 authority_service._step_concept_id(
                     workflow_id=workflow_id,
