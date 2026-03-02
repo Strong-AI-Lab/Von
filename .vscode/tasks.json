@@ -7,7 +7,7 @@
 			"script": "test:frontend",
 			"group": {
 				"kind": "test",
-				"isDefault": true
+				"isDefault": false
 			},
 			"problemMatcher": []
 		},
@@ -40,7 +40,10 @@
 			"command": "& { $env:VON_DB_NAME = 'test_von_db'; pdm run pytest tests/backend -q }",
 			"isBackground": false,
 			"problemMatcher": [],
-			"group": "test"
+			"group": {
+				"kind": "test",
+				"isDefault": true
+			}
 		}
 	]
 }

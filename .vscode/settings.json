@@ -9,12 +9,15 @@
     "-q",
     "tests"
   ],
+  "python.testing.cwd": "${workspaceFolder}",
+  "python.testing.pytestPath": "${workspaceFolder}\\.venv\\Scripts\\pytest.exe",
   "python.testing.pytestLogLevel": "WARNING",
   "python.testing.pytestEnv": {
     "VON_DB_NAME": "test_von_db",
     "VON_USE_MOCK_DB": "1"
   },
   "jest.jestCommandLine": "npm run test:frontend --",
+  "jest.shell": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
   "jest.rootPath": "${workspaceFolder}",
   "jest.runMode": "on-demand",
   "terminal.integrated.defaultProfile.windows": "PowerShell",

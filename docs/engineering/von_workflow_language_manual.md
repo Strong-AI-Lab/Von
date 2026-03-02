@@ -376,6 +376,111 @@ A VWL workflow is conformant when:
 - discovered actions are runnable in current registry,
 - submission verification passes preflight and postflight.
 
+## 16. Analysis-Driven Refinements (March 2026 Planning Baseline)
+
+This section captures planning-level refinements derived from the March 2026 source-analysis cycle (Codex workflow examples, SKILL models, and prompt-file metadata patterns).
+
+Unless explicitly implemented in runtime code, items below are normative planning targets for upcoming VWL capability work.
+
+### 16.1 Canonical Task Identity and External Projection
+
+- VWL workflows that operate on issue/task systems MUST treat Von-native task entities as canonical state.
+- External systems (for example Jira) SHOULD be modelled as projection/mirror surfaces.
+- Workflow steps that project state outward MUST carry stable traceability identifiers linking:
+  - canonical task identity,
+  - workflow instance/request identity,
+  - and external issue/update identity.
+
+### 16.2 Fan-Out and Batch Semantics
+
+- VWL SHOULD support first-class fan-out/map execution over task sets with per-item failure isolation.
+- Batch-oriented workflows SHOULD provide bounded windows and batch-level gate hooks before promote/commit stages.
+- Per-item and per-batch idempotency keys SHOULD be modelled explicitly to avoid duplicate side effects (for example branch, PR, and comment operations).
+
+### 16.3 Long-Horizon Workflow State
+
+- VWL SHOULD support durable plan-state artefacts for multi-hour workflows.
+- Recommended plan state includes step status (`pending|in_progress|blocked|done`), checkpoint timestamps, and resumable cursors.
+- Long-running workflows SHOULD expose periodic summary hooks and completion gates that verify declared deliverables before terminal success.
+
+### 16.4 Gate and Policy Semantics
+
+- Workflow definitions SHOULD support explicit approval and escalation gates between analysis and mutation stages.
+- LLM/tool steps SHOULD allow typed output contracts with deterministic validation failure branches.
+- Retry semantics SHOULD include bounded retries, backoff policy, and terminal-failure routing.
+
+### 16.5 Prompt Metadata Contract Extensions
+
+For prompt-bearing workflow or prompt concepts, VWL planning SHOULD support metadata fields equivalent to modern prompt-file ecosystems.
+
+Candidate predicate set (planning):
+
+- `#V#hasPromptName`
+- `#V#hasPromptDescription`
+- `#V#hasArgumentHint`
+- `#V#usesAgentProfile`
+- `#V#usesModelPreference`
+- `#V#allowsTool` (repeatable)
+- `#V#hasPromptScope` (`workspace|user|organisation|extension`)
+- `#V#hasPromptVariables`
+- `#V#hasPromptSource`
+- `#V#hasToolResolutionPriority`
+
+Conflict handling for prompt metadata SHOULD be deterministic, with documented precedence (for example prompt-level over agent defaults).
+
+### 16.6 External SKILL Interoperability
+
+VWL planning supports a dual interoperability direction for external SKILL artefacts:
+
+1. direct execution of supported SKILL formats through a constrained adapter runtime, and
+2. deterministic import/transpile of SKILL artefacts into VWL workflow definitions.
+
+Both modes SHOULD enforce:
+
+- capability and side-effect allowlists,
+- provenance capture from source artefact to runtime instance,
+- and canonical-task traceability across external projections.
+
+For compatibility with the VS Code Agent Skills model, SKILL interoperability SHOULD also support:
+
+- canonical `SKILL.md` YAML frontmatter ingestion and validation,
+- required fields: `name`, `description`,
+- optional fields: `argument-hint`, `user-invokable`, `disable-model-invocation`,
+- directory/name consistency validation (`name` MUST match parent directory),
+- and source-location provenance for project and personal skill search roots.
+
+Candidate predicate set (planning) for skill concepts:
+
+- `#V#hasSkillName`
+- `#V#hasSkillDescription`
+- `#V#hasSkillArgumentHint`
+- `#V#isUserInvokable`
+- `#V#disablesModelInvocation`
+- `#V#hasSkillSourceScope` (`project|personal|extension|shared`)
+- `#V#hasSkillDiscoveryLocation`
+
+Skill loading SHOULD preserve progressive disclosure semantics:
+
+1. discovery by lightweight metadata (`name`/`description`),
+2. instruction-body load on relevance or explicit invocation,
+3. deferred resource-file loading on demand.
+
+This allows large skill catalogues without unbounded prompt-context consumption and aligns with deterministic VWL runnability and observability goals.
+
+### 16.7 Provider-Agnostic Integration Boundary
+
+- Workflow logic SHOULD remain provider-agnostic (GitHub/GitLab/Jira adapters as bindings, not baked workflow semantics).
+- Security- and quality-sensitive loops SHOULD expose policy hooks for risk-tiered review requirements.
+- Scanner/model/tool provenance SHOULD be preserved in context diagnostics for reproducibility audits.
+
+### 16.8 Implementation Planning Output Requirement
+
+After analysis and manual refinement are complete, maintainers SHOULD create linked implementation tasks that:
+
+- scope each capability increment separately,
+- define acceptance checks and sequencing,
+- and preserve traceability back to analysis sources.
+
 ---
 
 ## Appendix A: Diagram Specification Pack (Tool-Ready)
