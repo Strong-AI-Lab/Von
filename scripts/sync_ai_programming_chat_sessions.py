@@ -6,7 +6,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +21,9 @@ from src.backend.services.ai_chat_session_ingestion_service import (  # noqa: E4
     CopilotSessionAdapter,
     GenericSessionAdapter,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_user_concept_id(explicit_user_concept_id: str | None) -> str:
@@ -45,6 +48,41 @@ def _resolve_user_concept_id(explicit_user_concept_id: str | None) -> str:
     )
 
 
+def _discover_standard_copilot_roots() -> list[Path]:
+    roots: list[Path] = [COPILOT_DEFAULT_ROOT]
+    appdata = os.getenv("APPDATA")
+    if not appdata:
+        return roots
+
+    user_roots = [
+        Path(appdata) / "Code" / "User",
+        Path(appdata) / "Code - Insiders" / "User",
+    ]
+    for user_root in user_roots:
+        workspace_storage = user_root / "workspaceStorage"
+        if workspace_storage.exists() and workspace_storage.is_dir():
+            for workspace_dir in workspace_storage.iterdir():
+                if not workspace_dir.is_dir():
+                    continue
+                chat_sessions = workspace_dir / "chatSessions"
+                if chat_sessions.exists() and chat_sessions.is_dir():
+                    roots.append(chat_sessions)
+
+        empty_window_chat_sessions = user_root / "globalStorage" / "emptyWindowChatSessions"
+        if empty_window_chat_sessions.exists() and empty_window_chat_sessions.is_dir():
+            roots.append(empty_window_chat_sessions)
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = str(root.resolve()) if root.exists() else str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(root)
+    return unique
+
+
 def _build_adapters(
     *,
     codex_root: str | None,
@@ -56,7 +94,7 @@ def _build_adapters(
     effective_copilot_roots = (
         [Path(root).expanduser() for root in copilot_roots]
         if copilot_roots
-        else [COPILOT_DEFAULT_ROOT]
+        else _discover_standard_copilot_roots()
     )
     effective_claude_roots = (
         [Path(root).expanduser() for root in claude_roots]
@@ -96,6 +134,29 @@ def _build_adapters(
             name_tokens=("chat", "session", "conversation", "history"),
         ),
     ]
+
+
+def _build_progress_callback(
+    *,
+    progress_jsonl_path: Path | None,
+    emit_progress_ndjson: bool,
+) -> Any:
+    handle = None
+    if progress_jsonl_path is not None:
+        progress_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = progress_jsonl_path.open("w", encoding="utf-8")
+
+    def _callback(event: dict[str, Any]) -> None:
+        event_json = json.dumps(event, ensure_ascii=True)
+        logger.info("sync_incremental_progress=%s", event_json)
+        if emit_progress_ndjson:
+            print(event_json, file=sys.stderr, flush=True)
+        if handle is not None:
+            handle.write(event_json + "\n")
+            handle.flush()
+
+    _callback._handle = handle  # type: ignore[attr-defined]
+    return _callback
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -153,6 +214,19 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional file path to persist run summary JSON.",
     )
     parser.add_argument(
+        "--progress-jsonl",
+        default=None,
+        help=(
+            "Optional NDJSON file path for incremental per-record telemetry. "
+            "If omitted and --output-json is set, defaults to <output-json>.progress.jsonl."
+        ),
+    )
+    parser.add_argument(
+        "--emit-progress-ndjson",
+        action="store_true",
+        help="Emit incremental telemetry events as NDJSON lines to stderr.",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         help="Python logging level (default: INFO).",
@@ -164,6 +238,7 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
 
+    progress_callback: Any | None = None
     try:
         user_concept_id = _resolve_user_concept_id(args.user_concept_id)
         adapters = _build_adapters(
@@ -172,6 +247,24 @@ def main(argv: list[str] | None = None) -> int:
             claude_roots=args.claude_root,
             antigravity_roots=args.antigravity_root,
         )
+        copilot_roots = [
+            str(root)
+            for adapter in adapters
+            if isinstance(adapter, CopilotSessionAdapter)
+            for root in adapter.roots
+        ]
+        logger.info("copilot_scan_roots=%s", json.dumps(copilot_roots, ensure_ascii=True))
+        progress_jsonl_path = None
+        if isinstance(args.progress_jsonl, str) and args.progress_jsonl.strip():
+            progress_jsonl_path = Path(args.progress_jsonl.strip()).expanduser()
+        elif isinstance(args.output_json, str) and args.output_json.strip():
+            progress_jsonl_path = Path(
+                args.output_json.strip() + ".progress.jsonl"
+            ).expanduser()
+        progress_callback = _build_progress_callback(
+            progress_jsonl_path=progress_jsonl_path,
+            emit_progress_ndjson=bool(args.emit_progress_ndjson),
+        )
         service = AIChatSessionIngestionService(
             user_concept_id=user_concept_id,
             adapters=adapters,
@@ -179,6 +272,7 @@ def main(argv: list[str] | None = None) -> int:
         result = service.run(
             dry_run=not bool(args.apply),
             limit=args.limit,
+            progress_callback=progress_callback,
         )
         payload = result.to_dict()
         print(json.dumps(payload, indent=2, ensure_ascii=True))
@@ -207,6 +301,17 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+    finally:
+        handle = None
+        try:
+            handle = getattr(progress_callback, "_handle", None)
+        except Exception:
+            handle = None
+        if handle is not None:
+            try:
+                handle.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

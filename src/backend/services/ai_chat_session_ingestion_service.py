@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol, Sequence
+from typing import Any, Callable, Protocol, Sequence
 
 from . import concept_service
 from .computer_file_copy_service import import_local_file_copy
@@ -16,7 +16,12 @@ from .relationship_write_service import add_relationship
 
 logger = logging.getLogger(__name__)
 
-PRED_DOC_HAS_FILE_COPY = "#V#propositional_information_thing_has_computer_file_copy"
+ProgressCallback = Callable[[dict[str, Any]], None]
+
+PRED_DOC_HAS_FILE = "#V#propositional_information_thing_has_computer_file"
+LEGACY_PRED_DOC_HAS_FILE_COPY = (
+    "#V#propositional_information_thing_has_computer_file_copy"
+)
 PRED_FILE_FOR_DOC = "#V#computer_file_for_propositional_information_thing"
 PRED_INSTANCE_OF = "#V#is_an_instance_of"
 
@@ -157,6 +162,7 @@ class SessionDecision:
     reason: str
     record: SessionRecord
     document_concept_id: str
+    repair_file_copy_concept_id: str | None = None
 
 
 @dataclass
@@ -433,7 +439,7 @@ class AIChatSessionIngestionService:
                 notes=(
                     "This concept models abstract session content. Concrete files that "
                     "embody the session are represented separately as file-copy concepts "
-                    f"and linked via {PRED_DOC_HAS_FILE_COPY}."
+                    f"and linked via {PRED_DOC_HAS_FILE}."
                 ),
             )
             self._ensure_type_concept(
@@ -467,8 +473,8 @@ class AIChatSessionIngestionService:
                 )
 
             self._ensure_predicate_concept(
-                concept_id=PRED_DOC_HAS_FILE_COPY,
-                name="propositional_information_thing_has_computer_file_copy",
+                concept_id=PRED_DOC_HAS_FILE,
+                name="propositional_information_thing_has_computer_file",
                 description=(
                     "Relates an abstract propositional-information document to one "
                     "of its concrete computer file copies."
@@ -491,7 +497,7 @@ class AIChatSessionIngestionService:
         required_concepts: list[str] = [
             BASE_DOCUMENT_TYPE_ID,
             BASE_FILE_COPY_TYPE_ID,
-            PRED_DOC_HAS_FILE_COPY,
+            PRED_DOC_HAS_FILE,
             PRED_FILE_FOR_DOC,
         ]
         for cfg in ENVIRONMENT_CONFIGS.values():
@@ -502,7 +508,13 @@ class AIChatSessionIngestionService:
                 warnings.append(f"missing_required_ontology_concept:{concept_id}")
         return warnings
 
-    def run(self, *, dry_run: bool = True, limit: int | None = None) -> SyncResult:
+    def run(
+        self,
+        *,
+        dry_run: bool = True,
+        limit: int | None = None,
+        progress_callback: ProgressCallback | None = None,
+    ) -> SyncResult:
         started_at = _utc_now_iso()
         counters = SyncCounters()
         warnings = (
@@ -518,47 +530,104 @@ class AIChatSessionIngestionService:
             records = records[:limit]
 
         counters.discovered = len(records)
+        self._emit_progress(
+            progress_callback,
+            {
+                "event": "discovery_complete",
+                "at_utc": _utc_now_iso(),
+                "dry_run": dry_run,
+                "discovered": counters.discovered,
+                "warnings_count": len(warnings),
+            },
+        )
 
-        for record in records:
+        for idx, record in enumerate(records, start=1):
             decision = self._classify_record(record)
             decisions.append(decision)
             if decision.action == "new":
                 counters.classified_new += 1
                 counters.intended_mutations += 1
-            elif decision.action == "updated":
+            elif decision.action in {"updated", "repair"}:
                 counters.classified_updated += 1
                 counters.intended_mutations += 1
             elif decision.action == "unchanged":
                 counters.classified_unchanged += 1
+            self._emit_progress(
+                progress_callback,
+                {
+                    "event": "record_classified",
+                    "at_utc": _utc_now_iso(),
+                    "dry_run": dry_run,
+                    "index": idx,
+                    "total": counters.discovered,
+                    "environment": decision.record.environment,
+                    "source_session_id": decision.record.source_session_id,
+                    "document_concept_id": decision.document_concept_id,
+                    "action": decision.action,
+                    "reason": decision.reason,
+                    "requires_mutation": decision.action != "unchanged",
+                    "counters": self._counters_to_dict(counters),
+                },
+            )
 
-        for decision in decisions:
+        for idx, decision in enumerate(decisions, start=1):
             if decision.action == "unchanged":
                 counters.skipped += 1
-                record_results.append(
-                    {
-                        "environment": decision.record.environment,
-                        "source_session_id": decision.record.source_session_id,
-                        "document_concept_id": decision.document_concept_id,
-                        "action": "unchanged",
-                        "reason": decision.reason,
-                    }
+                result_entry = {
+                    "environment": decision.record.environment,
+                    "source_session_id": decision.record.source_session_id,
+                    "document_concept_id": decision.document_concept_id,
+                    "action": "unchanged",
+                    "reason": decision.reason,
+                    "success": True,
+                    "storage_object_written": False,
+                    "ontology_links_aligned": True,
+                    "ontology_type_aligned": True,
+                }
+                record_results.append(result_entry)
+                self._emit_record_processed_progress(
+                    progress_callback=progress_callback,
+                    dry_run=dry_run,
+                    index=idx,
+                    total=len(decisions),
+                    decision=decision,
+                    result_entry=result_entry,
+                    counters=counters,
                 )
                 continue
 
             if dry_run:
-                record_results.append(
-                    {
-                        "environment": decision.record.environment,
-                        "source_session_id": decision.record.source_session_id,
-                        "document_concept_id": decision.document_concept_id,
-                        "action": f"would_{decision.action}",
-                        "reason": decision.reason,
-                    }
+                result_entry = {
+                    "environment": decision.record.environment,
+                    "source_session_id": decision.record.source_session_id,
+                    "document_concept_id": decision.document_concept_id,
+                    "action": f"would_{decision.action}",
+                    "reason": decision.reason,
+                    "success": True,
+                    "storage_object_written": False,
+                    "ontology_links_aligned": None,
+                    "ontology_type_aligned": None,
+                }
+                record_results.append(result_entry)
+                self._emit_record_processed_progress(
+                    progress_callback=progress_callback,
+                    dry_run=dry_run,
+                    index=idx,
+                    total=len(decisions),
+                    decision=decision,
+                    result_entry=result_entry,
+                    counters=counters,
                 )
                 continue
 
             if decision.action == "new":
                 applied = self._apply_new(decision.record, decision.document_concept_id)
+            elif decision.action == "repair":
+                applied = self._apply_repair(
+                    decision.record,
+                    decision.document_concept_id,
+                    decision.repair_file_copy_concept_id,
+                )
             else:
                 applied = self._apply_update(
                     decision.record, decision.document_concept_id
@@ -582,6 +651,15 @@ class AIChatSessionIngestionService:
             }
             result_entry.update(applied)
             record_results.append(result_entry)
+            self._emit_record_processed_progress(
+                progress_callback=progress_callback,
+                dry_run=dry_run,
+                index=idx,
+                total=len(decisions),
+                decision=decision,
+                result_entry=result_entry,
+                counters=counters,
+            )
 
         status = "dry_run" if dry_run else "ok"
         error_code: str | None = None
@@ -597,6 +675,19 @@ class AIChatSessionIngestionService:
 
         finished_at = _utc_now_iso()
         success = status in {"ok", "dry_run"}
+        self._emit_progress(
+            progress_callback,
+            {
+                "event": "sync_completed",
+                "at_utc": finished_at,
+                "dry_run": dry_run,
+                "status": status,
+                "success": success,
+                "error_code": error_code,
+                "requires_follow_up": requires_follow_up,
+                "counters": self._counters_to_dict(counters),
+            },
+        )
 
         return SyncResult(
             success=success,
@@ -610,6 +701,70 @@ class AIChatSessionIngestionService:
             records=record_results,
             error_code=error_code,
             requires_follow_up=requires_follow_up,
+        )
+
+    @staticmethod
+    def _emit_progress(
+        progress_callback: ProgressCallback | None, payload: dict[str, Any]
+    ) -> None:
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(payload)
+        except Exception as exc:
+            logger.warning("chat_session_ingestion progress callback failed: %s", exc)
+
+    @staticmethod
+    def _counters_to_dict(counters: SyncCounters) -> dict[str, int]:
+        return {
+            "discovered": counters.discovered,
+            "classified_new": counters.classified_new,
+            "classified_updated": counters.classified_updated,
+            "classified_unchanged": counters.classified_unchanged,
+            "created": counters.created,
+            "updated": counters.updated,
+            "skipped": counters.skipped,
+            "failed": counters.failed,
+            "intended_mutations": counters.intended_mutations,
+            "executed_mutations": counters.executed_mutations,
+        }
+
+    def _emit_record_processed_progress(
+        self,
+        *,
+        progress_callback: ProgressCallback | None,
+        dry_run: bool,
+        index: int,
+        total: int,
+        decision: SessionDecision,
+        result_entry: dict[str, Any],
+        counters: SyncCounters,
+    ) -> None:
+        self._emit_progress(
+            progress_callback,
+            {
+                "event": "record_processed",
+                "at_utc": _utc_now_iso(),
+                "dry_run": dry_run,
+                "index": index,
+                "total": total,
+                "environment": decision.record.environment,
+                "source_session_id": decision.record.source_session_id,
+                "document_concept_id": decision.document_concept_id,
+                "action": result_entry.get("action"),
+                "reason": result_entry.get("reason"),
+                "success": bool(result_entry.get("success")),
+                "file_copy_concept_id": result_entry.get("file_copy_concept_id"),
+                "storage_object_written": bool(
+                    result_entry.get("storage_object_written")
+                ),
+                "storage_backend": result_entry.get("storage_backend"),
+                "storage_key": result_entry.get("storage_key"),
+                "storage_uri": result_entry.get("storage_uri"),
+                "ontology_links_aligned": result_entry.get("ontology_links_aligned"),
+                "ontology_type_aligned": result_entry.get("ontology_type_aligned"),
+                "counters": self._counters_to_dict(counters),
+            },
         )
 
     def discover_records(self) -> tuple[list[SessionRecord], list[str]]:
@@ -650,6 +805,17 @@ class AIChatSessionIngestionService:
 
         existing_hash = self._read_attribute(existing, "source_content_sha256")
         if isinstance(existing_hash, str) and existing_hash == record.content_sha256:
+            repair_context = self._repair_context_for_existing_document(existing)
+            if repair_context is not None:
+                return SessionDecision(
+                    action="repair",
+                    reason=str(repair_context.get("reason") or "link_repair_required"),
+                    record=record,
+                    document_concept_id=document_concept_id,
+                    repair_file_copy_concept_id=repair_context.get(
+                        "file_copy_concept_id"
+                    ),
+                )
             return SessionDecision(
                 action="unchanged",
                 reason="content_hash_match",
@@ -664,6 +830,53 @@ class AIChatSessionIngestionService:
             document_concept_id=document_concept_id,
         )
 
+    def _repair_context_for_existing_document(
+        self, concept_doc: dict[str, Any]
+    ) -> dict[str, str] | None:
+        linked_ids = self._linked_file_copy_ids(concept_doc)
+        canonical_linked_ids = self._linked_file_copy_ids_for_predicate(
+            concept_doc, PRED_DOC_HAS_FILE
+        )
+        current_file_copy = self._read_attribute(
+            concept_doc, "current_file_copy_concept_id"
+        )
+        current_file_copy_id = (
+            current_file_copy.strip()
+            if isinstance(current_file_copy, str) and current_file_copy.strip()
+            else None
+        )
+
+        if current_file_copy_id and current_file_copy_id not in linked_ids:
+            return {
+                "reason": "current_file_copy_not_linked",
+                "file_copy_concept_id": current_file_copy_id,
+            }
+
+        if linked_ids and not canonical_linked_ids:
+            preferred = (
+                current_file_copy_id
+                if current_file_copy_id and current_file_copy_id in linked_ids
+                else linked_ids[0]
+            )
+            return {
+                "reason": "canonical_link_missing",
+                "file_copy_concept_id": preferred,
+            }
+
+        if not linked_ids and current_file_copy_id:
+            return {
+                "reason": "document_link_missing",
+                "file_copy_concept_id": current_file_copy_id,
+            }
+
+        if linked_ids and not current_file_copy_id:
+            return {
+                "reason": "current_file_copy_metadata_missing",
+                "file_copy_concept_id": linked_ids[0],
+            }
+
+        return None
+
     def _apply_new(self, record: SessionRecord, document_concept_id: str) -> dict[str, Any]:
         cfg = self._config_for(record.environment)
         file_import = self._import_record_file(
@@ -677,15 +890,20 @@ class AIChatSessionIngestionService:
         file_copy_concept_id = str(file_import.get("concept_id") or "").strip()
         if not file_copy_concept_id:
             return {"success": False, "error": "missing_file_copy_concept_id"}
+        storage = file_import.get("storage")
+        if not isinstance(storage, dict):
+            storage = {}
 
         title = record.title or Path(record.local_path).name
         existing = self._get_concept(document_concept_id)
+        document_concept_created = False
         if not existing:
             self._create_document_concept(
                 concept_id=document_concept_id,
                 name=title,
                 document_type_id=cfg.document_type_id,
             )
+            document_concept_created = True
 
         self._ensure_document_type(document_concept_id, cfg.document_type_id)
         self._ensure_link_pair(document_concept_id, file_copy_concept_id)
@@ -699,6 +917,17 @@ class AIChatSessionIngestionService:
         return {
             "success": True,
             "file_copy_concept_id": file_copy_concept_id,
+            "document_concept_created": document_concept_created,
+            "storage_object_written": bool(storage.get("key")),
+            "storage_backend": storage.get("backend"),
+            "storage_key": storage.get("key"),
+            "storage_uri": storage.get("uri"),
+            "ontology_links_aligned": self._is_document_file_link_aligned(
+                document_concept_id, file_copy_concept_id
+            ),
+            "ontology_type_aligned": self._is_document_type_aligned(
+                document_concept_id, cfg.document_type_id
+            ),
         }
 
     def _apply_update(self, record: SessionRecord, document_concept_id: str) -> dict[str, Any]:
@@ -719,6 +948,9 @@ class AIChatSessionIngestionService:
         new_file_copy_concept_id = str(file_import.get("concept_id") or "").strip()
         if not new_file_copy_concept_id:
             return {"success": False, "error": "missing_file_copy_concept_id"}
+        storage = file_import.get("storage")
+        if not isinstance(storage, dict):
+            storage = {}
 
         self._ensure_document_type(document_concept_id, cfg.document_type_id)
         for old_id in old_file_copy_ids:
@@ -739,6 +971,71 @@ class AIChatSessionIngestionService:
             "success": True,
             "file_copy_concept_id": new_file_copy_concept_id,
             "replaced_file_copy_concept_ids": old_file_copy_ids,
+            "storage_object_written": bool(storage.get("key")),
+            "storage_backend": storage.get("backend"),
+            "storage_key": storage.get("key"),
+            "storage_uri": storage.get("uri"),
+            "ontology_links_aligned": self._is_document_file_link_aligned(
+                document_concept_id, new_file_copy_concept_id
+            ),
+            "ontology_type_aligned": self._is_document_type_aligned(
+                document_concept_id, cfg.document_type_id
+            ),
+        }
+
+    def _apply_repair(
+        self,
+        record: SessionRecord,
+        document_concept_id: str,
+        preferred_file_copy_concept_id: str | None,
+    ) -> dict[str, Any]:
+        cfg = self._config_for(record.environment)
+        existing = self._get_concept(document_concept_id)
+        if not existing:
+            return {"success": False, "error": "document_missing_for_repair"}
+
+        linked_ids = self._linked_file_copy_ids(existing)
+        preferred = (
+            preferred_file_copy_concept_id.strip()
+            if isinstance(preferred_file_copy_concept_id, str)
+            and preferred_file_copy_concept_id.strip()
+            else None
+        )
+        if preferred is None:
+            attr_current = self._read_attribute(existing, "current_file_copy_concept_id")
+            if isinstance(attr_current, str) and attr_current.strip():
+                preferred = attr_current.strip()
+        if preferred is None and linked_ids:
+            preferred = linked_ids[0]
+        if preferred is None:
+            return {"success": False, "error": "missing_file_copy_reference_for_repair"}
+
+        self._ensure_document_type(document_concept_id, cfg.document_type_id)
+        self._ensure_link_pair(document_concept_id, preferred)
+
+        previous_ids = [file_id for file_id in linked_ids if file_id != preferred]
+        self._update_document_metadata(
+            document_concept_id=document_concept_id,
+            record=record,
+            current_file_copy_concept_id=preferred,
+            previous_file_copy_concept_ids=previous_ids,
+            source_system=cfg.source_system,
+        )
+
+        return {
+            "success": True,
+            "file_copy_concept_id": preferred,
+            "repaired_from_file_copy_concept_ids": linked_ids,
+            "storage_object_written": False,
+            "storage_backend": None,
+            "storage_key": None,
+            "storage_uri": None,
+            "ontology_links_aligned": self._is_document_file_link_aligned(
+                document_concept_id, preferred
+            ),
+            "ontology_type_aligned": self._is_document_type_aligned(
+                document_concept_id, cfg.document_type_id
+            ),
         }
 
     def _import_record_file(
@@ -790,7 +1087,7 @@ class AIChatSessionIngestionService:
     def _ensure_link_pair(self, document_concept_id: str, file_copy_concept_id: str) -> None:
         doc_to_file = add_relationship(
             document_concept_id,
-            PRED_DOC_HAS_FILE_COPY,
+            PRED_DOC_HAS_FILE,
             file_copy_concept_id,
         )
         if not doc_to_file.get("success"):
@@ -809,12 +1106,13 @@ class AIChatSessionIngestionService:
             )
 
     def _remove_link_pair(self, document_concept_id: str, file_copy_concept_id: str) -> None:
-        remove_relationship(
-            source_id=document_concept_id,
-            predicate=PRED_DOC_HAS_FILE_COPY,
-            target=file_copy_concept_id,
-            confirmed=True,
-        )
+        for predicate in (PRED_DOC_HAS_FILE, LEGACY_PRED_DOC_HAS_FILE_COPY):
+            remove_relationship(
+                source_id=document_concept_id,
+                predicate=predicate,
+                target=file_copy_concept_id,
+                confirmed=True,
+            )
         remove_relationship(
             source_id=file_copy_concept_id,
             predicate=PRED_FILE_FOR_DOC,
@@ -863,15 +1161,66 @@ class AIChatSessionIngestionService:
 
     @staticmethod
     def _linked_file_copy_ids(concept_doc: dict[str, Any]) -> list[str]:
+        linked_ids: list[str] = []
+        for predicate in (PRED_DOC_HAS_FILE, LEGACY_PRED_DOC_HAS_FILE_COPY):
+            linked_ids.extend(
+                AIChatSessionIngestionService._linked_file_copy_ids_for_predicate(
+                    concept_doc, predicate
+                )
+            )
+        return sorted(set(linked_ids))
+
+    @staticmethod
+    def _linked_file_copy_ids_for_predicate(
+        concept_doc: dict[str, Any], predicate: str
+    ) -> list[str]:
         relationships = concept_doc.get("relationships")
         if not isinstance(relationships, dict):
             return []
-        raw = relationships.get(PRED_DOC_HAS_FILE_COPY)
+        raw = relationships.get(predicate)
         if isinstance(raw, str):
             return [raw]
         if isinstance(raw, list):
             return [item for item in raw if isinstance(item, str)]
         return []
+
+    def _is_document_file_link_aligned(
+        self, document_concept_id: str, file_copy_concept_id: str
+    ) -> bool:
+        document = self._get_concept(document_concept_id)
+        if not isinstance(document, dict):
+            return False
+        linked_ids = self._linked_file_copy_ids_for_predicate(document, PRED_DOC_HAS_FILE)
+        if file_copy_concept_id not in linked_ids:
+            return False
+        file_copy = self._get_concept(file_copy_concept_id)
+        if not isinstance(file_copy, dict):
+            return False
+        relationships = file_copy.get("relationships")
+        if not isinstance(relationships, dict):
+            return False
+        inverse = relationships.get(PRED_FILE_FOR_DOC)
+        if isinstance(inverse, str):
+            return inverse == document_concept_id
+        if isinstance(inverse, list):
+            return document_concept_id in inverse
+        return False
+
+    def _is_document_type_aligned(
+        self, document_concept_id: str, document_type_id: str
+    ) -> bool:
+        document = self._get_concept(document_concept_id)
+        if not isinstance(document, dict):
+            return False
+        relationships = document.get("relationships")
+        if not isinstance(relationships, dict):
+            return False
+        raw = relationships.get("is_an_instance_of")
+        if isinstance(raw, str):
+            return raw == document_type_id
+        if isinstance(raw, list):
+            return document_type_id in raw
+        return False
 
     @staticmethod
     def _get_concept(concept_id: str) -> dict[str, Any] | None:
@@ -936,12 +1285,17 @@ def run_ingestion(
     dry_run: bool = True,
     limit: int | None = None,
     adapters: Sequence[SessionSourceAdapter] | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     service = AIChatSessionIngestionService(
         user_concept_id=user_concept_id,
         adapters=adapters,
     )
-    result = service.run(dry_run=dry_run, limit=limit)
+    result = service.run(
+        dry_run=dry_run,
+        limit=limit,
+        progress_callback=progress_callback,
+    )
     payload = result.to_dict()
     logger.info("ai_chat_session_ingestion_summary=%s", json.dumps(payload))
     return payload
