@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 import time
@@ -55,6 +56,7 @@ _WORKFLOW_DEFINITIONS_REFRESH_LOCKS: Dict[
 ] = {}
 _WORKFLOW_DEFINITIONS_CACHE_MAX_ENTRIES = 32
 _WORKFLOW_DEFINITIONS_CACHE_TTL_SECONDS_DEFAULT = 8.0
+_WORKFLOW_DEFINITIONS_REFRESH_RETRY_AFTER_SECONDS_DEFAULT = 1.0
 
 
 def _read_workflow_definitions_cache_ttl_seconds() -> float:
@@ -67,6 +69,18 @@ def _read_workflow_definitions_cache_ttl_seconds() -> float:
     except (TypeError, ValueError):
         return _WORKFLOW_DEFINITIONS_CACHE_TTL_SECONDS_DEFAULT
     return max(0.0, ttl)
+
+
+def _read_workflow_definitions_refresh_retry_after_seconds() -> float:
+    raw = os.getenv(
+        "VON_WORKFLOW_DEFINITIONS_REFRESH_RETRY_AFTER_SECONDS",
+        str(_WORKFLOW_DEFINITIONS_REFRESH_RETRY_AFTER_SECONDS_DEFAULT),
+    )
+    try:
+        delay_seconds = float(raw)
+    except (TypeError, ValueError):
+        return _WORKFLOW_DEFINITIONS_REFRESH_RETRY_AFTER_SECONDS_DEFAULT
+    return max(0.1, delay_seconds)
 
 
 def _read_cached_workflow_definitions_entry(
@@ -237,15 +251,21 @@ def api_list_workflow_definitions():
                         cache_key,
                     )
                     return jsonify(cached_payload)
-                return (
-                    jsonify(
-                        {
-                            "error": "workflow_definitions_refresh_in_progress",
-                            "detail": "Workflow definitions refresh is already running; retry shortly.",
-                        }
-                    ),
-                    503,
+                retry_after_seconds = (
+                    _read_workflow_definitions_refresh_retry_after_seconds()
                 )
+                payload = {
+                    "error": "workflow_definitions_refresh_in_progress",
+                    "detail": "Workflow definitions refresh is already running; retry shortly.",
+                    "retryable": True,
+                    "retry_after_seconds": retry_after_seconds,
+                }
+                response = jsonify(payload)
+                response.status_code = 503
+                response.headers["Retry-After"] = str(
+                    max(1, int(math.ceil(retry_after_seconds)))
+                )
+                return response
 
         from ...workflows.durable.registry_factory import (
             build_durable_workflow_registry_read_only,

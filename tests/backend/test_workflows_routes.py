@@ -915,3 +915,6 @@ def test_workflow_definitions_list_refresh_in_progress_without_stale_returns_503
     assert resp.status_code == 503
     payload = resp.get_json()
     assert payload["error"] == "workflow_definitions_refresh_in_progress"
+    assert payload["retryable"] is True
+    assert float(payload["retry_after_seconds"]) > 0.0
+    assert resp.headers.get("Retry-After") == "1"

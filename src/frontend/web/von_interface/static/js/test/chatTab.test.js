@@ -1,6 +1,8 @@
 import {
     __testOnly_buildThinkingProgressPresentation,
     __testOnly_buildWorkflowMonitorExportPayload,
+    __testOnly_refreshAvailableWorkflowDefinitions,
+    __testOnly_resetWorkflowDefinitionsState,
     __testOnly_formatAbsoluteTimestamp,
     __testOnly_formatThinkingEtaText,
     __testOnly_renderWorkflowDefinitionsBody,
@@ -533,6 +535,117 @@ describe('workflow monitor concept links', () => {
         ]);
 
         expect(document.body.textContent).toContain('Episodes: 8 scoped (12 total)');
+    });
+});
+
+describe('workflow monitor definitions refresh contention handling', () => {
+    async function flushMicrotasks() {
+        await Promise.resolve();
+        await Promise.resolve();
+    }
+
+    beforeEach(() => {
+        jest.useFakeTimers();
+        document.body.innerHTML = `
+            <div id="workflowStatusPanel"></div>
+            <div id="workflowStatusBody"></div>
+            <button id="workflowStatusRefresh"></button>
+            <button id="workflowStatusToggleAvailable"></button>
+            <input id="workflowStatusShowDesigns" type="checkbox" />
+        `;
+        __testOnly_resetWorkflowDefinitionsState();
+        __testOnly_renderWorkflowDefinitionsBody([]);
+    });
+
+    afterEach(() => {
+        jest.useRealTimers();
+        delete global.fetch;
+        __testOnly_resetWorkflowDefinitionsState();
+    });
+
+    test('treats refresh-in-progress response as transient and auto-retries with bounded delay', async () => {
+        let fetchCount = 0;
+        global.fetch = jest.fn(() => {
+            fetchCount += 1;
+            if (fetchCount === 1) {
+                return Promise.resolve({
+                    ok: false,
+                    status: 503,
+                    headers: {
+                        get: (name) => (String(name).toLowerCase() === 'retry-after' ? '1' : null)
+                    },
+                    json: async () => ({
+                        error: 'workflow_definitions_refresh_in_progress',
+                        detail: 'Workflow definitions refresh is already running; retry shortly.',
+                        retry_after_seconds: 1
+                    })
+                });
+            }
+            return Promise.resolve({
+                ok: true,
+                status: 200,
+                headers: { get: () => null },
+                json: async () => ({
+                    items: [
+                        {
+                            workflow_id: '#V#demo_retry_workflow',
+                            description: 'Retry test workflow.',
+                            initial_state: 'pending',
+                            source: 'built_in'
+                        }
+                    ]
+                })
+            });
+        });
+
+        await __testOnly_refreshAvailableWorkflowDefinitions();
+
+        expect(fetchCount).toBe(1);
+        expect(document.getElementById('workflowStatusBody').textContent).toContain(
+            'Workflow definitions are refreshing, retrying'
+        );
+        const contentionExport = __testOnly_buildWorkflowMonitorExportPayload();
+        expect(contentionExport.definitions_snapshot.payload.error).toBe(
+            'workflow_definitions_refresh_in_progress'
+        );
+        expect(contentionExport.definitions_snapshot.payload.retry_after_seconds).toBe(1);
+        expect(contentionExport.definitions_snapshot.payload.retry_attempt).toBe(1);
+
+        jest.advanceTimersByTime(1100);
+        await flushMicrotasks();
+
+        expect(fetchCount).toBe(2);
+        expect(document.getElementById('workflowStatusBody').textContent).toContain(
+            'demo retry workflow'
+        );
+        const successExport = __testOnly_buildWorkflowMonitorExportPayload();
+        expect(successExport.monitor_state.available_error).toBeNull();
+    });
+
+    test('keeps hard error state for non-contention 5xx responses', async () => {
+        global.fetch = jest.fn(() => Promise.resolve({
+            ok: false,
+            status: 500,
+            headers: { get: () => null },
+            json: async () => ({
+                error: 'workflow_definitions_fetch_failed',
+                detail: 'Workflow registry unavailable'
+            })
+        }));
+
+        await __testOnly_refreshAvailableWorkflowDefinitions();
+        jest.advanceTimersByTime(3000);
+        await flushMicrotasks();
+
+        expect(global.fetch).toHaveBeenCalledTimes(1);
+        expect(document.getElementById('workflowStatusBody').textContent).toContain(
+            'Could not load available workflows: Workflow registry unavailable'
+        );
+        const exportPayload = __testOnly_buildWorkflowMonitorExportPayload();
+        expect(exportPayload.definitions_snapshot.payload.error).toBe(
+            'workflow_definitions_fetch_failed'
+        );
+        expect(exportPayload.definitions_snapshot.payload.status).toBe(500);
     });
 });
 
