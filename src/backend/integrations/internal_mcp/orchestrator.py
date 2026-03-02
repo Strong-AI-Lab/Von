@@ -530,6 +530,21 @@ class InternalMCPChatOrchestrator:
         r"if you prefer)\b",
         flags=re.IGNORECASE,
     )
+    _AUTO_PROCEED_CONFIRMATION_LANGUAGE_PATTERN = re.compile(
+        r"\b(confirm(?:ed|ing|ation)?|approve(?:d|al)?|permission|ok(?:ay)?\s+to\s+proceed)\b",
+        flags=re.IGNORECASE,
+    )
+    _AUTO_PROCEED_LOW_RISK_CONFIRMATION_SUBJECT_PATTERN = re.compile(
+        r"\b(structure|format|layout|wording|phrasing|style|spelling|grammar|"
+        r"organisation|organization|plan|approach|response shape|output shape)\b",
+        flags=re.IGNORECASE,
+    )
+    _AUTO_PROCEED_HIGH_RISK_MUTATION_PATTERN = re.compile(
+        r"\b(delete|remove|merge|rename|create|add|update|modify|insert|upsert|"
+        r"write|link|unlink|relationship|predicate|concept|ontology|vontology|"
+        r"knowledge base|kb|production|deploy|billing|payment|credential|token)\b",
+        flags=re.IGNORECASE,
+    )
     _PROMPT_EXPLICIT_TOOL_CALL_PATTERN = re.compile(
         r"\bcall\s+`?([a-z_][a-z0-9_]*)`?\b",
         flags=re.IGNORECASE,
@@ -691,6 +706,16 @@ class InternalMCPChatOrchestrator:
         "update_text_relation": ("concept_id",),
         "create_concepts": ("parent_id",),
     }
+    _ADD_RELATIONSHIP_MISSING_REFERENCE_FIELDS: Mapping[str, tuple[str, ...]] = {
+        # Target recovery still allows fallback attempts on source/predicate
+        # because upstream payloads may surface a target-not-found envelope even
+        # when a neighbouring field is the real drifted identifier.
+        "target_not_found": ("target", "source_id", "predicate"),
+        "target_concept_not_found": ("target",),
+        "source_not_found": ("source_id",),
+        "source_concept_not_found": ("source_id",),
+        "predicate_concept_not_found": ("predicate",),
+    }
     _HIGH_IMPACT_REVIEW_REASON = "high_impact_kb_write_requires_human_review"
     _HIGH_IMPACT_NAMESPACE_REASON = "high_impact_kb_write_requires_namespace"
     _WRITE_INTENT_SESSION_MEMORY_TTL_SECONDS = 900
@@ -698,7 +723,9 @@ class InternalMCPChatOrchestrator:
     _WRITE_INTENT_SESSION_MEMORY_FOLLOW_UP_TURNS = 2
     _WRITE_CONTINUATION_PROMPT_PATTERN = re.compile(
         r"^\s*(yes|yep|yeah|ok|okay|sure|do it|go ahead|proceed|continue|"
-        r"please do|sounds good|make it so)\b",
+        r"please do|sounds good|make it so|"
+        r"confirm(?:ed)?(?:\s+(?:structure|format|layout|wording|plan|approach|details?))|"
+        r"looks good|that works)\b",
         flags=re.IGNORECASE,
     )
 
@@ -4127,7 +4154,7 @@ class InternalMCPChatOrchestrator:
                     result.payload, Mapping
                 ):
                     retry_payload, retry_context = (
-                        self._retry_add_relationship_on_target_not_found(
+                        self._retry_add_relationship_on_missing_reference(
                             payload=payload,
                             result_payload=cast(Mapping[str, Any], result.payload),
                         )
@@ -4503,6 +4530,26 @@ class InternalMCPChatOrchestrator:
                             ),
                             "contains_question_mark": bool(
                                 auto_proceed_assessment.get("contains_question_mark")
+                            ),
+                            "has_confirmation_language": bool(
+                                auto_proceed_assessment.get(
+                                    "has_confirmation_language"
+                                )
+                            ),
+                            "has_low_risk_confirmation_subject": bool(
+                                auto_proceed_assessment.get(
+                                    "has_low_risk_confirmation_subject"
+                                )
+                            ),
+                            "has_high_risk_mutation_signal": bool(
+                                auto_proceed_assessment.get(
+                                    "has_high_risk_mutation_signal"
+                                )
+                            ),
+                            "low_risk_confirmation_request": bool(
+                                auto_proceed_assessment.get(
+                                    "low_risk_confirmation_request"
+                                )
                             ),
                         }
                     )
@@ -7746,6 +7793,84 @@ class InternalMCPChatOrchestrator:
             resolution_cache[concept_id] = None
         return None
 
+    @staticmethod
+    def _canonicalise_literal_value_to_concept_id(value: str) -> str | None:
+        if not isinstance(value, str):
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        try:
+            from src.backend.utils.concept_id_utils import (
+                canonicalise_vontology_concept_id,
+            )
+        except Exception:
+            return None
+        canonical = canonicalise_vontology_concept_id(cleaned)
+        if isinstance(canonical, str) and canonical.startswith("#V#"):
+            return canonical
+        return None
+
+    def _resolve_add_relationship_missing_reference_value(
+        self,
+        *,
+        current_value: str,
+        preferred_language: str | None = None,
+        exists_cache: MutableMapping[str, bool] | None = None,
+        resolution_cache: MutableMapping[str, str | None] | None = None,
+    ) -> tuple[str | None, str | None]:
+        raw_value = current_value.strip()
+        if not raw_value:
+            return None, None
+
+        def _exists(candidate_id: str) -> bool:
+            if exists_cache is not None and candidate_id in exists_cache:
+                return bool(exists_cache[candidate_id])
+            exists_value = self._concept_exists_via_tool(candidate_id)
+            if exists_cache is not None:
+                exists_cache[candidate_id] = exists_value
+            return exists_value
+
+        if self._looks_like_concept_id(raw_value):
+            resolved = self._resolve_missing_concept_id(
+                raw_value,
+                preferred_language=preferred_language,
+                exists_cache=exists_cache,
+                resolution_cache=resolution_cache,
+            )
+            if isinstance(resolved, str) and resolved != raw_value:
+                return resolved, "resolved_missing_concept_id"
+            return None, None
+
+        candidate_values: list[tuple[str, str]] = []
+        canonical_value = self._canonicalise_literal_value_to_concept_id(raw_value)
+        if isinstance(canonical_value, str):
+            candidate_values.append(
+                ("canonicalised_literal_value", canonical_value)
+            )
+
+        resolved_by_name = self._resolve_concept_id_via_tool(
+            raw_value,
+            preferred_language=preferred_language,
+        )
+        if isinstance(resolved_by_name, str):
+            candidate_values.append(
+                ("resolved_literal_value_by_name", resolved_by_name)
+            )
+
+        seen_values: set[str] = set()
+        for strategy, candidate_value in candidate_values:
+            if (
+                not isinstance(candidate_value, str)
+                or not self._looks_like_concept_id(candidate_value)
+                or candidate_value in seen_values
+            ):
+                continue
+            seen_values.add(candidate_value)
+            if not _exists(candidate_value):
+                continue
+        return None, None
+
     def _is_write_tool(
         self,
         tool_name: str,
@@ -7818,54 +7943,68 @@ class InternalMCPChatOrchestrator:
                 return value
         return None
 
-    def _retry_add_relationship_on_target_not_found(
+    def _retry_add_relationship_on_missing_reference(
         self,
         *,
         payload: MutableMapping[str, Any],
         result_payload: Mapping[str, Any],
         preferred_language: str | None = None,
     ) -> tuple[MutableMapping[str, Any] | None, Mapping[str, Any] | None]:
-        error_code = result_payload.get("error_code") or result_payload.get("error")
-        if (
-            not isinstance(error_code, str)
-            or error_code.strip().lower() != "target_not_found"
-        ):
+        error_code_raw = result_payload.get("error_code") or result_payload.get("error")
+        if not isinstance(error_code_raw, str):
+            return None, None
+        error_code = error_code_raw.strip().lower()
+        candidate_fields = self._ADD_RELATIONSHIP_MISSING_REFERENCE_FIELDS.get(
+            error_code
+        )
+        if not candidate_fields:
             return None, None
 
         missing_concept_id = self._extract_add_relationship_missing_concept_id(
             result_payload
         )
-        candidate_fields = ("target", "source_id", "predicate")
         exists_cache: dict[str, bool] = {}
         resolution_cache: dict[str, str | None] = {}
 
         for field_name in candidate_fields:
             current_value = payload.get(field_name)
-            if not self._looks_like_concept_id(current_value):
+            if not isinstance(current_value, str):
                 continue
-            current_concept_id = cast(str, current_value)
-            if (
-                isinstance(missing_concept_id, str)
-                and missing_concept_id != current_concept_id
-            ):
+            current_reference = current_value.strip()
+            if not current_reference:
                 continue
 
-            resolved = self._resolve_missing_concept_id(
-                current_concept_id,
+            if (
+                isinstance(missing_concept_id, str)
+                and missing_concept_id.strip()
+            ):
+                missing_clean = missing_concept_id.strip()
+                accepted_missing_values = {current_reference}
+                canonical_current = self._canonicalise_literal_value_to_concept_id(
+                    current_reference
+                )
+                if isinstance(canonical_current, str):
+                    accepted_missing_values.add(canonical_current)
+                if missing_clean not in accepted_missing_values:
+                    continue
+
+            resolved, strategy = self._resolve_add_relationship_missing_reference_value(
+                current_value=current_reference,
                 preferred_language=preferred_language,
                 exists_cache=exists_cache,
                 resolution_cache=resolution_cache,
             )
-            if not isinstance(resolved, str) or resolved == current_concept_id:
+            if not isinstance(resolved, str) or resolved == current_reference:
                 continue
 
             retry_payload = dict(payload)
             retry_payload[field_name] = resolved
             return retry_payload, {
-                "reason": "target_not_found",
+                "reason": error_code,
                 "field": field_name,
-                "from": current_concept_id,
+                "from": current_reference,
                 "to": resolved,
+                "strategy": strategy,
             }
 
         return None, None
@@ -16435,6 +16574,10 @@ class InternalMCPChatOrchestrator:
                 "has_remaining_work_signal": False,
                 "asks_for_user_decision": False,
                 "contains_question_mark": False,
+                "has_confirmation_language": False,
+                "has_low_risk_confirmation_subject": False,
+                "has_high_risk_mutation_signal": False,
+                "low_risk_confirmation_request": False,
             }
 
         text = response_text.strip()
@@ -16466,16 +16609,43 @@ class InternalMCPChatOrchestrator:
             cls._AUTO_PROCEED_USER_DECISION_PATTERN.search(lowered)
         )
         contains_question_mark = "?" in normalised
+        has_confirmation_language = bool(
+            cls._AUTO_PROCEED_CONFIRMATION_LANGUAGE_PATTERN.search(lowered)
+        )
+        has_low_risk_confirmation_subject = bool(
+            cls._AUTO_PROCEED_LOW_RISK_CONFIRMATION_SUBJECT_PATTERN.search(lowered)
+        )
+        has_high_risk_mutation_signal = bool(
+            cls._AUTO_PROCEED_HIGH_RISK_MUTATION_PATTERN.search(lowered)
+        )
+        low_risk_confirmation_request = (
+            has_confirmation_language
+            and has_low_risk_confirmation_subject
+            and not has_high_risk_mutation_signal
+        )
 
         should_auto_proceed = False
         reason = "no_progress_signal"
-        if asks_for_user_decision:
+        if asks_for_user_decision and not low_risk_confirmation_request:
             reason = "user_decision_requested"
-        elif contains_question_mark and not has_progress_promise:
+        elif (
+            contains_question_mark
+            and not has_progress_promise
+            and not low_risk_confirmation_request
+        ):
             reason = "question_without_progress_promise"
-        elif has_progress_promise or (has_intent_language and has_remaining_work_signal):
+        elif (
+            has_progress_promise
+            or (has_intent_language and has_remaining_work_signal)
+            or low_risk_confirmation_request
+        ):
             should_auto_proceed = True
-            reason = "minimal_imposition_pass"
+            reason = (
+                "minimal_imposition_pass_low_risk_confirmation"
+                if low_risk_confirmation_request
+                and not (has_progress_promise or has_intent_language)
+                else "minimal_imposition_pass"
+            )
 
         return {
             "should_auto_proceed": should_auto_proceed,
@@ -16485,6 +16655,10 @@ class InternalMCPChatOrchestrator:
             "has_remaining_work_signal": has_remaining_work_signal,
             "asks_for_user_decision": asks_for_user_decision,
             "contains_question_mark": contains_question_mark,
+            "has_confirmation_language": has_confirmation_language,
+            "has_low_risk_confirmation_subject": has_low_risk_confirmation_subject,
+            "has_high_risk_mutation_signal": has_high_risk_mutation_signal,
+            "low_risk_confirmation_request": low_risk_confirmation_request,
         }
 
     @staticmethod

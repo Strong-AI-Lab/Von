@@ -3715,6 +3715,347 @@ def _import_local_file_copy(**kwargs):
         return _run_import()
 
 
+def _list_recent_screenshots(**kwargs):
+    import base64
+    import mimetypes
+    import os
+    from datetime import datetime, timedelta, timezone
+    from pathlib import Path
+
+    image_exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+    keyword_hints = ("screenshot", "screen shot", "snip", "capture")
+
+    def _coerce_int(
+        value: Any,
+        *,
+        default: int,
+        minimum: int,
+        maximum: int,
+        field_name: str,
+    ) -> int:
+        if value is None:
+            return default
+        try:
+            parsed = int(value)
+        except Exception:
+            raise ValueError(f"Invalid {field_name}: expected integer")
+        if parsed < minimum:
+            parsed = minimum
+        if parsed > maximum:
+            parsed = maximum
+        return parsed
+
+    try:
+        limit = _coerce_int(
+            kwargs.get("limit"),
+            default=12,
+            minimum=1,
+            maximum=100,
+            field_name="limit",
+        )
+        max_scan_files = _coerce_int(
+            kwargs.get("max_scan_files"),
+            default=300,
+            minimum=20,
+            maximum=3000,
+            field_name="max_scan_files",
+        )
+        max_base64_bytes = _coerce_int(
+            kwargs.get("max_base64_bytes"),
+            default=5 * 1024 * 1024,
+            minimum=1024,
+            maximum=50 * 1024 * 1024,
+            field_name="max_base64_bytes",
+        )
+        lookback_hours_raw = kwargs.get("lookback_hours")
+        if lookback_hours_raw is None:
+            lookback_hours = 24.0
+        else:
+            lookback_hours = float(lookback_hours_raw)
+            if lookback_hours <= 0:
+                lookback_hours = 24.0
+            lookback_hours = min(lookback_hours, 24.0 * 30.0)
+    except ValueError as exc:
+        return make_error_response(
+            "invalid_parameter",
+            str(exc),
+            details={"exception_type": "ValueError"},
+        )
+
+    include_base64 = bool(kwargs.get("include_base64", False))
+    match_clipboard = bool(kwargs.get("match_clipboard", True))
+
+    paths_raw = kwargs.get("paths")
+    explicit_paths: list[Path] = []
+    if paths_raw is not None:
+        if not isinstance(paths_raw, list):
+            return make_error_response(
+                "invalid_parameter",
+                "paths must be a list of directory strings when provided",
+                details={"parameter": "paths"},
+            )
+        for raw in paths_raw:
+            if isinstance(raw, str) and raw.strip():
+                explicit_paths.append(Path(raw.strip()))
+
+    home_dir = Path.home()
+    env_paths_raw = os.getenv("VON_INTERNAL_MCP_SCREENSHOT_PATHS", "")
+    env_paths: list[Path] = []
+    if isinstance(env_paths_raw, str) and env_paths_raw.strip():
+        for token in re.split(r"[;\n\r]+", env_paths_raw):
+            token = token.strip()
+            if token:
+                env_paths.append(Path(token))
+
+    if explicit_paths:
+        candidate_dirs = explicit_paths
+    else:
+        candidate_dirs = [
+            home_dir / "Pictures" / "Screenshots",
+            home_dir / "OneDrive" / "Pictures" / "Screenshots",
+            home_dir / "Desktop",
+            *env_paths,
+        ]
+
+    # Preserve first occurrence and keep deterministic ordering.
+    seen_dir_keys: set[str] = set()
+    ordered_dirs: list[Path] = []
+    for directory in candidate_dirs:
+        try:
+            key = str(directory.expanduser().resolve(strict=False)).lower()
+        except Exception:
+            key = str(directory).lower()
+        if key in seen_dir_keys:
+            continue
+        seen_dir_keys.add(key)
+        ordered_dirs.append(directory)
+
+    now_utc = datetime.now(timezone.utc)
+    cutoff = now_utc - timedelta(hours=lookback_hours)
+
+    candidate_items: list[dict[str, Any]] = []
+    scanned_files_count = 0
+    seen_paths: set[str] = set()
+
+    def _is_screenshot_like_name(path_obj: Path) -> bool:
+        name_lower = path_obj.name.lower()
+        return any(hint in name_lower for hint in keyword_hints)
+
+    for raw_dir in ordered_dirs:
+        directory = raw_dir.expanduser()
+        if not directory.exists() or not directory.is_dir():
+            continue
+        try:
+            entries = list(directory.iterdir())
+        except Exception:
+            continue
+
+        for entry in entries:
+            if scanned_files_count >= max_scan_files:
+                break
+            if not entry.is_file():
+                continue
+            ext = entry.suffix.lower()
+            if ext not in image_exts:
+                continue
+
+            if not explicit_paths:
+                parent_lower = entry.parent.name.lower()
+                if parent_lower != "screenshots" and not _is_screenshot_like_name(entry):
+                    continue
+
+            try:
+                stat = entry.stat()
+            except Exception:
+                continue
+            modified_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+            if modified_at < cutoff:
+                continue
+
+            try:
+                path_key = str(entry.resolve(strict=False)).lower()
+            except Exception:
+                path_key = str(entry).lower()
+            if path_key in seen_paths:
+                continue
+            seen_paths.add(path_key)
+
+            scanned_files_count += 1
+            candidate_items.append(
+                {
+                    "path": str(entry),
+                    "filename": entry.name,
+                    "size_bytes": int(stat.st_size),
+                    "modified_at_dt": modified_at,
+                    "modified_at": modified_at.isoformat(),
+                    "mime_type": mimetypes.guess_type(entry.name)[0]
+                    or "application/octet-stream",
+                    "width": None,
+                    "height": None,
+                    "hash64_hex": None,
+                    "clipboard_distance": None,
+                    "base64_omitted_reason": None,
+                }
+            )
+        if scanned_files_count >= max_scan_files:
+            break
+
+    # Newest first before optional clipboard re-ranking.
+    candidate_items.sort(
+        key=lambda item: item.get("modified_at_dt") or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+
+    pil_available = False
+    pil_import_error: str | None = None
+    Image = None
+    ImageGrab = None
+
+    if match_clipboard or include_base64:
+        try:
+            from PIL import Image as _PILImage  # type: ignore[import-not-found]
+            from PIL import ImageGrab as _PILImageGrab  # type: ignore[import-not-found]
+
+            pil_available = True
+            Image = _PILImage
+            ImageGrab = _PILImageGrab
+        except Exception as exc:
+            pil_available = False
+            pil_import_error = str(exc)
+
+    def _average_hash_hex(image_obj: Any) -> tuple[str, int]:
+        # 8x8 luminance average-hash: compact and fast enough for screenshot matching.
+        grayscale = image_obj.convert("L").resize((8, 8))
+        pixels = list(grayscale.getdata())
+        avg = sum(int(px) for px in pixels) / 64.0
+        bits = 0
+        for idx, pixel in enumerate(pixels):
+            if int(pixel) >= avg:
+                bits |= 1 << idx
+        return f"{bits:016x}", bits
+
+    clipboard_info: dict[str, Any] = {
+        "attempted": bool(match_clipboard),
+        "available": False,
+        "source": None,
+        "width": None,
+        "height": None,
+        "hash64_hex": None,
+        "error": None,
+    }
+    clipboard_hash_bits: int | None = None
+
+    if match_clipboard:
+        if not pil_available or ImageGrab is None:
+            clipboard_info["error"] = (
+                f"Pillow unavailable: {pil_import_error}"
+                if pil_import_error
+                else "Pillow unavailable"
+            )
+        else:
+            try:
+                clipboard_payload = ImageGrab.grabclipboard()
+                clipboard_image = None
+                clipboard_source = None
+                if hasattr(clipboard_payload, "size") and hasattr(
+                    clipboard_payload, "convert"
+                ):
+                    clipboard_image = clipboard_payload
+                    clipboard_source = "clipboard_image"
+                elif isinstance(clipboard_payload, list):
+                    for path_value in clipboard_payload:
+                        if not isinstance(path_value, str):
+                            continue
+                        path_obj = Path(path_value)
+                        if path_obj.suffix.lower() not in image_exts:
+                            continue
+                        try:
+                            if Image is not None:
+                                with Image.open(path_obj) as img:
+                                    clipboard_image = img.copy()
+                                    clipboard_source = "clipboard_file_list"
+                                    break
+                        except Exception:
+                            continue
+
+                if clipboard_image is not None:
+                    hash_hex, hash_bits = _average_hash_hex(clipboard_image)
+                    clipboard_hash_bits = hash_bits
+                    width, height = getattr(clipboard_image, "size", (None, None))
+                    clipboard_info.update(
+                        {
+                            "available": True,
+                            "source": clipboard_source,
+                            "hash64_hex": hash_hex,
+                            "width": int(width) if isinstance(width, int) else None,
+                            "height": int(height) if isinstance(height, int) else None,
+                        }
+                    )
+                else:
+                    clipboard_info["error"] = "No image data available in clipboard"
+            except Exception as exc:
+                clipboard_info["error"] = str(exc)
+
+    if clipboard_hash_bits is not None and pil_available and Image is not None:
+        for item in candidate_items:
+            file_path = Path(item["path"])
+            try:
+                with Image.open(file_path) as img:
+                    width, height = img.size
+                    hash_hex, hash_bits = _average_hash_hex(img)
+                    item["width"] = int(width)
+                    item["height"] = int(height)
+                    item["hash64_hex"] = hash_hex
+                    item["clipboard_distance"] = int(
+                        (hash_bits ^ clipboard_hash_bits).bit_count()
+                    )
+            except Exception:
+                continue
+
+        candidate_items.sort(
+            key=lambda item: (
+                item["clipboard_distance"]
+                if isinstance(item.get("clipboard_distance"), int)
+                else 10**9,
+                -int(item["modified_at_dt"].timestamp()),
+            )
+        )
+
+    selected = candidate_items[:limit]
+
+    if include_base64:
+        for item in selected:
+            file_path = Path(item["path"])
+            size_bytes = int(item.get("size_bytes") or 0)
+            if size_bytes > max_base64_bytes:
+                item["base64_omitted_reason"] = (
+                    f"File size {size_bytes} exceeds max_base64_bytes {max_base64_bytes}"
+                )
+                continue
+            try:
+                payload = file_path.read_bytes()
+                item["content_base64"] = base64.b64encode(payload).decode("ascii")
+            except Exception as exc:
+                item["base64_omitted_reason"] = f"Failed to read file: {exc}"
+
+    for item in selected:
+        item.pop("modified_at_dt", None)
+
+    return {
+        "success": True,
+        "items": selected,
+        "count": len(selected),
+        "scan_summary": {
+            "candidate_directories": [str(path.expanduser()) for path in ordered_dirs],
+            "lookback_hours": lookback_hours,
+            "scanned_files": scanned_files_count,
+            "matching_files": len(candidate_items),
+            "max_scan_files": max_scan_files,
+        },
+        "clipboard": clipboard_info,
+    }
+
+
 def _get_predicate_extent(**kwargs):
     from ...server.routes.predicate_routes import get_predicate_extent_data
 
@@ -5771,6 +6112,51 @@ def _import_local_file_copy_output_schema() -> Schema:
         description=(
             "import_local_file_copy output: blob-store registration result with created "
             "#V#computer_file_copy concept and canonical artifact_record."
+        ),
+    )
+
+
+def _list_recent_screenshots_input_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "limit": (int, type(None)),
+            "lookback_hours": (int, float, type(None)),
+            "paths": (list, type(None)),
+            "match_clipboard": (bool, type(None)),
+            "include_base64": (bool, type(None)),
+            "max_base64_bytes": (int, type(None)),
+            "max_scan_files": (int, type(None)),
+            # Accepted for LLM consistency; ignored by handler logic.
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "list_recent_screenshots input: optionally configure limit/lookback_hours, "
+            "custom paths, clipboard matching, and base64 inclusion for attachment workflows."
+        ),
+    )
+
+
+def _list_recent_screenshots_output_schema() -> Schema:
+    return Schema(
+        required={
+            "success": bool,
+        },
+        optional={
+            "items": (list, type(None)),
+            "count": (int, type(None)),
+            "scan_summary": (dict, type(None)),
+            "clipboard": (dict, type(None)),
+            "error": (str, type(None)),
+            "error_code": (str, type(None)),
+            "error_details": (dict, type(None)),
+            "suggestions": (list, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "list_recent_screenshots output: recent screenshot candidates with metadata, "
+            "optional base64 payloads, and clipboard match diagnostics."
         ),
     )
 
@@ -16498,6 +16884,19 @@ def build_default_catalogue() -> MethodCatalogue:
             description=(
                 "Import a local workspace file into the configured blob store and register a "
                 "#V#computer_file_copy concept with canonical provenance metadata."
+            ),
+        ),
+        MethodDefinition(
+            name="list_recent_screenshots",
+            handler=_list_recent_screenshots,
+            input_schema=_list_recent_screenshots_input_schema(),
+            output_schema=_list_recent_screenshots_output_schema(),
+            category="read",
+            timeout_sec=25.0,
+            description=(
+                "List recent screenshot files from local machine folders and optionally "
+                "match against clipboard image content. Supports optional base64 payload "
+                "inclusion for direct jira_add_attachment calls."
             ),
         ),
         # LinkedIn Data Dump MCP tools (local external server)

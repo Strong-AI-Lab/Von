@@ -39,6 +39,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 - `docs/concept_refactoring.md` (or current plan doc): project roadmap for major work.
 - `docs/software_engineering.md`: conventions, debugging, and lessons learned.
 - `docs/engineering/security_considerations.md`: required security context.
+- `docs/engineering/von_workflow_language_manual.md`: primary reference for workflow-related tasks; use it to guide workflow design/changes and update it whenever workflow semantics, capabilities, or constraints change.
 - `docs/engineering/atlassian_mcp_recovery_runbook.md`: canonical Atlassian MCP recovery and credential reset procedure.
 - `docs/engineering/jira_components_taxonomy.md`: canonical candidate Jira Components taxonomy for Von issues.
 
@@ -173,6 +174,10 @@ Do not "hack around" MCP failures with ad-hoc scripts or direct REST calls. Fix 
 	- Add a concise status comment on each relevant linked item describing what changed, what remains, and whether it is now unblocked, superseded, or complete.
 	- Apply transitions when justified by the completion outcome (for example `To Do` -> `Done` for fully satisfied scope, or `To Do` -> `SUPERSEDED` when absorbed by another task).
 - If a screenshot is provided to describe an issue or support issue creation, attach it to the Jira issue whenever possible using available MCP tooling rather than leaving it only in chat context.
+- **Pasted screenshot handling (mandatory default path)**:
+	- Use `list_recent_screenshots` first with `match_clipboard=true` and `include_base64=true` to locate the correct local image and get a Jira-ready payload.
+	- If clipboard image data is unavailable, select the most likely recent screenshot candidate, attach it with `jira_add_attachment`, and state in the Jira comment that selection was based on recency/path heuristics.
+	- Prefer this flow over asking the user for a manual file path; ask only if no credible candidate is found.
 - When setting Jira `Components`, use `docs/engineering/jira_components_taxonomy.md` as the default source of truth unless the user requests otherwise.
 - Jira site URL: https://naoinstitute.atlassian.net/
 - If a cloudId is required, fetch it from https://naoinstitute.atlassian.net/_edge/tenant_info and include that URL when requesting it.

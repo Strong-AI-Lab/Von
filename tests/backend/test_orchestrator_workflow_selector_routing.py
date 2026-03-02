@@ -3126,6 +3126,79 @@ def test_write_intent_memory_rejects_cross_session_continuation(monkeypatch):
     assert gate_entry.get("continuation_context_reused") is False
 
 
+def test_write_intent_memory_rehydrates_for_low_risk_confirm_structure_prompt(
+    monkeypatch,
+):
+    """Low-risk confirmation prompts should reuse same-session write context."""
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    monkeypatch.setattr(
+        orchestrator._gateway,
+        "describe_methods",
+        lambda: {"add_relationship": {"category": "write"}},
+    )
+
+    first = orchestrator.run(
+        prompt="Create a concept link in Vontology.",
+        context=[],
+        llm_client=_CapturingLLM(
+            [
+                "plain_response",
+                "First tool-calling turn.",
+            ]
+        ),
+        model=None,
+        user_namespace="#V#user",
+        conversation_session_id="session-1328-structure",
+    )
+    assert first.workflow_routing is not None
+    assert first.workflow_routing.verdict == "tool_seeking"
+    assert first.workflow_routing.source == "selector_override"
+
+    second = orchestrator.run(
+        prompt="Confirm structure.",
+        context=[],
+        llm_client=_CapturingLLM(
+            [
+                "plain_response",
+                "Continuation turn.",
+            ]
+        ),
+        model=None,
+        user_namespace="#V#user",
+        conversation_session_id="session-1328-structure",
+    )
+    assert second.workflow_routing is not None
+    assert second.workflow_routing.verdict == "tool_seeking"
+    assert second.workflow_routing.source == "selector_override"
+
+    rehydrate_entry = next(
+        (
+            entry
+            for entry in second.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "write_intent_session_memory"
+            and entry.get("stage") == "rehydrate"
+        ),
+        None,
+    )
+    assert rehydrate_entry is not None
+    assert rehydrate_entry.get("reused") is True
+    gate_entry = next(
+        (
+            entry
+            for entry in second.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "write_policy_gate"
+            and entry.get("stage") == "routing"
+        ),
+        None,
+    )
+    assert gate_entry is not None
+    assert gate_entry.get("gate_state") == "confirmed"
+    assert gate_entry.get("continuation_context_reused") is True
+
+
 # ---------------------------------------------------------------------------
 # JVNAUTOSCI-825: Routing info on tool-calling path.
 # ---------------------------------------------------------------------------

@@ -83,6 +83,7 @@ VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES: tuple[str, ...] = (
     "jira_search",
     "jira_transition",
     "jira_update_issue",
+    "list_recent_screenshots",
     "list_my_tasks",
     "merge_concepts",
     "qna_search",
@@ -306,6 +307,8 @@ def _infer_tool_family(tool_name: str) -> str:
     }:
         return "task"
     if tool_name.startswith("chat_") or tool_name.startswith("settings_"):
+        return "internal"
+    if tool_name in {"list_recent_screenshots"}:
         return "internal"
     return "vontology"
 
