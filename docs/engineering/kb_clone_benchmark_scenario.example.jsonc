@@ -1,0 +1,27 @@
+{
+  "scenario_id": "kb_clone_smoke_eval",
+  "source_db_name": "test_von_db",
+  "mode": "reliability",
+  "runs": 3,
+  "retry_budget": 0,
+  "retain_on_failure": false,
+  "model": "gpt-4.1-mini",
+  "identity": {
+    "user_name": "benchmark user",
+    "organisation_name": "benchmark organisation"
+  },
+  "turns": [
+    {
+      "prompt": "Reply with exactly: benchmark-ready",
+      "expected_substrings": [
+        "benchmark-ready"
+      ]
+    },
+    {
+      "prompt": "Reply with exactly: archive-complete",
+      "expected_substrings": [
+        "archive-complete"
+      ]
+    }
+  ]
+}
