@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import requests
 from dataclasses import asdict, dataclass
@@ -8370,6 +8371,84 @@ class InternalMCPChatOrchestrator:
                 "error_class": type(exc).__name__,
             }
 
+    def _invoke_with_llm_heartbeat(
+        self,
+        *,
+        call: Callable[[], Any],
+        stage_name: str,
+        model_name: str | None,
+        emit_progress: Callable[[Mapping[str, Any]], None] | None,
+        attempt_meta: Mapping[str, Any] | None = None,
+    ) -> Any:
+        if not callable(emit_progress):
+            return call()
+
+        def _coerce_float_env(name: str, default: float) -> float:
+            raw = os.getenv(name)
+            if raw is None:
+                return default
+            try:
+                value = float(raw)
+            except Exception:
+                return default
+            return value
+
+        heartbeat_interval_sec = max(
+            1.0,
+            min(
+                30.0,
+                _coerce_float_env("VON_LLM_HEARTBEAT_INTERVAL_SEC", 5.0),
+            ),
+        )
+        if stage_name == "screen_backfill":
+            timeout_sec = max(
+                0.0,
+                _coerce_float_env("VON_SCREEN_BACKFILL_LLM_TIMEOUT_SEC", 180.0),
+            )
+        else:
+            timeout_sec = max(0.0, _coerce_float_env("VON_LLM_CALL_TIMEOUT_SEC", 0.0))
+
+        state: dict[str, Any] = {}
+        done = threading.Event()
+        started = time.perf_counter()
+
+        def _worker() -> None:
+            try:
+                state["result"] = call()
+            except Exception as exc:
+                state["error"] = exc
+            finally:
+                done.set()
+
+        threading.Thread(
+            target=_worker,
+            daemon=True,
+            name=f"von-llm-{stage_name}",
+        ).start()
+
+        while not done.wait(timeout=heartbeat_interval_sec):
+            elapsed_ms = int((time.perf_counter() - started) * 1000.0)
+            heartbeat_payload: dict[str, Any] = {
+                "status": "heartbeat",
+                "stage": stage_name,
+                "model": model_name,
+                "duration_ms": elapsed_ms,
+                "liveness_state": "waiting",
+                "liveness_reason": "llm_call_pending",
+            }
+            if isinstance(attempt_meta, Mapping):
+                heartbeat_payload.update(dict(attempt_meta))
+            emit_progress(heartbeat_payload)
+            if timeout_sec > 0 and (elapsed_ms / 1000.0) >= timeout_sec:
+                raise TimeoutError(
+                    f"LLM call timed out after {int(timeout_sec)}s (stage={stage_name}, model={model_name or 'default'})"
+                )
+
+        error = state.get("error")
+        if isinstance(error, Exception):
+            raise error
+        return state.get("result")
+
     def _run_llm_with_fallbacks(
         self,
         *,
@@ -8387,6 +8466,7 @@ class InternalMCPChatOrchestrator:
         record_llm_call: Callable[..., Any],
         emit_progress: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> tuple[str, Optional[str], Mapping[str, Any]]:
+
         candidates = self._stage_model_candidates(
             stage=stage,
             default_model=default_model,
@@ -8501,10 +8581,16 @@ class InternalMCPChatOrchestrator:
 
             llm_start = time.perf_counter()
             try:
-                response = client.generate(
-                    prompt,
-                    context=cast(Optional[List[Dict[str, Any]]], context),
-                    model=model_name,
+                response = self._invoke_with_llm_heartbeat(
+                    call=lambda: client.generate(
+                        prompt,
+                        context=cast(Optional[List[Dict[str, Any]]], context),
+                        model=model_name,
+                    ),
+                    stage_name=stage,
+                    model_name=model_name,
+                    emit_progress=emit_progress,
+                    attempt_meta=attempt_meta,
                 )
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
                 if callable(emit_progress):
@@ -8895,12 +8981,18 @@ class InternalMCPChatOrchestrator:
                 )
             llm_start = time.perf_counter()
             try:
-                llm_response = client.generate_with_tools(
-                    prompt=prompt,
-                    available_tools=available_tool_definitions,
-                    context=cast(Optional[List[Dict[str, Any]]], context),
-                    model=model_name,
-                    system_message=None,
+                llm_response = self._invoke_with_llm_heartbeat(
+                    call=lambda: client.generate_with_tools(
+                        prompt=prompt,
+                        available_tools=available_tool_definitions,
+                        context=cast(Optional[List[Dict[str, Any]]], context),
+                        model=model_name,
+                        system_message=None,
+                    ),
+                    stage_name=stage,
+                    model_name=model_name,
+                    emit_progress=emit_progress,
+                    attempt_meta=attempt_meta,
                 )
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
                 if callable(emit_progress):
@@ -21241,7 +21333,9 @@ class InternalMCPChatOrchestrator:
 
                 if effective_depth < len(stack_by_depth):
                     stack_by_depth = stack_by_depth[:effective_depth]
-                if effective_depth == len(stack_by_depth):
+                # Ensure index-safe ancestry stack updates when parsers emit unusual
+                # depth signals (e.g. first row starting at depth=1).
+                if len(stack_by_depth) <= effective_depth:
                     stack_by_depth.append(node_id)
                 else:
                     stack_by_depth[effective_depth] = node_id
@@ -21712,22 +21806,35 @@ class InternalMCPChatOrchestrator:
                 )
 
             if not screen_hierarchy_elements:
-                screen_hierarchy_elements = (
-                    _extract_renderer_screen_hierarchy_elements_from_screen_text(
-                        screen_text=screen_text,
-                        focus_concept_id=decision.get(
-                            "request_payload_selected_concept_id"
-                        ),
+                try:
+                    screen_hierarchy_elements = (
+                        _extract_renderer_screen_hierarchy_elements_from_screen_text(
+                            screen_text=screen_text,
+                            focus_concept_id=decision.get(
+                                "request_payload_selected_concept_id"
+                            ),
+                        )
                     )
-                )
-                if screen_hierarchy_elements:
-                    include_hierarchy_elements = True
-                    selected_families.add("hierarchy_view")
-                    taxonomy_reason_code = (
-                        "renderer_screen_elements:taxonomy_hierarchy_from_screen_text"
+                    if screen_hierarchy_elements:
+                        include_hierarchy_elements = True
+                        selected_families.add("hierarchy_view")
+                        taxonomy_reason_code = (
+                            "renderer_screen_elements:taxonomy_hierarchy_from_screen_text"
+                        )
+                        if taxonomy_reason_code not in reason_codes:
+                            reason_codes.append(taxonomy_reason_code)
+                except Exception as exc:  # pragma: no cover - defensive recovery
+                    reason_code = "renderer_screen_elements:taxonomy_hierarchy_from_screen_text_error"
+                    if reason_code not in reason_codes:
+                        reason_codes.append(reason_code)
+                    aux_llm_calls.append(
+                        {
+                            "type": "renderer_screen_hierarchy_extract_error",
+                            "source": "taxonomy_hierarchy_parser",
+                            "error_class": type(exc).__name__,
+                            "error": str(exc),
+                        }
                     )
-                    if taxonomy_reason_code not in reason_codes:
-                        reason_codes.append(taxonomy_reason_code)
 
             if screen_hierarchy_elements:
                 decision["screen_hierarchy_elements"] = screen_hierarchy_elements
