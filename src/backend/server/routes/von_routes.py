@@ -1613,6 +1613,15 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
             tools_completed = max(tools_completed, int(explicit_done))
 
         merged = {**existing, **safe_update}
+        if "error" in safe_update:
+            error_text = _progress_str(safe_update.get("error"))
+            if error_text:
+                merged["error"] = error_text
+            else:
+                merged.pop("error", None)
+        else:
+            # Avoid stale-provider error leakage into later unrelated progress events.
+            merged.pop("error", None)
         merged["request_id"] = request_id
         merged["status"] = status
         merged["stage"] = stage
@@ -1682,6 +1691,25 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
             event_entry["success"] = success_flag
         if _progress_str(merged.get("error")):
             event_entry["error"] = str(merged.get("error"))
+        error_class = _progress_str(merged.get("error_class"))
+        if error_class:
+            event_entry["error_class"] = error_class
+        candidate = merged.get("candidate")
+        if isinstance(candidate, Mapping):
+            event_entry["candidate"] = dict(candidate)
+        fallback_attempt_no = _progress_number(merged.get("fallback_attempt_no"))
+        if fallback_attempt_no is not None:
+            event_entry["fallback_attempt_no"] = int(max(0.0, fallback_attempt_no))
+        fallback_candidate_count = _progress_number(
+            merged.get("fallback_candidate_count")
+        )
+        if fallback_candidate_count is not None:
+            event_entry["fallback_candidate_count"] = int(
+                max(0.0, fallback_candidate_count)
+            )
+        failure_kind = _progress_str(merged.get("failure_kind"))
+        if failure_kind:
+            event_entry["failure_kind"] = failure_kind
         trimmed_events = [
             *existing_events[-(_TOOL_PROGRESS_DIAGNOSTIC_EVENT_LIMIT - 1) :],
             event_entry,
@@ -5859,6 +5887,13 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 payload["candidate"] = dict(candidate)
             llm_interaction["calls"].append(payload)
 
+        def _emit_stage_progress(info: Mapping[str, Any] | None) -> None:
+            if not show_tool_use_progress:
+                return
+            payload = dict(info) if isinstance(info, Mapping) else {"status": "unknown"}
+            payload.setdefault("request_id", request_id)
+            _set_tool_progress(progress_scope_key, request_id, payload)
+
         if orchestrator is None:
             llm_start_perf = time.perf_counter()
             response_text = llm_client.generate(
@@ -6434,7 +6469,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             orchestrator, "_run_llm_with_fallbacks"
                         ):
                             try:
-                                policy_state, _ = (
+                                policy_state, registry_snapshot = (
                                     orchestrator._load_workflow_model_policy(
                                         request_language
                                     )
@@ -6453,11 +6488,17 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                         default_client=llm_client,
                                         default_model=model_name,
                                         policy_state=policy_state,
+                                        registry_snapshot=(
+                                            registry_snapshot
+                                            if isinstance(registry_snapshot, Mapping)
+                                            else None
+                                        ),
                                         user_concept_id=user_concept_id,
                                         org_concept_id=org_concept_id,
                                         llm_calls_log=llm_interaction["calls"],
                                         aux_log=auxiliary_llm_calls,
                                         record_llm_call=_record_stage_llm_call,
+                                        emit_progress=_emit_stage_progress,
                                     )
                                 )
                                 screen_backfill_model_id = screen_model_used
@@ -6467,6 +6508,13 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             llm_start = time.perf_counter()
                             screen_model_used = model_name
                             screen_backfill_model_id = screen_model_used
+                            _emit_stage_progress(
+                                {
+                                    "status": "llm_call_start",
+                                    "stage": "screen_backfill",
+                                    "model": screen_model_used,
+                                }
+                            )
                             synthesis_response = llm_client.generate(
                                 prompt="Generate <screen> display content",
                                 context=[
@@ -6475,10 +6523,32 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                 ],
                                 model=screen_model_used,
                             )
+                            screen_duration_ms = (
+                                time.perf_counter() - llm_start
+                            ) * 1000.0
+                            _emit_stage_progress(
+                                {
+                                    "status": "llm_call_chunk",
+                                    "stage": "screen_backfill",
+                                    "model": screen_model_used,
+                                    "chunks": 1,
+                                    "duration_ms": int(screen_duration_ms),
+                                }
+                            )
+                            _emit_stage_progress(
+                                {
+                                    "status": "llm_call_end",
+                                    "stage": "screen_backfill",
+                                    "model": screen_model_used,
+                                    "duration_ms": int(screen_duration_ms),
+                                    "success": True,
+                                    "error": None,
+                                }
+                            )
                             _record_stage_llm_call(
                                 call_type="llm.generate",
                                 model_name=screen_model_used,
-                                duration_ms=(time.perf_counter() - llm_start) * 1000.0,
+                                duration_ms=screen_duration_ms,
                                 usage=None,
                                 note="Screen backfill synthesis (legacy).",
                                 stage="screen_backfill",
@@ -7210,12 +7280,14 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 buttonify_workflow_used = True
                 buttonify_workflow_result = None
                 policy_state = None
+                registry_snapshot = None
                 try:
-                    policy_state, _ = orchestrator._load_workflow_model_policy(
+                    policy_state, registry_snapshot = orchestrator._load_workflow_model_policy(
                         request_language
                     )
                 except Exception:
                     policy_state = None
+                    registry_snapshot = None
 
                 try:
                     buttonify_workflow_result = orchestrator.execute_workflow(
@@ -7229,7 +7301,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             "buttonify_prompt_ids": list(BUTTONIFY_PROMPT_IDS),
                             "default_model": model_name,
                             "policy_state": policy_state,
+                            "registry_snapshot": registry_snapshot,
                             "record_llm_call": _record_stage_llm_call,
+                            "emit_progress": _emit_stage_progress,
                             "llm_calls_log": llm_interaction["calls"],
                             "aux_llm_calls": auxiliary_llm_calls,
                             "user_concept_id": user_concept_id,

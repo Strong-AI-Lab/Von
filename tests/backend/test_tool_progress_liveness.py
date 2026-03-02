@@ -167,6 +167,45 @@ def test_progress_event_contains_required_telemetry_fields(monkeypatch) -> None:
     assert isinstance(serialised["activity_idle_ms"], int)
 
 
+def test_progress_clears_stale_error_on_subsequent_success(monkeypatch) -> None:
+    clock = _set_clock(monkeypatch, start=4500.0)
+
+    von_routes._set_tool_progress(
+        "scope-stale",
+        "req-stale",
+        {
+            "status": "llm_call_end",
+            "stage": "buttonify",
+            "request_id": "req-stale",
+            "model": "granite3.3:2b",
+            "success": False,
+            "error": "Ollama unexpected error: failed to connect",
+            "error_class": "RuntimeError",
+        },
+    )
+    clock["now"] += 0.2
+    von_routes._set_tool_progress(
+        "scope-stale",
+        "req-stale",
+        {
+            "status": "llm_call_end",
+            "stage": "buttonify",
+            "request_id": "req-stale",
+            "model": "gpt-5.2-chat-latest",
+            "success": True,
+        },
+    )
+
+    state = von_routes._get_tool_progress("scope-stale", "req-stale")
+    assert state is not None
+    assert "error" not in state
+
+    events = state.get("diagnostic_events")
+    assert isinstance(events, list)
+    assert events[0].get("error") == "Ollama unexpected error: failed to connect"
+    assert "error" not in events[-1]
+
+
 def test_turn_execution_diagnostics_rebuilds_phase_and_tool_history(monkeypatch) -> None:
     clock = _set_clock(monkeypatch, start=5000.0)
 
