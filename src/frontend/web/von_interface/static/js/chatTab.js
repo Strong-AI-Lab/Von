@@ -58,6 +58,11 @@ function buildChatFetchHeaders(extraHeaders = {}) {
 // Store LLM debug data for each turn
 const llmDebugData = new Map();
 const llmDebugFetchInFlight = new Map();
+const CONVERSATION_LLM_COPY_BUTTON_ID = 'copyConversationLlmDebugJsonBtn';
+const CONVERSATION_LLM_COPY_BUTTON_LABEL = 'LLM(i)';
+const CONVERSATION_LLM_COPY_BUTTON_TITLE_READY = 'Copy conversation-level LLM telemetry JSON';
+const CONVERSATION_LLM_COPY_BUTTON_TITLE_DISABLED = 'Conversation-level LLM telemetry is not available yet';
+const CONVERSATION_LLM_TELEMETRY_SCHEMA_VERSION = 'conversation_llm_telemetry.v1';
 // Track conversation turns for Markdown export and state resets
 const transcriptTurns = [];
 // JVNAUTOSCI-1043: Track user edits to assistant messages
@@ -176,6 +181,19 @@ const workflowEpisodesState = {
     lastRequestQuery: '',
     lastFetchedAt: 0
 };
+
+function setLlmDebugDataEntry(turnId, debugData) {
+    if (!turnId) {
+        return;
+    }
+    llmDebugData.set(turnId, debugData);
+    refreshConversationLlmCopyButtonState();
+}
+
+function clearLlmDebugDataEntries() {
+    llmDebugData.clear();
+    refreshConversationLlmCopyButtonState();
+}
 
 function isDocumentVisibleForRealtimeConnections() {
     try {
@@ -8083,7 +8101,7 @@ async function uploadFilesToVon(files) {
                 total
             });
             const errorTurnId = `e-upload-${Date.now()}-${index}`;
-            llmDebugData.set(
+            setLlmDebugDataEntry(
                 errorTurnId,
                 buildTurnDiagnosticDebugPayload(errorMessage, diagnosticsPayload)
             );
@@ -9160,7 +9178,7 @@ function exitEditMode(messageTextEl, messageContainer, turnId, editButton, newTe
             // Update debug data to include edit information
             const debugData = llmDebugData.get(turnId);
             if (debugData) {
-                llmDebugData.set(turnId, {
+                setLlmDebugDataEntry(turnId, {
                     ...debugData,
                     user_edit: {
                         original_text: existingEdit.originalText || originalText,
@@ -10235,7 +10253,7 @@ function recordSpeechPlaybackTelemetry(turnId, telemetry) {
             ...debugData,
             speech_playback: telemetry
         };
-        llmDebugData.set(turnId, updated);
+        setLlmDebugDataEntry(turnId, updated);
     }
 
     if (telemetry.duration_suspect_too_long) {
@@ -13670,7 +13688,7 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
 
     scrollableField.innerHTML = '';
     transcriptTurns.length = 0;
-    llmDebugData.clear();
+    clearLlmDebugDataEntries();
 
     historyMessages.forEach((msg, index) => {
         if (msg.role === 'user' || msg.role === 'assistant') {
@@ -13694,7 +13712,7 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
                     ...(msg.llm_debug_data && typeof msg.llm_debug_data === 'object' ? msg.llm_debug_data : {}),
                     history_location: msg.history_location || null
                 };
-                llmDebugData.set(turnId, merged);
+                setLlmDebugDataEntry(turnId, merged);
             }
 
             appendMessage(label, msg.content, turnId, hasDebugData, true, msg.timestamp);
@@ -16497,6 +16515,7 @@ export function initializeChatTab() {
     const dictateButton = document.getElementById('dictateButton');
     const ttsToggle = document.getElementById('ttsToggle');
     const exportConversationJsonBtn = document.getElementById('exportConversationJsonBtn');
+    const copyConversationLlmDebugJsonBtn = document.getElementById(CONVERSATION_LLM_COPY_BUTTON_ID);
     const exportConversationMarkdownBtn = document.getElementById('exportConversationMarkdownBtn');
     const uploadFileButton = document.getElementById('uploadFileButton');
     const uploadFileInput = document.getElementById('uploadFileInput');
@@ -16670,9 +16689,15 @@ export function initializeChatTab() {
     if (exportConversationJsonBtn) {
         exportConversationJsonBtn.addEventListener('click', handleExportConversationJson);
     }
+    if (copyConversationLlmDebugJsonBtn) {
+        copyConversationLlmDebugJsonBtn.addEventListener('click', () => {
+            void handleCopyConversationLlmTelemetryJson();
+        });
+    }
     if (exportConversationMarkdownBtn) {
         exportConversationMarkdownBtn.addEventListener('click', handleExportConversationMarkdown);
     }
+    refreshConversationLlmCopyButtonState();
 
     if (inviteButton) {
         inviteButton.addEventListener('click', openInvitePopup);
@@ -17698,7 +17723,7 @@ async function handleSendPrompt(options = {}) {
                     spokenText,
                     displayElements
                 });
-                llmDebugData.set(assistantTurnId, enriched);
+                setLlmDebugDataEntry(assistantTurnId, enriched);
                 console.log('[chatTab] Stored LLM debug data for turn:', assistantTurnId, {
                     hasButtonify: !!data.llm_debug?.buttonify,
                     buttonifyOptions: data.llm_debug?.buttonify?.options,
@@ -17737,7 +17762,7 @@ async function handleSendPrompt(options = {}) {
             // Store LLM debug data if available even on error
             const errorTurnId = `e-${Date.now()}`;
             if (data.llm_debug) {
-                llmDebugData.set(errorTurnId, data.llm_debug);
+                setLlmDebugDataEntry(errorTurnId, data.llm_debug);
                 console.log('[chatTab] Stored LLM debug data for error turn:', errorTurnId);
             }
             appendMessage('Error', data.error || 'An error occurred', errorTurnId, !!data.llm_debug);
@@ -17791,7 +17816,7 @@ async function handleResetContext() {
             }
 
             transcriptTurns.length = 0;
-            llmDebugData.clear();
+            clearLlmDebugDataEntries();
             lastFinishedThinkingCard = null;
             setThinkingState(false, null);
             updateHistoryLength();
@@ -17944,7 +17969,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                     if (displayElements) {
                         merged.display_elements = displayElements;
                     }
-                    llmDebugData.set(turnId, merged);
+                    setLlmDebugDataEntry(turnId, merged);
 
                     // Clear any previous failure cool-down.
                     historySpokenBackfillFailures.delete(turnId);
@@ -18703,7 +18728,7 @@ async function loadLlmDebugDataForTurn(turnId, options = {}) {
                 ...data.llm_debug_data,
                 history_location: historyLocation
             };
-            llmDebugData.set(turnId, merged);
+            setLlmDebugDataEntry(turnId, merged);
             return merged;
         } catch (err) {
             console.warn('[chatTab] Failed to load LLM debug data:', err);
@@ -18947,54 +18972,208 @@ function buildConversationTelemetryExportFilename() {
     return `von_conversation_telemetry_${timestamp}.json`;
 }
 
-async function handleExportConversationJson() {
-    const button = document.getElementById('exportConversationJsonBtn');
-    if (!button) return;
-    const originalContent = button.innerHTML;
+function parseTurnTimestampMs(value) {
+    if (value === null || value === undefined) {
+        return null;
+    }
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+        return Math.floor(value);
+    }
+    if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (!trimmed) {
+            return null;
+        }
+        const asNumber = Number.parseInt(trimmed, 10);
+        if (Number.isFinite(asNumber) && asNumber > 0) {
+            return asNumber;
+        }
+        const asDateMs = Date.parse(trimmed);
+        if (Number.isFinite(asDateMs) && asDateMs > 0) {
+            return asDateMs;
+        }
+    }
+    return null;
+}
 
-    // Collect all debug data from the Map
-    const conversationData = {
+function parseTurnTimestampFromTurnId(turnId) {
+    if (typeof turnId !== 'string') {
+        return null;
+    }
+    const parts = turnId.split('-');
+    if (parts.length < 2) {
+        return null;
+    }
+    return parseTurnTimestampMs(parts[parts.length - 1]);
+}
+
+function resolveTurnTimestampMs(turnId, debugData) {
+    const fromDebugData = parseTurnTimestampMs(debugData?.timestamp);
+    if (fromDebugData) {
+        return fromDebugData;
+    }
+    return parseTurnTimestampFromTurnId(turnId);
+}
+
+function buildSortedConversationLlmDebugEntries() {
+    const entries = Array.from(llmDebugData.entries()).map(([turnId, debugData], index) => ({
+        turnId,
+        debugData,
+        timestampMs: resolveTurnTimestampMs(turnId, debugData),
+        insertionIndex: index
+    }));
+
+    entries.sort((a, b) => {
+        const left = Number.isFinite(a.timestampMs) ? a.timestampMs : -1;
+        const right = Number.isFinite(b.timestampMs) ? b.timestampMs : -1;
+        if (left !== right) {
+            return left - right;
+        }
+
+        const idCompare = String(a.turnId).localeCompare(String(b.turnId));
+        if (idCompare !== 0) {
+            return idCompare;
+        }
+
+        return a.insertionIndex - b.insertionIndex;
+    });
+
+    return entries;
+}
+
+function buildConversationLlmTelemetryPayload() {
+    if (llmDebugData.size === 0) {
+        return null;
+    }
+
+    const sortedEntries = buildSortedConversationLlmDebugEntries();
+    const transcriptTurnCount = Array.isArray(transcriptTurns) ? transcriptTurns.length : 0;
+    const missingTurnTelemetryCount = Math.max(0, transcriptTurnCount - sortedEntries.length);
+
+    return {
+        schema_version: CONVERSATION_LLM_TELEMETRY_SCHEMA_VERSION,
+        generated_at_utc: new Date().toISOString(),
+        session_id: activeChatSessionId || null,
+        session_name: activeChatSessionName || null,
+        metadata: {
+            total_turns: sortedEntries.length,
+            llm_debug_turn_count: llmDebugData.size,
+            transcript_turn_count: transcriptTurnCount,
+            has_partial_telemetry: missingTurnTelemetryCount > 0,
+            missing_turn_telemetry_count: missingTurnTelemetryCount,
+            ordering: 'timestamp_then_turn_id'
+        },
+        turns: sortedEntries.map((entry, index) => ({
+            sequence: index + 1,
+            turn_id: entry.turnId,
+            timestamp_utc: Number.isFinite(entry.timestampMs)
+                ? new Date(entry.timestampMs).toISOString()
+                : null,
+            debug_data: enrichDebugDataWithSpeechPlanning(entry.debugData, { turnId: entry.turnId })
+        }))
+    };
+}
+
+function buildConversationTranscriptFallbackPayload() {
+    const payload = {
         metadata: {
             exported_at: new Date().toISOString(),
-            total_turns: llmDebugData.size,
-            format_version: '1.1'
+            total_turns: 0,
+            format_version: '1.1',
+            source: 'transcript'
         },
         turns: []
     };
 
-    if (llmDebugData.size > 0) {
-        // Convert Map entries to array and sort by turnId timestamp
-        const sortedEntries = Array.from(llmDebugData.entries()).sort((a, b) => {
-            // Extract timestamp from turnId (format: 'a-1234567890' or 'u-1234567890')
-            const getTimestamp = (turnId) => {
-                const parts = turnId.split('-');
-                return parts.length > 1 ? parseInt(parts[1], 10) : 0;
-            };
-            return getTimestamp(a[0]) - getTimestamp(b[0]);
-        });
-
-        // Build conversation data
-        for (const [turnId, debugData] of sortedEntries) {
-            const enrichedDebugData = enrichDebugDataWithSpeechPlanning(debugData, { turnId });
-            conversationData.turns.push({
-                turn_id: turnId,
-                timestamp: new Date((debugData && debugData.timestamp) || Date.now()).toISOString(),
-                debug_data: enrichedDebugData
-            });
-        }
-    } else if (Array.isArray(transcriptTurns) && transcriptTurns.length > 0) {
-        conversationData.metadata.total_turns = transcriptTurns.length;
-        conversationData.metadata.source = 'transcript';
-        transcriptTurns.forEach((turn, index) => {
-            const timestamp = turn.timestamp ? new Date(turn.timestamp).toISOString() : new Date().toISOString();
-            conversationData.turns.push({
-                turn_id: `t-${index + 1}`,
-                timestamp,
-                role: turn.sender || null,
-                content: turn.message ?? ''
-            });
-        });
+    if (!Array.isArray(transcriptTurns) || transcriptTurns.length === 0) {
+        return payload;
     }
+
+    payload.metadata.total_turns = transcriptTurns.length;
+    transcriptTurns.forEach((turn, index) => {
+        const turnTimestampMs = parseTurnTimestampMs(turn?.timestamp);
+        payload.turns.push({
+            turn_id: `t-${index + 1}`,
+            timestamp: Number.isFinite(turnTimestampMs)
+                ? new Date(turnTimestampMs).toISOString()
+                : null,
+            role: turn?.sender || null,
+            content: turn?.message ?? ''
+        });
+    });
+
+    return payload;
+}
+
+function buildConversationTelemetryExportPayload() {
+    return buildConversationLlmTelemetryPayload() || buildConversationTranscriptFallbackPayload();
+}
+
+function refreshConversationLlmCopyButtonState() {
+    const button = document.getElementById(CONVERSATION_LLM_COPY_BUTTON_ID);
+    if (!(button instanceof HTMLButtonElement)) {
+        return;
+    }
+
+    const hasTelemetry = llmDebugData.size > 0;
+    button.disabled = !hasTelemetry;
+    button.setAttribute('aria-disabled', hasTelemetry ? 'false' : 'true');
+    button.setAttribute(
+        'title',
+        hasTelemetry ? CONVERSATION_LLM_COPY_BUTTON_TITLE_READY : CONVERSATION_LLM_COPY_BUTTON_TITLE_DISABLED
+    );
+
+    if (hasTelemetry) {
+        resetCopyJsonButtonPreCopyState(button);
+    }
+}
+
+async function copyConversationLlmTelemetryToClipboard(button = null) {
+    const payload = buildConversationLlmTelemetryPayload();
+    if (!payload) {
+        showToast('No conversation-level LLM telemetry is available yet.', 'info');
+        refreshConversationLlmCopyButtonState();
+        return false;
+    }
+
+    let jsonText = '';
+    try {
+        jsonText = JSON.stringify(payload, null, 2);
+    } catch (err) {
+        console.error('[chatTab] Failed to serialize conversation LLM telemetry:', err);
+        showToast('Failed to prepare conversation telemetry JSON.', 'error');
+        return false;
+    }
+
+    const copied = (button instanceof HTMLButtonElement)
+        ? await copyJsonTextWithButtonFeedback(button, jsonText, {
+            fallbackLabel: CONVERSATION_LLM_COPY_BUTTON_LABEL
+        })
+        : await copyTextToClipboard(jsonText);
+
+    if (!copied) {
+        showToast('Failed to copy conversation-level LLM telemetry JSON.', 'error');
+        return false;
+    }
+
+    if (payload.metadata?.has_partial_telemetry) {
+        showToast('Copied conversation LLM telemetry JSON (partial coverage).', 'info');
+    } else {
+        showToast('Copied conversation LLM telemetry JSON.', 'success');
+    }
+    return true;
+}
+
+async function handleCopyConversationLlmTelemetryJson() {
+    const button = document.getElementById(CONVERSATION_LLM_COPY_BUTTON_ID);
+    return copyConversationLlmTelemetryToClipboard(button);
+}
+
+async function handleExportConversationJson() {
+    const button = document.getElementById('exportConversationJsonBtn');
+    if (!button) return;
+    const originalContent = button.innerHTML;
+    const conversationData = buildConversationTelemetryExportPayload();
 
     // Convert to JSON string
     const jsonString = JSON.stringify(conversationData, null, 2);
@@ -19106,7 +19285,7 @@ export const exportConversationJson = handleExportConversationJson;
 export const exportConversationMarkdown = handleExportConversationMarkdown;
 // Export for testing
 export const setLlmDebugDataForTurn = (turnId, debugData) => {
-    llmDebugData.set(turnId, debugData);
+    setLlmDebugDataEntry(turnId, debugData);
 };
 // Export for testing
 export const __test_only__rehydrateHistory = rehydrateHistory;
@@ -19208,6 +19387,18 @@ export function __testOnly_buildDiagnosticsExportRequestPayload() {
 }
 export function __testOnly_buildSanitisedLlmDebugExportPayload(debugData) {
     return buildSanitisedLlmDebugExportPayload(debugData);
+}
+export function __testOnly_buildConversationLlmTelemetryPayload() {
+    return buildConversationLlmTelemetryPayload();
+}
+export function __testOnly_refreshConversationLlmCopyButtonState() {
+    refreshConversationLlmCopyButtonState();
+}
+export async function __testOnly_copyConversationLlmTelemetryToClipboard(button = null) {
+    return copyConversationLlmTelemetryToClipboard(button);
+}
+export function __testOnly_clearLlmDebugData() {
+    clearLlmDebugDataEntries();
 }
 export function __testOnly_extractImageFilesFromClipboardEvent(event) {
     return extractImageFilesFromClipboardEvent(event);

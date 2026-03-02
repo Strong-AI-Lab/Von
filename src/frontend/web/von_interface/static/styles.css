@@ -6407,6 +6407,14 @@ footer {
     box-shadow: 0 2px 4px rgba(0, 123, 255, 0.2);
 }
 
+.chat-export-btn:disabled,
+.chat-export-btn[aria-disabled="true"] {
+    opacity: 0.55;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+}
+
 .chat-export-btn:active {
     transform: translateY(0);
 }
