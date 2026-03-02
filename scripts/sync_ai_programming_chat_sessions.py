@@ -16,7 +16,6 @@ if str(REPO_ROOT) not in sys.path:
 
 from src.backend.services.ai_chat_session_ingestion_service import (  # noqa: E402
     AIChatSessionIngestionService,
-    COPILOT_DEFAULT_ROOT,
     CodexSessionAdapter,
     CopilotSessionAdapter,
     GenericSessionAdapter,
@@ -49,7 +48,7 @@ def _resolve_user_concept_id(explicit_user_concept_id: str | None) -> str:
 
 
 def _discover_standard_copilot_roots() -> list[Path]:
-    roots: list[Path] = [COPILOT_DEFAULT_ROOT]
+    roots: list[Path] = []
     appdata = os.getenv("APPDATA")
     if not appdata:
         return roots
@@ -193,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help=(
             "Copilot chat files root. Repeat to scan multiple roots. "
-            r"Default includes W:\Microsoft Copilot Chat Files."
+            "Default scans standard VS Code/Insiders chat-session storage locations."
         ),
     )
     parser.add_argument(
