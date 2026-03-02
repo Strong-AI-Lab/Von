@@ -3174,6 +3174,10 @@ def _read_file_copy(**kwargs):
 def _interpret_file_copy(**kwargs):
     import json
 
+    from ...services.arxiv_paper_link_service import (
+        extract_arxiv_id_candidates,
+        materialise_scholarly_representation_for_arxiv_file_copy,
+    )
     from ...services.computer_file_copy_service import fetch_file_copy_bytes
     from ...services.file_copy_interpretation_service import (
         build_document_interpretation,
@@ -3397,6 +3401,13 @@ def _interpret_file_copy(**kwargs):
     persisted_relations: list[dict[str, Any]] = []
     persisted_structural_relations: list[dict[str, Any]] = []
     persist_errors: list[dict[str, Any]] = []
+    arxiv_id_candidates: list[str] = []
+    selected_arxiv_id: str | None = None
+    scholarly_representation: dict[str, Any] = {
+        "attempted": False,
+        "verified": False,
+        "reason": "not_applicable",
+    }
     subtype_assertion: dict[str, Any] | None = None
     subtype_assertion_outcome = "not_attempted"
     if persist:
@@ -3497,8 +3508,92 @@ def _interpret_file_copy(**kwargs):
                             "error": str(exc),
                         }
                     )
+
+        if file_kind == "document":
+            arxiv_id_candidates = extract_arxiv_id_candidates(
+                kwargs.get("arxiv_id"),
+                kwargs.get("source_identifier"),
+                original_filename,
+                read_payload.get("blob"),
+                extracted_text,
+                content_for_persist,
+            )
+            selected_arxiv_id = arxiv_id_candidates[0] if arxiv_id_candidates else None
+            if isinstance(selected_arxiv_id, str) and selected_arxiv_id.strip():
+                scholarly_representation = {
+                    "attempted": True,
+                    "verified": False,
+                    "arxiv_id": selected_arxiv_id,
+                    "reason": "metadata_resolution_pending",
+                }
+
+                metadata_payload = _get_paper_metadata(arxiv_id=selected_arxiv_id)
+                metadata_error: str | None = None
+                metadata_record: dict[str, Any] | None = None
+                if isinstance(metadata_payload, dict):
+                    if metadata_payload.get("success") is False:
+                        metadata_error = str(
+                            metadata_payload.get("error")
+                            or metadata_payload.get("message")
+                            or "metadata_fetch_failed"
+                        )
+                    elif isinstance(metadata_payload.get("paper"), Mapping):
+                        metadata_record = dict(metadata_payload.get("paper") or {})
+                    elif isinstance(metadata_payload.get("result"), Mapping):
+                        metadata_record = dict(metadata_payload.get("result") or {})
+                    else:
+                        metadata_record = dict(metadata_payload)
+                else:
+                    metadata_error = f"unexpected_metadata_response:{type(metadata_payload).__name__}"
+
+                user_concept_id, _organisation_concept_id = _resolve_rag_actor_scope_ids(
+                    ns_report
+                )
+                if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+                    scholarly_representation = {
+                        "attempted": True,
+                        "verified": False,
+                        "arxiv_id": selected_arxiv_id,
+                        "reason": "missing_user_context_for_arxiv_representation",
+                    }
+                elif metadata_error:
+                    scholarly_representation = {
+                        "attempted": True,
+                        "verified": False,
+                        "arxiv_id": selected_arxiv_id,
+                        "reason": metadata_error,
+                        "metadata_error": metadata_error,
+                    }
+                else:
+                    with _with_namespace_actor_override(effective_namespace):
+                        scholarly_representation = (
+                            materialise_scholarly_representation_for_arxiv_file_copy(
+                                user_concept_id=user_concept_id.strip(),
+                                arxiv_id=selected_arxiv_id,
+                                file_copy_concept_id=concept_id,
+                                metadata=metadata_record,
+                                logger=logger,
+                            )
+                        )
+                    scholarly_representation["attempted"] = True
+                    scholarly_representation["metadata_source"] = "get_paper_metadata"
+                    scholarly_representation["metadata_available"] = bool(metadata_record)
+
+                if not bool(scholarly_representation.get("verified")):
+                    persist_errors.append(
+                        {
+                            "predicate": "#V#scholarly_representation_verification",
+                            "error": "scholarly_representation_not_verified",
+                            "details": scholarly_representation,
+                        }
+                    )
     else:
         subtype_assertion_outcome = "persist_disabled"
+        scholarly_representation = {
+            "attempted": False,
+            "verified": False,
+            "reason": "persist_disabled",
+        }
 
     content_text = extracted_text if isinstance(extracted_text, str) else None
     text_preview = None
@@ -3534,7 +3629,10 @@ def _interpret_file_copy(**kwargs):
             "subtype_detection": subtype_detection,
             "subtype_assertion_outcome": subtype_assertion_outcome,
             "subtype_assertion": subtype_assertion,
+            "arxiv_id_candidates": arxiv_id_candidates,
+            "selected_arxiv_id": selected_arxiv_id,
         },
+        "scholarly_representation": scholarly_representation,
         "namespace": effective_namespace,
         **ns_report,
         "read_result": {

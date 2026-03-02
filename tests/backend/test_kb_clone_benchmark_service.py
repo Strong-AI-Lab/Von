@@ -105,6 +105,48 @@ def _scenario(source_db_name: str) -> dict[str, Any]:
     }
 
 
+def test_clone_database_ontology_slice_excludes_non_ontology_collections() -> None:
+    source_db_name = "test_von_db_slice_source"
+    clone_db_name = "test_von_db_slice_clone"
+    mongo_client = _seed_source_db(source_db_name)
+    source_db = mongo_client[source_db_name]
+
+    source_db["text_values"].insert_one({"text": "seed", "lang": "en-NZ"})
+    source_db["text_relations"].insert_one(
+        {
+            "subject_concept_id": "#V#thing",
+            "predicate": "hasDescription",
+            "text": "seed",
+            "lang": "en-NZ",
+        }
+    )
+    source_db["interaction_sessions"].insert_one(
+        {"session_id": "noise", "history": [{"role": "user", "content": "noise"}]}
+    )
+    source_db["chat_history"].insert_one({"session_id": "noise-chat"})
+
+    counts = benchmark_service.clone_database_ontology_slice(
+        mongo_client,
+        source_db_name=source_db_name,
+        clone_db_name=clone_db_name,
+    )
+
+    assert set(counts.keys()) == {"concepts", "text_relations", "text_values"}
+    clone_db = mongo_client[clone_db_name]
+    clone_collections = set(clone_db.list_collection_names())
+    assert "interaction_sessions" not in clone_collections
+    assert "chat_history" not in clone_collections
+    assert clone_db["concepts"].count_documents({}) == source_db["concepts"].count_documents(
+        {}
+    )
+    assert clone_db["text_relations"].count_documents({}) == source_db[
+        "text_relations"
+    ].count_documents({})
+    assert clone_db["text_values"].count_documents({}) == source_db[
+        "text_values"
+    ].count_documents({})
+
+
 def test_kb_clone_benchmark_runs_end_to_end_and_cleans_up(tmp_path: Path) -> None:
     source_db_name = "test_von_db"
     mongo_client = _seed_source_db(source_db_name)

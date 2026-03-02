@@ -81,6 +81,12 @@ _INDEX_OPTION_KEYS = (
     "hidden",
 )
 
+ONTOLOGY_SLICE_COLLECTIONS: tuple[str, ...] = (
+    "concepts",
+    "text_relations",
+    "text_values",
+)
+
 
 class BenchmarkHarnessError(RuntimeError):
     """Raised when benchmark harness preconditions or lifecycle steps fail."""
@@ -299,13 +305,36 @@ def _copy_indexes(source: Collection, target: Collection) -> None:
 def _clone_database(
     client: MongoClient, *, source_db_name: str, clone_db_name: str
 ) -> dict[str, int]:
+    return _clone_database_subset(
+        client,
+        source_db_name=source_db_name,
+        clone_db_name=clone_db_name,
+        include_collections=None,
+    )
+
+
+def _clone_database_subset(
+    client: MongoClient,
+    *,
+    source_db_name: str,
+    clone_db_name: str,
+    include_collections: Sequence[str] | None,
+) -> dict[str, int]:
     source_db = client[source_db_name]
     if clone_db_name in client.list_database_names():
         client.drop_database(clone_db_name)
     clone_db = client[clone_db_name]
 
+    include_set = (
+        {str(name).strip() for name in include_collections if str(name).strip()}
+        if include_collections is not None
+        else None
+    )
+
     collection_counts: dict[str, int] = {}
     for collection_name in sorted(source_db.list_collection_names()):
+        if include_set is not None and collection_name not in include_set:
+            continue
         source_collection = source_db[collection_name]
         clone_collection = clone_db[collection_name]
 
@@ -315,6 +344,19 @@ def _clone_database(
         _copy_indexes(source_collection, clone_collection)
         collection_counts[collection_name] = len(docs)
     return collection_counts
+
+
+def clone_database_ontology_slice(
+    client: MongoClient, *, source_db_name: str, clone_db_name: str
+) -> dict[str, int]:
+    """Clone only ontology graph collections into an isolated benchmark DB."""
+
+    return _clone_database_subset(
+        client,
+        source_db_name=source_db_name,
+        clone_db_name=clone_db_name,
+        include_collections=ONTOLOGY_SLICE_COLLECTIONS,
+    )
 
 
 def _iter_collection_json_lines(collection: Collection) -> tuple[bytes, int]:

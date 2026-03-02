@@ -33,6 +33,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 27. **Definition of fully complete Jira task**: implementation committed and pushed, PR created, PR merged to `main`, and Jira transitioned/commented accordingly.
 28. **Fail closed when Vontology is unavailable for Vontology-governed behaviour**: do not silently fall back to in-code prompts, stale context reuse, or heuristic hacks. If required Vontology prompts/workflow data cannot be resolved, no-op that transformation and emit a clear user-visible and telemetry-visible reason.
 29. **Minimal-imposition principle**: exhaust existing context/data/search first; ask humans only when necessary, and then only for concise, low-effort, high-value inputs they are likely to know without extra work.
+30. When the user asks whether something is "finished" or "complete", do not treat Jira status alone as the answer. Verify effective implementation state in both code and Vontology, then report whether it is unimplemented, partly implemented, or fully implemented (with concise evidence).
 
 ## Core AI-Focused Documents
 - `docs/AINotes.md`: short-term memory and tactical log.
