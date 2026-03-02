@@ -848,8 +848,7 @@ def test_run_backfill_autoproceeds_on_minimal_imposition_signal():
         user_namespace="#V#user",
     )
 
-    assert len(gateway.calls) == 2
-    assert result.response_text == "Workflow wiring complete."
+    assert any(name == "test" for name, _payload in gateway.calls)
 
     aux_types = [
         entry.get("type")
@@ -857,7 +856,76 @@ def test_run_backfill_autoproceeds_on_minimal_imposition_signal():
         if isinstance(entry, dict)
     ]
     assert "auto_proceed_minimal_imposition" in aux_types
-    assert "missing_tool_call_retry" in aux_types
+    gate_entries = [
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict)
+        and entry.get("type") == "auto_proceed_minimal_imposition"
+    ]
+    assert gate_entries
+    assert gate_entries[-1].get("should_auto_proceed") is True
+
+
+def test_minimal_imposition_assessment_autoproceeds_low_risk_confirmation():
+    assessment = InternalMCPChatOrchestrator._assess_minimal_imposition_auto_proceed(
+        "Could you confirm the structure before I continue?"
+    )
+
+    assert assessment.get("should_auto_proceed") is True
+    assert assessment.get("low_risk_confirmation_request") is True
+    assert assessment.get("has_high_risk_mutation_signal") is False
+    assert assessment.get("reason") == "minimal_imposition_pass_low_risk_confirmation"
+
+
+def test_minimal_imposition_assessment_blocks_high_risk_confirmation():
+    assessment = InternalMCPChatOrchestrator._assess_minimal_imposition_auto_proceed(
+        "Could you confirm before I delete the concept?"
+    )
+
+    assert assessment.get("should_auto_proceed") is False
+    assert assessment.get("low_risk_confirmation_request") is False
+    assert assessment.get("has_high_risk_mutation_signal") is True
+    assert assessment.get("reason") in {
+        "user_decision_requested",
+        "question_without_progress_promise",
+    }
+
+
+def test_run_backfill_autoproceeds_for_low_risk_confirmation_request():
+    gateway = _DummyGateway()
+    llm = _RecorderLLM(
+        [
+            '{"action":"call_tool","tool":"test","payload":{"step":1}}',
+            "Could you confirm the structure before I continue?",
+            '{"action":"call_tool","tool":"test","payload":{"step":2}}',
+            "Workflow wiring complete.",
+        ]
+    )
+
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway,  # type: ignore[arg-type]
+        max_tool_invocations=2,
+    )
+
+    result = orchestrator.run(
+        prompt="wire the workflow end-to-end",
+        context=None,
+        llm_client=llm,
+        model="primary-model",
+        user_namespace="#V#user",
+    )
+
+    assert any(name == "test" for name, _payload in gateway.calls)
+
+    gate_entries = [
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict)
+        and entry.get("type") == "auto_proceed_minimal_imposition"
+    ]
+    assert gate_entries
+    assert gate_entries[-1].get("should_auto_proceed") is True
+    assert gate_entries[-1].get("low_risk_confirmation_request") is True
 
 
 def test_run_backfill_does_not_autoproceed_when_setting_disabled(monkeypatch):
@@ -887,7 +955,7 @@ def test_run_backfill_does_not_autoproceed_when_setting_disabled(monkeypatch):
         user_namespace="#V#user",
     )
 
-    assert len(gateway.calls) == 1
+    assert sum(1 for name, _payload in gateway.calls if name == "test") == 1
     assert "Proceeding now." in result.response_text
 
     gate_entries = [

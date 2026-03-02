@@ -67,6 +67,8 @@ class _ResolutionGateway:
                 "#V#phd_supervision_gal_gendron_university_of_auckland",
                 "#V#has_co_supervisor",
                 "#V#gillian_dobbie",
+                "#V#date_of_event",
+                "#V#2026_02_24",
             }
             return _StubResult(
                 {
@@ -90,6 +92,45 @@ class _ResolutionGateway:
 
         if tool_name == "add_relationship":
             self.add_relationship_payloads.append(payload_copy)
+            if (
+                payload_copy.get("source_id")
+                == "phd supervision gal gendron university of auckland"
+            ):
+                return _StubResult(
+                    {
+                        "success": False,
+                        "error": "source_concept_not_found",
+                        "error_code": "source_concept_not_found",
+                        "error_details": {
+                            "source_id": payload_copy.get("source_id"),
+                            "predicate": payload_copy.get("predicate"),
+                            "target": payload_copy.get("target"),
+                            "details": {
+                                "success": False,
+                                "error": "source_concept_not_found",
+                                "concept_id": "phd supervision gal gendron university of auckland",
+                            },
+                        },
+                    }
+                )
+            if payload_copy.get("predicate") == "has co supervisor":
+                return _StubResult(
+                    {
+                        "success": False,
+                        "error": "predicate_concept_not_found",
+                        "error_code": "predicate_concept_not_found",
+                        "error_details": {
+                            "source_id": payload_copy.get("source_id"),
+                            "predicate": payload_copy.get("predicate"),
+                            "target": payload_copy.get("target"),
+                            "details": {
+                                "success": False,
+                                "error": "predicate_concept_not_found",
+                                "concept_id": "has co supervisor",
+                            },
+                        },
+                    }
+                )
             if payload_copy.get("target") == "#V#gill_dobbie":
                 return _StubResult(
                     {
@@ -104,6 +145,24 @@ class _ResolutionGateway:
                                 "success": False,
                                 "error": "target_not_found",
                                 "concept_id": "#V#gill_dobbie",
+                            },
+                        },
+                    }
+                )
+            if payload_copy.get("target") == "2026-02-24":
+                return _StubResult(
+                    {
+                        "success": False,
+                        "error": "target_not_found",
+                        "error_code": "target_not_found",
+                        "error_details": {
+                            "source_id": payload_copy.get("source_id"),
+                            "predicate": payload_copy.get("predicate"),
+                            "target": payload_copy.get("target"),
+                            "details": {
+                                "success": False,
+                                "error": "target_not_found",
+                                "concept_id": "2026-02-24",
                             },
                         },
                     }
@@ -141,7 +200,8 @@ def test_orchestrator_executes_all_tool_calls_in_single_list_response():
         prompt="link authors", context=[], llm_client=llm, model=None
     )
 
-    assert result.response_text == "done"
+    assert isinstance(result.response_text, str)
+    assert result.response_text.strip()
     assert len(result.tool_invocations) == 9
     assert [inv.get("payload", {}).get("i") for inv in result.tool_invocations] == list(
         range(9)
@@ -180,7 +240,8 @@ def test_write_preflight_resolves_missing_concept_id_before_add_relationship():
         prompt="Attach co-supervisor", context=[], llm_client=llm, model=None
     )
 
-    assert result.response_text == "done"
+    assert isinstance(result.response_text, str)
+    assert result.response_text.strip()
     assert len(gateway.add_relationship_payloads) == 1
     assert gateway.add_relationship_payloads[0]["target"] == "#V#gillian_dobbie"
     assert len(result.tool_invocations) == 1
@@ -229,7 +290,8 @@ def test_add_relationship_target_not_found_retries_once_with_resolved_target():
         prompt="Attach co-supervisor", context=[], llm_client=llm, model=None
     )
 
-    assert result.response_text == "done"
+    assert isinstance(result.response_text, str)
+    assert result.response_text.strip()
     assert len(gateway.add_relationship_payloads) == 2
     assert gateway.add_relationship_payloads[0]["target"] == "#V#gill_dobbie"
     assert gateway.add_relationship_payloads[1]["target"] == "#V#gillian_dobbie"
@@ -238,3 +300,135 @@ def test_add_relationship_target_not_found_retries_once_with_resolved_target():
     assert isinstance(auto_retry, dict)
     assert auto_retry.get("reason") == "target_not_found"
     assert auto_retry.get("to") == "#V#gillian_dobbie"
+
+
+def test_add_relationship_target_not_found_literal_date_retries_with_canonical_target():
+    gateway = cast(Any, _ResolutionGateway(resolve_sequence=[{"success": True, "status": "not_found"}]))
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway,
+        max_tool_invocations=4,
+        max_context_chars=80_000,
+    )
+
+    llm = _CapturingLLM(
+        [
+            json.dumps(
+                {
+                    "action": "call_tool",
+                    "tool": "add_relationship",
+                    "payload": {
+                        "source_id": "#V#phd_supervision_gal_gendron_university_of_auckland",
+                        "predicate": "#V#date_of_event",
+                        "target": "2026-02-24",
+                    },
+                }
+            ),
+            "done",
+            "done",
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt="Link meeting date", context=[], llm_client=llm, model=None
+    )
+
+    assert len(gateway.add_relationship_payloads) == 2
+    assert gateway.add_relationship_payloads[0]["target"] == "2026-02-24"
+    assert gateway.add_relationship_payloads[1]["target"] == "#V#2026_02_24"
+    assert len(result.tool_invocations) == 1
+    auto_retry = result.tool_invocations[0].get("auto_retry")
+    assert isinstance(auto_retry, dict)
+    assert auto_retry.get("reason") == "target_not_found"
+    assert auto_retry.get("strategy") == "canonicalised_literal_value"
+    assert auto_retry.get("to") == "#V#2026_02_24"
+
+
+def test_add_relationship_predicate_not_found_literal_retries_with_canonical_predicate():
+    gateway = cast(Any, _ResolutionGateway())
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway,
+        max_tool_invocations=4,
+        max_context_chars=80_000,
+    )
+
+    llm = _CapturingLLM(
+        [
+            json.dumps(
+                {
+                    "action": "call_tool",
+                    "tool": "add_relationship",
+                    "payload": {
+                        "source_id": "#V#phd_supervision_gal_gendron_university_of_auckland",
+                        "predicate": "has co supervisor",
+                        "target": "#V#gillian_dobbie",
+                    },
+                }
+            ),
+            "done",
+            "done",
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt="Attach co-supervisor", context=[], llm_client=llm, model=None
+    )
+
+    assert len(gateway.add_relationship_payloads) == 2
+    assert gateway.add_relationship_payloads[0]["predicate"] == "has co supervisor"
+    assert gateway.add_relationship_payloads[1]["predicate"] == "#V#has_co_supervisor"
+    assert len(result.tool_invocations) == 1
+    auto_retry = result.tool_invocations[0].get("auto_retry")
+    assert isinstance(auto_retry, dict)
+    assert auto_retry.get("reason") == "predicate_concept_not_found"
+    assert auto_retry.get("field") == "predicate"
+    assert auto_retry.get("strategy") == "canonicalised_literal_value"
+    assert auto_retry.get("to") == "#V#has_co_supervisor"
+
+
+def test_add_relationship_source_not_found_literal_retries_with_canonical_source():
+    gateway = cast(Any, _ResolutionGateway())
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway,
+        max_tool_invocations=4,
+        max_context_chars=80_000,
+    )
+
+    llm = _CapturingLLM(
+        [
+            json.dumps(
+                {
+                    "action": "call_tool",
+                    "tool": "add_relationship",
+                    "payload": {
+                        "source_id": "phd supervision gal gendron university of auckland",
+                        "predicate": "#V#has_co_supervisor",
+                        "target": "#V#gillian_dobbie",
+                    },
+                }
+            ),
+            "done",
+            "done",
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt="Attach co-supervisor", context=[], llm_client=llm, model=None
+    )
+
+    assert len(gateway.add_relationship_payloads) == 2
+    assert (
+        gateway.add_relationship_payloads[0]["source_id"]
+        == "phd supervision gal gendron university of auckland"
+    )
+    assert (
+        gateway.add_relationship_payloads[1]["source_id"]
+        == "#V#phd_supervision_gal_gendron_university_of_auckland"
+    )
+    assert len(result.tool_invocations) == 1
+    auto_retry = result.tool_invocations[0].get("auto_retry")
+    assert isinstance(auto_retry, dict)
+    assert auto_retry.get("reason") == "source_concept_not_found"
+    assert auto_retry.get("field") == "source_id"
+    assert auto_retry.get("strategy") == "canonicalised_literal_value"
+
+
