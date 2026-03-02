@@ -1613,6 +1613,16 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
             tools_completed = max(tools_completed, int(explicit_done))
 
         merged = {**existing, **safe_update}
+        if "success" in safe_update:
+            success_value = safe_update.get("success")
+            if isinstance(success_value, bool):
+                merged["success"] = success_value
+            else:
+                merged.pop("success", None)
+        else:
+            # Terminal error/cancel events must not inherit an earlier success=True.
+            if status.lower() in {"error", "cancelled"}:
+                merged.pop("success", None)
         if "error" in safe_update:
             error_text = _progress_str(safe_update.get("error"))
             if error_text:

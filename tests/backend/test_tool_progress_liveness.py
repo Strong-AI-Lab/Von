@@ -206,6 +206,43 @@ def test_progress_clears_stale_error_on_subsequent_success(monkeypatch) -> None:
     assert "error" not in events[-1]
 
 
+def test_progress_clears_stale_success_on_error(monkeypatch) -> None:
+    clock = _set_clock(monkeypatch, start=4700.0)
+
+    von_routes._set_tool_progress(
+        "scope-stale-success",
+        "req-stale-success",
+        {
+            "status": "llm_call_end",
+            "stage": "tool_plan",
+            "request_id": "req-stale-success",
+            "success": True,
+        },
+    )
+    clock["now"] += 0.1
+    von_routes._set_tool_progress(
+        "scope-stale-success",
+        "req-stale-success",
+        {
+            "status": "error",
+            "stage": "tool_call",
+            "request_id": "req-stale-success",
+            "error": "list assignment index out of range",
+        },
+    )
+
+    state = von_routes._get_tool_progress("scope-stale-success", "req-stale-success")
+    assert state is not None
+    assert state["status"] == "error"
+    assert state.get("success") is not True
+    assert state.get("error") == "list assignment index out of range"
+
+    events = state.get("diagnostic_events")
+    assert isinstance(events, list)
+    assert events[-1].get("status") == "error"
+    assert events[-1].get("success") is None
+
+
 def test_turn_execution_diagnostics_rebuilds_phase_and_tool_history(monkeypatch) -> None:
     clock = _set_clock(monkeypatch, start=5000.0)
 

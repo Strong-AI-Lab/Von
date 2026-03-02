@@ -2160,6 +2160,66 @@ def test_renderer_selection_emits_hierarchy_from_taxonomy_screen_text(monkeypatc
     assert "#V#automated_meeting_transcript" in node_ids
 
 
+def test_renderer_selection_hierarchy_parser_tolerates_indented_root_rows(monkeypatch):
+    """Regression for JVNAUTOSCI-1365: avoid index errors on indented first rows."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    monkeypatch.setenv("VON_RENDERER_APPLICABILITY_ROUTING_ENABLE", "1")
+    monkeypatch.setenv(
+        "VON_RENDERER_APPLICABILITY_DEFINITION_IDS",
+        "#V#workflow_renderer,#V#table_renderer",
+    )
+
+    def _invoke(tool_name: str, _payload: Mapping[str, Any]):
+        if tool_name != "renderer_resolve_applicability":
+            raise AssertionError(f"Unexpected tool invocation: {tool_name}")
+        return _InvokeResult({"success": True, "selected_renderers": []})
+
+    monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
+
+    class _WorkflowResult:
+        def __init__(self):
+            self.data = {
+                "final_response": (
+                    "```text\n"
+                    "    #V#document\n"
+                    "    #V#meeting_document\n"
+                    "        #V#meeting_notes\n"
+                    "```"
+                ),
+                "tool_messages": [],
+                "invocations": [],
+                "iteration_count": 1,
+            }
+            self.final_state = "completed"
+            self.completed = True
+
+    def _execute_workflow(workflow_id: str, **_kwargs: Any):
+        if workflow_id != TOOL_CALLING_WORKFLOW_ID:
+            raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+        return _WorkflowResult()
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    llm = _CapturingLLM(["tool_seeking"])
+    result = orchestrator.run(
+        prompt="Show a taxonomy hierarchy",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert isinstance(result.render_plan, dict)
+    assert result.render_plan.get("screen_element_targets", {}).get("hierarchy_view") is True
+    hierarchy_elements = result.render_plan.get("screen_hierarchy_elements")
+    assert isinstance(hierarchy_elements, list)
+    assert len(hierarchy_elements) == 1
+    payload = hierarchy_elements[0].get("payload", {})
+    edges = payload.get("edges")
+    assert isinstance(edges, list)
+    assert len(edges) == 2
+
+
 def test_renderer_render_plan_skips_malformed_tool_messages_for_table_record_sets(
     monkeypatch,
 ):
