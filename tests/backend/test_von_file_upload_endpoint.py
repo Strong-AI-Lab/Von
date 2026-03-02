@@ -12,6 +12,7 @@ class _FakeStore:
         self._blob_ref_cls = blob_ref_cls
         self.last_put = None
         self._bytes_by_key = {}
+        self.deleted_keys: list[str] = []
 
     def put_bytes(self, key, data, content_type=None, metadata=None):
         self.last_put = {
@@ -34,6 +35,10 @@ class _FakeStore:
         if key not in self._bytes_by_key:
             raise FileNotFoundError(key)
         return self._bytes_by_key[key]
+
+    def delete(self, key):
+        self.deleted_keys.append(key)
+        self._bytes_by_key.pop(key, None)
 
 
 @pytest.fixture()
@@ -121,6 +126,14 @@ def app(monkeypatch):
     monkeypatch.setattr(
         "src.backend.services.concept_service.create_concept",
         fake_create_concept,
+    )
+
+    def fake_delete_concept(concept_id):
+        return concept_docs.pop(str(concept_id), None) is not None
+
+    monkeypatch.setattr(
+        "src.backend.services.concept_service.delete_concept",
+        fake_delete_concept,
     )
 
     upserts = []
@@ -354,3 +367,110 @@ def test_upload_returns_error_when_blob_store_fails(app, monkeypatch):
     assert created == []
     workflow_calls = app.config["TEST_WORKFLOW_LAUNCH_CALLS"]
     assert workflow_calls == []
+
+
+def test_file_copy_delete_removes_blob_and_concept(app):
+    client = app.test_client()
+
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#user"
+        sess["session_id"] = "test-session"
+
+    payload = b"delete me"
+    upload_resp = client.post(
+        "/von/api/files/upload",
+        data={"file": (io.BytesIO(payload), "delete.txt")},
+        content_type="multipart/form-data",
+    )
+    assert upload_resp.status_code == 200
+    uploaded = upload_resp.get_json()["uploaded"]
+    concept_id = uploaded["concept_id"]
+
+    encoded = urllib.parse.quote(concept_id, safe="")
+    delete_resp = client.delete(
+        f"/von/api/files/{encoded}",
+        json={"confirm_phrase": "DELETE FILE"},
+    )
+    assert delete_resp.status_code == 200
+    body = delete_resp.get_json()
+    assert body["success"] is True
+    assert body["blob_deleted"] is True
+    assert body["concept_deleted"] is True
+
+    fake_store = app.config["TEST_FAKE_STORE"]
+    assert fake_store.deleted_keys
+    assert fake_store.deleted_keys[-1].endswith("delete.txt")
+
+    concept_docs = app.config["TEST_CONCEPT_DOCS"]
+    assert concept_id not in concept_docs
+
+
+def test_file_copy_delete_requires_confirmation_phrase(app):
+    client = app.test_client()
+
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#user"
+        sess["session_id"] = "test-session"
+
+    payload = b"confirm me"
+    upload_resp = client.post(
+        "/von/api/files/upload",
+        data={"file": (io.BytesIO(payload), "confirm.txt")},
+        content_type="multipart/form-data",
+    )
+    assert upload_resp.status_code == 200
+    concept_id = upload_resp.get_json()["uploaded"]["concept_id"]
+
+    encoded = urllib.parse.quote(concept_id, safe="")
+    delete_resp = client.delete(
+        f"/von/api/files/{encoded}",
+        json={"confirm_phrase": "WRONG"},
+    )
+    assert delete_resp.status_code == 400
+    body = delete_resp.get_json()
+    assert body["error"] == "confirmation_required"
+    assert body["expected_confirm_phrase"] == "DELETE FILE"
+
+    concept_docs = app.config["TEST_CONCEPT_DOCS"]
+    assert concept_id in concept_docs
+
+
+def test_file_copy_delete_reports_blob_failure_without_deleting_concept(
+    app, monkeypatch
+):
+    client = app.test_client()
+
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#user"
+        sess["session_id"] = "test-session"
+
+    payload = b"blob failure"
+    upload_resp = client.post(
+        "/von/api/files/upload",
+        data={"file": (io.BytesIO(payload), "blobfail.txt")},
+        content_type="multipart/form-data",
+    )
+    assert upload_resp.status_code == 200
+    concept_id = upload_resp.get_json()["uploaded"]["concept_id"]
+
+    fake_store = app.config["TEST_FAKE_STORE"]
+
+    def boom(_key):
+        raise RuntimeError("swift unavailable")
+
+    monkeypatch.setattr(fake_store, "delete", boom)
+
+    encoded = urllib.parse.quote(concept_id, safe="")
+    delete_resp = client.delete(
+        f"/von/api/files/{encoded}",
+        json={"confirm_phrase": "DELETE FILE"},
+    )
+    assert delete_resp.status_code == 502
+    body = delete_resp.get_json()
+    assert body["success"] is False
+    assert body["error"] == "blob_delete_failed"
+    assert body["concept_deleted"] is False
+    assert body["blob_deleted"] is False
+
+    concept_docs = app.config["TEST_CONCEPT_DOCS"]
+    assert concept_id in concept_docs

@@ -1407,6 +1407,55 @@ def _record_file_upload_in_chat_history(
         return False
 
 
+_FILE_DELETE_CONFIRM_PHRASE = "DELETE FILE"
+
+
+def _get_effective_user_concept_id_for_file_routes() -> str | None:
+    try:
+        from ...security.access_control import get_effective_user_concept_id
+
+        user_concept_id = get_effective_user_concept_id()
+    except Exception:
+        user_concept_id = session.get("user_concept_id")
+
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        return None
+    return user_concept_id.strip()
+
+
+def _load_authorised_file_copy_concept_doc(
+    *,
+    concept_id: str,
+    user_concept_id: str,
+    log_prefix: str,
+) -> dict[str, Any] | None:
+    try:
+        from ...db.repositories.concepts_repository import ConceptsRepository
+
+        concept_doc = ConceptsRepository.find_one({"concept_id": concept_id})
+    except Exception as exc:
+        current_app.logger.warning("[%s] Concept lookup failed: %s", log_prefix, exc)
+        concept_doc = None
+
+    if not isinstance(concept_doc, dict):
+        return None
+
+    relationships = concept_doc.get("relationships")
+    from ...security.access_control import _get_specific_to_user_values
+
+    specific = (
+        _get_specific_to_user_values(relationships)
+        if isinstance(relationships, dict)
+        else []
+    )
+    if specific and user_concept_id not in {
+        str(x).strip() for x in specific if x is not None
+    }:
+        return None
+
+    return concept_doc
+
+
 @von_bp.route("/api/files/<path:file_copy_concept_id>/download", methods=["GET"])
 def download_file_copy(file_copy_concept_id: str):
     """Download an uploaded file-copy by its Vontology concept id.
@@ -1420,14 +1469,8 @@ def download_file_copy(file_copy_concept_id: str):
       - concept_id: optional override (for callers that prefer query param)
     """
 
-    try:
-        from ...security.access_control import get_effective_user_concept_id
-
-        user_concept_id = get_effective_user_concept_id()
-    except Exception:
-        user_concept_id = session.get("user_concept_id")
-
-    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+    user_concept_id = _get_effective_user_concept_id_for_file_routes()
+    if user_concept_id is None:
         return (
             jsonify(
                 {
@@ -1445,32 +1488,12 @@ def download_file_copy(file_copy_concept_id: str):
     if not concept_id:
         return jsonify({"success": False, "error": "missing_concept_id"}), 400
 
-    try:
-        from ...db.repositories.concepts_repository import ConceptsRepository
-
-        concept_doc = ConceptsRepository.find_one({"concept_id": concept_id})
-    except Exception as exc:
-        current_app.logger.warning("[files/download] Concept lookup failed: %s", exc)
-        concept_doc = None
-
-    if not isinstance(concept_doc, dict):
-        # Avoid leaking which concept IDs exist.
-        return jsonify({"success": False, "error": "not_found"}), 404
-
-    relationships = (
-        concept_doc.get("relationships") if isinstance(concept_doc, dict) else None
+    concept_doc = _load_authorised_file_copy_concept_doc(
+        concept_id=concept_id,
+        user_concept_id=user_concept_id,
+        log_prefix="files/download",
     )
-    # Check both legacy and predicate-style specific_to_user fields
-    from ...security.access_control import _get_specific_to_user_values
-
-    specific = (
-        _get_specific_to_user_values(relationships)
-        if isinstance(relationships, dict)
-        else []
-    )
-    if specific and user_concept_id.strip() not in {
-        str(x).strip() for x in specific if x is not None
-    }:
+    if concept_doc is None:
         # Avoid leaking which concept IDs exist.
         return jsonify({"success": False, "error": "not_found"}), 404
 
@@ -1519,6 +1542,90 @@ def download_file_copy(file_copy_concept_id: str):
     resp.headers["Cache-Control"] = "no-store"
     resp.headers["Pragma"] = "no-cache"
     return resp
+
+
+@von_bp.route("/api/files/<path:file_copy_concept_id>", methods=["DELETE"])
+def delete_file_copy(file_copy_concept_id: str):
+    """Delete a file-copy concept and its backing blob bytes.
+
+    This route is intentionally stricter than normal concept deletion:
+    callers must supply a typed confirmation phrase to reduce accidental
+    destructive operations.
+    """
+
+    user_concept_id = _get_effective_user_concept_id_for_file_routes()
+    if user_concept_id is None:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "missing_user_context",
+                    "message": "Missing user context: establish an authenticated session first.",
+                }
+            ),
+            401,
+        )
+
+    concept_id = request.args.get("concept_id") or file_copy_concept_id
+    concept_id = str(concept_id or "").strip()
+    if not concept_id:
+        return jsonify({"success": False, "error": "missing_concept_id"}), 400
+
+    payload = request.get_json(silent=True) or {}
+    confirm_phrase = str(payload.get("confirm_phrase") or "").strip()
+    if confirm_phrase != _FILE_DELETE_CONFIRM_PHRASE:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "confirmation_required",
+                    "message": (
+                        "Strong confirmation required. "
+                        f"Set confirm_phrase to '{_FILE_DELETE_CONFIRM_PHRASE}'."
+                    ),
+                    "expected_confirm_phrase": _FILE_DELETE_CONFIRM_PHRASE,
+                }
+            ),
+            400,
+        )
+
+    concept_doc = _load_authorised_file_copy_concept_doc(
+        concept_id=concept_id,
+        user_concept_id=user_concept_id,
+        log_prefix="files/delete",
+    )
+    if concept_doc is None:
+        return jsonify({"success": False, "error": "not_found"}), 404
+
+    from ...services.computer_file_copy_service import delete_file_copy_blob_and_concept
+
+    result = delete_file_copy_blob_and_concept(
+        file_copy_concept_id=concept_id,
+        logger=current_app.logger,
+    )
+    if not isinstance(result, dict):
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "delete_failed",
+                    "message": "Unexpected delete result.",
+                }
+            ),
+            500,
+        )
+
+    if result.get("success") is True:
+        return jsonify(result), 200
+
+    error = str(result.get("error") or "delete_failed").strip().lower()
+    if error == "not_found":
+        return jsonify(result), 404
+    if error == "blob_delete_failed":
+        return jsonify(result), 502
+    if error == "concept_delete_failed":
+        return jsonify(result), 500
+    return jsonify(result), 500
 
 
 def _prune_tool_progress() -> None:

@@ -1340,7 +1340,7 @@ export async function loadDynamicConceptTabContent(tabId, conceptId) {
                 attachConceptIdCopyChip(headerDiv, conceptId, kind);
                 attachRawDataButton(headerDiv, conceptId, kind, tabInfo.content);
                 attachKeyConceptStarButton(headerDiv, conceptId);
-                attachAnalysisButtons(headerDiv, conceptId, kind);
+                attachAnalysisButtons(headerDiv, conceptId, kind, nodeJson);
             }
         } catch (e) {
             console.warn('[dynamicTabs] Could not attach kind badge:', e);
@@ -6395,7 +6395,63 @@ async function renderRelationships(conceptId, suffix, kind) {
     }
 }
 // Helper: Add analysis and relationship buttons next to JSON button
-function attachAnalysisButtons(headerDiv, conceptId, kind) {
+const FILE_DELETE_CONFIRM_PHRASE = 'DELETE FILE';
+
+function toConceptIdArray(value) {
+    if (Array.isArray(value)) {
+        return value.map((item) => String(item || '').trim()).filter(Boolean);
+    }
+    if (typeof value === 'string' && value.trim()) {
+        return [value.trim()];
+    }
+    return [];
+}
+
+export function deriveFileCopyActionState(nodePayload = null) {
+    const rawDoc = (nodePayload && typeof nodePayload.raw_doc === 'object' && nodePayload.raw_doc)
+        ? nodePayload.raw_doc
+        : (nodePayload && typeof nodePayload === 'object' ? nodePayload : {});
+
+    const attributes = (rawDoc && typeof rawDoc.attributes === 'object' && rawDoc.attributes)
+        ? rawDoc.attributes
+        : {};
+    const relationships = (rawDoc && typeof rawDoc.relationships === 'object' && rawDoc.relationships)
+        ? rawDoc.relationships
+        : {};
+
+    const blobKey = String(
+        attributes.blob_key ||
+        attributes.has_blob_key ||
+        rawDoc.blob_key ||
+        ''
+    ).trim();
+    const blobUri = String(
+        attributes.blob_uri ||
+        attributes.has_blob_uri ||
+        rawDoc.blob_uri ||
+        ''
+    ).trim();
+    const hasResolvableBlobRef = !!(blobKey || blobUri);
+
+    const instanceTypeIds = toConceptIdArray(relationships.is_an_instance_of).map((id) => id.toLowerCase());
+    const typeHints = [
+        ...instanceTypeIds,
+        String(rawDoc.concept_id || '').toLowerCase(),
+    ];
+    const looksLikeFileCopyType = typeHints.some((value) =>
+        value.includes('file_copy') ||
+        value.includes('arxiv_pdf_file') ||
+        value.includes('arxiv_markdown_file')
+    );
+
+    return {
+        isFileCopyConcept: looksLikeFileCopyType || hasResolvableBlobRef,
+        hasResolvableBlobRef,
+        showFileActions: hasResolvableBlobRef && (looksLikeFileCopyType || hasResolvableBlobRef),
+    };
+}
+
+function attachAnalysisButtons(headerDiv, conceptId, kind, nodePayload = null) {
     try {
         if (!headerDiv || !conceptId) return;
 
@@ -6468,7 +6524,8 @@ function attachAnalysisButtons(headerDiv, conceptId, kind) {
         headerDiv.appendChild(buttonGroup);
 
         // After analysis buttons, attach delete concept button (unified endpoint)
-        attachDeleteConceptButton(headerDiv, conceptId, kind);
+        const fileCopyActionState = deriveFileCopyActionState(nodePayload);
+        attachDeleteConceptButton(headerDiv, conceptId, kind, fileCopyActionState);
 
     } catch (e) {
         console.warn('[dynamicTabs] attachAnalysisButtons failed', e);
@@ -6476,14 +6533,50 @@ function attachAnalysisButtons(headerDiv, conceptId, kind) {
 }
 
 // Helper: attach delete concept button to header
-function attachDeleteConceptButton(headerDiv, conceptId, kind) {
+function attachDeleteConceptButton(headerDiv, conceptId, kind, fileCopyActionState = null) {
     try {
         if (!headerDiv || !conceptId) return;
         if (headerDiv.querySelector('.delete-concept-button')) return; // already added
+        const fileActionsEnabled = !!(fileCopyActionState && fileCopyActionState.showFileActions);
+
+        if (fileActionsEnabled && !headerDiv.querySelector('.download-file-copy-button')) {
+            const downloadBtn = document.createElement('button');
+            downloadBtn.className = 'download-file-copy-button';
+            downloadBtn.title = 'Download backing file';
+            downloadBtn.setAttribute('aria-label', 'Download backing file');
+            downloadBtn.setAttribute('data-keep-title', 'true');
+            downloadBtn.textContent = '⬇️';
+            downloadBtn.style.padding = '2px 6px';
+            downloadBtn.style.border = '1px solid #d1d5db';
+            downloadBtn.style.borderRadius = '4px';
+            downloadBtn.style.background = '#eff6ff';
+            downloadBtn.style.color = '#1d4ed8';
+            downloadBtn.style.cursor = 'pointer';
+            downloadBtn.style.fontSize = '0.9rem';
+            downloadBtn.style.marginLeft = '4px';
+            downloadBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const downloadUrl = `/von/api/files/${encodeURIComponent(conceptId)}/download`;
+                try {
+                    window.open(downloadUrl, '_blank', 'noopener,noreferrer');
+                } catch (_) {
+                    window.location.href = downloadUrl;
+                }
+            });
+            headerDiv.appendChild(downloadBtn);
+        }
+
         const btn = document.createElement('button');
         btn.className = 'delete-concept-button';
-        btn.title = 'Delete this concept';
-        btn.setAttribute('aria-label', 'Delete this concept');
+        btn.title = fileActionsEnabled
+            ? 'Delete concept and backing file'
+            : 'Delete this concept';
+        btn.setAttribute(
+            'aria-label',
+            fileActionsEnabled
+                ? 'Delete concept and backing file'
+                : 'Delete this concept'
+        );
         btn.setAttribute('data-keep-title', 'true');
         btn.textContent = '🗑️';
         btn.style.padding = '2px 6px';
@@ -6496,12 +6589,36 @@ function attachDeleteConceptButton(headerDiv, conceptId, kind) {
         btn.style.marginLeft = '4px';
         btn.addEventListener('click', async (e) => {
             e.stopPropagation();
-            if (!confirm('Permanently delete this concept? This cannot be undone.')) return;
+            if (!fileActionsEnabled) {
+                if (!confirm('Permanently delete this concept? This cannot be undone.')) return;
+            } else {
+                const warningAccepted = confirm(
+                    'This will permanently delete both the concept and its backing file bytes. This cannot be undone. Continue?'
+                );
+                if (!warningAccepted) return;
+                const typed = window.prompt(
+                    `Type "${FILE_DELETE_CONFIRM_PHRASE}" to confirm permanent file deletion.`
+                );
+                if (typed === null) return;
+                if (String(typed || '').trim() !== FILE_DELETE_CONFIRM_PHRASE) {
+                    showToast('Delete cancelled: confirmation phrase did not match.', 'error');
+                    return;
+                }
+            }
             const originalText = btn.textContent;
             btn.disabled = true; btn.textContent = '…';
             try {
-                const url = `/vontology/api/vontology/node?concept_id=${encodeURIComponent(conceptId)}&simulate=0`;
-                const resp = await fetch(url, { method: 'DELETE' });
+                const url = fileActionsEnabled
+                    ? `/von/api/files/${encodeURIComponent(conceptId)}`
+                    : `/vontology/api/vontology/node?concept_id=${encodeURIComponent(conceptId)}&simulate=0`;
+                const fetchOptions = fileActionsEnabled
+                    ? {
+                        method: 'DELETE',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ confirm_phrase: FILE_DELETE_CONFIRM_PHRASE })
+                    }
+                    : { method: 'DELETE' };
+                const resp = await fetch(url, fetchOptions);
                 const data = await resp.json().catch(() => ({}));
                 if (!resp.ok || !data.success) throw new Error(data.error || data.message || `HTTP ${resp.status}`);
                 // Dispatch global event so other modules (tree, tabs) react
@@ -6512,10 +6629,14 @@ function attachDeleteConceptButton(headerDiv, conceptId, kind) {
                         document.dispatchEvent(evt);
                     } catch (_) { /* no-op */ }
                 });
-                alert(`Deleted concept ${conceptId}`);
+                showToast(
+                    fileActionsEnabled
+                        ? `Deleted file copy ${conceptId}`
+                        : `Deleted concept ${conceptId}`
+                );
             } catch (err) {
                 console.warn('[dynamicTabs] delete concept failed', err);
-                alert(`Delete failed: ${err.message}`);
+                showToast(`Delete failed: ${err.message}`, 'error');
             } finally {
                 btn.disabled = false; btn.textContent = originalText;
             }

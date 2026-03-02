@@ -440,6 +440,104 @@ def fetch_file_copy_bytes(
     }
 
 
+def delete_file_copy_blob_and_concept(
+    *,
+    file_copy_concept_id: str,
+    logger: Any | None = None,
+) -> dict[str, Any]:
+    """Delete a blob-backed file-copy concept and its backing bytes.
+
+    This helper intentionally reports partial outcomes explicitly. If blob
+    deletion succeeds but concept deletion fails, callers receive
+    ``partial=true`` and can surface a clear, non-ambiguous failure message.
+    """
+
+    info = resolve_file_copy_blob_info(file_copy_concept_id=file_copy_concept_id)
+    if info is None:
+        return {
+            "success": False,
+            "error": "not_found",
+            "message": "File-copy concept not found or missing blob metadata.",
+            "concept_deleted": False,
+            "blob_deleted": False,
+            "partial": False,
+        }
+
+    from .blob_store import get_blob_store_from_env
+
+    try:
+        store = get_blob_store_from_env()
+        store.delete(info.blob_key)
+    except Exception as exc:
+        if logger is not None:
+            logger.warning("[file_copy] Blob delete failed for %s: %s", info.concept_id, exc)
+        return {
+            "success": False,
+            "error": "blob_delete_failed",
+            "message": f"Failed to delete backing file bytes: {exc}",
+            "concept_id": info.concept_id,
+            "blob_key": info.blob_key,
+            "blob_uri": info.blob_uri,
+            "concept_deleted": False,
+            "blob_deleted": False,
+            "partial": False,
+        }
+
+    try:
+        from . import concept_service
+
+        concept_deleted = bool(concept_service.delete_concept(info.concept_id))
+    except Exception as exc:
+        if logger is not None:
+            logger.error(
+                "[file_copy] Concept delete failed after blob delete for %s: %s",
+                info.concept_id,
+                exc,
+            )
+        return {
+            "success": False,
+            "error": "concept_delete_failed",
+            "message": (
+                "Backing file bytes were deleted, but concept deletion failed. "
+                "The operation is partial and needs follow-up cleanup."
+            ),
+            "detail": str(exc),
+            "concept_id": info.concept_id,
+            "blob_key": info.blob_key,
+            "blob_uri": info.blob_uri,
+            "concept_deleted": False,
+            "blob_deleted": True,
+            "partial": True,
+        }
+
+    if not concept_deleted:
+        return {
+            "success": False,
+            "error": "concept_delete_failed",
+            "message": (
+                "Backing file bytes were deleted, but concept deletion did not complete. "
+                "The operation is partial and needs follow-up cleanup."
+            ),
+            "concept_id": info.concept_id,
+            "blob_key": info.blob_key,
+            "blob_uri": info.blob_uri,
+            "concept_deleted": False,
+            "blob_deleted": True,
+            "partial": True,
+        }
+
+    return {
+        "success": True,
+        "message": "File copy and backing file bytes deleted successfully.",
+        "concept_id": info.concept_id,
+        "blob_key": info.blob_key,
+        "blob_uri": info.blob_uri,
+        "concept_deleted": True,
+        "blob_deleted": True,
+        "partial": False,
+    }
+
+
 def _normalise_optional_text(value: Any) -> str | None:
     if not isinstance(value, str):
         return None

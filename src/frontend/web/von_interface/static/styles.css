@@ -8475,6 +8475,7 @@ button.prompt-vontology-cartouche {
 .concept-header {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
     /* use gap instead of relying on ad-hoc margins */
 }
