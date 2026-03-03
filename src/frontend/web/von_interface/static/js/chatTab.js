@@ -603,17 +603,32 @@ const TOOL_USE_SETTING_REFRESH_COOLDOWN_MS = 30_000;
 const THINKING_STATUS_ACTIVE = 'active';
 const THINKING_STATUS_WAITING = 'waiting';
 const THINKING_STATUS_STALLED = 'stalled';
+const THINKING_STATUS_COMPLETED = 'completed';
+const THINKING_STATUS_FAILED = 'failed';
+const THINKING_STATUS_CANCELLED = 'cancelled';
+const THINKING_STATUS_TERMINATED = 'terminated';
 const THINKING_CARD_TOGGLE_ARIA_LABEL_EXPANDED = 'Collapse thinking details';
 const THINKING_CARD_TOGGLE_ARIA_LABEL_COLLAPSED = 'Expand thinking details';
 const THINKING_ACTIVITY_LOW_LEVEL_EVENT_KINDS = new Set(['llm_call_chunk', 'heartbeat']);
 const THINKING_TERMINAL_PROGRESS_STATUSES = new Set([
     'completed',
+    'complete',
     'done',
     'error',
     'cancelled',
     'canceled',
     'aborted',
-    'failed'
+    'failed',
+    'terminated'
+]);
+const THINKING_STATUS_CLASS_NAMES = new Set([
+    THINKING_STATUS_ACTIVE,
+    THINKING_STATUS_WAITING,
+    THINKING_STATUS_STALLED,
+    THINKING_STATUS_COMPLETED,
+    THINKING_STATUS_FAILED,
+    THINKING_STATUS_CANCELLED,
+    THINKING_STATUS_TERMINATED
 ]);
 const DIAGNOSTICS_EXPORT_ENDPOINT = '/von/diagnostics/export';
 const DIAGNOSTICS_EXPORT_SHORTCUT_HINT = 'Ctrl+Shift+D';
@@ -738,19 +753,51 @@ function normaliseThinkingCardDisplayState(state) {
     };
 }
 
-function normaliseThinkingProgressStatus(progress) {
-    const status = (progress && typeof progress.status === 'string')
-        ? progress.status.trim().toLowerCase()
-        : '';
-    return status;
+function normaliseThinkingProgressStatusValue(value) {
+    return (typeof value === 'string') ? value.trim().toLowerCase() : '';
+}
+
+function canonicalThinkingTerminalStatus(value) {
+    const status = normaliseThinkingProgressStatusValue(value);
+    if (!THINKING_TERMINAL_PROGRESS_STATUSES.has(status)) {
+        return null;
+    }
+    if (status === 'completed' || status === 'complete' || status === 'done') {
+        return THINKING_STATUS_COMPLETED;
+    }
+    if (status === 'error' || status === 'failed') {
+        return THINKING_STATUS_FAILED;
+    }
+    if (status === 'cancelled' || status === 'canceled' || status === 'aborted') {
+        return THINKING_STATUS_CANCELLED;
+    }
+    if (status === 'terminated') {
+        return THINKING_STATUS_TERMINATED;
+    }
+    return null;
+}
+
+function resolveThinkingTerminalStatus(progress) {
+    if (!progress || typeof progress !== 'object') {
+        return null;
+    }
+    const candidates = [
+        progress.status,
+        progress.orchestrator_status,
+        progress.terminal_status,
+        progress.final_status
+    ];
+    for (const value of candidates) {
+        const canonical = canonicalThinkingTerminalStatus(value);
+        if (canonical) {
+            return canonical;
+        }
+    }
+    return null;
 }
 
 function isTerminalThinkingProgress(progress) {
-    const status = normaliseThinkingProgressStatus(progress);
-    if (!status) {
-        return false;
-    }
-    return THINKING_TERMINAL_PROGRESS_STATUSES.has(status);
+    return resolveThinkingTerminalStatus(progress) !== null;
 }
 
 function reduceThinkingCardDisplayState(state, event = {}) {
@@ -1086,6 +1133,14 @@ function thinkingLivenessLabel(state) {
     return 'Active';
 }
 
+function thinkingTerminalLabel(status) {
+    if (status === THINKING_STATUS_COMPLETED) return 'Complete';
+    if (status === THINKING_STATUS_FAILED) return 'Failed';
+    if (status === THINKING_STATUS_CANCELLED) return 'Cancelled';
+    if (status === THINKING_STATUS_TERMINATED) return 'Terminated';
+    return 'Complete';
+}
+
 function formatAbsoluteTimestamp(value) {
     if (!value) {
         return '';
@@ -1190,8 +1245,11 @@ function formatThinkingEtaText(progress) {
 }
 
 function buildThinkingProgressPresentation(progress, request = null) {
-    const livenessState = normaliseThinkingLivenessState(progress);
-    const livenessLabel = thinkingLivenessLabel(livenessState);
+    const terminalStatus = resolveThinkingTerminalStatus(progress);
+    const livenessState = terminalStatus || normaliseThinkingLivenessState(progress);
+    const livenessLabel = terminalStatus
+        ? thinkingTerminalLabel(terminalStatus)
+        : thinkingLivenessLabel(livenessState);
 
     if (!progress || typeof progress !== 'object') {
         return {
@@ -1222,7 +1280,9 @@ function buildThinkingProgressPresentation(progress, request = null) {
         stageText = `${stageText}: ${detail}`;
     }
 
-    if (livenessState === THINKING_STATUS_STALLED) {
+    if (terminalStatus) {
+        stageText = livenessLabel;
+    } else if (livenessState === THINKING_STATUS_STALLED) {
         stageText = stageText ? `Stalled: ${stageText}` : 'Stalled';
     } else if (livenessState === THINKING_STATUS_WAITING) {
         stageText = stageText ? `Waiting: ${stageText}` : 'Waiting';
@@ -1271,7 +1331,7 @@ function updateThinkingCardStatusBadge(progress) {
 
     const presentation = buildThinkingProgressPresentation(progress);
     badgeEl.textContent = presentation.livenessLabel;
-    badgeEl.classList.remove(THINKING_STATUS_ACTIVE, THINKING_STATUS_WAITING, THINKING_STATUS_STALLED);
+    THINKING_STATUS_CLASS_NAMES.forEach((stateClass) => badgeEl.classList.remove(stateClass));
     badgeEl.classList.add(presentation.livenessState);
     badgeEl.setAttribute('aria-hidden', 'false');
 }
@@ -1991,14 +2051,14 @@ function startToolUseProgressPolling(request) {
             setLoadingIndicatorDetailHtml(renderThinkingCardBodyHTML(request));
 
             const status = typeof progress?.status === 'string' ? progress.status : null;
-            if (status === 'disabled') {
-                poll.nextDelayMs = 10_000;
-                scheduleNextPoll(poll.nextDelayMs);
+            if (isTerminalThinkingProgress(progress)) {
+                stopToolUseProgressPolling(request);
                 return;
             }
 
-            if (status === 'completed' || status === 'error') {
-                stopToolUseProgressPolling(request);
+            if (normaliseThinkingProgressStatusValue(status) === 'disabled') {
+                poll.nextDelayMs = 10_000;
+                scheduleNextPoll(poll.nextDelayMs);
                 return;
             }
 
@@ -16967,7 +17027,7 @@ function setThinkingState(isThinking, request = activeChatRequest, options = {})
     if (statusBadge) {
         if (isThinking) {
             statusBadge.textContent = 'Active';
-            statusBadge.classList.remove(THINKING_STATUS_WAITING, THINKING_STATUS_STALLED);
+            THINKING_STATUS_CLASS_NAMES.forEach((stateClass) => statusBadge.classList.remove(stateClass));
             statusBadge.classList.add(THINKING_STATUS_ACTIVE);
             statusBadge.setAttribute('aria-hidden', 'false');
         } else {
