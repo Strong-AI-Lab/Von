@@ -13,7 +13,7 @@ import os
 import re
 from collections import Counter
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,60 @@ _FILE_SUBTYPE_RULES: tuple[dict[str, Any], ...] = (
         "mime_types": _DOCX_MIME_TYPES,
         "extensions": (".docx",),
     },
+)
+
+_ORGANISATION_SUFFIX_PATTERN = re.compile(
+    r"\b("
+    r"(?:[A-Z][A-Za-z0-9&'().,\-]*(?:[ \t]+[A-Z][A-Za-z0-9&'().,\-]*){0,8})[ \t]+"
+    r"(?:"
+    r"University|Institute|Organisation|Organization|Agency|Council|Ministry|"
+    r"Department|Centre|Center|Committee|Commission|Foundation|Association|"
+    r"Alliance|Consortium|Laboratory|Laboratories|Lab|School|Company|"
+    r"Corporation|Limited|Ltd|Inc|LLC|Group|Office|Authority|Bank|Society|"
+    r"Hospital|College|Press|Secretariat|Trust"
+    r")"
+    r")\b"
+)
+_ORGANISATION_PREFIX_PATTERN = re.compile(
+    r"\b("
+    r"(?:"
+    r"University|Institute|Organisation|Organization|Agency|Council|Ministry|"
+    r"Department|Centre|Center|Committee|Commission|Foundation|Association|"
+    r"Alliance|Consortium|Laboratory|Laboratories|Lab|School|Company|"
+    r"Corporation|Bank|Society|Hospital|College|Office|Authority|Press|Secretariat|Trust"
+    r")[ \t]+of[ \t]+"
+    r"(?:[A-Z][A-Za-z0-9&'().,\-]*(?:[ \t]+[A-Z][A-Za-z0-9&'().,\-]*){0,8})"
+    r")\b"
+)
+_ALL_CAPS_ORG_PATTERN = re.compile(r"\b[A-Z][A-Z0-9&.\-]{1,15}\b")
+_DIAGRAM_KEYWORD_PATTERN = re.compile(
+    r"\b(diagram|ecosystem|governance|network|stakeholder|consortium|"
+    r"alliance|architecture|workflow|pipeline|flow|map|chart)\b",
+    re.IGNORECASE,
+)
+_RELATION_CONNECTOR_PATTERN = re.compile(r"(?:->|=>|→|↔|<->|--|—|-)")
+_ORGANISATION_STOPWORDS = frozenset(
+    {
+        "AND",
+        "OR",
+        "FOR",
+        "THE",
+        "WITH",
+        "FROM",
+        "THIS",
+        "THAT",
+        "FIGURE",
+        "TABLE",
+        "DATA",
+        "MODEL",
+        "SYSTEM",
+        "INPUT",
+        "OUTPUT",
+        "OCR",
+        "PDF",
+        "API",
+        "HTTP",
+    }
 )
 
 
@@ -111,6 +165,473 @@ def infer_uploaded_file_subtype(
         "content_type_token": content_type_token,
         "filename_extension": extension,
     }
+
+
+def _normalise_whitespace(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _normalise_candidate_name(value: str) -> str:
+    cleaned = _normalise_whitespace(value).strip(" \t\r\n.,;:()[]{}")
+    if cleaned.lower().startswith("the "):
+        cleaned = cleaned[4:].strip()
+    return cleaned
+
+
+def is_pdf_file(*, content_type: str | None, filename: str | None) -> bool:
+    content_type_clean = _normalise_optional_text(content_type)
+    if isinstance(content_type_clean, str) and content_type_clean.lower().startswith(
+        "application/pdf"
+    ):
+        return True
+    filename_clean = _normalise_optional_text(filename)
+    return bool(isinstance(filename_clean, str) and filename_clean.lower().endswith(".pdf"))
+
+
+def extract_organisation_candidates_from_text(
+    *,
+    text: str | None,
+    source: str,
+    page_number: int | None = None,
+    figure_id: str | None = None,
+    extraction_method: str | None = None,
+    max_candidates: int = 40,
+) -> list[dict[str, Any]]:
+    """Extract candidate organisation names from text with provenance metadata."""
+
+    source_text = _normalise_optional_text(text)
+    if not source_text:
+        return []
+
+    candidate_map: dict[str, dict[str, Any]] = {}
+
+    def _register(raw_name: str, *, rule: str, base_confidence: float) -> None:
+        name = _normalise_candidate_name(raw_name)
+        if not name or len(name) < 3:
+            return
+        upper_name = name.upper()
+        if upper_name in _ORGANISATION_STOPWORDS:
+            return
+
+        key = name.casefold()
+        row = candidate_map.get(key)
+        if row is None:
+            row = {
+                "name": name,
+                "confidence": float(base_confidence),
+                "evidence_count": 1,
+                "evidence_rules": {rule},
+            }
+            candidate_map[key] = row
+        else:
+            row["confidence"] = max(float(row.get("confidence", 0.0)), base_confidence)
+            row["evidence_count"] = int(row.get("evidence_count", 0)) + 1
+            rules = row.get("evidence_rules")
+            if not isinstance(rules, set):
+                rules = set()
+            rules.add(rule)
+            row["evidence_rules"] = rules
+
+    for match in _ORGANISATION_PREFIX_PATTERN.finditer(source_text):
+        _register(match.group(1), rule="org_prefix", base_confidence=0.8)
+
+    for match in _ORGANISATION_SUFFIX_PATTERN.finditer(source_text):
+        _register(match.group(1), rule="org_suffix", base_confidence=0.82)
+
+    for match in _ALL_CAPS_ORG_PATTERN.finditer(source_text):
+        token = match.group(0).strip()
+        if len(token) < 3:
+            continue
+        if token in _ORGANISATION_STOPWORDS:
+            continue
+        _register(token, rule="all_caps", base_confidence=0.55)
+
+    rows = sorted(
+        candidate_map.values(),
+        key=lambda item: (-float(item.get("confidence", 0.0)), str(item.get("name", ""))),
+    )
+    rows = rows[: max(1, int(max_candidates))]
+
+    extracted_at = _utc_now_iso()
+    output: list[dict[str, Any]] = []
+    for row in rows:
+        output.append(
+            {
+                "name": row["name"],
+                "confidence": round(float(row["confidence"]), 3),
+                "evidence_count": int(row["evidence_count"]),
+                "evidence_rules": sorted(str(rule) for rule in (row.get("evidence_rules") or [])),
+                "provenance": {
+                    "source": source,
+                    "page_number": page_number,
+                    "figure_id": figure_id,
+                    "extraction_method": extraction_method,
+                    "extracted_at": extracted_at,
+                },
+            }
+        )
+    return output
+
+
+def extract_relationship_candidates_from_text(
+    *,
+    text: str | None,
+    organisation_names: Sequence[str],
+    page_number: int | None = None,
+    figure_id: str | None = None,
+    extraction_method: str | None = None,
+    max_candidates: int = 40,
+) -> list[dict[str, Any]]:
+    """Extract lightweight relation candidates from diagram-like connector text."""
+
+    source_text = _normalise_optional_text(text)
+    if not source_text:
+        return []
+    names = [item.strip() for item in organisation_names if isinstance(item, str) and item.strip()]
+    if len(names) < 2:
+        return []
+
+    candidate_rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, int | None, str | None]] = set()
+    lowered_pairs = [(name, name.casefold()) for name in names]
+
+    for line in source_text.splitlines():
+        cleaned_line = _normalise_whitespace(line)
+        if not cleaned_line:
+            continue
+        connector_match = _RELATION_CONNECTOR_PATTERN.search(cleaned_line)
+        if connector_match is None:
+            continue
+        connector = connector_match.group(0)
+        relation_hint = "directed_link" if connector in {"->", "=>", "→"} else "association"
+
+        hits: list[tuple[int, str]] = []
+        lowered_line = cleaned_line.casefold()
+        for original_name, folded_name in lowered_pairs:
+            idx = lowered_line.find(folded_name)
+            if idx >= 0:
+                hits.append((idx, original_name))
+        if len(hits) < 2:
+            continue
+        hits.sort(key=lambda item: item[0])
+
+        for index in range(len(hits) - 1):
+            left = hits[index][1]
+            right = hits[index + 1][1]
+            key = (left.casefold(), right.casefold(), relation_hint, page_number, figure_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidate_rows.append(
+                {
+                    "source_name": left,
+                    "target_name": right,
+                    "relation_hint": relation_hint,
+                    "confidence": 0.58 if relation_hint == "directed_link" else 0.5,
+                    "provenance": {
+                        "source": "pdf_diagram_relation_candidate",
+                        "page_number": page_number,
+                        "figure_id": figure_id,
+                        "extraction_method": extraction_method,
+                        "connector": connector,
+                        "line_excerpt": cleaned_line[:260],
+                    },
+                }
+            )
+
+    return candidate_rows[: max(1, int(max_candidates))]
+
+
+def _merge_organisation_candidates(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    max_candidates: int,
+) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        raw_name = row.get("name")
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            continue
+        key = raw_name.strip().casefold()
+        target = merged.get(key)
+        provenance = row.get("provenance")
+        if target is None:
+            target = {
+                "name": raw_name.strip(),
+                "confidence": float(row.get("confidence") or 0.0),
+                "evidence_count": int(row.get("evidence_count") or 0),
+                "evidence_rules": set(row.get("evidence_rules") or []),
+                "provenance": [dict(provenance)] if isinstance(provenance, Mapping) else [],
+            }
+            merged[key] = target
+            continue
+        target["confidence"] = max(
+            float(target.get("confidence") or 0.0),
+            float(row.get("confidence") or 0.0),
+        )
+        target["evidence_count"] = int(target.get("evidence_count") or 0) + int(
+            row.get("evidence_count") or 0
+        )
+        rules = target.get("evidence_rules")
+        if not isinstance(rules, set):
+            rules = set()
+        rules.update(row.get("evidence_rules") or [])
+        target["evidence_rules"] = rules
+        if isinstance(provenance, Mapping):
+            provenance_entries = target.get("provenance")
+            if not isinstance(provenance_entries, list):
+                provenance_entries = []
+            provenance_entries.append(dict(provenance))
+            target["provenance"] = provenance_entries
+
+    sorted_rows = sorted(
+        merged.values(),
+        key=lambda item: (-float(item.get("confidence") or 0.0), str(item.get("name") or "")),
+    )
+    sorted_rows = sorted_rows[: max(1, int(max_candidates))]
+    output: list[dict[str, Any]] = []
+    for row in sorted_rows:
+        output.append(
+            {
+                "name": row.get("name"),
+                "confidence": round(float(row.get("confidence") or 0.0), 3),
+                "evidence_count": int(row.get("evidence_count") or 0),
+                "evidence_rules": sorted(str(rule) for rule in (row.get("evidence_rules") or [])),
+                "provenance": list(row.get("provenance") or []),
+            }
+        )
+    return output
+
+
+def summarise_diagram_organisation_candidates(
+    *,
+    prose_text: str | None,
+    diagram_segments: Sequence[Mapping[str, Any]],
+    max_candidates: int = 40,
+) -> dict[str, Any]:
+    """Summarise prose vs diagram organisation candidates with provenance separation."""
+
+    prose_rows = extract_organisation_candidates_from_text(
+        text=prose_text,
+        source="pdf_prose_text",
+        extraction_method="pymupdf_text_layer",
+        max_candidates=max_candidates,
+    )
+    diagram_rows: list[dict[str, Any]] = []
+    relationship_rows: list[dict[str, Any]] = []
+
+    for segment in diagram_segments:
+        text_value = segment.get("text")
+        if not isinstance(text_value, str) or not text_value.strip():
+            continue
+        page_number_raw = segment.get("page_number")
+        page_number = int(page_number_raw) if isinstance(page_number_raw, int) else None
+        figure_id = (
+            str(segment.get("figure_id")).strip()
+            if isinstance(segment.get("figure_id"), str) and str(segment.get("figure_id")).strip()
+            else None
+        )
+        extraction_method = (
+            str(segment.get("extraction_method")).strip()
+            if isinstance(segment.get("extraction_method"), str)
+            and str(segment.get("extraction_method")).strip()
+            else None
+        )
+        page_candidates = extract_organisation_candidates_from_text(
+            text=text_value,
+            source="pdf_diagram_segment",
+            page_number=page_number,
+            figure_id=figure_id,
+            extraction_method=extraction_method,
+            max_candidates=max_candidates,
+        )
+        diagram_rows.extend(page_candidates)
+        relationship_rows.extend(
+            extract_relationship_candidates_from_text(
+                text=text_value,
+                organisation_names=[str(row.get("name")) for row in page_candidates],
+                page_number=page_number,
+                figure_id=figure_id,
+                extraction_method=extraction_method,
+                max_candidates=max_candidates,
+            )
+        )
+
+    prose_candidates = _merge_organisation_candidates(
+        prose_rows,
+        max_candidates=max_candidates,
+    )
+    diagram_candidates = _merge_organisation_candidates(
+        diagram_rows,
+        max_candidates=max_candidates,
+    )
+    prose_names = {
+        str(row.get("name")).casefold()
+        for row in prose_candidates
+        if isinstance(row.get("name"), str) and str(row.get("name")).strip()
+    }
+    diagram_only = [
+        row
+        for row in diagram_candidates
+        if isinstance(row.get("name"), str) and row["name"].casefold() not in prose_names
+    ]
+
+    return {
+        "prose_organisations": prose_candidates,
+        "diagram_organisations": diagram_candidates,
+        "diagram_only_organisations": diagram_only,
+        "diagram_relationship_candidates": relationship_rows[: max(1, int(max_candidates))],
+        "requires_human_confirmation": True,
+    }
+
+
+def _extract_pdf_page_ocr_text(page: Any, *, dpi: int) -> dict[str, Any]:
+    try:
+        import pytesseract  # type: ignore[import-not-found]
+        from PIL import Image  # type: ignore[import-not-found]
+    except Exception as exc:
+        return {
+            "text": None,
+            "method": "pdf_diagram_ocr_unavailable",
+            "error": str(exc),
+        }
+
+    try:
+        pixmap = page.get_pixmap(dpi=dpi)
+        png_bytes = pixmap.tobytes("png")
+        with Image.open(io.BytesIO(png_bytes)) as image:
+            text = pytesseract.image_to_string(image).strip()
+        return {
+            "text": text or None,
+            "method": "pdf_page_ocr",
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "text": None,
+            "method": "pdf_page_ocr_failed",
+            "error": str(exc),
+        }
+
+
+def extract_pdf_diagram_organisation_candidates(
+    *,
+    data_bytes: bytes,
+    content_type: str | None,
+    original_filename: str | None,
+    prose_text: str | None,
+    max_pages: int = 8,
+    max_candidates: int = 40,
+    ocr_dpi: int = 220,
+) -> dict[str, Any]:
+    """Extract organisation candidates from PDF diagram pages with provenance."""
+
+    if not is_pdf_file(content_type=content_type, filename=original_filename):
+        return {
+            "available": False,
+            "reason": "not_pdf",
+            "requires_human_confirmation": True,
+            "prose_organisations": [],
+            "diagram_organisations": [],
+            "diagram_only_organisations": [],
+            "diagram_relationship_candidates": [],
+            "page_summaries": [],
+            "errors": [],
+        }
+
+    try:
+        import fitz  # type: ignore[import-not-found]
+    except Exception as exc:
+        return {
+            "available": False,
+            "reason": "pymupdf_unavailable",
+            "requires_human_confirmation": True,
+            "prose_organisations": [],
+            "diagram_organisations": [],
+            "diagram_only_organisations": [],
+            "diagram_relationship_candidates": [],
+            "page_summaries": [],
+            "errors": [str(exc)],
+        }
+
+    page_summaries: list[dict[str, Any]] = []
+    diagram_segments: list[dict[str, Any]] = []
+    errors: list[str] = []
+    pages_scanned = 0
+    total_pages = 0
+
+    try:
+        with fitz.open(stream=bytes(data_bytes), filetype="pdf") as doc:
+            total_pages = len(doc)
+            pages_to_scan = max(1, min(int(max_pages), total_pages if total_pages > 0 else 1))
+            for page_index in range(pages_to_scan):
+                page = doc.load_page(page_index)
+                pages_scanned += 1
+                page_text = str(page.get_text("text") or "")
+                image_count = 0
+                try:
+                    image_count = len(page.get_images(full=True))
+                except Exception:
+                    image_count = 0
+
+                signals: list[str] = []
+                if image_count > 0:
+                    signals.append("embedded_images")
+                if _DIAGRAM_KEYWORD_PATTERN.search(page_text):
+                    signals.append("diagram_keywords")
+                if _RELATION_CONNECTOR_PATTERN.search(page_text):
+                    signals.append("connector_tokens")
+
+                is_diagram_candidate = bool(signals)
+                ocr_payload: dict[str, Any] = {
+                    "text": None,
+                    "method": "diagram_not_detected",
+                    "error": None,
+                }
+                if is_diagram_candidate:
+                    ocr_payload = _extract_pdf_page_ocr_text(page, dpi=max(120, int(ocr_dpi)))
+                    ocr_text = _normalise_optional_text(ocr_payload.get("text"))
+                    if ocr_text:
+                        diagram_segments.append(
+                            {
+                                "text": ocr_text,
+                                "page_number": page_index + 1,
+                                "figure_id": f"page_{page_index + 1}_diagram_candidate",
+                                "extraction_method": ocr_payload.get("method"),
+                            }
+                        )
+                    elif isinstance(ocr_payload.get("error"), str):
+                        errors.append(str(ocr_payload["error"]))
+
+                page_summaries.append(
+                    {
+                        "page_number": page_index + 1,
+                        "diagram_candidate": is_diagram_candidate,
+                        "signals": signals,
+                        "image_count": image_count,
+                        "ocr_method": ocr_payload.get("method"),
+                        "ocr_error": ocr_payload.get("error"),
+                    }
+                )
+    except Exception as exc:
+        errors.append(str(exc))
+
+    summary = summarise_diagram_organisation_candidates(
+        prose_text=prose_text,
+        diagram_segments=diagram_segments,
+        max_candidates=max_candidates,
+    )
+    summary.update(
+        {
+            "available": True,
+            "method": "pymupdf_diagram_ocr",
+            "page_summaries": page_summaries,
+            "pages_scanned": pages_scanned,
+            "total_pages": total_pages,
+            "errors": errors,
+        }
+    )
+    return summary
 
 
 def is_image_file(*, content_type: str | None, filename: str | None) -> bool:

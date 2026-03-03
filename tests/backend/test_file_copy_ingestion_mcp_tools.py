@@ -318,3 +318,82 @@ def test_interpret_file_copy_supports_non_persist_mode(monkeypatch):
     assert result["file_kind"] == "document"
     assert result["persisted"] is False
     assert result["persisted_relations"] == []
+
+
+def test_interpret_file_copy_includes_pdf_diagram_analysis(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.catalogue._read_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "text": "This report discusses the Ministry of Health.",
+            "content_type": "application/pdf",
+            "original_filename": "ecosystem-map.pdf",
+            "size_bytes": 4096,
+            "byte_length": 4096,
+            "blob": {"backend": "local", "key": "uploads/user/hash/ecosystem-map.pdf"},
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.computer_file_copy_service.fetch_file_copy_bytes",
+        lambda **_kwargs: {"success": True, "data": b"%PDF-1.4..."},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.file_copy_interpretation_service.build_document_interpretation",
+        lambda **_kwargs: {
+            "kind": "document",
+            "description": "Document text extracted: This report discusses the Ministry of Health.",
+            "subject_tags": ["document"],
+            "content_text": "This report discusses the Ministry of Health.",
+            "content_length": 44,
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.file_copy_interpretation_service.extract_pdf_diagram_organisation_candidates",
+        lambda **_kwargs: {
+            "available": True,
+            "method": "pymupdf_diagram_ocr",
+            "requires_human_confirmation": True,
+            "prose_organisations": [{"name": "Ministry of Health"}],
+            "diagram_organisations": [
+                {"name": "Ministry of Health"},
+                {"name": "University of Auckland"},
+            ],
+            "diagram_only_organisations": [{"name": "University of Auckland"}],
+            "diagram_relationship_candidates": [
+                {
+                    "source_name": "Ministry of Health",
+                    "target_name": "University of Auckland",
+                    "relation_hint": "directed_link",
+                }
+            ],
+            "page_summaries": [
+                {"page_number": 2, "diagram_candidate": True, "signals": ["embedded_images"]}
+            ],
+            "errors": [],
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.upsert_singleton_text_relation",
+        lambda **_kwargs: {"relation_id": "rel-diagram"},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.rag_text_relation_change_hook_service.maybe_sync_concept_text_relations_to_rag",
+        lambda **_kwargs: None,
+    )
+
+    result = cat._interpret_file_copy(
+        concept_id="#V#file_copy_pdf_test",
+        namespace="#V#user@org",
+        include_pdf_diagram_analysis=True,
+    )
+
+    assert result["success"] is True
+    assert result["file_kind"] == "document"
+    assert result["diagram_analysis"]["available"] is True
+    assert (
+        result["interpretation"]["candidate_assertions_require_confirmation"] is True
+    )
+    assert "diagram_organisation_candidates" in result["interpretation"]["subject_tags"]
+    assert result["diagnostics"]["diagram_analysis"]["diagram_only_count"] == 1
