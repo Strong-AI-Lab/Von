@@ -3182,8 +3182,10 @@ def _interpret_file_copy(**kwargs):
     from ...services.file_copy_interpretation_service import (
         build_document_interpretation,
         build_image_interpretation,
+        extract_pdf_diagram_organisation_candidates,
         infer_uploaded_file_subtype,
         is_image_file,
+        is_pdf_file,
     )
     from ...services.rag_text_relation_change_hook_service import (
         maybe_sync_concept_text_relations_to_rag,
@@ -3247,7 +3249,45 @@ def _interpret_file_copy(**kwargs):
     persist_content = bool(kwargs.get("persist_content", True))
     persist_interpretation_json = bool(kwargs.get("persist_interpretation_json", True))
     include_semantic_description = bool(kwargs.get("include_semantic_description", True))
+    include_pdf_diagram_analysis = bool(kwargs.get("include_pdf_diagram_analysis", True))
     include_text = bool(kwargs.get("include_text", False))
+    max_diagram_pages_raw = kwargs.get("max_diagram_pages")
+    if max_diagram_pages_raw is None:
+        max_diagram_pages = 8
+    else:
+        try:
+            max_diagram_pages = int(max_diagram_pages_raw)
+        except (TypeError, ValueError):
+            return make_error_response(
+                "invalid_parameter",
+                "Invalid max_diagram_pages: must be an integer",
+                details={"max_diagram_pages": max_diagram_pages_raw},
+            )
+        if max_diagram_pages <= 0:
+            return make_error_response(
+                "invalid_parameter",
+                "max_diagram_pages must be positive",
+                details={"max_diagram_pages": max_diagram_pages},
+            )
+
+    max_diagram_candidates_raw = kwargs.get("max_diagram_candidates")
+    if max_diagram_candidates_raw is None:
+        max_diagram_candidates = 40
+    else:
+        try:
+            max_diagram_candidates = int(max_diagram_candidates_raw)
+        except (TypeError, ValueError):
+            return make_error_response(
+                "invalid_parameter",
+                "Invalid max_diagram_candidates: must be an integer",
+                details={"max_diagram_candidates": max_diagram_candidates_raw},
+            )
+        if max_diagram_candidates <= 0:
+            return make_error_response(
+                "invalid_parameter",
+                "max_diagram_candidates must be positive",
+                details={"max_diagram_candidates": max_diagram_candidates},
+            )
     model_override = (
         kwargs.get("vision_model")
         if isinstance(kwargs.get("vision_model"), str)
@@ -3331,6 +3371,7 @@ def _interpret_file_copy(**kwargs):
     )
 
     interpretation: dict[str, Any]
+    diagram_analysis: dict[str, Any] | None = None
     image_fetch_error: str | None = None
     if file_kind == "image":
         with _with_namespace_actor_override(effective_namespace):
@@ -3383,6 +3424,87 @@ def _interpret_file_copy(**kwargs):
                 original_filename if isinstance(original_filename, str) else None
             ),
         )
+        if include_pdf_diagram_analysis and is_pdf_file(
+            content_type=content_type if isinstance(content_type, str) else None,
+            filename=original_filename if isinstance(original_filename, str) else None,
+        ):
+            with _with_namespace_actor_override(effective_namespace):
+                pdf_fetch = fetch_file_copy_bytes(
+                    file_copy_concept_id=concept_id,
+                    max_bytes=max_bytes,
+                    allow_large=allow_large,
+                )
+            if isinstance(pdf_fetch, dict) and pdf_fetch.get("success") is True:
+                pdf_bytes = pdf_fetch.get("data") or b""
+                diagram_analysis = extract_pdf_diagram_organisation_candidates(
+                    data_bytes=bytes(pdf_bytes),
+                    content_type=(
+                        content_type if isinstance(content_type, str) else None
+                    ),
+                    original_filename=(
+                        original_filename
+                        if isinstance(original_filename, str)
+                        else None
+                    ),
+                    prose_text=extracted_text,
+                    max_pages=max_diagram_pages,
+                    max_candidates=max_diagram_candidates,
+                )
+            else:
+                diagram_analysis = {
+                    "available": False,
+                    "reason": "pdf_byte_fetch_failed",
+                    "errors": [
+                        str(
+                            pdf_fetch.get("error")
+                            if isinstance(pdf_fetch, dict)
+                            else "unknown"
+                        )
+                    ],
+                    "requires_human_confirmation": True,
+                    "prose_organisations": [],
+                    "diagram_organisations": [],
+                    "diagram_only_organisations": [],
+                    "diagram_relationship_candidates": [],
+                    "page_summaries": [],
+                }
+
+            if isinstance(diagram_analysis, dict):
+                interpretation["diagram_analysis"] = diagram_analysis
+                interpretation["candidate_assertions_require_confirmation"] = True
+                raw_diagram_only = diagram_analysis.get("diagram_only_organisations")
+                diagram_only = (
+                    list(raw_diagram_only) if isinstance(raw_diagram_only, list) else []
+                )
+                if diagram_only:
+                    tags = interpretation.get("subject_tags")
+                    if not isinstance(tags, list):
+                        tags = []
+                    if "diagram_organisation_candidates" not in tags:
+                        tags.append("diagram_organisation_candidates")
+                    interpretation["subject_tags"] = tags
+
+                    names: list[str] = []
+                    for item in diagram_only[:3]:
+                        if isinstance(item, Mapping):
+                            name = item.get("name")
+                            if isinstance(name, str) and name.strip():
+                                names.append(name.strip())
+                    if names:
+                        names_text = ", ".join(names)
+                        existing_description = interpretation.get("description")
+                        if (
+                            isinstance(existing_description, str)
+                            and existing_description.strip()
+                        ):
+                            interpretation["description"] = (
+                                f"{existing_description.strip()} "
+                                f"Diagram-derived organisation candidates: {names_text}."
+                            )
+                        else:
+                            interpretation["description"] = (
+                                f"Diagram-derived organisation candidates: {names_text}."
+                            )
 
     description_text = interpretation.get("description")
     description = description_text if isinstance(description_text, str) else None
@@ -3604,6 +3726,19 @@ def _interpret_file_copy(**kwargs):
             else content_text
         )
 
+    diagram_only_count = 0
+    diagram_candidate_count = 0
+    diagram_relationship_count = 0
+    if isinstance(diagram_analysis, Mapping):
+        raw_only = diagram_analysis.get("diagram_only_organisations")
+        raw_candidates = diagram_analysis.get("diagram_organisations")
+        raw_relationships = diagram_analysis.get("diagram_relationship_candidates")
+        diagram_only_count = len(raw_only) if isinstance(raw_only, list) else 0
+        diagram_candidate_count = len(raw_candidates) if isinstance(raw_candidates, list) else 0
+        diagram_relationship_count = (
+            len(raw_relationships) if isinstance(raw_relationships, list) else 0
+        )
+
     return {
         "success": len(persist_errors) == 0,
         "concept_id": concept_id,
@@ -3621,6 +3756,7 @@ def _interpret_file_copy(**kwargs):
         "text": content_text if include_text else None,
         "content_truncated_for_persist": content_truncated,
         "interpretation": interpretation,
+        "diagram_analysis": diagram_analysis,
         "persisted": persist and len(persist_errors) == 0,
         "persisted_relations": persisted_relations,
         "persisted_structural_relations": persisted_structural_relations,
@@ -3631,6 +3767,17 @@ def _interpret_file_copy(**kwargs):
             "subtype_assertion": subtype_assertion,
             "arxiv_id_candidates": arxiv_id_candidates,
             "selected_arxiv_id": selected_arxiv_id,
+            "diagram_analysis": {
+                "enabled": include_pdf_diagram_analysis,
+                "available": (
+                    bool(diagram_analysis.get("available"))
+                    if isinstance(diagram_analysis, Mapping)
+                    else False
+                ),
+                "diagram_only_count": diagram_only_count,
+                "diagram_candidate_count": diagram_candidate_count,
+                "diagram_relationship_count": diagram_relationship_count,
+            },
         },
         "scholarly_representation": scholarly_representation,
         "namespace": effective_namespace,
@@ -6191,6 +6338,9 @@ def _interpret_file_copy_input_schema() -> Schema:
             "persist_content": (bool, type(None)),
             "persist_interpretation_json": (bool, type(None)),
             "include_semantic_description": (bool, type(None)),
+            "include_pdf_diagram_analysis": (bool, type(None)),
+            "max_diagram_pages": (int, type(None)),
+            "max_diagram_candidates": (int, type(None)),
             "vision_model": (str, type(None)),
             "semantic_prompt": (str, type(None)),
             "include_text": (bool, type(None)),
@@ -6201,8 +6351,10 @@ def _interpret_file_copy_input_schema() -> Schema:
             "interpret_file_copy input: concept_id for a #V#computer_file_copy instance. "
             "Optionally pass namespace, max_bytes/allow_large, and persistence controls. "
             "For image files (including screenshots, faces, and building photos), this tool "
-            "extracts OCR and semantic descriptions and persists canonical hasDescription/"
-            "hasContent plus structured interpretation metadata."
+            "extracts OCR and semantic descriptions. For PDF documents, it can also perform "
+            "diagram-aware organisation candidate extraction with provenance (candidate-only; "
+            "human confirmation required) and persists canonical hasDescription/hasContent "
+            "plus structured interpretation metadata."
         ),
     )
 
@@ -6225,6 +6377,7 @@ def _interpret_file_copy_output_schema() -> Schema:
             "text": (str, type(None)),
             "content_truncated_for_persist": (bool, type(None)),
             "interpretation": (dict, type(None)),
+            "diagram_analysis": (dict, type(None)),
             "persisted": (bool, type(None)),
             "persisted_relations": (list, type(None)),
             "persisted_structural_relations": (list, type(None)),

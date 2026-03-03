@@ -358,6 +358,17 @@ Event-launch semantics:
 - `file_copy.uploaded` launches use a single selected workflow strategy (`#V#file_copy_upload_handler_workflow` by default) to avoid duplicate uncontrolled launches.
 - Default event bindings are bootstrapped idempotently; conflicting bindings are not overwritten.
 
+### 10.5 PDF Diagram-Aware Organisation Extraction (JVNAUTOSCI-1017)
+
+When `#V#file_copy_interpretation_workflow` runs `interpret_file_copy` for PDF documents:
+
+- The interpreter MUST preserve prose-derived extraction and diagram-derived extraction as separate candidate sets.
+- Diagram analysis SHOULD use open-source components only (PyMuPDF for page/image access and OCR via `pytesseract` when available).
+- Candidate entities and candidate relations derived from diagrams MUST be emitted as verification candidates (not automatic ontology assertions).
+- Every extracted diagram candidate MUST carry provenance metadata (source, page/figure scope, extraction method, timestamp/evidence).
+- Output MUST include explicit `requires_human_confirmation=true` semantics for diagram-derived candidates.
+- If diagram OCR dependencies are unavailable, interpretation MUST fail soft (diagnostic payload preserved) rather than silently asserting diagram-derived facts.
+
 ## 11. Durable Runtime Semantics
 
 ### 11.1 Instance Model

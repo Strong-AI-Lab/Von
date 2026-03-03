@@ -163,3 +163,71 @@ def test_interpret_file_copy_gateway_asserts_docx_subtype(monkeypatch):
             "target": "#V#msword_docx_computer_file_copy",
         }
     ]
+
+
+def test_interpret_file_copy_gateway_returns_pdf_diagram_candidates(monkeypatch):
+    gateway = _build_gateway()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.catalogue._read_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "text": "The prose section references Ministry of Health.",
+            "content_type": "application/pdf",
+            "original_filename": "ecosystem.pdf",
+            "size_bytes": 5120,
+            "byte_length": 5120,
+            "blob": {"backend": "local", "key": "imports/user/hash/ecosystem.pdf"},
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.computer_file_copy_service.fetch_file_copy_bytes",
+        lambda **_kwargs: {"success": True, "data": b"%PDF-1.4..."},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.file_copy_interpretation_service.build_document_interpretation",
+        lambda **_kwargs: {
+            "kind": "document",
+            "description": "Document text extracted: The prose section references Ministry of Health.",
+            "subject_tags": ["document"],
+            "content_text": "The prose section references Ministry of Health.",
+            "content_length": 47,
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.file_copy_interpretation_service.extract_pdf_diagram_organisation_candidates",
+        lambda **_kwargs: {
+            "available": True,
+            "method": "pymupdf_diagram_ocr",
+            "requires_human_confirmation": True,
+            "prose_organisations": [{"name": "Ministry of Health"}],
+            "diagram_organisations": [
+                {"name": "Ministry of Health"},
+                {"name": "University of Auckland"},
+            ],
+            "diagram_only_organisations": [{"name": "University of Auckland"}],
+            "diagram_relationship_candidates": [],
+            "page_summaries": [{"page_number": 1, "diagram_candidate": True}],
+            "errors": [],
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.upsert_singleton_text_relation",
+        lambda **_kwargs: {"relation_id": "rel-gateway-diagram"},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.rag_text_relation_change_hook_service.maybe_sync_concept_text_relations_to_rag",
+        lambda **_kwargs: None,
+    )
+
+    payload = gateway.invoke(
+        "interpret_file_copy",
+        {"concept_id": "#V#imported_file_gateway", "namespace": "#V#user@org"},
+    ).payload
+
+    assert payload.get("success") is True
+    diagram_analysis = payload.get("diagram_analysis") or {}
+    assert diagram_analysis.get("available") is True
+    assert payload.get("diagnostics", {}).get("diagram_analysis", {}).get("diagram_only_count") == 1
+    interpretation = payload.get("interpretation") or {}
+    assert interpretation.get("candidate_assertions_require_confirmation") is True
