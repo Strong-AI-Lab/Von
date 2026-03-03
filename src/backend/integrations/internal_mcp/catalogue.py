@@ -3176,6 +3176,7 @@ def _interpret_file_copy(**kwargs):
 
     from ...services.arxiv_paper_link_service import (
         extract_arxiv_id_candidates,
+        materialise_scholarly_representation_for_file_copy,
         materialise_scholarly_representation_for_arxiv_file_copy,
     )
     from ...services.computer_file_copy_service import fetch_file_copy_bytes
@@ -3641,65 +3642,116 @@ def _interpret_file_copy(**kwargs):
                 content_for_persist,
             )
             selected_arxiv_id = arxiv_id_candidates[0] if arxiv_id_candidates else None
-            if isinstance(selected_arxiv_id, str) and selected_arxiv_id.strip():
+            user_concept_id, _organisation_concept_id = _resolve_rag_actor_scope_ids(
+                ns_report
+            )
+            metadata_record: dict[str, Any] | None = None
+            metadata_error: str | None = None
+
+            if not isinstance(user_concept_id, str) or not user_concept_id.strip():
                 scholarly_representation = {
                     "attempted": True,
                     "verified": False,
                     "arxiv_id": selected_arxiv_id,
-                    "reason": "metadata_resolution_pending",
+                    "reason": "missing_user_context_for_scholarly_representation",
                 }
+            else:
+                if isinstance(selected_arxiv_id, str) and selected_arxiv_id.strip():
+                    scholarly_representation = {
+                        "attempted": True,
+                        "verified": False,
+                        "arxiv_id": selected_arxiv_id,
+                        "reason": "metadata_resolution_pending",
+                    }
 
-                metadata_payload = _get_paper_metadata(arxiv_id=selected_arxiv_id)
-                metadata_error: str | None = None
-                metadata_record: dict[str, Any] | None = None
-                if isinstance(metadata_payload, dict):
-                    if metadata_payload.get("success") is False:
-                        metadata_error = str(
-                            metadata_payload.get("error")
-                            or metadata_payload.get("message")
-                            or "metadata_fetch_failed"
-                        )
-                    elif isinstance(metadata_payload.get("paper"), Mapping):
-                        metadata_record = dict(metadata_payload.get("paper") or {})
-                    elif isinstance(metadata_payload.get("result"), Mapping):
-                        metadata_record = dict(metadata_payload.get("result") or {})
+                    metadata_payload = _get_paper_metadata(arxiv_id=selected_arxiv_id)
+                    if isinstance(metadata_payload, dict):
+                        if metadata_payload.get("success") is False:
+                            metadata_error = str(
+                                metadata_payload.get("error")
+                                or metadata_payload.get("message")
+                                or "metadata_fetch_failed"
+                            )
+                        elif isinstance(metadata_payload.get("paper"), Mapping):
+                            metadata_record = dict(metadata_payload.get("paper") or {})
+                        elif isinstance(metadata_payload.get("result"), Mapping):
+                            metadata_record = dict(metadata_payload.get("result") or {})
+                        else:
+                            metadata_record = dict(metadata_payload)
                     else:
-                        metadata_record = dict(metadata_payload)
-                else:
-                    metadata_error = f"unexpected_metadata_response:{type(metadata_payload).__name__}"
+                        metadata_error = (
+                            f"unexpected_metadata_response:{type(metadata_payload).__name__}"
+                        )
 
-                user_concept_id, _organisation_concept_id = _resolve_rag_actor_scope_ids(
-                    ns_report
-                )
-                if not isinstance(user_concept_id, str) or not user_concept_id.strip():
-                    scholarly_representation = {
-                        "attempted": True,
-                        "verified": False,
-                        "arxiv_id": selected_arxiv_id,
-                        "reason": "missing_user_context_for_arxiv_representation",
-                    }
-                elif metadata_error:
-                    scholarly_representation = {
-                        "attempted": True,
-                        "verified": False,
-                        "arxiv_id": selected_arxiv_id,
-                        "reason": metadata_error,
-                        "metadata_error": metadata_error,
-                    }
-                else:
+                    if metadata_error:
+                        scholarly_representation = {
+                            "attempted": True,
+                            "verified": False,
+                            "arxiv_id": selected_arxiv_id,
+                            "reason": metadata_error,
+                            "metadata_error": metadata_error,
+                        }
+                    else:
+                        with _with_namespace_actor_override(effective_namespace):
+                            scholarly_representation = (
+                                materialise_scholarly_representation_for_arxiv_file_copy(
+                                    user_concept_id=user_concept_id.strip(),
+                                    arxiv_id=selected_arxiv_id,
+                                    file_copy_concept_id=concept_id,
+                                    metadata=metadata_record,
+                                    logger=logger,
+                                )
+                            )
+                        scholarly_representation["attempted"] = True
+                        scholarly_representation["metadata_source"] = "get_paper_metadata"
+                        scholarly_representation["metadata_available"] = bool(
+                            metadata_record
+                        )
+
+                if not bool(scholarly_representation.get("verified")):
+                    generic_metadata: dict[str, Any] = {}
+                    if isinstance(metadata_record, Mapping):
+                        generic_metadata.update(dict(metadata_record))
+                    if (
+                        "title" not in generic_metadata
+                        and isinstance(original_filename, str)
+                        and original_filename.strip()
+                    ):
+                        title_candidate = re.sub(
+                            r"\.[A-Za-z0-9]{1,6}$",
+                            "",
+                            original_filename.strip(),
+                        ).replace("_", " ")
+                        if title_candidate.strip():
+                            generic_metadata["title"] = title_candidate.strip()
+                    if (
+                        "summary" not in generic_metadata
+                        and isinstance(description, str)
+                        and description.strip()
+                    ):
+                        generic_metadata["summary"] = description.strip()
+
                     with _with_namespace_actor_override(effective_namespace):
-                        scholarly_representation = (
-                            materialise_scholarly_representation_for_arxiv_file_copy(
+                        generic_scholarly_representation = (
+                            materialise_scholarly_representation_for_file_copy(
                                 user_concept_id=user_concept_id.strip(),
-                                arxiv_id=selected_arxiv_id,
                                 file_copy_concept_id=concept_id,
-                                metadata=metadata_record,
+                                metadata=generic_metadata or None,
                                 logger=logger,
                             )
                         )
-                    scholarly_representation["attempted"] = True
-                    scholarly_representation["metadata_source"] = "get_paper_metadata"
-                    scholarly_representation["metadata_available"] = bool(metadata_record)
+                    generic_scholarly_representation["attempted"] = True
+                    generic_scholarly_representation["fallback_mode"] = (
+                        "from_arxiv_path"
+                        if isinstance(selected_arxiv_id, str)
+                        and selected_arxiv_id.strip()
+                        else "direct_generic"
+                    )
+                    if isinstance(selected_arxiv_id, str) and selected_arxiv_id.strip():
+                        generic_scholarly_representation["arxiv_id"] = selected_arxiv_id
+                    if metadata_error:
+                        generic_scholarly_representation["metadata_error"] = metadata_error
+                    scholarly_representation = generic_scholarly_representation
 
                 if not bool(scholarly_representation.get("verified")):
                     persist_errors.append(

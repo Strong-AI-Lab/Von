@@ -69,6 +69,16 @@ def test_file_copy_ingestion_tools_gateway_invoke(monkeypatch):
         "src.backend.services.rag_text_relation_change_hook_service.maybe_sync_concept_text_relations_to_rag",
         lambda **_kwargs: None,
     )
+    monkeypatch.setattr(
+        "src.backend.services.arxiv_paper_link_service.materialise_scholarly_representation_for_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "verified": True,
+            "paper_concept_id": "#V#paper_from_file_copy_gateway",
+            "file_copy_concept_id": "#V#imported_file_gateway",
+            "representation_mode": "generic_file_copy",
+        },
+    )
 
     class _StubRAG:
         def upsert_documents(
@@ -126,6 +136,16 @@ def test_interpret_file_copy_gateway_asserts_docx_subtype(monkeypatch):
             "subject_tags": ["document"],
             "content_text": "Gateway DOCX text",
             "content_length": 17,
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.arxiv_paper_link_service.materialise_scholarly_representation_for_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "verified": True,
+            "paper_concept_id": "#V#paper_from_file_copy_gateway",
+            "file_copy_concept_id": "#V#imported_file_gateway",
+            "representation_mode": "generic_file_copy",
         },
     )
 
@@ -209,6 +229,16 @@ def test_interpret_file_copy_gateway_returns_pdf_diagram_candidates(monkeypatch)
             "diagram_relationship_candidates": [],
             "page_summaries": [{"page_number": 1, "diagram_candidate": True}],
             "errors": [],
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.arxiv_paper_link_service.materialise_scholarly_representation_for_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "verified": True,
+            "paper_concept_id": "#V#paper_from_file_copy_gateway",
+            "file_copy_concept_id": "#V#imported_file_gateway",
+            "representation_mode": "generic_file_copy",
         },
     )
     monkeypatch.setattr(

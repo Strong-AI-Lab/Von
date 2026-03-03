@@ -26,6 +26,7 @@ from ...workflows.durable.workflow_instance_submission_service import (
 from ...languagemodels.llm_interface import get_llm_client, get_active_model_name
 from .settings_routes import get_all_settings_data
 from ...integrations.internal_mcp import ProgressTracker, ToolCallParsingError
+from ...integrations.internal_mcp.orchestrator import InternalMCPChatOrchestrator
 from ...services import chat_history_service
 from ...services.window_session_context_service import (
     get_or_create_window_context,
@@ -6014,24 +6015,169 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             _set_tool_progress(progress_scope_key, request_id, payload)
 
         if orchestrator is None:
-            llm_start_perf = time.perf_counter()
-            response_text = llm_client.generate(
-                prompt_text, context=enhanced_context, model=model_name
+            method_catalogue_for_fallback: Mapping[str, Any] | None = None
+            if gateway is not None and callable(getattr(gateway, "describe_methods", None)):
+                try:
+                    described = gateway.describe_methods()
+                    if isinstance(described, Mapping):
+                        method_catalogue_for_fallback = described
+                except Exception:
+                    method_catalogue_for_fallback = None
+
+            fallback_requirement_state = (
+                InternalMCPChatOrchestrator._derive_prompt_tool_requirements(
+                    prompt_text,
+                    method_catalogue=method_catalogue_for_fallback,
+                    context_messages=enhanced_context,
+                )
             )
-            llm_interaction["duration_ms"] = (
-                time.perf_counter() - llm_start_perf
-            ) * 1000.0
-            llm_interaction["calls"] = [
-                {
-                    "type": "llm.generate",
-                    "model": model_name,
-                    "provider": _infer_provider(model_name),
-                    "duration_ms": llm_interaction["duration_ms"],
-                    "usage": None,
-                    "workflow": "von_generate",
-                }
-            ]
+            required_scholarly_file_copy_ids = list(
+                cast(
+                    list[str],
+                    fallback_requirement_state.get(
+                        "required_scholarly_representation_for_file_copy_ids"
+                    )
+                    or [],
+                )
+            )
+            unavailable_required_tools = list(
+                cast(
+                    list[str],
+                    fallback_requirement_state.get("unavailable_required_tools") or [],
+                )
+            )
+
             tool_invocations = []
+            fallback_preflight_errors: list[dict[str, Any]] = []
+            if required_scholarly_file_copy_ids:
+                if (
+                    gateway is None
+                    or not callable(getattr(gateway, "invoke", None))
+                    or (
+                        isinstance(method_catalogue_for_fallback, Mapping)
+                        and "interpret_file_copy"
+                        not in {
+                            str(name).strip().lower()
+                            for name in method_catalogue_for_fallback.keys()
+                            if isinstance(name, str) and str(name).strip()
+                        }
+                    )
+                ):
+                    fallback_preflight_errors.append(
+                        {
+                            "error": "required_tool_unavailable",
+                            "tool": "interpret_file_copy",
+                            "required_file_copy_ids": list(
+                                required_scholarly_file_copy_ids
+                            ),
+                            "unavailable_required_tools": list(
+                                unavailable_required_tools
+                            ),
+                        }
+                    )
+                else:
+                    for file_copy_id in required_scholarly_file_copy_ids:
+                        payload: dict[str, Any] = {"concept_id": file_copy_id}
+                        if isinstance(user_namespace, str) and user_namespace.strip():
+                            payload["namespace"] = user_namespace.strip()
+                        try:
+                            invoke_result = gateway.invoke("interpret_file_copy", payload)
+                            result_payload = (
+                                invoke_result.payload
+                                if hasattr(invoke_result, "payload")
+                                else invoke_result
+                            )
+                            invocation_status = (
+                                "ok"
+                                if not (
+                                    isinstance(result_payload, Mapping)
+                                    and result_payload.get("success") is False
+                                )
+                                else "error"
+                            )
+                            tool_invocations.append(
+                                {
+                                    "tool": "interpret_file_copy",
+                                    "payload": payload,
+                                    "effective_payload": result_payload,
+                                    "status": invocation_status,
+                                    "error": (
+                                        str(result_payload.get("error"))
+                                        if (
+                                            isinstance(result_payload, Mapping)
+                                            and result_payload.get("success") is False
+                                        )
+                                        else None
+                                    ),
+                                }
+                            )
+                            if (
+                                isinstance(result_payload, Mapping)
+                                and result_payload.get("success") is False
+                            ):
+                                fallback_preflight_errors.append(
+                                    {
+                                        "error": "interpret_file_copy_failed",
+                                        "concept_id": file_copy_id,
+                                        "details": result_payload,
+                                    }
+                                )
+                        except Exception as exc:
+                            fallback_preflight_errors.append(
+                                {
+                                    "error": "interpret_file_copy_exception",
+                                    "concept_id": file_copy_id,
+                                    "details": str(exc),
+                                }
+                            )
+
+            if fallback_preflight_errors:
+                response_text = (
+                    "I could not complete the required scholarly-paper representation "
+                    "workflow while the orchestrator was unavailable, so I am failing "
+                    "closed instead of returning an unverifiable narrative response."
+                )
+                llm_interaction["duration_ms"] = 0.0
+                llm_interaction["calls"] = []
+                auxiliary_llm_calls.append(
+                    {
+                        "type": "orchestrator_unavailable_fail_closed",
+                        "reason": "required_scholarly_representation_unavailable",
+                        "required_scholarly_representation_for_file_copy_ids": list(
+                            required_scholarly_file_copy_ids
+                        ),
+                        "errors": list(fallback_preflight_errors),
+                    }
+                )
+            else:
+                if required_scholarly_file_copy_ids:
+                    auxiliary_llm_calls.append(
+                        {
+                            "type": "orchestrator_unavailable_preflight",
+                            "required_scholarly_representation_for_file_copy_ids": list(
+                                required_scholarly_file_copy_ids
+                            ),
+                            "preflight_tool": "interpret_file_copy",
+                            "invocation_count": len(tool_invocations),
+                        }
+                    )
+                llm_start_perf = time.perf_counter()
+                response_text = llm_client.generate(
+                    prompt_text, context=enhanced_context, model=model_name
+                )
+                llm_interaction["duration_ms"] = (
+                    time.perf_counter() - llm_start_perf
+                ) * 1000.0
+                llm_interaction["calls"] = [
+                    {
+                        "type": "llm.generate",
+                        "model": model_name,
+                        "provider": _infer_provider(model_name),
+                        "duration_ms": llm_interaction["duration_ms"],
+                        "usage": None,
+                        "workflow": "von_generate",
+                    }
+                ]
         else:
             try:
                 current_app.logger.info(

@@ -209,6 +209,22 @@ _DIAGNOSTIC_ONLY_PHRASES = (
     "why wasn't",
 )
 
+_PAPER_REPRESENTATION_INTENT_PATTERN = re.compile(
+    r"\b("
+    r"represent(?:ation|ing)?\s+(?:the\s+)?(?:corresponding\s+)?paper"
+    r"|paper\s+representation"
+    r"|represent\s+the\s+paper\s+not\s+the\s+file"
+    r"|represent\s+the\s+paper\s+rather\s+than\s+the\s+file"
+    r"|fully\s+represent\s+(?:the\s+)?(?:corresponding\s+)?paper"
+    r"|scholarly\s+paper\s+representation"
+    r")\b",
+    flags=re.IGNORECASE,
+)
+_FILE_COPY_CONCEPT_ID_PATTERN = re.compile(
+    r"#V#[A-Za-z0-9][A-Za-z0-9._-]*file_copy[A-Za-z0-9._-]*",
+    flags=re.IGNORECASE,
+)
+
 _ACTION_REQUEST_MUTATION_PATTERN = re.compile(
     r"\b(?:can you|could you|go ahead(?: and)?|please|would you)\s+"
     r"(?:add|apply|attach|create|delete|link|modify|remove|rename|set|update)\b"
@@ -826,6 +842,115 @@ def _infer_tool_execution_required_effect(
     }
 
 
+def _extract_file_copy_concept_ids_from_text(prompt_text: Any) -> list[str]:
+    if not isinstance(prompt_text, str) or not prompt_text.strip():
+        return []
+    matches = _FILE_COPY_CONCEPT_ID_PATTERN.findall(prompt_text)
+    concept_ids: list[str] = []
+    seen: set[str] = set()
+    for raw in matches:
+        concept_id = _safe_str(raw)
+        if not concept_id:
+            continue
+        lowered = concept_id.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        concept_ids.append(concept_id)
+    return concept_ids
+
+
+def _extract_required_scholarly_file_copy_ids_from_aux(
+    aux_llm_calls: Sequence[Mapping[str, Any]] | None,
+) -> list[str]:
+    concept_ids: list[str] = []
+    seen: set[str] = set()
+    for entry in aux_llm_calls or ():
+        if not isinstance(entry, Mapping):
+            continue
+        entry_type = (_safe_str(entry.get("type")) or "").strip().lower()
+        if entry_type not in {"prompt_tool_requirements", "workflow_selector_override"}:
+            continue
+        raw_values = entry.get("required_scholarly_representation_for_file_copy_ids")
+        if not isinstance(raw_values, Sequence) or isinstance(raw_values, (str, bytes)):
+            continue
+        for raw in raw_values:
+            concept_id = _safe_str(raw)
+            if not concept_id:
+                continue
+            lowered = concept_id.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            concept_ids.append(concept_id)
+    return concept_ids
+
+
+def _infer_scholarly_representation_required_effect(
+    *,
+    prompt_text: Any,
+    aux_llm_calls: Sequence[Mapping[str, Any]] | None,
+    successful_tools: Sequence[str],
+    failed_tools: Sequence[str],
+    blocked_tools: Sequence[str],
+) -> dict[str, Any] | None:
+    prompt_clean = prompt_text if isinstance(prompt_text, str) else ""
+    if not _PAPER_REPRESENTATION_INTENT_PATTERN.search(prompt_clean):
+        return None
+
+    required_targets = _extract_required_scholarly_file_copy_ids_from_aux(aux_llm_calls)
+    if not required_targets:
+        required_targets = _extract_file_copy_concept_ids_from_text(prompt_text)
+    if not required_targets:
+        return None
+
+    successful_lookup = {name.lower() for name in successful_tools if isinstance(name, str)}
+    failed_lookup = {name.lower() for name in failed_tools if isinstance(name, str)}
+    blocked_lookup = {name.lower() for name in blocked_tools if isinstance(name, str)}
+
+    effect_status = "not_executed"
+    status_reason = "No interpret_file_copy execution was observed."
+    failure_code = "scholarly_representation_not_executed"
+    if "interpret_file_copy" in successful_lookup:
+        effect_status = "satisfied"
+        status_reason = (
+            "Observed scholarly representation tool invocation: interpret_file_copy."
+        )
+        failure_code = None
+    elif "interpret_file_copy" in failed_lookup or "interpret_file_copy" in blocked_lookup:
+        effect_status = "not_satisfied"
+        status_reason = (
+            "interpret_file_copy failed or was blocked for required scholarly representation."
+        )
+        failure_code = "scholarly_representation_tool_failed"
+
+    effect: dict[str, Any] = {
+        "effect_id": "effect_scholarly_representation_1",
+        "intent_origin": "workflow_contract",
+        "effect_type": "scholarly_representation",
+        "description": (
+            "Ensure the corresponding scholarly-paper concept is materialised from the "
+            "file-copy context before final response completion."
+        ),
+        "required_tools": ["interpret_file_copy"],
+        "targets": list(required_targets),
+        "required_predicates": [
+            "#V#computer_file_for_propositional_information_thing",
+            "#V#propositional_information_thing_has_computer_file",
+        ],
+        "postcondition_required": True,
+        "postcondition_strategy": "execution_observed",
+        "status": effect_status,
+        "status_reason": status_reason,
+    }
+    if failure_code:
+        effect["failure_code"] = failure_code
+        effect["failure_codes"] = [failure_code]
+    else:
+        effect["failure_codes"] = []
+    return effect
+
+
 def _infer_mutation_required_effect(
     *,
     prompt_text: Any,
@@ -923,6 +1048,25 @@ def _build_postcondition_checks(
                 check_status = "inconclusive"
                 evidence = "Tool execution verification outcome is inconclusive."
                 verification_mode = "execution_inconclusive"
+        elif effect_type == "scholarly_representation":
+            if effect_status == "satisfied":
+                check_status = "verified"
+                evidence = (
+                    _safe_str(effect.get("status_reason"))
+                    or "Scholarly paper representation execution was observed."
+                )
+                verification_mode = "execution_observed"
+            elif effect_status in {"not_satisfied", "not_executed"}:
+                check_status = "not_verified"
+                evidence = (
+                    _safe_str(effect.get("status_reason"))
+                    or "Scholarly paper representation execution was not observed."
+                )
+                verification_mode = "execution_missing"
+            else:
+                check_status = "inconclusive"
+                evidence = "Scholarly paper representation verification is inconclusive."
+                verification_mode = "execution_inconclusive"
         else:
             if effect_status == "satisfied" and successful_write_tools:
                 if successful_verification_tools:
@@ -955,6 +1099,8 @@ def _build_postcondition_checks(
                 "check_type": (
                     "tool_execution_observed"
                     if effect_type == "tool_execution"
+                    else "scholarly_representation_observed"
+                    if effect_type == "scholarly_representation"
                     else "predicate_exists"
                 ),
                 "check_tool": "derived.turn_execution",
@@ -1090,6 +1236,10 @@ def _derive_completion_gate(
             decision = "escalation_required"
             if unresolved_effect_types == {"tool_execution"}:
                 decision_reason = "Required tool execution was not observed."
+            elif unresolved_effect_types == {"scholarly_representation"}:
+                decision_reason = (
+                    "Required scholarly paper representation was not executed."
+                )
             else:
                 decision_reason = "Required mutation was not executed."
     elif unresolved_check_ids:
@@ -1186,6 +1336,15 @@ def build_turn_execution_record(
     )
 
     required_effects: list[dict[str, Any]] = []
+    scholarly_representation_effect = _infer_scholarly_representation_required_effect(
+        prompt_text=prompt_text,
+        aux_llm_calls=aux_llm_calls,
+        successful_tools=successful_tools,
+        failed_tools=failed_tools,
+        blocked_tools=blocked_tools,
+    )
+    if scholarly_representation_effect is not None:
+        required_effects.append(scholarly_representation_effect)
     mutation_effect = _infer_mutation_required_effect(
         prompt_text=prompt_text,
         successful_write_tools=successful_write_tools,
@@ -1194,7 +1353,7 @@ def build_turn_execution_record(
     )
     if mutation_effect is not None:
         required_effects.append(mutation_effect)
-    elif not successful_write_tools:
+    elif not successful_write_tools and scholarly_representation_effect is None:
         tool_execution_effect = _infer_tool_execution_required_effect(
             execution_summary=execution_summary
         )

@@ -172,6 +172,16 @@ def test_interpret_file_copy_asserts_docx_subtype_when_determinable(monkeypatch)
             "content_length": 14,
         },
     )
+    monkeypatch.setattr(
+        "src.backend.services.arxiv_paper_link_service.materialise_scholarly_representation_for_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "verified": True,
+            "paper_concept_id": "#V#paper_from_file_copy",
+            "file_copy_concept_id": "#V#file_copy_docx_test",
+            "representation_mode": "generic_file_copy",
+        },
+    )
 
     relation_calls: list[dict[str, object]] = []
     text_writes: list[dict[str, object]] = []
@@ -246,6 +256,16 @@ def test_interpret_file_copy_reports_subtype_assertion_failure(monkeypatch):
             "subject_tags": ["document"],
             "content_text": "DOCX body text",
             "content_length": 14,
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.arxiv_paper_link_service.materialise_scholarly_representation_for_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "verified": True,
+            "paper_concept_id": "#V#paper_from_file_copy",
+            "file_copy_concept_id": "#V#file_copy_docx_test",
+            "representation_mode": "generic_file_copy",
         },
     )
     monkeypatch.setattr(
@@ -372,6 +392,16 @@ def test_interpret_file_copy_includes_pdf_diagram_analysis(monkeypatch):
                 {"page_number": 2, "diagram_candidate": True, "signals": ["embedded_images"]}
             ],
             "errors": [],
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.arxiv_paper_link_service.materialise_scholarly_representation_for_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "verified": True,
+            "paper_concept_id": "#V#paper_from_file_copy",
+            "file_copy_concept_id": "#V#file_copy_pdf_test",
+            "representation_mode": "generic_file_copy",
         },
     )
     monkeypatch.setattr(

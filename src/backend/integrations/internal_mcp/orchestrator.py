@@ -565,6 +565,29 @@ class InternalMCPChatOrchestrator:
         r"|\b(?:computer_)?file_copy_[A-Za-z0-9][A-Za-z0-9._-]*\b)",
         flags=re.IGNORECASE,
     )
+    _PROMPT_SCHOLARLY_REPRESENTATION_INTENT_PATTERN = re.compile(
+        r"\b("
+        r"represent(?:ation|ing)?\s+(?:the\s+)?(?:corresponding\s+)?paper"
+        r"|paper\s+representation"
+        r"|represent\s+the\s+paper\s+not\s+the\s+file"
+        r"|represent\s+the\s+paper\s+rather\s+than\s+the\s+file"
+        r"|fully\s+represent\s+(?:the\s+)?(?:corresponding\s+)?paper"
+        r"|scholarly\s+paper\s+representation"
+        r")\b",
+        flags=re.IGNORECASE,
+    )
+    _PROMPT_PAPER_INTENT_PATTERN = re.compile(
+        r"\b(paper|scholarly\s+(?:paper|article)|article)\b",
+        flags=re.IGNORECASE,
+    )
+    _PROMPT_REPRESENTATION_INTENT_PATTERN = re.compile(
+        r"\b(represent(?:ation|ing)?|formal(?:ise|ize)|model(?:ling)?|reconstruct)\b",
+        flags=re.IGNORECASE,
+    )
+    _FILE_COPY_CONCEPT_ID_PATTERN = re.compile(
+        r"^#V#[A-Za-z0-9][A-Za-z0-9._-]*file_copy[A-Za-z0-9._-]*$",
+        flags=re.IGNORECASE,
+    )
     _WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID = (
         "#V#workflow_introspection_maintenance_workflow"
     )
@@ -1412,6 +1435,30 @@ class InternalMCPChatOrchestrator:
             if isinstance(missing_prompt_fetch_concept_ids_raw, list)
             else []
         )
+        missing_prompt_read_file_copy_ids_raw = data.get(
+            "missing_prompt_read_file_copy_ids"
+        )
+        missing_prompt_read_file_copy_ids = (
+            [
+                str(item).strip()
+                for item in missing_prompt_read_file_copy_ids_raw
+                if isinstance(item, str) and str(item).strip()
+            ]
+            if isinstance(missing_prompt_read_file_copy_ids_raw, list)
+            else []
+        )
+        missing_prompt_scholarly_file_copy_ids_raw = data.get(
+            "missing_prompt_scholarly_representation_for_file_copy_ids"
+        )
+        missing_prompt_scholarly_file_copy_ids = (
+            [
+                str(item).strip()
+                for item in missing_prompt_scholarly_file_copy_ids_raw
+                if isinstance(item, str) and str(item).strip()
+            ]
+            if isinstance(missing_prompt_scholarly_file_copy_ids_raw, list)
+            else []
+        )
         required_prompt_create_type_name_raw = data.get("required_prompt_create_type_name")
         required_prompt_create_type_name = (
             str(required_prompt_create_type_name_raw).strip()
@@ -1421,6 +1468,8 @@ class InternalMCPChatOrchestrator:
         allow_semantic_retry = bool(
             missing_prompt_tools
             or missing_prompt_fetch_concept_ids
+            or missing_prompt_read_file_copy_ids
+            or missing_prompt_scholarly_file_copy_ids
             or required_prompt_create_type_name
         )
         retries_remaining_before = max(0, retry_budget - retry_attempts)
@@ -1870,6 +1919,16 @@ class InternalMCPChatOrchestrator:
             for item in missing_required_read_file_copy_ids
             if isinstance(item, str) and item.strip()
         ]
+        missing_required_scholarly_file_copy_ids = data.get(
+            "missing_prompt_scholarly_representation_for_file_copy_ids"
+        )
+        if not isinstance(missing_required_scholarly_file_copy_ids, list):
+            missing_required_scholarly_file_copy_ids = []
+        missing_required_scholarly_file_copy_ids = [
+            str(item).strip()
+            for item in missing_required_scholarly_file_copy_ids
+            if isinstance(item, str) and item.strip()
+        ]
         required_create_type_name_raw = data.get("required_prompt_create_type_name")
         required_create_type_name = (
             str(required_create_type_name_raw).strip()
@@ -1988,6 +2047,7 @@ class InternalMCPChatOrchestrator:
             missing_required_tools=missing_required_tools,
             missing_required_fetch_concept_ids=missing_required_fetch_concept_ids,
             missing_required_read_file_copy_ids=missing_required_read_file_copy_ids,
+            missing_required_scholarly_representation_file_copy_ids=missing_required_scholarly_file_copy_ids,
             required_create_type_name=required_create_type_name,
         )
         if forced:
@@ -2326,6 +2386,9 @@ class InternalMCPChatOrchestrator:
             "required_prompt_read_file_copy_ids": data.get(
                 "required_prompt_read_file_copy_ids"
             ),
+            "required_prompt_scholarly_representation_for_file_copy_ids": data.get(
+                "required_prompt_scholarly_representation_for_file_copy_ids"
+            ),
             "required_prompt_create_type_name": data.get(
                 "required_prompt_create_type_name"
             ),
@@ -2335,6 +2398,9 @@ class InternalMCPChatOrchestrator:
             ),
             "missing_prompt_read_file_copy_ids": data.get(
                 "missing_prompt_read_file_copy_ids"
+            ),
+            "missing_prompt_scholarly_representation_for_file_copy_ids": data.get(
+                "missing_prompt_scholarly_representation_for_file_copy_ids"
             ),
             "missing_tool_call_retry_reason_override": data.get(
                 "missing_tool_call_retry_reason_override"
@@ -3521,6 +3587,7 @@ class InternalMCPChatOrchestrator:
                 if isinstance(method_catalogue_for_requirements, Mapping)
                 else None
             ),
+            context_messages=augmented_context,
         )
         required_prompt_tools = list(
             cast(list[str], prompt_requirement_state.get("required_tools") or [])
@@ -3537,6 +3604,15 @@ class InternalMCPChatOrchestrator:
                 prompt_requirement_state.get("required_read_file_copy_ids") or [],
             )
         )
+        required_prompt_scholarly_representation_file_copy_ids = list(
+            cast(
+                list[str],
+                prompt_requirement_state.get(
+                    "required_scholarly_representation_for_file_copy_ids"
+                )
+                or [],
+            )
+        )
         required_prompt_create_type_name_raw = prompt_requirement_state.get(
             "required_create_type_name"
         )
@@ -3551,6 +3627,9 @@ class InternalMCPChatOrchestrator:
         )
         data["required_prompt_read_file_copy_ids"] = list(
             required_prompt_read_file_copy_ids
+        )
+        data["required_prompt_scholarly_representation_for_file_copy_ids"] = list(
+            required_prompt_scholarly_representation_file_copy_ids
         )
         data["required_prompt_create_type_name"] = required_prompt_create_type_name
 
@@ -3666,11 +3745,13 @@ class InternalMCPChatOrchestrator:
                 missing_prompt_tools,
                 missing_prompt_fetch_concept_ids,
                 missing_prompt_read_file_copy_ids,
+                missing_prompt_scholarly_representation_file_copy_ids,
             ) = (
                 self._derive_missing_prompt_requirements(
                     required_tools=required_prompt_tools,
                     required_fetch_concept_ids=required_prompt_fetch_concept_ids,
                     required_read_file_copy_ids=required_prompt_read_file_copy_ids,
+                    required_scholarly_representation_for_file_copy_ids=required_prompt_scholarly_representation_file_copy_ids,
                     tool_invocations=(),
                 )
             )
@@ -3680,10 +3761,14 @@ class InternalMCPChatOrchestrator:
             data["missing_prompt_read_file_copy_ids"] = list(
                 missing_prompt_read_file_copy_ids
             )
+            data["missing_prompt_scholarly_representation_for_file_copy_ids"] = list(
+                missing_prompt_scholarly_representation_file_copy_ids
+            )
             missing_retry_reason = self._build_missing_prompt_retry_reason(
                 missing_tools=missing_prompt_tools,
                 missing_fetch_concept_ids=missing_prompt_fetch_concept_ids,
                 missing_read_file_copy_ids=missing_prompt_read_file_copy_ids,
+                missing_scholarly_representation_file_copy_ids=missing_prompt_scholarly_representation_file_copy_ids,
             )
             data["missing_prompt_tools"] = list(missing_prompt_tools)
             if missing_retry_reason:
@@ -4535,6 +4620,7 @@ class InternalMCPChatOrchestrator:
                     if isinstance(method_catalogue_for_requirements, Mapping)
                     else None
                 ),
+                context_messages=augmented_context,
             )
             required_prompt_tools = list(
                 cast(list[str], prompt_requirement_state.get("required_tools") or [])
@@ -4549,6 +4635,15 @@ class InternalMCPChatOrchestrator:
                 cast(
                     list[str],
                     prompt_requirement_state.get("required_read_file_copy_ids") or [],
+                )
+            )
+            required_prompt_scholarly_representation_file_copy_ids = list(
+                cast(
+                    list[str],
+                    prompt_requirement_state.get(
+                        "required_scholarly_representation_for_file_copy_ids"
+                    )
+                    or [],
                 )
             )
             required_prompt_create_type_name_raw = prompt_requirement_state.get(
@@ -4566,6 +4661,9 @@ class InternalMCPChatOrchestrator:
             data["required_prompt_read_file_copy_ids"] = list(
                 required_prompt_read_file_copy_ids
             )
+            data["required_prompt_scholarly_representation_for_file_copy_ids"] = list(
+                required_prompt_scholarly_representation_file_copy_ids
+            )
             data["required_prompt_create_type_name"] = required_prompt_create_type_name
 
             invocations_for_requirements = cast(
@@ -4575,11 +4673,13 @@ class InternalMCPChatOrchestrator:
                 missing_prompt_tools,
                 missing_prompt_fetch_concept_ids,
                 missing_prompt_read_file_copy_ids,
+                missing_prompt_scholarly_representation_file_copy_ids,
             ) = (
                 self._derive_missing_prompt_requirements(
                     required_tools=required_prompt_tools,
                     required_fetch_concept_ids=required_prompt_fetch_concept_ids,
                     required_read_file_copy_ids=required_prompt_read_file_copy_ids,
+                    required_scholarly_representation_for_file_copy_ids=required_prompt_scholarly_representation_file_copy_ids,
                     tool_invocations=invocations_for_requirements,
                 )
             )
@@ -4590,10 +4690,14 @@ class InternalMCPChatOrchestrator:
             data["missing_prompt_read_file_copy_ids"] = list(
                 missing_prompt_read_file_copy_ids
             )
+            data["missing_prompt_scholarly_representation_for_file_copy_ids"] = list(
+                missing_prompt_scholarly_representation_file_copy_ids
+            )
             missing_retry_reason = self._build_missing_prompt_retry_reason(
                 missing_tools=missing_prompt_tools,
                 missing_fetch_concept_ids=missing_prompt_fetch_concept_ids,
                 missing_read_file_copy_ids=missing_prompt_read_file_copy_ids,
+                missing_scholarly_representation_file_copy_ids=missing_prompt_scholarly_representation_file_copy_ids,
             )
             if missing_retry_reason:
                 data["missing_tool_call_retry_reason_override"] = missing_retry_reason
@@ -4618,6 +4722,12 @@ class InternalMCPChatOrchestrator:
                             ),
                             "missing_read_file_copy_ids": list(
                                 missing_prompt_read_file_copy_ids
+                            ),
+                            "required_scholarly_representation_for_file_copy_ids": list(
+                                required_prompt_scholarly_representation_file_copy_ids
+                            ),
+                            "missing_scholarly_representation_for_file_copy_ids": list(
+                                missing_prompt_scholarly_representation_file_copy_ids
                             ),
                             "required_create_type_name": (
                                 required_prompt_create_type_name
@@ -6866,6 +6976,85 @@ class InternalMCPChatOrchestrator:
         return concept_ids
 
     @classmethod
+    def _is_file_copy_concept_id(cls, concept_id: Any) -> bool:
+        if not isinstance(concept_id, str):
+            return False
+        cleaned = concept_id.strip()
+        if not cleaned:
+            return False
+        return bool(cls._FILE_COPY_CONCEPT_ID_PATTERN.match(cleaned))
+
+    @classmethod
+    def _extract_file_copy_concept_ids_from_context_messages(
+        cls,
+        context_messages: Sequence[Mapping[str, Any]] | None,
+        *,
+        max_ids: int = 6,
+    ) -> list[str]:
+        if not context_messages:
+            return []
+
+        concept_ids: list[str] = []
+        seen: set[str] = set()
+        for message in reversed(list(context_messages)):
+            if not isinstance(message, Mapping):
+                continue
+            role = str(message.get("role") or "").strip().lower()
+            if role not in {"user", "assistant", "tool"}:
+                continue
+            content = message.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            candidates = cls._extract_explicit_concept_ids_from_prompt(content)
+            for candidate in candidates:
+                if not cls._is_file_copy_concept_id(candidate):
+                    continue
+                lowered = candidate.lower()
+                if lowered in seen:
+                    continue
+                seen.add(lowered)
+                concept_ids.append(candidate)
+                if len(concept_ids) >= max_ids:
+                    return concept_ids
+        return concept_ids
+
+    @classmethod
+    def _prompt_requests_scholarly_representation(
+        cls,
+        user_prompt: Any,
+    ) -> bool:
+        if not isinstance(user_prompt, str) or not user_prompt.strip():
+            return False
+        prompt_text = user_prompt.strip()
+        if cls._PROMPT_SCHOLARLY_REPRESENTATION_INTENT_PATTERN.search(prompt_text):
+            return True
+        has_paper_term = bool(cls._PROMPT_PAPER_INTENT_PATTERN.search(prompt_text))
+        has_representation_term = bool(
+            cls._PROMPT_REPRESENTATION_INTENT_PATTERN.search(prompt_text)
+        )
+        return has_paper_term and has_representation_term
+
+    @classmethod
+    def _extract_required_scholarly_representation_file_copy_ids(
+        cls,
+        user_prompt: Any,
+        *,
+        context_messages: Sequence[Mapping[str, Any]] | None = None,
+    ) -> list[str]:
+        if not cls._prompt_requests_scholarly_representation(user_prompt):
+            return []
+
+        explicit_prompt_ids = cls._extract_required_read_file_copy_ids_from_prompt(
+            user_prompt
+        )
+        if explicit_prompt_ids:
+            return explicit_prompt_ids
+
+        return cls._extract_file_copy_concept_ids_from_context_messages(
+            context_messages
+        )
+
+    @classmethod
     def _extract_required_create_type_name_from_prompt(
         cls,
         user_prompt: Any,
@@ -7024,11 +7213,49 @@ class InternalMCPChatOrchestrator:
         return concept_ids
 
     @classmethod
+    def _extract_interpret_file_copy_ids_from_invocations(
+        cls,
+        tool_invocations: Sequence[Mapping[str, Any]],
+    ) -> list[str]:
+        """Collect file-copy concept IDs already processed via interpret_file_copy calls."""
+
+        concept_ids: list[str] = []
+        seen: set[str] = set()
+
+        for invocation in tool_invocations:
+            if not isinstance(invocation, Mapping):
+                continue
+            raw_tool = invocation.get("tool")
+            if (
+                not isinstance(raw_tool, str)
+                or raw_tool.strip().lower() != "interpret_file_copy"
+            ):
+                continue
+
+            payload = invocation.get("effective_payload")
+            if not isinstance(payload, Mapping):
+                payload = invocation.get("payload")
+            if not isinstance(payload, Mapping):
+                continue
+
+            concept_id = cls._normalise_concept_id_candidate(payload.get("concept_id"))
+            if not concept_id or not cls._is_file_copy_concept_id(concept_id):
+                continue
+            key = concept_id.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            concept_ids.append(concept_id)
+
+        return concept_ids
+
+    @classmethod
     def _derive_prompt_tool_requirements(
         cls,
         user_prompt: Any,
         *,
         method_catalogue: Mapping[str, Any] | None = None,
+        context_messages: Sequence[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Derive deterministic prompt requirements for tool recovery."""
 
@@ -7053,6 +7280,15 @@ class InternalMCPChatOrchestrator:
         )
         required_read_file_copy_ids = cls._extract_required_read_file_copy_ids_from_prompt(
             user_prompt
+        )
+        required_scholarly_representation_for_file_copy_ids = (
+            cls._extract_required_scholarly_representation_file_copy_ids(
+                user_prompt,
+                context_messages=context_messages,
+            )
+        )
+        scholarly_representation_intent = bool(
+            required_scholarly_representation_for_file_copy_ids
         )
 
         required_create_type_name = cls._extract_required_create_type_name_from_prompt(
@@ -7088,6 +7324,13 @@ class InternalMCPChatOrchestrator:
         if required_read_file_copy_ids and "read_file_copy" not in seen_required:
             required_tools.append("read_file_copy")
             seen_required.add("read_file_copy")
+        if (
+            required_scholarly_representation_for_file_copy_ids
+            and _tool_available("interpret_file_copy")
+            and "interpret_file_copy" not in seen_required
+        ):
+            required_tools.append("interpret_file_copy")
+            seen_required.add("interpret_file_copy")
 
         unavailable_required_tools: list[str] = []
         if available_tools:
@@ -7102,6 +7345,8 @@ class InternalMCPChatOrchestrator:
             "required_tools": required_tools,
             "required_fetch_concept_ids": required_fetch_concept_ids,
             "required_read_file_copy_ids": required_read_file_copy_ids,
+            "required_scholarly_representation_for_file_copy_ids": required_scholarly_representation_for_file_copy_ids,
+            "scholarly_representation_intent": scholarly_representation_intent,
             "required_create_type_name": required_create_type_name,
             "unavailable_required_tools": unavailable_required_tools,
         }
@@ -7113,8 +7358,9 @@ class InternalMCPChatOrchestrator:
         required_tools: Sequence[str],
         required_fetch_concept_ids: Sequence[str],
         required_read_file_copy_ids: Sequence[str] = (),
+        required_scholarly_representation_for_file_copy_ids: Sequence[str] = (),
         tool_invocations: Sequence[Mapping[str, Any]],
-    ) -> tuple[list[str], list[str], list[str]]:
+    ) -> tuple[list[str], list[str], list[str], list[str]]:
         """Determine missing prompt requirements from invocation history."""
 
         missing_tools = cls._missing_prompt_tool_requirements(
@@ -7168,7 +7414,37 @@ class InternalMCPChatOrchestrator:
             if "read_file_copy" not in missing_lookup:
                 missing_tools.append("read_file_copy")
 
-        return missing_tools, missing_fetch_concept_ids, missing_read_file_copy_ids
+        missing_scholarly_representation_file_copy_ids: list[str] = []
+        if required_scholarly_representation_for_file_copy_ids:
+            interpreted_file_copy_ids = cls._extract_interpret_file_copy_ids_from_invocations(
+                tool_invocations
+            )
+            interpreted_lookup = {
+                concept_id.lower() for concept_id in interpreted_file_copy_ids
+            }
+            for concept_id in required_scholarly_representation_for_file_copy_ids:
+                if (
+                    isinstance(concept_id, str)
+                    and concept_id.strip()
+                    and concept_id.lower() not in interpreted_lookup
+                ):
+                    missing_scholarly_representation_file_copy_ids.append(concept_id)
+
+        if missing_scholarly_representation_file_copy_ids:
+            missing_lookup = {
+                tool_name.lower()
+                for tool_name in missing_tools
+                if isinstance(tool_name, str) and tool_name.strip()
+            }
+            if "interpret_file_copy" not in missing_lookup:
+                missing_tools.append("interpret_file_copy")
+
+        return (
+            missing_tools,
+            missing_fetch_concept_ids,
+            missing_read_file_copy_ids,
+            missing_scholarly_representation_file_copy_ids,
+        )
 
     @staticmethod
     def _build_missing_prompt_retry_reason(
@@ -7176,6 +7452,7 @@ class InternalMCPChatOrchestrator:
         missing_tools: Sequence[str],
         missing_fetch_concept_ids: Sequence[str],
         missing_read_file_copy_ids: Sequence[str] = (),
+        missing_scholarly_representation_file_copy_ids: Sequence[str] = (),
     ) -> str | None:
         """Build a stable retry reason for unmet prompt requirements."""
 
@@ -7188,6 +7465,7 @@ class InternalMCPChatOrchestrator:
             not missing_names
             and not missing_fetch_concept_ids
             and not missing_read_file_copy_ids
+            and not missing_scholarly_representation_file_copy_ids
         ):
             return None
 
@@ -7207,6 +7485,15 @@ class InternalMCPChatOrchestrator:
                 + ", ".join(
                     str(concept_id).strip()
                     for concept_id in missing_read_file_copy_ids
+                    if isinstance(concept_id, str) and concept_id.strip()
+                )
+            )
+        if missing_scholarly_representation_file_copy_ids:
+            details.append(
+                "scholarly representation targets: "
+                + ", ".join(
+                    str(concept_id).strip()
+                    for concept_id in missing_scholarly_representation_file_copy_ids
                     if isinstance(concept_id, str) and concept_id.strip()
                 )
             )
@@ -15781,9 +16068,12 @@ class InternalMCPChatOrchestrator:
         self,
         *,
         user_text: str,
+        context_messages: Sequence[Mapping[str, Any]] | None = None,
         missing_required_tools: Sequence[str],
         missing_required_fetch_concept_ids: Sequence[str] | None = None,
         missing_required_read_file_copy_ids: Sequence[str] | None = None,
+        missing_required_scholarly_representation_file_copy_ids: Sequence[str]
+        | None = None,
         required_create_type_name: str | None = None,
     ) -> list[_ToolCallRequest] | None:
         """Build deterministic tool calls for still-missing explicit requirements."""
@@ -15799,6 +16089,11 @@ class InternalMCPChatOrchestrator:
         missing_required_read_file_copy_ids = [
             str(item).strip()
             for item in (missing_required_read_file_copy_ids or [])
+            if isinstance(item, str) and str(item).strip()
+        ]
+        missing_required_scholarly_representation_file_copy_ids = [
+            str(item).strip()
+            for item in (missing_required_scholarly_representation_file_copy_ids or [])
             if isinstance(item, str) and str(item).strip()
         ]
 
@@ -15901,6 +16196,27 @@ class InternalMCPChatOrchestrator:
                     )
                 continue
 
+            if name == "interpret_file_copy":
+                scholarly_file_copy_ids = list(
+                    missing_required_scholarly_representation_file_copy_ids
+                )
+                if not scholarly_file_copy_ids:
+                    scholarly_file_copy_ids = (
+                        self._extract_required_scholarly_representation_file_copy_ids(
+                            user_text,
+                            context_messages=context_messages,
+                        )
+                    )
+                for concept_id in scholarly_file_copy_ids:
+                    forced_calls.append(
+                        {
+                            "action": "call_tool",
+                            "tool": name,
+                            "payload": {"concept_id": concept_id},
+                        }
+                    )
+                continue
+
         return forced_calls or None
 
     def _infer_missing_tool_call_retry_tool_calls(
@@ -15910,6 +16226,8 @@ class InternalMCPChatOrchestrator:
         missing_required_tools: Sequence[str] | None = None,
         missing_required_fetch_concept_ids: Sequence[str] | None = None,
         missing_required_read_file_copy_ids: Sequence[str] | None = None,
+        missing_required_scholarly_representation_file_copy_ids: Sequence[str]
+        | None = None,
         required_create_type_name: str | None = None,
     ) -> list[_ToolCallRequest] | None:
         """Best-effort deterministic recovery for common missing-tool-call cases.
@@ -15941,6 +16259,7 @@ class InternalMCPChatOrchestrator:
 
         required_forced = self._infer_required_prompt_tool_retry_tool_calls(
             user_text=last_user_text,
+            context_messages=augmented_context,
             missing_required_tools=(
                 list(missing_required_tools) if missing_required_tools else []
             ),
@@ -15952,6 +16271,11 @@ class InternalMCPChatOrchestrator:
             missing_required_read_file_copy_ids=(
                 list(missing_required_read_file_copy_ids)
                 if missing_required_read_file_copy_ids
+                else []
+            ),
+            missing_required_scholarly_representation_file_copy_ids=(
+                list(missing_required_scholarly_representation_file_copy_ids)
+                if missing_required_scholarly_representation_file_copy_ids
                 else []
             ),
             required_create_type_name=(
@@ -22628,6 +22952,7 @@ class InternalMCPChatOrchestrator:
             plain_requirement_state = self._derive_prompt_tool_requirements(
                 prompt,
                 method_catalogue=method_catalogue_for_routing,
+                context_messages=augmented_context,
             )
             required_prompt_tools = list(
                 cast(list[str], plain_requirement_state.get("required_tools") or [])
@@ -22644,6 +22969,15 @@ class InternalMCPChatOrchestrator:
                     plain_requirement_state.get("required_read_file_copy_ids") or [],
                 )
             )
+            required_prompt_scholarly_representation_file_copy_ids = list(
+                cast(
+                    list[str],
+                    plain_requirement_state.get(
+                        "required_scholarly_representation_for_file_copy_ids"
+                    )
+                    or [],
+                )
+            )
             unavailable_required_tools = list(
                 cast(
                     list[str],
@@ -22654,22 +22988,26 @@ class InternalMCPChatOrchestrator:
                 missing_prompt_tools,
                 missing_prompt_fetch_concept_ids,
                 missing_prompt_read_file_copy_ids,
+                missing_prompt_scholarly_representation_file_copy_ids,
             ) = self._derive_missing_prompt_requirements(
                 required_tools=required_prompt_tools,
                 required_fetch_concept_ids=required_prompt_fetch_concept_ids,
                 required_read_file_copy_ids=required_prompt_read_file_copy_ids,
+                required_scholarly_representation_for_file_copy_ids=required_prompt_scholarly_representation_file_copy_ids,
                 tool_invocations=(),
             )
             missing_retry_reason = self._build_missing_prompt_retry_reason(
                 missing_tools=missing_prompt_tools,
                 missing_fetch_concept_ids=missing_prompt_fetch_concept_ids,
                 missing_read_file_copy_ids=missing_prompt_read_file_copy_ids,
+                missing_scholarly_representation_file_copy_ids=missing_prompt_scholarly_representation_file_copy_ids,
             )
 
             if (
                 missing_prompt_tools
                 or missing_prompt_fetch_concept_ids
                 or missing_prompt_read_file_copy_ids
+                or missing_prompt_scholarly_representation_file_copy_ids
             ):
                 excluded_workflow_ids = sorted(
                     {
@@ -22710,6 +23048,12 @@ class InternalMCPChatOrchestrator:
                     ),
                     "missing_prompt_read_file_copy_ids": list(
                         missing_prompt_read_file_copy_ids
+                    ),
+                    "required_prompt_scholarly_representation_for_file_copy_ids": list(
+                        required_prompt_scholarly_representation_file_copy_ids
+                    ),
+                    "missing_prompt_scholarly_representation_for_file_copy_ids": list(
+                        missing_prompt_scholarly_representation_file_copy_ids
                     ),
                     "unavailable_required_tools": list(unavailable_required_tools),
                     "retry_reason": missing_retry_reason,

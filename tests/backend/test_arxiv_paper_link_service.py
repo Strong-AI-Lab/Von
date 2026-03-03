@@ -152,3 +152,52 @@ def test_materialise_scholarly_representation_adds_metadata_authors_and_topics()
         and item.get("text") == metadata["summary"]
         for item in summary_texts
     )
+
+
+def test_materialise_generic_scholarly_representation_for_file_copy():
+    from src.backend.services.computer_file_copy_service import (
+        create_computer_file_copy_instance,
+    )
+    from src.backend.services.arxiv_paper_link_service import (
+        materialise_scholarly_representation_for_file_copy,
+    )
+    from src.backend.db.repositories.concepts_repository import ConceptsRepository
+
+    record = create_computer_file_copy_instance(
+        type_concept_id="#V#computer_file_copy",
+        user_concept_id="#V#user_test",
+        name="Evaluating_the_Inductive.pdf",
+        sha256="fadedcab",
+        size_bytes=512,
+        content_type="application/pdf",
+        blob_backend="local",
+        blob_key="uploads/user/evaluating_the_inductive.pdf",
+        blob_uri="local://uploads/user/evaluating_the_inductive.pdf",
+        metadata={"source": "upload"},
+    )
+
+    report = materialise_scholarly_representation_for_file_copy(
+        user_concept_id="#V#user_test",
+        file_copy_concept_id=record.concept_id,
+        metadata={
+            "title": "Evaluating the Inductive",
+            "summary": "A structured account of inductive reasoning evaluation.",
+        },
+    )
+
+    assert report["success"] is True
+    assert report["verified"] is True
+    assert report["representation_mode"] == "generic_file_copy"
+    assert report["file_copy_concept_id"] == record.concept_id
+    paper_id = report["paper_concept_id"]
+    assert isinstance(paper_id, str) and paper_id.startswith(
+        "#V#scholarly_paper_for_file_copy_"
+    )
+
+    paper_doc = ConceptsRepository.find_one({"concept_id": paper_id})
+    assert paper_doc is not None
+    relationships = paper_doc.get("relationships") or {}
+    assert "#V#scholarly_article" in list(relationships.get("is_an_instance_of") or [])
+    assert record.concept_id in list(
+        relationships.get("#V#propositional_information_thing_has_computer_file") or []
+    )

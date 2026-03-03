@@ -67,6 +67,14 @@ class _FileCopyPromptToolGateway(_DummyGateway):
         }
 
 
+class _ScholarlyPromptToolGateway(_DummyGateway):
+    def describe_methods(self):
+        return {
+            "interpret_file_copy": {"description": "materialise scholarly representation"},
+            "read_file_copy": {"description": "read a file copy concept"},
+        }
+
+
 class _RelationshipGateway(_DummyGateway):
     def describe_methods(self):
         return {"add_relationship": {"description": "relationship write"}}
@@ -1133,6 +1141,7 @@ def test_derive_missing_prompt_requirements_tracks_missing_fetch_targets():
         missing_tools,
         missing_fetch_ids,
         missing_read_file_copy_ids,
+        missing_scholarly_ids,
     ) = orchestrator._derive_missing_prompt_requirements(
         required_tools=["fetch_concept"],
         required_fetch_concept_ids=required_fetch_ids,
@@ -1151,6 +1160,7 @@ def test_derive_missing_prompt_requirements_tracks_missing_fetch_targets():
         "#V#workflow_mapping_tool_field_concept_id_to_validated_type_id"
     ]
     assert missing_read_file_copy_ids == []
+    assert missing_scholarly_ids == []
     reason = orchestrator._build_missing_prompt_retry_reason(
         missing_tools=missing_tools,
         missing_fetch_concept_ids=missing_fetch_ids,
@@ -1175,6 +1185,32 @@ def test_derive_prompt_tool_requirements_detects_concept_verification_intent():
     assert "fetch_concept" in (requirements.get("required_tools") or [])
     assert requirements.get("required_fetch_concept_ids") == [
         "#V#workflow_mapping_target_type_id_to_concept_id_param"
+    ]
+
+
+def test_derive_prompt_tool_requirements_uses_context_for_corresponding_paper_intent():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=_ScholarlyPromptToolGateway()  # type: ignore[arg-type]
+    )
+
+    requirements = orchestrator._derive_prompt_tool_requirements(
+        "Fully represent the corresponding paper.",
+        method_catalogue=orchestrator._gateway.describe_methods(),
+        context_messages=[
+            {
+                "role": "user",
+                "content": (
+                    "Attached file concept: "
+                    "#V#uploaded_file_copy_76c1c13fed0140f496133d008b4cfad7"
+                ),
+            }
+        ],
+    )
+
+    required_tools = requirements.get("required_tools") or []
+    assert "interpret_file_copy" in required_tools
+    assert requirements.get("required_scholarly_representation_for_file_copy_ids") == [
+        "#V#uploaded_file_copy_76c1c13fed0140f496133d008b4cfad7"
     ]
 
 
@@ -1206,6 +1242,44 @@ def test_run_forces_read_file_copy_when_prompt_references_file_copy_concept():
     read_payload = next(payload for tool, payload in gateway.calls if tool == "read_file_copy")
     assert read_payload.get("concept_id") == "#V#computer_file_copy_case_1"
     assert result.response_text == "File copy inspected."
+
+
+def test_run_forces_interpret_file_copy_for_corresponding_paper_follow_up():
+    gateway = _ScholarlyPromptToolGateway()
+    llm = _RecorderLLM(
+        [
+            "I will represent the corresponding paper now.",
+            "Paper representation complete.",
+        ]
+    )
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway,  # type: ignore[arg-type]
+        max_tool_invocations=2,
+    )
+
+    result = orchestrator.run(
+        prompt="Fully represent the corresponding paper.",
+        context=[
+            {
+                "role": "user",
+                "content": (
+                    "Attached file concept: "
+                    "#V#uploaded_file_copy_76c1c13fed0140f496133d008b4cfad7"
+                ),
+            }
+        ],
+        llm_client=llm,
+        model="primary-model",
+        user_namespace="#V#user",
+    )
+
+    called_tools = [tool for tool, _ in gateway.calls]
+    assert called_tools.count("interpret_file_copy") == 1
+    interpret_payload = next(
+        payload for tool, payload in gateway.calls if tool == "interpret_file_copy"
+    )
+    assert interpret_payload.get("concept_id") == "#V#uploaded_file_copy_76c1c13fed0140f496133d008b4cfad7"
+    assert result.response_text == "Paper representation complete."
 
 
 def test_run_forces_checklist_tools_when_retry_response_has_no_tool_json():

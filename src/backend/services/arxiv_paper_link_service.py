@@ -38,6 +38,19 @@ def _stable_paper_instance_concept_id(arxiv_id: str) -> str:
     )
 
 
+def _stable_file_copy_paper_instance_concept_id(file_copy_concept_id: str) -> str:
+    raw = str(file_copy_concept_id or "").strip().lower()
+    slug = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
+    if len(slug) > 64:
+        slug = slug[:64].rstrip("_")
+    return (
+        f"#V#scholarly_paper_for_file_copy_{slug}_{digest}"
+        if slug
+        else f"#V#scholarly_paper_for_file_copy_{digest}"
+    )
+
+
 def _extract_string_candidates(raw_values: Iterable[Any]) -> list[str]:
     candidates: list[str] = []
     for value in raw_values:
@@ -446,13 +459,29 @@ def link_file_copy_to_arxiv_paper(
 ) -> dict[str, Any]:
     """Link a #V#computer_file_copy to the corresponding #V#paper_on_arxiv instance."""
 
-    from ..db.repositories.concepts_repository import ConceptsRepository
-
     paper_concept_id = ensure_arxiv_paper_instance(
         user_concept_id=user_concept_id,
         arxiv_id=arxiv_id,
         logger=logger,
     )
+    changed = _link_file_copy_to_paper_concept(
+        file_copy_concept_id=file_copy_concept_id,
+        paper_concept_id=paper_concept_id,
+    )
+
+    return {
+        "paper_concept_id": paper_concept_id,
+        "linked": True,
+        "changed": bool(changed),
+    }
+
+
+def _link_file_copy_to_paper_concept(
+    *,
+    file_copy_concept_id: str,
+    paper_concept_id: str,
+) -> bool:
+    from ..db.repositories.concepts_repository import ConceptsRepository
 
     changed = ConceptsRepository.mutate_relationship_edge(
         file_copy_concept_id,
@@ -461,9 +490,6 @@ def link_file_copy_to_arxiv_paper(
         action="add",
         maintain_inverse=True,
     )
-
-    # Prefer semantically meaningful predicates for file<->propositional content.
-    # These predicates were introduced specifically for the arXiv import path.
     changed = (
         ConceptsRepository.mutate_relationship_edge(
             file_copy_concept_id,
@@ -484,11 +510,114 @@ def link_file_copy_to_arxiv_paper(
         )
         or changed
     )
+    return bool(changed)
+
+
+def materialise_scholarly_representation_for_file_copy(
+    *,
+    user_concept_id: str,
+    file_copy_concept_id: str,
+    metadata: Mapping[str, Any] | None = None,
+    logger: Any | None = None,
+) -> dict[str, Any]:
+    """Materialise a minimal scholarly-paper concept for a file-copy document."""
+
+    from . import concept_service
+
+    _ensure_type_concept(
+        "#V#scholarly_article",
+        "Scholarly Article",
+        preferred_parent_id="#V#scholarly_work",
+        logger=logger,
+    )
+
+    paper_concept_id = _stable_file_copy_paper_instance_concept_id(file_copy_concept_id)
+    existing = None
+    try:
+        existing = concept_service.get_concept_by_concept_id(paper_concept_id)
+    except Exception:
+        existing = None
+
+    title = _extract_metadata_title(metadata)
+    summary = _extract_metadata_summary(metadata)
+    default_name = f"Scholarly paper for {file_copy_concept_id}"
+
+    if not existing:
+        concept_service.create_concept(
+            name=title or default_name,
+            concept_id=paper_concept_id,
+            parent_concept_ids=["#V#scholarly_article"],
+            create_as_instance=True,
+            system_tags=["scholarly", "paper", "file_copy"],
+            attributes={
+                "source": "file_copy",
+                "file_copy_concept_id": str(file_copy_concept_id).strip(),
+            },
+        )
+        concept_service.update_concept(
+            paper_concept_id,
+            {"relationships.specific_to_user": [user_concept_id.strip()]},
+        )
+
+    add_relationship(
+        source_id=paper_concept_id,
+        predicate="is_an_instance_of",
+        target="#V#scholarly_article",
+    )
+    _link_file_copy_to_paper_concept(
+        file_copy_concept_id=file_copy_concept_id,
+        paper_concept_id=paper_concept_id,
+    )
+
+    if isinstance(title, str) and title.strip():
+        upsert_text_for_concept(
+            subject_concept_id=paper_concept_id,
+            predicate="hasName",
+            text=title.strip(),
+            lang="en-NZ",
+            context={"name_type": "NL", "source": "file_copy_interpretation"},
+        )
+
+    if isinstance(summary, str) and summary.strip():
+        upsert_text_for_concept(
+            subject_concept_id=paper_concept_id,
+            predicate="hasDescription",
+            text=summary.strip(),
+            lang="en-NZ",
+            context={"source": "file_copy_interpretation"},
+        )
+
+    type_asserted = _relation_contains_target(
+        paper_concept_id,
+        "is_an_instance_of",
+        "#V#scholarly_article",
+    )
+    file_link_verified = _relation_contains_target(
+        paper_concept_id,
+        "#V#propositional_information_thing_has_computer_file",
+        file_copy_concept_id,
+    )
+    summary_present = bool(summary and summary.strip())
+    title_present = bool(title and title.strip())
+
+    verification_failures: list[str] = []
+    if not type_asserted:
+        verification_failures.append("type_missing")
+    if not file_link_verified:
+        verification_failures.append("file_link_missing")
 
     return {
+        "success": len(verification_failures) == 0,
+        "verified": len(verification_failures) == 0,
+        "representation_mode": "generic_file_copy",
         "paper_concept_id": paper_concept_id,
-        "linked": True,
-        "changed": bool(changed),
+        "file_copy_concept_id": file_copy_concept_id,
+        "title": title,
+        "title_present": title_present,
+        "summary_present": summary_present,
+        "type_asserted": type_asserted,
+        "file_link_verified": file_link_verified,
+        "verification_failures": verification_failures,
     }
 
 
@@ -733,5 +862,6 @@ __all__ = [
     "ensure_paper_on_arxiv_type_exists",
     "extract_arxiv_id_candidates",
     "link_file_copy_to_arxiv_paper",
+    "materialise_scholarly_representation_for_file_copy",
     "materialise_scholarly_representation_for_arxiv_file_copy",
 ]

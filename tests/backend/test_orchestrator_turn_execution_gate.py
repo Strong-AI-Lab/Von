@@ -393,6 +393,109 @@ def test_turn_execution_critic_flags_worker_unavailable_zero_execution() -> None
     assert completion_gate.get("safe_to_claim_completion") is False
 
 
+def test_turn_execution_critic_flags_missing_scholarly_representation() -> None:
+    orchestrator = _build_orchestrator()
+    request = _build_request(
+        action_id="turn_execution.critic",
+        data={
+            "prompt": "Fully represent the corresponding paper.",
+            "final_response": "I have represented the paper.",
+            "invocations": [],
+            "aux_llm_calls": [
+                {
+                    "type": "prompt_tool_requirements",
+                    "required_scholarly_representation_for_file_copy_ids": [
+                        "#V#uploaded_file_copy_76c1c13fed0140f496133d008b4cfad7"
+                    ],
+                }
+            ],
+            "turn_id": "req-turn-critic-scholarly-1",
+            "conversation_session_id": "session-critic-scholarly-1",
+            "workflow_discovery_result": None,
+            "workflow_routing": {
+                "workflow_id": "#V#tool_calling_workflow",
+                "verdict": "tool_seeking",
+            },
+        },
+    )
+
+    result = orchestrator._action_turn_execution_critic(request)
+    assert result.ok
+
+    record = result.outputs.get("turn_execution_record")
+    assert isinstance(record, dict)
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    assert len(required_effects) == 1
+    effect = required_effects[0]
+    assert effect.get("effect_type") == "scholarly_representation"
+    assert effect.get("status") == "not_executed"
+    assert effect.get("required_tools") == ["interpret_file_copy"]
+    assert effect.get("targets") == [
+        "#V#uploaded_file_copy_76c1c13fed0140f496133d008b4cfad7"
+    ]
+
+    completion_gate = record.get("completion_gate")
+    assert isinstance(completion_gate, dict)
+    assert completion_gate.get("decision") == "escalation_required"
+    assert (
+        completion_gate.get("decision_reason")
+        == "Required scholarly paper representation was not executed."
+    )
+    assert completion_gate.get("safe_to_claim_completion") is False
+
+
+def test_turn_execution_critic_marks_scholarly_representation_satisfied() -> None:
+    orchestrator = _build_orchestrator()
+    request = _build_request(
+        action_id="turn_execution.critic",
+        data={
+            "prompt": "Fully represent the corresponding paper.",
+            "final_response": "Paper representation has been produced.",
+            "invocations": [
+                {
+                    "tool": "interpret_file_copy",
+                    "payload": {
+                        "concept_id": "#V#uploaded_file_copy_76c1c13fed0140f496133d008b4cfad7"
+                    },
+                }
+            ],
+            "aux_llm_calls": [
+                {
+                    "type": "prompt_tool_requirements",
+                    "required_scholarly_representation_for_file_copy_ids": [
+                        "#V#uploaded_file_copy_76c1c13fed0140f496133d008b4cfad7"
+                    ],
+                }
+            ],
+            "turn_id": "req-turn-critic-scholarly-2",
+            "conversation_session_id": "session-critic-scholarly-2",
+            "workflow_discovery_result": None,
+            "workflow_routing": {
+                "workflow_id": "#V#tool_calling_workflow",
+                "verdict": "tool_seeking",
+            },
+        },
+    )
+
+    result = orchestrator._action_turn_execution_critic(request)
+    assert result.ok
+
+    record = result.outputs.get("turn_execution_record")
+    assert isinstance(record, dict)
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    assert len(required_effects) == 1
+    effect = required_effects[0]
+    assert effect.get("effect_type") == "scholarly_representation"
+    assert effect.get("status") == "satisfied"
+
+    completion_gate = record.get("completion_gate")
+    assert isinstance(completion_gate, dict)
+    assert completion_gate.get("decision") == "completed"
+    assert completion_gate.get("safe_to_claim_completion") is True
+
+
 def test_turn_completion_gate_requests_repeat_when_budget_available() -> None:
     orchestrator = _build_orchestrator()
     request = _build_request(
