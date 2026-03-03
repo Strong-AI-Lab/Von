@@ -535,6 +535,15 @@ function copyJson(suggestions) {
   });
 }
 
+async function copyJsonWithButtonFeedback(button, suggestions) {
+  const jsonText = JSON.stringify(suggestions, null, 2);
+  if (button instanceof HTMLButtonElement) {
+    await copyJsonTextWithButtonFeedback(button, jsonText);
+    return;
+  }
+  copyJson(suggestions);
+}
+
 export function initializeAnnotationTab(suffix = '') {
   const idSuffix = suffix ? `_${suffix}` : '';
   const container = document.getElementById(`annotationTab${idSuffix}`);
@@ -1300,7 +1309,9 @@ export function initializeAnnotationTab(suffix = '') {
         }
       } catch (persistErr) { /* ignore */ }
     });
-    attachOnce(copyBtn, 'click', 'copyJson', () => { copyJson(container.__suggestions || []); });
+    attachOnce(copyBtn, 'click', 'copyJson', () => {
+      void copyJsonWithButtonFeedback(copyBtn, container.__suggestions || []);
+    });
     attachOnce(sampleBtn, 'click', 'sampleFill', () => { input.value = SAMPLE_TEXT; input.focus(); });
     attachOnce(clearBtn, 'click', 'clearAll', () => {
       input.value = '';
