@@ -12,6 +12,11 @@ from src.backend.workflows.subworkflow_contracts import (
     WORKFLOW_SUBWORKFLOW_ACTION_ID,
     build_subworkflow_contract,
 )
+from src.backend.workflows.execution_contracts import (
+    WORKFLOW_CONTROL_ACTION_BREAK_ID,
+    WORKFLOW_CONTROL_ACTION_FORK_ID,
+    WORKFLOW_CONTROL_ACTION_JOIN_ID,
+)
 from src.backend.workflows.workflow_definition_identity_service import (
     validate_workflow_definition_contract,
 )
@@ -238,4 +243,138 @@ def test_validate_contract_rejects_recursive_subworkflow_reference() -> None:
     assert any(
         issue.get("reason_code") == "subworkflow_recursive_self_reference"
         for issue in validation["subworkflow_contract_issues"]
+    )
+
+
+def test_validate_contract_rejects_break_without_loop_scope_and_route() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#break_invalid_workflow",
+        initial_state="loop",
+        states={
+            "loop": WorkflowStateSpec(
+                state_id="loop",
+                actions=(
+                    WorkflowActionInvocation(action_id=WORKFLOW_CONTROL_ACTION_BREAK_ID),
+                ),
+                transitions=(
+                    WorkflowTransitionSpec(
+                        to_state="done",
+                        condition=lambda _ctx: True,
+                        reason="next_step",
+                    ),
+                ),
+            ),
+            "done": WorkflowStateSpec(state_id="done", terminal=True),
+        },
+        termination_states=("done",),
+    )
+
+    validation = validate_workflow_definition_contract(definition=definition)
+
+    assert validation["valid"] is False
+    assert "workflow_control_signal_invalid" in (validation.get("errors") or [])
+    assert any(
+        issue.get("reason_code") == "break_outside_loop_scope"
+        for issue in validation.get("control_signal_issues", [])
+    )
+    assert any(
+        issue.get("reason_code") == "break_transition_missing"
+        for issue in validation.get("control_signal_issues", [])
+    )
+
+
+def test_validate_contract_rejects_join_without_matching_fork() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#join_invalid_workflow",
+        initial_state="join_state",
+        states={
+            "join_state": WorkflowStateSpec(
+                state_id="join_state",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id=WORKFLOW_CONTROL_ACTION_JOIN_ID,
+                        inputs={"fork_id": "missing_fork"},
+                    ),
+                ),
+                terminal=True,
+            )
+        },
+        termination_states=("join_state",),
+    )
+
+    validation = validate_workflow_definition_contract(definition=definition)
+
+    assert validation["valid"] is False
+    assert "workflow_fork_join_invalid" in (validation.get("errors") or [])
+    assert any(
+        issue.get("reason_code") == "join_without_matching_fork"
+        for issue in validation.get("fork_join_issues", [])
+    )
+
+
+def test_validate_contract_accepts_join_with_declared_fork() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#join_valid_workflow",
+        initial_state="fork_state",
+        states={
+            "fork_state": WorkflowStateSpec(
+                state_id="fork_state",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id=WORKFLOW_CONTROL_ACTION_FORK_ID,
+                        inputs={"fork_id": "main"},
+                    ),
+                ),
+                transitions=(
+                    WorkflowTransitionSpec(
+                        to_state="join_state",
+                        condition=lambda _ctx: True,
+                        reason="next_step",
+                    ),
+                ),
+            ),
+            "join_state": WorkflowStateSpec(
+                state_id="join_state",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id=WORKFLOW_CONTROL_ACTION_JOIN_ID,
+                        inputs={"fork_id": "main"},
+                    ),
+                ),
+                terminal=True,
+            ),
+        },
+        termination_states=("join_state",),
+    )
+
+    validation = validate_workflow_definition_contract(definition=definition)
+
+    assert validation["valid"] is True
+    assert validation.get("fork_join_issues") == []
+
+
+def test_validate_contract_detects_recursive_subworkflow_cycle() -> None:
+    parent = _parent_with_subworkflow_contract(child_workflow_id="#V#child")
+    child = _parent_with_subworkflow_contract(child_workflow_id="#V#parent_workflow")
+    child = WorkflowDefinition(
+        workflow_id="#V#child",
+        initial_state=child.initial_state,
+        states=child.states,
+        termination_states=child.termination_states,
+        purpose="child",
+    )
+    loader_map = {
+        "#V#child": child,
+        "#V#parent_workflow": parent,
+    }
+
+    validation = validate_workflow_definition_contract(
+        definition=parent,
+        workflow_definition_loader=lambda workflow_id: loader_map.get(workflow_id),
+    )
+
+    assert validation["valid"] is False
+    assert any(
+        issue.get("reason_code") == "subworkflow_recursive_cycle"
+        for issue in validation.get("subworkflow_contract_issues", [])
     )

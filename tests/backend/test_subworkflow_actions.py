@@ -312,3 +312,82 @@ def test_subworkflow_action_is_idempotent_for_same_inputs() -> None:
     assert first.outputs["result"]["answer"] == "stable"
     assert second.outputs["result"]["answer"] == "stable"
     assert first.outputs["result"]["answer"] == second.outputs["result"]["answer"]
+
+
+def test_subworkflow_action_enforces_invocation_budget(monkeypatch) -> None:
+    registry = ActionRegistry()
+    register_subworkflow_actions(
+        registry,
+        definition_loader=lambda _workflow_id: _child_success_definition(),
+    )
+    monkeypatch.setenv("VON_WORKFLOW_SUBWORKFLOW_MAX_INVOCATIONS", "1")
+
+    context: dict[str, object] = {"__workflow_subworkflow_invocation_count": 1}
+    execution = registry.execute(
+        WORKFLOW_SUBWORKFLOW_ACTION_ID,
+        inputs={
+            "workflow_id": "#V#child_success",
+            "__parent_workflow_id": "#V#parent",
+            "__parent_state_id": "start",
+        },
+        context=context,
+        env=WorkflowEnvironment(llm_client=None),
+        trace=None,
+    )
+
+    assert execution.status == "failed"
+    assert "subworkflow_invocation_budget_exceeded" in str(execution.error or "")
+
+
+def test_subworkflow_action_propagates_child_control_signal() -> None:
+    registry = ActionRegistry()
+
+    child_definition = WorkflowDefinition(
+        workflow_id="#V#child_return",
+        initial_state="start",
+        states={
+            "start": WorkflowStateSpec(
+                state_id="start",
+                actions=(WorkflowActionInvocation(action_id="child.return"),),
+                terminal=True,
+            )
+        },
+        termination_states=("start",),
+    )
+
+    registry.register(
+        ActionSpec(
+            action_id="child.return",
+            handler=lambda _request: WorkflowActionResult(
+                outputs={
+                    "control_signal": "return",
+                    "return_payload": {"value": 7},
+                }
+            ),
+        )
+    )
+    register_subworkflow_actions(
+        registry,
+        definition_loader=lambda workflow_id: (
+            child_definition if workflow_id == "#V#child_return" else None
+        ),
+    )
+
+    context: dict[str, object] = {}
+    execution = registry.execute(
+        WORKFLOW_SUBWORKFLOW_ACTION_ID,
+        inputs={
+            "workflow_id": "#V#child_return",
+            "__parent_workflow_id": "#V#parent",
+            "__parent_state_id": "start",
+        },
+        context=context,
+        env=WorkflowEnvironment(llm_client=None),
+        trace=None,
+    )
+
+    assert execution.status == "success"
+    assert execution.outputs.get("control_signal") == "return"
+    nested = execution.outputs.get("subworkflow_result_envelope")
+    assert isinstance(nested, dict)
+    assert nested.get("control_signal") == "return"

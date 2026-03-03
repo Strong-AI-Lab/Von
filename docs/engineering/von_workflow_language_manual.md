@@ -1,7 +1,7 @@
 # Von Workflow Language (VWL) Manual
 
 Status: Draft (current implementation-aligned)
-Last updated: 2026-03-01 (Pacific/Auckland)
+Last updated: 2026-03-03 (Pacific/Auckland)
 Audience: Human engineers and AI agents
 
 ## 1. Purpose and Scope
@@ -35,10 +35,12 @@ Primary implementation anchors:
 
 - `src/backend/workflows/vontology_loader.py`
 - `src/backend/workflows/engine.py`
+- `src/backend/workflows/execution_contracts.py`
 - `src/backend/workflows/metadata_validation.py`
 - `src/backend/workflows/subworkflow_contracts.py`
 - `src/backend/workflows/workflow_definition_identity_service.py`
 - `src/backend/workflows/durable/models.py`
+- `src/backend/workflows/durable/control_flow_actions.py`
 - `src/backend/workflows/durable/worker.py`
 - `src/backend/workflows/durable/scheduler.py`
 - `src/backend/workflows/durable/workflow_instance_submission_service.py`
@@ -78,6 +80,7 @@ Canonical graph families include:
 - `workflowStepInvokesTool`
 - `nextStep`
 - `onTrueNextStep`, `onFalseNextStep`, `onFailureNextStep`, `onUnknownNextStep`
+- `onBreakNextStep`, `onContinueNextStep`
 - `hasPrecondition`, `hasEffect`
 - `readsVariable`, `writesVariable`
 - `hasInputMap`
@@ -99,6 +102,7 @@ A VWL program is a workflow concept graph:
   - `next`
   - `on_true`, `on_false`
   - `on_failure`, `on_unknown`.
+  - `on_break`, `on_continue`.
 - Optional metadata and mapping contracts.
 
 ## 5. Condition Language (Transition Expressions)
@@ -111,6 +115,7 @@ Supported kinds:
 - `context_flag`
 - `context_value_equals`
 - `transition_result_truth`
+- `control_signal`
 - `all`
 - `any`
 - `not`
@@ -122,6 +127,8 @@ Canonical forms:
 {"kind":"context_flag","key":"last_action_failed","expected":true}
 {"kind":"context_value_equals","key":"mode","value":"strict"}
 {"kind":"transition_result_truth","expected":false}
+{"kind":"control_signal","signal":"break"}
+{"kind":"control_signal","signal":"continue","scope":"main_loop"}
 {"kind":"all","conditions":[{"kind":"context_flag","key":"a"},{"kind":"context_flag","key":"b"}]}
 {"kind":"any","conditions":[...]}
 {"kind":"not","condition":{"kind":"context_flag","key":"disabled"}}
@@ -150,10 +157,13 @@ Important deterministic ordering:
 - Generated branch precedence for implicit branch links is:
   - `on_failure`
   - `on_unknown`
+  - `on_break`
+  - `on_continue`
   - `on_true`/`on_false`
   - `next_step`
 
 `on_failure` and `on_unknown` compile to context-flag conditions (`last_action_failed`, `last_action_unknown`).
+`on_break`/`on_continue` compile to control-signal conditions (`last_control_signal == break|continue`).
 
 ## 7. Execution Semantics
 
@@ -164,9 +174,11 @@ Runtime execution model (`WorkflowExecutor`):
 3. Execute actions in state order.
 4. Merge action outputs into context for non-failure outcomes.
 5. Apply tool-output-to-context mappings.
-6. Evaluate transitions in stored order and take first satisfied transition.
-7. If no valid transition and state terminal, complete.
-8. Abort on max transition count or unrecoverable errors.
+6. Emit canonical step-result envelope for each executed action.
+7. Evaluate transitions in stored order and take first satisfied transition.
+8. If no valid transition and state terminal, complete.
+9. Emit canonical workflow-result envelope at completion/failure.
+10. Abort on max transition count or unrecoverable errors.
 
 Action outcomes are normalised to:
 
@@ -175,6 +187,18 @@ Action outcomes are normalised to:
 - unknown.
 
 `last_action_failed` and `last_action_unknown` flags drive explicit failure/unknown routes.
+
+Canonical envelope keys:
+
+- step envelope list: `workflow_step_result_envelopes`
+- latest step envelope: `last_workflow_step_result_envelope`
+- workflow envelope: `workflow_result_envelope`
+
+Control-signal keys:
+
+- `last_control_signal` (`none|break|continue|return|error`)
+- `last_control_signal_scope`
+- boolean convenience flags (`last_control_signal_break`, `last_control_signal_continue`, `last_control_signal_return`, `last_control_signal_error`)
 
 ## 8. Metadata Contract Semantics
 
@@ -190,6 +214,9 @@ Per-state metadata keys currently used:
 - `tool_output_context_mappings`
 - `subworkflow_contract`
 - `invokes_workflow`
+- `loop_scope_id`
+- `fork_id`
+- `join_fork_id`
 
 Validation phases:
 
@@ -231,7 +258,37 @@ Semantic mappings bind:
 
 Runtime writes mapping events into context diagnostics for traceability.
 
-## 10. Subworkflow Semantics
+## 10. Control-Flow and Subworkflow Semantics
+
+Control-flow action IDs:
+
+- `workflow_control.break`
+- `workflow_control.continue`
+- `workflow_control.fork`
+- `workflow_control.join`
+
+### 10.1 Break/Continue
+
+- `workflow_control.break` MUST be routed by an explicit `on_break` transition.
+- `workflow_control.continue` MUST be routed by an explicit `on_continue` transition.
+- Validation rejects break/continue usage without loop-scope declaration (`loop_scope_id` metadata or explicit action input).
+
+### 10.2 Fork/Join
+
+Fork defaults:
+
+- failure policy default: `fail_fast`
+- supported failure policies: `fail_fast`, `collect_errors`, `allow_partial_success`
+- merge policy default: `deterministic_last_writer_wins`
+
+Runtime semantics:
+
+- Fork executes branch workflows in isolated branch contexts.
+- Join requires a matching prior fork ID.
+- Join merges successful branch declared outputs in deterministic branch-ID order.
+- Validation rejects join usage without a matching fork declaration.
+
+### 10.3 Subworkflow
 
 Subworkflow action ID:
 
@@ -253,6 +310,17 @@ Subworkflow contracts carry:
 - output mappings,
 - required/provided input-output lists,
 - failure mode.
+
+Recursion guards:
+
+- cycle guard via invocation chain check,
+- depth limit (env: `VON_WORKFLOW_SUBWORKFLOW_MAX_DEPTH`),
+- invocation budget limit (env: `VON_WORKFLOW_SUBWORKFLOW_MAX_INVOCATIONS`).
+
+Nested propagation:
+
+- child workflow envelopes are surfaced through `subworkflow_result_envelope`,
+- non-`none` child control signals propagate to parent action outputs.
 
 ## 11. Durable Runtime Semantics
 
@@ -371,6 +439,7 @@ A VWL workflow is conformant when:
 - step graph is loadable and initial step is determinable,
 - step invocation targets are unambiguous,
 - transition conditions are valid,
+- break/continue and fork/join control contracts are valid,
 - metadata contracts are syntactically valid,
 - required mappings are parseable,
 - discovered actions are runnable in current registry,

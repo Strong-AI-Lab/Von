@@ -15,6 +15,12 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Mapping, Optional
 
+from .execution_contracts import (
+    WORKFLOW_CONTROL_SIGNAL_ERROR,
+    resolve_control_signal_from_outputs,
+    stamp_control_signal_context,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -112,6 +118,20 @@ def _apply_action_outcome_context(
     context["last_action_error"] = result.error
     context["last_action_call_id"] = result.call_id
     context["last_action_duration_ms"] = result.duration_ms
+
+    control_signal, control_scope, return_payload = resolve_control_signal_from_outputs(
+        action_outcome=outcome,
+        outputs=result.outputs,
+    )
+    stamp_control_signal_context(
+        context=context,
+        signal=control_signal,
+        scope=control_scope,
+        return_payload=return_payload,
+    )
+    if control_signal == WORKFLOW_CONTROL_SIGNAL_ERROR:
+        context["last_action_failed"] = True
+        context["last_step_ok"] = False
 
 
 class ActionRegistry:

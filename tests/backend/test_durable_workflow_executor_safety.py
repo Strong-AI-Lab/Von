@@ -560,3 +560,66 @@ def test_durable_executor_applies_output_mapping_before_metadata_validation() ->
     assert events[0].get("context_key") == "validated_type_id"
     assert events[0].get("value_present") is True
 
+
+def test_durable_executor_populates_result_envelope_for_return_signal() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#durable_return_signal",
+        initial_state="compute",
+        states={
+            "compute": WorkflowStateSpec(
+                state_id="compute",
+                actions=(WorkflowActionInvocation(action_id="emit.return"),),
+                transitions=(
+                    WorkflowTransitionSpec(
+                        to_state="done",
+                        reason="next_step",
+                        condition=lambda _ctx: True,
+                    ),
+                ),
+            ),
+            "done": WorkflowStateSpec(state_id="done", terminal=True),
+        },
+    )
+
+    registry = ActionRegistry()
+    registry.register(
+        ActionSpec(
+            action_id="emit.return",
+            handler=lambda _request: WorkflowActionResult(
+                outputs={
+                    "control_signal": "return",
+                    "return_payload": {"answer": "done"},
+                }
+            ),
+        )
+    )
+
+    manager = MagicMock()
+    manager.get_instance.return_value = _build_instance(definition.workflow_id)
+    manager.is_cancelled.return_value = False
+    manager.extend_lock.return_value = True
+    manager.checkpoint.return_value = True
+
+    executor = DurableWorkflowExecutor(registry=registry, instance_manager=manager)
+    with (
+        patch(
+            "src.backend.languagemodels.llm_interface.get_llm_client",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "src.backend.languagemodels.llm_interface.get_active_model_name",
+            return_value="test-model",
+        ),
+    ):
+        result = executor.run_durable(
+            "instance-1",
+            definition,
+            resume_from_checkpoint=False,
+        )
+
+    assert result.completed is True
+    assert result.final_state == "compute"
+    assert isinstance(result.result_envelope, dict)
+    assert result.result_envelope.get("control_signal") == "return"
+    assert result.result_envelope.get("declared_output_payload") == {"answer": "done"}
+

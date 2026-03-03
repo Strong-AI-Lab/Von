@@ -16,6 +16,12 @@ from .subworkflow_contracts import (
     WORKFLOW_SUBWORKFLOW_ACTION_ID,
     normalise_subworkflow_contract,
 )
+from .execution_contracts import (
+    WORKFLOW_CONTROL_BREAK_ACTION_IDS,
+    WORKFLOW_CONTROL_CONTINUE_ACTION_IDS,
+    WORKFLOW_CONTROL_FORK_ACTION_IDS,
+    WORKFLOW_CONTROL_JOIN_ACTION_IDS,
+)
 
 WORKFLOW_DEFINITION_IDENTITY_SCHEMA_VERSION = "workflow_definition_identity.v1"
 WORKFLOW_DEFINITION_IDENTITY_VERSION = 1
@@ -32,6 +38,9 @@ _STATE_METADATA_CONTRACT_KEYS: tuple[str, ...] = (
     "tool_output_context_mappings",
     "subworkflow_contract",
     "invokes_workflow",
+    "loop_scope_id",
+    "fork_id",
+    "join_fork_id",
 )
 
 
@@ -123,6 +132,79 @@ def _extract_possible_outputs(definition: Any) -> set[str]:
     return outputs
 
 
+def _extract_action_input_text(action: Any, *keys: str) -> str:
+    inputs = getattr(action, "inputs", {})
+    if not isinstance(inputs, Mapping):
+        return ""
+    for key in keys:
+        value = inputs.get(key)
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _collect_subworkflow_children(definition: Any) -> set[str]:
+    children: set[str] = set()
+    states_raw = getattr(definition, "states", {})
+    states = states_raw if isinstance(states_raw, Mapping) else {}
+    for state_spec in states.values():
+        actions_raw = getattr(state_spec, "actions", ())
+        actions = actions_raw if _is_sequence_like(actions_raw) else ()
+        metadata = _state_metadata(state_spec)
+        contract_raw = metadata.get("subworkflow_contract")
+        contract, _ = normalise_subworkflow_contract(contract_raw)
+        if isinstance(contract, Mapping):
+            workflow_id = str(contract.get("workflow_id") or "").strip()
+            if workflow_id:
+                children.add(workflow_id)
+        for action in actions:
+            action_id = str(getattr(action, "action_id", "") or "").strip()
+            if action_id != WORKFLOW_SUBWORKFLOW_ACTION_ID:
+                continue
+            workflow_id = _extract_action_input_text(action, "workflow_id")
+            if workflow_id:
+                children.add(workflow_id)
+    return children
+
+
+def _find_recursive_subworkflow_cycle(
+    *,
+    parent_workflow_id: str,
+    child_workflow_id: str,
+    loader: Callable[[str], Any | None] | None,
+    max_depth: int = 16,
+) -> list[str] | None:
+    if (
+        not parent_workflow_id
+        or not child_workflow_id
+        or not callable(loader)
+        or max_depth < 1
+    ):
+        return None
+
+    stack: list[tuple[str, list[str]]] = [(child_workflow_id, [child_workflow_id])]
+    while stack:
+        workflow_id, path = stack.pop()
+        if len(path) > max_depth:
+            continue
+        if workflow_id == parent_workflow_id and len(path) > 1:
+            return path
+        try:
+            definition = loader(workflow_id)
+        except Exception:
+            continue
+        if definition is None:
+            continue
+        for child_id in sorted(_collect_subworkflow_children(definition)):
+            if child_id == parent_workflow_id:
+                return [*path, child_id]
+            if child_id in path:
+                continue
+            stack.append((child_id, [*path, child_id]))
+    return None
+
+
 def collect_workflow_action_ids(definition: Any) -> tuple[str, ...]:
     """Collect unique action IDs referenced by a workflow definition."""
 
@@ -195,6 +277,32 @@ def _transition_payload_from_graph_step(
                     "kind": "context_flag",
                     "key": "last_action_unknown",
                     "expected": True,
+                },
+            }
+        )
+
+    on_break_target = str(control_flow.get("on_break") or "").strip()
+    if on_break_target:
+        transitions.append(
+            {
+                "to_state": on_break_target,
+                "reason": "on_break",
+                "condition_spec": {
+                    "kind": "control_signal",
+                    "signal": "break",
+                },
+            }
+        )
+
+    on_continue_target = str(control_flow.get("on_continue") or "").strip()
+    if on_continue_target:
+        transitions.append(
+            {
+                "to_state": on_continue_target,
+                "reason": "on_continue",
+                "condition_spec": {
+                    "kind": "control_signal",
+                    "signal": "continue",
                 },
             }
         )
@@ -486,6 +594,8 @@ def validate_workflow_definition_contract(
             "unresolved_output_mapping_states": [],
             "invalid_output_mapping_specs": [],
             "subworkflow_contract_issues": [],
+            "control_signal_issues": [],
+            "fork_join_issues": [],
         }
 
     states_raw = getattr(definition, "states", {})
@@ -508,6 +618,9 @@ def validate_workflow_definition_contract(
     unresolved_output_mapping_states: list[str] = []
     invalid_output_mapping_specs: list[dict[str, Any]] = []
     subworkflow_contract_issues: list[dict[str, Any]] = []
+    control_signal_issues: list[dict[str, Any]] = []
+    fork_join_issues: list[dict[str, Any]] = []
+    declared_fork_ids: set[str] = set()
 
     supported_action_set: set[str] = set()
     if supported_action_ids is not None:
@@ -524,16 +637,36 @@ def validate_workflow_definition_contract(
             if isinstance(workflow_id, str) and str(workflow_id).strip()
         }
 
+    for scan_state_id in sorted(str(item) for item in states.keys()):
+        scan_state_spec = states[scan_state_id]
+        actions_raw = getattr(scan_state_spec, "actions", ())
+        actions = actions_raw if _is_sequence_like(actions_raw) else ()
+        for action in actions:
+            action_id = str(getattr(action, "action_id", "") or "").strip()
+            if action_id not in WORKFLOW_CONTROL_FORK_ACTION_IDS:
+                continue
+            fork_id = _extract_action_input_text(action, "fork_id", "fork_context_id")
+            declared_fork_ids.add(fork_id or scan_state_id)
+
     for state_id in sorted(str(item) for item in states.keys()):
         state_spec = states[state_id]
         metadata_raw = getattr(state_spec, "metadata", {})
         metadata = dict(metadata_raw) if isinstance(metadata_raw, Mapping) else {}
         actions_raw = getattr(state_spec, "actions", ())
-        actions = [
-            str(getattr(action, "action_id", "") or "").strip()
-            for action in (actions_raw if _is_sequence_like(actions_raw) else ())
-        ]
-        actions = [item for item in actions if item]
+        action_objects = actions_raw if _is_sequence_like(actions_raw) else ()
+        action_specs: list[tuple[str, Mapping[str, Any]]] = []
+        for action in action_objects:
+            action_id = str(getattr(action, "action_id", "") or "").strip()
+            if not action_id:
+                continue
+            action_inputs_raw = getattr(action, "inputs", {})
+            action_inputs = (
+                dict(action_inputs_raw)
+                if isinstance(action_inputs_raw, Mapping)
+                else {}
+            )
+            action_specs.append((action_id, action_inputs))
+        actions = [action_id for action_id, _ in action_specs]
         is_terminal_state = bool(getattr(state_spec, "terminal", False)) or (
             state_id in termination_states
         )
@@ -564,6 +697,79 @@ def validate_workflow_definition_contract(
                         ),
                     }
                 )
+
+        has_on_break_transition = any(
+            str(getattr(transition, "reason", "") or "").strip().lower() == "on_break"
+            for transition in transitions
+        )
+        has_on_continue_transition = any(
+            str(getattr(transition, "reason", "") or "").strip().lower()
+            == "on_continue"
+            for transition in transitions
+        )
+        loop_scope_id = str(metadata.get("loop_scope_id") or "").strip()
+        for action_id, action_inputs in action_specs:
+            if action_id in WORKFLOW_CONTROL_BREAK_ACTION_IDS:
+                action_scope = str(
+                    action_inputs.get("loop_scope_id")
+                    or action_inputs.get("scope")
+                    or ""
+                ).strip()
+                if not (action_scope or loop_scope_id):
+                    control_signal_issues.append(
+                        {
+                            "state_id": state_id,
+                            "action_id": action_id,
+                            "reason_code": "break_outside_loop_scope",
+                        }
+                    )
+                if not has_on_break_transition:
+                    control_signal_issues.append(
+                        {
+                            "state_id": state_id,
+                            "action_id": action_id,
+                            "reason_code": "break_transition_missing",
+                        }
+                    )
+            if action_id in WORKFLOW_CONTROL_CONTINUE_ACTION_IDS:
+                action_scope = str(
+                    action_inputs.get("loop_scope_id")
+                    or action_inputs.get("scope")
+                    or ""
+                ).strip()
+                if not (action_scope or loop_scope_id):
+                    control_signal_issues.append(
+                        {
+                            "state_id": state_id,
+                            "action_id": action_id,
+                            "reason_code": "continue_outside_loop_scope",
+                        }
+                    )
+                if not has_on_continue_transition:
+                    control_signal_issues.append(
+                        {
+                            "state_id": state_id,
+                            "action_id": action_id,
+                            "reason_code": "continue_transition_missing",
+                        }
+                    )
+            if action_id in WORKFLOW_CONTROL_JOIN_ACTION_IDS:
+                join_fork_id = str(
+                    action_inputs.get("fork_id")
+                    or action_inputs.get("fork_context_id")
+                    or metadata.get("fork_id")
+                    or metadata.get("join_fork_id")
+                    or state_id
+                ).strip()
+                if join_fork_id not in declared_fork_ids:
+                    fork_join_issues.append(
+                        {
+                            "state_id": state_id,
+                            "action_id": action_id,
+                            "fork_id": join_fork_id,
+                            "reason_code": "join_without_matching_fork",
+                        }
+                    )
 
         if metadata.get("unresolved_input_mappings"):
             unresolved_input_mapping_states.append(state_id)
@@ -635,6 +841,20 @@ def validate_workflow_definition_contract(
                                 "detail": str(exc),
                             }
                         )
+                recursive_cycle_path = _find_recursive_subworkflow_cycle(
+                    parent_workflow_id=parent_workflow_id,
+                    child_workflow_id=child_workflow_id,
+                    loader=workflow_definition_loader,
+                )
+                if recursive_cycle_path:
+                    subworkflow_contract_issues.append(
+                        {
+                            "state_id": state_id,
+                            "workflow_id": child_workflow_id,
+                            "reason_code": "subworkflow_recursive_cycle",
+                            "cycle_path": recursive_cycle_path,
+                        }
+                    )
 
                 child_known = bool(child_definition is not None)
                 if child_workflow_id and not child_known and known_workflow_set:
@@ -748,6 +968,23 @@ def validate_workflow_definition_contract(
             str(item.get("reason_code") or ""),
         ),
     )
+    control_signal_issues = sorted(
+        control_signal_issues,
+        key=lambda item: (
+            str(item.get("state_id") or ""),
+            str(item.get("action_id") or ""),
+            str(item.get("reason_code") or ""),
+        ),
+    )
+    fork_join_issues = sorted(
+        fork_join_issues,
+        key=lambda item: (
+            str(item.get("state_id") or ""),
+            str(item.get("action_id") or ""),
+            str(item.get("fork_id") or ""),
+            str(item.get("reason_code") or ""),
+        ),
+    )
 
     errors: list[str] = []
     if vacuous_state_ids:
@@ -764,6 +1001,10 @@ def validate_workflow_definition_contract(
         errors.append("workflow_output_mapping_unresolved")
     if invalid_output_mapping_specs:
         errors.append("workflow_output_mapping_invalid")
+    if control_signal_issues:
+        errors.append("workflow_control_signal_invalid")
+    if fork_join_issues:
+        errors.append("workflow_fork_join_invalid")
     if subworkflow_contract_issues:
         unresolved_reason_codes = {
             "subworkflow_workflow_not_found",
@@ -802,6 +1043,8 @@ def validate_workflow_definition_contract(
         "unresolved_output_mapping_states": unresolved_output_mapping_states,
         "invalid_output_mapping_specs": invalid_output_mapping_specs,
         "subworkflow_contract_issues": subworkflow_contract_issues,
+        "control_signal_issues": control_signal_issues,
+        "fork_join_issues": fork_join_issues,
     }
 
 

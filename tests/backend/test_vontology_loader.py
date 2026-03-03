@@ -76,6 +76,8 @@ def _make_step(
     on_false: str | None = None,
     on_failure: str | None = None,
     on_unknown: str | None = None,
+    on_break: str | None = None,
+    on_continue: str | None = None,
     preconditions: List[str] | None = None,
     effects: List[str] | None = None,
     reads_variables: List[str] | None = None,
@@ -102,6 +104,8 @@ def _make_step(
             "on_false": on_false,
             "on_failure": on_failure,
             "on_unknown": on_unknown,
+            "on_break": on_break,
+            "on_continue": on_continue,
         },
     }
 
@@ -579,6 +583,53 @@ class TestWorkflowGraphPredicateCompatibility:
             for edge in graph["edges"]
         )
 
+    def test_build_graph_reads_on_break_and_on_continue_next_step_predicates(self):
+        workflow_doc = {
+            "concept_id": "#V#workflow_loop_controls",
+            "relationships": {
+                "hasInitialStep": "#V#step_a",
+                "hasStep": ["#V#step_a", "#V#loop_head", "#V#loop_exit"],
+            },
+        }
+        step_docs = {
+            "#V#step_a": {
+                "concept_id": "#V#step_a",
+                "name": "Loop Step",
+                "relationships": {
+                    "invokesAction": "loop_tool",
+                    "onBreakNextStep": "#V#loop_exit",
+                    "onContinueNextStep": "#V#loop_head",
+                },
+            },
+            "#V#loop_head": {
+                "concept_id": "#V#loop_head",
+                "name": "Loop Head",
+                "relationships": {},
+            },
+            "#V#loop_exit": {
+                "concept_id": "#V#loop_exit",
+                "name": "Loop Exit",
+                "relationships": {},
+            },
+        }
+
+        with patch(
+            "src.backend.workflows.vontology_loader.ConceptsRepository.find_one",
+            return_value=workflow_doc,
+        ):
+            with patch(
+                "src.backend.workflows.vontology_loader._fetch_concepts_by_id",
+                return_value=step_docs,
+            ):
+                graph, _warnings = build_workflow_process_graph(
+                    "#V#workflow_loop_controls"
+                )
+
+        assert graph is not None
+        step = graph["steps"][0]
+        assert step["control_flow"]["on_break"] == "#V#loop_exit"
+        assert step["control_flow"]["on_continue"] == "#V#loop_head"
+
 
 # ---------------------------------------------------------------------------
 # Key fix: initial_step key (not initial_state).
@@ -876,6 +927,50 @@ class TestOnUnknownTransitions:
         transitions = defn.states["#V#step"].transitions
         assert transitions[0].reason == "on_unknown"
         assert transitions[1].reason == "next_step"
+
+
+class TestOnBreakContinueTransitions:
+    def test_on_break_and_on_continue_become_control_signal_transitions(self):
+        steps = [
+            _make_step(
+                "#V#loop_step",
+                invokes_action="loop.action",
+                on_break="#V#loop_exit",
+                on_continue="#V#loop_head",
+                next_step="#V#fallback",
+            ),
+            _make_step("#V#loop_head"),
+            _make_step("#V#loop_exit"),
+            _make_step("#V#fallback"),
+        ]
+        graph = _make_graph(initial_step="#V#loop_step", steps=steps)
+
+        with _stub_fetch_concepts(), _stub_narrative():
+            with patch(
+                "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+                return_value=(graph, []),
+            ):
+                defn = load_workflow_definition_from_vontology("#V#test_workflow")
+
+        assert defn is not None
+        loop_step = defn.states["#V#loop_step"]
+        reasons = [transition.reason for transition in loop_step.transitions]
+        assert reasons == ["on_break", "on_continue", "next_step"]
+
+        on_break = loop_step.transitions[0]
+        on_continue = loop_step.transitions[1]
+        assert on_break.condition_spec == {"kind": "control_signal", "signal": "break"}
+        assert on_continue.condition_spec == {
+            "kind": "control_signal",
+            "signal": "continue",
+        }
+        assert (
+            on_break.condition(
+                {"last_control_signal": "break", "last_control_signal_scope": "main"}
+            )
+            is True
+        )
+        assert on_continue.condition({"last_control_signal": "continue"}) is True
 
 
 class TestDeclarativeConditionBranches:
