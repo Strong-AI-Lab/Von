@@ -17,23 +17,30 @@ _BUTTONIFY_PROMPT_CONTRACT_SUFFIX = (
     "- Do NOT output noun/topic fragments.\n"
     '- If uncertain, output [].'
 )
+_BUTTONIFY_FILTERING_BOUNDARY_SCHEMA_VERSION = "buttonify_filtering_boundary_v1"
+_BUTTONIFY_FILTERING_PREVIEW_LIMIT = 8
 
 
-def normalise_buttonify_option(value: str | None) -> str | None:
+def _normalise_buttonify_option_with_reason(value: str | None) -> tuple[str | None, str | None]:
     if not isinstance(value, str):
-        return None
+        return None, "non_string"
     cleaned = re.sub(r"\s+", " ", value).strip()
     if not cleaned:
-        return None
+        return None, "empty"
     cleaned = cleaned.strip("-–—•*\t ")
     cleaned = re.sub(r"^[\"'“‘]+|[\"'”’]+$", "", cleaned).strip()
     cleaned = cleaned.rstrip(".,;:")
     if not cleaned:
-        return None
+        return None, "empty"
     if len(cleaned) > 60:
-        return None
+        return None, "too_long_chars"
     if len(cleaned.split()) > 4:
-        return None
+        return None, "too_many_words"
+    return cleaned, None
+
+
+def normalise_buttonify_option(value: str | None) -> str | None:
+    cleaned, _ = _normalise_buttonify_option_with_reason(value)
     return cleaned
 
 
@@ -147,16 +154,60 @@ def parse_buttonify_options_json(
     *,
     max_options: int = 4,
 ) -> list[str]:
+    options, _telemetry = parse_buttonify_options_json_with_telemetry(
+        raw_response,
+        max_options=max_options,
+    )
+    return options
+
+
+def _option_preview(value: Any, *, max_chars: int = 80) -> str:
+    text = str(value or "").strip()
+    if len(text) <= max_chars:
+        return text
+    return f"{text[: max_chars - 3]}..."
+
+
+def parse_buttonify_options_json_with_telemetry(
+    raw_response: Any,
+    *,
+    max_options: int = 4,
+) -> tuple[list[str], dict[str, Any]]:
+    telemetry: dict[str, Any] = {
+        "schema_version": _BUTTONIFY_FILTERING_BOUNDARY_SCHEMA_VERSION,
+        "source": "json",
+        "parse_success": False,
+        "parse_reason": None,
+        "raw_response_kind": type(raw_response).__name__,
+        "raw_response_preview": _option_preview(raw_response),
+        "input_candidate_count": 0,
+        "accepted_candidate_count": 0,
+        "rejected_candidate_count": 0,
+        "rejection_reason_counts": {},
+        "accepted_preview": [],
+        "rejected_preview": [],
+    }
     try:
         parsed = json.loads(str(raw_response))
-    except Exception:
-        return []
+    except Exception as exc:
+        telemetry["parse_reason"] = f"json_decode_failed:{type(exc).__name__}"
+        return [], telemetry
     if not isinstance(parsed, list):
-        return []
-    return sanitise_buttonify_options(
+        telemetry["parse_reason"] = "json_payload_not_list"
+        return [], telemetry
+
+    telemetry["parse_success"] = True
+    telemetry["parse_reason"] = "ok"
+    telemetry["input_candidate_count"] = len(parsed)
+    options, filtering_boundary = sanitise_buttonify_options_with_telemetry(
         (item for item in parsed if isinstance(item, str)),
         max_options=max_options,
     )
+    telemetry.update(dict(filtering_boundary))
+    telemetry["source"] = "json"
+    telemetry["parse_success"] = True
+    telemetry["parse_reason"] = "ok"
+    return options, telemetry
 
 
 _BUTTONIFY_CONCEPT_ID_PATTERN = re.compile(
@@ -188,12 +239,75 @@ def sanitise_buttonify_options(
     max_options: int = 4,
 ) -> list[str]:
     """Remove code-like options so quick replies stay user-facing."""
-    candidates = dedupe_buttonify_options(values, max_options=max_options * 3)
-    return [
-        option
-        for option in candidates
-        if not _looks_like_code_or_identifier(option)
-    ][:max_options]
+    options, _telemetry = sanitise_buttonify_options_with_telemetry(
+        values,
+        max_options=max_options,
+    )
+    return options
+
+
+def sanitise_buttonify_options_with_telemetry(
+    values: Iterable[str | None],
+    *,
+    max_options: int = 4,
+) -> tuple[list[str], dict[str, Any]]:
+    """Return cleaned options plus deterministic filtering-boundary telemetry."""
+
+    raw_values = list(values)
+    accepted_candidates: list[str] = []
+    accepted_seen: set[str] = set()
+    rejection_reason_counts: dict[str, int] = {}
+    rejected_preview: list[dict[str, Any]] = []
+
+    def _reject(reason: str, value: Any) -> None:
+        rejection_reason_counts[reason] = rejection_reason_counts.get(reason, 0) + 1
+        if len(rejected_preview) >= _BUTTONIFY_FILTERING_PREVIEW_LIMIT:
+            return
+        rejected_preview.append(
+            {
+                "reason": reason,
+                "value_preview": _option_preview(value),
+            }
+        )
+
+    for raw_value in raw_values:
+        cleaned, normalise_reason = _normalise_buttonify_option_with_reason(raw_value)
+        if normalise_reason:
+            _reject(normalise_reason, raw_value)
+            continue
+        if cleaned is None:
+            _reject("empty", raw_value)
+            continue
+        cleaned_key = cleaned.lower()
+        if cleaned_key in accepted_seen:
+            _reject("duplicate", raw_value)
+            continue
+        if _looks_like_code_or_identifier(cleaned):
+            _reject("code_or_identifier", raw_value)
+            continue
+        accepted_seen.add(cleaned_key)
+        accepted_candidates.append(cleaned)
+
+    overflow_count = max(0, len(accepted_candidates) - max_options)
+    if overflow_count > 0:
+        rejection_reason_counts["max_options_cap"] = (
+            rejection_reason_counts.get("max_options_cap", 0) + overflow_count
+        )
+
+    accepted = accepted_candidates[:max_options]
+    telemetry = {
+        "schema_version": _BUTTONIFY_FILTERING_BOUNDARY_SCHEMA_VERSION,
+        "source": "candidate_filter",
+        "input_candidate_count": len(raw_values),
+        "accepted_candidate_count": len(accepted),
+        "rejected_candidate_count": int(sum(rejection_reason_counts.values())),
+        "rejection_reason_counts": dict(
+            sorted(rejection_reason_counts.items(), key=lambda item: item[0])
+        ),
+        "accepted_preview": list(accepted[:_BUTTONIFY_FILTERING_PREVIEW_LIMIT]),
+        "rejected_preview": list(rejected_preview),
+    }
+    return accepted, telemetry
 
 
 def sanitise_buttonify_heuristic_options(

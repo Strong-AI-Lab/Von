@@ -286,6 +286,23 @@ def test_renderer_applicability_can_enable_narration_when_flag_enabled(monkeypat
                         "modalities": ["narrated_audio"],
                     }
                 ],
+                "diagnostics": {
+                    "filtering_boundary": {
+                        "schema_version": "renderer_filtering_boundary_v1",
+                        "candidate_count": 1,
+                        "applicable_count": 1,
+                        "rejected_count": 0,
+                        "selected_count": 1,
+                        "rejection_reason_counts": {},
+                        "applicable_preview": [
+                            {"renderer_id": "#V#narration_renderer"}
+                        ],
+                        "rejected_preview": [],
+                        "selected_preview": [
+                            {"renderer_id": "#V#narration_renderer"}
+                        ],
+                    }
+                },
             }
         )
 
@@ -336,6 +353,11 @@ def test_renderer_applicability_can_enable_narration_when_flag_enabled(monkeypat
     assert renderer_entry.get("should_narrate") is True
     assert renderer_entry.get("render_mode") == "spoken+screen"
     assert "#V#narration_renderer" in renderer_entry.get("selected_renderer_ids", [])
+    assert isinstance(renderer_entry.get("renderer_filtering_boundary"), dict)
+    assert (
+        renderer_entry.get("renderer_filtering_boundary", {}).get("schema_version")
+        == "renderer_filtering_boundary_v1"
+    )
 
 
 def test_renderer_applicability_error_preserves_selector_narration(monkeypatch):
@@ -3051,6 +3073,52 @@ def test_plain_response_overridden_to_tool_pipeline_for_mutative_intent(monkeypa
         entry.get("type") for entry in result.aux_llm_calls if isinstance(entry, dict)
     ]
     assert "workflow_selector_override" in aux_types
+
+
+def test_plain_response_overridden_when_prompt_requires_tool_verification(monkeypatch):
+    """Prompt-required tool checks must not be bypassed by plain-response routing."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+
+    monkeypatch.setattr(
+        orchestrator._gateway,
+        "describe_methods",
+        lambda: {"workflow_list_definitions": {"category": "read"}},
+    )
+
+    llm = _CapturingLLM(
+        [
+            "plain_response",
+            "I inspected workflow definitions.",
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt="Call workflow_list_definitions and confirm what exists.",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.verdict == "tool_seeking"
+    assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
+    assert result.workflow_routing.source == "selector_override"
+
+    override_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_selector_override"
+            and entry.get("reason") == "required_prompt_tools_missing"
+        ),
+        None,
+    )
+    assert override_entry is not None
+    assert "workflow_list_definitions" in (
+        override_entry.get("required_prompt_tools") or []
+    )
 
 
 def test_write_intent_memory_rehydrates_for_same_session_continuation(monkeypatch):

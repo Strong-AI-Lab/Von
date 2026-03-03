@@ -48,8 +48,8 @@ from ...services.chat_concept_reference_service import (
 from ...services.buttonify_service import (
     BUTTONIFY_PROMPT_IDS,
     enforce_buttonify_prompt_contract,
-    parse_buttonify_options_json,
-    sanitise_buttonify_options,
+    parse_buttonify_options_json_with_telemetry,
+    sanitise_buttonify_options_with_telemetry,
 )
 from ...services.prompt_template_service import PromptTemplateService
 from ...services.display_elements_service import (
@@ -7371,6 +7371,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         buttonify_model_attempted = False
         buttonify_workflow_used = False
         buttonify_preflight_rejection_reason = None
+        buttonify_filtering_boundary: dict[str, Any] | None = None
 
         if not buttonify_enabled:
             buttonify_suppression_reason = "buttonify_disabled"
@@ -7448,7 +7449,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
                 raw_options = workflow_payload.get("buttonify_options")
                 if isinstance(raw_options, list):
-                    buttonify_options = sanitise_buttonify_options(raw_options)
+                    (
+                        buttonify_options,
+                        buttonify_filtering_boundary,
+                    ) = sanitise_buttonify_options_with_telemetry(raw_options)
 
                 if isinstance(workflow_payload.get("buttonify_source"), str):
                     buttonify_source = workflow_payload.get("buttonify_source", "none")
@@ -7540,7 +7544,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         buttonify_error_class = type(exc).__name__
                         buttonify_response = None
 
-                    buttonify_options = parse_buttonify_options_json(buttonify_response)
+                    (
+                        buttonify_options,
+                        buttonify_filtering_boundary,
+                    ) = parse_buttonify_options_json_with_telemetry(buttonify_response)
                     buttonify_source = "llm" if buttonify_options else "none"
 
             if buttonify_source == "llm":
@@ -7570,6 +7577,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 "workflow_available": buttonify_workflow_available,
                 "preflight_rejection_reason": buttonify_preflight_rejection_reason,
             }
+            if isinstance(buttonify_filtering_boundary, Mapping):
+                buttonify_meta["filtering_boundary"] = dict(buttonify_filtering_boundary)
             if buttonify_workflow_contract is not None:
                 buttonify_meta["workflow_contract"] = buttonify_workflow_contract
 
@@ -7595,6 +7604,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     "prompt_truncated": buttonify_prompt_truncated,
                     "prompt_available": buttonify_prompt_available,
                     "prompt_error": buttonify_prompt_error,
+                    "filtering_boundary": (
+                        dict(buttonify_filtering_boundary)
+                        if isinstance(buttonify_filtering_boundary, Mapping)
+                        else None
+                    ),
                 },
                 options_emitted_count=len(buttonify_options),
                 source_path=buttonify_source,

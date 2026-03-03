@@ -551,6 +551,20 @@ class InternalMCPChatOrchestrator:
         r"\bcall\s+`?([a-z_][a-z0-9_]*)`?\b",
         flags=re.IGNORECASE,
     )
+    _PROMPT_CONCEPT_VERIFICATION_HINT_PATTERN = re.compile(
+        r"\b("
+        r"verify|verification|check|confirm|validate|"
+        r"exist(?:s|ence)?|real|valid|"
+        r"do(?:es)?\s+.+?\s+exist|"
+        r"is\s+.+?\s+(?:real|valid)"
+        r")\b",
+        flags=re.IGNORECASE,
+    )
+    _PROMPT_FILE_COPY_REFERENCE_PATTERN = re.compile(
+        r"(#V#[A-Za-z0-9][A-Za-z0-9._-]*file_copy[A-Za-z0-9._-]*"
+        r"|\b(?:computer_)?file_copy_[A-Za-z0-9][A-Za-z0-9._-]*\b)",
+        flags=re.IGNORECASE,
+    )
     _WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID = (
         "#V#workflow_introspection_maintenance_workflow"
     )
@@ -806,6 +820,22 @@ class InternalMCPChatOrchestrator:
 
         # Deterministic ontology preflight cache (per language).
         self._preflight_cache: dict[str, dict[str, Any]] = {}
+        # Provider reachability probe cache used to throttle repeated failing probes.
+        self._provider_probe_cache: dict[str, dict[str, Any]] = {}
+        self._provider_probe_cache_max_entries = self._coerce_int(
+            None,
+            env_var="VON_INTERNAL_MCP_PROVIDER_PROBE_CACHE_MAX_ENTRIES",
+            default=64,
+            min_value=8,
+            max_value=512,
+        )
+        self._provider_probe_cooldown_seconds = self._coerce_int(
+            None,
+            env_var="VON_INTERNAL_MCP_PROVIDER_PROBE_COOLDOWN_SEC",
+            default=20,
+            min_value=0,
+            max_value=600,
+        )
 
         # Topic vocabulary cache for context-based discovery (JVNAUTOSCI-1052).
         # Key: hash of extracted topic keywords; Value: {timestamp, types, predicates}.
@@ -1832,6 +1862,14 @@ class InternalMCPChatOrchestrator:
             for item in missing_required_fetch_concept_ids
             if isinstance(item, str) and item.strip()
         ]
+        missing_required_read_file_copy_ids = data.get("missing_prompt_read_file_copy_ids")
+        if not isinstance(missing_required_read_file_copy_ids, list):
+            missing_required_read_file_copy_ids = []
+        missing_required_read_file_copy_ids = [
+            str(item).strip()
+            for item in missing_required_read_file_copy_ids
+            if isinstance(item, str) and item.strip()
+        ]
         required_create_type_name_raw = data.get("required_prompt_create_type_name")
         required_create_type_name = (
             str(required_create_type_name_raw).strip()
@@ -1949,6 +1987,7 @@ class InternalMCPChatOrchestrator:
             user_prompt=data.get("user_prompt"),
             missing_required_tools=missing_required_tools,
             missing_required_fetch_concept_ids=missing_required_fetch_concept_ids,
+            missing_required_read_file_copy_ids=missing_required_read_file_copy_ids,
             required_create_type_name=required_create_type_name,
         )
         if forced:
@@ -2284,12 +2323,18 @@ class InternalMCPChatOrchestrator:
             "required_prompt_fetch_concept_ids": data.get(
                 "required_prompt_fetch_concept_ids"
             ),
+            "required_prompt_read_file_copy_ids": data.get(
+                "required_prompt_read_file_copy_ids"
+            ),
             "required_prompt_create_type_name": data.get(
                 "required_prompt_create_type_name"
             ),
             "missing_prompt_tools": data.get("missing_prompt_tools"),
             "missing_prompt_fetch_concept_ids": data.get(
                 "missing_prompt_fetch_concept_ids"
+            ),
+            "missing_prompt_read_file_copy_ids": data.get(
+                "missing_prompt_read_file_copy_ids"
             ),
             "missing_tool_call_retry_reason_override": data.get(
                 "missing_tool_call_retry_reason_override"
@@ -3486,6 +3531,12 @@ class InternalMCPChatOrchestrator:
                 prompt_requirement_state.get("required_fetch_concept_ids") or [],
             )
         )
+        required_prompt_read_file_copy_ids = list(
+            cast(
+                list[str],
+                prompt_requirement_state.get("required_read_file_copy_ids") or [],
+            )
+        )
         required_prompt_create_type_name_raw = prompt_requirement_state.get(
             "required_create_type_name"
         )
@@ -3497,6 +3548,9 @@ class InternalMCPChatOrchestrator:
         data["required_prompt_tools"] = list(required_prompt_tools)
         data["required_prompt_fetch_concept_ids"] = list(
             required_prompt_fetch_concept_ids
+        )
+        data["required_prompt_read_file_copy_ids"] = list(
+            required_prompt_read_file_copy_ids
         )
         data["required_prompt_create_type_name"] = required_prompt_create_type_name
 
@@ -3608,19 +3662,28 @@ class InternalMCPChatOrchestrator:
 
         # Missing-tool-call recovery.
         if not has_valid_tool_call:
-            missing_prompt_tools, missing_prompt_fetch_concept_ids = (
+            (
+                missing_prompt_tools,
+                missing_prompt_fetch_concept_ids,
+                missing_prompt_read_file_copy_ids,
+            ) = (
                 self._derive_missing_prompt_requirements(
                     required_tools=required_prompt_tools,
                     required_fetch_concept_ids=required_prompt_fetch_concept_ids,
+                    required_read_file_copy_ids=required_prompt_read_file_copy_ids,
                     tool_invocations=(),
                 )
             )
             data["missing_prompt_fetch_concept_ids"] = list(
                 missing_prompt_fetch_concept_ids
             )
+            data["missing_prompt_read_file_copy_ids"] = list(
+                missing_prompt_read_file_copy_ids
+            )
             missing_retry_reason = self._build_missing_prompt_retry_reason(
                 missing_tools=missing_prompt_tools,
                 missing_fetch_concept_ids=missing_prompt_fetch_concept_ids,
+                missing_read_file_copy_ids=missing_prompt_read_file_copy_ids,
             )
             data["missing_prompt_tools"] = list(missing_prompt_tools)
             if missing_retry_reason:
@@ -4482,6 +4545,12 @@ class InternalMCPChatOrchestrator:
                     prompt_requirement_state.get("required_fetch_concept_ids") or [],
                 )
             )
+            required_prompt_read_file_copy_ids = list(
+                cast(
+                    list[str],
+                    prompt_requirement_state.get("required_read_file_copy_ids") or [],
+                )
+            )
             required_prompt_create_type_name_raw = prompt_requirement_state.get(
                 "required_create_type_name"
             )
@@ -4494,15 +4563,23 @@ class InternalMCPChatOrchestrator:
             data["required_prompt_fetch_concept_ids"] = list(
                 required_prompt_fetch_concept_ids
             )
+            data["required_prompt_read_file_copy_ids"] = list(
+                required_prompt_read_file_copy_ids
+            )
             data["required_prompt_create_type_name"] = required_prompt_create_type_name
 
             invocations_for_requirements = cast(
                 Sequence[Mapping[str, Any]], data.get("invocations") or []
             )
-            missing_prompt_tools, missing_prompt_fetch_concept_ids = (
+            (
+                missing_prompt_tools,
+                missing_prompt_fetch_concept_ids,
+                missing_prompt_read_file_copy_ids,
+            ) = (
                 self._derive_missing_prompt_requirements(
                     required_tools=required_prompt_tools,
                     required_fetch_concept_ids=required_prompt_fetch_concept_ids,
+                    required_read_file_copy_ids=required_prompt_read_file_copy_ids,
                     tool_invocations=invocations_for_requirements,
                 )
             )
@@ -4510,9 +4587,13 @@ class InternalMCPChatOrchestrator:
             data["missing_prompt_fetch_concept_ids"] = list(
                 missing_prompt_fetch_concept_ids
             )
+            data["missing_prompt_read_file_copy_ids"] = list(
+                missing_prompt_read_file_copy_ids
+            )
             missing_retry_reason = self._build_missing_prompt_retry_reason(
                 missing_tools=missing_prompt_tools,
                 missing_fetch_concept_ids=missing_prompt_fetch_concept_ids,
+                missing_read_file_copy_ids=missing_prompt_read_file_copy_ids,
             )
             if missing_retry_reason:
                 data["missing_tool_call_retry_reason_override"] = missing_retry_reason
@@ -4531,6 +4612,12 @@ class InternalMCPChatOrchestrator:
                             ),
                             "missing_fetch_concept_ids": list(
                                 missing_prompt_fetch_concept_ids
+                            ),
+                            "required_read_file_copy_ids": list(
+                                required_prompt_read_file_copy_ids
+                            ),
+                            "missing_read_file_copy_ids": list(
+                                missing_prompt_read_file_copy_ids
                             ),
                             "required_create_type_name": (
                                 required_prompt_create_type_name
@@ -6698,6 +6785,11 @@ class InternalMCPChatOrchestrator:
         if not isinstance(user_prompt, str) or not user_prompt.strip():
             return []
 
+        explicit_concept_ids = cls._extract_explicit_concept_ids_from_prompt(user_prompt)
+        has_verification_intent = bool(
+            cls._PROMPT_CONCEPT_VERIFICATION_HINT_PATTERN.search(user_prompt)
+        )
+
         # Require multiple suffix segments so field names like
         # "workflow_mapping_spec" are not treated as concept IDs.
         matches = re.findall(
@@ -6708,6 +6800,13 @@ class InternalMCPChatOrchestrator:
         )
         concept_ids: list[str] = []
         seen: set[str] = set()
+        if has_verification_intent:
+            for concept_id in explicit_concept_ids:
+                key = concept_id.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                concept_ids.append(concept_id)
         for match in matches:
             concept_id = cls._normalise_concept_id_candidate(match)
             if not concept_id:
@@ -6716,6 +6815,53 @@ class InternalMCPChatOrchestrator:
             if key in seen:
                 continue
             seen.add(key)
+            concept_ids.append(concept_id)
+        return concept_ids
+
+    @classmethod
+    def _extract_explicit_concept_ids_from_prompt(
+        cls,
+        user_prompt: Any,
+    ) -> list[str]:
+        if not isinstance(user_prompt, str) or not user_prompt.strip():
+            return []
+        raw_matches = re.findall(
+            r"#V#[A-Za-z0-9][A-Za-z0-9._-]*",
+            user_prompt,
+            flags=re.IGNORECASE,
+        )
+        concept_ids: list[str] = []
+        seen: set[str] = set()
+        for raw_match in raw_matches:
+            concept_id = cls._normalise_concept_id_candidate(raw_match)
+            if not concept_id:
+                continue
+            lowered = concept_id.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            concept_ids.append(concept_id)
+        return concept_ids
+
+    @classmethod
+    def _extract_required_read_file_copy_ids_from_prompt(
+        cls,
+        user_prompt: Any,
+    ) -> list[str]:
+        if not isinstance(user_prompt, str) or not user_prompt.strip():
+            return []
+
+        references = cls._PROMPT_FILE_COPY_REFERENCE_PATTERN.findall(user_prompt)
+        concept_ids: list[str] = []
+        seen: set[str] = set()
+        for reference in references:
+            concept_id = cls._normalise_concept_id_candidate(reference)
+            if not concept_id:
+                continue
+            lowered = concept_id.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
             concept_ids.append(concept_id)
         return concept_ids
 
@@ -6844,6 +6990,40 @@ class InternalMCPChatOrchestrator:
         return concept_ids
 
     @classmethod
+    def _extract_read_file_copy_ids_from_invocations(
+        cls,
+        tool_invocations: Sequence[Mapping[str, Any]],
+    ) -> list[str]:
+        """Collect file-copy concept IDs already read via read_file_copy calls."""
+
+        concept_ids: list[str] = []
+        seen: set[str] = set()
+
+        for invocation in tool_invocations:
+            if not isinstance(invocation, Mapping):
+                continue
+            raw_tool = invocation.get("tool")
+            if not isinstance(raw_tool, str) or raw_tool.strip().lower() != "read_file_copy":
+                continue
+
+            payload = invocation.get("effective_payload")
+            if not isinstance(payload, Mapping):
+                payload = invocation.get("payload")
+            if not isinstance(payload, Mapping):
+                continue
+
+            concept_id = cls._normalise_concept_id_candidate(payload.get("concept_id"))
+            if not concept_id:
+                continue
+            key = concept_id.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            concept_ids.append(concept_id)
+
+        return concept_ids
+
+    @classmethod
     def _derive_prompt_tool_requirements(
         cls,
         user_prompt: Any,
@@ -6871,8 +7051,9 @@ class InternalMCPChatOrchestrator:
         required_fetch_concept_ids = cls._extract_required_fetch_concept_ids_from_prompt(
             user_prompt
         )
-        if not _tool_available("fetch_concept"):
-            required_fetch_concept_ids = []
+        required_read_file_copy_ids = cls._extract_required_read_file_copy_ids_from_prompt(
+            user_prompt
+        )
 
         required_create_type_name = cls._extract_required_create_type_name_from_prompt(
             user_prompt
@@ -6903,11 +7084,26 @@ class InternalMCPChatOrchestrator:
             seen_required.add("create_concepts")
         if required_fetch_concept_ids and "fetch_concept" not in seen_required:
             required_tools.append("fetch_concept")
+            seen_required.add("fetch_concept")
+        if required_read_file_copy_ids and "read_file_copy" not in seen_required:
+            required_tools.append("read_file_copy")
+            seen_required.add("read_file_copy")
+
+        unavailable_required_tools: list[str] = []
+        if available_tools:
+            for tool_name in required_tools:
+                lowered = str(tool_name or "").strip().lower()
+                if not lowered:
+                    continue
+                if lowered not in available_tools and lowered not in unavailable_required_tools:
+                    unavailable_required_tools.append(lowered)
 
         return {
             "required_tools": required_tools,
             "required_fetch_concept_ids": required_fetch_concept_ids,
+            "required_read_file_copy_ids": required_read_file_copy_ids,
             "required_create_type_name": required_create_type_name,
+            "unavailable_required_tools": unavailable_required_tools,
         }
 
     @classmethod
@@ -6916,8 +7112,9 @@ class InternalMCPChatOrchestrator:
         *,
         required_tools: Sequence[str],
         required_fetch_concept_ids: Sequence[str],
+        required_read_file_copy_ids: Sequence[str] = (),
         tool_invocations: Sequence[Mapping[str, Any]],
-    ) -> tuple[list[str], list[str]]:
+    ) -> tuple[list[str], list[str], list[str]]:
         """Determine missing prompt requirements from invocation history."""
 
         missing_tools = cls._missing_prompt_tool_requirements(
@@ -6948,13 +7145,37 @@ class InternalMCPChatOrchestrator:
             if "fetch_concept" not in missing_lookup:
                 missing_tools.append("fetch_concept")
 
-        return missing_tools, missing_fetch_concept_ids
+        missing_read_file_copy_ids: list[str] = []
+        if required_read_file_copy_ids:
+            read_file_copy_ids = cls._extract_read_file_copy_ids_from_invocations(
+                tool_invocations
+            )
+            read_lookup = {concept_id.lower() for concept_id in read_file_copy_ids}
+            for concept_id in required_read_file_copy_ids:
+                if (
+                    isinstance(concept_id, str)
+                    and concept_id.strip()
+                    and concept_id.lower() not in read_lookup
+                ):
+                    missing_read_file_copy_ids.append(concept_id)
+
+        if missing_read_file_copy_ids:
+            missing_lookup = {
+                tool_name.lower()
+                for tool_name in missing_tools
+                if isinstance(tool_name, str) and tool_name.strip()
+            }
+            if "read_file_copy" not in missing_lookup:
+                missing_tools.append("read_file_copy")
+
+        return missing_tools, missing_fetch_concept_ids, missing_read_file_copy_ids
 
     @staticmethod
     def _build_missing_prompt_retry_reason(
         *,
         missing_tools: Sequence[str],
         missing_fetch_concept_ids: Sequence[str],
+        missing_read_file_copy_ids: Sequence[str] = (),
     ) -> str | None:
         """Build a stable retry reason for unmet prompt requirements."""
 
@@ -6963,7 +7184,11 @@ class InternalMCPChatOrchestrator:
             for tool_name in missing_tools
             if isinstance(tool_name, str) and tool_name.strip()
         ]
-        if not missing_names and not missing_fetch_concept_ids:
+        if (
+            not missing_names
+            and not missing_fetch_concept_ids
+            and not missing_read_file_copy_ids
+        ):
             return None
 
         details: list[str] = list(missing_names)
@@ -6973,6 +7198,15 @@ class InternalMCPChatOrchestrator:
                 + ", ".join(
                     str(concept_id).strip()
                     for concept_id in missing_fetch_concept_ids
+                    if isinstance(concept_id, str) and concept_id.strip()
+                )
+            )
+        if missing_read_file_copy_ids:
+            details.append(
+                "read_file_copy targets: "
+                + ", ".join(
+                    str(concept_id).strip()
+                    for concept_id in missing_read_file_copy_ids
                     if isinstance(concept_id, str) and concept_id.strip()
                 )
             )
@@ -8311,6 +8545,63 @@ class InternalMCPChatOrchestrator:
             return f"http://{host}".rstrip("/")
         return f"http://{host}:11434"
 
+    @staticmethod
+    def _provider_probe_cache_key(*, provider: str, host: str | None = None) -> str:
+        provider_key = str(provider or "").strip().lower()
+        host_key = str(host or "").strip().lower()
+        return f"{provider_key}:{host_key}"
+
+    def _provider_probe_cache_get(
+        self,
+        *,
+        provider: str,
+        host: str | None = None,
+    ) -> Mapping[str, Any] | None:
+        key = self._provider_probe_cache_key(provider=provider, host=host)
+        cached = self._provider_probe_cache.get(key)
+        if not isinstance(cached, Mapping):
+            return None
+        return dict(cached)
+
+    def _provider_probe_cache_set(
+        self,
+        *,
+        provider: str,
+        host: str | None = None,
+        result: Mapping[str, Any],
+    ) -> None:
+        key = self._provider_probe_cache_key(provider=provider, host=host)
+        now_epoch = float(time.time())
+        entry = {
+            "provider": str(provider).strip().lower(),
+            "host": str(host).strip().lower() if isinstance(host, str) else "",
+            "recorded_at_epoch": now_epoch,
+            "reachable": bool(result.get("reachable")),
+            "result": dict(result),
+        }
+        self._provider_probe_cache[key] = entry
+        max_entries = max(1, int(self._provider_probe_cache_max_entries))
+        if len(self._provider_probe_cache) <= max_entries:
+            return
+        oldest_key = None
+        oldest_ts = None
+        for cache_key, cache_entry in self._provider_probe_cache.items():
+            if not isinstance(cache_entry, Mapping):
+                continue
+            raw_ts = cache_entry.get("recorded_at_epoch")
+            if isinstance(raw_ts, (int, float, str)):
+                try:
+                    ts = float(raw_ts)
+                except Exception:
+                    ts = now_epoch
+            else:
+                ts = now_epoch
+            if oldest_ts is None or ts < oldest_ts:
+                oldest_ts = ts
+                oldest_key = cache_key
+        if oldest_key:
+            self._provider_probe_cache.pop(oldest_key, None)
+
     def _probe_model_candidate_reachability(
         self,
         *,
@@ -8342,16 +8633,47 @@ class InternalMCPChatOrchestrator:
         )
         host = self._normalise_ollama_probe_host(telemetry.get("host"))
         probe_url = f"{host}/api/tags"
+        cooldown_seconds = max(0, int(self._provider_probe_cooldown_seconds))
+        if cooldown_seconds > 0:
+            cached = self._provider_probe_cache_get(provider=provider, host=host)
+            if isinstance(cached, Mapping):
+                cached_reachable = bool(cached.get("reachable"))
+                recorded_at_raw = cached.get("recorded_at_epoch")
+                if isinstance(recorded_at_raw, (int, float, str)):
+                    try:
+                        recorded_at = float(recorded_at_raw)
+                    except Exception:
+                        recorded_at = 0.0
+                else:
+                    recorded_at = 0.0
+                age_seconds = max(0.0, time.time() - recorded_at)
+                if (not cached_reachable) and age_seconds < float(cooldown_seconds):
+                    cached_result = cached.get("result")
+                    if isinstance(cached_result, Mapping):
+                        cached_payload: dict[str, Any] = dict(cached_result)
+                    else:
+                        cached_payload = {}
+                    cached_payload.setdefault("provider", provider)
+                    cached_payload.setdefault("host", host)
+                    cached_payload.setdefault("probe_url", probe_url)
+                    cached_payload["cached"] = True
+                    cached_payload["cooldown_hit"] = True
+                    cached_payload["cooldown_seconds"] = cooldown_seconds
+                    cached_payload["cooldown_remaining_ms"] = int(
+                        max(0.0, (float(cooldown_seconds) - age_seconds) * 1000.0)
+                    )
+                    cached_payload["cache_age_ms"] = int(age_seconds * 1000.0)
+                    return cached_payload
 
         probe_start = time.perf_counter()
         try:
-            response = requests.get(
+            http_response = requests.get(
                 probe_url,
                 headers={"Accept": "application/json"},
                 timeout=max(0.1, float(timeout_ms) / 1000.0),
             )
-            response.raise_for_status()
-            return {
+            http_response.raise_for_status()
+            result = {
                 "provider": provider,
                 "host": host,
                 "probe_url": probe_url,
@@ -8359,8 +8681,10 @@ class InternalMCPChatOrchestrator:
                 "duration_ms": int((time.perf_counter() - probe_start) * 1000.0),
                 "reachable": True,
             }
+            self._provider_probe_cache_set(provider=provider, host=host, result=result)
+            return result
         except Exception as exc:
-            return {
+            result = {
                 "provider": provider,
                 "host": host,
                 "probe_url": probe_url,
@@ -8370,6 +8694,8 @@ class InternalMCPChatOrchestrator:
                 "error": str(exc),
                 "error_class": type(exc).__name__,
             }
+            self._provider_probe_cache_set(provider=provider, host=host, result=result)
+            return result
 
     def _invoke_with_llm_heartbeat(
         self,
@@ -15457,6 +15783,7 @@ class InternalMCPChatOrchestrator:
         user_text: str,
         missing_required_tools: Sequence[str],
         missing_required_fetch_concept_ids: Sequence[str] | None = None,
+        missing_required_read_file_copy_ids: Sequence[str] | None = None,
         required_create_type_name: str | None = None,
     ) -> list[_ToolCallRequest] | None:
         """Build deterministic tool calls for still-missing explicit requirements."""
@@ -15467,6 +15794,11 @@ class InternalMCPChatOrchestrator:
         missing_required_fetch_concept_ids = [
             str(item).strip()
             for item in (missing_required_fetch_concept_ids or [])
+            if isinstance(item, str) and str(item).strip()
+        ]
+        missing_required_read_file_copy_ids = [
+            str(item).strip()
+            for item in (missing_required_read_file_copy_ids or [])
             if isinstance(item, str) and str(item).strip()
         ]
 
@@ -15553,6 +15885,22 @@ class InternalMCPChatOrchestrator:
                     )
                 continue
 
+            if name == "read_file_copy":
+                read_file_copy_ids = list(missing_required_read_file_copy_ids)
+                if not read_file_copy_ids:
+                    read_file_copy_ids = self._extract_required_read_file_copy_ids_from_prompt(
+                        user_text
+                    )
+                for concept_id in read_file_copy_ids:
+                    forced_calls.append(
+                        {
+                            "action": "call_tool",
+                            "tool": name,
+                            "payload": {"concept_id": concept_id},
+                        }
+                    )
+                continue
+
         return forced_calls or None
 
     def _infer_missing_tool_call_retry_tool_calls(
@@ -15561,6 +15909,7 @@ class InternalMCPChatOrchestrator:
         user_prompt: Any | None = None,
         missing_required_tools: Sequence[str] | None = None,
         missing_required_fetch_concept_ids: Sequence[str] | None = None,
+        missing_required_read_file_copy_ids: Sequence[str] | None = None,
         required_create_type_name: str | None = None,
     ) -> list[_ToolCallRequest] | None:
         """Best-effort deterministic recovery for common missing-tool-call cases.
@@ -15598,6 +15947,11 @@ class InternalMCPChatOrchestrator:
             missing_required_fetch_concept_ids=(
                 list(missing_required_fetch_concept_ids)
                 if missing_required_fetch_concept_ids
+                else []
+            ),
+            missing_required_read_file_copy_ids=(
+                list(missing_required_read_file_copy_ids)
+                if missing_required_read_file_copy_ids
                 else []
             ),
             required_create_type_name=(
@@ -22097,6 +22451,9 @@ class InternalMCPChatOrchestrator:
                 loading_diag = diagnostics_obj.get("renderer_definition_loading")
                 if isinstance(loading_diag, Mapping):
                     decision["renderer_definition_loading"] = dict(loading_diag)
+                filtering_boundary = diagnostics_obj.get("filtering_boundary")
+                if isinstance(filtering_boundary, Mapping):
+                    decision["renderer_filtering_boundary"] = dict(filtering_boundary)
 
             decision["reason"] = "resolved"
             decision["should_narrate"] = narration_selected
@@ -22266,6 +22623,100 @@ class InternalMCPChatOrchestrator:
             aux_llm_calls.append(override_payload)
             if trace_enabled and trace is not None:
                 trace.metadata["workflow_selector_override"] = dict(override_payload)
+
+        if selector_verdict == "plain_response":
+            plain_requirement_state = self._derive_prompt_tool_requirements(
+                prompt,
+                method_catalogue=method_catalogue_for_routing,
+            )
+            required_prompt_tools = list(
+                cast(list[str], plain_requirement_state.get("required_tools") or [])
+            )
+            required_prompt_fetch_concept_ids = list(
+                cast(
+                    list[str],
+                    plain_requirement_state.get("required_fetch_concept_ids") or [],
+                )
+            )
+            required_prompt_read_file_copy_ids = list(
+                cast(
+                    list[str],
+                    plain_requirement_state.get("required_read_file_copy_ids") or [],
+                )
+            )
+            unavailable_required_tools = list(
+                cast(
+                    list[str],
+                    plain_requirement_state.get("unavailable_required_tools") or [],
+                )
+            )
+            (
+                missing_prompt_tools,
+                missing_prompt_fetch_concept_ids,
+                missing_prompt_read_file_copy_ids,
+            ) = self._derive_missing_prompt_requirements(
+                required_tools=required_prompt_tools,
+                required_fetch_concept_ids=required_prompt_fetch_concept_ids,
+                required_read_file_copy_ids=required_prompt_read_file_copy_ids,
+                tool_invocations=(),
+            )
+            missing_retry_reason = self._build_missing_prompt_retry_reason(
+                missing_tools=missing_prompt_tools,
+                missing_fetch_concept_ids=missing_prompt_fetch_concept_ids,
+                missing_read_file_copy_ids=missing_prompt_read_file_copy_ids,
+            )
+
+            if (
+                missing_prompt_tools
+                or missing_prompt_fetch_concept_ids
+                or missing_prompt_read_file_copy_ids
+            ):
+                excluded_workflow_ids = sorted(
+                    {
+                        CHAT_ASSISTANT_WORKFLOW_ID,
+                        selected_workflow_id_text or CHAT_ASSISTANT_WORKFLOW_ID,
+                    }
+                )
+                selected_workflow_id = TOOL_CALLING_WORKFLOW_ID
+                selected_workflow_id_text = TOOL_CALLING_WORKFLOW_ID
+                selector_verdict = "tool_seeking"
+                selector_requests_narration = False
+                selector_requests_custom_workflow = False
+                if isinstance(routing_info, WorkflowRoutingInfo):
+                    routing_info = WorkflowRoutingInfo(
+                        workflow_id=TOOL_CALLING_WORKFLOW_ID,
+                        verdict="tool_seeking",
+                        prompt_id=routing_info.prompt_id,
+                        discovered_workflow_ids=routing_info.discovered_workflow_ids,
+                        routing_duration_ms=routing_info.routing_duration_ms,
+                        source="selector_override",
+                    )
+                override_payload = {
+                    "type": "workflow_selector_override",
+                    "reason": "required_prompt_tools_missing",
+                    "selected_workflow_id": TOOL_CALLING_WORKFLOW_ID,
+                    "excluded_workflow_ids": excluded_workflow_ids,
+                    "excluded_selector_verdicts": ["plain_response"],
+                    "required_prompt_tools": list(required_prompt_tools),
+                    "missing_prompt_tools": list(missing_prompt_tools),
+                    "required_prompt_fetch_concept_ids": list(
+                        required_prompt_fetch_concept_ids
+                    ),
+                    "missing_prompt_fetch_concept_ids": list(
+                        missing_prompt_fetch_concept_ids
+                    ),
+                    "required_prompt_read_file_copy_ids": list(
+                        required_prompt_read_file_copy_ids
+                    ),
+                    "missing_prompt_read_file_copy_ids": list(
+                        missing_prompt_read_file_copy_ids
+                    ),
+                    "unavailable_required_tools": list(unavailable_required_tools),
+                    "retry_reason": missing_retry_reason,
+                }
+                aux_llm_calls.append(override_payload)
+                if trace_enabled and trace is not None:
+                    trace.metadata["workflow_selector_override"] = dict(override_payload)
 
         selected_uses_tool_pipeline_contract = _workflow_matches_action_contract(
             selected_workflow_id_text,

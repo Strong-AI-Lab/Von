@@ -10033,6 +10033,374 @@ def _upsert_renderer_profile_output_schema() -> Schema:
     )
 
 
+# GitHub schema helpers
+def _github_get_auth_config_input_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={},
+        allow_unknown=True,
+        description="github_get_auth_config input: no arguments",
+    )
+
+
+def _github_list_tools_input_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={},
+        allow_unknown=True,
+        description="github_list_tools input: no arguments",
+    )
+
+
+def _github_get_me_input_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={},
+        allow_unknown=True,
+        description="github_get_me input: no arguments",
+    )
+
+
+def _github_get_file_contents_input_schema() -> Schema:
+    return Schema(
+        required={"owner": str, "repo": str},
+        optional={
+            "path": (str, type(None)),
+            "ref": (str, type(None)),
+            "sha": (str, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "github_get_file_contents input: owner/repo required; optional path/ref/sha."
+        ),
+    )
+
+
+def _github_list_commits_input_schema() -> Schema:
+    return Schema(
+        required={"owner": str, "repo": str},
+        optional={
+            "sha": (str, type(None)),
+            "author": (str, type(None)),
+            "page": (int, type(None)),
+            "perPage": (int, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "github_list_commits input: owner/repo required; optional sha/author/page/perPage."
+        ),
+    )
+
+
+def _github_search_code_input_schema() -> Schema:
+    return Schema(
+        required={"query": str},
+        optional={
+            "page": (int, type(None)),
+            "perPage": (int, type(None)),
+            "sort": (str, type(None)),
+            "order": (str, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description="github_search_code input: query required, paging/sort optional.",
+    )
+
+
+def _github_list_pull_requests_input_schema() -> Schema:
+    return Schema(
+        required={"owner": str, "repo": str},
+        optional={
+            "state": (str, type(None)),
+            "base": (str, type(None)),
+            "head": (str, type(None)),
+            "sort": (str, type(None)),
+            "direction": (str, type(None)),
+            "page": (int, type(None)),
+            "perPage": (int, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "github_list_pull_requests input: owner/repo required; filtering/sort/paging optional."
+        ),
+    )
+
+
+def _github_pull_request_read_input_schema() -> Schema:
+    return Schema(
+        required={
+            "owner": str,
+            "repo": str,
+            "pullNumber": int,
+            "method": str,
+        },
+        optional={
+            "page": (int, type(None)),
+            "perPage": (int, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "github_pull_request_read input: owner/repo/pullNumber/method required."
+        ),
+    )
+
+
+def _github_issue_read_input_schema() -> Schema:
+    return Schema(
+        required={
+            "owner": str,
+            "repo": str,
+            "issue_number": int,
+            "method": str,
+        },
+        optional={
+            "page": (int, type(None)),
+            "perPage": (int, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description="github_issue_read input: owner/repo/issue_number/method required.",
+    )
+
+
+def _github_list_releases_input_schema() -> Schema:
+    return Schema(
+        required={"owner": str, "repo": str},
+        optional={
+            "page": (int, type(None)),
+            "perPage": (int, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description="github_list_releases input: owner/repo required.",
+    )
+
+
+def _github_get_latest_release_input_schema() -> Schema:
+    return Schema(
+        required={"owner": str, "repo": str},
+        optional={"namespace": (str, type(None))},
+        allow_unknown=True,
+        description="github_get_latest_release input: owner/repo required.",
+    )
+
+
+def _github_list_tags_input_schema() -> Schema:
+    return Schema(
+        required={"owner": str, "repo": str},
+        optional={
+            "page": (int, type(None)),
+            "perPage": (int, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description="github_list_tags input: owner/repo required.",
+    )
+
+
+def _github_list_branches_input_schema() -> Schema:
+    return Schema(
+        required={"owner": str, "repo": str},
+        optional={
+            "page": (int, type(None)),
+            "perPage": (int, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description="github_list_branches input: owner/repo required.",
+    )
+
+
+def _github_create_branch_input_schema() -> Schema:
+    return Schema(
+        required={"owner": str, "repo": str, "branch": str},
+        optional={
+            "from_branch": (str, type(None)),
+            "dry_run": (bool,),
+            "approved": (bool,),
+            "execute": (bool,),
+            "request_id": (str, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "github_create_branch input: owner/repo/branch required with write guardrails."
+        ),
+    )
+
+
+def _github_create_or_update_file_input_schema() -> Schema:
+    return Schema(
+        required={
+            "owner": str,
+            "repo": str,
+            "branch": str,
+            "path": str,
+            "content": str,
+            "message": str,
+        },
+        optional={
+            "sha": (str, type(None)),
+            "dry_run": (bool,),
+            "approved": (bool,),
+            "execute": (bool,),
+            "request_id": (str, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "github_create_or_update_file input: owner/repo/branch/path/content/message required with write guardrails."
+        ),
+    )
+
+
+def _github_create_pull_request_input_schema() -> Schema:
+    return Schema(
+        required={
+            "owner": str,
+            "repo": str,
+            "title": str,
+            "head": str,
+            "base": str,
+        },
+        optional={
+            "body": (str, type(None)),
+            "draft": (bool, type(None)),
+            "maintainer_can_modify": (bool, type(None)),
+            "dry_run": (bool,),
+            "approved": (bool,),
+            "execute": (bool,),
+            "request_id": (str, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "github_create_pull_request input: owner/repo/title/head/base required with write guardrails."
+        ),
+    )
+
+
+def _github_update_pull_request_input_schema() -> Schema:
+    return Schema(
+        required={"owner": str, "repo": str, "pullNumber": int},
+        optional={
+            "title": (str, type(None)),
+            "body": (str, type(None)),
+            "base": (str, type(None)),
+            "state": (str, type(None)),
+            "draft": (bool, type(None)),
+            "maintainer_can_modify": (bool, type(None)),
+            "reviewers": (list, type(None)),
+            "dry_run": (bool,),
+            "approved": (bool,),
+            "execute": (bool,),
+            "request_id": (str, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "github_update_pull_request input: owner/repo/pullNumber required with write guardrails."
+        ),
+    )
+
+
+def _github_create_pull_request_with_copilot_input_schema() -> Schema:
+    return Schema(
+        required={
+            "owner": str,
+            "repo": str,
+            "title": str,
+            "problem_statement": str,
+        },
+        optional={
+            "base_ref": (str, type(None)),
+            "dry_run": (bool,),
+            "approved": (bool,),
+            "execute": (bool,),
+            "request_id": (str, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "github_create_pull_request_with_copilot input: owner/repo/title/problem_statement required with write guardrails."
+        ),
+    )
+
+
+def _github_get_auth_config_output_schema() -> Schema:
+    return Schema(
+        required={
+            "success": bool,
+            "token_present": bool,
+            "token_length": int,
+            "env_keys_used": dict,
+            "allow_repositories": list,
+            "execute_mode_enabled": bool,
+        },
+        optional={
+            "command": (str, type(None)),
+            "args": (list, type(None)),
+            "proxy_tool_count": (int, type(None)),
+            "proxy_tools_available": (bool, type(None)),
+            "proxy_error": (str, type(None)),
+            "error": (str, type(None)),
+            "error_code": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "github_get_auth_config output: token presence and non-secret GitHub MCP diagnostics."
+        ),
+    )
+
+
+def _github_list_tools_output_schema() -> Schema:
+    return Schema(
+        required={"success": bool},
+        optional={
+            "tools": (list, type(None)),
+            "count": (int, type(None)),
+            "proxy_stats": (dict, type(None)),
+            "error": (str, type(None)),
+            "error_code": (str, type(None)),
+            "suggestions": (list, type(None)),
+        },
+        allow_unknown=True,
+        description="github_list_tools output: available external GitHub MCP tools and proxy stats.",
+    )
+
+
+def _github_generic_output_schema(action: str) -> Schema:
+    return Schema(
+        required={"success": bool},
+        optional={
+            "error": (str, type(None)),
+            "error_code": (str, type(None)),
+            "action": (str, type(None)),
+            "tool": (str, type(None)),
+            "executed": (bool, type(None)),
+            "dry_run": (bool, type(None)),
+            "reused": (bool, type(None)),
+            "owner": (str, type(None)),
+            "repo": (str, type(None)),
+            "repository": (str, type(None)),
+            "proxy_stats": (dict, type(None)),
+            "result": (dict, list, str, int, float, bool, type(None)),
+            "items": (list, type(None)),
+            "count": (int, type(None)),
+            "proposed_payload": (dict, type(None)),
+            "suggestions": (list, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            f"github_{action} output: normalised GitHub proxy payload with guardrail metadata."
+        ),
+    )
+
+
 # Jira schema helpers
 def _jira_search_input_schema() -> Schema:
     return Schema(
@@ -12436,6 +12804,396 @@ _JIRA_ATTACHMENT_ALLOWED_MIME_TYPES_DEFAULT = frozenset(
         "application/json",
     }
 )
+_GITHUB_WRITE_CACHE: dict[str, dict[str, Any]] = {}
+_GITHUB_WRITE_CACHE_TTL_SEC = 3600.0
+_GITHUB_WRITE_CACHE_MAX = 200
+
+
+def _github_repo_allow_list() -> list[str]:
+    import os
+
+    raw = os.getenv("VON_GITHUB_REPO_ALLOW_LIST") or "Strong-AI-Lab/Von"
+    repos: list[str] = []
+    for part in raw.split(","):
+        candidate = str(part or "").strip().strip("/")
+        if not candidate or "/" not in candidate:
+            continue
+        owner, repo = candidate.split("/", 1)
+        normalised = f"{owner.strip().lower()}/{repo.strip().lower()}"
+        if not normalised or normalised not in repos:
+            repos.append(normalised)
+    return repos
+
+
+def _github_repo_key(owner: Any, repo: Any) -> str | None:
+    owner_text = str(owner).strip().lower() if isinstance(owner, str) else ""
+    repo_text = str(repo).strip().lower() if isinstance(repo, str) else ""
+    if not owner_text or not repo_text:
+        return None
+    return f"{owner_text}/{repo_text}"
+
+
+def _github_execute_mode_enabled() -> bool:
+    import os
+
+    return os.getenv("VON_INTERNAL_MCP_GITHUB_EXECUTE_MODE", "0").lower() in {
+        "1",
+        "true",
+    }
+
+
+def _github_write_guardrails(
+    *,
+    action: str,
+    repositories: Sequence[str],
+    dry_run: bool,
+    approved: bool,
+    execute: bool,
+) -> dict[str, Any] | None:
+    allowed = _github_repo_allow_list()
+    if not allowed:
+        return {
+            "success": False,
+            "error": "GitHub writes are blocked: repository allow-list is empty",
+            "error_code": "allowlist_missing",
+            "action": action,
+        }
+
+    for repository in repositories:
+        candidate = str(repository or "").strip().lower()
+        if not candidate:
+            return {
+                "success": False,
+                "error": "GitHub writes require owner/repo for allow-list checks",
+                "error_code": "repository_required",
+                "action": action,
+            }
+        if candidate not in allowed:
+            return {
+                "success": False,
+                "error": (
+                    f"GitHub writes are blocked for repository '{candidate}'. "
+                    f"Allowed: {', '.join(allowed)}"
+                ),
+                "error_code": "repository_not_allowlisted",
+                "repository": candidate,
+                "allowed_repositories": allowed,
+                "action": action,
+            }
+
+    if dry_run:
+        return None
+    if execute and _github_execute_mode_enabled():
+        return None
+    if approved:
+        return None
+    return {
+        "success": False,
+        "error": (
+            "Approval required for GitHub write. Set approved=true to confirm this write, "
+            "or run in execute mode (set VON_INTERNAL_MCP_GITHUB_EXECUTE_MODE=1 and pass execute=true)."
+        ),
+        "error_code": "approval_required",
+        "action": action,
+        "allowed_repositories": allowed,
+    }
+
+
+def _github_cache_get(tool: str, request_id: str) -> dict[str, Any] | None:
+    import time
+
+    key = f"{tool}:{request_id}"
+    record = _GITHUB_WRITE_CACHE.get(key)
+    if not isinstance(record, dict):
+        return None
+    ts = record.get("timestamp")
+    if not isinstance(ts, (int, float)):
+        return None
+    if (time.time() - float(ts)) > _GITHUB_WRITE_CACHE_TTL_SEC:
+        _GITHUB_WRITE_CACHE.pop(key, None)
+        return None
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    return dict(payload)
+
+
+def _github_cache_set(tool: str, request_id: str, payload: dict[str, Any]) -> None:
+    import time
+
+    if len(_GITHUB_WRITE_CACHE) >= _GITHUB_WRITE_CACHE_MAX:
+        oldest_key = None
+        oldest_ts = None
+        for key, record in _GITHUB_WRITE_CACHE.items():
+            ts = record.get("timestamp") if isinstance(record, dict) else None
+            if not isinstance(ts, (int, float)):
+                continue
+            if oldest_ts is None or float(ts) < oldest_ts:
+                oldest_ts = float(ts)
+                oldest_key = key
+        if oldest_key:
+            _GITHUB_WRITE_CACHE.pop(oldest_key, None)
+
+    _GITHUB_WRITE_CACHE[f"{tool}:{request_id}"] = {
+        "timestamp": time.time(),
+        "payload": dict(payload),
+    }
+
+
+def _github_clean_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _github_normalise_response(
+    *,
+    tool_name: str,
+    raw_result: Any,
+    proxy_stats: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    payload: dict[str, Any]
+    if isinstance(raw_result, dict):
+        payload = dict(raw_result)
+        payload.setdefault("success", True)
+    elif isinstance(raw_result, list):
+        payload = {"success": True, "items": list(raw_result), "count": len(raw_result)}
+    else:
+        payload = {"success": True, "result": raw_result}
+
+    payload.setdefault("tool", tool_name)
+    if isinstance(proxy_stats, Mapping):
+        payload.setdefault("proxy_stats", dict(proxy_stats))
+    return payload
+
+
+def _github_invoke_proxy_tool(tool_name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    from .github_proxy_mcp import GitHubProxyError, get_github_proxy
+
+    async def _async_call():
+        proxy = await get_github_proxy()
+        result = await proxy.call_tool(tool_name, dict(arguments))
+        return result, proxy.get_stats()
+
+    try:
+        raw_result, proxy_stats = _run_async_compat(_async_call)
+    except GitHubProxyError as exc:
+        return make_error_response(
+            "github_proxy_error",
+            str(exc),
+            details={"exception_type": "GitHubProxyError", "tool": tool_name},
+            suggestions=["Check GitHub MCP connectivity, command args, and token configuration"],
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        return make_error_response(
+            "github_proxy_error",
+            f"GitHub proxy invocation failed: {exc}",
+            details={"exception_type": type(exc).__name__, "tool": tool_name},
+            suggestions=["Check GitHub MCP server availability"],
+        )
+
+    return _github_normalise_response(
+        tool_name=tool_name,
+        raw_result=raw_result,
+        proxy_stats=proxy_stats if isinstance(proxy_stats, Mapping) else None,
+    )
+
+
+def _github_extract_owner_repo(kwargs: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    owner = _github_clean_text(kwargs.get("owner"))
+    repo = _github_clean_text(kwargs.get("repo"))
+    return owner, repo
+
+
+def _github_require_owner_repo(kwargs: Mapping[str, Any]) -> tuple[str, str] | dict[str, Any]:
+    owner, repo = _github_extract_owner_repo(kwargs)
+    if not owner or not repo:
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameters: owner and repo",
+            details={"missing": ["owner", "repo"]},
+            suggestions=["Provide GitHub repository owner and repo names"],
+        )
+    return owner, repo
+
+
+def _github_execute_write_tool(
+    *,
+    action: str,
+    proxy_tool_name: str,
+    owner: str,
+    repo: str,
+    dry_run: bool,
+    approved: bool,
+    execute: bool,
+    request_id: str | None,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    repository = _github_repo_key(owner, repo)
+    if not repository:
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameters: owner and repo",
+            details={"missing": ["owner", "repo"]},
+        )
+
+    guardrail_error = _github_write_guardrails(
+        action=action,
+        repositories=[repository],
+        dry_run=dry_run,
+        approved=approved,
+        execute=execute,
+    )
+    if guardrail_error is not None:
+        return guardrail_error
+
+    if isinstance(request_id, str) and request_id.strip() and not dry_run:
+        cached = _github_cache_get(proxy_tool_name, request_id.strip())
+        if cached is not None:
+            cached["reused"] = True
+            return cached
+
+    proposed_payload = dict(payload)
+    if dry_run:
+        return {
+            "success": True,
+            "dry_run": True,
+            "executed": False,
+            "action": action,
+            "owner": owner,
+            "repo": repo,
+            "repository": repository,
+            "proposed_payload": proposed_payload,
+        }
+
+    result = _github_invoke_proxy_tool(proxy_tool_name, proposed_payload)
+    if not isinstance(result, dict):
+        result = {"success": False, "error": "Unexpected GitHub proxy response shape"}
+
+    if result.get("success") is False:
+        result.setdefault("action", action)
+        result.setdefault("dry_run", False)
+        result.setdefault("executed", True)
+        result.setdefault("owner", owner)
+        result.setdefault("repo", repo)
+        result.setdefault("repository", repository)
+        return result
+
+    result = dict(result)
+    result.setdefault("success", True)
+    result["action"] = action
+    result["dry_run"] = False
+    result["executed"] = True
+    result["owner"] = owner
+    result["repo"] = repo
+    result["repository"] = repository
+    if isinstance(request_id, str) and request_id.strip():
+        _github_cache_set(proxy_tool_name, request_id.strip(), result)
+    return result
+
+
+def _github_get_auth_config(**kwargs):
+    import os
+    import shlex
+    from .github_proxy_mcp import GitHubProxyError, get_github_proxy
+
+    env = os.environ.copy()
+
+    def _clean(value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ('"', "'"):
+            cleaned = cleaned[1:-1].strip()
+        return cleaned or None
+
+    token_key = None
+    token: str | None = None
+    for candidate_key in ("GITHUB_PERSONAL_ACCESS_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"):
+        candidate_value = _clean(env.get(candidate_key))
+        if candidate_value:
+            token_key = candidate_key
+            token = candidate_value
+            break
+
+    command = str(os.getenv("VON_GITHUB_MCP_COMMAND") or "npx").strip() or "npx"
+    raw_args = os.getenv("VON_GITHUB_MCP_ARGS")
+    if isinstance(raw_args, str) and raw_args.strip():
+        args = shlex.split(raw_args.strip())
+    else:
+        args = ["-y", "@modelcontextprotocol/server-github"]
+
+    payload: dict[str, Any] = {
+        "success": True,
+        "token_present": bool(token),
+        "token_length": len(token) if token else 0,
+        "env_keys_used": {
+            "token": token_key,
+            "command": "VON_GITHUB_MCP_COMMAND" if os.getenv("VON_GITHUB_MCP_COMMAND") else None,
+            "args": "VON_GITHUB_MCP_ARGS" if os.getenv("VON_GITHUB_MCP_ARGS") else None,
+            "allow_list": "VON_GITHUB_REPO_ALLOW_LIST",
+            "execute_mode": "VON_INTERNAL_MCP_GITHUB_EXECUTE_MODE",
+        },
+        "allow_repositories": _github_repo_allow_list(),
+        "execute_mode_enabled": _github_execute_mode_enabled(),
+        "command": command,
+        "args": args,
+    }
+
+    async def _async_probe():
+        proxy = await get_github_proxy()
+        tools = await proxy.list_tools()
+        return tools, proxy.get_stats()
+
+    try:
+        tools, stats = _run_async_compat(_async_probe)
+        payload["proxy_tools_available"] = True
+        payload["proxy_tool_count"] = len(tools) if isinstance(tools, list) else 0
+        if isinstance(stats, Mapping):
+            payload["proxy_stats"] = dict(stats)
+    except GitHubProxyError as exc:
+        payload["proxy_tools_available"] = False
+        payload["proxy_error"] = str(exc)
+        payload["error"] = str(exc)
+        payload["error_code"] = "github_proxy_error"
+    except Exception as exc:  # pragma: no cover - defensive
+        payload["proxy_tools_available"] = False
+        payload["proxy_error"] = str(exc)
+        payload["error"] = str(exc)
+        payload["error_code"] = "github_proxy_error"
+    return payload
+
+
+def _github_list_tools(**kwargs):
+    from .github_proxy_mcp import GitHubProxyError, get_github_proxy
+
+    async def _async_list():
+        proxy = await get_github_proxy()
+        tools = await proxy.list_tools()
+        return tools, proxy.get_stats()
+
+    try:
+        tools, stats = _run_async_compat(_async_list)
+        return {
+            "success": True,
+            "tools": tools if isinstance(tools, list) else [],
+            "count": len(tools) if isinstance(tools, list) else 0,
+            "proxy_stats": dict(stats) if isinstance(stats, Mapping) else {},
+        }
+    except GitHubProxyError as exc:
+        return make_error_response(
+            "github_proxy_error",
+            str(exc),
+            details={"exception_type": "GitHubProxyError"},
+            suggestions=["Check GitHub MCP connectivity and authentication"],
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        return make_error_response(
+            "github_proxy_error",
+            f"GitHub tool listing failed: {exc}",
+            details={"exception_type": type(exc).__name__},
+        )
 
 
 def _jira_project_allow_list() -> list[str]:
@@ -12651,6 +13409,394 @@ def _jira_decode_attachment_bytes(content_base64: Any) -> bytes | None:
             return base64.urlsafe_b64decode(compact + padding)
         except (binascii.Error, ValueError):
             return None
+
+
+def _github_get_me(**kwargs):
+    return _github_invoke_proxy_tool("github_get_me", {})
+
+
+def _github_get_file_contents(**kwargs):
+    owner_repo = _github_require_owner_repo(kwargs)
+    if isinstance(owner_repo, dict):
+        return owner_repo
+    owner, repo = owner_repo
+    payload: dict[str, Any] = {"owner": owner, "repo": repo}
+    path = _github_clean_text(kwargs.get("path"))
+    if path is not None:
+        payload["path"] = path
+    ref = _github_clean_text(kwargs.get("ref"))
+    if ref is not None:
+        payload["ref"] = ref
+    sha = _github_clean_text(kwargs.get("sha"))
+    if sha is not None:
+        payload["sha"] = sha
+    return _github_invoke_proxy_tool("github_get_file_contents", payload)
+
+
+def _github_list_commits(**kwargs):
+    owner_repo = _github_require_owner_repo(kwargs)
+    if isinstance(owner_repo, dict):
+        return owner_repo
+    owner, repo = owner_repo
+    payload: dict[str, Any] = {"owner": owner, "repo": repo}
+    for field in ("sha", "author"):
+        value = _github_clean_text(kwargs.get(field))
+        if value is not None:
+            payload[field] = value
+    for field in ("page", "perPage"):
+        value = kwargs.get(field)
+        if isinstance(value, int):
+            payload[field] = value
+    return _github_invoke_proxy_tool("github_list_commits", payload)
+
+
+def _github_search_code(**kwargs):
+    query = _github_clean_text(kwargs.get("query"))
+    if not query:
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: query",
+            details={"missing": ["query"]},
+            suggestions=["Provide a GitHub code-search query string"],
+        )
+    payload: dict[str, Any] = {"query": query}
+    for field in ("sort", "order"):
+        value = _github_clean_text(kwargs.get(field))
+        if value is not None:
+            payload[field] = value
+    for field in ("page", "perPage"):
+        value = kwargs.get(field)
+        if isinstance(value, int):
+            payload[field] = value
+    return _github_invoke_proxy_tool("github_search_code", payload)
+
+
+def _github_list_pull_requests(**kwargs):
+    owner_repo = _github_require_owner_repo(kwargs)
+    if isinstance(owner_repo, dict):
+        return owner_repo
+    owner, repo = owner_repo
+    payload: dict[str, Any] = {"owner": owner, "repo": repo}
+    for field in ("state", "base", "head", "sort", "direction"):
+        value = _github_clean_text(kwargs.get(field))
+        if value is not None:
+            payload[field] = value
+    for field in ("page", "perPage"):
+        value = kwargs.get(field)
+        if isinstance(value, int):
+            payload[field] = value
+    return _github_invoke_proxy_tool("github_list_pull_requests", payload)
+
+
+def _github_pull_request_read(**kwargs):
+    owner_repo = _github_require_owner_repo(kwargs)
+    if isinstance(owner_repo, dict):
+        return owner_repo
+    owner, repo = owner_repo
+
+    pull_number = kwargs.get("pullNumber")
+    method = _github_clean_text(kwargs.get("method"))
+    if not isinstance(pull_number, int) or pull_number <= 0 or not method:
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameters: pullNumber (positive int) and method",
+            details={"missing": ["pullNumber", "method"]},
+            suggestions=[
+                "Provide pullNumber and method (e.g. get, get_files, get_status, get_diff)",
+            ],
+        )
+
+    payload: dict[str, Any] = {
+        "owner": owner,
+        "repo": repo,
+        "pullNumber": pull_number,
+        "method": method,
+    }
+    for field in ("page", "perPage"):
+        value = kwargs.get(field)
+        if isinstance(value, int):
+            payload[field] = value
+    return _github_invoke_proxy_tool("github_pull_request_read", payload)
+
+
+def _github_issue_read(**kwargs):
+    owner_repo = _github_require_owner_repo(kwargs)
+    if isinstance(owner_repo, dict):
+        return owner_repo
+    owner, repo = owner_repo
+
+    issue_number = kwargs.get("issue_number")
+    method = _github_clean_text(kwargs.get("method"))
+    if not isinstance(issue_number, int) or issue_number <= 0 or not method:
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameters: issue_number (positive int) and method",
+            details={"missing": ["issue_number", "method"]},
+            suggestions=["Provide method (e.g. get, get_comments, get_labels)"],
+        )
+
+    payload: dict[str, Any] = {
+        "owner": owner,
+        "repo": repo,
+        "issue_number": issue_number,
+        "method": method,
+    }
+    for field in ("page", "perPage"):
+        value = kwargs.get(field)
+        if isinstance(value, int):
+            payload[field] = value
+    return _github_invoke_proxy_tool("github_issue_read", payload)
+
+
+def _github_list_releases(**kwargs):
+    owner_repo = _github_require_owner_repo(kwargs)
+    if isinstance(owner_repo, dict):
+        return owner_repo
+    owner, repo = owner_repo
+    payload: dict[str, Any] = {"owner": owner, "repo": repo}
+    for field in ("page", "perPage"):
+        value = kwargs.get(field)
+        if isinstance(value, int):
+            payload[field] = value
+    return _github_invoke_proxy_tool("github_list_releases", payload)
+
+
+def _github_get_latest_release(**kwargs):
+    owner_repo = _github_require_owner_repo(kwargs)
+    if isinstance(owner_repo, dict):
+        return owner_repo
+    owner, repo = owner_repo
+    return _github_invoke_proxy_tool(
+        "github_get_latest_release",
+        {"owner": owner, "repo": repo},
+    )
+
+
+def _github_list_tags(**kwargs):
+    owner_repo = _github_require_owner_repo(kwargs)
+    if isinstance(owner_repo, dict):
+        return owner_repo
+    owner, repo = owner_repo
+    payload: dict[str, Any] = {"owner": owner, "repo": repo}
+    for field in ("page", "perPage"):
+        value = kwargs.get(field)
+        if isinstance(value, int):
+            payload[field] = value
+    return _github_invoke_proxy_tool("github_list_tags", payload)
+
+
+def _github_list_branches(**kwargs):
+    owner_repo = _github_require_owner_repo(kwargs)
+    if isinstance(owner_repo, dict):
+        return owner_repo
+    owner, repo = owner_repo
+    payload: dict[str, Any] = {"owner": owner, "repo": repo}
+    for field in ("page", "perPage"):
+        value = kwargs.get(field)
+        if isinstance(value, int):
+            payload[field] = value
+    return _github_invoke_proxy_tool("github_list_branches", payload)
+
+
+def _github_create_branch(**kwargs):
+    owner_repo = _github_require_owner_repo(kwargs)
+    if isinstance(owner_repo, dict):
+        return owner_repo
+    owner, repo = owner_repo
+    branch = _github_clean_text(kwargs.get("branch"))
+    if not branch:
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: branch",
+            details={"missing": ["branch"]},
+        )
+
+    payload: dict[str, Any] = {"owner": owner, "repo": repo, "branch": branch}
+    from_branch = _github_clean_text(kwargs.get("from_branch"))
+    if from_branch is not None:
+        payload["from_branch"] = from_branch
+
+    return _github_execute_write_tool(
+        action="create_branch",
+        proxy_tool_name="github_create_branch",
+        owner=owner,
+        repo=repo,
+        dry_run=bool(kwargs.get("dry_run", True)),
+        approved=bool(kwargs.get("approved", False)),
+        execute=bool(kwargs.get("execute", False)),
+        request_id=_github_clean_text(kwargs.get("request_id")),
+        payload=payload,
+    )
+
+
+def _github_create_or_update_file(**kwargs):
+    owner_repo = _github_require_owner_repo(kwargs)
+    if isinstance(owner_repo, dict):
+        return owner_repo
+    owner, repo = owner_repo
+
+    branch = _github_clean_text(kwargs.get("branch"))
+    path = _github_clean_text(kwargs.get("path"))
+    message = _github_clean_text(kwargs.get("message"))
+    content = kwargs.get("content")
+    if (
+        not branch
+        or not path
+        or not message
+        or not isinstance(content, str)
+        or content == ""
+    ):
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameters: branch, path, message, content",
+            details={"missing": ["branch", "path", "message", "content"]},
+        )
+
+    payload: dict[str, Any] = {
+        "owner": owner,
+        "repo": repo,
+        "branch": branch,
+        "path": path,
+        "message": message,
+        "content": content,
+    }
+    sha = _github_clean_text(kwargs.get("sha"))
+    if sha is not None:
+        payload["sha"] = sha
+
+    return _github_execute_write_tool(
+        action="create_or_update_file",
+        proxy_tool_name="github_create_or_update_file",
+        owner=owner,
+        repo=repo,
+        dry_run=bool(kwargs.get("dry_run", True)),
+        approved=bool(kwargs.get("approved", False)),
+        execute=bool(kwargs.get("execute", False)),
+        request_id=_github_clean_text(kwargs.get("request_id")),
+        payload=payload,
+    )
+
+
+def _github_create_pull_request(**kwargs):
+    owner_repo = _github_require_owner_repo(kwargs)
+    if isinstance(owner_repo, dict):
+        return owner_repo
+    owner, repo = owner_repo
+
+    title = _github_clean_text(kwargs.get("title"))
+    head = _github_clean_text(kwargs.get("head"))
+    base = _github_clean_text(kwargs.get("base"))
+    if not title or not head or not base:
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameters: title, head, base",
+            details={"missing": ["title", "head", "base"]},
+        )
+
+    payload: dict[str, Any] = {
+        "owner": owner,
+        "repo": repo,
+        "title": title,
+        "head": head,
+        "base": base,
+    }
+    body = kwargs.get("body")
+    if isinstance(body, str):
+        payload["body"] = body
+    for field in ("draft", "maintainer_can_modify"):
+        value = kwargs.get(field)
+        if isinstance(value, bool):
+            payload[field] = value
+
+    return _github_execute_write_tool(
+        action="create_pull_request",
+        proxy_tool_name="github_create_pull_request",
+        owner=owner,
+        repo=repo,
+        dry_run=bool(kwargs.get("dry_run", True)),
+        approved=bool(kwargs.get("approved", False)),
+        execute=bool(kwargs.get("execute", False)),
+        request_id=_github_clean_text(kwargs.get("request_id")),
+        payload=payload,
+    )
+
+
+def _github_update_pull_request(**kwargs):
+    owner_repo = _github_require_owner_repo(kwargs)
+    if isinstance(owner_repo, dict):
+        return owner_repo
+    owner, repo = owner_repo
+
+    pull_number = kwargs.get("pullNumber")
+    if not isinstance(pull_number, int) or pull_number <= 0:
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: pullNumber (positive int)",
+            details={"missing": ["pullNumber"]},
+        )
+
+    payload: dict[str, Any] = {"owner": owner, "repo": repo, "pullNumber": pull_number}
+    for field in ("title", "body", "base", "state"):
+        value = _github_clean_text(kwargs.get(field))
+        if value is not None:
+            payload[field] = value
+    for field in ("draft", "maintainer_can_modify"):
+        value = kwargs.get(field)
+        if isinstance(value, bool):
+            payload[field] = value
+    reviewers = kwargs.get("reviewers")
+    if isinstance(reviewers, list):
+        payload["reviewers"] = [str(item) for item in reviewers if str(item).strip()]
+
+    return _github_execute_write_tool(
+        action="update_pull_request",
+        proxy_tool_name="github_update_pull_request",
+        owner=owner,
+        repo=repo,
+        dry_run=bool(kwargs.get("dry_run", True)),
+        approved=bool(kwargs.get("approved", False)),
+        execute=bool(kwargs.get("execute", False)),
+        request_id=_github_clean_text(kwargs.get("request_id")),
+        payload=payload,
+    )
+
+
+def _github_create_pull_request_with_copilot(**kwargs):
+    owner_repo = _github_require_owner_repo(kwargs)
+    if isinstance(owner_repo, dict):
+        return owner_repo
+    owner, repo = owner_repo
+
+    title = _github_clean_text(kwargs.get("title"))
+    problem_statement = _github_clean_text(kwargs.get("problem_statement"))
+    if not title or not problem_statement:
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameters: title and problem_statement",
+            details={"missing": ["title", "problem_statement"]},
+        )
+
+    payload: dict[str, Any] = {
+        "owner": owner,
+        "repo": repo,
+        "title": title,
+        "problem_statement": problem_statement,
+    }
+    base_ref = _github_clean_text(kwargs.get("base_ref"))
+    if base_ref is not None:
+        payload["base_ref"] = base_ref
+
+    return _github_execute_write_tool(
+        action="create_pull_request_with_copilot",
+        proxy_tool_name="github_create_pull_request_with_copilot",
+        owner=owner,
+        repo=repo,
+        dry_run=bool(kwargs.get("dry_run", True)),
+        approved=bool(kwargs.get("approved", False)),
+        execute=bool(kwargs.get("execute", False)),
+        request_id=_github_clean_text(kwargs.get("request_id")),
+        payload=payload,
+    )
 
 
 def _jira_search(**kwargs):
@@ -16556,6 +17702,40 @@ def build_default_catalogue() -> MethodCatalogue:
     jira_hygiene_emit_audit_output_schema = _jira_generic_output_schema(
         "hygiene_emit_audit"
     )
+    github_get_auth_config_output_schema = _github_get_auth_config_output_schema()
+    github_list_tools_output_schema = _github_list_tools_output_schema()
+    github_get_me_output_schema = _github_generic_output_schema("get_me")
+    github_get_file_contents_output_schema = _github_generic_output_schema(
+        "get_file_contents"
+    )
+    github_list_commits_output_schema = _github_generic_output_schema("list_commits")
+    github_search_code_output_schema = _github_generic_output_schema("search_code")
+    github_list_pull_requests_output_schema = _github_generic_output_schema(
+        "list_pull_requests"
+    )
+    github_pull_request_read_output_schema = _github_generic_output_schema(
+        "pull_request_read"
+    )
+    github_issue_read_output_schema = _github_generic_output_schema("issue_read")
+    github_list_releases_output_schema = _github_generic_output_schema("list_releases")
+    github_get_latest_release_output_schema = _github_generic_output_schema(
+        "get_latest_release"
+    )
+    github_list_tags_output_schema = _github_generic_output_schema("list_tags")
+    github_list_branches_output_schema = _github_generic_output_schema("list_branches")
+    github_create_branch_output_schema = _github_generic_output_schema("create_branch")
+    github_create_or_update_file_output_schema = _github_generic_output_schema(
+        "create_or_update_file"
+    )
+    github_create_pull_request_output_schema = _github_generic_output_schema(
+        "create_pull_request"
+    )
+    github_update_pull_request_output_schema = _github_generic_output_schema(
+        "update_pull_request"
+    )
+    github_create_pull_request_with_copilot_output_schema = _github_generic_output_schema(
+        "create_pull_request_with_copilot"
+    )
     task_create_output_schema = _task_generic_output_schema("create")
     task_get_output_schema = _task_generic_output_schema("get")
     task_list_output_schema = _task_generic_output_schema("list")
@@ -17470,6 +18650,185 @@ def build_default_catalogue() -> MethodCatalogue:
             description=(
                 "Force reindex a specific concept's text relations into RAG for the current namespace. "
                 "Useful after bulk edits or when RAG appears stale."
+            ),
+        ),
+        # GitHub MCP tools
+        MethodDefinition(
+            name="github_get_auth_config",
+            handler=_github_get_auth_config,
+            input_schema=_github_get_auth_config_input_schema(),
+            output_schema=github_get_auth_config_output_schema,
+            category="read",
+            timeout_sec=12.0,
+            description=(
+                "Inspect GitHub MCP auth/config state (token presence, allow-list, execute mode, command args) "
+                "without exposing secrets. Also probes tool availability."
+            ),
+        ),
+        MethodDefinition(
+            name="github_list_tools",
+            handler=_github_list_tools,
+            input_schema=_github_list_tools_input_schema(),
+            output_schema=github_list_tools_output_schema,
+            category="read",
+            timeout_sec=20.0,
+            description="List tools exposed by the configured external GitHub MCP server.",
+        ),
+        MethodDefinition(
+            name="github_get_me",
+            handler=_github_get_me,
+            input_schema=_github_get_me_input_schema(),
+            output_schema=github_get_me_output_schema,
+            category="read",
+            timeout_sec=20.0,
+            description="Get details of the authenticated GitHub user.",
+        ),
+        MethodDefinition(
+            name="github_get_file_contents",
+            handler=_github_get_file_contents,
+            input_schema=_github_get_file_contents_input_schema(),
+            output_schema=github_get_file_contents_output_schema,
+            category="read",
+            timeout_sec=30.0,
+            description="Get the contents of a file or directory from a GitHub repository.",
+        ),
+        MethodDefinition(
+            name="github_list_commits",
+            handler=_github_list_commits,
+            input_schema=_github_list_commits_input_schema(),
+            output_schema=github_list_commits_output_schema,
+            category="read",
+            timeout_sec=30.0,
+            description="List commits for a branch, tag, or repository default branch.",
+        ),
+        MethodDefinition(
+            name="github_search_code",
+            handler=_github_search_code,
+            input_schema=_github_search_code_input_schema(),
+            output_schema=github_search_code_output_schema,
+            category="read",
+            timeout_sec=30.0,
+            description="Search code across GitHub repositories using GitHub search syntax.",
+        ),
+        MethodDefinition(
+            name="github_list_pull_requests",
+            handler=_github_list_pull_requests,
+            input_schema=_github_list_pull_requests_input_schema(),
+            output_schema=github_list_pull_requests_output_schema,
+            category="read",
+            timeout_sec=30.0,
+            description="List pull requests for a GitHub repository.",
+        ),
+        MethodDefinition(
+            name="github_pull_request_read",
+            handler=_github_pull_request_read,
+            input_schema=_github_pull_request_read_input_schema(),
+            output_schema=github_pull_request_read_output_schema,
+            category="read",
+            timeout_sec=30.0,
+            description="Read pull request details/files/reviews/status for a repository pull request.",
+        ),
+        MethodDefinition(
+            name="github_issue_read",
+            handler=_github_issue_read,
+            input_schema=_github_issue_read_input_schema(),
+            output_schema=github_issue_read_output_schema,
+            category="read",
+            timeout_sec=30.0,
+            description="Read issue details/comments/labels for a repository issue.",
+        ),
+        MethodDefinition(
+            name="github_list_releases",
+            handler=_github_list_releases,
+            input_schema=_github_list_releases_input_schema(),
+            output_schema=github_list_releases_output_schema,
+            category="read",
+            timeout_sec=20.0,
+            description="List releases in a GitHub repository.",
+        ),
+        MethodDefinition(
+            name="github_get_latest_release",
+            handler=_github_get_latest_release,
+            input_schema=_github_get_latest_release_input_schema(),
+            output_schema=github_get_latest_release_output_schema,
+            category="read",
+            timeout_sec=20.0,
+            description="Get the latest release in a GitHub repository.",
+        ),
+        MethodDefinition(
+            name="github_list_tags",
+            handler=_github_list_tags,
+            input_schema=_github_list_tags_input_schema(),
+            output_schema=github_list_tags_output_schema,
+            category="read",
+            timeout_sec=20.0,
+            description="List tags in a GitHub repository.",
+        ),
+        MethodDefinition(
+            name="github_list_branches",
+            handler=_github_list_branches,
+            input_schema=_github_list_branches_input_schema(),
+            output_schema=github_list_branches_output_schema,
+            category="read",
+            timeout_sec=20.0,
+            description="List branches in a GitHub repository.",
+        ),
+        MethodDefinition(
+            name="github_create_branch",
+            handler=_github_create_branch,
+            input_schema=_github_create_branch_input_schema(),
+            output_schema=github_create_branch_output_schema,
+            category="write",
+            timeout_sec=30.0,
+            description=(
+                "Create a branch in a GitHub repository with write guardrails "
+                "(dry-run by default, repository allow-list, explicit approval/execute mode)."
+            ),
+        ),
+        MethodDefinition(
+            name="github_create_or_update_file",
+            handler=_github_create_or_update_file,
+            input_schema=_github_create_or_update_file_input_schema(),
+            output_schema=github_create_or_update_file_output_schema,
+            category="write",
+            timeout_sec=35.0,
+            description=(
+                "Create or update a file in a GitHub repository with write guardrails "
+                "(dry-run by default, repository allow-list, explicit approval/execute mode)."
+            ),
+        ),
+        MethodDefinition(
+            name="github_create_pull_request",
+            handler=_github_create_pull_request,
+            input_schema=_github_create_pull_request_input_schema(),
+            output_schema=github_create_pull_request_output_schema,
+            category="write",
+            timeout_sec=35.0,
+            description=(
+                "Create a pull request with write guardrails (dry-run default plus explicit approval controls)."
+            ),
+        ),
+        MethodDefinition(
+            name="github_update_pull_request",
+            handler=_github_update_pull_request,
+            input_schema=_github_update_pull_request_input_schema(),
+            output_schema=github_update_pull_request_output_schema,
+            category="write",
+            timeout_sec=35.0,
+            description=(
+                "Update pull request metadata with write guardrails (dry-run default plus explicit approval controls)."
+            ),
+        ),
+        MethodDefinition(
+            name="github_create_pull_request_with_copilot",
+            handler=_github_create_pull_request_with_copilot,
+            input_schema=_github_create_pull_request_with_copilot_input_schema(),
+            output_schema=github_create_pull_request_with_copilot_output_schema,
+            category="write",
+            timeout_sec=35.0,
+            description=(
+                "Delegate implementation to GitHub Copilot coding agent with write guardrails "
+                "(dry-run by default plus approval/execute controls)."
             ),
         ),
         # Jira MCP tools

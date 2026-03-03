@@ -262,6 +262,8 @@ def schema_to_json_schema(schema: Schema) -> dict[str, Any]:
 def _infer_tool_family(tool_name: str) -> str:
     if tool_name.startswith("jira_"):
         return "jira"
+    if tool_name.startswith("github_"):
+        return "github"
     if tool_name.startswith("workflow_"):
         return "workflow"
     if tool_name.startswith("gmail_"):

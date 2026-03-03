@@ -108,6 +108,15 @@ _NON_FORMAL_STAGE_SPECS: tuple[_StageSpec, ...] = (
         runtime_aliases=("buttonify",),
     ),
     _StageSpec(
+        stage_id="response_finalising",
+        stage_label="Finalising response",
+        order=128,
+        stage_kind="non_formal",
+        boundary_type="postprocess",
+        stage_concept_id="#V#conversation_turn_stage_response_finalising",
+        runtime_aliases=("response_finalising",),
+    ),
+    _StageSpec(
         stage_id="plain_response",
         stage_label="Plain-response routing",
         order=130,

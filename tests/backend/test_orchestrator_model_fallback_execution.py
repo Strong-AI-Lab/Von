@@ -183,3 +183,43 @@ def test_run_llm_with_fallbacks_records_attempt_chain_and_fallback_metadata(
     assert attempts[1]["status"] == "succeeded"
 
     assert recorded_calls[0]["note"] == "candidate reachability probe failed; trying fallback"
+
+
+def test_probe_model_candidate_reachability_uses_failure_cooldown_cache(
+    monkeypatch,
+) -> None:
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _StubGateway()))
+    orchestrator._provider_probe_cooldown_seconds = 120
+
+    request_calls = {"count": 0}
+
+    class _FailingResponse:
+        def raise_for_status(self) -> None:
+            raise RuntimeError("connection refused")
+
+    def _fake_get(*_args: Any, **_kwargs: Any) -> _FailingResponse:
+        request_calls["count"] += 1
+        return _FailingResponse()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.requests.get",
+        _fake_get,
+    )
+
+    telemetry = {
+        "provider": "ollama",
+        "host": "http://localhost:11434",
+        "model": "granite3.3:2b",
+    }
+    first = orchestrator._probe_model_candidate_reachability(telemetry=telemetry)
+    second = orchestrator._probe_model_candidate_reachability(telemetry=telemetry)
+
+    assert isinstance(first, Mapping)
+    assert first.get("reachable") is False
+    assert first.get("cooldown_hit") is not True
+
+    assert isinstance(second, Mapping)
+    assert second.get("reachable") is False
+    assert second.get("cooldown_hit") is True
+    assert second.get("cached") is True
+    assert request_calls["count"] == 1

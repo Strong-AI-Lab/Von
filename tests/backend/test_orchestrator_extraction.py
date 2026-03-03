@@ -59,6 +59,14 @@ class _ChecklistPromptToolGateway(_DummyGateway):
         }
 
 
+class _FileCopyPromptToolGateway(_DummyGateway):
+    def describe_methods(self):
+        return {
+            "read_file_copy": {"description": "read a file copy concept"},
+            "fetch_concept": {"description": "fetch concept"},
+        }
+
+
 class _RelationshipGateway(_DummyGateway):
     def describe_methods(self):
         return {"add_relationship": {"description": "relationship write"}}
@@ -1121,7 +1129,11 @@ def test_derive_missing_prompt_requirements_tracks_missing_fetch_targets():
         "#V#workflow_mapping_tool_field_concept_id_to_validated_type_id",
     ]
 
-    missing_tools, missing_fetch_ids = orchestrator._derive_missing_prompt_requirements(
+    (
+        missing_tools,
+        missing_fetch_ids,
+        missing_read_file_copy_ids,
+    ) = orchestrator._derive_missing_prompt_requirements(
         required_tools=["fetch_concept"],
         required_fetch_concept_ids=required_fetch_ids,
         tool_invocations=[
@@ -1138,6 +1150,7 @@ def test_derive_missing_prompt_requirements_tracks_missing_fetch_targets():
     assert missing_fetch_ids == [
         "#V#workflow_mapping_tool_field_concept_id_to_validated_type_id"
     ]
+    assert missing_read_file_copy_ids == []
     reason = orchestrator._build_missing_prompt_retry_reason(
         missing_tools=missing_tools,
         missing_fetch_concept_ids=missing_fetch_ids,
@@ -1147,6 +1160,52 @@ def test_derive_missing_prompt_requirements_tracks_missing_fetch_targets():
         "fetch_concept; "
         "fetch_concept targets: #V#workflow_mapping_tool_field_concept_id_to_validated_type_id"
     )
+
+
+def test_derive_prompt_tool_requirements_detects_concept_verification_intent():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=_ChecklistPromptToolGateway()  # type: ignore[arg-type]
+    )
+
+    requirements = orchestrator._derive_prompt_tool_requirements(
+        "Can you verify whether #V#workflow_mapping_target_type_id_to_concept_id_param exists?",
+        method_catalogue=orchestrator._gateway.describe_methods(),
+    )
+
+    assert "fetch_concept" in (requirements.get("required_tools") or [])
+    assert requirements.get("required_fetch_concept_ids") == [
+        "#V#workflow_mapping_target_type_id_to_concept_id_param"
+    ]
+
+
+def test_run_forces_read_file_copy_when_prompt_references_file_copy_concept():
+    gateway = _FileCopyPromptToolGateway()
+    llm = _RecorderLLM(
+        [
+            "I should inspect the uploaded file first.",
+            "File copy inspected.",
+        ]
+    )
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway,  # type: ignore[arg-type]
+        max_tool_invocations=2,
+    )
+
+    result = orchestrator.run(
+        prompt=(
+            "Please review uploaded file #V#computer_file_copy_case_1 and summarise key points."
+        ),
+        context=None,
+        llm_client=llm,
+        model="primary-model",
+        user_namespace="#V#user",
+    )
+
+    called_tools = [tool for tool, _ in gateway.calls]
+    assert called_tools.count("read_file_copy") == 1
+    read_payload = next(payload for tool, payload in gateway.calls if tool == "read_file_copy")
+    assert read_payload.get("concept_id") == "#V#computer_file_copy_case_1"
+    assert result.response_text == "File copy inspected."
 
 
 def test_run_forces_checklist_tools_when_retry_response_has_no_tool_json():

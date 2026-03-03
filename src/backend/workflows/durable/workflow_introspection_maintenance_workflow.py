@@ -16,6 +16,7 @@ access so maintenance remains aligned with Vontology-first operations.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import logging
 import re
 from threading import Lock
@@ -45,6 +46,20 @@ _GUARDRAIL_MARKER = "WORKFLOW MAINTENANCE GUARDRAIL"
 _DEFAULT_LANGUAGE = "en-NZ"
 _DEFAULT_MAX_PROMPT_CHARS = 16_000
 _DEFAULT_OPERATION_CAP = 8
+_DEFAULT_GITHUB_REPOSITORY = "Strong-AI-Lab/Von"
+_DEFAULT_JIRA_PROJECT_KEY = "JVNAUTOSCI"
+_DEFAULT_JIRA_ISSUE_TYPE = "Task"
+_MAX_GITHUB_EVIDENCE_PATHS = 3
+_MAX_GITHUB_EVIDENCE_PREVIEW_CHARS = 1200
+_SELF_DIAGNOSIS_LABELS: tuple[str, ...] = (
+    "workflow-self-diagnosis",
+    "github-readonly",
+    "workflow-introspection",
+)
+_SELF_DIAGNOSIS_TOOL_NAME = "__jira_self_diagnosis_upsert__"
+_SOURCE_PATH_PATTERN = re.compile(
+    r"((?:src|tests|docs)/[A-Za-z0-9_.\-/]+\.(?:py|md|json|yml|yaml|ts|js|tsx|jsx))"
+)
 
 _ABSOLUTE_TERMS: tuple[str, ...] = (
     "always",
@@ -183,6 +198,412 @@ def _normalise_prompt_lookup_candidates(namespace: str | None) -> list[str]:
         seen.add(item)
         deduped.append(item)
     return deduped
+
+
+def _normalise_repository_from_text(value: Any) -> tuple[str | None, str | None, str | None]:
+    text = _normalise_text(value)
+    if not text:
+        return None, None, None
+    cleaned = text.strip().strip("/")
+    if "/" not in cleaned:
+        return None, None, None
+    owner, repo = cleaned.split("/", 1)
+    owner_clean = _normalise_text(owner)
+    repo_clean = _normalise_text(repo)
+    if not owner_clean or not repo_clean:
+        return None, None, None
+    return owner_clean, repo_clean, f"{owner_clean}/{repo_clean}"
+
+
+def _resolve_github_repository(
+    maintenance_context: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> tuple[str | None, str | None, str | None]:
+    for owner_key, repo_key in (
+        ("github_owner", "github_repo"),
+        ("owner", "repo"),
+    ):
+        owner = _normalise_text(maintenance_context.get(owner_key))
+        repo = _normalise_text(maintenance_context.get(repo_key))
+        if owner and repo:
+            return owner, repo, f"{owner}/{repo}"
+
+    for key in ("github_repository", "repository"):
+        owner, repo, repository = _normalise_repository_from_text(maintenance_context.get(key))
+        if repository:
+            return owner, repo, repository
+
+    incident_text = _incident_text_from_evidence(evidence)
+    if incident_text:
+        repo_match = re.search(r"\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\b", incident_text)
+        if repo_match:
+            owner, repo, repository = _normalise_repository_from_text(repo_match.group(1))
+            if repository:
+                return owner, repo, repository
+
+    try:
+        import os
+
+        raw_allow_list = os.getenv("VON_GITHUB_REPO_ALLOW_LIST") or _DEFAULT_GITHUB_REPOSITORY
+        first_repo = _normalise_text(raw_allow_list.split(",")[0] if raw_allow_list else None)
+        owner, repo, repository = _normalise_repository_from_text(first_repo)
+        if repository:
+            return owner, repo, repository
+    except Exception:
+        pass
+
+    owner, repo, repository = _normalise_repository_from_text(_DEFAULT_GITHUB_REPOSITORY)
+    return owner, repo, repository
+
+
+def _extract_candidate_source_paths(*texts: str) -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for text in texts:
+        for match in _SOURCE_PATH_PATTERN.finditer(str(text or "")):
+            candidate = _normalise_text(match.group(1))
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            paths.append(candidate)
+            if len(paths) >= _MAX_GITHUB_EVIDENCE_PATHS:
+                return paths
+    return paths
+
+
+def _summarise_github_file_content(payload: Mapping[str, Any]) -> dict[str, Any]:
+    text_preview: str | None = None
+    if isinstance(payload.get("content"), str):
+        text_preview = payload.get("content")
+    elif isinstance(payload.get("text"), str):
+        text_preview = payload.get("text")
+    elif isinstance(payload.get("result"), Mapping):
+        result = payload.get("result")
+        if isinstance(result, Mapping) and isinstance(result.get("content"), str):
+            text_preview = result.get("content")
+
+    preview = ""
+    if isinstance(text_preview, str):
+        preview = text_preview[:_MAX_GITHUB_EVIDENCE_PREVIEW_CHARS]
+
+    return {
+        "path": payload.get("path"),
+        "sha": payload.get("sha"),
+        "size": payload.get("size"),
+        "preview": preview,
+    }
+
+
+def _collect_github_evidence(
+    maintenance_context: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    owner, repo, repository = _resolve_github_repository(maintenance_context, evidence)
+    payload: dict[str, Any] = {
+        "repository": repository,
+        "owner": owner,
+        "repo": repo,
+        "auth": _invoke_mcp_tool("github_get_auth_config", {}),
+        "latest_commits": {},
+        "open_pull_requests": {},
+        "file_evidence": [],
+        "errors": [],
+    }
+
+    if not owner or not repo:
+        payload["errors"].append("repository_resolution_failed")
+        payload["success"] = False
+        return payload
+
+    commits = _invoke_mcp_tool(
+        "github_list_commits",
+        {"owner": owner, "repo": repo, "perPage": 5},
+    )
+    payload["latest_commits"] = commits
+    if not bool(commits.get("success")):
+        payload["errors"].append("github_list_commits_failed")
+
+    pull_requests = _invoke_mcp_tool(
+        "github_list_pull_requests",
+        {
+            "owner": owner,
+            "repo": repo,
+            "state": "open",
+            "sort": "updated",
+            "direction": "desc",
+            "perPage": 5,
+        },
+    )
+    payload["open_pull_requests"] = pull_requests
+    if not bool(pull_requests.get("success")):
+        payload["errors"].append("github_list_pull_requests_failed")
+
+    incident_text = _incident_text_from_evidence(evidence)
+    prompt_preview = _normalise_text(
+        _coerce_mapping(evidence.get("turn_execution")).get("prompt_preview")
+    ) or ""
+    paths = _extract_candidate_source_paths(incident_text, prompt_preview)
+    for source_path in paths:
+        file_result = _invoke_mcp_tool(
+            "github_get_file_contents",
+            {"owner": owner, "repo": repo, "path": source_path},
+        )
+        summary = {"path": source_path, "success": bool(file_result.get("success"))}
+        if bool(file_result.get("success")):
+            summary.update(_summarise_github_file_content(file_result))
+        else:
+            summary["error"] = file_result.get("error")
+            summary["error_code"] = file_result.get("error_code")
+            payload["errors"].append(f"github_get_file_contents_failed:{source_path}")
+        payload["file_evidence"].append(summary)
+
+    auth_payload = _coerce_mapping(payload.get("auth"))
+    auth_success = bool(auth_payload.get("success"))
+    tools_available = bool(auth_payload.get("proxy_tools_available", False))
+    payload["success"] = auth_success and tools_available and not payload["errors"]
+    if not auth_success:
+        payload["errors"].append("github_auth_probe_failed")
+    elif not tools_available:
+        payload["errors"].append("github_tools_unavailable")
+    return payload
+
+
+def _diagnosis_cause_ids(diagnosis: Mapping[str, Any]) -> list[str]:
+    cause_ids: list[str] = []
+    for row in _coerce_mapping_list(diagnosis.get("root_causes"), max_items=50):
+        cause_id = _normalise_text(row.get("cause_id"))
+        if cause_id and cause_id not in cause_ids:
+            cause_ids.append(cause_id)
+    return cause_ids
+
+
+def _build_self_diagnosis_fingerprint(
+    *,
+    maintenance_context: Mapping[str, Any],
+    diagnosis: Mapping[str, Any],
+    github_evidence: Mapping[str, Any],
+) -> str:
+    fingerprint_parts = [
+        _normalise_text(maintenance_context.get("selected_workflow_id")) or "",
+        _normalise_text(maintenance_context.get("request_id")) or "",
+        _normalise_text(github_evidence.get("repository")) or "",
+        ",".join(sorted(_diagnosis_cause_ids(diagnosis))),
+    ]
+    canonical = "|".join(fingerprint_parts).lower()
+    return hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def _extract_jira_issue_key(payload: Mapping[str, Any]) -> str | None:
+    for key in ("issue_key", "key"):
+        value = _normalise_text(payload.get(key))
+        if value:
+            return value
+    result = payload.get("result")
+    if isinstance(result, Mapping):
+        for key in ("issue_key", "key"):
+            value = _normalise_text(result.get(key))
+            if value:
+                return value
+    return None
+
+
+def _extract_jira_search_issue_keys(payload: Mapping[str, Any]) -> list[str]:
+    issues = payload.get("issues")
+    if not isinstance(issues, list):
+        result = payload.get("result")
+        if isinstance(result, Mapping) and isinstance(result.get("issues"), list):
+            issues = result.get("issues")
+    if not isinstance(issues, list):
+        return []
+    keys: list[str] = []
+    for issue in issues:
+        if not isinstance(issue, Mapping):
+            continue
+        key = _normalise_text(issue.get("key"))
+        if key and key not in keys:
+            keys.append(key)
+    return keys
+
+
+def _extract_jira_account_id(payload: Mapping[str, Any]) -> str | None:
+    account_id = _normalise_text(payload.get("accountId"))
+    if account_id:
+        return account_id
+    user = payload.get("user")
+    if isinstance(user, Mapping):
+        return _normalise_text(user.get("accountId"))
+    result = payload.get("result")
+    if isinstance(result, Mapping):
+        account_id = _normalise_text(result.get("accountId"))
+        if account_id:
+            return account_id
+        user = result.get("user")
+        if isinstance(user, Mapping):
+            return _normalise_text(user.get("accountId"))
+    return None
+
+
+def _build_jira_remediation_summary(
+    diagnosis: Mapping[str, Any],
+    maintenance_context: Mapping[str, Any],
+) -> str:
+    cause_ids = _diagnosis_cause_ids(diagnosis)
+    cause_fragment = ", ".join(cause_ids[:2]) if cause_ids else "unknown root cause"
+    workflow_id = _normalise_text(maintenance_context.get("selected_workflow_id")) or "workflow"
+    return f"Workflow self-diagnosis remediation: {cause_fragment} ({workflow_id})"
+
+
+def _build_jira_remediation_description(
+    *,
+    maintenance_context: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    diagnosis: Mapping[str, Any],
+    github_evidence: Mapping[str, Any],
+    fingerprint: str,
+) -> str:
+    incident_text = _incident_text_from_evidence(evidence) or "No incident text provided."
+    cause_ids = _diagnosis_cause_ids(diagnosis)
+    github_errors: list[str] = []
+    errors = github_evidence.get("errors")
+    if isinstance(errors, list):
+        github_errors = [str(item) for item in errors if isinstance(item, str)]
+    lines = [
+        "Generated by Codex on behalf of Michael Witbrock.",
+        "",
+        f"Self-diagnosis fingerprint: {fingerprint}",
+        f"Request ID: {_normalise_text(maintenance_context.get('request_id')) or 'unknown'}",
+        f"Selected workflow: {_normalise_text(maintenance_context.get('selected_workflow_id')) or 'unknown'}",
+        f"Repository (read-only evidence): {_normalise_text(github_evidence.get('repository')) or 'unknown'}",
+        "",
+        "Incident summary:",
+        incident_text[:1200],
+        "",
+        "Root-cause IDs:",
+        ", ".join(cause_ids) if cause_ids else "none",
+        "",
+        "GitHub evidence status:",
+        f"success={bool(github_evidence.get('success'))}; errors={', '.join(github_errors) if github_errors else 'none'}",
+        "",
+        "Acceptance checks:",
+        "1. Reproduce and verify the diagnosis signal.",
+        "2. Implement a bounded fix through workflow/tool pathways.",
+        "3. Add or update regression tests for the observed failure mode.",
+    ]
+    return "\n".join(lines)
+
+
+def _execute_jira_self_diagnosis_upsert(payload: Mapping[str, Any]) -> dict[str, Any]:
+    project_key = _normalise_text(payload.get("project_key")) or _DEFAULT_JIRA_PROJECT_KEY
+    issue_type = _normalise_text(payload.get("issue_type")) or _DEFAULT_JIRA_ISSUE_TYPE
+    summary = _normalise_text(payload.get("summary"))
+    description = _normalise_text(payload.get("description"))
+    fingerprint = _normalise_text(payload.get("fingerprint"))
+    request_id = _normalise_text(payload.get("request_id"))
+
+    if not summary or not description or not fingerprint:
+        return {
+            "success": False,
+            "error": "jira_remediation_payload_invalid",
+            "error_code": "jira_remediation_payload_invalid",
+        }
+
+    search_jql = (
+        f'project = "{project_key}" '
+        f'AND labels = "{_SELF_DIAGNOSIS_LABELS[0]}" '
+        f'AND text ~ "\\"{fingerprint}\\"" '
+        "ORDER BY updated DESC"
+    )
+    search_result = _invoke_mcp_tool(
+        "jira_search",
+        {
+            "jql": search_jql,
+            "max_results": 5,
+            "fields": ["summary", "status", "assignee", "labels"],
+        },
+    )
+    if not bool(search_result.get("success")):
+        return {
+            "success": False,
+            "error": search_result.get("error") or "jira_search_failed",
+            "error_code": search_result.get("error_code") or "jira_search_failed",
+            "search_jql": search_jql,
+        }
+
+    existing_keys = _extract_jira_search_issue_keys(search_result)
+    if existing_keys:
+        issue_key = existing_keys[0]
+        comment = (
+            "Generated by Codex on behalf of Michael Witbrock.\n\n"
+            "Self-diagnosis rerun found matching fingerprint "
+            f"`{fingerprint}`.\n\n"
+            f"Latest incident summary:\n{description[:1200]}"
+        )
+        comment_result = _invoke_mcp_tool(
+            "jira_add_comment",
+            {"issue_key": issue_key, "comment": comment},
+        )
+        if not bool(comment_result.get("success")):
+            return {
+                "success": False,
+                "error": comment_result.get("error") or "jira_add_comment_failed",
+                "error_code": comment_result.get("error_code") or "jira_add_comment_failed",
+                "issue_key": issue_key,
+            }
+        return {
+            "success": True,
+            "mode": "updated_existing",
+            "issue_key": issue_key,
+            "fingerprint": fingerprint,
+            "search_jql": search_jql,
+        }
+
+    myself = _invoke_mcp_tool("jira_get_myself", {})
+    assignee_account_id = _extract_jira_account_id(myself)
+    if not assignee_account_id:
+        return {
+            "success": False,
+            "error": "jira_assignee_resolution_failed",
+            "error_code": "jira_assignee_resolution_failed",
+        }
+
+    labels = payload.get("labels")
+    final_labels = (
+        [str(item) for item in labels if isinstance(item, str) and item.strip()]
+        if isinstance(labels, list)
+        else list(_SELF_DIAGNOSIS_LABELS)
+    )
+    if fingerprint not in final_labels:
+        final_labels.append(f"diag-{fingerprint}")
+
+    create_result = _invoke_mcp_tool(
+        "jira_create_issue",
+        {
+            "project_key": project_key,
+            "issue_type": issue_type,
+            "summary": summary,
+            "description": description,
+            "labels": final_labels,
+            "assignee_account_id": assignee_account_id,
+            "dry_run": False,
+            "approved": True,
+            "request_id": request_id or f"diag-{fingerprint}",
+        },
+    )
+    if not bool(create_result.get("success")):
+        return {
+            "success": False,
+            "error": create_result.get("error") or "jira_create_issue_failed",
+            "error_code": create_result.get("error_code") or "jira_create_issue_failed",
+        }
+
+    issue_key = _extract_jira_issue_key(_coerce_mapping(create_result))
+    return {
+        "success": True,
+        "mode": "created_new",
+        "issue_key": issue_key,
+        "fingerprint": fingerprint,
+        "project_key": project_key,
+    }
 
 
 def _get_gateway():
@@ -506,21 +927,6 @@ def _handle_assess_context(request: WorkflowActionRequest) -> WorkflowActionResu
             },
         )
 
-    known_tools = _available_tool_names()
-    trace = _append_trace_event(
-        context,
-        stage="assess",
-        event="evidence_collected",
-        details={
-            "namespace": namespace,
-            "request_id": request_id,
-            "prompt_lookup_namespace": prompt_lookup_namespace,
-            "selected_workflow_id": selected_workflow_id,
-            "known_tool_count": len(known_tools),
-            "workflow_definition_count": int(workflow_definitions.get("count") or 0),
-        },
-    )
-
     maintenance_context = {
         "namespace": namespace,
         "request_id": request_id,
@@ -534,7 +940,45 @@ def _handle_assess_context(request: WorkflowActionRequest) -> WorkflowActionResu
             minimum=1,
             maximum=50,
         ),
+        "emit_jira_remediation": _coerce_bool(
+            context.get("emit_jira_remediation"),
+            default=True,
+        ),
+        "jira_project_key": _normalise_text(context.get("jira_project_key"))
+        or _DEFAULT_JIRA_PROJECT_KEY,
+        "jira_issue_type": _normalise_text(context.get("jira_issue_type"))
+        or _DEFAULT_JIRA_ISSUE_TYPE,
+        "github_owner": _normalise_text(context.get("github_owner")),
+        "github_repo": _normalise_text(context.get("github_repo")),
+        "github_repository": _normalise_text(context.get("github_repository"))
+        or _normalise_text(context.get("repository")),
     }
+    known_tools = _available_tool_names()
+    github_evidence = _collect_github_evidence(
+        maintenance_context,
+        {
+            "incident_text": _normalise_text(context.get("incident_text")),
+            "turn_execution": turn_execution,
+        },
+    )
+    trace = _append_trace_event(
+        context,
+        stage="assess",
+        event="evidence_collected",
+        details={
+            "namespace": namespace,
+            "request_id": request_id,
+            "prompt_lookup_namespace": prompt_lookup_namespace,
+            "selected_workflow_id": selected_workflow_id,
+            "known_tool_count": len(known_tools),
+            "workflow_definition_count": int(workflow_definitions.get("count") or 0),
+            "github_repository": github_evidence.get("repository"),
+            "github_evidence_success": bool(github_evidence.get("success")),
+            "github_error_count": len(github_evidence.get("errors", []))
+            if isinstance(github_evidence.get("errors"), list)
+            else 0,
+        },
+    )
     maintenance_evidence = {
         "incident_text": _normalise_text(context.get("incident_text")),
         "workflow_definitions": workflow_definitions,
@@ -542,6 +986,7 @@ def _handle_assess_context(request: WorkflowActionRequest) -> WorkflowActionResu
         "turn_execution": turn_execution,
         "workflow_concept": workflow_concept,
         "known_tool_names": known_tools,
+        "github_evidence": github_evidence,
     }
 
     return WorkflowActionResult(
@@ -692,6 +1137,24 @@ def _handle_diagnose_conflation(request: WorkflowActionRequest) -> WorkflowActio
             ],
         )
 
+    github_evidence = _coerce_mapping(evidence.get("github_evidence"))
+    if github_evidence:
+        github_success = bool(github_evidence.get("success"))
+        if not github_success:
+            github_errors = github_evidence.get("errors")
+            error_summary = (
+                ", ".join([str(item) for item in github_errors if isinstance(item, str)])
+                if isinstance(github_errors, list)
+                else "unknown"
+            )
+            _append_cause(
+                "github_read_evidence_unavailable",
+                summary="Read-only GitHub evidence collection is unavailable; fail closed for repository-grounded diagnosis.",
+                scope="github",
+                evidence_items=[error_summary],
+                severity="high",
+            )
+
     conflation_detected = len(root_causes) > 0
     confidence = "low"
     if len(root_causes) >= 3:
@@ -714,6 +1177,8 @@ def _handle_diagnose_conflation(request: WorkflowActionRequest) -> WorkflowActio
         "directive_findings": directives,
         "implicated_prompt_concept_ids": implicated_prompt_ids,
         "selected_workflow_id": maintenance_context.get("selected_workflow_id"),
+        "github_repository": github_evidence.get("repository"),
+        "github_evidence_success": bool(github_evidence.get("success")),
     }
 
     trace = _append_trace_event(
@@ -740,6 +1205,7 @@ def _handle_plan_repairs(request: WorkflowActionRequest) -> WorkflowActionResult
     maintenance_context = _coerce_mapping(context.get("maintenance_context"))
     evidence = _coerce_mapping(context.get("maintenance_evidence"))
     diagnosis = _coerce_mapping(context.get("maintenance_diagnosis"))
+    github_evidence = _coerce_mapping(evidence.get("github_evidence"))
     prompt_context = _coerce_mapping(evidence.get("prompt_context"))
     prompt_concepts = _coerce_mapping_list(prompt_context.get("behaviour_prompt_concepts"))
     directive_findings = _coerce_mapping_list(diagnosis.get("directive_findings"))
@@ -822,6 +1288,54 @@ def _handle_plan_repairs(request: WorkflowActionRequest) -> WorkflowActionResult
             }
         )
 
+    jira_remediation_skipped_reason: str | None = None
+    if _coerce_bool(maintenance_context.get("emit_jira_remediation"), default=True) and bool(
+        diagnosis.get("conflation_detected")
+    ):
+        if not bool(github_evidence.get("success")):
+            jira_remediation_skipped_reason = "github_evidence_unavailable"
+        else:
+            fingerprint = _build_self_diagnosis_fingerprint(
+                maintenance_context=maintenance_context,
+                diagnosis=diagnosis,
+                github_evidence=github_evidence,
+            )
+            summary = _build_jira_remediation_summary(diagnosis, maintenance_context)
+            description = _build_jira_remediation_description(
+                maintenance_context=maintenance_context,
+                evidence=evidence,
+                diagnosis=diagnosis,
+                github_evidence=github_evidence,
+                fingerprint=fingerprint,
+            )
+            operations.append(
+                {
+                    "operation_id": (
+                        f"jira_remediation:{maintenance_context.get('request_id') or fingerprint}"
+                    ),
+                    "risk": "medium",
+                    "tool_name": _SELF_DIAGNOSIS_TOOL_NAME,
+                    "reason": (
+                        "Create or update a deduplicated Jira remediation issue from workflow self-diagnosis evidence."
+                    ),
+                    "payload": {
+                        "project_key": _normalise_text(
+                            maintenance_context.get("jira_project_key")
+                        )
+                        or _DEFAULT_JIRA_PROJECT_KEY,
+                        "issue_type": _normalise_text(
+                            maintenance_context.get("jira_issue_type")
+                        )
+                        or _DEFAULT_JIRA_ISSUE_TYPE,
+                        "summary": summary,
+                        "description": description,
+                        "fingerprint": fingerprint,
+                        "labels": list(_SELF_DIAGNOSIS_LABELS),
+                        "request_id": maintenance_context.get("request_id"),
+                    },
+                }
+            )
+
     apply_requested = bool(maintenance_context.get("apply_repairs", True))
     max_operations = _coerce_int(
         maintenance_context.get("max_operations"),
@@ -837,6 +1351,7 @@ def _handle_plan_repairs(request: WorkflowActionRequest) -> WorkflowActionResult
         "dry_run": bool(maintenance_context.get("dry_run", False)),
         "operation_count": len(operations),
         "operations": operations,
+        "jira_remediation_skipped_reason": jira_remediation_skipped_reason,
     }
 
     trace = _append_trace_event(
@@ -901,7 +1416,10 @@ def _handle_apply_repairs(request: WorkflowActionRequest) -> WorkflowActionResul
                 }
             )
             continue
-        result = _invoke_mcp_tool(tool_name, payload)
+        if tool_name == _SELF_DIAGNOSIS_TOOL_NAME:
+            result = _execute_jira_self_diagnosis_upsert(payload)
+        else:
+            result = _invoke_mcp_tool(tool_name, payload)
         ok = bool(result.get("success", False))
         if ok:
             success_count += 1
@@ -912,6 +1430,9 @@ def _handle_apply_repairs(request: WorkflowActionRequest) -> WorkflowActionResul
                 "status": "success" if ok else "failed",
                 "error": result.get("error"),
                 "error_code": result.get("error_code"),
+                "mode": result.get("mode"),
+                "issue_key": result.get("issue_key"),
+                "fingerprint": result.get("fingerprint"),
             }
         )
 
@@ -937,6 +1458,8 @@ def _handle_verify_repairs(request: WorkflowActionRequest) -> WorkflowActionResu
     verification: dict[str, Any] = {
         "expected_prompt_updates": expected_prompt_ids,
         "verified_prompt_updates": [],
+        "expected_remediation_issue_keys": [],
+        "verified_remediation_issue_keys": [],
         "verification_errors": [],
         "verified": True,
     }
@@ -965,12 +1488,44 @@ def _handle_verify_repairs(request: WorkflowActionRequest) -> WorkflowActionResu
             if concept_id in expected_prompt_ids and _GUARDRAIL_MARKER in content:
                 verification["verified_prompt_updates"].append(concept_id)
 
+    remediation_issue_keys: list[str] = []
+    for row in _coerce_mapping_list(apply_report.get("results"), max_items=100):
+        if _normalise_text(row.get("tool_name")) != _SELF_DIAGNOSIS_TOOL_NAME:
+            continue
+        if _normalise_text(row.get("status")) != "success":
+            continue
+        issue_key = _normalise_text(row.get("issue_key"))
+        if issue_key and issue_key not in remediation_issue_keys:
+            remediation_issue_keys.append(issue_key)
+    verification["expected_remediation_issue_keys"] = remediation_issue_keys
+
+    for issue_key in remediation_issue_keys:
+        issue_result = _invoke_mcp_tool(
+            "jira_get_issue",
+            {"issue_key": issue_key, "fields": ["summary", "status", "labels"]},
+        )
+        if bool(issue_result.get("success")):
+            verification["verified_remediation_issue_keys"].append(issue_key)
+        else:
+            verification["verification_errors"].append(
+                f"jira_issue_not_observable:{issue_key}"
+            )
+
     missing = sorted(set(expected_prompt_ids) - set(verification["verified_prompt_updates"]))
     if missing:
         verification["verified"] = False
         verification["verification_errors"].append(
             f"guardrail_marker_missing_for_prompts:{','.join(missing)}"
         )
+    missing_remediation_keys = sorted(
+        set(remediation_issue_keys) - set(verification["verified_remediation_issue_keys"])
+    )
+    if missing_remediation_keys:
+        verification["verified"] = False
+        verification["verification_errors"].append(
+            f"remediation_issue_not_verified:{','.join(missing_remediation_keys)}"
+        )
+    if verification["verification_errors"]:
         return WorkflowActionResult(
             status="failed",
             error="repair_verification_failed",

@@ -733,7 +733,11 @@ def _summarise_tool_execution_context(
     observed_executed_count = max(progress_tools_completed, invocation_count)
 
     failure_codes: list[str] = []
-    if observed_executed_count <= 0 and worker_unavailable_event_count > 0:
+    if (
+        tool_route_selected
+        and observed_executed_count <= 0
+        and worker_unavailable_event_count > 0
+    ):
         failure_codes.append("worker_unavailable_zero_execution")
     if missing_tool_parse_error_count > 0 or parse_error_invocation_count > 0:
         failure_codes.append("missing_tool_call_parse_error")

@@ -243,10 +243,15 @@ def test_generate_buttonify_uses_llm_extraction(monkeypatch):
     assert isinstance(buttonify, dict)
     assert buttonify.get("source") == "llm"
     assert buttonify.get("options") == ["Proceed", "Hold"]
+    filtering_boundary = buttonify.get("filtering_boundary")
+    assert isinstance(filtering_boundary, dict)
+    assert filtering_boundary.get("schema_version") == "buttonify_filtering_boundary_v1"
+    assert filtering_boundary.get("accepted_candidate_count") == 2
     buttonify_event = _find_transformation_event(llm_debug, "buttonify")
     assert buttonify_event["status"] == "success"
     assert buttonify_event["source_path"] == "llm"
     assert buttonify_event["options_emitted_count"] == 2
+    assert isinstance(buttonify_event["output_summary"].get("filtering_boundary"), dict)
     assert "timestamp_utc" in buttonify_event
 
     # First call is assistant response, second call is buttonify extraction.
@@ -309,6 +314,9 @@ def test_generate_buttonify_non_json_llm_output_noops(monkeypatch):
     assert buttonify.get("source") == "none"
     assert buttonify.get("options") == []
     assert buttonify.get("suppression_reason") == "no_candidates"
+    filtering_boundary = buttonify.get("filtering_boundary")
+    assert isinstance(filtering_boundary, dict)
+    assert filtering_boundary.get("schema_version") == "buttonify_filtering_boundary_v1"
 
     buttonify_event = _find_transformation_event(llm_debug, "buttonify")
     assert buttonify_event["status"] == "no_op"

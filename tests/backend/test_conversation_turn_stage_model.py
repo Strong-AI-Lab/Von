@@ -69,3 +69,16 @@ def test_stage_path_maps_buttonify_runtime_stage() -> None:
     assert len(path) == 1
     assert path[0]["stage_id"] == "buttonify"
     assert path[0]["workflow_id"] == CHAT_BUTTONIFY_WORKFLOW_ID
+
+
+def test_stage_path_maps_response_finalising_runtime_stage() -> None:
+    result = build_conversation_turn_stage_path(
+        runtime_stages=["response_finalising"],
+        workflow_id=TOOL_CALLING_WORKFLOW_ID,
+    )
+
+    assert result["has_unmapped_runtime_stages"] is False
+    path = result["path"]
+    assert len(path) == 1
+    assert path[0]["stage_id"] == "response_finalising"
+    assert path[0]["runtime_stage_normalised"] == "response_finalising"

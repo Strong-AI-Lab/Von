@@ -68,6 +68,8 @@ _ALLOWED_SCREEN_ELEMENT_FAMILIES: frozenset[str] = frozenset(
         "relation_graph_view",
     }
 )
+_RENDERER_FILTERING_BOUNDARY_SCHEMA_VERSION = "renderer_filtering_boundary_v1"
+_RENDERER_FILTERING_PREVIEW_LIMIT = 12
 
 
 def _normalise_strings(values: Sequence[Any] | None) -> tuple[str, ...]:
@@ -488,6 +490,71 @@ def _select_renderers(
     return tuple(enriched)
 
 
+def _build_renderer_filtering_boundary(
+    *,
+    evaluations: Sequence[RendererCandidateEvaluation],
+    selections: Sequence[RendererSelection],
+) -> dict[str, Any]:
+    rejection_reason_counts: dict[str, int] = {}
+    rejected_preview: list[dict[str, Any]] = []
+    applicable_preview: list[dict[str, Any]] = []
+
+    for evaluation in evaluations:
+        row = evaluation.to_dict()
+        if evaluation.applicable:
+            if len(applicable_preview) < _RENDERER_FILTERING_PREVIEW_LIMIT:
+                applicable_preview.append(
+                    {
+                        "renderer_id": row.get("renderer_id"),
+                        "priority": row.get("priority"),
+                        "modalities": row.get("modalities", []),
+                    }
+                )
+            continue
+
+        reasons = [
+            str(reason).strip()
+            for reason in row.get("rejection_reasons", [])
+            if isinstance(reason, str) and str(reason).strip()
+        ]
+        for reason in reasons:
+            rejection_reason_counts[reason] = rejection_reason_counts.get(reason, 0) + 1
+        if len(rejected_preview) < _RENDERER_FILTERING_PREVIEW_LIMIT:
+            rejected_preview.append(
+                {
+                    "renderer_id": row.get("renderer_id"),
+                    "rejection_reasons": reasons,
+                    "priority": row.get("priority"),
+                }
+            )
+
+    selected_preview = [
+        {
+            "renderer_id": item.renderer_id,
+            "renderer_type": item.renderer_type,
+            "selection_reason": item.selection_reason,
+            "modalities": list(item.modalities),
+        }
+        for item in list(selections)[:_RENDERER_FILTERING_PREVIEW_LIMIT]
+    ]
+
+    applicable_count = sum(1 for evaluation in evaluations if evaluation.applicable)
+    rejected_count = max(0, len(evaluations) - applicable_count)
+    return {
+        "schema_version": _RENDERER_FILTERING_BOUNDARY_SCHEMA_VERSION,
+        "candidate_count": len(evaluations),
+        "applicable_count": applicable_count,
+        "rejected_count": rejected_count,
+        "selected_count": len(selections),
+        "rejection_reason_counts": dict(
+            sorted(rejection_reason_counts.items(), key=lambda item: item[0])
+        ),
+        "applicable_preview": applicable_preview,
+        "rejected_preview": rejected_preview,
+        "selected_preview": selected_preview,
+    }
+
+
 def resolve_renderer_applicability(
     *,
     renderer_profiles: Sequence[RendererProfile],
@@ -545,6 +612,10 @@ def resolve_renderer_applicability(
             "provenance": dict(transient.provenance) if transient else dict(request.provenance),
         },
     }
+    diagnostics["filtering_boundary"] = _build_renderer_filtering_boundary(
+        evaluations=evaluations,
+        selections=selections,
+    )
 
     return RendererResolutionResult(
         interpreted_object_kind=object_kind,
