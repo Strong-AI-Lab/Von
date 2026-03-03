@@ -290,6 +290,8 @@ def _classify_progress_cause(stage: str, status: str) -> str:
     stage_lower = stage.lower()
     status_lower = status.lower()
 
+    if "worker_unavailable" in status_lower:
+        return "worker_unavailable"
     if "finalis" in stage_lower:
         return "post_processing"
     if "tool" in stage_lower or status_lower.startswith("tool_"):
@@ -299,7 +301,7 @@ def _classify_progress_cause(stage: str, status: str) -> str:
     if "retry" in stage_lower or status_lower.startswith("retry_"):
         return "model_timeout"
     if "orchestrator" in stage_lower:
-        return "worker_unavailable"
+        return "orchestrator_startup_wait"
     return "network_silence"
 
 

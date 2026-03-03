@@ -167,6 +167,17 @@ def test_progress_event_contains_required_telemetry_fields(monkeypatch) -> None:
     assert isinstance(serialised["activity_idle_ms"], int)
 
 
+def test_orchestrator_start_uses_startup_wait_liveness_reason() -> None:
+    assert (
+        von_routes._classify_progress_cause("orchestrator_start", "heartbeat")
+        == "orchestrator_startup_wait"
+    )
+    assert (
+        von_routes._classify_progress_cause("tool_plan", "worker_unavailable")
+        == "worker_unavailable"
+    )
+
+
 def test_progress_clears_stale_error_on_subsequent_success(monkeypatch) -> None:
     clock = _set_clock(monkeypatch, start=4500.0)
 
