@@ -1,62 +1,58 @@
 {
-  "servers": {
-    "vontology": {
-      "type": "stdio",
-      "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
-      "args": [
-        "src/backend/mcp_server/mcp_stdio_server.py"
-      ],
-      "cwd": "${workspaceFolder}"
-    },
-    "vonrag": {
-      "type": "stdio",
-      "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
-      "args": [
-        "src/backend/mcp_server/rag_mcp_stdio_server.py"
-      ],
-      "cwd": "${workspaceFolder}"
-    },
-    "arxiv": {
-      "type": "stdio",
-      "command": "uv",
-      "args": [
-        "tool",
-        "run",
-        "arxiv-mcp-server",
-        "--storage-path",
-        "${workspaceFolder}\\data\\arxiv_papers"
-      ],
-      "cwd": "${workspaceFolder}"
-    },
-    "mongodb": {
-      "type": "stdio",
-      "command": "npx",
-      "args": [
-        "-y",
-        "mongodb-mcp-server"
-      ],
-      "env": {
-        "MDB_MCP_CONNECTION_STRING": "${env:MONGO_URI}"
-      }
-    },
-    "github": {
-      "url": "https://api.githubcopilot.com/mcp/",
-      "type": "http"
-    },
-    "atlassian": {
-      "type": "http",
-      "url": "https://mcp.atlassian.com/v1/mcp"
-    },
-    "chrome-devtools": {
-      "type": "stdio",
-      "command": "npx",
-      "args": [
-        "-y",
-        "chrome-devtools-mcp@latest",
-        "--autoConnect",
-        "--channel=beta"
-      ]
-    }
-  },
-  "inputs": []
+	"inputs": [],
+	"servers": {
+		"vontology": {
+			"type": "stdio",
+			"command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+			"args": [
+				"src/backend/mcp_server/mcp_stdio_server.py"
+			],
+			"cwd": "${workspaceFolder}"
+		},
+		"vonrag": {
+			"type": "stdio",
+			"command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+			"args": [
+				"src/backend/mcp_server/rag_mcp_stdio_server.py"
+			],
+			"cwd": "${workspaceFolder}"
+		},
+		"arxiv": {
+			"type": "stdio",
+			"command": "uv",
+			"args": [
+				"tool",
+				"run",
+				"arxiv-mcp-server",
+				"--storage-path",
+				"${workspaceFolder}\\data\\arxiv_papers"
+			],
+			"cwd": "${workspaceFolder}"
+		},
+		"mongodb": {
+			"type": "stdio",
+			"command": "npx",
+			"args": [
+				"-y",
+				"mongodb-mcp-server"
+			],
+			"env": {
+				"MDB_MCP_CONNECTION_STRING": "${env:MONGO_URI}"
+			}
+		},
+		"github": {
+			"url": "https://api.githubcopilot.com/mcp/",
+			"type": "http"
+		},
+		"chrome-devtools": {
+			"type": "stdio",
+			"command": "npx",
+			"args": [
+				"-y",
+				"chrome-devtools-mcp@latest",
+				"--autoConnect",
+				"--channel=beta"
+			]
+		}
+	}
 }
