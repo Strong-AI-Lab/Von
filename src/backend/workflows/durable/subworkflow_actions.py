@@ -23,6 +23,12 @@ from ..subworkflow_contracts import (
     WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE,
     WORKFLOW_SUBWORKFLOW_FAILURE_MODE_PROPAGATE,
 )
+from ..execution_contracts import (
+    WORKFLOW_CONTROL_SIGNAL_NONE,
+    append_runtime_event,
+    increment_runtime_metric,
+    normalise_control_signal,
+)
 from ..trace_model import WorkflowExecutionTrace
 from ..vontology_loader import load_workflow_definition_from_vontology
 
@@ -39,6 +45,8 @@ _RESERVED_SUBWORKFLOW_INPUT_KEYS: set[str] = {
 _INVOCATION_CHAIN_KEY = "__workflow_invocation_chain"
 _MAX_SUBWORKFLOW_DEPTH_ENV = "VON_WORKFLOW_SUBWORKFLOW_MAX_DEPTH"
 _DEFAULT_SUBWORKFLOW_DEPTH_LIMIT = 8
+_MAX_SUBWORKFLOW_INVOCATIONS_ENV = "VON_WORKFLOW_SUBWORKFLOW_MAX_INVOCATIONS"
+_DEFAULT_SUBWORKFLOW_INVOCATION_LIMIT = 64
 _DEFAULT_MAX_TRANSITIONS = 40
 _MAX_TRANSITIONS_LIMIT = 300
 
@@ -70,6 +78,17 @@ def _coerce_max_depth() -> int:
     except (TypeError, ValueError):
         return _DEFAULT_SUBWORKFLOW_DEPTH_LIMIT
     return max(1, min(32, parsed))
+
+
+def _coerce_invocation_limit() -> int:
+    raw = os.getenv(_MAX_SUBWORKFLOW_INVOCATIONS_ENV)
+    if raw is None:
+        return _DEFAULT_SUBWORKFLOW_INVOCATION_LIMIT
+    try:
+        parsed = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return _DEFAULT_SUBWORKFLOW_INVOCATION_LIMIT
+    return max(1, min(512, parsed))
 
 
 def _coerce_max_transitions(value: Any) -> int:
@@ -168,6 +187,20 @@ def _build_subworkflow_handler(
                 ),
             )
 
+        invocation_limit = _coerce_invocation_limit()
+        try:
+            invocation_count = int(request.data.get("__workflow_subworkflow_invocation_count", 0))
+        except (TypeError, ValueError):
+            invocation_count = 0
+        if invocation_count >= invocation_limit:
+            return WorkflowActionResult(
+                status="failed",
+                error=(
+                    "subworkflow_invocation_budget_exceeded:"
+                    f"max_invocations={invocation_limit}"
+                ),
+            )
+
         definition = definition_loader(child_workflow_id)
         if definition is None:
             return WorkflowActionResult(
@@ -182,6 +215,8 @@ def _build_subworkflow_handler(
             parent_workflow_id=parent_workflow_id,
             parent_state_id=parent_state_id,
         )
+        child_inputs["__workflow_subworkflow_invocation_count"] = invocation_count + 1
+        request.data["__workflow_subworkflow_invocation_count"] = invocation_count + 1
         child_trace = WorkflowExecutionTrace(
             workflow_id=child_workflow_id,
             user_namespace=request.environment.user_namespace,
@@ -190,6 +225,8 @@ def _build_subworkflow_handler(
                 "parent_state_id": parent_state_id or None,
                 "failure_mode": failure_mode,
                 "invocation_chain": list(child_chain),
+                "invocation_count": invocation_count + 1,
+                "invocation_limit": invocation_limit,
             },
         )
         executor = WorkflowExecutor(
@@ -209,6 +246,8 @@ def _build_subworkflow_handler(
             "child_workflow_id": child_workflow_id,
             "failure_mode": failure_mode,
             "invocation_chain": list(child_chain),
+            "invocation_count": invocation_count + 1,
+            "invocation_limit": invocation_limit,
             "child_completed": bool(child_result.completed),
             "child_final_state": _normalise_text(child_result.final_state),
             "child_error": _normalise_text(child_result.error) or None,
@@ -217,11 +256,46 @@ def _build_subworkflow_handler(
             request_trace=request.trace,
             invocation_event=invocation_event,
         )
+        increment_runtime_metric(context=request.data, key="subworkflow_invocations")
+        append_runtime_event(
+            context=request.data,
+            event={
+                "status": "subworkflow_invoked",
+                "child_workflow_id": child_workflow_id,
+                "child_completed": bool(child_result.completed),
+                "child_final_state": _normalise_text(child_result.final_state),
+                "invocation_count": invocation_count + 1,
+                "invocation_limit": invocation_limit,
+            },
+        )
 
         outputs: Dict[str, Any] = {
             "result": dict(child_result.data),
             "subworkflow_invocation": invocation_event,
+            "subworkflow_result_envelope": (
+                dict(child_result.result_envelope)
+                if isinstance(child_result.result_envelope, Mapping)
+                else None
+            ),
         }
+        child_control_signal = normalise_control_signal(
+            (
+                child_result.result_envelope or {}
+            ).get("control_signal")
+            if isinstance(child_result.result_envelope, Mapping)
+            else None
+        )
+        if child_control_signal != WORKFLOW_CONTROL_SIGNAL_NONE:
+            outputs["control_signal"] = child_control_signal
+            outputs["workflow_control"] = {"signal": child_control_signal}
+            child_scope = (
+                (child_result.result_envelope or {}).get("control_signal_scope")
+                if isinstance(child_result.result_envelope, Mapping)
+                else None
+            )
+            if isinstance(child_scope, str) and child_scope.strip():
+                outputs["control_scope"] = child_scope.strip()
+                outputs["workflow_control"]["scope"] = child_scope.strip()
         if child_result.completed:
             return WorkflowActionResult(status="success", outputs=outputs)
 

@@ -14,7 +14,10 @@ from typing import Any, Mapping
 from ..engine import (
     WorkflowDefinition,
     apply_tool_output_context_mappings,
+    evaluate_transition_condition_spec,
     resolve_action_inputs_from_context,
+    state_has_on_break_transition,
+    state_has_on_continue_transition,
     state_has_on_failure_transition,
     state_has_on_unknown_transition,
 )
@@ -37,6 +40,20 @@ from ..action_registry import (
     normalise_action_outcome,
 )
 from ..trace_model import WorkflowExecutionTrace
+from ..execution_contracts import (
+    WORKFLOW_CONTROL_SIGNAL_BREAK,
+    WORKFLOW_CONTROL_SIGNAL_CONTINUE,
+    WORKFLOW_CONTROL_SIGNAL_RETURN,
+    WORKFLOW_RETURN_PAYLOAD_KEY,
+    append_runtime_event,
+    append_step_result_envelope,
+    build_step_result_envelope,
+    build_workflow_result_envelope,
+    clear_control_signal_context,
+    get_last_control_signal,
+    get_last_control_signal_scope,
+    set_workflow_result_envelope,
+)
 from .instance_manager import WorkflowInstanceManager
 from .models import WorkflowInstance, WorkflowInstanceStatus
 
@@ -53,6 +70,7 @@ class DurableWorkflowResult:
     final_state: str
     error: str | None = None
     step_count: int = 0
+    result_envelope: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to JSON-serialisable dict."""
@@ -63,6 +81,7 @@ class DurableWorkflowResult:
             "final_state": self.final_state,
             "error": self.error,
             "step_count": self.step_count,
+            "result_envelope": self.result_envelope,
         }
 
 
@@ -133,6 +152,7 @@ class DurableWorkflowExecutor:
             context = dict(instance.inputs)
             current_state = definition.initial_state
             step_index = 0
+        clear_control_signal_context(context)
 
         # Create execution environment
         from ...languagemodels.llm_interface import (
@@ -168,19 +188,59 @@ class DurableWorkflowExecutor:
         )
 
         transitions = 0
+
+        def _build_result(
+            *,
+            completed: bool,
+            final_state: str,
+            error: str | None = None,
+            checkpoint: bool = False,
+            error_step: str | None = None,
+        ) -> DurableWorkflowResult:
+            result_envelope = build_workflow_result_envelope(
+                workflow_id=definition.workflow_id,
+                completed=completed,
+                final_state=final_state,
+                error=error,
+                control_signal=get_last_control_signal(context),
+                return_payload=context.get(WORKFLOW_RETURN_PAYLOAD_KEY),
+                context=context,
+                transition_count=transitions,
+            )
+            set_workflow_result_envelope(context=context, envelope=result_envelope)
+            if checkpoint:
+                self._instance_manager.checkpoint(
+                    instance_id,
+                    current_state=final_state,
+                    workflow_data=context,
+                    step_index=step_index,
+                    error=error,
+                    error_step=error_step,
+                    progress_current=step_index,
+                    progress_total=total_steps,
+                    progress_message=final_state,
+                )
+            return DurableWorkflowResult(
+                instance_id=instance_id,
+                data=context,
+                completed=completed,
+                final_state=final_state,
+                error=error,
+                step_count=step_index,
+                result_envelope=result_envelope,
+            )
+
         while transitions < self._max_transitions:
             transitions += 1
             step_index += 1
 
             # Check for cancellation
             if self._instance_manager.is_cancelled(instance_id):
-                return DurableWorkflowResult(
-                    instance_id=instance_id,
-                    data=context,
+                return _build_result(
                     completed=False,
                     final_state=current_state,
                     error="cancelled",
-                    step_count=step_index,
+                    checkpoint=True,
                 )
 
             # Extend lock if worker_id provided
@@ -191,23 +251,11 @@ class DurableWorkflowExecutor:
             state_spec = definition.states.get(current_state)
             if state_spec is None:
                 error = f"unknown_state:{current_state}"
-                self._instance_manager.checkpoint(
-                    instance_id,
-                    current_state=current_state,
-                    workflow_data=context,
-                    step_index=step_index,
-                    error=error,
-                    progress_current=step_index,
-                    progress_total=total_steps,
-                    progress_message=current_state,
-                )
-                return DurableWorkflowResult(
-                    instance_id=instance_id,
-                    data=context,
+                return _build_result(
                     completed=False,
                     final_state=current_state,
                     error=error,
-                    step_count=step_index,
+                    checkpoint=True,
                 )
 
             # Record state entry in trace
@@ -253,31 +301,22 @@ class DurableWorkflowExecutor:
                 )
             if not pre_validation.ok and enforce_metadata_failures:
                 error = format_metadata_validation_error(pre_validation)
-                self._instance_manager.checkpoint(
-                    instance_id,
-                    current_state=current_state,
-                    workflow_data=context,
-                    step_index=step_index,
-                    error=error,
-                    progress_current=step_index,
-                    progress_total=total_steps,
-                    progress_message=current_state,
-                )
                 trace.finish_failed(error)
-                return DurableWorkflowResult(
-                    instance_id=instance_id,
-                    data=context,
+                return _build_result(
                     completed=False,
                     final_state=current_state,
                     error=error,
-                    step_count=step_index,
+                    checkpoint=True,
                 )
 
             # Execute actions
             state_has_failure_route = state_has_on_failure_transition(state_spec)
             state_has_unknown_route = state_has_on_unknown_transition(state_spec)
+            state_has_break_route = state_has_on_break_transition(state_spec)
+            state_has_continue_route = state_has_on_continue_transition(state_spec)
             context_before_actions = dict(context)
             for action in state_spec.actions:
+                context_before_action = dict(context)
                 resolved_inputs = resolve_action_inputs_from_context(
                     action_inputs=action.inputs,
                     context=context,
@@ -314,6 +353,39 @@ class DurableWorkflowExecutor:
                         action_id=action.action_id,
                     )
 
+                step_envelope = build_step_result_envelope(
+                    workflow_id=definition.workflow_id,
+                    state_id=current_state,
+                    action_id=action.action_id,
+                    action_status=result.status,
+                    action_outcome=action_outcome,
+                    action_error=result.error,
+                    action_outputs=result.outputs if isinstance(result.outputs, Mapping) else {},
+                    control_signal=get_last_control_signal(context),
+                    control_signal_scope=get_last_control_signal_scope(context),
+                    duration_ms=result.duration_ms,
+                    context_before=context_before_action,
+                    context_after=context,
+                )
+                append_step_result_envelope(context=context, envelope=step_envelope)
+                if step_envelope["control_signal"] != "none":
+                    event = {
+                        "status": "control_signal",
+                        "workflow_id": definition.workflow_id,
+                        "state_id": current_state,
+                        "action_id": action.action_id,
+                        "control_signal": step_envelope["control_signal"],
+                        "control_signal_scope": step_envelope.get(
+                            "control_signal_scope"
+                        ),
+                    }
+                    append_runtime_event(context=context, event=event)
+                    trace.record_state_transition(
+                        current_state,
+                        current_state,
+                        verdict=event,
+                    )
+
                 if action_outcome == WORKFLOW_ACTION_OUTCOME_FAILURE:
                     if state_has_failure_route:
                         # Safety envelope (JVNAUTOSCI-1087): if the state defines
@@ -322,25 +394,13 @@ class DurableWorkflowExecutor:
                         break
                     error = result.error or "action_failed"
                     # Checkpoint the failure state
-                    self._instance_manager.checkpoint(
-                        instance_id,
-                        current_state=current_state,
-                        workflow_data=context,
-                        step_index=step_index,
-                        error=error,
-                        error_step=action.action_id,
-                        progress_current=step_index,
-                        progress_total=total_steps,
-                        progress_message=current_state,
-                    )
                     trace.finish_failed(error)
-                    return DurableWorkflowResult(
-                        instance_id=instance_id,
-                        data=context,
+                    return _build_result(
                         completed=False,
                         final_state=current_state,
                         error=error,
-                        step_count=step_index,
+                        checkpoint=True,
+                        error_step=action.action_id,
                     )
                 if action_outcome == WORKFLOW_ACTION_OUTCOME_UNKNOWN:
                     if state_has_unknown_route:
@@ -348,26 +408,43 @@ class DurableWorkflowExecutor:
                         # silently continue via default transitions.
                         break
                     error = result.error or "action_unknown"
-                    self._instance_manager.checkpoint(
-                        instance_id,
-                        current_state=current_state,
-                        workflow_data=context,
-                        step_index=step_index,
-                        error=error,
-                        error_step=action.action_id,
-                        progress_current=step_index,
-                        progress_total=total_steps,
-                        progress_message=current_state,
-                    )
                     trace.finish_failed(error)
-                    return DurableWorkflowResult(
-                        instance_id=instance_id,
-                        data=context,
+                    return _build_result(
                         completed=False,
                         final_state=current_state,
                         error=error,
-                        step_count=step_index,
+                        checkpoint=True,
+                        error_step=action.action_id,
                     )
+
+                control_signal = get_last_control_signal(context)
+                if control_signal in {
+                    WORKFLOW_CONTROL_SIGNAL_BREAK,
+                    WORKFLOW_CONTROL_SIGNAL_CONTINUE,
+                    WORKFLOW_CONTROL_SIGNAL_RETURN,
+                }:
+                    break
+
+            control_signal = get_last_control_signal(context)
+            if control_signal == WORKFLOW_CONTROL_SIGNAL_BREAK and not state_has_break_route:
+                trace.finish_failed("workflow_break_outside_loop_scope")
+                return _build_result(
+                    completed=False,
+                    final_state=current_state,
+                    error="workflow_break_outside_loop_scope",
+                    checkpoint=True,
+                )
+            if (
+                control_signal == WORKFLOW_CONTROL_SIGNAL_CONTINUE
+                and not state_has_continue_route
+            ):
+                trace.finish_failed("workflow_continue_outside_loop_scope")
+                return _build_result(
+                    completed=False,
+                    final_state=current_state,
+                    error="workflow_continue_outside_loop_scope",
+                    checkpoint=True,
+                )
 
             if state_has_unknown_route and bool(context.get("last_action_unknown")):
                 post_validation = skipped_metadata_validation(
@@ -422,45 +499,29 @@ class DurableWorkflowExecutor:
                 )
             if not post_validation.ok and enforce_metadata_failures:
                 error = format_metadata_validation_error(post_validation)
-                self._instance_manager.checkpoint(
-                    instance_id,
-                    current_state=current_state,
-                    workflow_data=context,
-                    step_index=step_index,
-                    error=error,
-                    progress_current=step_index,
-                    progress_total=total_steps,
-                    progress_message=current_state,
-                )
                 trace.finish_failed(error)
-                return DurableWorkflowResult(
-                    instance_id=instance_id,
-                    data=context,
+                return _build_result(
                     completed=False,
                     final_state=current_state,
                     error=error,
-                    step_count=step_index,
+                    checkpoint=True,
+                )
+
+            if control_signal == WORKFLOW_CONTROL_SIGNAL_RETURN:
+                trace.finish_completed()
+                return _build_result(
+                    completed=True,
+                    final_state=current_state,
+                    checkpoint=True,
                 )
 
             # Check for terminal state
             if current_state in termination_states:
-                # Final checkpoint
-                self._instance_manager.checkpoint(
-                    instance_id,
-                    current_state=current_state,
-                    workflow_data=context,
-                    step_index=step_index,
-                    progress_current=step_index,
-                    progress_total=total_steps,
-                    progress_message=current_state,
-                )
                 trace.finish_completed()
-                return DurableWorkflowResult(
-                    instance_id=instance_id,
-                    data=context,
+                return _build_result(
                     completed=True,
                     final_state=current_state,
-                    step_count=step_index,
+                    checkpoint=True,
                 )
 
             # Evaluate transitions
@@ -468,7 +529,16 @@ class DurableWorkflowExecutor:
             transition_reason = None
             for transition in state_spec.transitions:
                 try:
-                    if transition.condition(context):
+                    condition_result = bool(transition.condition(context))
+                    if (
+                        not condition_result
+                        and isinstance(transition.condition_spec, Mapping)
+                    ):
+                        condition_result = evaluate_transition_condition_spec(
+                            context=context,
+                            condition_spec=transition.condition_spec,
+                        )
+                    if condition_result:
                         next_state = transition.to_state
                         transition_reason = transition.reason
                         break
@@ -482,24 +552,12 @@ class DurableWorkflowExecutor:
 
             if next_state is None:
                 error = "no_transition"
-                self._instance_manager.checkpoint(
-                    instance_id,
-                    current_state=current_state,
-                    workflow_data=context,
-                    step_index=step_index,
-                    error=error,
-                    progress_current=step_index,
-                    progress_total=total_steps,
-                    progress_message=current_state,
-                )
                 trace.finish_failed(error)
-                return DurableWorkflowResult(
-                    instance_id=instance_id,
-                    data=context,
+                return _build_result(
                     completed=False,
                     final_state=current_state,
                     error=error,
-                    step_count=step_index,
+                    checkpoint=True,
                 )
 
             # CHECKPOINT after successful step (before transitioning)
@@ -519,27 +577,16 @@ class DurableWorkflowExecutor:
                 reason=transition_reason,
             )
             current_state = next_state
+            clear_control_signal_context(context)
 
         # Transition limit exceeded
         error = "transition_limit"
-        self._instance_manager.checkpoint(
-            instance_id,
-            current_state=current_state,
-            workflow_data=context,
-            step_index=step_index,
-            error=error,
-            progress_current=step_index,
-            progress_total=total_steps,
-            progress_message=current_state,
-        )
         trace.finish_failed(error)
-        return DurableWorkflowResult(
-            instance_id=instance_id,
-            data=context,
+        return _build_result(
             completed=False,
             final_state=current_state,
             error=error,
-            step_count=step_index,
+            checkpoint=True,
         )
 
     def run_new_instance(

@@ -57,6 +57,7 @@ from .entity_identity_resolution_workflow import (
     register_entity_identity_resolution_actions,
 )
 from .subworkflow_actions import register_subworkflow_actions
+from .control_flow_actions import register_control_flow_actions
 from .workflow_creation_workflow import register_workflow_creation_actions
 from ..vontology_loader import (
     build_workflow_process_graph,
@@ -561,6 +562,7 @@ def build_durable_action_registry() -> ActionRegistry:
     register_file_copy_upload_handler_actions(registry)
     register_file_copy_interpretation_actions(registry)
     register_entity_identity_resolution_actions(registry)
+    register_control_flow_actions(registry, definition_loader=_resolve_subworkflow_definition)
     register_subworkflow_actions(registry, definition_loader=_resolve_subworkflow_definition)
     register_workflow_creation_actions(registry)
     # Keep durable action routing aligned with orchestrator routing: if an

@@ -24,6 +24,20 @@ from .metadata_validation import (
     validate_state_metadata_post_action,
     validate_state_metadata_pre_action,
 )
+from .execution_contracts import (
+    WORKFLOW_CONTROL_SIGNAL_BREAK,
+    WORKFLOW_CONTROL_SIGNAL_CONTINUE,
+    WORKFLOW_CONTROL_SIGNAL_RETURN,
+    WORKFLOW_RETURN_PAYLOAD_KEY,
+    append_runtime_event,
+    append_step_result_envelope,
+    build_step_result_envelope,
+    build_workflow_result_envelope,
+    clear_control_signal_context,
+    get_last_control_signal,
+    get_last_control_signal_scope,
+    set_workflow_result_envelope,
+)
 from .trace_model import WorkflowExecutionTrace
 
 _CONTEXT_BINDING_KEYS: tuple[str, ...] = (
@@ -404,6 +418,16 @@ def _normalise_transition_condition_spec(
             "expected": expected,
         }
 
+    if kind == "control_signal":
+        signal = str(condition_spec.get("signal") or "").strip().lower()
+        if signal not in {"break", "continue", "return", "error"}:
+            raise ValueError("workflow_condition_invalid:control_signal_invalid")
+        scope = str(condition_spec.get("scope") or "").strip()
+        payload: Dict[str, Any] = {"kind": "control_signal", "signal": signal}
+        if scope:
+            payload["scope"] = scope
+        return payload
+
     if kind == "all":
         children = condition_spec.get("conditions")
         if not isinstance(children, list) or not children:
@@ -478,6 +502,16 @@ def evaluate_transition_condition_spec(
     if kind == "transition_result_truth":
         expected = bool(condition_spec.get("expected", True))
         return _evaluate_transition_result_truth(context) is expected
+    if kind == "control_signal":
+        expected_signal = str(condition_spec.get("signal") or "").strip().lower()
+        observed_signal = get_last_control_signal(context)
+        if observed_signal != expected_signal:
+            return False
+        expected_scope = str(condition_spec.get("scope") or "").strip()
+        if not expected_scope:
+            return True
+        observed_scope = get_last_control_signal_scope(context)
+        return bool(observed_scope) and observed_scope == expected_scope
     if kind == "all":
         children = condition_spec.get("conditions") or []
         if not isinstance(children, list):
@@ -580,6 +614,7 @@ class WorkflowResult:
     completed: bool
     final_state: str
     error: str | None = None
+    result_envelope: Dict[str, Any] | None = None
 
 
 def state_has_on_failure_transition(state_spec: WorkflowStateSpec) -> bool:
@@ -590,6 +625,16 @@ def state_has_on_failure_transition(state_spec: WorkflowStateSpec) -> bool:
 def state_has_on_unknown_transition(state_spec: WorkflowStateSpec) -> bool:
     """Return True when a state declares an explicit `on_unknown` route."""
     return state_has_transition_reason(state_spec, "on_unknown")
+
+
+def state_has_on_break_transition(state_spec: WorkflowStateSpec) -> bool:
+    """Return True when a state declares an explicit `on_break` route."""
+    return state_has_transition_reason(state_spec, "on_break")
+
+
+def state_has_on_continue_transition(state_spec: WorkflowStateSpec) -> bool:
+    """Return True when a state declares an explicit `on_continue` route."""
+    return state_has_transition_reason(state_spec, "on_continue")
 
 
 def state_has_transition_reason(state_spec: WorkflowStateSpec, reason: str) -> bool:
@@ -621,6 +666,7 @@ class WorkflowExecutor:
         trace: WorkflowExecutionTrace | None = None,
     ) -> WorkflowResult:
         context: Dict[str, Any] = data or {}
+        clear_control_signal_context(context)
         current_state = definition.initial_state
         transitions = 0
         termination_states = set(definition.termination_states) | {
@@ -631,13 +677,37 @@ class WorkflowExecutor:
             validation_mode
         )
 
+        def _build_result(
+            *,
+            completed: bool,
+            final_state: str,
+            error: str | None = None,
+        ) -> WorkflowResult:
+            result_envelope = build_workflow_result_envelope(
+                workflow_id=definition.workflow_id,
+                completed=completed,
+                final_state=final_state,
+                error=error,
+                control_signal=get_last_control_signal(context),
+                return_payload=context.get(WORKFLOW_RETURN_PAYLOAD_KEY),
+                context=context,
+                transition_count=transitions,
+            )
+            set_workflow_result_envelope(context=context, envelope=result_envelope)
+            return WorkflowResult(
+                data=context,
+                completed=completed,
+                final_state=final_state,
+                error=error,
+                result_envelope=result_envelope,
+            )
+
         while transitions < self._max_transitions:
             transitions += 1
             state_spec = definition.states.get(current_state)
             if state_spec is None:
                 error = f"unknown_state:{current_state}"
-                return WorkflowResult(
-                    data=context,
+                return _build_result(
                     completed=False,
                     final_state=current_state,
                     error=error,
@@ -688,8 +758,7 @@ class WorkflowExecutor:
                 error = format_metadata_validation_error(pre_validation)
                 if trace is not None:
                     trace.finish_failed(error)
-                return WorkflowResult(
-                    data=context,
+                return _build_result(
                     completed=False,
                     final_state=current_state,
                     error=error,
@@ -697,8 +766,11 @@ class WorkflowExecutor:
 
             state_has_failure_route = state_has_on_failure_transition(state_spec)
             state_has_unknown_route = state_has_on_unknown_transition(state_spec)
+            state_has_break_route = state_has_on_break_transition(state_spec)
+            state_has_continue_route = state_has_on_continue_transition(state_spec)
             context_before_actions = dict(context)
             for action in state_spec.actions:
+                context_before_action = dict(context)
                 resolved_inputs = resolve_action_inputs_from_context(
                     action_inputs=action.inputs,
                     context=context,
@@ -733,6 +805,38 @@ class WorkflowExecutor:
                         state_id=current_state,
                         action_id=action.action_id,
                     )
+                step_envelope = build_step_result_envelope(
+                    workflow_id=definition.workflow_id,
+                    state_id=current_state,
+                    action_id=action.action_id,
+                    action_status=result.status,
+                    action_outcome=action_outcome,
+                    action_error=result.error,
+                    action_outputs=result.outputs if isinstance(result.outputs, Mapping) else {},
+                    control_signal=get_last_control_signal(context),
+                    control_signal_scope=get_last_control_signal_scope(context),
+                    duration_ms=result.duration_ms,
+                    context_before=context_before_action,
+                    context_after=context,
+                )
+                append_step_result_envelope(context=context, envelope=step_envelope)
+                if trace is not None and step_envelope["control_signal"] != "none":
+                    event = {
+                        "status": "control_signal",
+                        "workflow_id": definition.workflow_id,
+                        "state_id": current_state,
+                        "action_id": action.action_id,
+                        "control_signal": step_envelope["control_signal"],
+                        "control_signal_scope": step_envelope.get(
+                            "control_signal_scope"
+                        ),
+                    }
+                    append_runtime_event(context=context, event=event)
+                    trace.record_state_transition(
+                        current_state,
+                        current_state,
+                        verdict=event,
+                    )
                 if action_outcome == WORKFLOW_ACTION_OUTCOME_FAILURE:
                     if state_has_failure_route:
                         # Safety envelope (JVNAUTOSCI-1087): preserve the failure
@@ -740,8 +844,7 @@ class WorkflowExecutor:
                         break
                     if trace is not None:
                         trace.finish_failed(result.error or "action_failed")
-                    return WorkflowResult(
-                        data=context,
+                    return _build_result(
                         completed=False,
                         final_state=current_state,
                         error=result.error or "action_failed",
@@ -754,18 +857,46 @@ class WorkflowExecutor:
                     unknown_error = result.error or "action_unknown"
                     if trace is not None:
                         trace.finish_failed(unknown_error)
-                    return WorkflowResult(
-                        data=context,
+                    return _build_result(
                         completed=False,
                         final_state=current_state,
                         error=unknown_error,
                     )
+
+                control_signal = get_last_control_signal(context)
+                if control_signal in {
+                    WORKFLOW_CONTROL_SIGNAL_BREAK,
+                    WORKFLOW_CONTROL_SIGNAL_CONTINUE,
+                    WORKFLOW_CONTROL_SIGNAL_RETURN,
+                }:
+                    break
 
             if current_state in termination_states:
                 materialise_terminal_effect_context(
                     context=context,
                     state_spec=state_spec,
                     state_id=current_state,
+                )
+
+            control_signal = get_last_control_signal(context)
+            if control_signal == WORKFLOW_CONTROL_SIGNAL_BREAK and not state_has_break_route:
+                if trace is not None:
+                    trace.finish_failed("workflow_break_outside_loop_scope")
+                return _build_result(
+                    completed=False,
+                    final_state=current_state,
+                    error="workflow_break_outside_loop_scope",
+                )
+            if (
+                control_signal == WORKFLOW_CONTROL_SIGNAL_CONTINUE
+                and not state_has_continue_route
+            ):
+                if trace is not None:
+                    trace.finish_failed("workflow_continue_outside_loop_scope")
+                return _build_result(
+                    completed=False,
+                    final_state=current_state,
+                    error="workflow_continue_outside_loop_scope",
                 )
 
             if state_has_unknown_route and bool(context.get("last_action_unknown")):
@@ -823,16 +954,26 @@ class WorkflowExecutor:
                 error = format_metadata_validation_error(post_validation)
                 if trace is not None:
                     trace.finish_failed(error)
-                return WorkflowResult(
-                    data=context,
+                return _build_result(
                     completed=False,
                     final_state=current_state,
                     error=error,
                 )
 
+            if control_signal == WORKFLOW_CONTROL_SIGNAL_RETURN:
+                if trace is not None:
+                    trace.finish_completed()
+                return _build_result(
+                    completed=True,
+                    final_state=current_state,
+                )
+
             if current_state in termination_states:
-                return WorkflowResult(
-                    data=context, completed=True, final_state=current_state
+                if trace is not None:
+                    trace.finish_completed()
+                return _build_result(
+                    completed=True,
+                    final_state=current_state,
                 )
 
             next_state = None
@@ -856,8 +997,9 @@ class WorkflowExecutor:
                     continue
 
             if next_state is None:
-                return WorkflowResult(
-                    data=context,
+                if trace is not None:
+                    trace.finish_failed("no_transition")
+                return _build_result(
                     completed=False,
                     final_state=current_state,
                     error="no_transition",
@@ -870,9 +1012,11 @@ class WorkflowExecutor:
                     reason=transition_reason,
                 )
             current_state = next_state
+            clear_control_signal_context(context)
 
-        return WorkflowResult(
-            data=context,
+        if trace is not None:
+            trace.finish_failed("transition_limit")
+        return _build_result(
             completed=False,
             final_state=current_state,
             error="transition_limit",

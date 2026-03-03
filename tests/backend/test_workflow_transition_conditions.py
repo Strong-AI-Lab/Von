@@ -155,3 +155,63 @@ def test_executor_evaluates_transition_result_truth_condition_spec(
 
     assert result.completed is True
     assert result.final_state == expected_state
+
+
+def test_executor_routes_on_break_control_signal_condition() -> None:
+    on_break_spec, on_break_fn = build_transition_condition(
+        {"kind": "control_signal", "signal": "break", "scope": "main_loop"}
+    )
+    next_spec, next_fn = build_transition_condition({"kind": "always"})
+
+    definition = WorkflowDefinition(
+        workflow_id="#V#condition_spec_break_workflow",
+        initial_state="loop_step",
+        states={
+            "loop_step": WorkflowStateSpec(
+                state_id="loop_step",
+                actions=(WorkflowActionInvocation(action_id="emit.break"),),
+                transitions=(
+                    WorkflowTransitionSpec(
+                        to_state="loop_exit",
+                        reason="on_break",
+                        condition=on_break_fn,
+                        condition_spec=on_break_spec,
+                    ),
+                    WorkflowTransitionSpec(
+                        to_state="loop_continue",
+                        reason="next_step",
+                        condition=next_fn,
+                        condition_spec=next_spec,
+                    ),
+                ),
+            ),
+            "loop_exit": WorkflowStateSpec(state_id="loop_exit", terminal=True),
+            "loop_continue": WorkflowStateSpec(state_id="loop_continue", terminal=True),
+        },
+    )
+
+    registry = ActionRegistry()
+    registry.register(
+        ActionSpec(
+            action_id="emit.break",
+            handler=lambda _request: WorkflowActionResult(
+                status="success",
+                outputs={"control_signal": "break", "control_scope": "main_loop"},
+            ),
+        )
+    )
+
+    result = WorkflowExecutor(registry=registry, max_transitions=5).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={},
+    )
+
+    assert result.completed is True
+    assert result.final_state == "loop_exit"
+
+
+def test_build_transition_condition_rejects_invalid_control_signal() -> None:
+    with pytest.raises(ValueError) as exc_info:
+        build_transition_condition({"kind": "control_signal", "signal": "pause"})
+    assert "workflow_condition_invalid:control_signal_invalid" in str(exc_info.value)

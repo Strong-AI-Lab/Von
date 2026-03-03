@@ -81,6 +81,18 @@ WORKFLOW_GRAPH_PREDICATE_ALIASES: Dict[str, Tuple[str, ...]] = {
         "#V#on_unknown_next_step",
         "on_unknown_next_step",
     ),
+    "onBreakNextStep": (
+        "#V#onBreakNextStep",
+        "onBreakNextStep",
+        "#V#on_break_next_step",
+        "on_break_next_step",
+    ),
+    "onContinueNextStep": (
+        "#V#onContinueNextStep",
+        "onContinueNextStep",
+        "#V#on_continue_next_step",
+        "on_continue_next_step",
+    ),
     "hasPrecondition": (
         "#V#hasPrecondition",
         "hasPrecondition",
@@ -1312,6 +1324,28 @@ def build_workflow_process_graph(
             matched_predicates=(on_unknown_predicate,),
         )
 
+        on_break_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES["onBreakNextStep"]
+        on_break, on_break_predicate = _first_relationship_target_with_predicate(
+            step_rels,
+            on_break_candidates,
+        )
+        _record_legacy_alias_use(
+            legacy_aliases=legacy_aliases,
+            canonical_predicate=on_break_candidates[0],
+            matched_predicates=(on_break_predicate,),
+        )
+
+        on_continue_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES["onContinueNextStep"]
+        on_continue, on_continue_predicate = _first_relationship_target_with_predicate(
+            step_rels,
+            on_continue_candidates,
+        )
+        _record_legacy_alias_use(
+            legacy_aliases=legacy_aliases,
+            canonical_predicate=on_continue_candidates[0],
+            matched_predicates=(on_continue_predicate,),
+        )
+
         precondition_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES["hasPrecondition"]
         preconditions, precondition_predicates = _all_relationship_targets_with_predicates(
             step_rels,
@@ -1420,6 +1454,8 @@ def build_workflow_process_graph(
                     "on_false": on_false,
                     "on_failure": on_failure,
                     "on_unknown": on_unknown,
+                    "on_break": on_break,
+                    "on_continue": on_continue,
                 },
             }
         )
@@ -1429,6 +1465,8 @@ def build_workflow_process_graph(
         _edge(step_id, "onFalseNextStep", on_false)
         _edge(step_id, "onFailureNextStep", on_failure)
         _edge(step_id, "onUnknownNextStep", on_unknown)
+        _edge(step_id, "onBreakNextStep", on_break)
+        _edge(step_id, "onContinueNextStep", on_continue)
 
     if legacy_aliases:
         warnings.append(
@@ -1645,6 +1683,8 @@ def load_workflow_definition_from_vontology(
 
         on_failure_target = control_flow.get("on_failure")
         on_unknown_target = control_flow.get("on_unknown")
+        on_break_target = control_flow.get("on_break")
+        on_continue_target = control_flow.get("on_continue")
         on_true_target = control_flow.get("on_true")
         on_false_target = control_flow.get("on_false")
         next_target = control_flow.get("next")
@@ -1721,7 +1761,8 @@ def load_workflow_definition_from_vontology(
                     condition_spec=raw_condition_spec,
                 )
 
-        # Priority: on_failure → on_unknown → on_true/on_false → next.
+        # Priority: on_failure → on_unknown → on_break/on_continue →
+        # on_true/on_false → next.
         # Canonical Vontology workflows rely on this deterministic ordering.
         if on_failure_target:
             _append_transition_from_spec(
@@ -1742,6 +1783,26 @@ def load_workflow_definition_from_vontology(
                     "kind": "context_flag",
                     "key": "last_action_unknown",
                     "expected": True,
+                },
+            )
+
+        if on_break_target:
+            _append_transition_from_spec(
+                to_state=on_break_target,
+                reason="on_break",
+                condition_spec={
+                    "kind": "control_signal",
+                    "signal": "break",
+                },
+            )
+
+        if on_continue_target:
+            _append_transition_from_spec(
+                to_state=on_continue_target,
+                reason="on_continue",
+                condition_spec={
+                    "kind": "control_signal",
+                    "signal": "continue",
                 },
             )
 
