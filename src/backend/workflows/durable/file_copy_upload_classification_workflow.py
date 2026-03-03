@@ -357,6 +357,8 @@ def _build_classification_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
     available_workflow_ids = set(_resolve_available_workflow_ids(raw))
     target_workflow_id: str | None = None
     target_workflow_available = False
+    unsupported_specialised_route = False
+    unsupported_route_reason: str | None = None
     mutation_route = route_key in {
         ROUTE_KEY_SCHOLARLY,
         ROUTE_KEY_CV,
@@ -377,7 +379,9 @@ def _build_classification_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
                 break
 
         if not target_workflow_available:
-            reasons.append("specialised_workflow_unavailable")
+            unsupported_specialised_route = True
+            unsupported_route_reason = "specialised_workflow_unavailable"
+            reasons.append(unsupported_route_reason)
             mutation_route = False
             route_mode = (
                 ROUTE_MODE_INTERPRET if allow_interpret_fallback else ROUTE_MODE_NOOP
@@ -412,6 +416,8 @@ def _build_classification_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
         "fail_closed": bool(fail_closed),
         "target_workflow_id": target_workflow_id,
         "target_workflow_available": bool(target_workflow_available),
+        "unsupported_specialised_route": bool(unsupported_specialised_route),
+        "unsupported_route_reason": unsupported_route_reason,
         "allow_interpret_fallback": bool(allow_interpret_fallback),
         "route_reasons": list(reasons),
         "scored_candidates": dict(scored),
@@ -456,6 +462,10 @@ def _handle_persist_route_decision(request: WorkflowActionRequest) -> WorkflowAc
         "fail_closed": bool(request.data.get("fail_closed")),
         "target_workflow_id": request.data.get("target_workflow_id"),
         "target_workflow_available": bool(request.data.get("target_workflow_available")),
+        "unsupported_specialised_route": bool(
+            request.data.get("unsupported_specialised_route")
+        ),
+        "unsupported_route_reason": request.data.get("unsupported_route_reason"),
         "allow_interpret_fallback": bool(request.data.get("allow_interpret_fallback", True)),
         "route_reasons": list(request.data.get("route_reasons") or []),
         "scored_candidates": dict(request.data.get("scored_candidates") or {}),
