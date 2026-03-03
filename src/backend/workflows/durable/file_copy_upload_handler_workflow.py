@@ -82,16 +82,31 @@ def _as_bool(value: Any, *, default: bool) -> bool:
     return default
 
 
-def _map_from_subworkflow_result(
+def _normalise_reason_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        token = value.strip()
+        return [token] if token else []
+    if not isinstance(value, list):
+        return []
+    return [
+        str(item).strip()
+        for item in value
+        if isinstance(item, str) and str(item).strip()
+    ]
+
+
+def _resolve_route_terminal_reason(
+    data: Mapping[str, Any],
     *,
-    outputs: dict[str, Any],
-    prefix: str,
-) -> dict[str, Any]:
-    payload = dict(outputs)
-    mapped: dict[str, Any] = {}
-    for key, value in payload.items():
-        mapped[f"{prefix}{key}"] = value
-    return mapped
+    fallback: str,
+) -> str:
+    explicit = _clean_text(data.get("upload_route_terminal_reason"))
+    if explicit:
+        return explicit
+    reasons = _normalise_reason_list(data.get("upload_route_reasons"))
+    if reasons:
+        return reasons[0]
+    return fallback
 
 
 def _handle_mark_noop(_request: WorkflowActionRequest) -> WorkflowActionResult:
@@ -106,9 +121,10 @@ def _handle_mark_noop(_request: WorkflowActionRequest) -> WorkflowActionResult:
 
 
 def _handle_mark_fail_closed(request: WorkflowActionRequest) -> WorkflowActionResult:
-    reason = _clean_text(request.data.get("upload_route_reasons"))
-    if not reason:
-        reason = "low_confidence_mutation_route"
+    reason = _resolve_route_terminal_reason(
+        request.data,
+        fallback="low_confidence_mutation_route",
+    )
     return WorkflowActionResult(
         status="success",
         outputs={
@@ -123,12 +139,14 @@ def _handle_mark_fail_closed(request: WorkflowActionRequest) -> WorkflowActionRe
 def _handle_mark_specialised_failure(
     request: WorkflowActionRequest,
 ) -> WorkflowActionResult:
-    error = _clean_text(request.data.get("upload_specialised_error")) or "specialised_failed"
+    error = (
+        _clean_text(request.data.get("upload_specialised_error"))
+        or "specialised_failed"
+    )
     return WorkflowActionResult(
         status="success",
         outputs={
             "upload_specialised_fallback_triggered": True,
-            "upload_route_success": False,
             "upload_route_terminal_reason": error,
         },
     )
@@ -195,14 +213,11 @@ def _handle_persist_route_outcome(request: WorkflowActionRequest) -> WorkflowAct
     effective_mode = _resolve_effective_mode(request.data)
     route_success = _resolve_route_success(request.data, effective_mode)
     final_workflow_id = _resolve_final_workflow_id(request.data)
-    route_reasons_raw = request.data.get("upload_route_reasons")
-    route_reasons: list[str] = []
-    if isinstance(route_reasons_raw, list):
-        route_reasons = [
-            str(item).strip()
-            for item in route_reasons_raw
-            if isinstance(item, str) and str(item).strip()
-        ]
+    route_reasons = _normalise_reason_list(request.data.get("upload_route_reasons"))
+    route_terminal_reason = _resolve_route_terminal_reason(
+        request.data,
+        fallback="route_completed",
+    )
 
     payload = {
         "handler_version": FILE_COPY_UPLOAD_HANDLER_VERSION,
@@ -221,7 +236,12 @@ def _handle_persist_route_outcome(request: WorkflowActionRequest) -> WorkflowAct
         "mutation_route": bool(request.data.get("upload_mutation_route")),
         "fail_closed": bool(request.data.get("upload_fail_closed")),
         "route_success": bool(route_success),
+        "route_terminal_reason": route_terminal_reason,
         "route_reasons": route_reasons,
+        "unsupported_specialised_route": bool(
+            request.data.get("upload_unsupported_specialised_route")
+        ),
+        "unsupported_route_reason": request.data.get("upload_unsupported_route_reason"),
         "decision_persisted": bool(request.data.get("upload_route_decision_persisted")),
         "target_workflow_id": request.data.get("upload_target_workflow_id"),
         "target_workflow_available": bool(
@@ -328,6 +348,14 @@ def build_file_copy_upload_handler_workflow() -> WorkflowDefinition:
                 {"tool_output_field": "result.fail_closed", "context_key": "upload_fail_closed"},
                 {"tool_output_field": "result.target_workflow_id", "context_key": "upload_target_workflow_id"},
                 {"tool_output_field": "result.target_workflow_available", "context_key": "upload_target_workflow_available"},
+                {
+                    "tool_output_field": "result.unsupported_specialised_route",
+                    "context_key": "upload_unsupported_specialised_route",
+                },
+                {
+                    "tool_output_field": "result.unsupported_route_reason",
+                    "context_key": "upload_unsupported_route_reason",
+                },
                 {"tool_output_field": "result.allow_interpret_fallback", "context_key": "upload_allow_interpret_fallback"},
                 {"tool_output_field": "result.route_decision_persisted", "context_key": "upload_route_decision_persisted"},
                 {"tool_output_field": "child_workflow_failed", "context_key": "upload_classifier_child_failed"},

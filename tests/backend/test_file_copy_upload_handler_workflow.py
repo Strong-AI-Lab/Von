@@ -62,6 +62,24 @@ def test_mark_fail_closed_action_sets_fail_closed_outputs() -> None:
     assert result.outputs["upload_effective_route_mode"] == "fail_closed"
     assert result.outputs["upload_fail_closed_applied"] is True
     assert result.outputs["upload_route_success"] is False
+    assert result.outputs["upload_route_terminal_reason"] == "confidence_below_threshold"
+
+
+def test_mark_specialised_failure_does_not_force_route_success_false() -> None:
+    registry = ActionRegistry()
+    register_file_copy_upload_handler_actions(registry)
+    context: dict[str, object] = {"upload_specialised_error": "child_failed"}
+    result = registry.execute(
+        "file_copy_upload.mark_specialised_failure",
+        inputs={},
+        context=context,
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["upload_specialised_fallback_triggered"] is True
+    assert result.outputs["upload_route_terminal_reason"] == "child_failed"
+    assert "upload_route_success" not in result.outputs
 
 
 def test_persist_route_outcome_writes_singleton_text_relation(monkeypatch) -> None:
@@ -110,3 +128,51 @@ def test_persist_route_outcome_writes_singleton_text_relation(monkeypatch) -> No
     payload = json.loads(str(calls[0]["text"]))
     assert payload["effective_route_mode"] == "fail_closed"
     assert payload["route_success"] is False
+    assert payload["route_terminal_reason"] == "mutation_route_confidence_below_threshold"
+
+
+def test_persist_route_outcome_marks_interpret_fallback_success(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def _fake_upsert_singleton_text_relation(**kwargs):
+        calls.append(dict(kwargs))
+        return {"kept_relation_id": "rel-3", "replaced_count": 0}
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.file_copy_upload_handler_workflow.upsert_singleton_text_relation",
+        _fake_upsert_singleton_text_relation,
+    )
+
+    registry = ActionRegistry()
+    register_file_copy_upload_handler_actions(registry)
+    context: dict[str, object] = {
+        "file_copy_concept_id": "#V#file_copy_78",
+        "classification_version": "file_copy_upload_classification.v1",
+        "upload_route_key": "cv",
+        "upload_route_mode": "specialised",
+        "upload_route_confidence": 0.88,
+        "upload_mutation_route": True,
+        "upload_route_reasons": ["specialised_workflow_unavailable"],
+        "upload_specialised_fallback_triggered": True,
+        "upload_interpret_workflow_id": "#V#file_copy_interpretation_workflow",
+        "upload_interpret_child_failed": False,
+        "upload_unsupported_specialised_route": True,
+        "upload_unsupported_route_reason": "specialised_workflow_unavailable",
+    }
+    result = registry.execute(
+        "file_copy_upload.persist_route_outcome",
+        inputs={},
+        context=context,
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["upload_route_outcome_persisted"] is True
+    assert result.outputs["upload_effective_route_mode"] == "interpret_after_specialised_failure"
+    assert result.outputs["upload_route_success"] is True
+    assert len(calls) == 1
+    payload = json.loads(str(calls[0]["text"]))
+    assert payload["route_success"] is True
+    assert payload["effective_route_mode"] == "interpret_after_specialised_failure"
+    assert payload["unsupported_specialised_route"] is True
+    assert payload["unsupported_route_reason"] == "specialised_workflow_unavailable"

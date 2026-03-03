@@ -322,6 +322,32 @@ Nested propagation:
 - child workflow envelopes are surfaced through `subworkflow_result_envelope`,
 - non-`none` child control signals propagate to parent action outputs.
 
+### 10.4 File-Copy Upload Routing Workflows (JVNAUTOSCI-1309)
+
+Built-in workflow IDs:
+
+- `#V#file_copy_upload_classification_workflow`
+- `#V#file_copy_upload_handler_workflow`
+- `#V#file_copy_interpretation_workflow` (baseline safe path)
+
+Classification outputs (persisted and propagated to the handler) include:
+
+- `route_key` (`scholarly|cv|business_card|interpret|noop`)
+- `route_mode` (`specialised|interpret|fail_closed|noop`)
+- `route_confidence`, `route_reasons`, `target_workflow_id`, `target_workflow_available`
+- `unsupported_specialised_route` and `unsupported_route_reason` when a mutation-class route was selected but no specialised workflow is available.
+
+Safety semantics:
+
+- Low-confidence mutation routes MUST fail closed (`route_mode=fail_closed`) rather than invoking mutation workflows.
+- When specialised CV/business-card workflows are not available, classification MUST emit explicit unsupported-route diagnostics (`unsupported_specialised_route=true`) and route to non-mutation handling (`interpret` or `noop` per fallback policy).
+- Handler outcome persistence (`#V#has_file_copy_upload_route_outcome_json`) records selected/effective route mode, success, reasons, and unsupported-route diagnostics for post-run inspection.
+
+Event-launch semantics:
+
+- `file_copy.uploaded` launches use a single selected workflow strategy (`#V#file_copy_upload_handler_workflow` by default) to avoid duplicate uncontrolled launches.
+- Default event bindings are bootstrapped idempotently; conflicting bindings are not overwritten.
+
 ## 11. Durable Runtime Semantics
 
 ### 11.1 Instance Model

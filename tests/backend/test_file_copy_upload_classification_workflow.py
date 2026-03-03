@@ -89,6 +89,37 @@ def test_classification_fail_closes_low_confidence_mutation_route(monkeypatch) -
     assert "mutation_route_confidence_below_threshold" in result.outputs["route_reasons"]
 
 
+def test_classification_marks_unsupported_specialised_route_when_unavailable(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.file_copy_upload_classification_workflow._resolve_available_workflow_ids",
+        lambda _payload: ("#V#integration_scholarly_paper_representation_workflow",),
+    )
+    registry = ActionRegistry()
+    register_file_copy_upload_classification_actions(registry)
+
+    context: dict[str, object] = {
+        "file_copy_concept_id": "#V#file_copy_unsupported_cv",
+        "original_filename": "candidate-resume.pdf",
+        "content_type": "application/pdf",
+    }
+    result = registry.execute(
+        "file_copy_upload.classify",
+        inputs={},
+        context=context,
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["route_key"] == "cv"
+    assert result.outputs["route_mode"] == "interpret"
+    assert result.outputs["target_workflow_available"] is False
+    assert result.outputs["unsupported_specialised_route"] is True
+    assert result.outputs["unsupported_route_reason"] == "specialised_workflow_unavailable"
+    assert "specialised_workflow_unavailable" in result.outputs["route_reasons"]
+
+
 def test_persist_route_decision_writes_singleton_text_relation(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
 
