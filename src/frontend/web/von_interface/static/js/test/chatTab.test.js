@@ -687,6 +687,21 @@ describe('thinking liveness presentation', () => {
         expect(__testOnly_formatThinkingEtaText({ eta_ms: 250 })).toBe('ETA <1s');
         expect(__testOnly_formatThinkingEtaText({})).toBeNull();
     });
+
+    test('treats terminal status as authoritative over active liveness', () => {
+        const presentation = __testOnly_buildThinkingProgressPresentation({
+            status: 'pending',
+            orchestrator_status: 'completed',
+            liveness_state: 'active',
+            stage: 'response_finalising',
+            idle_ms: 1800
+        });
+
+        expect(presentation.livenessState).toBe('completed');
+        expect(presentation.livenessLabel).toBe('Complete');
+        expect(presentation.stageText).toBe('Complete');
+        expect(presentation.lastActivityText).toContain('Last activity');
+    });
 });
 
 describe('thinking card display state reducer', () => {
@@ -738,6 +753,21 @@ describe('thinking card display state reducer', () => {
             progress: { status: 'completed' }
         });
         expect(state.expanded).toBe(true);
+        expect(state.autoFurlApplied).toBe(true);
+    });
+
+    test('treats orchestrator terminal status as terminal progress update', () => {
+        let state = __testOnly_reduceThinkingCardDisplayState(null, { type: 'reset_for_active' });
+        state = __testOnly_reduceThinkingCardDisplayState(state, {
+            type: 'progress_update',
+            progress: {
+                status: 'pending',
+                orchestrator_status: 'completed',
+                liveness_state: 'active'
+            }
+        });
+
+        expect(state.expanded).toBe(false);
         expect(state.autoFurlApplied).toBe(true);
     });
 });
@@ -1005,7 +1035,9 @@ describe('thinking card toggle accessibility', () => {
                 return Promise.resolve({
                     ok: true,
                     json: async () => ({
-                        status: 'completed',
+                        status: 'pending',
+                        orchestrator_status: 'completed',
+                        liveness_state: 'active',
                         phase: 'response_finalising',
                         phase_label: 'Finalising response',
                         tool: 'response_finalising',
@@ -1052,6 +1084,8 @@ describe('thinking card toggle accessibility', () => {
         expect(toggleButton.getAttribute('aria-expanded')).toBe('false');
         expect(wrapper.classList.contains('is-collapsed')).toBe(true);
         expect(detail.getAttribute('aria-hidden')).toBe('true');
+        expect(document.getElementById('thinkingCardStatusBadge').textContent).toBe('Complete');
+        expect(document.getElementById('thinkingCardStatusBadge').classList.contains('completed')).toBe(true);
 
         toggleButton.click();
 

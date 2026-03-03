@@ -200,6 +200,16 @@ Control-signal keys:
 - `last_control_signal_scope`
 - boolean convenience flags (`last_control_signal_break`, `last_control_signal_continue`, `last_control_signal_return`, `last_control_signal_error`)
 
+### 7.1 Thinking-Card Progress Terminal Precedence (JVNAUTOSCI-1316)
+
+For chat progress payloads consumed by the thinking card:
+
+- Terminal status MUST be authoritative over liveness when rendering run-state badges.
+- Terminal detection MUST check both `status` and `orchestrator_status` (and treat values such as `completed|done`, `failed|error`, `cancelled|aborted|canceled`, `terminated` as terminal).
+- If any terminal status is present, the badge MUST render terminal state immediately (never remain `Active`/`Waiting`/`Stalled` because of `liveness_state`).
+- `liveness_state` remains informational for metadata (for example "Last activity"), not authoritative for terminality.
+- Progress polling SHOULD stop once terminality is detected (except explicit user-triggered refresh flows).
+
 ## 8. Metadata Contract Semantics
 
 Per-state metadata keys currently used:

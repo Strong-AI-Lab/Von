@@ -6566,6 +6566,26 @@ footer {
     color: #b91c1c;
 }
 
+.thinking-card-status.completed {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.thinking-card-status.failed {
+    background: #fee2e2;
+    color: #b91c1c;
+}
+
+.thinking-card-status.cancelled {
+    background: #e2e8f0;
+    color: #334155;
+}
+
+.thinking-card-status.terminated {
+    background: #ffedd5;
+    color: #9a3412;
+}
+
 .thinking-card-action {
     display: none;
     align-items: center;
