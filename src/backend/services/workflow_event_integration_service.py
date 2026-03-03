@@ -39,6 +39,7 @@ EVENT_TYPE_TEXT_RELATION_UPDATED = "text_relation.updated"
 EVENT_TYPE_TEXT_RELATION_DELETED = "text_relation.deleted"
 EVENT_TYPE_VONTOLOGY_MUTATED = "vontology.mutated"
 EVENT_TYPE_FILE_COPY_UPLOADED = "file_copy.uploaded"
+DEFAULT_FILE_COPY_UPLOADED_WORKFLOW_ID = "#V#file_copy_upload_handler_workflow"
 
 # Backward-compatible environment wiring (legacy/system bootstrap).
 EVENT_WORKFLOW_ID_ENV_MAP: dict[str, str] = {
@@ -59,7 +60,7 @@ _DEFAULT_EVENT_BINDINGS: tuple[dict[str, Any], ...] = (
     },
     {
         "event_type": EVENT_TYPE_FILE_COPY_UPLOADED,
-        "workflow_id": "#V#file_copy_interpretation_workflow",
+        "workflow_id": DEFAULT_FILE_COPY_UPLOADED_WORKFLOW_ID,
         "input_mapping": {
             "concept_id": "event.file_copy_concept_id",
             "file_copy_concept_id": "event.file_copy_concept_id",
@@ -1366,7 +1367,11 @@ def maybe_launch_file_copy_uploaded_workflow(
     uploaded_at_iso: str | None = None,
     index_in_rag: bool = True,
 ) -> dict[str, Any]:
-    """Launch interpretation workflow(s) for a newly uploaded file copy."""
+    """Launch upload-handler workflow for a newly uploaded file copy.
+
+    File uploads are routed through a single selected workflow ID to avoid
+    duplicate uncontrolled launches when multiple bindings may exist.
+    """
 
     concept_id = str(file_copy_concept_id or "").strip()
     if not concept_id:
@@ -1380,12 +1385,17 @@ def maybe_launch_file_copy_uploaded_workflow(
         }
 
     ensure_report = ensure_default_event_bindings()
+    selected_workflow_id = (
+        _workflow_id_for_event(EVENT_TYPE_FILE_COPY_UPLOADED)
+        or DEFAULT_FILE_COPY_UPLOADED_WORKFLOW_ID
+    )
     launch_result = launch_event_workflow(
         event_type=EVENT_TYPE_FILE_COPY_UPLOADED,
         event_id=concept_id,
         user_id=uploaded_by_concept_id,
         org_id=organisation_concept_id,
         namespace=namespace,
+        workflow_id=selected_workflow_id,
         event_payload={
             "concept_id": concept_id,
             "file_copy_concept_id": concept_id,
@@ -1411,4 +1421,6 @@ def maybe_launch_file_copy_uploaded_workflow(
     )
     if isinstance(launch_result, dict):
         launch_result["default_binding_bootstrap"] = ensure_report
+        launch_result["selected_workflow_id"] = selected_workflow_id
+        launch_result["launch_strategy"] = "single_selected_binding"
     return launch_result

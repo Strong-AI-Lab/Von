@@ -204,7 +204,7 @@ def app(monkeypatch):
             "success": True,
             "triggered": True,
             "event_type": "file_copy.uploaded",
-            "workflow_id": "#V#file_copy_interpretation_workflow",
+            "workflow_id": "#V#file_copy_upload_handler_workflow",
             "reason": "created_new_instance",
             "instance_id": "test-instance-1",
         }

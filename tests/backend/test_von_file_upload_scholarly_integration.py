@@ -12,9 +12,8 @@ from src.backend.services.kb_clone_benchmark_service import (
     ONTOLOGY_SLICE_COLLECTIONS,
     clone_database_ontology_slice,
 )
-from src.backend.workflows.durable.file_copy_interpretation_workflow import (
-    FILE_COPY_INTERPRETATION_WORKFLOW_ID,
-    build_file_copy_interpretation_workflow,
+from src.backend.workflows.durable.file_copy_upload_handler_workflow import (
+    FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
 )
 from src.backend.workflows.durable.models import WorkflowInstanceStatus
 from src.backend.workflows.durable.registry_factory import (
@@ -182,18 +181,22 @@ def _mock_paper_metadata(**kwargs):
 
 def _run_pending_file_copy_instance(instance_id: str):
     manager = get_instance_manager()
+    instance = manager.get_instance(instance_id)
+    assert instance is not None
+    workflow_id = str(instance.workflow_id or "").strip()
+    assert workflow_id
+
     claimed = manager.find_and_claim_instance(
         _TEST_WORKER_ID,
-        workflow_ids=[FILE_COPY_INTERPRETATION_WORKFLOW_ID],
+        workflow_ids=[workflow_id],
     )
     assert claimed is not None
     assert claimed.instance_id == instance_id
     assert claimed.status == WorkflowInstanceStatus.RUNNING
 
     registry = build_workflow_registry_read_only()
-    definition = registry.get(FILE_COPY_INTERPRETATION_WORKFLOW_ID)
-    if definition is None:
-        definition = build_file_copy_interpretation_workflow()
+    definition = registry.get(workflow_id)
+    assert definition is not None
 
     executor = create_durable_executor(
         build_durable_action_registry(),
@@ -317,7 +320,7 @@ def test_upload_event_workflow_materialises_scholarly_representation_in_ontology
     launch_payload = first_body.get("workflow_event_launch") or {}
     assert launch_payload.get("success") is True
     assert launch_payload.get("triggered") is True
-    assert launch_payload.get("workflow_id") == FILE_COPY_INTERPRETATION_WORKFLOW_ID
+    assert launch_payload.get("workflow_id") == FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID
 
     first_instance_id = str(launch_payload.get("instance_id") or "").strip()
     assert first_instance_id

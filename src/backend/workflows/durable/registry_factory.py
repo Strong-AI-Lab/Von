@@ -11,6 +11,7 @@ See JVNAUTOSCI-922 Phase 1 for the motivation and design.
 from __future__ import annotations
 
 import copy
+from functools import lru_cache
 import logging
 import os
 from datetime import datetime, timezone
@@ -42,6 +43,14 @@ from .workflow_introspection_maintenance_workflow import (
 from .file_copy_interpretation_workflow import (
     get_file_copy_interpretation_workflow_registration,
     register_file_copy_interpretation_actions,
+)
+from .file_copy_upload_classification_workflow import (
+    get_file_copy_upload_classification_workflow_registration,
+    register_file_copy_upload_classification_actions,
+)
+from .file_copy_upload_handler_workflow import (
+    get_file_copy_upload_handler_workflow_registration,
+    register_file_copy_upload_handler_actions,
 )
 from .entity_identity_resolution_workflow import (
     get_entity_identity_resolution_workflow_registration,
@@ -412,6 +421,8 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
     registry.register(get_rumination_workflow_registration())
     registry.register(get_planning_workflow_registration())
     registry.register(get_workflow_introspection_maintenance_registration())
+    registry.register(get_file_copy_upload_classification_workflow_registration())
+    registry.register(get_file_copy_upload_handler_workflow_registration())
     registry.register(get_file_copy_interpretation_workflow_registration())
     registry.register(get_entity_identity_resolution_workflow_registration())
 
@@ -546,11 +557,35 @@ def build_durable_action_registry() -> ActionRegistry:
     register_rumination_actions(registry)
     register_planning_actions(registry)
     register_workflow_introspection_maintenance_actions(registry)
+    register_file_copy_upload_classification_actions(registry)
+    register_file_copy_upload_handler_actions(registry)
     register_file_copy_interpretation_actions(registry)
     register_entity_identity_resolution_actions(registry)
-    register_subworkflow_actions(registry)
+    register_subworkflow_actions(registry, definition_loader=_resolve_subworkflow_definition)
     register_workflow_creation_actions(registry)
     # Keep durable action routing aligned with orchestrator routing: if an
     # action ID is not explicitly registered, treat it as an MCP tool name.
     registry.set_fallback_handler(_durable_mcp_fallback_action)
     return registry
+
+
+@lru_cache(maxsize=128)
+def _resolve_subworkflow_definition(workflow_id: str):
+    """Resolve subworkflow definitions from registry first, then Vontology loader.
+
+    This keeps built-in durable subworkflow composition runnable even when
+    Vontology publication is unavailable or intentionally read-only in tests.
+    """
+    workflow_id_clean = str(workflow_id or "").strip()
+    if not workflow_id_clean:
+        return None
+
+    try:
+        registry = build_workflow_registry_read_only()
+        definition = registry.get(workflow_id_clean)
+        if definition is not None:
+            return definition
+    except Exception:
+        definition = None
+
+    return load_workflow_definition_from_vontology(workflow_id_clean)

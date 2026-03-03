@@ -43,6 +43,10 @@ logger = logging.getLogger(__name__)
 # ``workflows.durable`` during authority bootstrap (that path imports registry
 # factory and can create circular imports).
 FILE_COPY_INTERPRETATION_WORKFLOW_ID = "#V#file_copy_interpretation_workflow"
+FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID = (
+    "#V#file_copy_upload_classification_workflow"
+)
+FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID = "#V#file_copy_upload_handler_workflow"
 WORKFLOW_CREATION_WORKFLOW_ID = "#V#von_workflow_creation_workflow"
 
 WORKFLOW_CREATION_STEP_IDENTIFY_NEED = "#V#workflow_creation_step_identify_need"
@@ -329,6 +333,68 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
                 next_state="completed",
             ),
             _CanonicalStepPublicationSpec(state_id="completed"),
+        ),
+    ),
+    FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state="classify",
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id="classify",
+                action_id="file_copy_upload.classify",
+                next_state="persist_decision",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="persist_decision",
+                action_id="file_copy_upload.persist_decision",
+                next_state="complete",
+            ),
+            _CanonicalStepPublicationSpec(state_id="complete"),
+            _CanonicalStepPublicationSpec(state_id="failed"),
+        ),
+    ),
+    FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state="classify",
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id="classify",
+                action_id="workflow_invoke_subworkflow",
+                on_true_state="specialised",
+                on_false_state="interpret",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="specialised",
+                action_id="workflow_invoke_subworkflow",
+                on_true_state="record_outcome",
+                on_false_state="specialised_failed",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="specialised_failed",
+                action_id="file_copy_upload.mark_specialised_failure",
+                on_true_state="interpret",
+                on_false_state="record_outcome",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="interpret",
+                action_id="workflow_invoke_subworkflow",
+                next_state="record_outcome",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="noop",
+                action_id="file_copy_upload.mark_noop",
+                next_state="record_outcome",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="fail_closed",
+                action_id="file_copy_upload.mark_fail_closed",
+                next_state="record_outcome",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="record_outcome",
+                action_id="file_copy_upload.persist_route_outcome",
+                next_state="complete",
+            ),
+            _CanonicalStepPublicationSpec(state_id="complete"),
+            _CanonicalStepPublicationSpec(state_id="failed"),
         ),
     ),
     FILE_COPY_INTERPRETATION_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(

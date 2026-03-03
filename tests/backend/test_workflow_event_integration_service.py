@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from src.backend.workflows.durable.models import EventWorkflowBinding
 from src.backend.services.workflow_event_integration_service import (
+    DEFAULT_FILE_COPY_UPLOADED_WORKFLOW_ID,
     EVENT_TYPE_CONCEPT_UPDATED,
     EVENT_TYPE_EFFORT_UNIT_COMPLETED,
     EVENT_TYPE_FILE_COPY_UPLOADED,
@@ -517,12 +518,15 @@ def test_maybe_launch_file_copy_uploaded_workflow_emits_upload_event(
     assert result["success"] is True
     assert result["triggered"] is True
     assert result["default_binding_bootstrap"]["ensured"] is True
+    assert result["launch_strategy"] == "single_selected_binding"
+    assert result["selected_workflow_id"] == DEFAULT_FILE_COPY_UPLOADED_WORKFLOW_ID
     mock_ensure_default_event_bindings.assert_called_once()
 
     called_args = mock_launch_event_workflow.call_args
     assert called_args is not None
     assert called_args.kwargs["event_type"] == EVENT_TYPE_FILE_COPY_UPLOADED
     assert called_args.kwargs["event_id"] == "#V#uploaded_file_copy_123"
+    assert called_args.kwargs["workflow_id"] == DEFAULT_FILE_COPY_UPLOADED_WORKFLOW_ID
     assert called_args.kwargs["inputs"]["file_copy_concept_id"] == "#V#uploaded_file_copy_123"
     assert called_args.kwargs["inputs"]["index_in_rag"] is True
 
