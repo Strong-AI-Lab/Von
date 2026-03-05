@@ -329,6 +329,78 @@ def test_interpret_file_copy_gateway_fails_closed_on_unverified_company_represen
     )
 
 
+def test_interpret_file_copy_gateway_fails_closed_on_unverified_meeting_representation(
+    monkeypatch,
+):
+    gateway = _build_gateway()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.catalogue._read_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "text": "Meeting transcript content.",
+            "content_type": "text/plain",
+            "original_filename": "meeting-transcript.txt",
+            "size_bytes": 96,
+            "byte_length": 96,
+            "blob": {"backend": "local", "key": "imports/user/hash/meeting-transcript.txt"},
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.file_copy_interpretation_service.build_document_interpretation",
+        lambda **_kwargs: {
+            "kind": "document",
+            "description": "Document text extracted: Meeting transcript content.",
+            "subject_tags": ["document"],
+            "content_text": "Meeting transcript content.",
+            "content_length": 27,
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.arxiv_paper_link_service.materialise_scholarly_representation_for_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "verified": True,
+            "paper_concept_id": "#V#paper_from_file_copy_gateway",
+            "file_copy_concept_id": "#V#imported_file_gateway",
+            "representation_mode": "generic_file_copy",
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.meeting_file_representation_service.materialise_meeting_representation_for_file_copy",
+        lambda **_kwargs: {
+            "success": False,
+            "attempted": True,
+            "verified": False,
+            "reason": "meeting_identity_unresolved",
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.upsert_singleton_text_relation",
+        lambda **_kwargs: {"relation_id": "rel-gateway-meeting"},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.rag_text_relation_change_hook_service.maybe_sync_concept_text_relations_to_rag",
+        lambda **_kwargs: None,
+    )
+
+    interpreted = gateway.invoke(
+        "interpret_file_copy",
+        {"concept_id": "#V#imported_file_gateway", "namespace": "#V#user@org"},
+    ).payload
+
+    assert interpreted.get("success") is False
+    meeting_representation = interpreted.get("meeting_representation") or {}
+    assert meeting_representation.get("attempted") is True
+    assert meeting_representation.get("verified") is False
+    persist_errors = interpreted.get("persist_errors") or []
+    assert any(
+        row.get("predicate") == "#V#meeting_representation_verification"
+        for row in persist_errors
+        if isinstance(row, dict)
+    )
+
+
 def test_interpret_file_copy_gateway_returns_pdf_diagram_candidates(monkeypatch):
     gateway = _build_gateway()
 
