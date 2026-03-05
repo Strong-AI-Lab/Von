@@ -642,15 +642,23 @@ def _summarise_tool_invocations(
         error_value = _safe_str(invocation.get("error"))
         blocked = bool(invocation.get("blocked"))
         payload_status = ""
+        payload_success: bool | None = None
         if isinstance(payload_value, Mapping):
             payload_status = (
                 _safe_str(payload_value.get("status")) or ""
             ).lower()
+            raw_success = payload_value.get("success")
+            if isinstance(raw_success, bool):
+                payload_success = raw_success
 
         status = "ok"
         if blocked:
             status = "blocked"
-        elif error_value or payload_status in {"error", "failed", "failure"}:
+        elif (
+            error_value
+            or payload_status in {"error", "failed", "failure"}
+            or payload_success is False
+        ):
             status = "error"
 
         result_summary = _safe_str(invocation.get("result_summary"))

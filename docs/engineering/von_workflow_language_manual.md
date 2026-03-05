@@ -1,7 +1,7 @@
 # Von Workflow Language (VWL) Manual
 
 Status: Draft (current implementation-aligned)
-Last updated: 2026-03-03 (Pacific/Auckland)
+Last updated: 2026-03-05 (Pacific/Auckland)
 Audience: Human engineers and AI agents
 
 ## 1. Purpose and Scope
@@ -368,6 +368,30 @@ When `#V#file_copy_interpretation_workflow` runs `interpret_file_copy` for PDF d
 - Every extracted diagram candidate MUST carry provenance metadata (source, page/figure scope, extraction method, timestamp/evidence).
 - Output MUST include explicit `requires_human_confirmation=true` semantics for diagram-derived candidates.
 - If diagram OCR dependencies are unavailable, interpretation MUST fail soft (diagnostic payload preserved) rather than silently asserting diagram-derived facts.
+
+### 10.6 Scholarly Paper Representation Contract (JVNAUTOSCI-1369 / JVNAUTOSCI-1372)
+
+For paper-representation intents, VWL required-effects semantics MUST ensure execution paths include mutation-capable tooling, not read-only enrichment alone.
+
+Canonical paper profile source expectations:
+
+- `file_copy` source: required tool set MUST include `interpret_file_copy`.
+- `url` source (including arXiv URLs/IDs): required tool set MUST include `download_paper`.
+- `mixed` source: required tool set SHOULD include both `download_paper` and `interpret_file_copy`.
+
+Important runtime contract note:
+
+- Current `required_effects_contract.v1` evaluates `required_tools` as an any-of set (one observed required tool can satisfy the effect), so source-specific tool lists MUST be authored to preserve mutation guarantees.
+- Read-only tools such as `extract_url` or `get_paper_metadata` MAY be used for enrichment, but MUST NOT be the sole required-effect satisfaction path for paper representation.
+
+Operational expectations for arXiv tool handlers:
+
+- `download_paper` and `finalise_cached_paper` SHOULD attempt scholarly representation materialisation for authenticated file-copy registrations.
+- Tool responses SHOULD expose `scholarly_representation` diagnostics (`attempted`, `verified`, `paper_concept_id`, `metadata_source`, `metadata_available`, and explicit error/fallback fields when not verified).
+
+Turn-execution gate expectation:
+
+- Tool invocations whose payload explicitly reports `success=false` MUST be treated as failed execution for required-effect evaluation and completion gating.
 
 ## 11. Durable Runtime Semantics
 

@@ -21,8 +21,8 @@ def _representation_profiles() -> list[dict]:
             "domain_terms": ["paper", "arxiv", "abstract", "metadata"],
             "required_tools_by_source": {
                 "file_copy": ["interpret_file_copy"],
-                "url": ["extract_url", "get_paper_metadata"],
-                "mixed": ["interpret_file_copy", "extract_url"],
+                "url": ["download_paper"],
+                "mixed": ["download_paper", "interpret_file_copy"],
                 "unknown": ["interpret_file_copy"],
             },
             "required_predicates": [
@@ -173,6 +173,81 @@ def test_paper_representation_contract_emitted_with_required_effects(monkeypatch
     assert effect.get("effect_type") == "scholarly_representation"
     assert effect.get("required_tools") == ["interpret_file_copy"]
     assert effect.get("targets") == ["#V#uploaded_file_copy_abc123"]
+
+
+def test_paper_url_representation_contract_requires_download_paper(monkeypatch) -> None:
+    _patch_representation_profile_loader(
+        monkeypatch, profiles=_representation_profiles()
+    )
+    record = _build_record(
+        prompt_text=(
+            "Download and represent metadata on this scientific paper "
+            "https://arxiv.org/abs/2502.14996"
+        ),
+        response_text="Observed required tool execution.",
+        tool_invocations=[
+            {
+                "tool": "download_paper",
+                "payload": {
+                    "success": True,
+                    "arxiv_id": "2502.14996",
+                    "computer_file_copy_concept_id": "#V#uploaded_file_copy_2502_14996",
+                },
+            },
+            {
+                "tool": "fetch_concept",
+                "payload": {"success": True, "concept_id": "#V#paper_on_arxiv_2502_14996"},
+            },
+        ],
+    )
+
+    execution = record.get("execution")
+    assert isinstance(execution, dict)
+    contract = execution.get("required_effects_contract") or {}
+    assert contract.get("artefact_source") == "url"
+
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    assert required_effects
+    effect = required_effects[0]
+    assert effect.get("required_tools") == ["download_paper"]
+    assert effect.get("status") == "satisfied"
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "completed"
+    assert completion_gate.get("safe_to_claim_completion") is True
+
+
+def test_representation_tool_success_false_marks_effect_unresolved(monkeypatch) -> None:
+    _patch_representation_profile_loader(
+        monkeypatch, profiles=_representation_profiles()
+    )
+    record = _build_record(
+        prompt_text=(
+            "Download and represent metadata on this scientific paper "
+            "https://arxiv.org/abs/2502.14996"
+        ),
+        tool_invocations=[
+            {
+                "tool": "download_paper",
+                "payload": {
+                    "success": False,
+                    "error": "arxiv_proxy_timeout",
+                },
+            }
+        ],
+    )
+
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    assert required_effects
+    effect = required_effects[0]
+    assert effect.get("status") == "not_satisfied"
+    assert effect.get("failure_code") == "paper_representation_tool_failed"
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "failed"
+    assert completion_gate.get("safe_to_claim_completion") is False
 
 
 def test_person_company_meeting_profiles_generate_non_empty_effects(monkeypatch) -> None:
