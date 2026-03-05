@@ -1519,6 +1519,7 @@ def _infer_mutation_required_effect(
 
     effect_status = "pending"
     status_reason: str | None = None
+    failure_codes: list[str] = []
     if successful_write_tools:
         effect_status = "satisfied"
         status_reason = (
@@ -1533,12 +1534,14 @@ def _infer_mutation_required_effect(
             if names
             else "Write attempt failed or was blocked."
         )
+        failure_codes = ["kb_mutation_write_failed_or_blocked"]
     else:
         effect_status = "not_executed"
         status_reason = "No write-capable tool invocation was observed."
+        failure_codes = ["kb_mutation_not_executed"]
 
     required_tools = list(successful_write_tools[:3]) or ["add_relationship"]
-    return {
+    mutation_effect = {
         "effect_id": "effect_1",
         "intent_origin": "implicit" if mutation_intent else "explicit",
         "effect_type": "kb_mutation",
@@ -1551,6 +1554,12 @@ def _infer_mutation_required_effect(
         "status": effect_status,
         "status_reason": status_reason,
     }
+    if failure_codes:
+        mutation_effect["failure_code"] = failure_codes[0]
+        mutation_effect["failure_codes"] = list(failure_codes)
+    else:
+        mutation_effect["failure_codes"] = []
+    return mutation_effect
 
 
 def _build_postcondition_checks(
@@ -1763,6 +1772,18 @@ def _derive_completion_gate(
                     if isinstance(code, str) and code.strip()
                 }
             )
+        else:
+            unresolved_statuses = {
+                _safe_str(entry.get("status")) or ""
+                for entry in unresolved_preconditions
+                if isinstance(entry, Mapping)
+            }
+            fallback_codes: list[str] = ["required_effects_unresolved"]
+            if "not_satisfied" in unresolved_statuses:
+                fallback_codes.append("required_effect_not_satisfied")
+            if "not_executed" in unresolved_statuses:
+                fallback_codes.append("required_effect_not_executed")
+            blocking_failure_codes = sorted(set(fallback_codes))
         if any(
             (_safe_str(effect.get("status")) or "") == "not_satisfied"
             for effect in required_effects
@@ -1802,12 +1823,16 @@ def _derive_completion_gate(
         blocking_effect_ids = sorted(set(unresolved_check_ids))
         decision = "partial"
         decision_reason = "Mutation execution observed but postcondition verification is inconclusive."
+        if not blocking_failure_codes:
+            blocking_failure_codes = ["postcondition_inconclusive"]
 
     if decision == "completed" and not completion_claim_validated:
         decision = "partial"
         decision_reason = (
             "Completion claim was detected but could not be fully validated."
         )
+        if not blocking_failure_codes:
+            blocking_failure_codes = ["completion_claim_unvalidated"]
 
     safe_to_claim = decision == "completed"
     evidence_payload = {
