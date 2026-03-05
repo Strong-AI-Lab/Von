@@ -209,21 +209,11 @@ _DIAGNOSTIC_ONLY_PHRASES = (
     "why wasn't",
 )
 
-_PAPER_REPRESENTATION_INTENT_PATTERN = re.compile(
-    r"\b("
-    r"represent(?:ation|ing)?\s+(?:the\s+)?(?:corresponding\s+)?paper"
-    r"|paper\s+representation"
-    r"|represent\s+the\s+paper\s+not\s+the\s+file"
-    r"|represent\s+the\s+paper\s+rather\s+than\s+the\s+file"
-    r"|fully\s+represent\s+(?:the\s+)?(?:corresponding\s+)?paper"
-    r"|scholarly\s+paper\s+representation"
-    r")\b",
-    flags=re.IGNORECASE,
-)
 _FILE_COPY_CONCEPT_ID_PATTERN = re.compile(
     r"#V#[A-Za-z0-9][A-Za-z0-9._-]*file_copy[A-Za-z0-9._-]*",
     flags=re.IGNORECASE,
 )
+_URL_PATTERN = re.compile(r"https?://[^\s)>\"]+", flags=re.IGNORECASE)
 
 _ACTION_REQUEST_MUTATION_PATTERN = re.compile(
     r"\b(?:can you|could you|go ahead(?: and)?|please|would you)\s+"
@@ -242,6 +232,179 @@ _TOOL_EXECUTION_FAILURE_REASON_MAP = {
     "missing_tool_call_retry_exhausted": "Tool-call recovery exhausted retries without executing a tool.",
     "missing_tool_call_unresolved": "Tool-calling was selected but no executable tool call was produced.",
 }
+
+_REPRESENTATION_CONTRACT_SCHEMA_VERSION = "required_effects_contract.v1"
+_REPRESENTATION_ACTION_PATTERN = re.compile(
+    r"\b("
+    r"represent(?:ation|ing|ed)?"
+    r"|materiali(?:s|z)e(?:d|s|ing)?"
+    r"|extract(?:ed|s|ing)?"
+    r"|model(?:led|ing)?"
+    r"|capture(?:d|s|ing)?"
+    r"|ingest(?:ed|s|ing)?"
+    r"|create|build|make"
+    r")\b",
+    flags=re.IGNORECASE,
+)
+_STATUS_CHECK_PROMPT_PATTERN = re.compile(
+    r"^\s*(?:did|do|does|have|has|is|are|was|were)\s+you\b",
+    flags=re.IGNORECASE,
+)
+
+_AUX_REQUIRED_FILE_COPY_ID_FIELDS = (
+    "required_scholarly_representation_for_file_copy_ids",
+    "required_representation_for_file_copy_ids",
+    "required_read_file_copy_ids",
+)
+
+_REPRESENTATION_DEFAULT_DECISION_POLICY = {
+    "completion_block_on_unresolved_effects": True,
+    "fail_closed_on_missing_requirements": True,
+    "auto_apply_low_risk_defaults": True,
+    "requires_explicit_user_decision_for_high_risk": True,
+}
+
+# REFERENCE CONFIG: extend representation coverage by adding a profile here
+# instead of introducing prompt-specific branches in execution code.
+_REPRESENTATION_DOMAIN_PROFILES: tuple[dict[str, Any], ...] = (
+    {
+        "profile_id": "paper",
+        "target_entity_class": "scholarly_paper",
+        "effect_type": "scholarly_representation",
+        "intent_pattern": re.compile(
+            r"\b("
+            r"paper\s+representation"
+            r"|represent(?:ation|ing)?\s+(?:the\s+)?(?:corresponding\s+)?paper"
+            r"|fully\s+represent\s+(?:the\s+)?(?:corresponding\s+)?paper"
+            r"|scholarly\s+paper\s+representation"
+            r")\b",
+            flags=re.IGNORECASE,
+        ),
+        "domain_terms": (
+            "paper",
+            "scientific paper",
+            "arxiv",
+            "preprint",
+            "doi",
+            "manuscript",
+            "metadata",
+            "abstract",
+        ),
+        "required_tools_by_source": {
+            "file_copy": ["interpret_file_copy"],
+            "url": ["extract_url", "get_paper_metadata"],
+            "mixed": ["interpret_file_copy", "extract_url"],
+            "unknown": ["interpret_file_copy"],
+        },
+        "required_predicates": [
+            "#V#computer_file_for_propositional_information_thing",
+            "#V#propositional_information_thing_has_computer_file",
+        ],
+        "description": (
+            "Ensure the corresponding scholarly-paper concept is materialised from "
+            "the supplied artefact context before final response completion."
+        ),
+    },
+    {
+        "profile_id": "person",
+        "target_entity_class": "person",
+        "effect_type": "representation_person",
+        "intent_pattern": re.compile(
+            r"\b("
+            r"(?:business\s+card|cv|curriculum\s+vitae|resume)\b.*\b(?:person|profile|contact)"
+            r"|(?:person|profile|contact)\b.*\b(?:business\s+card|cv|curriculum\s+vitae|resume)"
+            r")\b",
+            flags=re.IGNORECASE,
+        ),
+        "domain_terms": (
+            "person",
+            "business card",
+            "cv",
+            "curriculum vitae",
+            "resume",
+            "contact",
+            "profile",
+            "researcher",
+        ),
+        "required_tools_by_source": {
+            "file_copy": ["interpret_file_copy"],
+            "url": ["extract_url"],
+            "mixed": ["interpret_file_copy", "extract_url"],
+            "unknown": ["interpret_file_copy"],
+        },
+        "required_predicates": ["#V#person"],
+        "description": (
+            "Ensure a person representation is materialised from the supplied "
+            "artefact context before final response completion."
+        ),
+    },
+    {
+        "profile_id": "company",
+        "target_entity_class": "company",
+        "effect_type": "representation_company",
+        "intent_pattern": re.compile(
+            r"\b("
+            r"(?:company|organisation|organization|business|startup)\b.*\b(?:web\s?page|website|url)"
+            r"|(?:web\s?page|website|url)\b.*\b(?:company|organisation|organization|business|startup)"
+            r")\b",
+            flags=re.IGNORECASE,
+        ),
+        "domain_terms": (
+            "company",
+            "organisation",
+            "organization",
+            "business",
+            "startup",
+            "firm",
+            "web page",
+            "website",
+            "url",
+        ),
+        "required_tools_by_source": {
+            "file_copy": ["interpret_file_copy"],
+            "url": ["extract_url"],
+            "mixed": ["interpret_file_copy", "extract_url"],
+            "unknown": ["extract_url"],
+        },
+        "required_predicates": ["#V#organisation"],
+        "description": (
+            "Ensure a company representation is materialised from the supplied "
+            "artefact context before final response completion."
+        ),
+    },
+    {
+        "profile_id": "meeting",
+        "target_entity_class": "meeting",
+        "effect_type": "representation_meeting",
+        "intent_pattern": re.compile(
+            r"\b("
+            r"(?:meeting|calendar\s+event)\b.*\b(?:transcript|calendar|minutes|agenda)"
+            r"|(?:transcript|calendar|minutes|agenda)\b.*\b(?:meeting|calendar\s+event)"
+            r")\b",
+            flags=re.IGNORECASE,
+        ),
+        "domain_terms": (
+            "meeting",
+            "calendar event",
+            "transcript",
+            "calendar",
+            "minutes",
+            "agenda",
+            "attendees",
+        ),
+        "required_tools_by_source": {
+            "file_copy": ["interpret_file_copy"],
+            "url": ["extract_url"],
+            "mixed": ["interpret_file_copy", "extract_url"],
+            "unknown": ["interpret_file_copy"],
+        },
+        "required_predicates": ["#V#meeting"],
+        "description": (
+            "Ensure a meeting representation is materialised from the supplied "
+            "artefact context before final response completion."
+        ),
+    },
+)
 
 
 def _has_affirmative_mutation_term(prompt_text: str) -> bool:
@@ -846,109 +1009,322 @@ def _extract_file_copy_concept_ids_from_text(prompt_text: Any) -> list[str]:
     if not isinstance(prompt_text, str) or not prompt_text.strip():
         return []
     matches = _FILE_COPY_CONCEPT_ID_PATTERN.findall(prompt_text)
-    concept_ids: list[str] = []
+    return _dedupe_string_sequence(matches)
+
+
+def _dedupe_string_sequence(values: Sequence[Any]) -> list[str]:
+    cleaned_values: list[str] = []
     seen: set[str] = set()
-    for raw in matches:
-        concept_id = _safe_str(raw)
-        if not concept_id:
+    for raw in values:
+        cleaned = _safe_str(raw)
+        if not cleaned:
             continue
-        lowered = concept_id.lower()
+        lowered = cleaned.lower()
         if lowered in seen:
             continue
         seen.add(lowered)
-        concept_ids.append(concept_id)
-    return concept_ids
+        cleaned_values.append(cleaned)
+    return cleaned_values
 
 
-def _extract_required_scholarly_file_copy_ids_from_aux(
+def _extract_urls_from_text(prompt_text: Any) -> list[str]:
+    if not isinstance(prompt_text, str) or not prompt_text.strip():
+        return []
+    return _dedupe_string_sequence(_URL_PATTERN.findall(prompt_text))
+
+
+def _extract_required_file_copy_ids_from_aux(
     aux_llm_calls: Sequence[Mapping[str, Any]] | None,
 ) -> list[str]:
     concept_ids: list[str] = []
-    seen: set[str] = set()
     for entry in aux_llm_calls or ():
         if not isinstance(entry, Mapping):
             continue
         entry_type = (_safe_str(entry.get("type")) or "").strip().lower()
         if entry_type not in {"prompt_tool_requirements", "workflow_selector_override"}:
             continue
-        raw_values = entry.get("required_scholarly_representation_for_file_copy_ids")
-        if not isinstance(raw_values, Sequence) or isinstance(raw_values, (str, bytes)):
-            continue
-        for raw in raw_values:
-            concept_id = _safe_str(raw)
-            if not concept_id:
+        for field_name in _AUX_REQUIRED_FILE_COPY_ID_FIELDS:
+            raw_values = entry.get(field_name)
+            if not isinstance(raw_values, Sequence) or isinstance(
+                raw_values, (str, bytes)
+            ):
                 continue
-            lowered = concept_id.lower()
-            if lowered in seen:
-                continue
-            seen.add(lowered)
-            concept_ids.append(concept_id)
-    return concept_ids
+            concept_ids.extend(raw_values)
+    return _dedupe_string_sequence(concept_ids)
 
 
-def _infer_scholarly_representation_required_effect(
+def _extract_required_scholarly_file_copy_ids_from_aux(
+    aux_llm_calls: Sequence[Mapping[str, Any]] | None,
+) -> list[str]:
+    # Backward-compatible helper retained for call sites that still expect the
+    # scholarly-specific name while the contract path is being rolled out.
+    return _extract_required_file_copy_ids_from_aux(aux_llm_calls)
+
+
+def _contains_any_phrase(text: str, phrases: Sequence[str]) -> bool:
+    return any(phrase in text for phrase in phrases if isinstance(phrase, str))
+
+
+def _extract_representation_source_hints(prompt_text: str) -> list[str]:
+    hints: list[str] = []
+    lowered = prompt_text.lower()
+    if _contains_any_phrase(lowered, ("business card",)):
+        hints.append("business_card")
+    if _contains_any_phrase(lowered, ("cv", "curriculum vitae", "resume")):
+        hints.append("cv")
+    if _contains_any_phrase(lowered, ("transcript", "minutes", "agenda")):
+        hints.append("transcript")
+    if _contains_any_phrase(lowered, ("calendar event", "calendar")):
+        hints.append("calendar_event")
+    if _contains_any_phrase(lowered, ("web page", "webpage", "website")):
+        hints.append("web_page")
+    if _contains_any_phrase(lowered, ("url", "http://", "https://")):
+        hints.append("url")
+    if _contains_any_phrase(lowered, ("pdf", "document", "file")):
+        hints.append("document")
+    return _dedupe_string_sequence(hints)
+
+
+def _infer_representation_artefact_source(
+    *,
+    file_copy_ids: Sequence[str],
+    urls: Sequence[str],
+    source_hints: Sequence[str],
+) -> str:
+    if file_copy_ids and urls:
+        return "mixed"
+    if file_copy_ids:
+        return "file_copy"
+    if urls:
+        return "url"
+    if "url" in source_hints or "web_page" in source_hints:
+        return "url"
+    if source_hints:
+        return "file_copy"
+    return "unknown"
+
+
+def _prompt_requests_representation_action(prompt_text: str) -> bool:
+    if not prompt_text:
+        return False
+    lowered = prompt_text.lower()
+    if _looks_like_diagnostic_only_prompt(lowered):
+        return False
+    if _STATUS_CHECK_PROMPT_PATTERN.search(lowered):
+        if not re.search(r"\b(?:can|could|would)\s+you\b|\bplease\b", lowered):
+            return False
+    if _REPRESENTATION_ACTION_PATTERN.search(lowered):
+        return True
+    return _contains_any_phrase(lowered, ("representation", "materialisation", "model"))
+
+
+def _select_representation_domain_profile(prompt_text: str) -> dict[str, Any] | None:
+    lowered = prompt_text.lower()
+    best_profile: dict[str, Any] | None = None
+    best_score = 0
+
+    for profile in _REPRESENTATION_DOMAIN_PROFILES:
+        score = 0
+        intent_pattern = profile.get("intent_pattern")
+        if isinstance(intent_pattern, re.Pattern) and intent_pattern.search(prompt_text):
+            score += 4
+        domain_terms = profile.get("domain_terms")
+        if isinstance(domain_terms, Sequence):
+            for term in domain_terms:
+                if isinstance(term, str) and term and term in lowered:
+                    score += 1
+        if score > best_score:
+            best_score = score
+            best_profile = profile
+
+    if best_profile is None or best_score <= 0:
+        return None
+    return best_profile
+
+
+def _resolve_representation_required_tools(
+    *,
+    profile: Mapping[str, Any],
+    artefact_source: str,
+) -> list[str]:
+    by_source = profile.get("required_tools_by_source")
+    if not isinstance(by_source, Mapping):
+        return []
+    tools = by_source.get(artefact_source)
+    if not isinstance(tools, Sequence) or isinstance(tools, (str, bytes)):
+        tools = by_source.get("unknown")
+    if not isinstance(tools, Sequence) or isinstance(tools, (str, bytes)):
+        return []
+    return _dedupe_string_sequence(tools)
+
+
+def _build_representation_required_effect_template(
+    *,
+    profile: Mapping[str, Any],
+    required_tools: Sequence[str],
+    targets: Sequence[str],
+) -> dict[str, Any]:
+    profile_id = _safe_str(profile.get("profile_id")) or "representation"
+    effect_type = (
+        _safe_str(profile.get("effect_type"))
+        or f"representation_{profile_id}"
+    )
+    description = (
+        _safe_str(profile.get("description"))
+        or "Ensure the requested representation is materialised from the artefact context."
+    )
+    required_predicates = profile.get("required_predicates")
+    if not isinstance(required_predicates, Sequence) or isinstance(
+        required_predicates, (str, bytes)
+    ):
+        required_predicates = []
+
+    return {
+        "effect_id": f"effect_{profile_id}_representation_1",
+        "intent_origin": "workflow_contract",
+        "effect_type": effect_type,
+        "representation_domain_id": profile_id,
+        "description": description,
+        "required_tools": _dedupe_string_sequence(required_tools),
+        "targets": _dedupe_string_sequence(targets),
+        "required_predicates": _dedupe_string_sequence(required_predicates),
+        "postcondition_required": True,
+        "postcondition_strategy": "execution_observed",
+    }
+
+
+def _build_representation_required_effects_contract(
     *,
     prompt_text: Any,
     aux_llm_calls: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, Any] | None:
+    # Contract generation is intentionally deterministic and prompt/aux-driven
+    # so repeated runs over the same context produce the same contract_id.
+    prompt_clean = _safe_str(prompt_text) or ""
+    if not _prompt_requests_representation_action(prompt_clean):
+        return None
+
+    profile = _select_representation_domain_profile(prompt_clean)
+    if profile is None:
+        return None
+
+    file_copy_ids = _extract_required_file_copy_ids_from_aux(aux_llm_calls)
+    if not file_copy_ids:
+        file_copy_ids = _extract_file_copy_concept_ids_from_text(prompt_clean)
+    urls = _extract_urls_from_text(prompt_clean)
+    source_hints = _extract_representation_source_hints(prompt_clean)
+    artefact_source = _infer_representation_artefact_source(
+        file_copy_ids=file_copy_ids,
+        urls=urls,
+        source_hints=source_hints,
+    )
+
+    required_tools = _resolve_representation_required_tools(
+        profile=profile,
+        artefact_source=artefact_source,
+    )
+
+    targets = list(file_copy_ids) if file_copy_ids else list(urls)
+    effect_template = _build_representation_required_effect_template(
+        profile=profile,
+        required_tools=required_tools,
+        targets=targets,
+    )
+
+    contract_payload: dict[str, Any] = {
+        "schema_version": _REPRESENTATION_CONTRACT_SCHEMA_VERSION,
+        "intent_class": "representation",
+        "domain_profile_id": _safe_str(profile.get("profile_id")) or "representation",
+        "target_entity_class": _safe_str(profile.get("target_entity_class")) or "thing",
+        "artefact_source": artefact_source,
+        "artefact_context": {
+            "file_copy_ids": list(file_copy_ids),
+            "urls": list(urls),
+            "source_hints": list(source_hints),
+        },
+        "required_effects": [effect_template],
+        "default_decision_policy": dict(_REPRESENTATION_DEFAULT_DECISION_POLICY),
+    }
+    contract_fingerprint = _hash_payload(contract_payload) or ""
+    contract_payload["contract_id"] = f"required_effects_{contract_fingerprint[:16]}"
+    return contract_payload
+
+
+def _is_representation_effect_type(effect_type: str | None) -> bool:
+    if not isinstance(effect_type, str):
+        return False
+    lowered = effect_type.strip().lower()
+    return lowered == "scholarly_representation" or lowered.startswith("representation_")
+
+
+def _materialise_required_effects_from_contract(
+    *,
+    contract: Mapping[str, Any] | None,
     successful_tools: Sequence[str],
     failed_tools: Sequence[str],
     blocked_tools: Sequence[str],
-) -> dict[str, Any] | None:
-    prompt_clean = prompt_text if isinstance(prompt_text, str) else ""
-    if not _PAPER_REPRESENTATION_INTENT_PATTERN.search(prompt_clean):
-        return None
-
-    required_targets = _extract_required_scholarly_file_copy_ids_from_aux(aux_llm_calls)
-    if not required_targets:
-        required_targets = _extract_file_copy_concept_ids_from_text(prompt_text)
-    if not required_targets:
-        return None
+) -> list[dict[str, Any]]:
+    if not isinstance(contract, Mapping):
+        return []
+    raw_effects = contract.get("required_effects")
+    if not isinstance(raw_effects, Sequence) or isinstance(raw_effects, (str, bytes)):
+        return []
 
     successful_lookup = {name.lower() for name in successful_tools if isinstance(name, str)}
     failed_lookup = {name.lower() for name in failed_tools if isinstance(name, str)}
     blocked_lookup = {name.lower() for name in blocked_tools if isinstance(name, str)}
 
-    effect_status = "not_executed"
-    status_reason = "No interpret_file_copy execution was observed."
-    failure_code = "scholarly_representation_not_executed"
-    if "interpret_file_copy" in successful_lookup:
-        effect_status = "satisfied"
-        status_reason = (
-            "Observed scholarly representation tool invocation: interpret_file_copy."
-        )
-        failure_code = None
-    elif "interpret_file_copy" in failed_lookup or "interpret_file_copy" in blocked_lookup:
-        effect_status = "not_satisfied"
-        status_reason = (
-            "interpret_file_copy failed or was blocked for required scholarly representation."
-        )
-        failure_code = "scholarly_representation_tool_failed"
+    domain_id = _safe_str(contract.get("domain_profile_id")) or "representation"
+    required_effects: list[dict[str, Any]] = []
+    for template in raw_effects:
+        if not isinstance(template, Mapping):
+            continue
+        effect = dict(template)
+        required_tools = _dedupe_string_sequence(effect.get("required_tools") or [])
 
-    effect: dict[str, Any] = {
-        "effect_id": "effect_scholarly_representation_1",
-        "intent_origin": "workflow_contract",
-        "effect_type": "scholarly_representation",
-        "description": (
-            "Ensure the corresponding scholarly-paper concept is materialised from the "
-            "file-copy context before final response completion."
-        ),
-        "required_tools": ["interpret_file_copy"],
-        "targets": list(required_targets),
-        "required_predicates": [
-            "#V#computer_file_for_propositional_information_thing",
-            "#V#propositional_information_thing_has_computer_file",
-        ],
-        "postcondition_required": True,
-        "postcondition_strategy": "execution_observed",
-        "status": effect_status,
-        "status_reason": status_reason,
-    }
-    if failure_code:
-        effect["failure_code"] = failure_code
-        effect["failure_codes"] = [failure_code]
-    else:
-        effect["failure_codes"] = []
-    return effect
+        effect_status = "not_executed"
+        status_reason = "No required representation tool execution was observed."
+        failure_code = f"{domain_id}_representation_not_executed"
+
+        first_success_tool = next(
+            (tool for tool in required_tools if tool.lower() in successful_lookup),
+            None,
+        )
+        if first_success_tool:
+            effect_status = "satisfied"
+            status_reason = (
+                "Observed required representation tool invocation: "
+                f"{first_success_tool}."
+            )
+            failure_code = ""
+        else:
+            first_failed_tool = next(
+                (
+                    tool
+                    for tool in required_tools
+                    if tool.lower() in failed_lookup or tool.lower() in blocked_lookup
+                ),
+                None,
+            )
+            if first_failed_tool:
+                effect_status = "not_satisfied"
+                status_reason = (
+                    "Required representation tool failed or was blocked: "
+                    f"{first_failed_tool}."
+                )
+                failure_code = f"{domain_id}_representation_tool_failed"
+
+        effect["status"] = effect_status
+        effect["status_reason"] = status_reason
+        if failure_code:
+            effect["failure_code"] = failure_code
+            effect["failure_codes"] = [failure_code]
+        else:
+            effect["failure_codes"] = []
+
+        required_effects.append(effect)
+
+    return required_effects
 
 
 def _infer_mutation_required_effect(
@@ -1048,24 +1424,29 @@ def _build_postcondition_checks(
                 check_status = "inconclusive"
                 evidence = "Tool execution verification outcome is inconclusive."
                 verification_mode = "execution_inconclusive"
-        elif effect_type == "scholarly_representation":
+        elif _is_representation_effect_type(effect_type):
+            representation_label = (
+                "Scholarly paper representation"
+                if effect_type == "scholarly_representation"
+                else "Requested representation"
+            )
             if effect_status == "satisfied":
                 check_status = "verified"
                 evidence = (
                     _safe_str(effect.get("status_reason"))
-                    or "Scholarly paper representation execution was observed."
+                    or f"{representation_label} execution was observed."
                 )
                 verification_mode = "execution_observed"
             elif effect_status in {"not_satisfied", "not_executed"}:
                 check_status = "not_verified"
                 evidence = (
                     _safe_str(effect.get("status_reason"))
-                    or "Scholarly paper representation execution was not observed."
+                    or f"{representation_label} execution was not observed."
                 )
                 verification_mode = "execution_missing"
             else:
                 check_status = "inconclusive"
-                evidence = "Scholarly paper representation verification is inconclusive."
+                evidence = f"{representation_label} verification is inconclusive."
                 verification_mode = "execution_inconclusive"
         else:
             if effect_status == "satisfied" and successful_write_tools:
@@ -1100,7 +1481,7 @@ def _build_postcondition_checks(
                     "tool_execution_observed"
                     if effect_type == "tool_execution"
                     else "scholarly_representation_observed"
-                    if effect_type == "scholarly_representation"
+                    if _is_representation_effect_type(effect_type)
                     else "predicate_exists"
                 ),
                 "check_tool": "derived.turn_execution",
@@ -1240,6 +1621,11 @@ def _derive_completion_gate(
                 decision_reason = (
                     "Required scholarly paper representation was not executed."
                 )
+            elif unresolved_effect_types and all(
+                _is_representation_effect_type(effect_type)
+                for effect_type in unresolved_effect_types
+            ):
+                decision_reason = "Required representation was not executed."
             else:
                 decision_reason = "Required mutation was not executed."
     elif unresolved_check_ids:
@@ -1335,16 +1721,20 @@ def build_turn_execution_record(
         serialised_invocations=serialised_invocations,
     )
 
-    required_effects: list[dict[str, Any]] = []
-    scholarly_representation_effect = _infer_scholarly_representation_required_effect(
+    representation_effects_contract = _build_representation_required_effects_contract(
         prompt_text=prompt_text,
         aux_llm_calls=aux_llm_calls,
+    )
+    representation_effects = _materialise_required_effects_from_contract(
+        contract=representation_effects_contract,
         successful_tools=successful_tools,
         failed_tools=failed_tools,
         blocked_tools=blocked_tools,
     )
-    if scholarly_representation_effect is not None:
-        required_effects.append(scholarly_representation_effect)
+
+    required_effects: list[dict[str, Any]] = []
+    required_effects.extend(representation_effects)
+
     mutation_effect = _infer_mutation_required_effect(
         prompt_text=prompt_text,
         successful_write_tools=successful_write_tools,
@@ -1353,7 +1743,7 @@ def build_turn_execution_record(
     )
     if mutation_effect is not None:
         required_effects.append(mutation_effect)
-    elif not successful_write_tools and scholarly_representation_effect is None:
+    elif not successful_write_tools and not representation_effects:
         tool_execution_effect = _infer_tool_execution_required_effect(
             execution_summary=execution_summary
         )
@@ -1434,6 +1824,21 @@ def build_turn_execution_record(
             workflow_id=selected_workflow_id,
         )
 
+    execution_summary_with_contract = dict(execution_summary)
+    if isinstance(representation_effects_contract, Mapping):
+        execution_summary_with_contract["required_effects_contract_id"] = _safe_str(
+            representation_effects_contract.get("contract_id")
+        )
+        execution_summary_with_contract["required_effects_contract_domain"] = _safe_str(
+            representation_effects_contract.get("domain_profile_id")
+        )
+        execution_summary_with_contract["required_effects_contract_intent"] = _safe_str(
+            representation_effects_contract.get("intent_class")
+        )
+        execution_summary_with_contract["required_effects_declared_count"] = len(
+            representation_effects_contract.get("required_effects") or []
+        )
+
     return {
         "schema_version": TURN_EXECUTION_RECORD_SCHEMA_VERSION,
         "request_id": _safe_str(request_id),
@@ -1460,7 +1865,8 @@ def build_turn_execution_record(
         "required_effects": required_effects,
         "execution": {
             "tool_invocations": serialised_invocations,
-            "summary": execution_summary,
+            "summary": execution_summary_with_contract,
+            "required_effects_contract": representation_effects_contract,
             "diagnostic_events": diagnostic_events,
             "retry": retry,
             "workflow_stage_model": build_conversation_turn_stage_model_snapshot(),
