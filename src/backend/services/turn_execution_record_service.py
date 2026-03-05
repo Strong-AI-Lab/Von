@@ -19,6 +19,10 @@ from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import OperationFailure, PyMongoError
 
 from ..db.mongo_client import get_db
+from .representation_contract_vontology_service import (
+    canonical_representation_profile_concept_ids,
+    load_representation_contract_profiles_from_concept_ids,
+)
 from ..workflows.conversation_turn_stage_model import (
     build_conversation_turn_stage_model_snapshot,
     build_conversation_turn_stage_path,
@@ -246,9 +250,33 @@ _REPRESENTATION_ACTION_PATTERN = re.compile(
     r")\b",
     flags=re.IGNORECASE,
 )
+_REPRESENTATION_CREATE_ONLY_PATTERN = re.compile(
+    r"\b(?:create|build|make)\b",
+    flags=re.IGNORECASE,
+)
 _STATUS_CHECK_PROMPT_PATTERN = re.compile(
     r"^\s*(?:did|do|does|have|has|is|are|was|were)\s+you\b",
     flags=re.IGNORECASE,
+)
+_REPRESENTATION_CREATE_OBJECT_CUES = (
+    "representation",
+    "profile",
+    "metadata",
+    "paper",
+    "person",
+    "company",
+    "organisation",
+    "organization",
+    "meeting",
+    "business card",
+    "cv",
+    "curriculum vitae",
+    "resume",
+    "transcript",
+    "calendar",
+    "web page",
+    "website",
+    "url",
 )
 
 _AUX_REQUIRED_FILE_COPY_ID_FIELDS = (
@@ -257,154 +285,25 @@ _AUX_REQUIRED_FILE_COPY_ID_FIELDS = (
     "required_read_file_copy_ids",
 )
 
-_REPRESENTATION_DEFAULT_DECISION_POLICY = {
+_REPRESENTATION_DEFAULT_DECISION_POLICY_FALLBACK = {
     "completion_block_on_unresolved_effects": True,
     "fail_closed_on_missing_requirements": True,
     "auto_apply_low_risk_defaults": True,
     "requires_explicit_user_decision_for_high_risk": True,
 }
 
-# REFERENCE CONFIG: extend representation coverage by adding a profile here
-# instead of introducing prompt-specific branches in execution code.
-_REPRESENTATION_DOMAIN_PROFILES: tuple[dict[str, Any], ...] = (
-    {
-        "profile_id": "paper",
-        "target_entity_class": "scholarly_paper",
-        "effect_type": "scholarly_representation",
-        "intent_pattern": re.compile(
-            r"\b("
-            r"paper\s+representation"
-            r"|represent(?:ation|ing)?\s+(?:the\s+)?(?:corresponding\s+)?paper"
-            r"|fully\s+represent\s+(?:the\s+)?(?:corresponding\s+)?paper"
-            r"|scholarly\s+paper\s+representation"
-            r")\b",
-            flags=re.IGNORECASE,
-        ),
-        "domain_terms": (
-            "paper",
-            "scientific paper",
-            "arxiv",
-            "preprint",
-            "doi",
-            "manuscript",
-            "metadata",
-            "abstract",
-        ),
-        "required_tools_by_source": {
-            "file_copy": ["interpret_file_copy"],
-            "url": ["extract_url", "get_paper_metadata"],
-            "mixed": ["interpret_file_copy", "extract_url"],
-            "unknown": ["interpret_file_copy"],
-        },
-        "required_predicates": [
-            "#V#computer_file_for_propositional_information_thing",
-            "#V#propositional_information_thing_has_computer_file",
-        ],
-        "description": (
-            "Ensure the corresponding scholarly-paper concept is materialised from "
-            "the supplied artefact context before final response completion."
-        ),
-    },
-    {
-        "profile_id": "person",
-        "target_entity_class": "person",
-        "effect_type": "representation_person",
-        "intent_pattern": re.compile(
-            r"\b("
-            r"(?:business\s+card|cv|curriculum\s+vitae|resume)\b.*\b(?:person|profile|contact)"
-            r"|(?:person|profile|contact)\b.*\b(?:business\s+card|cv|curriculum\s+vitae|resume)"
-            r")\b",
-            flags=re.IGNORECASE,
-        ),
-        "domain_terms": (
-            "person",
-            "business card",
-            "cv",
-            "curriculum vitae",
-            "resume",
-            "contact",
-            "profile",
-            "researcher",
-        ),
-        "required_tools_by_source": {
-            "file_copy": ["interpret_file_copy"],
-            "url": ["extract_url"],
-            "mixed": ["interpret_file_copy", "extract_url"],
-            "unknown": ["interpret_file_copy"],
-        },
-        "required_predicates": ["#V#person"],
-        "description": (
-            "Ensure a person representation is materialised from the supplied "
-            "artefact context before final response completion."
-        ),
-    },
-    {
-        "profile_id": "company",
-        "target_entity_class": "company",
-        "effect_type": "representation_company",
-        "intent_pattern": re.compile(
-            r"\b("
-            r"(?:company|organisation|organization|business|startup)\b.*\b(?:web\s?page|website|url)"
-            r"|(?:web\s?page|website|url)\b.*\b(?:company|organisation|organization|business|startup)"
-            r")\b",
-            flags=re.IGNORECASE,
-        ),
-        "domain_terms": (
-            "company",
-            "organisation",
-            "organization",
-            "business",
-            "startup",
-            "firm",
-            "web page",
-            "website",
-            "url",
-        ),
-        "required_tools_by_source": {
-            "file_copy": ["interpret_file_copy"],
-            "url": ["extract_url"],
-            "mixed": ["interpret_file_copy", "extract_url"],
-            "unknown": ["extract_url"],
-        },
-        "required_predicates": ["#V#organisation"],
-        "description": (
-            "Ensure a company representation is materialised from the supplied "
-            "artefact context before final response completion."
-        ),
-    },
-    {
-        "profile_id": "meeting",
-        "target_entity_class": "meeting",
-        "effect_type": "representation_meeting",
-        "intent_pattern": re.compile(
-            r"\b("
-            r"(?:meeting|calendar\s+event)\b.*\b(?:transcript|calendar|minutes|agenda)"
-            r"|(?:transcript|calendar|minutes|agenda)\b.*\b(?:meeting|calendar\s+event)"
-            r")\b",
-            flags=re.IGNORECASE,
-        ),
-        "domain_terms": (
-            "meeting",
-            "calendar event",
-            "transcript",
-            "calendar",
-            "minutes",
-            "agenda",
-            "attendees",
-        ),
-        "required_tools_by_source": {
-            "file_copy": ["interpret_file_copy"],
-            "url": ["extract_url"],
-            "mixed": ["interpret_file_copy", "extract_url"],
-            "unknown": ["interpret_file_copy"],
-        },
-        "required_predicates": ["#V#meeting"],
-        "description": (
-            "Ensure a meeting representation is materialised from the supplied "
-            "artefact context before final response completion."
-        ),
-    },
+_REPRESENTATION_CONFIG_UNAVAILABLE_FAILURE_CODE = (
+    "representation_profile_catalogue_unavailable"
 )
+_REPRESENTATION_PROFILE_UNMATCHED_FAILURE_CODE = "representation_profile_unmatched"
+_REPRESENTATION_FAILURE_REASON_MAP = {
+    _REPRESENTATION_CONFIG_UNAVAILABLE_FAILURE_CODE: (
+        "Required representation profile catalogue is unavailable."
+    ),
+    _REPRESENTATION_PROFILE_UNMATCHED_FAILURE_CODE: (
+        "No representation profile matched the requested intent."
+    ),
+}
 
 
 def _has_affirmative_mutation_term(prompt_text: str) -> bool:
@@ -1085,6 +984,85 @@ def _extract_representation_source_hints(prompt_text: str) -> list[str]:
     return _dedupe_string_sequence(hints)
 
 
+def _normalise_representation_decision_policy(raw: Any) -> dict[str, bool]:
+    policy = dict(_REPRESENTATION_DEFAULT_DECISION_POLICY_FALLBACK)
+    if not isinstance(raw, Mapping):
+        return policy
+    for key in _REPRESENTATION_DEFAULT_DECISION_POLICY_FALLBACK:
+        if key in raw:
+            policy[key] = bool(raw.get(key))
+    return policy
+
+
+def _load_representation_domain_profiles_from_vontology() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    requested_profile_concept_ids = list(canonical_representation_profile_concept_ids())
+    loaded_profiles, diagnostics = load_representation_contract_profiles_from_concept_ids(
+        requested_profile_concept_ids
+    )
+
+    normalised_profiles: list[dict[str, Any]] = []
+    for profile in loaded_profiles:
+        if not isinstance(profile, Mapping):
+            continue
+        profile_payload = dict(profile)
+        profile_payload["profile_id"] = _safe_str(profile_payload.get("profile_id")) or ""
+        profile_payload["profile_concept_id"] = _safe_str(
+            profile_payload.get("profile_concept_id")
+        ) or _safe_str(profile_payload.get("_source_concept_id"))
+        profile_payload["target_entity_class"] = (
+            _safe_str(profile_payload.get("target_entity_class")) or "thing"
+        )
+        profile_payload["effect_type"] = (
+            _safe_str(profile_payload.get("effect_type"))
+            or "representation_profile_guard"
+        )
+        profile_payload["description"] = (
+            _safe_str(profile_payload.get("description"))
+            or "Ensure the requested representation is materialised from the artefact context."
+        )
+        profile_payload["intent_patterns"] = _dedupe_string_sequence(
+            profile_payload.get("intent_patterns") or []
+        )
+        profile_payload["domain_terms"] = _dedupe_string_sequence(
+            profile_payload.get("domain_terms") or []
+        )
+        profile_payload["required_predicates"] = _dedupe_string_sequence(
+            profile_payload.get("required_predicates") or []
+        )
+
+        normalised_tools_by_source: dict[str, list[str]] = {}
+        raw_tools_by_source = profile_payload.get("required_tools_by_source")
+        if isinstance(raw_tools_by_source, Mapping):
+            for source, raw_tools in raw_tools_by_source.items():
+                source_key = (_safe_str(source) or "").lower()
+                if not source_key:
+                    continue
+                if isinstance(raw_tools, Sequence) and not isinstance(raw_tools, (str, bytes)):
+                    normalised_tools_by_source[source_key] = _dedupe_string_sequence(raw_tools)
+        profile_payload["required_tools_by_source"] = normalised_tools_by_source
+        profile_payload["default_decision_policy"] = _normalise_representation_decision_policy(
+            profile_payload.get("default_decision_policy")
+        )
+
+        if not profile_payload["profile_id"]:
+            continue
+        normalised_profiles.append(profile_payload)
+
+    diagnostics_payload = dict(diagnostics) if isinstance(diagnostics, Mapping) else {}
+    diagnostics_payload.setdefault(
+        "representation_profile_source",
+        "vontology_concept_text_relations",
+    )
+    diagnostics_payload.setdefault(
+        "requested_concept_ids",
+        list(requested_profile_concept_ids),
+    )
+    diagnostics_payload["loaded_profile_count"] = len(normalised_profiles)
+    if not _safe_str(diagnostics_payload.get("profile_version_hash")):
+        diagnostics_payload["profile_version_hash"] = _hash_payload(normalised_profiles)
+    return normalised_profiles, diagnostics_payload
+
+
 def _infer_representation_artefact_source(
     *,
     file_copy_ids: Sequence[str],
@@ -1114,28 +1092,63 @@ def _prompt_requests_representation_action(prompt_text: str) -> bool:
         if not re.search(r"\b(?:can|could|would)\s+you\b|\bplease\b", lowered):
             return False
     if _REPRESENTATION_ACTION_PATTERN.search(lowered):
+        if _REPRESENTATION_CREATE_ONLY_PATTERN.search(lowered) and not _contains_any_phrase(
+            lowered,
+            _REPRESENTATION_CREATE_OBJECT_CUES,
+        ):
+            return False
         return True
-    return _contains_any_phrase(lowered, ("representation", "materialisation", "model"))
+    return _contains_any_phrase(
+        lowered,
+        ("representation", "materialisation", "model", "profile", "metadata"),
+    )
 
 
-def _select_representation_domain_profile(prompt_text: str) -> dict[str, Any] | None:
+def _compile_representation_intent_patterns(patterns: Any) -> list[re.Pattern[str]]:
+    if not isinstance(patterns, Sequence) or isinstance(patterns, (str, bytes)):
+        return []
+    compiled_patterns: list[re.Pattern[str]] = []
+    for raw_pattern in patterns:
+        pattern_text = _safe_str(raw_pattern)
+        if not pattern_text:
+            continue
+        try:
+            compiled_patterns.append(re.compile(pattern_text, flags=re.IGNORECASE))
+        except Exception:
+            continue
+    return compiled_patterns
+
+
+def _select_representation_domain_profile(
+    prompt_text: str,
+    *,
+    profiles: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
     lowered = prompt_text.lower()
     best_profile: dict[str, Any] | None = None
     best_score = 0
 
-    for profile in _REPRESENTATION_DOMAIN_PROFILES:
+    for profile in profiles:
+        if not isinstance(profile, Mapping):
+            continue
         score = 0
-        intent_pattern = profile.get("intent_pattern")
-        if isinstance(intent_pattern, re.Pattern) and intent_pattern.search(prompt_text):
-            score += 4
+        intent_patterns = _compile_representation_intent_patterns(
+            profile.get("intent_patterns")
+        )
+        for intent_pattern in intent_patterns:
+            if intent_pattern.search(prompt_text):
+                score += 4
+
         domain_terms = profile.get("domain_terms")
-        if isinstance(domain_terms, Sequence):
+        if isinstance(domain_terms, Sequence) and not isinstance(
+            domain_terms, (str, bytes)
+        ):
             for term in domain_terms:
                 if isinstance(term, str) and term and term in lowered:
                     score += 1
         if score > best_score:
             best_score = score
-            best_profile = profile
+            best_profile = dict(profile)
 
     if best_profile is None or best_score <= 0:
         return None
@@ -1165,10 +1178,8 @@ def _build_representation_required_effect_template(
     targets: Sequence[str],
 ) -> dict[str, Any]:
     profile_id = _safe_str(profile.get("profile_id")) or "representation"
-    effect_type = (
-        _safe_str(profile.get("effect_type"))
-        or f"representation_{profile_id}"
-    )
+    profile_concept_id = _safe_str(profile.get("profile_concept_id"))
+    effect_type = _safe_str(profile.get("effect_type")) or f"representation_{profile_id}"
     description = (
         _safe_str(profile.get("description"))
         or "Ensure the requested representation is materialised from the artefact context."
@@ -1184,12 +1195,37 @@ def _build_representation_required_effect_template(
         "intent_origin": "workflow_contract",
         "effect_type": effect_type,
         "representation_domain_id": profile_id,
+        "representation_profile_concept_id": profile_concept_id,
         "description": description,
         "required_tools": _dedupe_string_sequence(required_tools),
         "targets": _dedupe_string_sequence(targets),
         "required_predicates": _dedupe_string_sequence(required_predicates),
         "postcondition_required": True,
         "postcondition_strategy": "execution_observed",
+    }
+
+
+def _build_fail_closed_representation_effect(
+    *,
+    failure_code: str,
+    status_reason: str,
+    targets: Sequence[str],
+) -> dict[str, Any]:
+    return {
+        "effect_id": "effect_representation_contract_guard_1",
+        "intent_origin": "workflow_contract",
+        "effect_type": "representation_contract_guard",
+        "representation_domain_id": "representation",
+        "description": "Required representation contract profile resolution failed.",
+        "required_tools": [],
+        "targets": _dedupe_string_sequence(targets),
+        "required_predicates": [],
+        "postcondition_required": True,
+        "postcondition_strategy": "execution_observed",
+        "status": "not_executed",
+        "status_reason": status_reason,
+        "failure_code": failure_code,
+        "failure_codes": [failure_code],
     }
 
 
@@ -1204,10 +1240,6 @@ def _build_representation_required_effects_contract(
     if not _prompt_requests_representation_action(prompt_clean):
         return None
 
-    profile = _select_representation_domain_profile(prompt_clean)
-    if profile is None:
-        return None
-
     file_copy_ids = _extract_required_file_copy_ids_from_aux(aux_llm_calls)
     if not file_copy_ids:
         file_copy_ids = _extract_file_copy_concept_ids_from_text(prompt_clean)
@@ -1218,24 +1250,130 @@ def _build_representation_required_effects_contract(
         urls=urls,
         source_hints=source_hints,
     )
+    targets = list(file_copy_ids) if file_copy_ids else list(urls)
 
-    required_tools = _resolve_representation_required_tools(
-        profile=profile,
-        artefact_source=artefact_source,
+    profiles, profile_loading = _load_representation_domain_profiles_from_vontology()
+    selected_profile = _select_representation_domain_profile(
+        prompt_clean,
+        profiles=profiles,
     )
 
-    targets = list(file_copy_ids) if file_copy_ids else list(urls)
+    profile_source = (
+        _safe_str(profile_loading.get("representation_profile_source"))
+        or "vontology_concept_text_relations"
+    )
+    profile_version_hash = _safe_str(profile_loading.get("profile_version_hash"))
+    requested_profile_concept_ids = _dedupe_string_sequence(
+        profile_loading.get("requested_concept_ids") or []
+    )
+    loaded_profile_concept_ids = _dedupe_string_sequence(
+        profile_loading.get("loaded_concept_ids") or []
+    )
+    selected_profile_concept_id = (
+        _safe_str(selected_profile.get("profile_concept_id"))
+        if isinstance(selected_profile, Mapping)
+        else None
+    )
+    profile_resolution: dict[str, Any] = {
+        "source": profile_source,
+        "requested_profile_concept_ids": requested_profile_concept_ids,
+        "loaded_profile_concept_ids": loaded_profile_concept_ids,
+        "loaded_profile_count": len(profiles),
+        "profile_version_hash": profile_version_hash,
+        "selected_profile_concept_id": selected_profile_concept_id,
+        "fail_closed": False,
+        "fail_closed_reason": None,
+    }
+
+    if not profiles:
+        fail_closed_reason = "profile_catalogue_unavailable"
+        profile_resolution["fail_closed"] = True
+        profile_resolution["fail_closed_reason"] = fail_closed_reason
+        effect_template = _build_fail_closed_representation_effect(
+            failure_code=_REPRESENTATION_CONFIG_UNAVAILABLE_FAILURE_CODE,
+            status_reason=(
+                "Representation intent was recognised, but the Vontology "
+                "representation profile catalogue could not be resolved."
+            ),
+            targets=targets,
+        )
+        contract_payload: dict[str, Any] = {
+            "schema_version": _REPRESENTATION_CONTRACT_SCHEMA_VERSION,
+            "intent_class": "representation",
+            "domain_profile_id": "representation",
+            "target_entity_class": "thing",
+            "artefact_source": artefact_source,
+            "artefact_context": {
+                "file_copy_ids": list(file_copy_ids),
+                "urls": list(urls),
+                "source_hints": list(source_hints),
+            },
+            "required_effects": [effect_template],
+            "default_decision_policy": dict(
+                _REPRESENTATION_DEFAULT_DECISION_POLICY_FALLBACK
+            ),
+            "profile_source": profile_source,
+            "profile_version_hash": profile_version_hash,
+            "profile_resolution": profile_resolution,
+        }
+        contract_fingerprint = _hash_payload(contract_payload) or ""
+        contract_payload["contract_id"] = f"required_effects_{contract_fingerprint[:16]}"
+        return contract_payload
+
+    if not isinstance(selected_profile, Mapping):
+        fail_closed_reason = "profile_unmatched_for_intent"
+        profile_resolution["fail_closed"] = True
+        profile_resolution["fail_closed_reason"] = fail_closed_reason
+        effect_template = _build_fail_closed_representation_effect(
+            failure_code=_REPRESENTATION_PROFILE_UNMATCHED_FAILURE_CODE,
+            status_reason=(
+                "Representation intent was recognised, but no Vontology "
+                "representation profile matched this prompt."
+            ),
+            targets=targets,
+        )
+        contract_payload = {
+            "schema_version": _REPRESENTATION_CONTRACT_SCHEMA_VERSION,
+            "intent_class": "representation",
+            "domain_profile_id": "representation",
+            "target_entity_class": "thing",
+            "artefact_source": artefact_source,
+            "artefact_context": {
+                "file_copy_ids": list(file_copy_ids),
+                "urls": list(urls),
+                "source_hints": list(source_hints),
+            },
+            "required_effects": [effect_template],
+            "default_decision_policy": dict(
+                _REPRESENTATION_DEFAULT_DECISION_POLICY_FALLBACK
+            ),
+            "profile_source": profile_source,
+            "profile_version_hash": profile_version_hash,
+            "profile_resolution": profile_resolution,
+        }
+        contract_fingerprint = _hash_payload(contract_payload) or ""
+        contract_payload["contract_id"] = f"required_effects_{contract_fingerprint[:16]}"
+        return contract_payload
+
+    required_tools = _resolve_representation_required_tools(
+        profile=selected_profile,
+        artefact_source=artefact_source,
+    )
     effect_template = _build_representation_required_effect_template(
-        profile=profile,
+        profile=selected_profile,
         required_tools=required_tools,
         targets=targets,
+    )
+    default_decision_policy = _normalise_representation_decision_policy(
+        selected_profile.get("default_decision_policy")
     )
 
     contract_payload: dict[str, Any] = {
         "schema_version": _REPRESENTATION_CONTRACT_SCHEMA_VERSION,
         "intent_class": "representation",
-        "domain_profile_id": _safe_str(profile.get("profile_id")) or "representation",
-        "target_entity_class": _safe_str(profile.get("target_entity_class")) or "thing",
+        "domain_profile_id": _safe_str(selected_profile.get("profile_id")) or "representation",
+        "domain_profile_concept_id": _safe_str(selected_profile.get("profile_concept_id")),
+        "target_entity_class": _safe_str(selected_profile.get("target_entity_class")) or "thing",
         "artefact_source": artefact_source,
         "artefact_context": {
             "file_copy_ids": list(file_copy_ids),
@@ -1243,7 +1381,10 @@ def _build_representation_required_effects_contract(
             "source_hints": list(source_hints),
         },
         "required_effects": [effect_template],
-        "default_decision_policy": dict(_REPRESENTATION_DEFAULT_DECISION_POLICY),
+        "default_decision_policy": default_decision_policy,
+        "profile_source": profile_source,
+        "profile_version_hash": profile_version_hash,
+        "profile_resolution": profile_resolution,
     }
     contract_fingerprint = _hash_payload(contract_payload) or ""
     contract_payload["contract_id"] = f"required_effects_{contract_fingerprint[:16]}"
@@ -1282,9 +1423,19 @@ def _materialise_required_effects_from_contract(
         effect = dict(template)
         required_tools = _dedupe_string_sequence(effect.get("required_tools") or [])
 
-        effect_status = "not_executed"
-        status_reason = "No required representation tool execution was observed."
-        failure_code = f"{domain_id}_representation_not_executed"
+        existing_status = (_safe_str(effect.get("status")) or "").lower()
+        effect_status = (
+            existing_status
+            if existing_status in {"satisfied", "not_satisfied", "not_executed"}
+            else "not_executed"
+        )
+        status_reason = _safe_str(effect.get("status_reason")) or (
+            "No required representation tool execution was observed."
+        )
+        failure_codes = _normalise_failure_codes(effect.get("failure_codes"))
+        explicit_failure_code = _safe_str(effect.get("failure_code"))
+        if explicit_failure_code and explicit_failure_code not in failure_codes:
+            failure_codes.append(explicit_failure_code)
 
         first_success_tool = next(
             (tool for tool in required_tools if tool.lower() in successful_lookup),
@@ -1296,7 +1447,7 @@ def _materialise_required_effects_from_contract(
                 "Observed required representation tool invocation: "
                 f"{first_success_tool}."
             )
-            failure_code = ""
+            failure_codes = []
         else:
             first_failed_tool = next(
                 (
@@ -1312,14 +1463,19 @@ def _materialise_required_effects_from_contract(
                     "Required representation tool failed or was blocked: "
                     f"{first_failed_tool}."
                 )
-                failure_code = f"{domain_id}_representation_tool_failed"
+                failure_codes = [f"{domain_id}_representation_tool_failed"]
+            elif not required_tools and not failure_codes:
+                failure_codes = [f"{domain_id}_representation_not_executed"]
+            elif required_tools:
+                failure_codes = [f"{domain_id}_representation_not_executed"]
 
         effect["status"] = effect_status
         effect["status_reason"] = status_reason
-        if failure_code:
-            effect["failure_code"] = failure_code
-            effect["failure_codes"] = [failure_code]
+        if failure_codes:
+            effect["failure_code"] = failure_codes[0]
+            effect["failure_codes"] = failure_codes
         else:
+            effect.pop("failure_code", None)
             effect["failure_codes"] = []
 
         required_effects.append(effect)
@@ -1615,9 +1771,20 @@ def _derive_completion_gate(
             decision_reason = "Mutation attempt failed or was blocked."
         else:
             decision = "escalation_required"
+            representation_failure_reason = next(
+                (
+                    _REPRESENTATION_FAILURE_REASON_MAP.get(code)
+                    for code in blocking_failure_codes
+                    if isinstance(code, str) and code in _REPRESENTATION_FAILURE_REASON_MAP
+                ),
+                None,
+            )
             if unresolved_effect_types == {"tool_execution"}:
                 decision_reason = "Required tool execution was not observed."
-            elif unresolved_effect_types == {"scholarly_representation"}:
+            elif (
+                unresolved_effect_types == {"scholarly_representation"}
+                and not representation_failure_reason
+            ):
                 decision_reason = (
                     "Required scholarly paper representation was not executed."
                 )
@@ -1625,7 +1792,10 @@ def _derive_completion_gate(
                 _is_representation_effect_type(effect_type)
                 for effect_type in unresolved_effect_types
             ):
-                decision_reason = "Required representation was not executed."
+                decision_reason = (
+                    representation_failure_reason
+                    or "Required representation was not executed."
+                )
             else:
                 decision_reason = "Required mutation was not executed."
     elif unresolved_check_ids:
@@ -1832,12 +2002,38 @@ def build_turn_execution_record(
         execution_summary_with_contract["required_effects_contract_domain"] = _safe_str(
             representation_effects_contract.get("domain_profile_id")
         )
+        execution_summary_with_contract["required_effects_contract_domain_concept_id"] = _safe_str(
+            representation_effects_contract.get("domain_profile_concept_id")
+        )
         execution_summary_with_contract["required_effects_contract_intent"] = _safe_str(
             representation_effects_contract.get("intent_class")
+        )
+        execution_summary_with_contract["required_effects_contract_profile_source"] = _safe_str(
+            representation_effects_contract.get("profile_source")
+        )
+        execution_summary_with_contract["required_effects_contract_profile_version_hash"] = _safe_str(
+            representation_effects_contract.get("profile_version_hash")
         )
         execution_summary_with_contract["required_effects_declared_count"] = len(
             representation_effects_contract.get("required_effects") or []
         )
+        profile_resolution = representation_effects_contract.get("profile_resolution")
+        if isinstance(profile_resolution, Mapping):
+            execution_summary_with_contract["required_effects_contract_profile_requested_ids"] = _dedupe_string_sequence(
+                profile_resolution.get("requested_profile_concept_ids") or []
+            )
+            execution_summary_with_contract["required_effects_contract_profile_loaded_ids"] = _dedupe_string_sequence(
+                profile_resolution.get("loaded_profile_concept_ids") or []
+            )
+            execution_summary_with_contract["required_effects_contract_profile_selected_id"] = _safe_str(
+                profile_resolution.get("selected_profile_concept_id")
+            )
+            execution_summary_with_contract["required_effects_contract_fail_closed"] = bool(
+                profile_resolution.get("fail_closed")
+            )
+            execution_summary_with_contract["required_effects_contract_fail_closed_reason"] = _safe_str(
+                profile_resolution.get("fail_closed_reason")
+            )
 
     return {
         "schema_version": TURN_EXECUTION_RECORD_SCHEMA_VERSION,

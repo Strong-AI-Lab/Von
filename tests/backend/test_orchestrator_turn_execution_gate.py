@@ -69,6 +69,51 @@ def _build_request(
     )
 
 
+def _patch_representation_profile_loader(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_record_service._load_representation_domain_profiles_from_vontology",
+        lambda: (
+            [
+                {
+                    "profile_id": "paper",
+                    "profile_concept_id": "#V#representation_contract_profile_paper",
+                    "target_entity_class": "scholarly_paper",
+                    "effect_type": "scholarly_representation",
+                    "description": "Represent paper metadata.",
+                    "intent_patterns": [
+                        r"\bpaper\s+representation\b",
+                        r"\bcorresponding\s+paper\b",
+                    ],
+                    "domain_terms": ["paper", "arxiv", "metadata", "abstract"],
+                    "required_tools_by_source": {
+                        "file_copy": ["interpret_file_copy"],
+                        "url": ["extract_url", "get_paper_metadata"],
+                        "mixed": ["interpret_file_copy", "extract_url"],
+                        "unknown": ["interpret_file_copy"],
+                    },
+                    "required_predicates": [
+                        "#V#computer_file_for_propositional_information_thing",
+                        "#V#propositional_information_thing_has_computer_file",
+                    ],
+                    "default_decision_policy": {
+                        "completion_block_on_unresolved_effects": True,
+                        "fail_closed_on_missing_requirements": True,
+                        "auto_apply_low_risk_defaults": True,
+                        "requires_explicit_user_decision_for_high_risk": True,
+                    },
+                }
+            ],
+            {
+                "representation_profile_source": "vontology_concept_text_relations",
+                "requested_concept_ids": ["#V#representation_contract_profile_paper"],
+                "loaded_concept_ids": ["#V#representation_contract_profile_paper"],
+                "loaded_profile_count": 1,
+                "profile_version_hash": "hash-paper-profile",
+            },
+        ),
+    )
+
+
 def test_turn_execution_critic_detects_unresolved_kb_mutation() -> None:
     orchestrator = _build_orchestrator()
     aux_llm_calls: list[dict[str, Any]] = []
@@ -393,7 +438,8 @@ def test_turn_execution_critic_flags_worker_unavailable_zero_execution() -> None
     assert completion_gate.get("safe_to_claim_completion") is False
 
 
-def test_turn_execution_critic_flags_missing_scholarly_representation() -> None:
+def test_turn_execution_critic_flags_missing_scholarly_representation(monkeypatch) -> None:
+    _patch_representation_profile_loader(monkeypatch)
     orchestrator = _build_orchestrator()
     request = _build_request(
         action_id="turn_execution.critic",
@@ -445,7 +491,8 @@ def test_turn_execution_critic_flags_missing_scholarly_representation() -> None:
     assert completion_gate.get("safe_to_claim_completion") is False
 
 
-def test_turn_execution_critic_marks_scholarly_representation_satisfied() -> None:
+def test_turn_execution_critic_marks_scholarly_representation_satisfied(monkeypatch) -> None:
+    _patch_representation_profile_loader(monkeypatch)
     orchestrator = _build_orchestrator()
     request = _build_request(
         action_id="turn_execution.critic",
