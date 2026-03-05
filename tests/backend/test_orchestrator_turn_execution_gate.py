@@ -146,11 +146,16 @@ def test_turn_execution_critic_detects_unresolved_kb_mutation() -> None:
     assert isinstance(required_effects, list)
     assert len(required_effects) == 1
     assert required_effects[0]["status"] == "not_executed"
+    assert required_effects[0]["failure_code"] == "kb_mutation_not_executed"
+    assert required_effects[0]["failure_codes"] == ["kb_mutation_not_executed"]
 
     completion_gate = record.get("completion_gate")
     assert isinstance(completion_gate, dict)
     assert completion_gate.get("decision") == "escalation_required"
     assert completion_gate.get("safe_to_claim_completion") is False
+    assert completion_gate.get("blocking_failure_codes") == [
+        "kb_mutation_not_executed"
+    ]
     evidence_payload = completion_gate.get("evidence_payload")
     assert isinstance(evidence_payload, dict)
     assert evidence_payload.get("completion_outcome") == "failure"
@@ -304,6 +309,43 @@ def test_turn_completion_gate_appends_execution_status_for_unresolved_effect() -
     )
 
 
+def test_turn_completion_gate_backfills_failure_codes_for_unresolved_preconditions() -> None:
+    orchestrator = _build_orchestrator()
+    request = _build_request(
+        action_id="turn_execution.completion_gate",
+        data={
+            "final_response": "I have completed the update.",
+            "turn_execution_record": {
+                "completion_gate": {
+                    "decision": "escalation_required",
+                    "decision_reason": "Required mutation was not executed.",
+                    "safe_to_claim_completion": False,
+                    "requires_follow_up": True,
+                    "blocking_effect_ids": ["effect_1"],
+                    "evidence_payload": {
+                        "unresolved_preconditions": [
+                            {
+                                "effect_id": "effect_1",
+                                "effect_type": "kb_mutation",
+                                "status": "not_executed",
+                                "status_reason": "No write-capable tool invocation was observed.",
+                            }
+                        ]
+                    },
+                }
+            },
+        },
+    )
+
+    result = orchestrator._action_turn_execution_completion_gate(request)
+
+    assert result.ok
+    assert result.outputs.get("completion_gate_blocking_failure_codes") == [
+        "required_effect_not_executed",
+        "required_effects_unresolved",
+    ]
+
+
 def test_turn_execution_critic_flags_missing_non_kb_mutation_execution() -> None:
     orchestrator = _build_orchestrator()
     request = _build_request(
@@ -333,11 +375,16 @@ def test_turn_execution_critic_flags_missing_non_kb_mutation_execution() -> None
     assert isinstance(required_effects, list)
     assert len(required_effects) == 1
     assert required_effects[0]["status"] == "not_executed"
+    assert required_effects[0]["failure_code"] == "kb_mutation_not_executed"
+    assert required_effects[0]["failure_codes"] == ["kb_mutation_not_executed"]
 
     completion_gate = record.get("completion_gate")
     assert isinstance(completion_gate, dict)
     assert completion_gate.get("decision") == "escalation_required"
     assert completion_gate.get("safe_to_claim_completion") is False
+    assert completion_gate.get("blocking_failure_codes") == [
+        "kb_mutation_not_executed"
+    ]
 
 
 def test_turn_execution_critic_treats_diagnostic_prompt_as_non_mutating() -> None:

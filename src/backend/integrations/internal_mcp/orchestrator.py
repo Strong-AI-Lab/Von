@@ -5215,6 +5215,25 @@ class InternalMCPChatOrchestrator:
                 for code in _normalise_string_list(unresolved.get("failure_codes")):
                     if code not in blocking_failure_codes:
                         blocking_failure_codes.append(code)
+        if not blocking_failure_codes and unresolved_preconditions:
+            unresolved_statuses = {
+                str(unresolved.get("status") or "").strip()
+                for unresolved in unresolved_preconditions
+                if isinstance(unresolved, Mapping)
+            }
+            blocking_failure_codes.append("required_effects_unresolved")
+            if "not_satisfied" in unresolved_statuses:
+                blocking_failure_codes.append("required_effect_not_satisfied")
+            if "not_executed" in unresolved_statuses:
+                blocking_failure_codes.append("required_effect_not_executed")
+        if not blocking_failure_codes:
+            if decision == "failed":
+                blocking_failure_codes.append("required_effect_not_satisfied")
+            elif decision == "escalation_required":
+                blocking_failure_codes.append("required_effect_not_executed")
+            elif decision == "partial":
+                blocking_failure_codes.append("postcondition_inconclusive")
+        blocking_failure_codes = sorted(set(blocking_failure_codes))
 
         safe_to_claim_completion = bool(
             completion_gate_payload.get("safe_to_claim_completion", True)
