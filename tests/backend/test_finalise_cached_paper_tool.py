@@ -124,3 +124,84 @@ def test_finalise_cached_paper_errors_when_cache_missing(monkeypatch, tmp_path):
 
     assert result["success"] is False
     assert result["error"] == "cached_pdf_not_found"
+
+
+def test_finalise_cached_paper_materialises_scholarly_representation(
+    monkeypatch, tmp_path
+):
+    from src.backend.integrations.internal_mcp import catalogue
+
+    cache_dir = tmp_path / "arxiv_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = cache_dir / "2502.14996.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%fake\n")
+
+    monkeypatch.setenv("ARXIV_CACHE_PATH", str(cache_dir))
+    monkeypatch.setenv("VON_BLOB_STORE_BACKEND", "local")
+    monkeypatch.setenv("VON_BLOB_STORE_LOCAL_ROOT", str(tmp_path / "blob_store"))
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#user_test",
+    )
+
+    class _FakeRecord:
+        concept_id = "#V#computer_file_copy_test"
+        uploaded_at = "2026-01-01T00:00:00+00:00"
+
+    monkeypatch.setattr(
+        "src.backend.services.computer_file_copy_service.create_computer_file_copy_instance",
+        lambda **_kwargs: _FakeRecord(),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.arxiv_paper_link_service.link_file_copy_to_arxiv_paper",
+        lambda **_kwargs: {"paper_concept_id": "#V#paper_on_arxiv_2502_14996_deadbeef"},
+    )
+    monkeypatch.setattr(
+        catalogue,
+        "_get_paper_metadata",
+        lambda **_kwargs: {
+            "success": True,
+            "paper": {
+                "id": "2502.14996",
+                "title": "Paper Title",
+                "summary": "Paper summary",
+                "authors": ["A. Author"],
+                "categories": ["cs.AI"],
+            },
+        },
+    )
+
+    materialise_calls: list[dict] = []
+
+    def _fake_materialise_arxiv_file_copy(**kwargs):
+        materialise_calls.append(dict(kwargs))
+        return {
+            "success": True,
+            "verified": True,
+            "paper_concept_id": "#V#paper_on_arxiv_2502_14996_deadbeef",
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.arxiv_paper_link_service.materialise_scholarly_representation_for_arxiv_file_copy",
+        _fake_materialise_arxiv_file_copy,
+    )
+
+    result = catalogue._finalise_cached_paper(
+        arxiv_id="2502.14996",
+        include_markdown=False,
+    )
+
+    assert result["success"] is True
+    scholarly = result.get("scholarly_representation") or {}
+    assert scholarly.get("verified") is True
+    assert scholarly.get("metadata_source") == "get_paper_metadata"
+    assert scholarly.get("metadata_available") is True
+    assert result.get("paper_concept_id") == "#V#paper_on_arxiv_2502_14996_deadbeef"
+    assert len(materialise_calls) == 1
+    assert materialise_calls[0]["user_concept_id"] == "#V#user_test"
+    assert materialise_calls[0]["arxiv_id"] == "2502.14996"
+    assert (
+        materialise_calls[0]["file_copy_concept_id"]
+        == "#V#computer_file_copy_test"
+    )

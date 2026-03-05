@@ -87,8 +87,8 @@ def _patch_representation_profile_loader(monkeypatch) -> None:
                     "domain_terms": ["paper", "arxiv", "metadata", "abstract"],
                     "required_tools_by_source": {
                         "file_copy": ["interpret_file_copy"],
-                        "url": ["extract_url", "get_paper_metadata"],
-                        "mixed": ["interpret_file_copy", "extract_url"],
+                        "url": ["download_paper"],
+                        "mixed": ["download_paper", "interpret_file_copy"],
                         "unknown": ["interpret_file_copy"],
                     },
                     "required_predicates": [
