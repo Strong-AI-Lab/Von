@@ -3,6 +3,118 @@ from __future__ import annotations
 from src.backend.services.turn_execution_record_service import build_turn_execution_record
 
 
+def _representation_profiles() -> list[dict]:
+    default_policy = {
+        "completion_block_on_unresolved_effects": True,
+        "fail_closed_on_missing_requirements": True,
+        "auto_apply_low_risk_defaults": True,
+        "requires_explicit_user_decision_for_high_risk": True,
+    }
+    return [
+        {
+            "profile_id": "paper",
+            "profile_concept_id": "#V#representation_contract_profile_paper",
+            "target_entity_class": "scholarly_paper",
+            "effect_type": "scholarly_representation",
+            "description": "Represent scholarly paper metadata.",
+            "intent_patterns": [r"\bpaper\s+representation\b", r"\bcorresponding\s+paper\b"],
+            "domain_terms": ["paper", "arxiv", "abstract", "metadata"],
+            "required_tools_by_source": {
+                "file_copy": ["interpret_file_copy"],
+                "url": ["extract_url", "get_paper_metadata"],
+                "mixed": ["interpret_file_copy", "extract_url"],
+                "unknown": ["interpret_file_copy"],
+            },
+            "required_predicates": [
+                "#V#computer_file_for_propositional_information_thing",
+                "#V#propositional_information_thing_has_computer_file",
+            ],
+            "default_decision_policy": default_policy,
+        },
+        {
+            "profile_id": "person",
+            "profile_concept_id": "#V#representation_contract_profile_person",
+            "target_entity_class": "person",
+            "effect_type": "representation_person",
+            "description": "Represent person information from artefacts.",
+            "intent_patterns": [
+                r"\b(?:business\s+card|cv|curriculum\s+vitae|resume)\b.*\b(?:person|profile|contact)"
+            ],
+            "domain_terms": ["person", "business card", "cv", "resume", "contact"],
+            "required_tools_by_source": {
+                "file_copy": ["interpret_file_copy"],
+                "url": ["extract_url"],
+                "mixed": ["interpret_file_copy", "extract_url"],
+                "unknown": ["interpret_file_copy"],
+            },
+            "required_predicates": ["#V#person"],
+            "default_decision_policy": default_policy,
+        },
+        {
+            "profile_id": "company",
+            "profile_concept_id": "#V#representation_contract_profile_company",
+            "target_entity_class": "company",
+            "effect_type": "representation_company",
+            "description": "Represent company information from artefacts.",
+            "intent_patterns": [
+                r"\b(?:company|organisation|organization|business|startup)\b.*\b(?:web\s?page|website|url)"
+            ],
+            "domain_terms": ["company", "organisation", "business", "website", "url"],
+            "required_tools_by_source": {
+                "file_copy": ["interpret_file_copy"],
+                "url": ["extract_url"],
+                "mixed": ["interpret_file_copy", "extract_url"],
+                "unknown": ["extract_url"],
+            },
+            "required_predicates": ["#V#organisation"],
+            "default_decision_policy": default_policy,
+        },
+        {
+            "profile_id": "meeting",
+            "profile_concept_id": "#V#representation_contract_profile_meeting",
+            "target_entity_class": "meeting",
+            "effect_type": "representation_meeting",
+            "description": "Represent meeting information from artefacts.",
+            "intent_patterns": [
+                r"\b(?:meeting|calendar\s+event)\b.*\b(?:transcript|calendar|minutes|agenda)"
+            ],
+            "domain_terms": ["meeting", "transcript", "calendar", "minutes", "agenda"],
+            "required_tools_by_source": {
+                "file_copy": ["interpret_file_copy"],
+                "url": ["extract_url"],
+                "mixed": ["interpret_file_copy", "extract_url"],
+                "unknown": ["interpret_file_copy"],
+            },
+            "required_predicates": ["#V#meeting"],
+            "default_decision_policy": default_policy,
+        },
+    ]
+
+
+def _patch_representation_profile_loader(monkeypatch, *, profiles: list[dict]) -> None:
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_record_service._load_representation_domain_profiles_from_vontology",
+        lambda: (
+            profiles,
+            {
+                "representation_profile_source": "vontology_concept_text_relations",
+                "requested_concept_ids": [
+                    profile.get("profile_concept_id")
+                    for profile in profiles
+                    if isinstance(profile, dict)
+                ],
+                "loaded_concept_ids": [
+                    profile.get("profile_concept_id")
+                    for profile in profiles
+                    if isinstance(profile, dict)
+                ],
+                "loaded_profile_count": len(profiles),
+                "profile_version_hash": "hash-test-profiles",
+            },
+        ),
+    )
+
+
 def _build_record(**overrides):
     payload = {
         "request_id": "req-contract-1",
@@ -28,7 +140,10 @@ def _build_record(**overrides):
     return build_turn_execution_record(**payload)
 
 
-def test_paper_representation_contract_emitted_with_required_effects() -> None:
+def test_paper_representation_contract_emitted_with_required_effects(monkeypatch) -> None:
+    _patch_representation_profile_loader(
+        monkeypatch, profiles=_representation_profiles()
+    )
     record = _build_record(
         aux_llm_calls=[
             {
@@ -60,7 +175,10 @@ def test_paper_representation_contract_emitted_with_required_effects() -> None:
     assert effect.get("targets") == ["#V#uploaded_file_copy_abc123"]
 
 
-def test_person_company_meeting_profiles_generate_non_empty_effects() -> None:
+def test_person_company_meeting_profiles_generate_non_empty_effects(monkeypatch) -> None:
+    _patch_representation_profile_loader(
+        monkeypatch, profiles=_representation_profiles()
+    )
     person_record = _build_record(
         prompt_text="Create a person profile from this CV file #V#uploaded_file_copy_person_1."
     )
@@ -103,7 +221,10 @@ def test_person_company_meeting_profiles_generate_non_empty_effects() -> None:
     assert meeting_effects[0].get("effect_type") == "representation_meeting"
 
 
-def test_representation_contract_is_idempotent_for_same_prompt_and_context() -> None:
+def test_representation_contract_is_idempotent_for_same_prompt_and_context(monkeypatch) -> None:
+    _patch_representation_profile_loader(
+        monkeypatch, profiles=_representation_profiles()
+    )
     common_payload = {
         "request_id": "req-contract-idempotent",
         "session_id": "session-contract-idempotent",
@@ -122,7 +243,10 @@ def test_representation_contract_is_idempotent_for_same_prompt_and_context() -> 
     assert contract_a == contract_b
 
 
-def test_status_question_does_not_emit_representation_contract() -> None:
+def test_status_question_does_not_emit_representation_contract(monkeypatch) -> None:
+    _patch_representation_profile_loader(
+        monkeypatch, profiles=_representation_profiles()
+    )
     record = _build_record(
         prompt_text=(
             "Did you make a scientific paper concept for "
@@ -138,3 +262,46 @@ def test_status_question_does_not_emit_representation_contract() -> None:
     execution = record.get("execution")
     assert isinstance(execution, dict)
     assert execution.get("required_effects_contract") is None
+
+
+def test_representation_contract_fails_closed_when_profile_catalogue_unavailable(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_record_service._load_representation_domain_profiles_from_vontology",
+        lambda: (
+            [],
+            {
+                "representation_profile_source": "vontology_concept_text_relations",
+                "requested_concept_ids": [
+                    "#V#representation_contract_profile_paper",
+                    "#V#representation_contract_profile_person",
+                ],
+                "loaded_concept_ids": [],
+                "loaded_profile_count": 0,
+                "profile_version_hash": None,
+            },
+        ),
+    )
+
+    record = _build_record(
+        prompt_text=(
+            "Fully represent the corresponding paper from "
+            "#V#uploaded_file_copy_abc123."
+        )
+    )
+
+    execution = record.get("execution") or {}
+    contract = execution.get("required_effects_contract") or {}
+    assert contract.get("domain_profile_id") == "representation"
+    assert contract.get("profile_source") == "vontology_concept_text_relations"
+    profile_resolution = contract.get("profile_resolution") or {}
+    assert profile_resolution.get("fail_closed") is True
+    assert profile_resolution.get("fail_closed_reason") == "profile_catalogue_unavailable"
+
+    required_effects = record.get("required_effects") or []
+    assert required_effects
+    effect = required_effects[0]
+    assert effect.get("effect_type") == "representation_contract_guard"
+    assert effect.get("status") == "not_executed"
+    assert effect.get("failure_code") == "representation_profile_catalogue_unavailable"
