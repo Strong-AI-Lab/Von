@@ -433,6 +433,26 @@ Completion-gate expectation:
 
 - Company-representation turns MUST remain non-complete when `interpret_file_copy` reports unresolved core company effects (for example `reason=company_identity_unresolved` or `reason=company_url_unresolved`).
 
+### 10.9 Meeting Representation Contract (JVNAUTOSCI-1369 / JVNAUTOSCI-1375)
+
+For meeting-representation intents driven by transcript/calendar artefacts, required-effects semantics MUST enforce meeting identity materialisation and source linkage before completion can be claimed.
+
+Canonical meeting profile source expectations:
+
+- `file_copy` source (transcript/calendar uploads): required tool set MUST include `interpret_file_copy`.
+- `url` source MAY use `extract_url` for enrichment, but file-copy meeting materialisation is the canonical mutation path for uploaded artefacts.
+
+Operational expectations for `interpret_file_copy` on meeting artefacts:
+
+- The handler SHOULD attempt deterministic meeting materialisation when transcript/calendar cues are detected.
+- Materialisation SHOULD persist core identity effects (meeting concept + `hasName`) and source linkage (`#V#documentary_evidence_for` from file-copy concept to meeting concept).
+- Date/time, participant, and outcome extraction MAY use conservative defaults (`#V#hasNote`) with explicit provenance.
+- If core meeting identity cannot be resolved or source linkage fails, the tool MUST fail closed (`success=false`) and return explicit `meeting_representation` diagnostics (`attempted`, `verified`, `reason`, IDs, and error details).
+
+Completion-gate expectation:
+
+- Meeting-representation turns MUST remain non-complete when `interpret_file_copy` reports unresolved core meeting effects (for example `reason=meeting_identity_unresolved`).
+
 ## 11. Durable Runtime Semantics
 
 ### 11.1 Instance Model

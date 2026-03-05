@@ -3368,6 +3368,9 @@ def _interpret_file_copy(**kwargs):
     from ...services.person_file_representation_service import (
         materialise_person_representation_for_file_copy,
     )
+    from ...services.meeting_file_representation_service import (
+        materialise_meeting_representation_for_file_copy,
+    )
     from ...services.company_file_representation_service import (
         materialise_company_representation_for_file_copy,
     )
@@ -3721,6 +3724,11 @@ def _interpret_file_copy(**kwargs):
         "verified": False,
         "reason": "not_applicable",
     }
+    meeting_representation: dict[str, Any] = {
+        "attempted": False,
+        "verified": False,
+        "reason": "not_applicable",
+    }
     subtype_assertion: dict[str, Any] | None = None
     subtype_assertion_outcome = "not_attempted"
     if persist:
@@ -4002,6 +4010,33 @@ def _interpret_file_copy(**kwargs):
                     "details": dict(company_representation),
                 }
             )
+
+        meeting_representation = materialise_meeting_representation_for_file_copy(
+            user_concept_id=(
+                user_concept_id.strip()
+                if isinstance(user_concept_id, str) and user_concept_id.strip()
+                else None
+            ),
+            file_copy_concept_id=concept_id,
+            extracted_text=extracted_text,
+            original_filename=(
+                original_filename if isinstance(original_filename, str) else None
+            ),
+            interpretation=interpretation,
+            logger=logger,
+        )
+        if (
+            isinstance(meeting_representation, Mapping)
+            and bool(meeting_representation.get("attempted"))
+            and not bool(meeting_representation.get("verified"))
+        ):
+            persist_errors.append(
+                {
+                    "predicate": "#V#meeting_representation_verification",
+                    "error": "meeting_representation_not_verified",
+                    "details": dict(meeting_representation),
+                }
+            )
     else:
         subtype_assertion_outcome = "persist_disabled"
         scholarly_representation = {
@@ -4015,6 +4050,11 @@ def _interpret_file_copy(**kwargs):
             "reason": "persist_disabled",
         }
         company_representation = {
+            "attempted": False,
+            "verified": False,
+            "reason": "persist_disabled",
+        }
+        meeting_representation = {
             "attempted": False,
             "verified": False,
             "reason": "persist_disabled",
@@ -4085,6 +4125,7 @@ def _interpret_file_copy(**kwargs):
         "scholarly_representation": scholarly_representation,
         "person_representation": person_representation,
         "company_representation": company_representation,
+        "meeting_representation": meeting_representation,
         "namespace": effective_namespace,
         **ns_report,
         "read_result": {
@@ -6691,6 +6732,7 @@ def _interpret_file_copy_output_schema() -> Schema:
             "scholarly_representation": (dict, type(None)),
             "person_representation": (dict, type(None)),
             "company_representation": (dict, type(None)),
+            "meeting_representation": (dict, type(None)),
             "namespace": (str, type(None)),
             "read_result": (dict, type(None)),
             "image_fetch_error": (str, type(None)),
