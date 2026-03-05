@@ -250,6 +250,76 @@ def test_representation_tool_success_false_marks_effect_unresolved(monkeypatch) 
     assert completion_gate.get("safe_to_claim_completion") is False
 
 
+def test_person_representation_blocks_completion_when_identity_unresolved(monkeypatch) -> None:
+    _patch_representation_profile_loader(
+        monkeypatch, profiles=_representation_profiles()
+    )
+    record = _build_record(
+        prompt_text="Represent this person profile from this CV file #V#uploaded_file_copy_person_1.",
+        response_text="Progress note.",
+        tool_invocations=[
+            {
+                "tool": "interpret_file_copy",
+                "payload": {
+                    "success": False,
+                    "error": "person_identity_unresolved",
+                    "person_representation": {
+                        "attempted": True,
+                        "verified": False,
+                        "reason": "person_identity_unresolved",
+                    },
+                },
+            }
+        ],
+    )
+
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    assert required_effects
+    effect = required_effects[0]
+    assert effect.get("effect_type") == "representation_person"
+    assert effect.get("status") == "not_satisfied"
+    assert effect.get("failure_code") == "person_representation_tool_failed"
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "failed"
+    assert completion_gate.get("safe_to_claim_completion") is False
+
+
+def test_person_representation_marks_completion_when_verified(monkeypatch) -> None:
+    _patch_representation_profile_loader(
+        monkeypatch, profiles=_representation_profiles()
+    )
+    record = _build_record(
+        prompt_text="Represent this person profile from this CV file #V#uploaded_file_copy_person_1.",
+        response_text="Progress note.",
+        tool_invocations=[
+            {
+                "tool": "interpret_file_copy",
+                "payload": {
+                    "success": True,
+                    "person_representation": {
+                        "attempted": True,
+                        "verified": True,
+                        "person_concept_id": "#V#person_jane_doe_1234abcd",
+                    },
+                },
+            }
+        ],
+    )
+
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    assert required_effects
+    effect = required_effects[0]
+    assert effect.get("effect_type") == "representation_person"
+    assert effect.get("status") == "satisfied"
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "completed"
+    assert completion_gate.get("safe_to_claim_completion") is True
+
+
 def test_person_company_meeting_profiles_generate_non_empty_effects(monkeypatch) -> None:
     _patch_representation_profile_loader(
         monkeypatch, profiles=_representation_profiles()

@@ -393,6 +393,26 @@ Turn-execution gate expectation:
 
 - Tool invocations whose payload explicitly reports `success=false` MUST be treated as failed execution for required-effect evaluation and completion gating.
 
+### 10.7 Person Representation Contract (JVNAUTOSCI-1369 / JVNAUTOSCI-1373)
+
+For person-representation intents driven by CV/business-card artefacts, required-effects semantics MUST enforce identity materialisation and source linkage before completion can be claimed.
+
+Canonical person profile source expectations:
+
+- `file_copy` source (CV/business-card uploads): required tool set MUST include `interpret_file_copy`.
+- `url` source MAY use `extract_url` for enrichment, but file-copy person materialisation remains the canonical mutation path for uploaded artefacts.
+
+Operational expectations for `interpret_file_copy` on person artefacts:
+
+- The handler SHOULD attempt deterministic person materialisation when CV/business-card cues are detected.
+- Materialisation SHOULD persist core identity effects (person concept + `hasName`) and source linkage (`#V#documentary_evidence_for` from file-copy concept to person concept).
+- Contact/role/affiliation extraction MAY use conservative defaults (`#V#has_email`, `#V#hasRole`, `#V#hasNote`) without additional user questioning.
+- If core identity cannot be resolved or source linkage fails, the tool MUST fail closed (`success=false`) and return explicit `person_representation` diagnostics (`attempted`, `verified`, `reason`, IDs, and error details).
+
+Completion-gate expectation:
+
+- Person-representation turns MUST remain non-complete when `interpret_file_copy` reports unresolved core identity effects (for example `reason=person_identity_unresolved`).
+
 ## 11. Durable Runtime Semantics
 
 ### 11.1 Instance Model

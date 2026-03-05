@@ -3365,6 +3365,9 @@ def _interpret_file_copy(**kwargs):
         maybe_sync_concept_text_relations_to_rag,
     )
     from ...services.relationship_write_service import add_relationship
+    from ...services.person_file_representation_service import (
+        materialise_person_representation_for_file_copy,
+    )
     from ...services.text_value_service import upsert_singleton_text_relation
 
     concept_id = kwargs.get("concept_id") or kwargs.get("file_copy_concept_id")
@@ -3699,7 +3702,13 @@ def _interpret_file_copy(**kwargs):
     persist_errors: list[dict[str, Any]] = []
     arxiv_id_candidates: list[str] = []
     selected_arxiv_id: str | None = None
+    user_concept_id, _organisation_concept_id = _resolve_rag_actor_scope_ids(ns_report)
     scholarly_representation: dict[str, Any] = {
+        "attempted": False,
+        "verified": False,
+        "reason": "not_applicable",
+    }
+    person_representation: dict[str, Any] = {
         "attempted": False,
         "verified": False,
         "reason": "not_applicable",
@@ -3815,9 +3824,6 @@ def _interpret_file_copy(**kwargs):
                 content_for_persist,
             )
             selected_arxiv_id = arxiv_id_candidates[0] if arxiv_id_candidates else None
-            user_concept_id, _organisation_concept_id = _resolve_rag_actor_scope_ids(
-                ns_report
-            )
             metadata_record: dict[str, Any] | None = None
             metadata_error: str | None = None
 
@@ -3934,9 +3940,41 @@ def _interpret_file_copy(**kwargs):
                             "details": scholarly_representation,
                         }
                     )
+
+        person_representation = materialise_person_representation_for_file_copy(
+            user_concept_id=(
+                user_concept_id.strip()
+                if isinstance(user_concept_id, str) and user_concept_id.strip()
+                else None
+            ),
+            file_copy_concept_id=concept_id,
+            extracted_text=extracted_text,
+            original_filename=(
+                original_filename if isinstance(original_filename, str) else None
+            ),
+            interpretation=interpretation,
+            logger=logger,
+        )
+        if (
+            isinstance(person_representation, Mapping)
+            and bool(person_representation.get("attempted"))
+            and not bool(person_representation.get("verified"))
+        ):
+            persist_errors.append(
+                {
+                    "predicate": "#V#person_representation_verification",
+                    "error": "person_representation_not_verified",
+                    "details": dict(person_representation),
+                }
+            )
     else:
         subtype_assertion_outcome = "persist_disabled"
         scholarly_representation = {
+            "attempted": False,
+            "verified": False,
+            "reason": "persist_disabled",
+        }
+        person_representation = {
             "attempted": False,
             "verified": False,
             "reason": "persist_disabled",
@@ -4005,6 +4043,7 @@ def _interpret_file_copy(**kwargs):
             },
         },
         "scholarly_representation": scholarly_representation,
+        "person_representation": person_representation,
         "namespace": effective_namespace,
         **ns_report,
         "read_result": {
