@@ -825,15 +825,14 @@ describe('thinking activity history normalisation', () => {
 
         expect(rows.map((row) => row.label)).toEqual(expect.arrayContaining([
             'Building context',
-            'Searching workflows',
-            'Found workflows',
-            'Starting orchestrator',
+            'Workflow discovery',
+            'Workflow dispatch',
             'Starting LLM call',
-            'Starting fetch_concept',
-            'fetch_concept failed',
+            'Tool call: fetch_concept',
+            'Tool call failed: fetch_concept',
             'Turn completed'
         ]));
-        const failureRow = rows.find((row) => row.label === 'fetch_concept failed');
+        const failureRow = rows.find((row) => row.label === 'Tool call failed: fetch_concept');
         expect(failureRow?.state).toBe('failure');
     });
 
@@ -894,6 +893,60 @@ describe('thinking activity history normalisation', () => {
         });
         expect(fallbackHtml).toContain('fetch_concept');
         expect(fallbackHtml).toContain('Fetched');
+    });
+
+    test('renders canonical workflow stages with selected workflow details', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            workflowStagePath: {
+                path: [
+                    { stage_id: 'workflow_discovery', stage_label: 'Workflow discovery' },
+                    { stage_id: 'workflow_dispatch', stage_label: 'Workflow dispatch' },
+                    { stage_id: 'tool_plan', stage_label: 'Plan tool calls' }
+                ]
+            },
+            workflowDiscovery: {
+                match_count: 1,
+                matches: [
+                    {
+                        concept_id: '#V#tool_calling_workflow',
+                        name: 'Tool calling workflow'
+                    }
+                ]
+            },
+            latestProgress: {
+                phase: 'workflow_dispatch',
+                selected_workflow_id: '#V#tool_calling_workflow',
+                selected_workflow_name: 'Tool calling workflow',
+                workflow_selector_verdict: 'tool_seeking'
+            }
+        });
+
+        expect(html).toContain('Workflow discovery');
+        expect(html).toContain('Found Tool calling workflow (#V#tool_calling_workflow)');
+        expect(html).toContain('Workflow dispatch');
+        expect(html).toContain('Selected Tool calling workflow (#V#tool_calling_workflow)');
+        expect(html).toContain('Plan tool calls');
+    });
+
+    test('renders explicit no-workflow-found state as a failure row', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            workflowStagePath: {
+                path: [
+                    { stage_id: 'workflow_discovery', stage_label: 'Workflow discovery' }
+                ]
+            },
+            workflowDiscovery: {
+                match_count: 0,
+                matches: []
+            },
+            latestProgress: {
+                phase: 'workflow_discovery_complete'
+            }
+        });
+
+        expect(html).toContain('Workflow discovery');
+        expect(html).toContain('No applicable workflow found');
+        expect(html).toContain('thinking-card-tool-status failure');
     });
 });
 
