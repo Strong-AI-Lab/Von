@@ -4,8 +4,15 @@ Shared fixtures and env-var defaults for the backend test suite.
 """
 
 import os
+import sys
+from pathlib import Path
 
 import pytest
+
+_BACKEND_TESTS_DIR = Path(__file__).resolve().parent
+if str(_BACKEND_TESTS_DIR) not in sys.path:
+    # Keep backend-shared test helpers importable without turning tests into a package.
+    sys.path.insert(0, str(_BACKEND_TESTS_DIR))
 
 
 @pytest.fixture(autouse=True)

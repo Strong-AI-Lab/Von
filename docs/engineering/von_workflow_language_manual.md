@@ -453,6 +453,25 @@ Completion-gate expectation:
 
 - Meeting-representation turns MUST remain non-complete when `interpret_file_copy` reports unresolved core meeting effects (for example `reason=meeting_identity_unresolved`).
 
+### 10.10 Cross-Domain Representation Regression Suite (JVNAUTOSCI-1369 / JVNAUTOSCI-1376)
+
+Canonical regression coverage for representation intent contracts is maintained in:
+
+- `tests/backend/test_representation_intent_cross_domain_regression_suite.py`
+- shared fixtures/helpers: `tests/backend/representation_intent_regression_helpers.py`
+
+Required suite behaviours:
+
+- For each anchor domain (`paper`, `person`, `company`, `meeting`), unresolved required effects MUST block completion with explicit domain failure codes in `completion_gate.blocking_failure_codes`.
+- Verified required effects MUST permit completion (`decision=completed`, `safe_to_claim_completion=true`).
+- Contract policy telemetry MUST preserve minimal-imposition defaults (`auto_apply_low_risk_defaults=true`, `requires_explicit_user_decision_for_high_risk=true`).
+- Repeated runs with unchanged prompt + tool context MUST remain idempotent at contract/effect/gate level.
+- Gateway-path `interpret_file_copy` failures for unresolved representation verification MUST fail closed with explicit `persist_errors` reason codes per domain.
+
+Extension rule:
+
+- Any new representation domain profile added to VWL MUST add a corresponding scenario to this suite before merge.
+
 ## 11. Durable Runtime Semantics
 
 ### 11.1 Instance Model
