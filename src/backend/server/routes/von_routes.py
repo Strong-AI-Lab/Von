@@ -372,6 +372,13 @@ def _serialise_tool_progress_state(
             events[-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT :]
         )
 
+    payload["workflow_stage_path"] = _build_live_workflow_stage_path(payload)
+    workflow_discovery = payload.get("workflow_discovery")
+    if isinstance(workflow_discovery, Mapping):
+        payload["workflow_discovery"] = _normalise_workflow_discovery_progress_payload(
+            workflow_discovery
+        )
+
     return payload
 
 
@@ -423,6 +430,126 @@ def _iso_utc_to_epoch_ms(value: Any) -> int | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return int(parsed.timestamp() * 1000.0)
+
+
+def _normalise_workflow_discovery_progress_payload(
+    workflow_discovery: Mapping[str, Any] | None,
+    *,
+    query: str | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    """Return a stable workflow-discovery payload for live progress rendering.
+
+    The thinking card needs a deterministic shape even when discovery produces
+    zero matches. This keeps "no workflow found" distinct from "no payload was
+    emitted yet", and gives the frontend one canonical contract to render.
+    """
+
+    payload = (
+        {
+            key: value
+            for key, value in workflow_discovery.items()
+            if isinstance(key, str)
+        }
+        if isinstance(workflow_discovery, Mapping)
+        else {}
+    )
+
+    matches_raw = payload.get("matches")
+    matches = [dict(item) for item in matches_raw if isinstance(item, Mapping)] if isinstance(matches_raw, list) else []
+    payload["matches"] = matches
+
+    candidates_raw = payload.get("candidates")
+    if isinstance(candidates_raw, list):
+        payload["candidates"] = [
+            dict(item) for item in candidates_raw if isinstance(item, Mapping)
+        ]
+    else:
+        payload["candidates"] = list(matches)
+
+    routing_matches_raw = payload.get("routing_matches")
+    if isinstance(routing_matches_raw, list):
+        payload["routing_matches"] = [
+            dict(item) for item in routing_matches_raw if isinstance(item, Mapping)
+        ]
+    else:
+        payload["routing_matches"] = list(matches)
+
+    payload["match_count"] = len(payload["matches"])
+    payload["candidate_count"] = len(payload["candidates"])
+
+    if isinstance(query, str) and query.strip():
+        payload.setdefault("query", query.strip())
+
+    errors: list[str] = []
+    existing_errors = payload.get("errors")
+    if isinstance(existing_errors, list):
+        errors.extend(
+            str(item).strip()
+            for item in existing_errors
+            if isinstance(item, str) and item.strip()
+        )
+    elif isinstance(existing_errors, str) and existing_errors.strip():
+        errors.append(existing_errors.strip())
+
+    if isinstance(error, str) and error.strip():
+        errors.append(error.strip())
+
+    payload["errors"] = errors or None
+    return payload
+
+
+def _build_live_workflow_stage_path(
+    state: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(state, Mapping):
+        return build_conversation_turn_stage_path(runtime_stages=(), workflow_id=None)
+
+    def _canonicalise_live_runtime_stage(stage: str | None) -> str | None:
+        if not isinstance(stage, str):
+            return None
+        clean_stage = stage.strip()
+        if not clean_stage:
+            return None
+        if clean_stage == "workflow_discovery_complete":
+            return "workflow_discovery"
+        if clean_stage == "orchestrator_start":
+            return "workflow_dispatch"
+        if clean_stage == "orchestrator_end":
+            return None
+        return clean_stage
+
+    diagnostic_events_raw = state.get("diagnostic_events")
+    diagnostic_events = (
+        [cast(dict[str, Any], entry) for entry in diagnostic_events_raw if isinstance(entry, dict)]
+        if isinstance(diagnostic_events_raw, list)
+        else []
+    )
+    runtime_stages: list[str] = []
+    last_stage_normalised: str | None = None
+    for entry in diagnostic_events:
+        raw_stage = _progress_str(entry.get("phase")) or _progress_str(entry.get("stage"))
+        canonical_stage = _canonicalise_live_runtime_stage(raw_stage)
+        if not canonical_stage:
+            continue
+        canonical_stage_normalised = canonical_stage.strip().lower()
+        if canonical_stage_normalised == last_stage_normalised:
+            continue
+        runtime_stages.append(canonical_stage)
+        last_stage_normalised = canonical_stage_normalised
+
+    current_stage = _canonicalise_live_runtime_stage(
+        _progress_str(state.get("phase")) or _progress_str(state.get("stage"))
+    )
+    if current_stage:
+        current_stage_normalised = current_stage.strip().lower()
+        if current_stage_normalised != last_stage_normalised:
+            runtime_stages.append(current_stage)
+    selected_workflow_id = _progress_str(state.get("selected_workflow_id"))
+    return build_conversation_turn_stage_path(
+        runtime_stages=runtime_stages,
+        workflow_id=selected_workflow_id,
+    )
 
 
 def _normalise_progress_events_from_diagnostic_events(
@@ -788,9 +915,14 @@ def _build_turn_execution_diagnostics(
 
     phase_history = _derive_phase_history_from_diagnostic_events(diagnostic_events)
     runtime_stages = [entry.get("phase") for entry in phase_history]
+    selected_workflow_id = (
+        _progress_str(latest_progress.get("selected_workflow_id"))
+        if isinstance(latest_progress, dict)
+        else None
+    )
     workflow_stage_path = build_conversation_turn_stage_path(
         runtime_stages=runtime_stages,
-        workflow_id=None,
+        workflow_id=selected_workflow_id,
     )
     llm_call_entries = [
         cast(dict[str, Any], entry)
@@ -1830,6 +1962,21 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
         failure_kind = _progress_str(merged.get("failure_kind"))
         if failure_kind:
             event_entry["failure_kind"] = failure_kind
+        selected_workflow_id = _progress_str(merged.get("selected_workflow_id"))
+        if selected_workflow_id:
+            event_entry["selected_workflow_id"] = selected_workflow_id
+        selected_workflow_name = _progress_str(merged.get("selected_workflow_name"))
+        if selected_workflow_name:
+            event_entry["selected_workflow_name"] = selected_workflow_name
+        selector_verdict = _progress_str(merged.get("workflow_selector_verdict"))
+        if selector_verdict:
+            event_entry["workflow_selector_verdict"] = selector_verdict
+        selector_source = _progress_str(merged.get("workflow_selector_source"))
+        if selector_source:
+            event_entry["workflow_selector_source"] = selector_source
+        workflow_match_count = _progress_number(merged.get("workflow_match_count"))
+        if workflow_match_count is not None:
+            event_entry["workflow_match_count"] = int(max(0.0, workflow_match_count))
         trimmed_events = [
             *existing_events[-(_TOOL_PROGRESS_DIAGNOSTIC_EVENT_LIMIT - 1) :],
             event_entry,
@@ -5466,27 +5613,56 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     prompt_text,
                     namespace=user_namespace,
                 )
+                workflow_discovery_progress = _normalise_workflow_discovery_progress_payload(
+                    workflow_discovery_result,
+                    query=prompt_text,
+                )
                 if workflow_discovery_result:
                     current_app.logger.info(
                         "[WORKFLOW_DISCOVERY] Found %d relevant workflows for prompt",
                         workflow_discovery_result.get("match_count", 0),
                     )
-                    # Emit workflow discovery results in tool progress for frontend
-                    if show_tool_use_progress:
-                        _set_tool_progress(
-                            progress_scope_key,
-                            request_id,
-                            {
-                                "status": "thinking",
-                                "phase": "workflow_discovery_complete",
-                                "phase_label": "Found workflows",
-                                "request_id": request_id,
-                                "workflow_discovery": workflow_discovery_result,
-                            },
-                        )
+                # Emit workflow discovery outcome for frontend even when no
+                # workflow matched, so the thinking card can show an explicit
+                # "no workflow found" step instead of silently skipping it.
+                if show_tool_use_progress:
+                    match_count = int(workflow_discovery_progress.get("match_count", 0))
+                    _set_tool_progress(
+                        progress_scope_key,
+                        request_id,
+                        {
+                            "status": "thinking",
+                            "phase": "workflow_discovery_complete",
+                            "phase_label": (
+                                "Found workflows"
+                                if match_count > 0
+                                else "No workflows found"
+                            ),
+                            "request_id": request_id,
+                            "workflow_discovery": workflow_discovery_progress,
+                            "workflow_match_count": match_count,
+                        },
+                    )
             except Exception as e:
                 current_app.logger.warning("[WORKFLOW_DISCOVERY] Search failed: %s", e)
                 workflow_discovery_result = None
+                if show_tool_use_progress:
+                    _set_tool_progress(
+                        progress_scope_key,
+                        request_id,
+                        {
+                            "status": "thinking",
+                            "phase": "workflow_discovery_complete",
+                            "phase_label": "Workflow discovery failed",
+                            "request_id": request_id,
+                            "workflow_discovery": _normalise_workflow_discovery_progress_payload(
+                                None,
+                                query=prompt_text,
+                                error=str(e),
+                            ),
+                            "workflow_match_count": 0,
+                        },
+                    )
 
         # ---------------------------------------------------------
         # Tool-backed RAG counts (avoid KA vs chat-history confusion)

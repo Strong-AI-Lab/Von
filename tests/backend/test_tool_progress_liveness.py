@@ -167,6 +167,65 @@ def test_progress_event_contains_required_telemetry_fields(monkeypatch) -> None:
     assert isinstance(serialised["activity_idle_ms"], int)
 
 
+def test_live_progress_serialisation_includes_workflow_stage_path(monkeypatch) -> None:
+    clock = _set_clock(monkeypatch, start=4200.0)
+
+    von_routes._set_tool_progress(
+        "scope-workflow",
+        "req-workflow",
+        {
+            "status": "thinking",
+            "phase": "workflow_discovery",
+            "request_id": "req-workflow",
+        },
+    )
+    clock["now"] += 0.1
+    von_routes._set_tool_progress(
+        "scope-workflow",
+        "req-workflow",
+        {
+            "status": "phase_transition",
+            "phase": "workflow_dispatch",
+            "request_id": "req-workflow",
+            "selected_workflow_id": "#V#tool_calling_workflow",
+            "selected_workflow_name": "Tool calling workflow",
+        },
+    )
+
+    state = von_routes._get_tool_progress("scope-workflow", "req-workflow")
+    assert state is not None
+
+    serialised = von_routes._serialise_tool_progress_state(
+        state,
+        now_epoch=clock["now"],
+    )
+
+    workflow_stage_path = serialised.get("workflow_stage_path")
+    assert isinstance(workflow_stage_path, dict)
+    assert workflow_stage_path.get("workflow_id") == "#V#tool_calling_workflow"
+    path = workflow_stage_path.get("path")
+    assert isinstance(path, list)
+    assert [entry.get("stage_id") for entry in path] == [
+        "workflow_discovery",
+        "workflow_dispatch",
+    ]
+
+
+def test_workflow_discovery_progress_payload_preserves_explicit_no_match_state() -> None:
+    payload = von_routes._normalise_workflow_discovery_progress_payload(
+        None,
+        query="find a workflow for this task",
+    )
+
+    assert payload["query"] == "find a workflow for this task"
+    assert payload["matches"] == []
+    assert payload["routing_matches"] == []
+    assert payload["candidates"] == []
+    assert payload["match_count"] == 0
+    assert payload["candidate_count"] == 0
+    assert payload["errors"] is None
+
+
 def test_orchestrator_start_uses_startup_wait_liveness_reason() -> None:
     assert (
         von_routes._classify_progress_cause("orchestrator_start", "heartbeat")

@@ -254,6 +254,8 @@ class ProgressTracker:
     # Phase labels mirrored from orchestrator for convenience.
     _PHASE_LABELS: Mapping[str, str] = {
         "context_build": "Building context",
+        "workflow_dispatch": "Workflow dispatch",
+        "plain_response": "Plain-response routing",
         "tool_plan": "Planning tool calls",
         "tool_execute": "Executing tools",
         "screen_backfill": "Generating response",
@@ -457,6 +459,8 @@ class InternalMCPChatOrchestrator:
     # --- Tool-use progress phases (JVNAUTOSCI-984) ---
     # Used to provide phase-aware status updates during tool execution.
     PHASE_CONTEXT_BUILD = "context_build"
+    PHASE_WORKFLOW_DISPATCH = "workflow_dispatch"
+    PHASE_PLAIN_RESPONSE = "plain_response"
     PHASE_TOOL_PLAN = "tool_plan"
     PHASE_TOOL_EXECUTE = "tool_execute"
     PHASE_SCREEN_BACKFILL = "screen_backfill"
@@ -467,6 +471,8 @@ class InternalMCPChatOrchestrator:
 
     _PHASE_LABELS: Mapping[str, str] = {
         PHASE_CONTEXT_BUILD: "Building context",
+        PHASE_WORKFLOW_DISPATCH: "Workflow dispatch",
+        PHASE_PLAIN_RESPONSE: "Plain-response routing",
         PHASE_TOOL_PLAN: "Planning tool calls",
         PHASE_TOOL_EXECUTE: "Executing tools",
         PHASE_SCREEN_BACKFILL: "Generating response",
@@ -18649,6 +18655,34 @@ class InternalMCPChatOrchestrator:
             if isinstance(selected_workflow_id, str) and selected_workflow_id.strip()
             else None
         )
+
+        def _resolve_selected_workflow_name(workflow_id: str | None) -> str | None:
+            clean_workflow_id = (
+                workflow_id.strip()
+                if isinstance(workflow_id, str) and workflow_id.strip()
+                else None
+            )
+            if not clean_workflow_id:
+                return None
+
+            for match in (*discovered_matches, *excluded_discovered_matches):
+                if not isinstance(match, Mapping):
+                    continue
+                match_id = match.get("concept_id")
+                if (
+                    isinstance(match_id, str)
+                    and match_id.strip() == clean_workflow_id
+                ):
+                    match_name = match.get("name")
+                    if isinstance(match_name, str) and match_name.strip():
+                        return match_name.strip()
+
+            pretty_name = clean_workflow_id
+            if pretty_name.startswith("#V#"):
+                pretty_name = pretty_name[3:]
+            pretty_name = pretty_name.replace("_", " ").strip()
+            return pretty_name[:1].upper() + pretty_name[1:] if pretty_name else clean_workflow_id
+
         selector_verdict = (
             routing_info.verdict.strip().lower()
             if isinstance(routing_info, WorkflowRoutingInfo)
@@ -23081,6 +23115,27 @@ class InternalMCPChatOrchestrator:
                 if trace_enabled and trace is not None:
                     trace.metadata["workflow_selector_override"] = dict(override_payload)
 
+        selected_workflow_name = _resolve_selected_workflow_name(
+            selected_workflow_id_text
+        )
+        workflow_dispatch_progress: dict[str, Any] = {
+            "selected_workflow_id": selected_workflow_id_text,
+            "selected_workflow_name": selected_workflow_name,
+            "workflow_selector_verdict": selector_verdict or None,
+            "workflow_selector_source": (
+                routing_info.source
+                if isinstance(routing_info, WorkflowRoutingInfo)
+                else None
+            ),
+            "workflow_match_count": len(discovered_matches),
+            "workflow_candidate_count": len(discovered_matches)
+            + len(excluded_discovered_matches),
+        }
+        _emit_phase_transition_local(
+            self.PHASE_WORKFLOW_DISPATCH,
+            extra=workflow_dispatch_progress,
+        )
+
         selected_uses_tool_pipeline_contract = _workflow_matches_action_contract(
             selected_workflow_id_text,
             required_action_ids=_TOOL_PIPELINE_ACTION_IDS,
@@ -23092,6 +23147,10 @@ class InternalMCPChatOrchestrator:
         # plan→validate→execute→backfill pipeline.  This saves an LLM
         # round-trip worth of system prompt tokens and reduces latency.
         if selector_verdict == "plain_response":
+            _emit_phase_transition_local(
+                self.PHASE_PLAIN_RESPONSE,
+                extra=workflow_dispatch_progress,
+            )
             planner_model = _model_for_stage("planner")
             if trace_enabled and trace is not None:
                 llm_step = trace.start_step(

@@ -960,6 +960,14 @@ function createThinkingCardHistorySnapshot(request) {
                 : []
         }
         : null;
+    const workflowStagePath = (request.workflowStagePath && typeof request.workflowStagePath === 'object')
+        ? {
+            ...request.workflowStagePath,
+            path: Array.isArray(request.workflowStagePath.path)
+                ? request.workflowStagePath.path.map((entry) => ({ ...entry }))
+                : []
+        }
+        : null;
 
     const effectiveProgressForTerminal = latestProgress || { status: 'completed' };
     const completedDisplayState = reduceThinkingCardDisplayState(
@@ -971,6 +979,7 @@ function createThinkingCardHistorySnapshot(request) {
         activityHistory,
         toolUseProgressHistory: toolHistory,
         workflowDiscovery,
+        workflowStagePath,
         latestProgress,
         thinkingStartedAtMs: Number.isFinite(request.thinkingStartedAtMs) ? Number(request.thinkingStartedAtMs) : null,
         thinkingFinishedAtMs: Date.now(),
@@ -1270,9 +1279,32 @@ function buildThinkingProgressPresentation(progress, request = null) {
         ? progress.stage_label.trim()
         : null;
     const tool = (typeof progress.tool === 'string' && progress.tool.trim()) ? progress.tool.trim() : null;
-    const subtask = (typeof progress.subtask === 'string' && progress.subtask.trim())
+    let subtask = (typeof progress.subtask === 'string' && progress.subtask.trim())
         ? progress.subtask.trim()
         : ((typeof progress.workflow_task === 'string' && progress.workflow_task.trim()) ? progress.workflow_task.trim() : null);
+    const workflowDiscovery = (progress.workflow_discovery && typeof progress.workflow_discovery === 'object')
+        ? progress.workflow_discovery
+        : ((request?.workflowDiscovery && typeof request.workflowDiscovery === 'object') ? request.workflowDiscovery : null);
+
+    if ((stage === 'workflow_dispatch' || stage === 'plain_response') && !subtask) {
+        subtask = formatWorkflowDisplayText(
+            progress.selected_workflow_id,
+            progress.selected_workflow_name,
+            workflowDiscovery
+        ) || subtask;
+    } else if (stage === 'workflow_discovery_complete') {
+        const matchCount = getWorkflowDiscoveryMatchCount(workflowDiscovery);
+        if (matchCount === 0) {
+            subtask = 'No applicable workflow found';
+        } else if (matchCount > 0 && !subtask) {
+            const primaryMatch = normaliseWorkflowDiscoveryMatches(workflowDiscovery)[0] || null;
+            subtask = formatWorkflowDisplayText(
+                primaryMatch?.concept_id,
+                primaryMatch?.name,
+                workflowDiscovery
+            ) || subtask;
+        }
+    }
 
     let stageText = phaseLabel || stageLabel || (stage ? toTitleCaseWords(stage) : DEFAULT_THINKING_TEXT);
     const detail = tool || subtask;
@@ -1519,6 +1551,11 @@ function buildThinkingActivityLabelAndDetail(entry) {
     const provider = normaliseThinkingActivityString(entry.provider);
     const resultSummary = normaliseThinkingActivityString(entry.result_summary);
     const error = normaliseThinkingActivityString(entry.error);
+    const selectedWorkflowId = normaliseThinkingActivityString(entry.selected_workflow_id);
+    const selectedWorkflowName = normaliseThinkingActivityString(entry.selected_workflow_name);
+    const workflowMatchCount = Number.isFinite(entry.workflow_match_count)
+        ? Math.max(0, Number(entry.workflow_match_count))
+        : null;
     const batchSize = Number.isFinite(entry.batch_size) ? Number(entry.batch_size) : null;
 
     const stageText = stageLabel || formatThinkingActivityFallbackLabel(stage);
@@ -1533,11 +1570,28 @@ function buildThinkingActivityLabelAndDetail(entry) {
             detailParts.push(formatThinkingActivityFallbackLabel(stage));
         }
     } else if (status === 'workflow_discovery') {
-        label = 'Searching workflows';
+        label = 'Workflow discovery';
+        detailParts.push('Searching applicable workflows');
     } else if (status === 'workflow_discovery_complete') {
-        label = 'Found workflows';
+        label = 'Workflow discovery';
+        if (workflowMatchCount === 0) {
+            detailParts.push('No applicable workflow found');
+        } else if (workflowMatchCount && workflowMatchCount > 0) {
+            detailParts.push(
+                workflowMatchCount > 1
+                    ? `${workflowMatchCount} workflows found`
+                    : '1 workflow found'
+            );
+        }
     } else if (status === 'orchestrator_start') {
-        label = 'Starting orchestrator';
+        label = 'Workflow dispatch';
+        const workflowLabel = formatWorkflowDisplayText(
+            selectedWorkflowId,
+            selectedWorkflowName
+        );
+        if (workflowLabel) {
+            detailParts.push(`Selected ${workflowLabel}`);
+        }
     } else if (status === 'orchestrator_end') {
         label = 'Finished orchestrator';
     } else if (status === 'llm_call_start') {
@@ -1556,13 +1610,13 @@ function buildThinkingActivityLabelAndDetail(entry) {
             detailParts.push(modelText);
         }
     } else if (status === 'tool_call_start') {
-        label = toolName ? `Starting ${toolName}` : 'Starting tool call';
+        label = toolName ? `Tool call: ${toolName}` : 'Starting tool call';
     } else if (status === 'tool_invoked') {
-        label = toolName ? `${toolName} completed` : 'Tool call completed';
+        label = toolName ? `Tool call completed: ${toolName}` : 'Tool call completed';
     } else if (status === 'tool_failed') {
-        label = toolName ? `${toolName} failed` : 'Tool call failed';
+        label = toolName ? `Tool call failed: ${toolName}` : 'Tool call failed';
     } else if (status === 'tool_blocked') {
-        label = toolName ? `${toolName} blocked` : 'Tool call blocked';
+        label = toolName ? `Tool call blocked: ${toolName}` : 'Tool call blocked';
     } else if (status === 'retry_start') {
         label = 'Retrying step';
         if (subtask) {
@@ -1780,7 +1834,10 @@ function renderToolHistoryHTML(request) {
             statusClass = 'failure';
         }
 
-        const toolName = escapeHtml(tool || workflowTask);
+        const toolLabel = tool
+            ? `Tool call: ${tool}`
+            : (workflowTask ? `Workflow task: ${workflowTask}` : '');
+        const toolName = escapeHtml(toolLabel);
         const batchLabel = batchSize !== null ? `<span class="thinking-card-tool-batch">(batch ${batchSize})</span>` : '';
         const resultLabel = resultSummary ? `<span class="thinking-card-tool-result">${escapeHtml(resultSummary)}</span>` : '';
 
@@ -1791,6 +1848,218 @@ function renderToolHistoryHTML(request) {
     }
 
     return items.join('');
+}
+
+function normaliseWorkflowDiscoveryMatches(workflowDiscovery) {
+    if (!workflowDiscovery || typeof workflowDiscovery !== 'object') {
+        return [];
+    }
+
+    const matches = Array.isArray(workflowDiscovery.matches) ? workflowDiscovery.matches : [];
+    return matches.filter((match) => match && typeof match === 'object');
+}
+
+function getWorkflowDiscoveryMatchCount(workflowDiscovery) {
+    if (!workflowDiscovery || typeof workflowDiscovery !== 'object') {
+        return null;
+    }
+
+    if (Number.isFinite(workflowDiscovery.match_count)) {
+        return Math.max(0, Number(workflowDiscovery.match_count));
+    }
+
+    return normaliseWorkflowDiscoveryMatches(workflowDiscovery).length;
+}
+
+function findWorkflowDiscoveryMatchById(workflowDiscovery, workflowId) {
+    const cleanWorkflowId = normaliseThinkingActivityString(workflowId);
+    if (!cleanWorkflowId) {
+        return null;
+    }
+
+    return normaliseWorkflowDiscoveryMatches(workflowDiscovery).find((match) => (
+        normaliseThinkingActivityString(match.concept_id) === cleanWorkflowId
+    )) || null;
+}
+
+function formatWorkflowDisplayText(workflowId, workflowName, workflowDiscovery = null) {
+    const cleanWorkflowId = normaliseThinkingActivityString(workflowId);
+    let cleanWorkflowName = normaliseThinkingActivityString(workflowName);
+
+    if (!cleanWorkflowName && cleanWorkflowId) {
+        const match = findWorkflowDiscoveryMatchById(workflowDiscovery, cleanWorkflowId);
+        cleanWorkflowName = normaliseThinkingActivityString(match?.name);
+    }
+
+    if (cleanWorkflowName && cleanWorkflowId && cleanWorkflowName !== cleanWorkflowId) {
+        return `${cleanWorkflowName} (${cleanWorkflowId})`;
+    }
+
+    return cleanWorkflowName || cleanWorkflowId || '';
+}
+
+function buildWorkflowStageDetail(stageId, request) {
+    const workflowDiscovery = (request?.workflowDiscovery && typeof request.workflowDiscovery === 'object')
+        ? request.workflowDiscovery
+        : null;
+    const latestProgress = (request?.latestProgress && typeof request.latestProgress === 'object')
+        ? request.latestProgress
+        : null;
+    const cleanStageId = normaliseThinkingActivityString(stageId);
+
+    if (cleanStageId === 'workflow_discovery') {
+        const errors = Array.isArray(workflowDiscovery?.errors)
+            ? workflowDiscovery.errors.filter((item) => typeof item === 'string' && item.trim())
+            : [];
+        if (errors.length > 0) {
+            return errors[0].trim();
+        }
+
+        const matchCount = getWorkflowDiscoveryMatchCount(workflowDiscovery);
+        if (matchCount === null) {
+            return 'Searching applicable workflows';
+        }
+        if (matchCount <= 0) {
+            return 'No applicable workflow found';
+        }
+
+        const primaryMatch = normaliseWorkflowDiscoveryMatches(workflowDiscovery)[0] || null;
+        const primaryLabel = formatWorkflowDisplayText(
+            primaryMatch?.concept_id,
+            primaryMatch?.name,
+            workflowDiscovery
+        );
+        if (primaryLabel) {
+            return matchCount > 1
+                ? `Found ${primaryLabel} · ${matchCount} matches`
+                : `Found ${primaryLabel}`;
+        }
+        return matchCount > 1
+            ? `Found ${matchCount} applicable workflows`
+            : 'Found 1 applicable workflow';
+    }
+
+    if (cleanStageId === 'workflow_dispatch' || cleanStageId === 'plain_response') {
+        const workflowLabel = formatWorkflowDisplayText(
+            latestProgress?.selected_workflow_id,
+            latestProgress?.selected_workflow_name,
+            workflowDiscovery
+        );
+        const verdict = normaliseThinkingActivityString(latestProgress?.workflow_selector_verdict);
+        const detailParts = [];
+        if (workflowLabel) {
+            detailParts.push(`Selected ${workflowLabel}`);
+        }
+        if (verdict) {
+            detailParts.push(formatThinkingActivityFallbackLabel(verdict));
+        }
+        return detailParts.join(' · ');
+    }
+
+    if (cleanStageId === 'tool_execute') {
+        const toolNames = Array.isArray(request?.toolUseProgressHistory)
+            ? request.toolUseProgressHistory
+                .map((entry) => normaliseThinkingActivityString(entry?.tool || entry?.workflowTask))
+                .filter(Boolean)
+            : [];
+        const uniqueToolNames = [...new Set(toolNames)];
+        if (uniqueToolNames.length > 0) {
+            const preview = uniqueToolNames.slice(0, 3).join(', ');
+            return uniqueToolNames.length > 3
+                ? `Tools: ${preview} +${uniqueToolNames.length - 3} more`
+                : `Tools: ${preview}`;
+        }
+    }
+
+    return '';
+}
+
+function buildThinkingWorkflowStageRows(request) {
+    if (!request || typeof request !== 'object') {
+        return [];
+    }
+
+    const workflowStagePath = (request.workflowStagePath && typeof request.workflowStagePath === 'object')
+        ? request.workflowStagePath
+        : null;
+    const path = Array.isArray(workflowStagePath?.path)
+        ? workflowStagePath.path.filter((entry) => entry && typeof entry === 'object')
+        : [];
+
+    const workflowDiscovery = (request.workflowDiscovery && typeof request.workflowDiscovery === 'object')
+        ? request.workflowDiscovery
+        : null;
+    if (path.length === 0) {
+        if (workflowDiscovery) {
+            return [{
+                label: 'Workflow discovery',
+                detail: buildWorkflowStageDetail('workflow_discovery', request),
+                state: getWorkflowDiscoveryMatchCount(workflowDiscovery) > 0 ? 'success' : 'failure'
+            }];
+        }
+        return [];
+    }
+
+    const latestProgress = (request.latestProgress && typeof request.latestProgress === 'object')
+        ? request.latestProgress
+        : null;
+    const latestStageId = (() => {
+        const lastStage = path[path.length - 1];
+        return normaliseThinkingActivityString(lastStage?.stage_id || lastStage?.runtime_stage_normalised);
+    })();
+    const latestStatus = normaliseThinkingActivityString(latestProgress?.status).toLowerCase();
+    const latestIsTerminal = isTerminalThinkingProgress(latestProgress);
+    const latestIsFailure = latestStatus === 'error' || latestStatus === 'failed';
+
+    return path.map((entry, index) => {
+        const stageId = normaliseThinkingActivityString(entry.stage_id || entry.runtime_stage_normalised);
+        const stageLabel = normaliseThinkingActivityString(entry.stage_label)
+            || formatThinkingActivityFallbackLabel(stageId)
+            || 'Workflow step';
+        const detail = buildWorkflowStageDetail(stageId, request);
+        let state = 'success';
+
+        if (stageId === 'workflow_discovery') {
+            const matchCount = getWorkflowDiscoveryMatchCount(workflowDiscovery);
+            const discoveryErrors = Array.isArray(workflowDiscovery?.errors)
+                ? workflowDiscovery.errors.filter((item) => typeof item === 'string' && item.trim())
+                : [];
+            if (discoveryErrors.length > 0 || matchCount === 0) {
+                state = 'failure';
+            } else if (matchCount === null) {
+                state = 'pending';
+            }
+        } else if (index === path.length - 1 && !latestIsTerminal) {
+            state = 'pending';
+        } else if (latestIsFailure && stageId === latestStageId) {
+            state = 'failure';
+        }
+
+        return {
+            label: stageLabel,
+            detail,
+            state
+        };
+    });
+}
+
+function renderThinkingWorkflowStageHistoryHTML(request) {
+    const rows = buildThinkingWorkflowStageRows(request);
+    if (rows.length === 0) {
+        return '';
+    }
+
+    return rows.map((entry) => {
+        const statusClass = (entry.state === 'success' || entry.state === 'failure') ? entry.state : 'pending';
+        const statusIcon = statusClass === 'success' ? '✓' : (statusClass === 'failure' ? '✗' : '');
+        const detailLabel = normaliseThinkingActivityString(entry.detail)
+            ? `<span class="thinking-card-tool-result">${escapeHtml(entry.detail)}</span>`
+            : '';
+        return `<div class="thinking-card-tool thinking-card-activity">
+            <span class="thinking-card-tool-status ${statusClass}">${statusIcon}</span>
+            <span class="thinking-card-tool-name">${escapeHtml(entry.label)}</span>${detailLabel}
+        </div>`;
+    }).join('');
 }
 
 /**
@@ -1823,12 +2092,21 @@ function renderWorkflowDiscoveryHTML(workflows) {
 }
 
 /**
- * Render the complete thinking card body HTML including tool history and workflow discovery.
- * JVNAUTOSCI-1076: Combines tool history with workflow suggestions.
+ * Render the complete thinking card body HTML including canonical workflow
+ * stages and lower-level tool activity.
  */
 function renderThinkingCardBodyHTML(request) {
+    const workflowStageHtml = renderThinkingWorkflowStageHistoryHTML(request);
+    if (workflowStageHtml) {
+        return workflowStageHtml + renderToolHistoryHTML(request);
+    }
+
     const activityHistoryHtml = renderThinkingActivityHistoryHTML(request);
-    const toolHistoryHtml = activityHistoryHtml || renderToolHistoryHTML(request);
+    if (activityHistoryHtml) {
+        return activityHistoryHtml;
+    }
+
+    const toolHistoryHtml = renderToolHistoryHTML(request);
     const workflowHtml = request?.workflowDiscovery?.matches
         ? renderWorkflowDiscoveryHTML(request.workflowDiscovery.matches)
         : '';
@@ -2043,8 +2321,13 @@ function startToolUseProgressPolling(request) {
                 request.activityHistory = request.activityHistory.slice(-80);
             }
 
-            // JVNAUTOSCI-1076: Capture workflow discovery from progress
-            if (progress.workflow_discovery && progress.workflow_discovery.matches) {
+            if (progress.workflow_stage_path && typeof progress.workflow_stage_path === 'object') {
+                request.workflowStagePath = progress.workflow_stage_path;
+            }
+
+            // JVNAUTOSCI-1076: Capture workflow discovery from progress,
+            // including explicit no-match payloads.
+            if (progress.workflow_discovery && typeof progress.workflow_discovery === 'object') {
                 request.workflowDiscovery = progress.workflow_discovery;
             }
 
@@ -17151,7 +17434,8 @@ function buildThinkingDiagnosticsPayload(request) {
         progress_events: Array.isArray(request.progressEvents) ? request.progressEvents.slice(-40) : [],
         phase_history: Array.isArray(request.phaseHistory) ? request.phaseHistory.slice(-40) : [],
         tool_history: Array.isArray(request.toolUseProgressHistory) ? request.toolUseProgressHistory.slice(-40) : [],
-        workflow_discovery: request.workflowDiscovery || null
+        workflow_discovery: request.workflowDiscovery || null,
+        workflow_stage_path: request.workflowStagePath || null
     };
 }
 
@@ -17686,6 +17970,7 @@ async function handleSendPrompt(options = {}) {
         thinkingStartedAtMs: Date.now(),
         activityHistory: [],
         toolUseProgressHistory: [],
+        workflowStagePath: null,
         latestProgress: null,
         progressEvents: [],
         thinkingCardDisplayState: reduceThinkingCardDisplayState(null, { type: 'reset_for_active' })
