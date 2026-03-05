@@ -410,6 +410,78 @@ def test_interpret_file_copy_fails_closed_when_person_representation_unverified(
     )
 
 
+def test_interpret_file_copy_fails_closed_when_company_representation_unverified(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.catalogue._read_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "text": "Company profile content for uploaded web page.",
+            "content_type": "text/plain",
+            "original_filename": "company-webpage.txt",
+            "size_bytes": 256,
+            "byte_length": 256,
+            "blob": {"backend": "local", "key": "uploads/user/hash/company-webpage.txt"},
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.file_copy_interpretation_service.build_document_interpretation",
+        lambda **_kwargs: {
+            "kind": "document",
+            "description": "Document text extracted: Company profile content for uploaded web page.",
+            "subject_tags": ["document"],
+            "content_text": "Company profile content for uploaded web page.",
+            "content_length": 47,
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.arxiv_paper_link_service.materialise_scholarly_representation_for_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "verified": True,
+            "paper_concept_id": "#V#paper_from_file_copy",
+            "file_copy_concept_id": "#V#file_copy_company_test",
+            "representation_mode": "generic_file_copy",
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.company_file_representation_service.materialise_company_representation_for_file_copy",
+        lambda **_kwargs: {
+            "success": False,
+            "attempted": True,
+            "verified": False,
+            "reason": "company_identity_unresolved",
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.upsert_singleton_text_relation",
+        lambda **_kwargs: {"relation_id": "rel-company"},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.rag_text_relation_change_hook_service.maybe_sync_concept_text_relations_to_rag",
+        lambda **_kwargs: None,
+    )
+
+    result = cat._interpret_file_copy(
+        concept_id="#V#file_copy_company_test",
+        namespace="#V#user@org",
+    )
+
+    assert result["success"] is False
+    company_representation = result.get("company_representation") or {}
+    assert company_representation.get("attempted") is True
+    assert company_representation.get("verified") is False
+    persist_errors = result.get("persist_errors") or []
+    assert any(
+        row.get("predicate") == "#V#company_representation_verification"
+        for row in persist_errors
+        if isinstance(row, dict)
+    )
+
+
 def test_interpret_file_copy_includes_pdf_diagram_analysis(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue as cat
 

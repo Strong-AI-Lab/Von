@@ -257,6 +257,78 @@ def test_interpret_file_copy_gateway_fails_closed_on_unverified_person_represent
     )
 
 
+def test_interpret_file_copy_gateway_fails_closed_on_unverified_company_representation(
+    monkeypatch,
+):
+    gateway = _build_gateway()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.catalogue._read_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "text": "Company profile content for uploaded web page.",
+            "content_type": "text/plain",
+            "original_filename": "company-webpage.txt",
+            "size_bytes": 96,
+            "byte_length": 96,
+            "blob": {"backend": "local", "key": "imports/user/hash/company-webpage.txt"},
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.file_copy_interpretation_service.build_document_interpretation",
+        lambda **_kwargs: {
+            "kind": "document",
+            "description": "Document text extracted: Company profile content for uploaded web page.",
+            "subject_tags": ["document"],
+            "content_text": "Company profile content for uploaded web page.",
+            "content_length": 47,
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.arxiv_paper_link_service.materialise_scholarly_representation_for_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "verified": True,
+            "paper_concept_id": "#V#paper_from_file_copy_gateway",
+            "file_copy_concept_id": "#V#imported_file_gateway",
+            "representation_mode": "generic_file_copy",
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.company_file_representation_service.materialise_company_representation_for_file_copy",
+        lambda **_kwargs: {
+            "success": False,
+            "attempted": True,
+            "verified": False,
+            "reason": "company_identity_unresolved",
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.upsert_singleton_text_relation",
+        lambda **_kwargs: {"relation_id": "rel-gateway-company"},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.rag_text_relation_change_hook_service.maybe_sync_concept_text_relations_to_rag",
+        lambda **_kwargs: None,
+    )
+
+    interpreted = gateway.invoke(
+        "interpret_file_copy",
+        {"concept_id": "#V#imported_file_gateway", "namespace": "#V#user@org"},
+    ).payload
+
+    assert interpreted.get("success") is False
+    company_representation = interpreted.get("company_representation") or {}
+    assert company_representation.get("attempted") is True
+    assert company_representation.get("verified") is False
+    persist_errors = interpreted.get("persist_errors") or []
+    assert any(
+        row.get("predicate") == "#V#company_representation_verification"
+        for row in persist_errors
+        if isinstance(row, dict)
+    )
+
+
 def test_interpret_file_copy_gateway_returns_pdf_diagram_candidates(monkeypatch):
     gateway = _build_gateway()
 

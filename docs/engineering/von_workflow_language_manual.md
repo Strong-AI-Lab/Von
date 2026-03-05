@@ -413,6 +413,26 @@ Completion-gate expectation:
 
 - Person-representation turns MUST remain non-complete when `interpret_file_copy` reports unresolved core identity effects (for example `reason=person_identity_unresolved`).
 
+### 10.8 Company Representation Contract (JVNAUTOSCI-1369 / JVNAUTOSCI-1374)
+
+For company-representation intents driven by web-page artefacts, required-effects semantics MUST enforce company identity + URL identity materialisation and source linkage before completion can be claimed.
+
+Canonical company profile source expectations:
+
+- `file_copy` source (uploaded web-page artefacts): required tool set MUST include `interpret_file_copy`.
+- `url` source MAY use `extract_url` for enrichment, but file-copy company materialisation is the canonical mutation path for uploaded web-page artefacts.
+
+Operational expectations for `interpret_file_copy` on company artefacts:
+
+- The handler SHOULD attempt deterministic company materialisation when web-page/company cues are detected.
+- Materialisation SHOULD persist core identity effects (company concept + `hasName`), URL identity (`#V#has_url`), and source linkage (`#V#documentary_evidence_for` from file-copy concept to company concept).
+- Descriptor extraction MAY use conservative defaults (`#V#hasNote`) without additional user questioning.
+- If core company identity, URL identity, or source linkage cannot be resolved, the tool MUST fail closed (`success=false`) and return explicit `company_representation` diagnostics (`attempted`, `verified`, `reason`, IDs, URLs, and error details).
+
+Completion-gate expectation:
+
+- Company-representation turns MUST remain non-complete when `interpret_file_copy` reports unresolved core company effects (for example `reason=company_identity_unresolved` or `reason=company_url_unresolved`).
+
 ## 11. Durable Runtime Semantics
 
 ### 11.1 Instance Model
