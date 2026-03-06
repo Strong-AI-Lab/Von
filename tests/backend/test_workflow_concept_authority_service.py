@@ -68,6 +68,39 @@ def test_workflow_authority_report_classifies_missing_and_untyped(monkeypatch):
     assert "#V#wf_untyped" in report["missing_required_type_by_workflow_id"]
 
 
+def test_workflow_authority_report_accepts_required_type_via_subtype(monkeypatch):
+    registry = _DummyRegistry(workflow_ids=["#V#wf_durable"])
+
+    monkeypatch.setattr(
+        authority_service,
+        "resolve_available_workflow_type_ids",
+        lambda: ("#V#ai_workflow",),
+    )
+
+    def _mock_load_concept(concept_id: str):
+        if concept_id == "#V#wf_durable":
+            return {
+                "concept_id": concept_id,
+                "relationships": {"is_an_instance_of": ["#V#durable_workflow"]},
+            }, None
+        if concept_id == "#V#durable_workflow":
+            return {
+                "concept_id": concept_id,
+                "relationships": {"is_a_type_of": ["#V#ai_workflow"]},
+            }, None
+        return None, None
+
+    monkeypatch.setattr(authority_service, "_load_concept", _mock_load_concept)
+
+    report = authority_service.build_workflow_concept_authority_report(
+        registry=cast(Any, registry)
+    )
+
+    assert report["drift_detected"] is False
+    assert report["counts"]["missing_required_type"] == 0
+    assert report["valid_workflow_ids"] == ["#V#wf_durable"]
+
+
 def test_bootstrap_workflow_concepts_creates_missing(monkeypatch):
     registry = _DummyRegistry(workflow_ids=["#V#wf_create"])
 
@@ -148,6 +181,44 @@ def test_bootstrap_workflow_concepts_enforces_required_type(monkeypatch):
     assert "#V#ai_workflow" in payload["relationships"]["is_an_instance_of"]
 
 
+def test_bootstrap_workflow_concepts_preserves_valid_subtype_typing(monkeypatch):
+    registry = _DummyRegistry(workflow_ids=["#V#wf_durable"])
+
+    monkeypatch.setattr(
+        authority_service,
+        "resolve_available_workflow_type_ids",
+        lambda: ("#V#ai_workflow",),
+    )
+
+    def _mock_load_concept(concept_id: str):
+        if concept_id == "#V#wf_durable":
+            return {
+                "concept_id": concept_id,
+                "relationships": {"is_an_instance_of": ["#V#durable_workflow"]},
+            }, None
+        if concept_id == "#V#durable_workflow":
+            return {
+                "concept_id": concept_id,
+                "relationships": {"is_a_type_of": ["#V#ai_workflow"]},
+            }, None
+        return None, None
+
+    monkeypatch.setattr(authority_service, "_load_concept", _mock_load_concept)
+
+    monkeypatch.setattr(
+        authority_service.concept_service,
+        "update_concept",
+        lambda *args, **kwargs: pytest.fail("update_concept should not be called"),
+    )
+
+    report = authority_service.bootstrap_workflow_concepts(
+        registry=cast(Any, registry)
+    )
+
+    assert report["counts"]["updated"] == 0
+    assert report["unchanged_workflow_ids"] == ["#V#wf_durable"]
+
+
 @pytest.fixture
 def _reset_mock_workflow_graph_db(monkeypatch):
     monkeypatch.setenv("VON_USE_MOCK_DB", "1")
@@ -179,27 +250,33 @@ def test_bootstrap_publishes_canonical_chat_graphs_with_loader_runtime_parity(
         classify_workflow_concept_executability,
         invalidate_workflow_discovery_executability_caches,
     )
-    from src.backend.workflows.definitions import register_default_workflows
+    from src.backend.workflows.durable.registry_factory import (
+        build_workflow_registry_read_only,
+    )
     from src.backend.workflows.vontology_loader import (
         build_workflow_process_graph,
         load_workflow_definition_from_vontology,
     )
-    from src.backend.workflows.workflow_registry import WorkflowRegistry
 
-    registry = WorkflowRegistry()
-    register_default_workflows(registry)
+    registry = build_workflow_registry_read_only()
+    expected_published_ids = {
+        workflow_id
+        for workflow_id in (
+            *authority_service.CANONICAL_CHAT_WORKFLOW_IDS,
+            *authority_service.CANONICAL_DURABLE_WORKFLOW_IDS,
+        )
+        if registry.get_registration(workflow_id) is not None
+    }
 
     report = authority_service.bootstrap_workflow_concepts(registry=cast(Any, registry))
     graph_publication = report.get("graph_publication") or {}
     counts = graph_publication.get("counts") or {}
-    assert counts.get("workflows_published") == len(
-        authority_service.CANONICAL_CHAT_WORKFLOW_IDS
-    )
+    assert counts.get("workflows_published") == len(expected_published_ids)
     assert counts.get("errors") == 0
 
     invalidate_workflow_discovery_executability_caches()
 
-    for workflow_id in authority_service.CANONICAL_CHAT_WORKFLOW_IDS:
+    for workflow_id in sorted(expected_published_ids):
         graph, warnings = build_workflow_process_graph(workflow_id)
         assert isinstance(graph, dict), f"{workflow_id}: graph_missing {warnings}"
         assert warnings == []

@@ -6576,6 +6576,11 @@ footer {
     color: #166534;
 }
 
+.thinking-card-status.follow_up_required {
+    background: #fef3c7;
+    color: #92400e;
+}
+
 .thinking-card-status.failed {
     background: #fee2e2;
     color: #b91c1c;

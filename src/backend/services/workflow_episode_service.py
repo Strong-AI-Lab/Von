@@ -229,6 +229,11 @@ def _ensure_indexes() -> None:
                 [("turn_id", ASCENDING), ("attempt_started_at", DESCENDING)],
                 name="turn_attempted_at",
             )
+        if "session_attempted_at" not in existing:
+            coll.create_index(
+                [("session_id", ASCENDING), ("attempt_started_at", DESCENDING)],
+                name="session_attempted_at",
+            )
     except OperationFailure as exc:
         logger.warning("[workflow_episode] Index creation partially failed: %s", exc)
     except Exception as exc:  # pragma: no cover - defensive
@@ -556,6 +561,31 @@ def list_workflow_use_episodes(
 
     cursor = coll.find(query).sort("attempt_started_at", DESCENDING).limit(safe_limit)
     return [_serialise_episode(doc) for doc in cursor]
+
+
+def get_latest_workflow_use_episode(
+    *,
+    workflow_id: str | None = None,
+    namespace: str | None = None,
+    session_id: str | None = None,
+    turn_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Return the newest workflow-use episode matching the supplied filters."""
+
+    coll = _get_collection()
+    if coll is None:
+        return None
+
+    query = _build_episode_query(
+        workflow_id=workflow_id,
+        namespace=namespace,
+        session_id=session_id,
+        turn_id=turn_id,
+    )
+    doc = coll.find_one(query, sort=[("attempt_started_at", DESCENDING)])
+    if not isinstance(doc, Mapping):
+        return None
+    return _serialise_episode(doc)
 
 
 def count_workflow_use_episodes(

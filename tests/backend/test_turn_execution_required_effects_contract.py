@@ -9,6 +9,7 @@ from representation_intent_regression_helpers import (
 from representation_intent_regression_helpers import (
     representation_profiles as _representation_profiles,
 )
+from src.backend.services import turn_execution_record_service
 
 
 def test_paper_representation_contract_emitted_with_required_effects(monkeypatch) -> None:
@@ -465,3 +466,80 @@ def test_representation_contract_fails_closed_when_profile_catalogue_unavailable
     assert effect.get("effect_type") == "representation_contract_guard"
     assert effect.get("status") == "not_executed"
     assert effect.get("failure_code") == "representation_profile_catalogue_unavailable"
+
+
+def test_terse_follow_up_reuses_representation_contract_from_continuation_context(
+    monkeypatch,
+) -> None:
+    _patch_representation_profile_loader(
+        monkeypatch, profiles=_representation_profiles()
+    )
+    initial = _build_record(
+        aux_llm_calls=[
+            {
+                "type": "prompt_tool_requirements",
+                "required_scholarly_representation_for_file_copy_ids": [
+                    "#V#uploaded_file_copy_abc123"
+                ],
+            }
+        ]
+    )
+
+    execution = initial.get("execution")
+    assert isinstance(execution, dict)
+    prior_contract = execution.get("required_effects_contract")
+    assert isinstance(prior_contract, dict)
+
+    monkeypatch.setattr(
+        turn_execution_record_service,
+        "_load_representation_domain_profiles_from_vontology",
+        lambda: (
+            [],
+            {
+                "representation_profile_source": "vontology_concept_text_relations",
+                "requested_concept_ids": [],
+                "loaded_concept_ids": [],
+                "loaded_profile_count": 0,
+                "profile_version_hash": None,
+            },
+        ),
+    )
+
+    follow_up = _build_record(
+        prompt_text="Please proceed.",
+        response_text="Still working on it.",
+        aux_llm_calls=[
+            {
+                "type": "workflow_continuation_context",
+                "applied": True,
+                "context": {
+                    "selected_workflow_id": "#V#scholarly_paper_representation_workflow",
+                    "requires_follow_up": True,
+                    "has_unresolved_required_effects": True,
+                    "required_effects_contract": prior_contract,
+                },
+            }
+        ],
+    )
+
+    follow_up_execution = follow_up.get("execution")
+    assert isinstance(follow_up_execution, dict)
+    contract = follow_up_execution.get("required_effects_contract")
+    assert isinstance(contract, dict)
+    assert contract.get("intent_class") == "representation"
+    assert contract.get("domain_profile_id") == "paper"
+    assert contract.get("artefact_context", {}).get("file_copy_ids") == [
+        "#V#uploaded_file_copy_abc123"
+    ]
+
+    required_effects = follow_up.get("required_effects")
+    assert isinstance(required_effects, list)
+    assert required_effects
+    effect = required_effects[0]
+    assert effect.get("effect_type") == "scholarly_representation"
+    assert effect.get("status") == "not_executed"
+    assert effect.get("targets") == ["#V#uploaded_file_copy_abc123"]
+
+    completion_gate = follow_up.get("completion_gate") or {}
+    assert completion_gate.get("requires_follow_up") is True
+    assert completion_gate.get("safe_to_claim_completion") is False

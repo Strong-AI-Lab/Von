@@ -57,7 +57,7 @@ DEFAULT_RELATION_SCAN_LIMIT = 120
 DEFAULT_RELATION_MAX_PREDICATES_PER_CONCEPT = 4
 DEFAULT_RELATION_AUTO_APPLY_CONFIDENCE_THRESHOLD = 0.95
 DEFAULT_RELATION_DETAIL_LIMIT = 80
-DEFAULT_RELATION_QUESTION_LIMIT = 50
+DEFAULT_RELATION_QUESTION_LIMIT = 1
 RELATION_AUTO_APPLY_POLICY_VERSION = "relation_auto_apply_policy.v1"
 RELATION_PRIORITY_KEYWORDS: tuple[str, ...] = (
     "owner",
@@ -116,6 +116,102 @@ DEFAULT_GAP_DIMENSIONS: List[Dict[str, Any]] = [
         "prompt_concept_id": None,  # Uses default enrichment prompt
     },
 ]
+
+
+def _resolve_relation_policy_input(
+    *,
+    task: dict[str, Any],
+    ctx: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve low-imposition acquisition policy from Vontology profiles.
+
+    The profile surface is Vontology-backed so workflow-governed acquisition can
+    evolve without hard-coding fresh heuristics for every new workflow.
+    """
+
+    from ...services.knowledge_acquisition_profile_vontology_service import (
+        ensure_canonical_knowledge_acquisition_profiles,
+        load_knowledge_acquisition_profile,
+    )
+
+    requested_profile_concept_id = (
+        task.get("knowledge_acquisition_profile_concept_id")
+        or ctx.get("knowledge_acquisition_profile_concept_id")
+    )
+    workflow_id = str(
+        task.get("workflow_id")
+        or ctx.get("workflow_id")
+        or RUMINATION_WORKFLOW_ID
+    ).strip() or RUMINATION_WORKFLOW_ID
+
+    profile, diagnostics = load_knowledge_acquisition_profile(
+        workflow_id=workflow_id,
+        profile_concept_id=(
+            str(requested_profile_concept_id).strip()
+            if isinstance(requested_profile_concept_id, str)
+            and str(requested_profile_concept_id).strip()
+            else None
+        ),
+    )
+    bootstrap_report: dict[str, Any] | None = None
+    if profile is None:
+        bootstrap_report = ensure_canonical_knowledge_acquisition_profiles(
+            concept_ids=[requested_profile_concept_id]
+            if isinstance(requested_profile_concept_id, str)
+            and str(requested_profile_concept_id).strip()
+            else None,
+            link_workflow_ids=[workflow_id],
+            provenance={
+                "source": "rumination_workflow",
+                "reason": "knowledge_acquisition_profile_bootstrap",
+            },
+            context={"workflow_id": workflow_id},
+        )
+        profile, diagnostics = load_knowledge_acquisition_profile(
+            workflow_id=workflow_id,
+            profile_concept_id=(
+                str(requested_profile_concept_id).strip()
+                if isinstance(requested_profile_concept_id, str)
+                and str(requested_profile_concept_id).strip()
+                else None
+            ),
+        )
+
+    relation_auto_apply_policy = {}
+    decision_policy = {}
+    question_limit = DEFAULT_RELATION_QUESTION_LIMIT
+    detail_limit = DEFAULT_RELATION_DETAIL_LIMIT
+    profile_concept_id = None
+    policy_error = None
+    if isinstance(profile, dict):
+        relation_auto_apply_policy = dict(
+            profile.get("relation_auto_apply_policy") or {}
+        )
+        decision_policy = dict(profile.get("decision_policy") or {})
+        question_limit = int(profile.get("question_limit") or question_limit)
+        detail_limit = int(profile.get("detail_limit") or detail_limit)
+        profile_concept_id = str(profile.get("profile_concept_id") or "").strip() or None
+        if "policy_version" not in relation_auto_apply_policy:
+            relation_auto_apply_policy["policy_version"] = str(
+                relation_auto_apply_policy.get("policy_version")
+                or profile.get("profile_id")
+                or RELATION_AUTO_APPLY_POLICY_VERSION
+            ).strip() or RELATION_AUTO_APPLY_POLICY_VERSION
+    else:
+        policy_error = "knowledge_acquisition_profile_unavailable"
+
+    return {
+        "workflow_id": workflow_id,
+        "requested_profile_concept_id": requested_profile_concept_id,
+        "profile_concept_id": profile_concept_id,
+        "relation_auto_apply_policy": relation_auto_apply_policy,
+        "decision_policy": decision_policy,
+        "question_limit": max(1, question_limit),
+        "detail_limit": max(1, detail_limit),
+        "diagnostics": diagnostics,
+        "bootstrap_report": bootstrap_report,
+        "error": policy_error,
+    }
 
 
 def build_rumination_workflow() -> WorkflowDefinition:
@@ -427,8 +523,7 @@ def _resolve_relation_auto_apply_candidate(
     instance_doc: dict[str, Any],
     predicate: str,
     confidence_threshold: float,
-    task: dict[str, Any],
-    ctx: dict[str, Any],
+    policy_input: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Resolve an auto-apply candidate and return eligibility diagnostics."""
     if not isinstance(predicate, str) or not predicate.startswith("#V#"):
@@ -476,8 +571,7 @@ def _resolve_relation_auto_apply_candidate(
     policy = _resolve_relation_auto_apply_policy(
         predicate=predicate,
         confidence_threshold=confidence_threshold,
-        task=task,
-        ctx=ctx,
+        policy_input=policy_input,
     )
     effective_threshold = float(policy["effective_threshold"])
     min_evidence_count = int(policy["min_evidence_count"])
@@ -632,22 +726,10 @@ def _resolve_relation_auto_apply_policy(
     *,
     predicate: str,
     confidence_threshold: float,
-    task: dict[str, Any],
-    ctx: dict[str, Any],
+    policy_input: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Resolve auto-apply policy from defaults plus optional context overrides."""
-    policy_input_raw = ctx.get("relation_auto_apply_policy")
-    policy_input: dict[str, Any]
-    if isinstance(policy_input_raw, dict):
-        policy_input = dict(policy_input_raw)
-    else:
-        policy_input = {}
-
-    task_policy = task.get("auto_apply_policy")
-    if isinstance(task_policy, dict):
-        merged_policy = dict(policy_input)
-        merged_policy.update(task_policy)
-        policy_input = merged_policy
+    policy_input = dict(policy_input or {})
 
     predicate_class = _classify_relation_predicate(predicate)
     class_thresholds = dict(DEFAULT_RELATION_CLASS_THRESHOLDS)
@@ -693,7 +775,6 @@ def _resolve_relation_auto_apply_policy(
 
     policy_version = str(
         policy_input.get("policy_version")
-        or ctx.get("relation_auto_apply_policy_version")
         or RELATION_AUTO_APPLY_POLICY_VERSION
     ).strip() or RELATION_AUTO_APPLY_POLICY_VERSION
 
@@ -796,11 +877,23 @@ def _dispatch_relation_completion_task(
         ),
         default=DEFAULT_RELATION_AUTO_APPLY_CONFIDENCE_THRESHOLD,
     )
+    relation_policy_context = _resolve_relation_policy_input(task=task, ctx=ctx)
     detail_limit = int(
-        ctx.get("relation_detail_limit", DEFAULT_RELATION_DETAIL_LIMIT)
+        ctx.get(
+            "relation_detail_limit",
+            relation_policy_context.get("detail_limit", DEFAULT_RELATION_DETAIL_LIMIT),
+        )
     )
     question_limit = int(
-        ctx.get("relation_question_limit", DEFAULT_RELATION_QUESTION_LIMIT)
+        ctx.get(
+            "relation_question_limit",
+            relation_policy_context.get(
+                "question_limit", DEFAULT_RELATION_QUESTION_LIMIT
+            ),
+        )
+    )
+    relation_auto_apply_policy = dict(
+        relation_policy_context.get("relation_auto_apply_policy") or {}
     )
 
     candidates = list(ctx.get("relation_gap_candidates") or [])
@@ -816,6 +909,32 @@ def _dispatch_relation_completion_task(
     deferral_reason_counts: dict[str, int] = {}
     proposal_details: list[dict[str, Any]] = []
     deferred_questions: list[dict[str, Any]] = []
+
+    if relation_policy_context.get("error"):
+        return {
+            "gap_name": task.get("gap_name"),
+            "predicate": task.get("predicate"),
+            "dispatch_mode": "relation_completion",
+            "allocation": allocation,
+            "dry_run": dry_run,
+            "metrics": {
+                "concepts_considered": 0,
+                "proposed_relations": 0,
+                "auto_applied_relations": 0,
+                "would_apply_relations": 0,
+                "deferred_relations": 0,
+                "confirmed_relations": 0,
+                "failed_relations": 1,
+                "deferral_reason_counts": {},
+            },
+            "proposal_details": [],
+            "deferred_questions": [],
+            "policy_profile_concept_id": relation_policy_context.get(
+                "profile_concept_id"
+            ),
+            "policy_resolution": relation_policy_context,
+            "policy_error": relation_policy_context.get("error"),
+        }
 
     for candidate in selected_candidates:
         concept_id = candidate.get("concept_id")
@@ -852,8 +971,7 @@ def _dispatch_relation_completion_task(
                 instance_doc=instance_doc,
                 predicate=predicate,
                 confidence_threshold=confidence_threshold,
-                task=task,
-                ctx=ctx,
+                policy_input=relation_auto_apply_policy,
             )
             if auto_candidate.get("status") == "eligible":
                 detail["target_id"] = auto_candidate["target_id"]
@@ -969,6 +1087,8 @@ def _dispatch_relation_completion_task(
         "metrics": relation_metrics,
         "proposal_details": proposal_details,
         "deferred_questions": deferred_questions,
+        "policy_profile_concept_id": relation_policy_context.get("profile_concept_id"),
+        "policy_resolution": relation_policy_context,
     }
     return task_result
 

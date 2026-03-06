@@ -519,7 +519,9 @@ def test_terminal_progress_payload_reflects_completion_gate_follow_up() -> None:
         ],
     )
     assert payload["request_id"] == "req-f"
-    assert payload["status"] == "completed"
+    assert payload["status"] == "follow_up_required"
+    assert payload["stage"] == "follow_up_required"
+    assert payload["phase_label"] == "Follow-up required"
     assert payload["success"] is False
     assert payload["completion_gate_decision"] == "escalation_required"
     assert payload["completion_gate_requires_follow_up"] is True

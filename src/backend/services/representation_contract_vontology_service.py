@@ -11,11 +11,13 @@ import json
 import re
 from typing import Any, Mapping, Sequence
 
-from .concept_service import get_concept_by_concept_id
+from . import concept_service
+from .concept_service import ConceptNotFoundError, get_concept_by_concept_id
 from .text_value_service import get_texts_for_concept
 from .text_value_service import upsert_singleton_text_relation
 
 DEFAULT_REPRESENTATION_PROFILE_PREDICATE = "#V#has_representation_contract_profile_json"
+REPRESENTATION_CONTRACT_PROFILE_TYPE_ID = "#V#representation_contract_profile"
 
 _DEFAULT_PROFILE_TEXT_PREDICATES: tuple[str, ...] = (
     "#V#has_representation_contract_profile_json",
@@ -183,6 +185,12 @@ _CANONICAL_PROFILE_BY_CONCEPT_ID: dict[str, dict[str, Any]] = {
 }
 
 
+def _profile_display_name(profile: Mapping[str, Any]) -> str:
+    profile_id = _safe_str(profile.get("profile_id")) or "representation"
+    pretty = profile_id.replace("_", " ").strip()
+    return f"{pretty[:1].upper() + pretty[1:] if pretty else 'Representation'} representation contract profile"
+
+
 def canonical_representation_profile_concept_ids() -> tuple[str, ...]:
     """Return canonical representation profile concept IDs in deterministic order."""
     return tuple(
@@ -194,6 +202,123 @@ def canonical_representation_profile_concept_ids() -> tuple[str, ...]:
 def canonical_representation_profile_blueprints() -> tuple[dict[str, Any], ...]:
     """Return copy-on-read canonical representation starter profiles."""
     return tuple(dict(item) for item in _CANONICAL_REPRESENTATION_PROFILE_BLUEPRINTS)
+
+
+def ensure_canonical_representation_contract_profiles(
+    *,
+    concept_ids: Sequence[str] | None = None,
+    predicate: str = DEFAULT_REPRESENTATION_PROFILE_PREDICATE,
+    language: str = "en-NZ",
+    policy: str = "replace_others",
+    provenance: Mapping[str, Any] | None = None,
+    context: Mapping[str, Any] | None = None,
+    garbage_collect: bool = True,
+    create_missing_concepts: bool = True,
+) -> dict[str, Any]:
+    """Ensure canonical representation-profile concepts exist and carry profile JSON."""
+
+    requested_concept_ids = (
+        _normalise_strings(concept_ids) or canonical_representation_profile_concept_ids()
+    )
+    type_created = False
+    created_profile_concept_ids: list[str] = []
+    persisted_profile_concept_ids: list[str] = []
+    unknown_canonical_profile_concept_ids: list[str] = []
+    missing_concept_ids: list[str] = []
+    errors_by_concept_id: dict[str, str] = {}
+
+    profile_type = _safe_get_concept(REPRESENTATION_CONTRACT_PROFILE_TYPE_ID)
+    if not isinstance(profile_type, Mapping) and create_missing_concepts:
+        try:
+            concept_service.create_concept(
+                name="Representation contract profile",
+                concept_id=REPRESENTATION_CONTRACT_PROFILE_TYPE_ID,
+                description=(
+                    "Type for canonical workflow contract profiles that declare "
+                    "required-effects semantics for representation intents."
+                ),
+                parent_concept_ids=["#V#thing"],
+                create_as_instance=False,
+            )
+            type_created = True
+        except Exception as exc:
+            errors_by_concept_id[REPRESENTATION_CONTRACT_PROFILE_TYPE_ID] = (
+                f"type_create_failed:{exc}"
+            )
+
+    for concept_id in requested_concept_ids:
+        seed_profile = _CANONICAL_PROFILE_BY_CONCEPT_ID.get(concept_id)
+        if not isinstance(seed_profile, Mapping):
+            unknown_canonical_profile_concept_ids.append(concept_id)
+            continue
+
+        concept = _safe_get_concept(concept_id)
+        if not isinstance(concept, Mapping):
+            if not create_missing_concepts:
+                missing_concept_ids.append(concept_id)
+                continue
+            try:
+                concept_service.create_concept(
+                    name=_profile_display_name(seed_profile),
+                    concept_id=concept_id,
+                    description=_safe_str(seed_profile.get("description")),
+                    parent_concept_ids=[REPRESENTATION_CONTRACT_PROFILE_TYPE_ID],
+                    create_as_instance=True,
+                )
+                created_profile_concept_ids.append(concept_id)
+                concept = _safe_get_concept(concept_id)
+            except Exception as exc:
+                errors_by_concept_id[concept_id] = f"create_failed:{exc}"
+                continue
+
+        if not isinstance(concept, Mapping):
+            missing_concept_ids.append(concept_id)
+            continue
+
+        try:
+            result = upsert_representation_contract_profile(
+                profile_concept_id=concept_id,
+                representation_profile=dict(seed_profile),
+                predicate=predicate,
+                language=language,
+                policy=policy,
+                provenance=provenance,
+                context=context,
+                garbage_collect=garbage_collect,
+            )
+        except Exception as exc:
+            errors_by_concept_id[concept_id] = f"profile_upsert_failed:{exc}"
+            continue
+
+        if bool(result.get("success")):
+            persisted_profile_concept_ids.append(concept_id)
+        else:
+            errors_by_concept_id[concept_id] = "profile_upsert_unsuccessful"
+
+    return {
+        "success": not (
+            unknown_canonical_profile_concept_ids
+            or missing_concept_ids
+            or errors_by_concept_id
+        ),
+        "requested_profile_concept_ids": list(requested_concept_ids),
+        "canonical_profile_concept_ids": list(canonical_representation_profile_concept_ids()),
+        "profile_type_id": REPRESENTATION_CONTRACT_PROFILE_TYPE_ID,
+        "profile_type_created": type_created,
+        "created_profile_concept_ids": created_profile_concept_ids,
+        "persisted_profile_concept_ids": persisted_profile_concept_ids,
+        "unknown_canonical_profile_concept_ids": unknown_canonical_profile_concept_ids,
+        "missing_concept_ids": missing_concept_ids,
+        "errors_by_concept_id": errors_by_concept_id,
+        "counts": {
+            "requested": len(requested_concept_ids),
+            "created_concepts": len(created_profile_concept_ids),
+            "persisted_profiles": len(persisted_profile_concept_ids),
+            "missing_concepts": len(missing_concept_ids),
+            "unknown_canonical_ids": len(unknown_canonical_profile_concept_ids),
+            "errors": len(errors_by_concept_id),
+        },
+    }
 
 
 def _safe_str(value: Any) -> str | None:
@@ -263,6 +388,16 @@ def _format_parse_error(exc: Exception) -> str:
     if len(message) > 160:
         message = f"{message[:157]}..."
     return f"{exc.__class__.__name__}: {message}"
+
+
+def _safe_get_concept(concept_id: str) -> Mapping[str, Any] | None:
+    """Return ``None`` for absent concepts so bootstrap can create them cleanly."""
+
+    try:
+        concept = get_concept_by_concept_id(concept_id)
+    except ConceptNotFoundError:
+        return None
+    return concept if isinstance(concept, Mapping) else None
 
 
 def _parse_profile_json_with_diagnostics(
@@ -420,7 +555,7 @@ def load_representation_contract_profiles_from_concept_ids(
 
     for concept_id in ordered_concept_ids:
         try:
-            concept = get_concept_by_concept_id(concept_id)
+            concept = _safe_get_concept(concept_id)
         except Exception:
             concept = None
 
@@ -548,7 +683,7 @@ def upsert_representation_contract_profile(
     if not concept_id:
         raise ValueError("profile_concept_id is required")
 
-    concept = get_concept_by_concept_id(concept_id)
+    concept = _safe_get_concept(concept_id)
     if not isinstance(concept, Mapping):
         raise ValueError(f"Profile concept not found: {concept_id}")
 
@@ -611,7 +746,7 @@ def bootstrap_canonical_representation_contract_profiles(
             unknown_canonical_profile_concept_ids.append(concept_id)
             continue
         try:
-            concept = get_concept_by_concept_id(concept_id)
+            concept = _safe_get_concept(concept_id)
         except Exception as exc:
             errors_by_concept_id[concept_id] = f"concept_lookup_failed:{exc}"
             continue

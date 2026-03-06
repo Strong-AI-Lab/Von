@@ -3586,8 +3586,12 @@ class InternalMCPChatOrchestrator:
         if isinstance(method_catalogue_for_requirements, Mapping):
             data["method_catalogue"] = method_catalogue_for_requirements
 
+        prompt_for_requirements = data.get("prompt_for_requirements")
+        if not isinstance(prompt_for_requirements, str) or not prompt_for_requirements.strip():
+            prompt_for_requirements = prompt
+
         prompt_requirement_state = self._derive_prompt_tool_requirements(
-            prompt,
+            prompt_for_requirements,
             method_catalogue=(
                 method_catalogue_for_requirements
                 if isinstance(method_catalogue_for_requirements, Mapping)
@@ -4619,8 +4623,12 @@ class InternalMCPChatOrchestrator:
                 except Exception:
                     method_catalogue_for_requirements = None
 
+            prompt_for_requirements = data.get("prompt_for_requirements")
+            if not isinstance(prompt_for_requirements, str) or not prompt_for_requirements.strip():
+                prompt_for_requirements = data.get("prompt")
+
             prompt_requirement_state = self._derive_prompt_tool_requirements(
-                data.get("prompt"),
+                prompt_for_requirements,
                 method_catalogue=(
                     method_catalogue_for_requirements
                     if isinstance(method_catalogue_for_requirements, Mapping)
@@ -17967,6 +17975,7 @@ class InternalMCPChatOrchestrator:
         conversation_session_id: Optional[str] = None,
         turn_id: Optional[str] = None,
         workflow_discovery_result: Mapping[str, Any] | None = None,
+        workflow_continuation_context: Mapping[str, Any] | None = None,
     ) -> OrchestratorResult:
         aux_llm_calls: List[Mapping[str, Any]] = []
         llm_calls: list[dict[str, Any]] = []
@@ -18518,6 +18527,92 @@ class InternalMCPChatOrchestrator:
             preferred_language=preferred_language,
         )
 
+        effective_prompt_for_routing = prompt
+        workflow_continuation_payload = (
+            dict(workflow_continuation_context)
+            if isinstance(workflow_continuation_context, Mapping)
+            else None
+        )
+        try:
+            from ...services.workflow_continuation_service import (
+                assess_prompt_for_workflow_continuation,
+                build_workflow_continuation_routing_prompt,
+                build_workflow_continuation_system_message,
+                get_session_workflow_continuation_context,
+            )
+
+            if workflow_continuation_payload is None and conversation_session_id:
+                workflow_continuation_payload = get_session_workflow_continuation_context(
+                    session_id=conversation_session_id,
+                    namespace=user_namespace,
+                    user_id=None,
+                )
+
+            if isinstance(workflow_continuation_payload, Mapping):
+                apply_decision = assess_prompt_for_workflow_continuation(
+                    prompt=prompt,
+                    continuation_context=workflow_continuation_payload,
+                )
+                workflow_continuation_payload = dict(workflow_continuation_payload)
+                workflow_continuation_payload["applied"] = bool(
+                    apply_decision.get("applies", False)
+                )
+                workflow_continuation_payload["apply_reason"] = str(
+                    apply_decision.get("reason") or ""
+                ).strip() or None
+                if bool(workflow_continuation_payload.get("applied")):
+                    system_message = build_workflow_continuation_system_message(
+                        workflow_continuation_payload
+                    )
+                    if isinstance(system_message, str) and system_message.strip():
+                        insert_at = (
+                            1
+                            if augmented_context
+                            and isinstance(augmented_context[0], Mapping)
+                            and augmented_context[0].get("role") == "system"
+                            else 0
+                        )
+                        augmented_context.insert(
+                            insert_at,
+                            {
+                                "role": "system",
+                                "content": system_message.strip(),
+                            },
+                        )
+                    effective_prompt_for_routing = (
+                        build_workflow_continuation_routing_prompt(
+                            prompt=prompt,
+                            continuation_context=workflow_continuation_payload,
+                        )
+                        or prompt
+                    )
+                aux_llm_calls.append(
+                    {
+                        "type": "workflow_continuation_context",
+                        "applied": bool(workflow_continuation_payload.get("applied", False)),
+                        "reason": workflow_continuation_payload.get("apply_reason"),
+                        "context": dict(workflow_continuation_payload),
+                    }
+                )
+                if trace_enabled and trace is not None:
+                    trace.metadata["workflow_continuation_context"] = {
+                        "applied": bool(workflow_continuation_payload.get("applied", False)),
+                        "reason": workflow_continuation_payload.get("apply_reason"),
+                        "selected_workflow_id": workflow_continuation_payload.get(
+                            "selected_workflow_id"
+                        ),
+                        "requires_follow_up": bool(
+                            workflow_continuation_payload.get("requires_follow_up", False)
+                        ),
+                        "has_unresolved_required_effects": bool(
+                            workflow_continuation_payload.get(
+                                "has_unresolved_required_effects", False
+                            )
+                        ),
+                    }
+        except Exception:
+            workflow_continuation_payload = None
+
         base_prompt_telemetry = self._consume_base_system_prompt_telemetry()
         if base_prompt_telemetry:
             aux_llm_calls.append(base_prompt_telemetry)
@@ -18574,7 +18669,7 @@ class InternalMCPChatOrchestrator:
                 selector_selection = self._workflow_selector.select_workflow(
                     llm_client=llm_client,
                     model=classifier_model,
-                    turn_text=prompt,
+                    turn_text=effective_prompt_for_routing,
                     discovered_workflows=discovered_matches or None,
                 )
                 routing_duration_ms = (time.perf_counter() - selector_start) * 1000.0
@@ -23003,7 +23098,7 @@ class InternalMCPChatOrchestrator:
 
         if selector_verdict == "plain_response":
             plain_requirement_state = self._derive_prompt_tool_requirements(
-                prompt,
+                effective_prompt_for_routing,
                 method_catalogue=method_catalogue_for_routing,
                 context_messages=augmented_context,
             )
@@ -23348,6 +23443,7 @@ class InternalMCPChatOrchestrator:
         tc_data: dict[str, Any] = {
             # Inputs.
             "prompt": prompt,
+            "prompt_for_requirements": effective_prompt_for_routing,
             "augmented_context": augmented_context,
             "policy_state": policy_state,
             "registry_snapshot": registry_snapshot,

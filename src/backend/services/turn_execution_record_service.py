@@ -21,6 +21,7 @@ from pymongo.errors import OperationFailure, PyMongoError
 from ..db.mongo_client import get_db
 from .representation_contract_vontology_service import (
     canonical_representation_profile_concept_ids,
+    ensure_canonical_representation_contract_profiles,
     load_representation_contract_profiles_from_concept_ids,
 )
 from ..workflows.conversation_turn_stage_model import (
@@ -1007,6 +1008,43 @@ def _load_representation_domain_profiles_from_vontology() -> tuple[list[dict[str
     loaded_profiles, diagnostics = load_representation_contract_profiles_from_concept_ids(
         requested_profile_concept_ids
     )
+    bootstrap_report: dict[str, Any] | None = None
+    diagnostics_mapping = diagnostics if isinstance(diagnostics, Mapping) else {}
+    missing_profile_concept_ids = _dedupe_string_sequence(
+        diagnostics_mapping.get("missing_profile_concept_ids") or []
+    )
+    malformed_profile_concept_ids = _dedupe_string_sequence(
+        diagnostics_mapping.get("malformed_profile_concept_ids") or []
+    )
+    if (
+        not loaded_profiles
+        or missing_profile_concept_ids
+        or malformed_profile_concept_ids
+    ):
+        try:
+            bootstrap_targets = (
+                missing_profile_concept_ids
+                or malformed_profile_concept_ids
+                or requested_profile_concept_ids
+            )
+            bootstrap_report = ensure_canonical_representation_contract_profiles(
+                concept_ids=bootstrap_targets,
+                provenance={
+                    "source": "turn_execution_record_service",
+                    "reason": "representation_profile_catalogue_drift_repair",
+                },
+                context={"path": "_load_representation_domain_profiles_from_vontology"},
+            )
+        except Exception as exc:
+            bootstrap_report = {
+                "success": False,
+                "reason": "bootstrap_exception",
+                "error": str(exc),
+            }
+
+        loaded_profiles, diagnostics = load_representation_contract_profiles_from_concept_ids(
+            requested_profile_concept_ids
+        )
 
     normalised_profiles: list[dict[str, Any]] = []
     for profile in loaded_profiles:
@@ -1068,6 +1106,8 @@ def _load_representation_domain_profiles_from_vontology() -> tuple[list[dict[str
     diagnostics_payload["loaded_profile_count"] = len(normalised_profiles)
     if not _safe_str(diagnostics_payload.get("profile_version_hash")):
         diagnostics_payload["profile_version_hash"] = _hash_payload(normalised_profiles)
+    if isinstance(bootstrap_report, Mapping):
+        diagnostics_payload["bootstrap"] = dict(bootstrap_report)
     return normalised_profiles, diagnostics_payload
 
 
@@ -1237,6 +1277,41 @@ def _build_fail_closed_representation_effect(
     }
 
 
+def _extract_applied_workflow_continuation_context(
+    aux_llm_calls: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(aux_llm_calls, Sequence) or isinstance(aux_llm_calls, (str, bytes)):
+        return None
+    for entry in reversed(aux_llm_calls):
+        if not isinstance(entry, Mapping):
+            continue
+        if _safe_str(entry.get("type")) != "workflow_continuation_context":
+            continue
+        if not bool(entry.get("applied", False)):
+            continue
+        context = entry.get("context")
+        if isinstance(context, Mapping):
+            return dict(context)
+    return None
+
+
+def _representation_contract_from_continuation_context(
+    continuation_context: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(continuation_context, Mapping):
+        return None
+    contract = continuation_context.get("required_effects_contract")
+    if not isinstance(contract, Mapping):
+        return None
+    intent_class = _safe_str(contract.get("intent_class"))
+    schema_version = _safe_str(contract.get("schema_version"))
+    if intent_class != "representation":
+        return None
+    if schema_version and schema_version != _REPRESENTATION_CONTRACT_SCHEMA_VERSION:
+        return None
+    return dict(contract)
+
+
 def _build_representation_required_effects_contract(
     *,
     prompt_text: Any,
@@ -1245,8 +1320,12 @@ def _build_representation_required_effects_contract(
     # Contract generation is intentionally deterministic and prompt/aux-driven
     # so repeated runs over the same context produce the same contract_id.
     prompt_clean = _safe_str(prompt_text) or ""
+    continuation_context = _extract_applied_workflow_continuation_context(aux_llm_calls)
+    continuation_contract = _representation_contract_from_continuation_context(
+        continuation_context
+    )
     if not _prompt_requests_representation_action(prompt_clean):
-        return None
+        return continuation_contract
 
     file_copy_ids = _extract_required_file_copy_ids_from_aux(aux_llm_calls)
     if not file_copy_ids:
@@ -1265,6 +1344,8 @@ def _build_representation_required_effects_contract(
         prompt_clean,
         profiles=profiles,
     )
+    if selected_profile is None and isinstance(continuation_contract, Mapping):
+        return continuation_contract
 
     profile_source = (
         _safe_str(profile_loading.get("representation_profile_source"))
@@ -2137,6 +2218,11 @@ def _ensure_turn_execution_indexes(collection) -> None:
                     [("namespace", ASCENDING), ("created_at_utc", DESCENDING)],
                     name="namespace_created_desc",
                 )
+            if "session_created_desc" not in existing_indexes:
+                collection.create_index(
+                    [("session_id", ASCENDING), ("created_at_utc", DESCENDING)],
+                    name="session_created_desc",
+                )
             if "decision_created_desc" not in existing_indexes:
                 collection.create_index(
                     [
@@ -2243,6 +2329,53 @@ def upsert_turn_execution_record_projection(
             "reason": "mongo_error",
             "request_id": request_id,
         }
+
+
+def get_latest_turn_execution_record_projection(
+    *,
+    session_id: str | None,
+    namespace: str | None = None,
+    user_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Return the latest projected turn-execution record for a chat session."""
+
+    clean_session_id = _safe_str(session_id)
+    if not clean_session_id:
+        return None
+
+    coll = get_turn_execution_records_collection()
+    if coll is None:
+        return None
+
+    query: dict[str, Any] = {"session_id": clean_session_id}
+    clean_namespace = _safe_str(namespace)
+    if clean_namespace:
+        query["namespace"] = clean_namespace
+    clean_user_id = _safe_str(user_id)
+    if clean_user_id:
+        query["user_id"] = clean_user_id
+
+    projection = {"_id": 0}
+    doc = coll.find_one(
+        query,
+        projection=projection,
+        sort=[("created_at_utc", DESCENDING), ("updated_at_utc", DESCENDING)],
+    )
+    if isinstance(doc, Mapping):
+        return dict(doc)
+
+    # Older projections may be missing namespace/user_id even when session_id is
+    # stable, so fall back to session-scoped lookup before giving up.
+    if clean_namespace or clean_user_id:
+        doc = coll.find_one(
+            {"session_id": clean_session_id},
+            projection=projection,
+            sort=[("created_at_utc", DESCENDING), ("updated_at_utc", DESCENDING)],
+        )
+        if isinstance(doc, Mapping):
+            return dict(doc)
+
+    return None
 
 
 def _normalise_positive_int(

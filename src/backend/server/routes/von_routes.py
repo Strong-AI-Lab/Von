@@ -91,8 +91,15 @@ von_bp = Blueprint("von", __name__, template_folder=_TEMPLATE_DIR)
 _TOOL_PROGRESS_TTL_SEC = 10 * 60
 _TOOL_PROGRESS_LOCK = threading.Lock()
 _TOOL_PROGRESS: dict[tuple[str, str], dict[str, Any]] = {}
-_TOOL_PROGRESS_TERMINAL_STATUSES = {"completed", "error", "cancelled"}
-_TOOL_PROGRESS_TERMINAL_PHASES = {"completed", "failed", "error", "cancelled", "terminated"}
+_TOOL_PROGRESS_TERMINAL_STATUSES = {"completed", "follow_up_required", "error", "cancelled"}
+_TOOL_PROGRESS_TERMINAL_PHASES = {
+    "completed",
+    "follow_up_required",
+    "failed",
+    "error",
+    "cancelled",
+    "terminated",
+}
 _TOOL_PROGRESS_DIAGNOSTIC_EVENT_LIMIT = 80
 
 _ONBOARDING_WORKFLOW_IDS_ENV = "VON_NEW_MEMBER_ONBOARDING_WORKFLOW_IDS"
@@ -214,6 +221,7 @@ def _default_stage_label(stage: str) -> str:
         "orchestrator_start": "Starting orchestrator",
         "orchestrator_end": "Finishing orchestrator",
         "completed": "Complete",
+        "follow_up_required": "Follow-up required",
         "error": "Error",
     }
     if stage in mapping:
@@ -244,6 +252,7 @@ def _derive_progress_stage(update: dict[str, Any], existing: dict[str, Any]) -> 
         "retry_start": "tool_recovery",
         "retry_end": "tool_recovery",
         "completed": "completed",
+        "follow_up_required": "follow_up_required",
         "error": "error",
     }
     derived = status_stage_map.get(status)
@@ -282,6 +291,7 @@ def _derive_progress_event_kind(update: dict[str, Any]) -> str:
         "retry_start": "retry_start",
         "retry_end": "retry_end",
         "completed": "completed",
+        "follow_up_required": "completed",
         "error": "error",
     }
     return status_kind_map.get(status, status or "status_update")
@@ -2642,18 +2652,18 @@ def _build_terminal_tool_progress_payload(
         else True
     )
     progress_success = bool(safe_to_claim_completion and not requires_follow_up)
+    terminal_status = "completed" if progress_success else "follow_up_required"
+    terminal_label = "Complete" if progress_success else "Follow-up required"
 
     payload: dict[str, Any] = {
-        "status": "completed",
-        "stage": "completed",
-        "phase_label": "Complete",
+        "status": terminal_status,
+        "stage": terminal_status,
+        "phase_label": terminal_label,
         "request_id": request_id,
         "success": progress_success,
         "completion_gate_requires_follow_up": requires_follow_up,
         "completion_gate_safe_to_claim_completion": safe_to_claim_completion,
-        "orchestrator_status": (
-            "completed" if progress_success else "follow_up_required"
-        ),
+        "orchestrator_status": terminal_status,
     }
     if isinstance(completion_gate, dict):
         payload["completion_gate_decision"] = completion_gate.get("decision")
@@ -5581,6 +5591,44 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             "tools_invoked": [],
             "tool_results_included_in_prompt": False,
         }
+        workflow_continuation_context: dict[str, Any] | None = None
+        workflow_discovery_query = prompt_text
+        try:
+            from ...services.workflow_continuation_service import (
+                assess_prompt_for_workflow_continuation,
+                build_workflow_continuation_routing_prompt,
+                get_session_workflow_continuation_context,
+            )
+
+            workflow_continuation_context = get_session_workflow_continuation_context(
+                session_id=session_id,
+                namespace=user_namespace,
+                user_id=history_user_id,
+            )
+            if isinstance(workflow_continuation_context, Mapping):
+                apply_decision = assess_prompt_for_workflow_continuation(
+                    prompt=prompt_text,
+                    continuation_context=workflow_continuation_context,
+                )
+                workflow_continuation_context = dict(workflow_continuation_context)
+                workflow_continuation_context["applied"] = bool(
+                    apply_decision.get("applies", False)
+                )
+                workflow_continuation_context["apply_reason"] = str(
+                    apply_decision.get("reason") or ""
+                ).strip() or None
+                if bool(workflow_continuation_context.get("applied")):
+                    workflow_discovery_query = build_workflow_continuation_routing_prompt(
+                        prompt=prompt_text,
+                        continuation_context=workflow_continuation_context,
+                    )
+        except Exception as exc:
+            current_app.logger.debug(
+                "[WORKFLOW_CONTINUATION] Context lookup skipped: %s",
+                exc,
+            )
+            workflow_continuation_context = None
+            workflow_discovery_query = prompt_text
 
         # ---------------------------------------------------------
         # JVNAUTOSCI-1076: Workflow discovery during conversation turn
@@ -5610,12 +5658,12 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 )
 
                 workflow_discovery_result = discover_workflows_for_turn(
-                    prompt_text,
+                    workflow_discovery_query,
                     namespace=user_namespace,
                 )
                 workflow_discovery_progress = _normalise_workflow_discovery_progress_payload(
                     workflow_discovery_result,
-                    query=prompt_text,
+                    query=workflow_discovery_query,
                 )
                 if workflow_discovery_result:
                     current_app.logger.info(
@@ -5657,7 +5705,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             "request_id": request_id,
                             "workflow_discovery": _normalise_workflow_discovery_progress_payload(
                                 None,
-                                query=prompt_text,
+                                query=workflow_discovery_query,
                                 error=str(e),
                             ),
                             "workflow_match_count": 0,
@@ -6429,6 +6477,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                 conversation_session_id=bg_session_id,
                                 turn_id=request_id,
                                 workflow_discovery_result=workflow_discovery_result,
+                                workflow_continuation_context=workflow_continuation_context,
                             )
 
                             # Phase 4: Persist to chat history
@@ -6535,6 +6584,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     conversation_session_id=session_id,
                     turn_id=request_id,
                     workflow_discovery_result=workflow_discovery_result,
+                    workflow_continuation_context=workflow_continuation_context,
                 )
                 llm_interaction["duration_ms"] = (
                     time.perf_counter() - orchestrator_start_perf

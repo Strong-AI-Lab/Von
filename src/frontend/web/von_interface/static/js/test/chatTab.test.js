@@ -827,6 +827,21 @@ describe('thinking liveness presentation', () => {
         expect(presentation.stageText).toBe('Complete');
         expect(presentation.lastActivityText).toContain('Last activity');
     });
+
+    test('renders follow-up-required as a distinct terminal state', () => {
+        const presentation = __testOnly_buildThinkingProgressPresentation({
+            status: 'pending',
+            orchestrator_status: 'follow_up_required',
+            liveness_state: 'active',
+            stage: 'response_finalising',
+            idle_ms: 900
+        });
+
+        expect(presentation.livenessState).toBe('follow_up_required');
+        expect(presentation.livenessLabel).toBe('Follow-up required');
+        expect(presentation.stageText).toBe('Follow-up required');
+        expect(presentation.lastActivityText).toContain('Last activity');
+    });
 });
 
 describe('thinking card display state reducer', () => {
@@ -888,6 +903,20 @@ describe('thinking card display state reducer', () => {
             progress: {
                 status: 'pending',
                 orchestrator_status: 'completed',
+                liveness_state: 'active'
+            }
+        });
+
+        expect(state.expanded).toBe(false);
+        expect(state.autoFurlApplied).toBe(true);
+    });
+
+    test('treats follow-up-required as a terminal progress update', () => {
+        let state = __testOnly_reduceThinkingCardDisplayState(null, { type: 'reset_for_active' });
+        state = __testOnly_reduceThinkingCardDisplayState(state, {
+            type: 'progress_update',
+            progress: {
+                status: 'follow_up_required',
                 liveness_state: 'active'
             }
         });
