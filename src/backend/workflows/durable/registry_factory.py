@@ -56,6 +56,14 @@ from .entity_identity_resolution_workflow import (
     get_entity_identity_resolution_workflow_registration,
     register_entity_identity_resolution_actions,
 )
+from .parent_specificity_concept_dossier_workflow import (
+    get_parent_specificity_concept_dossier_workflow_registration,
+    register_parent_specificity_concept_dossier_actions,
+)
+from .parent_specificity_rumination_workflow import (
+    get_parent_specificity_rumination_workflow_registration,
+    register_parent_specificity_rumination_actions,
+)
 from .subworkflow_actions import register_subworkflow_actions
 from .control_flow_actions import register_control_flow_actions
 from .workflow_creation_workflow import register_workflow_creation_actions
@@ -426,6 +434,8 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
     registry.register(get_file_copy_upload_handler_workflow_registration())
     registry.register(get_file_copy_interpretation_workflow_registration())
     registry.register(get_entity_identity_resolution_workflow_registration())
+    registry.register(get_parent_specificity_concept_dossier_workflow_registration())
+    registry.register(get_parent_specificity_rumination_workflow_registration())
 
     # 3. Vontology-discovered workflows
     discovered_workflow_ids: List[str] = []
@@ -562,6 +572,8 @@ def build_durable_action_registry() -> ActionRegistry:
     register_file_copy_upload_handler_actions(registry)
     register_file_copy_interpretation_actions(registry)
     register_entity_identity_resolution_actions(registry)
+    register_parent_specificity_concept_dossier_actions(registry)
+    register_parent_specificity_rumination_actions(registry)
     register_control_flow_actions(registry, definition_loader=_resolve_subworkflow_definition)
     register_subworkflow_actions(registry, definition_loader=_resolve_subworkflow_definition)
     register_workflow_creation_actions(registry)

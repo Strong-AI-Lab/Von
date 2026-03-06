@@ -1571,6 +1571,7 @@ def load_workflow_definition_from_vontology(
         invalid_output_mapping_specs: list[Dict[str, str]] = []
         subworkflow_input_mappings: list[Dict[str, str]] = []
         subworkflow_output_mappings: list[Dict[str, str]] = []
+        subworkflow_failure_mode = ""
         if invocation_action_id:
             # Read input mapping from Vontology (hasInputMap relationships).
             input_map: Dict[str, Any] = {}
@@ -1628,6 +1629,10 @@ def load_workflow_definition_from_vontology(
                                 "mapping_concept_id": mapping_concept_id,
                             }
                         )
+            if has_workflow_invocation:
+                subworkflow_failure_mode = str(
+                    input_map.get("failure_mode") or input_map.get("__failure_mode") or ""
+                ).strip()
 
             if has_workflow_invocation:
                 input_map["workflow_id"] = str(invokes_workflow).strip()
@@ -1669,10 +1674,13 @@ def load_workflow_definition_from_vontology(
                             "mapping_concept_id": mapping_concept_id,
                         }
                     )
-                    if has_workflow_invocation:
+                    if has_workflow_invocation and tool_output_field.startswith("result."):
+                        child_output_field = tool_output_field[len("result.") :].strip()
+                        if not child_output_field:
+                            continue
                         subworkflow_output_mappings.append(
                             {
-                                "child_output_field": tool_output_field,
+                                "child_output_field": child_output_field,
                                 "parent_context_key": context_key,
                                 "mapping_concept_id": mapping_concept_id,
                             }
@@ -1862,6 +1870,7 @@ def load_workflow_definition_from_vontology(
                     workflow_id=workflow_target,
                     input_mappings=subworkflow_input_mappings,
                     output_mappings=subworkflow_output_mappings,
+                    failure_mode=subworkflow_failure_mode,
                 )
         if tool_output_context_mappings:
             step_metadata["tool_output_context_mappings"] = tool_output_context_mappings

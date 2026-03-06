@@ -222,6 +222,53 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
                 schedule_exc,
             )
 
+        # Parent-specificity rumination uses a Vontology-governed prompt plus a
+        # managed durable schedule so it can keep scanning for new refinement
+        # opportunities whenever the backend is running.
+        try:
+            from ..services.parent_specificity_vontology_service import (
+                ensure_parent_specificity_prompt_support,
+            )
+
+            parent_specificity_prompt_report = (
+                ensure_parent_specificity_prompt_support()
+            )
+            result["parent_specificity_prompt_bootstrap"] = (
+                parent_specificity_prompt_report
+            )
+            if not bool(parent_specificity_prompt_report.get("success", False)):
+                app_logger.warning(
+                    "[durable_workflows] parent-specificity prompt bootstrap failed: %s",
+                    parent_specificity_prompt_report,
+                )
+        except Exception as prompt_exc:
+            app_logger.warning(
+                "[durable_workflows] parent-specificity prompt bootstrap error: %s",
+                prompt_exc,
+            )
+
+        try:
+            from ..services.parent_specificity_schedule_bootstrap_service import (
+                ensure_parent_specificity_background_schedule,
+            )
+
+            parent_specificity_schedule_report = (
+                ensure_parent_specificity_background_schedule()
+            )
+            result["parent_specificity_schedule_bootstrap"] = (
+                parent_specificity_schedule_report
+            )
+            if not bool(parent_specificity_schedule_report.get("success", False)):
+                app_logger.warning(
+                    "[durable_workflows] parent-specificity schedule bootstrap failed: %s",
+                    parent_specificity_schedule_report,
+                )
+        except Exception as schedule_exc:
+            app_logger.warning(
+                "[durable_workflows] parent-specificity schedule bootstrap error: %s",
+                schedule_exc,
+            )
+
         # Log status
         status = get_system_status()
         app_logger.info(

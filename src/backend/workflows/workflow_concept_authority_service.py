@@ -12,7 +12,7 @@ import logging
 import re
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ..services import concept_service
 from ..services.concept_service import ConceptNotFoundError
@@ -26,6 +26,13 @@ from .definitions import (
     TOOL_CALLING_WORKFLOW_ID,
     WRITE_TOOL_POLICY_WORKFLOW_ID,
 )
+from .parent_specificity_workflow_contracts import (
+    PARENT_SPECIFICITY_DOSSIER_CONTEXT_INPUT_MAPPING_CONCEPT_ID,
+    PARENT_SPECIFICITY_DOSSIER_FAILURE_MODE_BINDINGS,
+    PARENT_SPECIFICITY_DOSSIER_TOOL_OUTPUT_MAPPINGS,
+    PARENT_SPECIFICITY_DOSSIER_WRITES_CONTEXT_KEYS,
+    ParentSpecificityToolOutputMappingSpec,
+)
 from .vontology_loader import (
     WORKFLOW_GRAPH_PREDICATE_ALIASES,
     build_workflow_process_graph,
@@ -34,6 +41,10 @@ from .vontology_loader import (
 from .workflow_definition_identity_service import (
     collect_workflow_action_ids,
     validate_workflow_definition_contract,
+)
+from .subworkflow_contracts import (
+    WORKFLOW_SUBWORKFLOW_ACTION_ID,
+    normalise_subworkflow_contract,
 )
 from .workflow_registry import WorkflowRegistry
 
@@ -47,6 +58,12 @@ FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID = (
     "#V#file_copy_upload_classification_workflow"
 )
 FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID = "#V#file_copy_upload_handler_workflow"
+PARENT_SPECIFICITY_DOSSIER_WORKFLOW_ID = (
+    "#V#parent_specificity_concept_dossier_workflow"
+)
+PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID = (
+    "#V#parent_specificity_rumination_workflow"
+)
 RUMINATION_WORKFLOW_ID = "#V#rumination_workflow"
 WORKFLOW_CREATION_WORKFLOW_ID = "#V#von_workflow_creation_workflow"
 
@@ -107,6 +124,8 @@ CANONICAL_CHAT_WORKFLOW_IDS: tuple[str, ...] = (
 # Additional built-in workflows that should be published when registered.
 CANONICAL_DURABLE_WORKFLOW_IDS: tuple[str, ...] = (
     FILE_COPY_INTERPRETATION_WORKFLOW_ID,
+    PARENT_SPECIFICITY_DOSSIER_WORKFLOW_ID,
+    PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID,
     RUMINATION_WORKFLOW_ID,
 )
 
@@ -131,10 +150,16 @@ _STEP_RELATIONSHIP_ALIAS_KEYS: tuple[str, ...] = tuple(
     dict.fromkeys(
         (
             *WORKFLOW_GRAPH_PREDICATE_ALIASES["invokesAction"],
+            *WORKFLOW_GRAPH_PREDICATE_ALIASES["invokesWorkflow"],
             *WORKFLOW_GRAPH_PREDICATE_ALIASES["workflowStepInvokesTool"],
+            *WORKFLOW_GRAPH_PREDICATE_ALIASES["hasInputMap"],
             *WORKFLOW_GRAPH_PREDICATE_ALIASES[
                 "workflowStepMapsContextKeyToToolParam"
             ],
+            *WORKFLOW_GRAPH_PREDICATE_ALIASES[
+                "workflowStepMapsToolOutputFieldToContextKey"
+            ],
+            *WORKFLOW_GRAPH_PREDICATE_ALIASES["workflowStepWritesContextKey"],
             *WORKFLOW_GRAPH_PREDICATE_ALIASES["nextStep"],
             *WORKFLOW_GRAPH_PREDICATE_ALIASES["onTrueNextStep"],
             *WORKFLOW_GRAPH_PREDICATE_ALIASES["onFalseNextStep"],
@@ -153,7 +178,12 @@ class _CanonicalStepPublicationSpec:
     state_id: str
     concept_id: str | None = None
     action_id: str | None = None
+    invoked_workflow_id: str | None = None
+    static_input_bindings: tuple[tuple[str, str], ...] = ()
     context_input_mappings: tuple[str, ...] = ()
+    tool_output_context_mappings: tuple[str, ...] = ()
+    tool_output_mapping_specs: tuple[ParentSpecificityToolOutputMappingSpec, ...] = ()
+    writes_context_keys: tuple[str, ...] = ()
     next_state: str | None = None
     on_true_state: str | None = None
     on_false_state: str | None = None
@@ -171,6 +201,9 @@ class _CanonicalWorkflowPublicationSpec:
 _FILE_COPY_WORKFLOW_CONTEXT_INPUT_MAPPINGS: tuple[str, ...] = (
     "#V#workflow_mapping_concept_id_to_concept_id_parameter",
     "#V#workflow_mapping_file_copy_concept_id_to_file_copy_concept_id_parameter",
+)
+_PARENT_SPECIFICITY_DOSSIER_CONTEXT_INPUT_MAPPINGS: tuple[str, ...] = (
+    PARENT_SPECIFICITY_DOSSIER_CONTEXT_INPUT_MAPPING_CONCEPT_ID,
 )
 
 
@@ -419,6 +452,71 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
             _CanonicalStepPublicationSpec(state_id="failed"),
         ),
     ),
+    PARENT_SPECIFICITY_DOSSIER_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state="collect",
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id="collect",
+                action_id="parent_specificity.collect_dossier",
+                writes_context_keys=(
+                    "concept_dossier",
+                    "concept_dossier_summary",
+                    "concept_dossier_languages",
+                    "concept_dossier_relation_count",
+                ),
+                next_state="complete",
+            ),
+            _CanonicalStepPublicationSpec(state_id="complete"),
+            _CanonicalStepPublicationSpec(state_id="failed"),
+        ),
+    ),
+    PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state="assess",
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id="assess",
+                action_id="parent_specificity.assess_candidates",
+                on_true_state="prepare_candidate",
+                on_false_state="complete",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="prepare_candidate",
+                action_id="parent_specificity.prepare_candidate",
+                on_true_state="gather_dossier",
+                on_false_state="complete",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="gather_dossier",
+                action_id="workflow_invoke_subworkflow",
+                invoked_workflow_id=PARENT_SPECIFICITY_DOSSIER_WORKFLOW_ID,
+                static_input_bindings=PARENT_SPECIFICITY_DOSSIER_FAILURE_MODE_BINDINGS,
+                context_input_mappings=_PARENT_SPECIFICITY_DOSSIER_CONTEXT_INPUT_MAPPINGS,
+                tool_output_context_mappings=tuple(
+                    item.concept_id
+                    for item in PARENT_SPECIFICITY_DOSSIER_TOOL_OUTPUT_MAPPINGS
+                ),
+                tool_output_mapping_specs=PARENT_SPECIFICITY_DOSSIER_TOOL_OUTPUT_MAPPINGS,
+                writes_context_keys=PARENT_SPECIFICITY_DOSSIER_WRITES_CONTEXT_KEYS,
+                next_state="analyse_candidate",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="analyse_candidate",
+                action_id="parent_specificity.analyse_candidate",
+                next_state="apply_candidate",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="apply_candidate",
+                action_id="parent_specificity.apply_candidate",
+                on_true_state="prepare_candidate",
+                on_false_state="complete",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="complete",
+                action_id="parent_specificity.finalise",
+            ),
+            _CanonicalStepPublicationSpec(state_id="failed"),
+        ),
+    ),
     RUMINATION_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
         initial_state="assess",
         steps=(
@@ -510,12 +608,134 @@ def _workflow_slug(workflow_id: str) -> str:
     return _slugify_token(workflow_id)
 
 
+def _resolve_step_invoked_workflow_id(
+    *,
+    registration_definition: Any,
+    state_id: str,
+) -> str | None:
+    states = getattr(registration_definition, "states", None)
+    if not isinstance(states, Mapping):
+        return None
+    state_spec = states.get(state_id)
+    if state_spec is None:
+        return None
+
+    metadata = getattr(state_spec, "metadata", None)
+    if isinstance(metadata, Mapping):
+        contract, _error = normalise_subworkflow_contract(
+            metadata.get("subworkflow_contract")
+        )
+        workflow_id = (
+            str((contract or {}).get("workflow_id") or "").strip()
+            if isinstance(contract, Mapping)
+            else ""
+        )
+        if workflow_id:
+            return workflow_id
+
+        direct_target = str(metadata.get("invokes_workflow") or "").strip()
+        if direct_target:
+            return direct_target
+
+    actions = getattr(state_spec, "actions", None)
+    if not isinstance(actions, Sequence):
+        return None
+    for action in actions:
+        action_id = str(getattr(action, "action_id", "") or "").strip()
+        if action_id != "workflow_invoke_subworkflow":
+            continue
+        inputs = getattr(action, "inputs", None)
+        if not isinstance(inputs, Mapping):
+            continue
+        workflow_input = inputs.get("workflow_id")
+        if isinstance(workflow_input, str) and workflow_input.strip():
+            return workflow_input.strip()
+    return None
+
+
 def _step_concept_id(*, workflow_id: str, state_id: str) -> str:
     return f"#V#workflow_step_{_workflow_slug(workflow_id)}_{_slugify_token(state_id)}"
 
 
 def _terminal_effect_id(*, workflow_id: str, state_id: str) -> str:
     return f"#V#workflow_effect_{_workflow_slug(workflow_id)}_{_slugify_token(state_id)}_terminal"
+
+
+def _workflow_context_key_concept_id(context_key: str) -> str:
+    raw = str(context_key or "").strip()
+    if raw.startswith("#V#workflow_context_key_"):
+        return raw
+    if raw.startswith("workflow_context_key_"):
+        return f"#V#{raw}"
+    if raw.startswith("#V#"):
+        return f"#V#workflow_context_key_{raw[3:]}"
+    return f"#V#workflow_context_key_{raw}"
+
+
+def _ensure_tool_output_mapping_concept(
+    *,
+    step_concept_id: str,
+    mapping_target_id: str,
+    mapping_spec: ParentSpecificityToolOutputMappingSpec,
+) -> tuple[bool, str | None]:
+    mapping_concept_id = str(mapping_spec.concept_id or "").strip()
+    if not mapping_concept_id:
+        return False, "mapping_concept_id_missing"
+
+    existing_doc, load_error = _load_concept(mapping_concept_id)
+    if load_error:
+        return False, f"mapping_lookup_failed:{load_error}"
+
+    created = False
+    if existing_doc is None:
+        try:
+            concept_service.create_concept(
+                name=(
+                    "Workflow mapping "
+                    f"{mapping_spec.tool_output_field} to {mapping_spec.context_key}"
+                ),
+                concept_id=mapping_concept_id,
+                description=(
+                    "Map tool output field "
+                    f"'{mapping_spec.tool_output_field}' to context key "
+                    f"'{mapping_spec.context_key}'."
+                ),
+                parent_concept_ids=[],
+                create_as_instance=True,
+            )
+            created = True
+            existing_doc, load_error = _load_concept(mapping_concept_id)
+            if load_error:
+                return False, f"mapping_lookup_after_create_failed:{load_error}"
+        except Exception as exc:  # pragma: no cover - defensive
+            return False, f"mapping_create_failed:{exc}"
+
+    target_spec = {
+        "schema_version": 1,
+        "mapping_type": "tool_output_field_to_context_key",
+        "workflow_step_id": step_concept_id,
+        "tool_id": mapping_target_id,
+        "tool_output_field_name": mapping_spec.tool_output_field,
+        "target_context_key_concept_id": _workflow_context_key_concept_id(
+            mapping_spec.context_key
+        ),
+    }
+    existing_spec = (
+        ((existing_doc or {}).get("concept_data") or {}).get("workflow_mapping_spec")
+        if isinstance(existing_doc, Mapping)
+        else None
+    )
+    if existing_spec == target_spec:
+        return False, None
+
+    try:
+        concept_service.update_concept(
+            mapping_concept_id,
+            {"concept_data.workflow_mapping_spec": target_spec},
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        return False, f"mapping_update_failed:{exc}"
+    return created, None
 
 
 def _normalise_relationships(concept_doc: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -608,6 +828,7 @@ def publish_canonical_chat_workflow_graphs(
     validation_failures_by_workflow_id: dict[str, Dict[str, Any]] = {}
     created_step_ids: list[str] = []
     created_action_concept_ids: list[str] = []
+    created_mapping_concept_ids: list[str] = []
 
     workflow_type_ids = list(resolve_available_workflow_type_ids())
     preferred_workflow_type = workflow_type_ids[0] if workflow_type_ids else None
@@ -635,10 +856,10 @@ def publish_canonical_chat_workflow_graphs(
         candidate_id = str(candidate_workflow_id or "").strip()
         if not candidate_id:
             return None
-        registered_definition = registry.get(candidate_id)
-        if registered_definition is not None:
-            return registered_definition
-        return load_workflow_definition_from_vontology(candidate_id)
+        authoritative_definition = load_workflow_definition_from_vontology(candidate_id)
+        if authoritative_definition is not None:
+            return authoritative_definition
+        return registry.get(candidate_id)
 
     for workflow_id in target_workflow_ids:
         spec = _CANONICAL_WORKFLOW_PUBLICATION_SPECS.get(workflow_id)
@@ -646,6 +867,7 @@ def publish_canonical_chat_workflow_graphs(
         if spec is None or registration is None:
             skipped_missing_registration.append(workflow_id)
             continue
+        registration_definition = getattr(registration, "definition", None)
 
         workflow_doc, workflow_load_error = _load_concept(workflow_id)
         if workflow_load_error:
@@ -746,9 +968,41 @@ def publish_canonical_chat_workflow_graphs(
                 alias_keys=_STEP_RELATIONSHIP_ALIAS_KEYS,
             )
 
-            if isinstance(step.action_id, str) and step.action_id.strip():
+            invoked_workflow_id = (
+                step.invoked_workflow_id.strip()
+                if isinstance(step.invoked_workflow_id, str)
+                and step.invoked_workflow_id.strip()
+                else _resolve_step_invoked_workflow_id(
+                    registration_definition=registration_definition,
+                    state_id=step.state_id,
+                )
+            )
+            mapping_target_id = (
+                invoked_workflow_id if invoked_workflow_id else step.action_id
+            )
+            if (
+                isinstance(step.action_id, str)
+                and step.action_id.strip()
+                and not (
+                    step.action_id.strip() == WORKFLOW_SUBWORKFLOW_ACTION_ID
+                    and invoked_workflow_id
+                )
+            ):
                 step_relationships[_CANONICAL_GRAPH_PREDICATES["invokesAction"]] = [
                     step.action_id.strip()
+                ]
+            if invoked_workflow_id:
+                step_relationships[
+                    _CANONICAL_GRAPH_PREDICATES["invokesWorkflow"]
+                ] = [invoked_workflow_id]
+            if step.static_input_bindings:
+                step_relationships[_CANONICAL_GRAPH_PREDICATES["hasInputMap"]] = [
+                    f"{key}={value}"
+                    for key, value in step.static_input_bindings
+                    if isinstance(key, str)
+                    and key.strip()
+                    and isinstance(value, str)
+                    and value.strip()
                 ]
             if step.context_input_mappings:
                 mapping_ids = [
@@ -762,6 +1016,51 @@ def publish_canonical_chat_workflow_graphs(
                             "workflowStepMapsContextKeyToToolParam"
                         ]
                     ] = mapping_ids
+            if step.tool_output_mapping_specs:
+                if not isinstance(mapping_target_id, str) or not mapping_target_id.strip():
+                    errors_by_workflow_id[workflow_id] = (
+                        f"tool_output_mapping_target_missing:{step_concept_id}"
+                    )
+                    step_update_failed = True
+                    break
+                for mapping_spec in step.tool_output_mapping_specs:
+                    created_mapping, mapping_error = _ensure_tool_output_mapping_concept(
+                        step_concept_id=step_concept_id,
+                        mapping_target_id=mapping_target_id.strip(),
+                        mapping_spec=mapping_spec,
+                    )
+                    if mapping_error:
+                        errors_by_workflow_id[workflow_id] = (
+                            f"mapping_spec_failed:{mapping_spec.concept_id}:{mapping_error}"
+                        )
+                        step_update_failed = True
+                        break
+                    if created_mapping:
+                        created_mapping_concept_ids.append(mapping_spec.concept_id)
+                if step_update_failed:
+                    break
+            if step.tool_output_context_mappings:
+                mapping_ids = [
+                    item.strip()
+                    for item in step.tool_output_context_mappings
+                    if isinstance(item, str) and item.strip()
+                ]
+                if mapping_ids:
+                    step_relationships[
+                        _CANONICAL_GRAPH_PREDICATES[
+                            "workflowStepMapsToolOutputFieldToContextKey"
+                        ]
+                    ] = mapping_ids
+            if step.writes_context_keys:
+                writes_context_keys = [
+                    item.strip()
+                    for item in step.writes_context_keys
+                    if isinstance(item, str) and item.strip()
+                ]
+                if writes_context_keys:
+                    step_relationships[
+                        _CANONICAL_GRAPH_PREDICATES["workflowStepWritesContextKey"]
+                    ] = writes_context_keys
 
             if isinstance(step.next_state, str) and step.next_state.strip():
                 step_relationships[_CANONICAL_GRAPH_PREDICATES["nextStep"]] = [
@@ -808,11 +1107,6 @@ def publish_canonical_chat_workflow_graphs(
                 break
 
         if not step_update_failed:
-            registration_definition = (
-                getattr(registration, "definition", None)
-                if registration is not None
-                else None
-            )
             registration_source = (
                 str(getattr(registration, "source", "") or "").strip().lower()
                 if registration is not None
@@ -888,6 +1182,7 @@ def publish_canonical_chat_workflow_graphs(
             "workflows_skipped_missing_concept": len(skipped_missing_concept),
             "step_concepts_created": len(created_step_ids),
             "action_concepts_created": len(created_action_concept_ids),
+            "mapping_concepts_created": len(created_mapping_concept_ids),
             "validation_failures": len(validation_failures_by_workflow_id),
             "errors": len(errors_by_workflow_id),
         },
@@ -896,6 +1191,7 @@ def publish_canonical_chat_workflow_graphs(
         "skipped_missing_concept_workflow_ids": skipped_missing_concept,
         "created_step_concept_ids": created_step_ids,
         "created_action_concept_ids": created_action_concept_ids,
+        "created_mapping_concept_ids": created_mapping_concept_ids,
         "validation_failures_by_workflow_id": validation_failures_by_workflow_id,
         "errors_by_workflow_id": errors_by_workflow_id,
     }

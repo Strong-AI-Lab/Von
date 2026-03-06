@@ -242,6 +242,32 @@ def _reset_mock_workflow_graph_db(monkeypatch):
     authority_service.clear_workflow_type_resolution_cache()
 
 
+def _comparable_state_metadata(state: Any) -> dict[str, Any]:
+    metadata = getattr(state, "metadata", None)
+    if not isinstance(metadata, dict):
+        return {}
+    comparable: dict[str, Any] = {}
+    for key in (
+        "invokes_workflow",
+        "reads_context_keys",
+        "writes_context_keys",
+        "tool_output_context_mappings",
+        "subworkflow_contract",
+    ):
+        value = metadata.get(key)
+        if value:
+            comparable[key] = value
+    return comparable
+
+
+def _built_metadata_subset_matches(*, loaded_state: Any, built_state: Any) -> bool:
+    expected = _comparable_state_metadata(built_state)
+    if not expected:
+        return True
+    loaded = _comparable_state_metadata(loaded_state)
+    return {key: loaded.get(key) for key in expected.keys()} == expected
+
+
 def test_bootstrap_publishes_canonical_chat_graphs_with_loader_runtime_parity(
     _reset_mock_workflow_graph_db,
 ):
@@ -330,6 +356,10 @@ def test_bootstrap_publishes_canonical_chat_graphs_with_loader_runtime_parity(
                 )
                 for transition in built_state.transitions
             }
+            assert _built_metadata_subset_matches(
+                loaded_state=loaded_state,
+                built_state=built_state,
+            )
 
         is_executable, reason, detail = classify_workflow_concept_executability(
             workflow_id

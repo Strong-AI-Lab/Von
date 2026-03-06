@@ -40,7 +40,10 @@ from src.backend.workflows.vontology_loader import (
     resolve_workflow_description,
     resolve_workflow_narrative_text,
 )
-from src.backend.workflows.subworkflow_contracts import WORKFLOW_SUBWORKFLOW_ACTION_ID
+from src.backend.workflows.subworkflow_contracts import (
+    WORKFLOW_SUBWORKFLOW_ACTION_ID,
+    WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1587,13 +1590,113 @@ class TestSubworkflowCompositionContracts:
         assert metadata["invokes_workflow"] == "#V#child_workflow"
         assert metadata["subworkflow_contract"]["workflow_id"] == "#V#child_workflow"
         assert metadata["subworkflow_contract"]["provided_inputs"] == ["child_input"]
-        assert metadata["subworkflow_contract"]["mapped_outputs"] == ["child_output"]
+        assert metadata["subworkflow_contract"]["mapped_outputs"] == []
         assert metadata["tool_output_context_mappings"] == [
             {
                 "tool_output_field": "child_output",
                 "context_key": "parent_output",
                 "mapping_concept_id": output_mapping_id,
             }
+        ]
+
+    def test_load_definition_preserves_subworkflow_failure_mode_and_result_mappings(self):
+        input_mapping_id = "#V#mapping_subworkflow_input"
+        result_mapping_id = "#V#mapping_subworkflow_result_output"
+        failure_mapping_id = "#V#mapping_subworkflow_failure_output"
+        docs = {
+            "#V#step": {
+                "concept_id": "#V#step",
+                "relationships": {
+                    "#V#hasInputMap": [
+                        f"failure_mode={WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE}"
+                    ],
+                },
+            },
+            input_mapping_id: {
+                "concept_id": input_mapping_id,
+                "concept_data": {
+                    "workflow_mapping_spec": {
+                        "schema_version": 1,
+                        "mapping_type": "context_key_to_tool_param",
+                        "workflow_step_id": "#V#step",
+                        "tool_id": "#V#child_workflow",
+                        "context_key_concept_id": "#V#workflow_context_key_parent_input",
+                        "tool_param_name": "child_input",
+                    }
+                },
+                "relationships": {},
+            },
+            result_mapping_id: {
+                "concept_id": result_mapping_id,
+                "concept_data": {
+                    "workflow_mapping_spec": {
+                        "schema_version": 1,
+                        "mapping_type": "tool_output_field_to_context_key",
+                        "workflow_step_id": "#V#step",
+                        "tool_id": "#V#child_workflow",
+                        "tool_output_field_name": "result.child_output",
+                        "target_context_key_concept_id": (
+                            "#V#workflow_context_key_parent_output"
+                        ),
+                    }
+                },
+                "relationships": {},
+            },
+            failure_mapping_id: {
+                "concept_id": failure_mapping_id,
+                "concept_data": {
+                    "workflow_mapping_spec": {
+                        "schema_version": 1,
+                        "mapping_type": "tool_output_field_to_context_key",
+                        "workflow_step_id": "#V#step",
+                        "tool_id": "#V#child_workflow",
+                        "tool_output_field_name": "child_workflow_failed",
+                        "target_context_key_concept_id": (
+                            "#V#workflow_context_key_parent_failed"
+                        ),
+                    }
+                },
+                "relationships": {},
+            },
+        }
+        steps = [
+            _make_step(
+                "#V#step",
+                invokes_workflow="#V#child_workflow",
+                context_input_mappings=[input_mapping_id],
+                tool_output_context_mappings=[result_mapping_id, failure_mapping_id],
+            )
+        ]
+        graph = _make_graph(initial_step="#V#step", steps=steps)
+
+        with _stub_fetch_concepts(docs), _stub_narrative():
+            with patch(
+                "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+                return_value=(graph, []),
+            ):
+                defn = load_workflow_definition_from_vontology("#V#parent_workflow")
+
+        assert defn is not None
+        state = defn.states["#V#step"]
+        assert state.actions[0].inputs["failure_mode"] == (
+            WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE
+        )
+        metadata = state.metadata
+        assert metadata["subworkflow_contract"]["failure_mode"] == (
+            WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE
+        )
+        assert metadata["subworkflow_contract"]["mapped_outputs"] == ["child_output"]
+        assert metadata["tool_output_context_mappings"] == [
+            {
+                "tool_output_field": "result.child_output",
+                "context_key": "parent_output",
+                "mapping_concept_id": result_mapping_id,
+            },
+            {
+                "tool_output_field": "child_workflow_failed",
+                "context_key": "parent_failed",
+                "mapping_concept_id": failure_mapping_id,
+            },
         ]
 
     def test_detect_vacuous_steps_treats_invokes_workflow_as_executable_contract(self):
