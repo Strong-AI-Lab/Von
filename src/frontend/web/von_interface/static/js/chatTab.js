@@ -153,7 +153,9 @@ const workflowDefinitionsState = {
     visible: false,
     loading: false,
     error: '',
+    notice: '',
     items: [],
+    cacheState: 'none',
     lastFetchedAt: 0,
     lastPayload: null,
     lastRequestQuery: '',
@@ -167,6 +169,9 @@ const WORKFLOW_DEFINITIONS_CONTENTION_RETRY_BASE_MS = 750;
 const WORKFLOW_DEFINITIONS_CONTENTION_RETRY_MAX_MS = 5000;
 const WORKFLOW_DEFINITIONS_CONTENTION_RETRY_MAX_ATTEMPTS = 3;
 const WORKFLOW_DEFINITIONS_CONTENTION_RETRY_DEFAULT_SECONDS = 1;
+const WORKFLOW_DEFINITIONS_TIMEOUT_RETRY_BASE_MS = 1200;
+const WORKFLOW_DEFINITIONS_TIMEOUT_RETRY_MAX_MS = 6000;
+const WORKFLOW_DEFINITIONS_TIMEOUT_RETRY_MAX_ATTEMPTS = 2;
 let workflowStatusPanelInitialised = false;
 let chatTabInitialised = false;
 const REALTIME_CONNECTION_TELEMETRY_SCHEMA_VERSION = 1;
@@ -15965,6 +15970,7 @@ function buildWorkflowMonitorExportPayload() {
             show_designs: Boolean(workflowDefinitionsState.showDesigns),
             loading_available: Boolean(workflowDefinitionsState.loading),
             available_error: workflowDefinitionsState.error || null,
+            available_notice: workflowDefinitionsState.notice || null,
             available_last_fetched_at: workflowDefinitionsState.lastFetchedAt
                 ? new Date(workflowDefinitionsState.lastFetchedAt).toISOString()
                 : null
@@ -16102,24 +16108,30 @@ function renderWorkflowDefinitionsList(items) {
     const { body } = getWorkflowStatusElements();
     if (!body) return;
 
-    if (workflowDefinitionsState.loading) {
+    if (workflowDefinitionsState.loading && !items.length) {
         body.innerHTML = '<div class="workflow-status-empty">Loading available workflows…</div>';
         return;
     }
 
-    if (workflowDefinitionsState.error && !items.length) {
-        body.innerHTML = `<div class="workflow-status-empty workflow-status-error">${escapeHtml(workflowDefinitionsState.error)}</div>`;
-        return;
+    const bannerParts = [];
+    if (workflowDefinitionsState.loading && items.length) {
+        bannerParts.push('<div class="workflow-status-empty">Refreshing available workflows…</div>');
     }
+    if (workflowDefinitionsState.error) {
+        bannerParts.push(`<div class="workflow-status-empty workflow-status-error">${escapeHtml(workflowDefinitionsState.error)}</div>`);
+    } else if (workflowDefinitionsState.notice) {
+        bannerParts.push(`<div class="workflow-status-empty workflow-status-info">${escapeHtml(workflowDefinitionsState.notice)}</div>`);
+    }
+    const bannerHtml = bannerParts.join('');
 
     if (!items.length) {
-        body.innerHTML = '<div class="workflow-status-empty">No available workflows</div>';
+        body.innerHTML = bannerHtml || '<div class="workflow-status-empty">No available workflows</div>';
         return;
     }
 
     const filteredItems = filterWorkflowDefinitionsForDisplay(items);
     if (!filteredItems.length) {
-        body.innerHTML = '<div class="workflow-status-empty">No available workflows (design artefacts hidden)</div>';
+        body.innerHTML = bannerHtml || '<div class="workflow-status-empty">No available workflows (design artefacts hidden)</div>';
         return;
     }
 
@@ -16187,7 +16199,7 @@ function renderWorkflowDefinitionsList(items) {
         `;
     }).join('');
 
-    body.innerHTML = html;
+    body.innerHTML = `${bannerHtml}${html}`;
 }
 
 function bindWorkflowStatusConceptLinks() {
@@ -16321,6 +16333,18 @@ function parseWorkflowDefinitionsRetryAfterSeconds(payload, response) {
     return WORKFLOW_DEFINITIONS_CONTENTION_RETRY_DEFAULT_SECONDS;
 }
 
+function parseWorkflowDefinitionsCacheRetryAfterSeconds(payload) {
+    const cacheValue = Number(payload?.cache?.retry_after_seconds);
+    if (Number.isFinite(cacheValue) && cacheValue > 0) {
+        return cacheValue;
+    }
+    return WORKFLOW_DEFINITIONS_CONTENTION_RETRY_DEFAULT_SECONDS;
+}
+
+function formatWorkflowDefinitionsRetryDelaySeconds(delayMs) {
+    return Math.max(0.1, Math.round((delayMs / 1000) * 10) / 10);
+}
+
 function clearWorkflowDefinitionsRetryTimer() {
     if (workflowDefinitionsState.retryTimeoutId) {
         clearTimeout(workflowDefinitionsState.retryTimeoutId);
@@ -16337,6 +16361,55 @@ function scheduleWorkflowDefinitionsRetry({ delayMs, silent = true } = {}) {
     }, boundedDelay);
 }
 
+function applyWorkflowDefinitionsRetryableState({
+    nextRetryAttempt,
+    retryAfterSeconds = 0,
+    maxAttempts,
+    baseDelayMs,
+    maxDelayMs,
+    pendingMessage,
+    exhaustedMessage,
+    exhaustedKind = 'notice',
+    payload
+} = {}) {
+    const attempt = Math.max(1, Math.round(Number(nextRetryAttempt) || 1));
+    const boundedBaseDelayMs = Math.max(50, Math.round(Number(baseDelayMs) || 0));
+    const boundedMaxDelayMs = Math.max(
+        boundedBaseDelayMs,
+        Math.round(Number(maxDelayMs) || boundedBaseDelayMs)
+    );
+    const retryAfterMs = Math.max(0, Math.round(Number(retryAfterSeconds) * 1000) || 0);
+    const exponentialDelayMs = Math.min(
+        boundedBaseDelayMs * (2 ** (attempt - 1)),
+        boundedMaxDelayMs
+    );
+    const retryDelayMs = Math.max(exponentialDelayMs, retryAfterMs);
+    const shouldRetry = attempt <= Math.max(1, Math.round(Number(maxAttempts) || 1));
+    const retryDelaySecondsRounded = formatWorkflowDefinitionsRetryDelaySeconds(retryDelayMs);
+
+    workflowDefinitionsState.retryAttempt = attempt;
+    workflowDefinitionsState.error = '';
+    workflowDefinitionsState.notice = '';
+    if (shouldRetry) {
+        workflowDefinitionsState.notice = pendingMessage(retryDelaySecondsRounded);
+        scheduleWorkflowDefinitionsRetry({ delayMs: retryDelayMs, silent: true });
+    } else {
+        clearWorkflowDefinitionsRetryTimer();
+        if (exhaustedKind === 'error') {
+            workflowDefinitionsState.error = exhaustedMessage;
+        } else {
+            workflowDefinitionsState.notice = exhaustedMessage;
+        }
+    }
+
+    workflowDefinitionsState.lastPayload = {
+        ...(payload && typeof payload === 'object' ? payload : {}),
+        retryable: shouldRetry,
+        retry_attempt: attempt,
+        retry_scheduled_in_ms: shouldRetry ? retryDelayMs : null
+    };
+}
+
 async function refreshAvailableWorkflowDefinitions({ silent = false } = {}) {
     const { panel } = getWorkflowStatusElements();
     if (!panel) return;
@@ -16348,6 +16421,7 @@ async function refreshAvailableWorkflowDefinitions({ silent = false } = {}) {
         silent
         && Number.isFinite(workflowDefinitionsState.lastFetchedAt)
         && workflowDefinitionsState.lastFetchedAt > 0
+        && workflowDefinitionsState.cacheState !== 'stale'
         && (now - workflowDefinitionsState.lastFetchedAt) < WORKFLOW_DEFINITIONS_SILENT_REFRESH_COOLDOWN_MS
     ) {
         return;
@@ -16355,6 +16429,7 @@ async function refreshAvailableWorkflowDefinitions({ silent = false } = {}) {
 
     workflowDefinitionsState.loading = true;
     workflowDefinitionsState.error = '';
+    workflowDefinitionsState.notice = '';
     if (workflowDefinitionsState.visible) {
         renderWorkflowStatusBody();
     }
@@ -16380,37 +16455,25 @@ async function refreshAvailableWorkflowDefinitions({ silent = false } = {}) {
                 : '';
             if (responseError === 'workflow_definitions_refresh_in_progress') {
                 const retryAfterSeconds = parseWorkflowDefinitionsRetryAfterSeconds(responsePayload, resp);
-                const nextRetryAttempt = workflowDefinitionsState.retryAttempt + 1;
-                workflowDefinitionsState.retryAttempt = nextRetryAttempt;
-                const exponentialDelayMs = Math.min(
-                    WORKFLOW_DEFINITIONS_CONTENTION_RETRY_BASE_MS * (2 ** (nextRetryAttempt - 1)),
-                    WORKFLOW_DEFINITIONS_CONTENTION_RETRY_MAX_MS
-                );
-                const retryAfterMs = Math.round(retryAfterSeconds * 1000);
-                const retryDelayMs = Math.max(exponentialDelayMs, retryAfterMs);
-                const shouldRetry = nextRetryAttempt <= WORKFLOW_DEFINITIONS_CONTENTION_RETRY_MAX_ATTEMPTS;
-                const retryDelaySecondsRounded = Math.max(
-                    0.1,
-                    Math.round((retryDelayMs / 1000) * 10) / 10
-                );
-                workflowDefinitionsState.error = shouldRetry
-                    ? `Workflow definitions are refreshing, retrying in ${retryDelaySecondsRounded}s...`
-                    : 'Workflow definitions are still refreshing. Press Refresh to try again.';
-                workflowDefinitionsState.lastPayload = {
-                    error: 'workflow_definitions_refresh_in_progress',
-                    detail: (typeof responsePayload?.detail === 'string' && responsePayload.detail.trim())
-                        ? responsePayload.detail.trim()
-                        : 'Workflow definitions refresh is already running; retry shortly.',
-                    retryable: shouldRetry,
-                    retry_after_seconds: retryAfterSeconds,
-                    retry_attempt: nextRetryAttempt,
-                    retry_scheduled_in_ms: shouldRetry ? retryDelayMs : null,
-                    status: resp.status,
-                    request_query: workflowDefinitionsState.lastRequestQuery || null
-                };
-                if (shouldRetry) {
-                    scheduleWorkflowDefinitionsRetry({ delayMs: retryDelayMs, silent: true });
-                }
+                applyWorkflowDefinitionsRetryableState({
+                    nextRetryAttempt: workflowDefinitionsState.retryAttempt + 1,
+                    retryAfterSeconds,
+                    maxAttempts: WORKFLOW_DEFINITIONS_CONTENTION_RETRY_MAX_ATTEMPTS,
+                    baseDelayMs: WORKFLOW_DEFINITIONS_CONTENTION_RETRY_BASE_MS,
+                    maxDelayMs: WORKFLOW_DEFINITIONS_CONTENTION_RETRY_MAX_MS,
+                    pendingMessage: (delaySeconds) => `Workflow definitions are refreshing, retrying in ${delaySeconds}s...`,
+                    exhaustedMessage: 'Workflow definitions are still refreshing. Press Refresh to try again.',
+                    exhaustedKind: 'notice',
+                    payload: {
+                        error: 'workflow_definitions_refresh_in_progress',
+                        detail: (typeof responsePayload?.detail === 'string' && responsePayload.detail.trim())
+                            ? responsePayload.detail.trim()
+                            : 'Workflow definitions refresh is already running; retry shortly.',
+                        retry_after_seconds: retryAfterSeconds,
+                        status: resp.status,
+                        request_query: workflowDefinitionsState.lastRequestQuery || null
+                    }
+                });
                 if (!silent) {
                     console.info('[workflowStatus] Workflow definitions refresh contention', workflowDefinitionsState.lastPayload);
                 }
@@ -16430,6 +16493,30 @@ async function refreshAvailableWorkflowDefinitions({ silent = false } = {}) {
         workflowDefinitionsState.items = Array.isArray(data?.items) ? data.items : [];
         workflowDefinitionsState.lastFetchedAt = Date.now();
         workflowDefinitionsState.error = '';
+        workflowDefinitionsState.notice = '';
+        workflowDefinitionsState.cacheState = (
+            typeof data?.cache?.state === 'string' && data.cache.state.trim() === 'stale'
+        ) ? 'stale' : 'fresh';
+        if (workflowDefinitionsState.cacheState === 'stale' && data?.cache?.refresh_in_progress) {
+            applyWorkflowDefinitionsRetryableState({
+                nextRetryAttempt: workflowDefinitionsState.retryAttempt + 1,
+                retryAfterSeconds: parseWorkflowDefinitionsCacheRetryAfterSeconds(data),
+                maxAttempts: WORKFLOW_DEFINITIONS_CONTENTION_RETRY_MAX_ATTEMPTS,
+                baseDelayMs: WORKFLOW_DEFINITIONS_CONTENTION_RETRY_BASE_MS,
+                maxDelayMs: WORKFLOW_DEFINITIONS_CONTENTION_RETRY_MAX_MS,
+                pendingMessage: (delaySeconds) => (
+                    `Showing cached workflow definitions while the monitor refreshes in the background. Retrying in ${delaySeconds}s...`
+                ),
+                exhaustedMessage: 'Showing cached workflow definitions. Press Refresh to check again.',
+                exhaustedKind: 'notice',
+                payload: {
+                    ...data,
+                    detail: 'Showing cached workflow definitions while a background refresh completes.',
+                    request_query: workflowDefinitionsState.lastRequestQuery || null
+                }
+            });
+            return;
+        }
         workflowDefinitionsState.retryAttempt = 0;
         clearWorkflowDefinitionsRetryTimer();
     } catch (err) {
@@ -16441,25 +16528,52 @@ async function refreshAvailableWorkflowDefinitions({ silent = false } = {}) {
         const responseDetail = (typeof responsePayload?.detail === 'string' && responsePayload.detail.trim())
             ? responsePayload.detail.trim()
             : '';
-        workflowDefinitionsState.error = isAbortError
-            ? 'Workflow definitions request timed out. Please retry.'
-            : (responseDetail
+        if (isAbortError) {
+            const hasItems = Array.isArray(workflowDefinitionsState.items) && workflowDefinitionsState.items.length > 0;
+            applyWorkflowDefinitionsRetryableState({
+                nextRetryAttempt: workflowDefinitionsState.retryAttempt + 1,
+                retryAfterSeconds: 0,
+                maxAttempts: WORKFLOW_DEFINITIONS_TIMEOUT_RETRY_MAX_ATTEMPTS,
+                baseDelayMs: WORKFLOW_DEFINITIONS_TIMEOUT_RETRY_BASE_MS,
+                maxDelayMs: WORKFLOW_DEFINITIONS_TIMEOUT_RETRY_MAX_MS,
+                pendingMessage: (delaySeconds) => (
+                    hasItems
+                        ? `Showing last loaded workflow definitions while the request catches up. Retrying in ${delaySeconds}s...`
+                        : `Workflow definitions are taking longer than expected. Retrying in ${delaySeconds}s...`
+                ),
+                exhaustedMessage: hasItems
+                    ? 'Showing last loaded workflow definitions. Press Refresh to try again.'
+                    : 'Workflow definitions request timed out. Please retry.',
+                exhaustedKind: hasItems ? 'notice' : 'error',
+                payload: {
+                    error: 'workflow_definitions_request_timed_out',
+                    detail: `Request timed out after ${Math.round(WORKFLOW_DEFINITIONS_FETCH_TIMEOUT_MS / 1000)}s`,
+                    status,
+                    response_payload: responsePayload,
+                    request_query: workflowDefinitionsState.lastRequestQuery || null
+                }
+            });
+        } else {
+            workflowDefinitionsState.error = responseDetail
                 ? `Could not load available workflows: ${responseDetail}`
-                : 'Could not load available workflows');
-        workflowDefinitionsState.retryAttempt = 0;
-        clearWorkflowDefinitionsRetryTimer();
-        workflowDefinitionsState.lastPayload = {
-            error: (typeof responsePayload?.error === 'string' && responsePayload.error.trim())
-                ? responsePayload.error.trim()
-                : 'workflow_definitions_fetch_failed',
-            detail: isAbortError
-                ? `Request timed out after ${Math.round(WORKFLOW_DEFINITIONS_FETCH_TIMEOUT_MS / 1000)}s`
-                : (responseDetail || (err instanceof Error ? err.message : String(err || 'unknown_error'))),
-            status,
-            retryable: false,
-            response_payload: responsePayload,
-            request_query: workflowDefinitionsState.lastRequestQuery || null
-        };
+                : 'Could not load available workflows';
+            workflowDefinitionsState.notice = '';
+            workflowDefinitionsState.retryAttempt = 0;
+            workflowDefinitionsState.cacheState = workflowDefinitionsState.items.length
+                ? workflowDefinitionsState.cacheState
+                : 'none';
+            clearWorkflowDefinitionsRetryTimer();
+            workflowDefinitionsState.lastPayload = {
+                error: (typeof responsePayload?.error === 'string' && responsePayload.error.trim())
+                    ? responsePayload.error.trim()
+                    : 'workflow_definitions_fetch_failed',
+                detail: responseDetail || (err instanceof Error ? err.message : String(err || 'unknown_error')),
+                status,
+                retryable: false,
+                response_payload: responsePayload,
+                request_query: workflowDefinitionsState.lastRequestQuery || null
+            };
+        }
         if (!silent) {
             console.warn('[workflowStatus] Available workflow fetch failed', err);
         }
@@ -19645,7 +19759,9 @@ export function __testOnly_renderWorkflowDefinitionsBody(items = []) {
     workflowDefinitionsState.visible = true;
     workflowDefinitionsState.loading = false;
     workflowDefinitionsState.error = '';
+    workflowDefinitionsState.notice = '';
     workflowDefinitionsState.items = Array.isArray(items) ? items : [];
+    workflowDefinitionsState.cacheState = workflowDefinitionsState.items.length ? 'fresh' : 'none';
     renderWorkflowStatusBody();
 }
 export function __testOnly_setWorkflowShowDesigns(enabled) {
@@ -19659,7 +19775,9 @@ export function __testOnly_resetWorkflowDefinitionsState() {
     workflowDefinitionsState.visible = false;
     workflowDefinitionsState.loading = false;
     workflowDefinitionsState.error = '';
+    workflowDefinitionsState.notice = '';
     workflowDefinitionsState.items = [];
+    workflowDefinitionsState.cacheState = 'none';
     workflowDefinitionsState.lastFetchedAt = 0;
     workflowDefinitionsState.lastPayload = null;
     workflowDefinitionsState.lastRequestQuery = '';

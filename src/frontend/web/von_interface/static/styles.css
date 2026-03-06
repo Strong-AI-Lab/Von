@@ -6091,6 +6091,11 @@ footer {
     color: #991b1b;
 }
 
+.workflow-status-empty.workflow-status-info {
+    background: rgba(239, 246, 255, 0.92);
+    color: #1d4ed8;
+}
+
 .workflow-episodes-popup {
     max-width: 720px;
 }
