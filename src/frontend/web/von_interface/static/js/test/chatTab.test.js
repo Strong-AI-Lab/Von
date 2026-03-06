@@ -622,6 +622,131 @@ describe('workflow monitor definitions refresh contention handling', () => {
         expect(successExport.monitor_state.available_error).toBeNull();
     });
 
+    test('shows cached workflows while a stale background refresh completes', async () => {
+        let fetchCount = 0;
+        global.fetch = jest.fn(() => {
+            fetchCount += 1;
+            if (fetchCount === 1) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    headers: { get: () => null },
+                    json: async () => ({
+                        items: [
+                            {
+                                workflow_id: '#V#cached_workflow',
+                                description: 'Cached workflow.',
+                                initial_state: 'start',
+                                source: 'built_in'
+                            }
+                        ],
+                        cache: {
+                            state: 'stale',
+                            refresh_in_progress: true,
+                            retry_after_seconds: 1
+                        }
+                    })
+                });
+            }
+            return Promise.resolve({
+                ok: true,
+                status: 200,
+                headers: { get: () => null },
+                json: async () => ({
+                    items: [
+                        {
+                            workflow_id: '#V#fresh_workflow',
+                            description: 'Fresh workflow.',
+                            initial_state: 'ready',
+                            source: 'built_in'
+                        }
+                    ],
+                    cache: {
+                        state: 'fresh',
+                        refresh_in_progress: false
+                    }
+                })
+            });
+        });
+
+        await __testOnly_refreshAvailableWorkflowDefinitions();
+
+        expect(fetchCount).toBe(1);
+        expect(document.getElementById('workflowStatusBody').textContent).toContain(
+            'Showing cached workflow definitions while the monitor refreshes in the background'
+        );
+        expect(document.getElementById('workflowStatusBody').textContent).toContain(
+            'cached workflow'
+        );
+        const staleExport = __testOnly_buildWorkflowMonitorExportPayload();
+        expect(staleExport.monitor_state.available_notice).toContain('Showing cached workflow definitions');
+        expect(staleExport.definitions_snapshot.payload.cache.state).toBe('stale');
+
+        jest.advanceTimersByTime(1100);
+        await flushMicrotasks();
+
+        expect(fetchCount).toBe(2);
+        expect(document.getElementById('workflowStatusBody').textContent).toContain(
+            'fresh workflow'
+        );
+        const successExport = __testOnly_buildWorkflowMonitorExportPayload();
+        expect(successExport.monitor_state.available_notice).toBeNull();
+    });
+
+    test('treats timeout as transient and retries before surfacing a hard timeout', async () => {
+        let fetchCount = 0;
+        global.fetch = jest.fn(() => {
+            fetchCount += 1;
+            if (fetchCount === 1) {
+                const err = new Error('timeout');
+                err.name = 'AbortError';
+                return Promise.reject(err);
+            }
+            return Promise.resolve({
+                ok: true,
+                status: 200,
+                headers: { get: () => null },
+                json: async () => ({
+                    items: [
+                        {
+                            workflow_id: '#V#timeout_recovery_workflow',
+                            description: 'Recovered after timeout.',
+                            initial_state: 'ready',
+                            source: 'built_in'
+                        }
+                    ],
+                    cache: {
+                        state: 'fresh',
+                        refresh_in_progress: false
+                    }
+                })
+            });
+        });
+
+        await __testOnly_refreshAvailableWorkflowDefinitions();
+
+        expect(fetchCount).toBe(1);
+        expect(document.getElementById('workflowStatusBody').textContent).toContain(
+            'Workflow definitions are taking longer than expected. Retrying in'
+        );
+        const timeoutExport = __testOnly_buildWorkflowMonitorExportPayload();
+        expect(timeoutExport.monitor_state.available_notice).toContain('Retrying');
+        expect(timeoutExport.definitions_snapshot.payload.error).toBe(
+            'workflow_definitions_request_timed_out'
+        );
+
+        jest.advanceTimersByTime(1300);
+        await flushMicrotasks();
+
+        expect(fetchCount).toBe(2);
+        expect(document.getElementById('workflowStatusBody').textContent).toContain(
+            'timeout recovery workflow'
+        );
+        const successExport = __testOnly_buildWorkflowMonitorExportPayload();
+        expect(successExport.monitor_state.available_error).toBeNull();
+        expect(successExport.monitor_state.available_notice).toBeNull();
+    });
+
     test('keeps hard error state for non-contention 5xx responses', async () => {
         global.fetch = jest.fn(() => Promise.resolve({
             ok: false,

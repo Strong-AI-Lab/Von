@@ -893,6 +893,84 @@ def test_workflow_definitions_list_serves_stale_when_refresh_in_progress(
     payload = resp.get_json()
     assert payload["count"] == 1
     assert payload["items"][0]["workflow_id"] == "#V#stale_workflow"
+    assert payload["cache"]["state"] == "stale"
+    assert payload["cache"]["refresh_in_progress"] is True
+    assert float(payload["cache"]["retry_after_seconds"]) > 0.0
+
+
+def test_workflow_definitions_list_serves_expired_cache_and_starts_background_refresh(
+    monkeypatch, app_client
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+    import src.backend.workflows.durable.registry_factory as registry_factory
+
+    cache_key = (10, None, None, None)
+    stale_payload = {
+        "items": [
+            {
+                "workflow_id": "#V#stale_workflow",
+                "description": "stale",
+                "description_source": "cache",
+                "initial_state": "start",
+                "source": "built_in",
+                "definition_identity": None,
+                "attempts": 0,
+                "completions": 0,
+                "completion_rate": None,
+                "last_episode_at": None,
+                "episodes_count": 0,
+                "is_executable": True,
+                "executability_reason": "executable_now",
+                "executability_detail": None,
+            }
+        ],
+        "count": 1,
+        "total": 1,
+        "episodes_scope": {"namespace": None, "session_id": None, "turn_id": None},
+        "parity_inventory": {},
+    }
+
+    refresh_calls: list[dict[str, object]] = []
+
+    monkeypatch.setenv("VON_WORKFLOW_DEFINITIONS_CACHE_TTL_SECONDS", "60")
+    monkeypatch.setattr(
+        registry_factory,
+        "build_durable_workflow_registry_read_only",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("Should not rebuild registry in foreground")
+        ),
+    )
+    def _fake_start_background_refresh(**kwargs):
+        refresh_calls.append(kwargs)
+        refresh_lock = kwargs.get("refresh_lock")
+        if refresh_lock is not None:
+            refresh_lock.release()
+        return True
+
+    monkeypatch.setattr(
+        workflows_routes,
+        "_start_workflow_definitions_background_refresh",
+        _fake_start_background_refresh,
+    )
+
+    with workflows_routes._WORKFLOW_DEFINITIONS_CACHE_LOCK:
+        workflows_routes._WORKFLOW_DEFINITIONS_CACHE.clear()
+        workflows_routes._WORKFLOW_DEFINITIONS_CACHE[cache_key] = {
+            "expires_at_monotonic": time.monotonic() - 1.0,
+            "stored_at_monotonic": time.monotonic() - 5.0,
+            "payload": stale_payload,
+        }
+
+    resp = app_client.get("/api/workflows/definitions?limit=10")
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["items"][0]["workflow_id"] == "#V#stale_workflow"
+    assert payload["cache"]["state"] == "stale"
+    assert payload["cache"]["refresh_in_progress"] is True
+    assert float(payload["cache"]["retry_after_seconds"]) > 0.0
+    assert refresh_calls
+    assert refresh_calls[0]["cache_key"] == cache_key
 
 
 def test_workflow_definitions_list_refresh_in_progress_without_stale_returns_503(

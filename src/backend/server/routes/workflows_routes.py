@@ -87,29 +87,34 @@ def _read_cached_workflow_definitions_entry(
     *,
     cache_key: Tuple[int, Optional[str], Optional[str], Optional[str]],
     bypass_cache: bool,
-) -> Tuple[Optional[Dict[str, Any]], bool]:
+) -> Tuple[Optional[Dict[str, Any]], bool, Optional[float]]:
     if bypass_cache:
-        return None, False
+        return None, False, None
 
     ttl_seconds = _read_workflow_definitions_cache_ttl_seconds()
     if ttl_seconds <= 0.0:
-        return None, False
+        return None, False, None
 
     now_monotonic = time.monotonic()
     with _WORKFLOW_DEFINITIONS_CACHE_LOCK:
         entry = _WORKFLOW_DEFINITIONS_CACHE.get(cache_key)
         if not isinstance(entry, dict):
-            return None, False
+            return None, False, None
         expires_at = entry.get("expires_at_monotonic")
+        stored_at = entry.get("stored_at_monotonic")
         payload = entry.get("payload")
         if not isinstance(payload, dict):
             _WORKFLOW_DEFINITIONS_CACHE.pop(cache_key, None)
-            return None, False
+            return None, False, None
         if not isinstance(expires_at, (int, float)):
             _WORKFLOW_DEFINITIONS_CACHE.pop(cache_key, None)
-            return None, False
+            return None, False, None
+        if not isinstance(stored_at, (int, float)):
+            _WORKFLOW_DEFINITIONS_CACHE.pop(cache_key, None)
+            return None, False, None
         is_fresh = now_monotonic < float(expires_at)
-        return payload, is_fresh
+        age_seconds = max(0.0, now_monotonic - float(stored_at))
+        return payload, is_fresh, age_seconds
 
 
 def _read_cached_workflow_definitions(
@@ -117,13 +122,53 @@ def _read_cached_workflow_definitions(
     cache_key: Tuple[int, Optional[str], Optional[str], Optional[str]],
     bypass_cache: bool,
 ) -> Optional[Dict[str, Any]]:
-    payload, is_fresh = _read_cached_workflow_definitions_entry(
+    payload, is_fresh, _age_seconds = _read_cached_workflow_definitions_entry(
         cache_key=cache_key,
         bypass_cache=bypass_cache,
     )
     if is_fresh and isinstance(payload, dict):
         return payload
     return None
+
+
+def _build_workflow_definitions_cache_metadata(
+    *,
+    state: str,
+    age_seconds: float | None,
+    refresh_in_progress: bool,
+    retry_after_seconds: float | None = None,
+) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {
+        "state": state,
+        "refresh_in_progress": bool(refresh_in_progress),
+        "age_seconds": (
+            round(float(age_seconds), 3)
+            if isinstance(age_seconds, (int, float))
+            else None
+        ),
+        "ttl_seconds": round(_read_workflow_definitions_cache_ttl_seconds(), 3),
+    }
+    if isinstance(retry_after_seconds, (int, float)) and retry_after_seconds > 0:
+        metadata["retry_after_seconds"] = round(float(retry_after_seconds), 3)
+    return metadata
+
+
+def _attach_workflow_definitions_cache_metadata(
+    payload: Dict[str, Any],
+    *,
+    state: str,
+    age_seconds: float | None,
+    refresh_in_progress: bool,
+    retry_after_seconds: float | None = None,
+) -> Dict[str, Any]:
+    response_payload = dict(payload)
+    response_payload["cache"] = _build_workflow_definitions_cache_metadata(
+        state=state,
+        age_seconds=age_seconds,
+        refresh_in_progress=refresh_in_progress,
+        retry_after_seconds=retry_after_seconds,
+    )
+    return response_payload
 
 
 def _get_workflow_definitions_refresh_lock(
@@ -165,6 +210,196 @@ def _write_cached_workflow_definitions(
                 oldest_stamp = float(stored_at)
         if oldest_key is not None:
             _WORKFLOW_DEFINITIONS_CACHE.pop(oldest_key, None)
+
+
+def _build_workflow_definitions_payload(
+    *,
+    limit: int,
+    namespace: str | None,
+    session_id: str | None,
+    turn_id: str | None,
+) -> Dict[str, Any]:
+    from ...workflows.durable.registry_factory import (
+        build_durable_workflow_registry_read_only,
+        get_workflow_registry_inventory_snapshot,
+    )
+    from ...services.workflow_discovery_service import (
+        classify_workflow_concept_executability,
+    )
+
+    # Read-only build avoids concept bootstrap writes on list/introspection paths.
+    registry = build_durable_workflow_registry_read_only()
+    inventory_snapshot = get_workflow_registry_inventory_snapshot()
+    if not isinstance(inventory_snapshot, dict):
+        inventory_snapshot = {}
+    workflow_ids = sorted(list(registry.all_workflow_ids()))
+    selected_ids = workflow_ids[:limit]
+    usage_aggregate_map = get_workflow_usage_aggregates_for_workflows(selected_ids)
+    episode_count_map = get_workflow_episode_counts_for_workflows(
+        selected_ids,
+        namespace=namespace or None,
+        session_id=session_id or None,
+        turn_id=turn_id or None,
+    )
+
+    items: List[Dict[str, Any]] = []
+    for workflow_id in selected_ids:
+        registration = registry.get_registration(workflow_id)
+        definition = (
+            registration.definition if registration is not None else registry.get(workflow_id)
+        )
+
+        registration_purpose = registration.purpose if registration is not None else None
+        definition_purpose = (
+            getattr(definition, "purpose", "") if definition is not None else None
+        )
+        description, description_source = resolve_workflow_description(
+            workflow_id,
+            workflow_source=(registration.source if registration is not None else None),
+            registration_purpose=registration_purpose,
+            definition_purpose=definition_purpose,
+        )
+        source = "unknown"
+        if registration is not None:
+            if isinstance(registration.source, str) and registration.source.strip():
+                source = registration.source.strip()
+        definition_identity = build_workflow_definition_identity(
+            workflow_id=workflow_id,
+            source=source,
+            definition=definition,
+            authoritative_definition=(
+                definition if source.lower() == "vontology" and definition is not None else None
+            ),
+        )
+
+        initial_state = ""
+        if definition is not None:
+            state_value = getattr(definition, "initial_state", "")
+            if isinstance(state_value, str):
+                initial_state = state_value
+
+        usage = (
+            usage_aggregate_map.get(workflow_id, {})
+            if isinstance(usage_aggregate_map, dict)
+            else {}
+        )
+        attempts = usage.get("attempts")
+        completions = usage.get("completions")
+        completion_rate = usage.get("completion_rate")
+
+        try:
+            is_executable, executability_reason, executability_detail = (
+                classify_workflow_concept_executability(workflow_id)
+            )
+        except Exception as exc:
+            logger.warning(
+                "Workflow executability classification failed for %s: %s",
+                workflow_id,
+                exc,
+            )
+            is_executable = False
+            executability_reason = "classification_error"
+            executability_detail = f"classification_error:{type(exc).__name__}"
+
+        items.append(
+            {
+                "workflow_id": workflow_id,
+                "description": description,
+                "description_source": description_source,
+                "initial_state": initial_state,
+                "source": source,
+                "definition_identity": definition_identity,
+                "attempts": int(attempts) if isinstance(attempts, (int, float)) else 0,
+                "completions": (
+                    int(completions) if isinstance(completions, (int, float)) else 0
+                ),
+                "completion_rate": (
+                    float(completion_rate)
+                    if isinstance(completion_rate, (int, float))
+                    else None
+                ),
+                "last_episode_at": (
+                    str(usage.get("last_episode_at"))
+                    if usage.get("last_episode_at") is not None
+                    else None
+                ),
+                "episodes_count": int(episode_count_map.get(workflow_id, 0)),
+                "is_executable": bool(is_executable),
+                "executability_reason": executability_reason,
+                "executability_detail": executability_detail,
+            }
+        )
+
+    return {
+        "items": items,
+        "count": len(items),
+        "total": len(workflow_ids),
+        "episodes_scope": {
+            "namespace": namespace or None,
+            "session_id": session_id or None,
+            "turn_id": turn_id or None,
+        },
+        "parity_inventory": inventory_snapshot,
+    }
+
+
+def _refresh_workflow_definitions_cache_entry(
+    *,
+    cache_key: Tuple[int, Optional[str], Optional[str], Optional[str]],
+    limit: int,
+    namespace: str | None,
+    session_id: str | None,
+    turn_id: str | None,
+    refresh_lock: threading.Lock,
+) -> None:
+    try:
+        payload = _build_workflow_definitions_payload(
+            limit=limit,
+            namespace=namespace,
+            session_id=session_id,
+            turn_id=turn_id,
+        )
+        _write_cached_workflow_definitions(cache_key=cache_key, payload=payload)
+    except Exception:
+        logger.exception(
+            "Background workflow definitions refresh failed for key=%s",
+            cache_key,
+        )
+    finally:
+        refresh_lock.release()
+
+
+def _start_workflow_definitions_background_refresh(
+    *,
+    cache_key: Tuple[int, Optional[str], Optional[str], Optional[str]],
+    limit: int,
+    namespace: str | None,
+    session_id: str | None,
+    turn_id: str | None,
+    refresh_lock: threading.Lock,
+) -> bool:
+    try:
+        thread = threading.Thread(
+            target=_refresh_workflow_definitions_cache_entry,
+            kwargs={
+                "cache_key": cache_key,
+                "limit": limit,
+                "namespace": namespace,
+                "session_id": session_id,
+                "turn_id": turn_id,
+                "refresh_lock": refresh_lock,
+            },
+            name="workflow-definitions-refresh",
+            daemon=True,
+        )
+        thread.start()
+        return True
+    except Exception:
+        logger.exception(
+            "Could not start background workflow definitions refresh for key=%s",
+            cache_key,
+        )
+        return False
 
 
 @workflows_bp.get("/api/workflows/definitions/<path:workflow_id>")
@@ -234,26 +469,73 @@ def api_list_workflow_definitions():
     refresh_lock: threading.Lock | None = None
     refresh_lock_acquired = False
     try:
-        cached_payload, cached_is_fresh = _read_cached_workflow_definitions_entry(
-            cache_key=cache_key,
-            bypass_cache=bypass_cache,
+        cached_payload, cached_is_fresh, cached_age_seconds = (
+            _read_cached_workflow_definitions_entry(
+                cache_key=cache_key,
+                bypass_cache=bypass_cache,
+            )
         )
         if cached_is_fresh and isinstance(cached_payload, dict):
-            return jsonify(cached_payload)
+            return jsonify(
+                _attach_workflow_definitions_cache_metadata(
+                    cached_payload,
+                    state="fresh",
+                    age_seconds=cached_age_seconds,
+                    refresh_in_progress=False,
+                )
+            )
 
-        if not bypass_cache:
+        retry_after_seconds = _read_workflow_definitions_refresh_retry_after_seconds()
+
+        # Serve expired payloads immediately and refresh in the background so the
+        # monitor stays responsive even when registry rebuilds take longer than
+        # the UI timeout budget. The cache metadata keeps stale responses explicit.
+        if isinstance(cached_payload, dict) and not bypass_cache:
+            refresh_lock = _get_workflow_definitions_refresh_lock(cache_key)
+            refresh_lock_acquired = refresh_lock.acquire(blocking=False)
+            if refresh_lock_acquired:
+                refresh_started = _start_workflow_definitions_background_refresh(
+                    cache_key=cache_key,
+                    limit=limit,
+                    namespace=namespace or None,
+                    session_id=session_id or None,
+                    turn_id=turn_id or None,
+                    refresh_lock=refresh_lock,
+                )
+                if refresh_started:
+                    refresh_lock_acquired = False
+                    logger.info(
+                        "[workflow_definitions] Serving stale cache and refreshing in background for key=%s",
+                        cache_key,
+                    )
+                    return jsonify(
+                        _attach_workflow_definitions_cache_metadata(
+                            cached_payload,
+                            state="stale",
+                            age_seconds=cached_age_seconds,
+                            refresh_in_progress=True,
+                            retry_after_seconds=retry_after_seconds,
+                        )
+                    )
+            else:
+                logger.info(
+                    "[workflow_definitions] Serving stale cache while refresh in progress for key=%s",
+                    cache_key,
+                )
+                return jsonify(
+                    _attach_workflow_definitions_cache_metadata(
+                        cached_payload,
+                        state="stale",
+                        age_seconds=cached_age_seconds,
+                        refresh_in_progress=True,
+                        retry_after_seconds=retry_after_seconds,
+                    )
+                )
+
+        if not bypass_cache and not refresh_lock_acquired:
             refresh_lock = _get_workflow_definitions_refresh_lock(cache_key)
             refresh_lock_acquired = refresh_lock.acquire(blocking=False)
             if not refresh_lock_acquired:
-                if isinstance(cached_payload, dict):
-                    logger.info(
-                        "[workflow_definitions] Serving stale cache while refresh in progress for key=%s",
-                        cache_key,
-                    )
-                    return jsonify(cached_payload)
-                retry_after_seconds = (
-                    _read_workflow_definitions_refresh_retry_after_seconds()
-                )
                 payload = {
                     "error": "workflow_definitions_refresh_in_progress",
                     "detail": "Workflow definitions refresh is already running; retry shortly.",
@@ -267,140 +549,21 @@ def api_list_workflow_definitions():
                 )
                 return response
 
-        from ...workflows.durable.registry_factory import (
-            build_durable_workflow_registry_read_only,
-            get_workflow_registry_inventory_snapshot,
-        )
-        from ...services.workflow_discovery_service import (
-            classify_workflow_concept_executability,
-        )
-
-        # Read-only build avoids concept bootstrap writes on list/introspection paths.
-        registry = build_durable_workflow_registry_read_only()
-        inventory_snapshot = get_workflow_registry_inventory_snapshot()
-        if not isinstance(inventory_snapshot, dict):
-            inventory_snapshot = {}
-        workflow_ids = sorted(list(registry.all_workflow_ids()))
-        selected_ids = workflow_ids[:limit]
-        usage_aggregate_map = get_workflow_usage_aggregates_for_workflows(selected_ids)
-        episode_count_map = get_workflow_episode_counts_for_workflows(
-            selected_ids,
+        payload = _build_workflow_definitions_payload(
+            limit=limit,
             namespace=namespace or None,
             session_id=session_id or None,
             turn_id=turn_id or None,
         )
-
-        items: List[Dict[str, Any]] = []
-        for workflow_id in selected_ids:
-            registration = registry.get_registration(workflow_id)
-            definition = (
-                registration.definition
-                if registration is not None
-                else registry.get(workflow_id)
-            )
-
-            registration_purpose = (
-                registration.purpose if registration is not None else None
-            )
-            definition_purpose = (
-                getattr(definition, "purpose", "") if definition is not None else None
-            )
-            description, description_source = resolve_workflow_description(
-                workflow_id,
-                workflow_source=(registration.source if registration is not None else None),
-                registration_purpose=registration_purpose,
-                definition_purpose=definition_purpose,
-            )
-            source = "unknown"
-            if registration is not None:
-                if isinstance(registration.source, str) and registration.source.strip():
-                    source = registration.source.strip()
-            definition_identity = build_workflow_definition_identity(
-                workflow_id=workflow_id,
-                source=source,
-                definition=definition,
-                authoritative_definition=(
-                    definition
-                    if source.lower() == "vontology" and definition is not None
-                    else None
-                ),
-            )
-
-            initial_state = ""
-            if definition is not None:
-                state_value = getattr(definition, "initial_state", "")
-                if isinstance(state_value, str):
-                    initial_state = state_value
-
-            usage = (
-                usage_aggregate_map.get(workflow_id, {})
-                if isinstance(usage_aggregate_map, dict)
-                else {}
-            )
-            attempts = usage.get("attempts")
-            completions = usage.get("completions")
-            completion_rate = usage.get("completion_rate")
-
-            try:
-                is_executable, executability_reason, executability_detail = (
-                    classify_workflow_concept_executability(workflow_id)
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Workflow executability classification failed for %s: %s",
-                    workflow_id,
-                    exc,
-                )
-                is_executable = False
-                executability_reason = "classification_error"
-                executability_detail = f"classification_error:{type(exc).__name__}"
-
-            items.append(
-                {
-                    "workflow_id": workflow_id,
-                    "description": description,
-                    "description_source": description_source,
-                    "initial_state": initial_state,
-                    "source": source,
-                    "definition_identity": definition_identity,
-                    "attempts": (
-                        int(attempts) if isinstance(attempts, (int, float)) else 0
-                    ),
-                    "completions": (
-                        int(completions)
-                        if isinstance(completions, (int, float))
-                        else 0
-                    ),
-                    "completion_rate": (
-                        float(completion_rate)
-                        if isinstance(completion_rate, (int, float))
-                        else None
-                    ),
-                    "last_episode_at": (
-                        str(usage.get("last_episode_at"))
-                        if usage.get("last_episode_at") is not None
-                        else None
-                    ),
-                    "episodes_count": int(episode_count_map.get(workflow_id, 0)),
-                    "is_executable": bool(is_executable),
-                    "executability_reason": executability_reason,
-                    "executability_detail": executability_detail,
-                }
-            )
-
-        payload = {
-            "items": items,
-            "count": len(items),
-            "total": len(workflow_ids),
-            "episodes_scope": {
-                "namespace": namespace or None,
-                "session_id": session_id or None,
-                "turn_id": turn_id or None,
-            },
-            "parity_inventory": inventory_snapshot,
-        }
         _write_cached_workflow_definitions(cache_key=cache_key, payload=payload)
-        return jsonify(payload)
+        return jsonify(
+            _attach_workflow_definitions_cache_metadata(
+                payload,
+                state="fresh",
+                age_seconds=0.0,
+                refresh_in_progress=False,
+            )
+        )
     except Exception as exc:
         logger.exception("Failed to list workflow definitions via API")
         return jsonify({"error": "workflow_definitions_list_failed", "detail": str(exc)}), 500
