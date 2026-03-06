@@ -609,6 +609,7 @@ const THINKING_STATUS_ACTIVE = 'active';
 const THINKING_STATUS_WAITING = 'waiting';
 const THINKING_STATUS_STALLED = 'stalled';
 const THINKING_STATUS_COMPLETED = 'completed';
+const THINKING_STATUS_FOLLOW_UP_REQUIRED = 'follow_up_required';
 const THINKING_STATUS_FAILED = 'failed';
 const THINKING_STATUS_CANCELLED = 'cancelled';
 const THINKING_STATUS_TERMINATED = 'terminated';
@@ -619,6 +620,9 @@ const THINKING_TERMINAL_PROGRESS_STATUSES = new Set([
     'completed',
     'complete',
     'done',
+    'follow_up_required',
+    'follow-up-required',
+    'follow up required',
     'error',
     'cancelled',
     'canceled',
@@ -631,6 +635,7 @@ const THINKING_STATUS_CLASS_NAMES = new Set([
     THINKING_STATUS_WAITING,
     THINKING_STATUS_STALLED,
     THINKING_STATUS_COMPLETED,
+    THINKING_STATUS_FOLLOW_UP_REQUIRED,
     THINKING_STATUS_FAILED,
     THINKING_STATUS_CANCELLED,
     THINKING_STATUS_TERMINATED
@@ -769,6 +774,13 @@ function canonicalThinkingTerminalStatus(value) {
     }
     if (status === 'completed' || status === 'complete' || status === 'done') {
         return THINKING_STATUS_COMPLETED;
+    }
+    if (
+        status === 'follow_up_required'
+        || status === 'follow-up-required'
+        || status === 'follow up required'
+    ) {
+        return THINKING_STATUS_FOLLOW_UP_REQUIRED;
     }
     if (status === 'error' || status === 'failed') {
         return THINKING_STATUS_FAILED;
@@ -1149,6 +1161,7 @@ function thinkingLivenessLabel(state) {
 
 function thinkingTerminalLabel(status) {
     if (status === THINKING_STATUS_COMPLETED) return 'Complete';
+    if (status === THINKING_STATUS_FOLLOW_UP_REQUIRED) return 'Follow-up required';
     if (status === THINKING_STATUS_FAILED) return 'Failed';
     if (status === THINKING_STATUS_CANCELLED) return 'Cancelled';
     if (status === THINKING_STATUS_TERMINATED) return 'Terminated';

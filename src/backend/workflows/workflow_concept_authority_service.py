@@ -47,6 +47,7 @@ FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID = (
     "#V#file_copy_upload_classification_workflow"
 )
 FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID = "#V#file_copy_upload_handler_workflow"
+RUMINATION_WORKFLOW_ID = "#V#rumination_workflow"
 WORKFLOW_CREATION_WORKFLOW_ID = "#V#von_workflow_creation_workflow"
 
 WORKFLOW_CREATION_STEP_IDENTIFY_NEED = "#V#workflow_creation_step_identify_need"
@@ -106,6 +107,7 @@ CANONICAL_CHAT_WORKFLOW_IDS: tuple[str, ...] = (
 # Additional built-in workflows that should be published when registered.
 CANONICAL_DURABLE_WORKFLOW_IDS: tuple[str, ...] = (
     FILE_COPY_INTERPRETATION_WORKFLOW_ID,
+    RUMINATION_WORKFLOW_ID,
 )
 
 # Additional Vontology-authored governance workflows that should be repaired to
@@ -414,6 +416,34 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
                 next_state="complete",
             ),
             _CanonicalStepPublicationSpec(state_id="complete"),
+            _CanonicalStepPublicationSpec(state_id="failed"),
+        ),
+    ),
+    RUMINATION_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state="assess",
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id="assess",
+                action_id="rumination.assess_gaps",
+                on_true_state="plan",
+                on_false_state="complete",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="plan",
+                action_id="rumination.plan_enrichment",
+                on_true_state="dispatch",
+                on_false_state="complete",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="dispatch",
+                action_id="rumination.dispatch_enrichment",
+                on_true_state="dispatch",
+                on_false_state="complete",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="complete",
+                action_id="rumination.finalise",
+            ),
             _CanonicalStepPublicationSpec(state_id="failed"),
         ),
     ),
@@ -891,6 +921,18 @@ def _extract_instance_of(concept_doc: Dict[str, Any]) -> List[str]:
     return []
 
 
+def _extract_type_parents(concept_doc: Dict[str, Any]) -> List[str]:
+    relationships = concept_doc.get("relationships") or {}
+    if not isinstance(relationships, dict):
+        return []
+    raw_values = relationships.get("is_a_type_of", [])
+    if isinstance(raw_values, str):
+        return [raw_values] if raw_values else []
+    if isinstance(raw_values, list):
+        return [item for item in raw_values if isinstance(item, str) and item]
+    return []
+
+
 def _load_concept(concept_id: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     try:
         return concept_service.get_concept_by_concept_id(concept_id), None
@@ -898,6 +940,54 @@ def _load_concept(concept_id: str) -> Tuple[Optional[Dict[str, Any]], Optional[s
         return None, None
     except Exception as exc:  # pragma: no cover - defensive
         return None, str(exc)
+
+
+def _instance_of_satisfies_required_types(
+    instance_of: List[str],
+    *,
+    required_type_ids: List[str],
+) -> bool:
+    """Return whether direct or inherited workflow typing satisfies policy.
+
+    Some workflow concepts are intentionally typed as ``#V#durable_workflow``,
+    which is itself a subtype of ``#V#ai_workflow``. Authority checks must
+    treat that as valid instead of forcing redundant direct typing writes.
+    """
+
+    if not required_type_ids:
+        return True
+
+    required = {
+        item.strip().lower()
+        for item in required_type_ids
+        if isinstance(item, str) and item.strip()
+    }
+    if not required:
+        return True
+
+    queue = [
+        item.strip()
+        for item in instance_of
+        if isinstance(item, str) and item.strip()
+    ]
+    seen: set[str] = set()
+    while queue:
+        candidate = queue.pop(0)
+        lowered = candidate.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        if lowered in required:
+            return True
+
+        concept_doc, load_error = _load_concept(candidate)
+        if load_error or not isinstance(concept_doc, dict):
+            continue
+        for parent_id in _extract_type_parents(concept_doc):
+            parent_lowered = parent_id.lower()
+            if parent_lowered not in seen:
+                queue.append(parent_id)
+    return False
 
 
 @lru_cache(maxsize=1)
@@ -1013,7 +1103,10 @@ def bootstrap_workflow_concepts(
             continue
 
         current_instance_of = _extract_instance_of(concept_doc)
-        if any(type_id in current_instance_of for type_id in required_type_ids):
+        if _instance_of_satisfies_required_types(
+            current_instance_of,
+            required_type_ids=required_type_ids,
+        ):
             unchanged.append(workflow_id)
             continue
 
@@ -1102,8 +1195,9 @@ def build_workflow_concept_authority_report(
             continue
 
         instance_of = _extract_instance_of(concept_doc)
-        if required_type_ids and not any(
-            type_id in instance_of for type_id in required_type_ids
+        if required_type_ids and not _instance_of_satisfies_required_types(
+            instance_of,
+            required_type_ids=required_type_ids,
         ):
             missing_required_type[workflow_id] = instance_of
             continue

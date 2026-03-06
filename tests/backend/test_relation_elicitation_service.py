@@ -79,6 +79,44 @@ class TestRelationElicitationService(unittest.TestCase):
 
         self.assertEqual(opportunities, ["hypothesized_relation", "new_opportunity"])
 
+    @patch(
+        "src.backend.services.relation_elicitation_service.upsert_uncertain_relationship_assertion"
+    )
+    @patch("src.backend.services.concept_service.get_concept_by_concept_id")
+    def test_process_and_store_hypothesis_uses_canonical_uncertain_assertions(
+        self,
+        mock_get_by_concept_id,
+        mock_upsert_uncertain,
+    ):
+        mock_get_by_concept_id.return_value = {
+            "concept_id": "understand_user_response_for_relation",
+            "attributes": {
+                "prompt_template": "Extract [Relation Name] from: [User Response]"
+            },
+        }
+        mock_upsert_uncertain.return_value = {
+            "success": True,
+            "assertion": {"assertion_id": "ura_123", "status": "proposed"},
+        }
+
+        llm_client = MagicMock()
+        llm_client.generate.return_value = "#V#strong_ai_lab"
+        service = RelationElicitationService(llm_client=llm_client)
+
+        result = service.process_and_store_hypothesis(
+            "#V#alice",
+            "#V#has_affiliation",
+            "Alice is affiliated with Strong AI Lab.",
+        )
+        assert result is not None
+
+        self.assertEqual(result["assertion_id"], "ura_123")
+        self.assertEqual(result["value"], "#V#strong_ai_lab")
+        self.assertEqual(result["confidence_score"], 0.85)
+        self.assertEqual(result["status"], "proposed")
+        self.assertEqual(result["stored_in"], "uncertain_relationship_assertions")
+        mock_upsert_uncertain.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

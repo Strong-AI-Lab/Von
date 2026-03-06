@@ -586,6 +586,101 @@ class TestRuminationFinalise:
 
 
 class TestRuminationRelationCompletionHelpers:
+    def test_dispatch_relation_completion_limits_questions_via_profile(self) -> None:
+        from src.backend.workflows.durable.rumination_workflow import (
+            _dispatch_relation_completion_task,
+        )
+
+        instance_doc = {
+            "concept_id": "#V#alice",
+            "relationships": {},
+            "hypothesized_relations": {},
+            "name": "Alice",
+        }
+
+        with (
+            patch(
+                "src.backend.workflows.durable.rumination_workflow."
+                "_resolve_relation_policy_input",
+                return_value={
+                    "profile_concept_id": "#V#knowledge_acquisition_profile_low_imposition_relation_completion",
+                    "relation_auto_apply_policy": {
+                        "policy_version": "knowledge_acquisition_profile.v1"
+                    },
+                    "question_limit": 1,
+                    "detail_limit": 10,
+                },
+            ),
+            patch(
+                "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
+                return_value=instance_doc,
+            ),
+            patch(
+                "src.backend.services.relation_elicitation_service."
+                "RelationElicitationService.generate_question_for_elicit",
+                side_effect=[
+                    "What is Alice's affiliation?",
+                    "What project is Alice working on?",
+                ],
+            ),
+        ):
+            result = _dispatch_relation_completion_task(
+                task={
+                    "gap_name": "missing_relations",
+                    "predicate": "__relation_completion__",
+                    "allocation": 1,
+                },
+                ctx={
+                    "dry_run": True,
+                    "relation_gap_candidates": [
+                        {
+                            "concept_id": "#V#alice",
+                            "missing_predicates": [
+                                "#V#has_affiliation",
+                                "#V#works_on_project",
+                            ],
+                        }
+                    ],
+                },
+            )
+
+        assert result["metrics"]["deferred_relations"] == 2
+        assert len(result["deferred_questions"]) == 1
+        assert result["policy_profile_concept_id"] == (
+            "#V#knowledge_acquisition_profile_low_imposition_relation_completion"
+        )
+
+    def test_dispatch_relation_completion_reports_profile_resolution_failure(self) -> None:
+        from src.backend.workflows.durable.rumination_workflow import (
+            _dispatch_relation_completion_task,
+        )
+
+        with patch(
+            "src.backend.workflows.durable.rumination_workflow."
+            "_resolve_relation_policy_input",
+            return_value={
+                "profile_concept_id": None,
+                "relation_auto_apply_policy": {},
+                "question_limit": 1,
+                "detail_limit": 10,
+                "error": "knowledge_acquisition_profile_unavailable",
+            },
+        ):
+            result = _dispatch_relation_completion_task(
+                task={
+                    "gap_name": "missing_relations",
+                    "predicate": "__relation_completion__",
+                    "allocation": 1,
+                },
+                ctx={
+                    "dry_run": True,
+                    "relation_gap_candidates": [],
+                },
+            )
+
+        assert result["policy_error"] == "knowledge_acquisition_profile_unavailable"
+        assert result["metrics"]["failed_relations"] == 1
+
     def test_dispatch_relation_completion_auto_apply_dry_run(self) -> None:
         from src.backend.workflows.durable.rumination_workflow import (
             _dispatch_relation_completion_task,
@@ -611,6 +706,18 @@ class TestRuminationRelationCompletionHelpers:
             return None
 
         with (
+            patch(
+                "src.backend.workflows.durable.rumination_workflow."
+                "_resolve_relation_policy_input",
+                return_value={
+                    "profile_concept_id": "#V#knowledge_acquisition_profile_low_imposition_relation_completion",
+                    "relation_auto_apply_policy": {
+                        "policy_version": "knowledge_acquisition_profile.v1"
+                    },
+                    "question_limit": 1,
+                    "detail_limit": 80,
+                },
+            ),
             patch(
                 "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
                 side_effect=_fake_find_one,
@@ -681,9 +788,23 @@ class TestRuminationRelationCompletionHelpers:
                 return {"concept_id": "#V#strong_ai_lab"}
             return None
 
-        with patch(
-            "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
-            side_effect=_fake_find_one,
+        with (
+            patch(
+                "src.backend.workflows.durable.rumination_workflow."
+                "_resolve_relation_policy_input",
+                return_value={
+                    "profile_concept_id": "#V#knowledge_acquisition_profile_low_imposition_relation_completion",
+                    "relation_auto_apply_policy": {
+                        "policy_version": "knowledge_acquisition_profile.v1"
+                    },
+                    "question_limit": 1,
+                    "detail_limit": 80,
+                },
+            ),
+            patch(
+                "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
+                side_effect=_fake_find_one,
+            ),
         ):
             result = _dispatch_relation_completion_task(
                 task={
@@ -743,6 +864,18 @@ class TestRuminationRelationCompletionHelpers:
             return None
 
         with (
+            patch(
+                "src.backend.workflows.durable.rumination_workflow."
+                "_resolve_relation_policy_input",
+                return_value={
+                    "profile_concept_id": "#V#knowledge_acquisition_profile_low_imposition_relation_completion",
+                    "relation_auto_apply_policy": {
+                        "policy_version": "knowledge_acquisition_profile.v1"
+                    },
+                    "question_limit": 1,
+                    "detail_limit": 80,
+                },
+            ),
             patch(
                 "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
                 side_effect=_fake_find_one,
@@ -819,23 +952,35 @@ class TestRuminationRelationCompletionHelpers:
             }
         )
 
-        result = _dispatch_relation_completion_task(
-            task={
-                "gap_name": "missing_relations",
-                "predicate": "__relation_completion__",
-                "allocation": 1,
-                "auto_apply_confidence_threshold": 0.95,
+        with patch(
+            "src.backend.workflows.durable.rumination_workflow."
+            "_resolve_relation_policy_input",
+            return_value={
+                "profile_concept_id": "#V#knowledge_acquisition_profile_low_imposition_relation_completion",
+                "relation_auto_apply_policy": {
+                    "policy_version": "knowledge_acquisition_profile.v1"
+                },
+                "question_limit": 1,
+                "detail_limit": 80,
             },
-            ctx={
-                "dry_run": False,
-                "relation_gap_candidates": [
-                    {
-                        "concept_id": "#V#alice",
-                        "missing_predicates": ["#V#related_to"],
-                    }
-                ],
-            },
-        )
+        ):
+            result = _dispatch_relation_completion_task(
+                task={
+                    "gap_name": "missing_relations",
+                    "predicate": "__relation_completion__",
+                    "allocation": 1,
+                    "auto_apply_confidence_threshold": 0.95,
+                },
+                ctx={
+                    "dry_run": False,
+                    "relation_gap_candidates": [
+                        {
+                            "concept_id": "#V#alice",
+                            "missing_predicates": ["#V#related_to"],
+                        }
+                    ],
+                },
+            )
 
         metrics = result["metrics"]
         assert metrics["auto_applied_relations"] == 1
@@ -848,7 +993,7 @@ class TestRuminationRelationCompletionHelpers:
         audit_log = (source_doc or {}).get("relationship_auto_apply_audit") or []
         assert isinstance(audit_log, list) and len(audit_log) > 0
         assert audit_log[-1]["hypothesis_id"] == "hyp-real-1"
-        assert audit_log[-1]["policy_version"] == "relation_auto_apply_policy.v1"
+        assert audit_log[-1]["policy_version"] == "knowledge_acquisition_profile.v1"
 
 
 class TestRuminationRegistration:

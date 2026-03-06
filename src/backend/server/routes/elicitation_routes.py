@@ -53,7 +53,6 @@ def ask_question():
             f"[elicitation/ask] user={user_ctx.get('user_id')} org={user_ctx.get('org_id')} lang={user_ctx.get('language')}"
         )
 
-        # This part of the service needs to be refactored to not be interactive
         question = service.generate_question_for_elicit(instance_id, predicate)
         if question:
             return jsonify({"question": question}), 200
@@ -88,7 +87,6 @@ def submit_response():
             f"[elicitation/submit] user={user_ctx.get('user_id')} org={user_ctx.get('org_id')} instance={instance_id} predicate={predicate}"
         )
 
-        # This part of the service needs to be refactored
         hypothesis = service.process_and_store_hypothesis(
             instance_id, predicate, answer
         )

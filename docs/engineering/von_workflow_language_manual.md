@@ -1,7 +1,7 @@
 # Von Workflow Language (VWL) Manual
 
 Status: Draft (current implementation-aligned)
-Last updated: 2026-03-05 (Pacific/Auckland)
+Last updated: 2026-03-06 (Pacific/Auckland)
 Audience: Human engineers and AI agents
 
 ## 1. Purpose and Scope
@@ -59,6 +59,10 @@ Canonical concepts (confirmed via Vontology MCP):
 - `#V#workflow_context_key`: type for deterministic context key symbols.
 - `#V#workflow_stage`: type for model-policy stage scoping.
 - `#V#workflow_model_policy`: type for stage-aware model selection policy.
+
+Typing rule:
+
+- A workflow concept typed as a subtype of `#V#ai_workflow` (for example `#V#durable_workflow`) MUST satisfy workflow-authority checks that require `#V#ai_workflow`.
 
 ### 3.2 Core Predicate Concepts
 
@@ -219,6 +223,34 @@ For live chat progress payloads used by workflow-aware thinking-card rendering:
 - live workflow-dispatch progress SHOULD expose `selected_workflow_id` and SHOULD expose a human-readable `selected_workflow_name` when available;
 - selector metadata such as `workflow_selector_verdict` and `workflow_selector_source` SHOULD be preserved in the live payload so the UI can explain why a workflow route was chosen;
 - thinking-card step labels SHOULD prefer canonical workflow-stage labels (for example `Workflow discovery`, `Workflow dispatch`, `Plan tool calls`) over transport/internal labels such as `orchestrator_start`.
+
+### 7.3 Completion-Gate Terminal Semantics (JVNAUTOSCI-1380)
+
+For workflow-governed conversation turns:
+
+- completion safety MUST be determined by completion-gate outputs, not by whether a response text was produced;
+- if `completion_gate_safe_to_claim_completion=false`, the orchestrator MUST NOT surface the turn as `completed`;
+- unresolved required effects or inconclusive mutation/representation verification MUST produce `follow_up_required` or `failed`, with explicit blocking effect IDs and failure codes preserved in diagnostics;
+- UI/progress surfaces MUST derive terminal state from authoritative completion status (`completed`, `follow_up_required`, `failed`, `cancelled`) rather than from liveness/heartbeat signals.
+
+### 7.4 Workflow Episode Continuation and Repair Semantics (JVNAUTOSCI-1380)
+
+Workflow routing for multi-turn agentive work MUST be stateful.
+
+Authoritative routing context SHOULD include:
+
+- active workflow/episode identity,
+- active workflow source (`conversation_turn`, `durable_instance`, or equivalent),
+- unresolved required effects,
+- prior completion-gate verdict,
+- and any workflow contract/profile identifiers already resolved for the episode.
+
+Continuation/repair rules:
+
+- terse continuation turns such as `please proceed`, `continue`, or `go ahead` SHOULD prefer continuing the active workflow episode over rediscovering a new workflow from the raw prompt;
+- terse repair turns such as `you did not create it`, `that relation was not added`, or `this is still missing` SHOULD route into verification/repair on the active workflow episode rather than generic search fallback;
+- previously resolved representation contract profiles MAY be reused for follow-up and repair turns when the active episode and artefact context remain compatible;
+- if the active workflow episode cannot be resumed safely, the system MUST fail closed with explicit diagnostics rather than silently claiming the work was completed.
 
 ## 8. Metadata Contract Semantics
 
@@ -482,6 +514,47 @@ Extension rule:
 
 - Any new representation domain profile added to VWL MUST add a corresponding scenario to this suite before merge.
 
+### 10.11 Workflow-Governed Low-Imposition Knowledge Acquisition (JVNAUTOSCI-1380)
+
+Low-imposition knowledge acquisition is a workflow policy, not just a prompt style.
+
+Canonical Vontology surface:
+
+- profile type: `#V#knowledge_acquisition_profile`
+- profile payload predicate: `#V#has_knowledge_acquisition_profile_json`
+- workflow-to-profile link predicate: `#V#has_knowledge_acquisition_profile`
+- current canonical profile: `#V#knowledge_acquisition_profile_low_imposition_relation_completion`
+
+Current runtime anchor:
+
+- `#V#rumination_workflow` relation-completion dispatch reads its knowledge-acquisition policy from the linked profile concept.
+
+Normative policy semantics:
+
+- workflows MUST retrieve existing context/evidence first before asking the user for new input;
+- low-risk defaults MAY be auto-applied only when the linked profile policy allows it and confidence/evidence thresholds are met;
+- high-risk or ambiguous changes MUST require explicit user confirmation;
+- relation-completion runs SHOULD ask at most one focused clarification question per run when machine-side evidence is insufficient;
+- if the linked acquisition profile cannot be resolved, the workflow MUST fail closed with explicit `knowledge_acquisition_profile_unavailable` diagnostics rather than falling back to ad hoc prompting.
+
+Persistence semantics:
+
+- uncertain or provisional relation proposals SHOULD be stored through the canonical uncertain-assertion pathway, not legacy side channels;
+- acquisition workflows SHOULD preserve provenance (`source`, interaction identifier, evidence count, confidence score) for later promotion/audit.
+
+### 10.12 Representation and Acquisition Profiles as Workflow Contracts (JVNAUTOSCI-1380)
+
+Representation profiles and knowledge-acquisition profiles are workflow contracts.
+
+Therefore:
+
+- workflow-governed runtime code SHOULD resolve contract/profile semantics from Vontology profile concepts, not from hard-coded prompt wording;
+- canonical profile concepts SHOULD exist before runtime use and SHOULD be bootstrapped through shared service pathways;
+- missing canonical profile concepts are configuration/runtime dependency failures and MUST remain visible in diagnostics;
+- adding a new agentive workflow domain SHOULD normally include both:
+  - a workflow/process graph, and
+  - a Vontology-backed contract/profile concept that defines completion or acquisition policy for that domain.
+
 ## 11. Durable Runtime Semantics
 
 ### 11.1 Instance Model
@@ -603,6 +676,7 @@ A VWL workflow is conformant when:
 - metadata contracts are syntactically valid,
 - required mappings are parseable,
 - discovered actions are runnable in current registry,
+- workflow typing satisfies canonical workflow authority rules, including subtype satisfaction for required workflow types,
 - submission verification passes preflight and postflight.
 
 ## 16. Analysis-Driven Refinements (March 2026 Planning Baseline)

@@ -185,3 +185,67 @@ def test_bootstrap_canonical_representation_profiles_persists_existing_only(
         "#V#representation_contract_profile_paper",
         "#V#representation_contract_profile_person",
     }
+
+
+def test_ensure_canonical_representation_profiles_creates_missing_type_and_profiles(
+    monkeypatch,
+) -> None:
+    existing_concepts: set[str] = set()
+    created_concepts: list[dict[str, object]] = []
+    persisted_profiles: list[str] = []
+
+    def _fake_get_concept(concept_id):
+        if concept_id in existing_concepts:
+            return {"concept_id": concept_id, "relationships": {}}
+        return None
+
+    def _fake_create_concept(**kwargs):
+        concept_id = kwargs["concept_id"]
+        existing_concepts.add(concept_id)
+        created_concepts.append(dict(kwargs))
+        return {"concept_id": concept_id}
+
+    def _fake_upsert_profile(**kwargs):
+        persisted_profiles.append(kwargs["profile_concept_id"])
+        return {"success": True, "profile_concept_id": kwargs["profile_concept_id"]}
+
+    monkeypatch.setattr(service, "get_concept_by_concept_id", _fake_get_concept)
+    monkeypatch.setattr(service.concept_service, "create_concept", _fake_create_concept)
+    monkeypatch.setattr(
+        service,
+        "upsert_representation_contract_profile",
+        _fake_upsert_profile,
+    )
+
+    report = service.ensure_canonical_representation_contract_profiles(
+        concept_ids=[
+            "#V#representation_contract_profile_paper",
+            "#V#representation_contract_profile_person",
+        ]
+    )
+
+    assert report["success"] is True
+    assert report["profile_type_created"] is True
+    assert report["profile_type_id"] == "#V#representation_contract_profile"
+    assert set(report["created_profile_concept_ids"]) == {
+        "#V#representation_contract_profile_paper",
+        "#V#representation_contract_profile_person",
+    }
+    assert set(report["persisted_profile_concept_ids"]) == {
+        "#V#representation_contract_profile_paper",
+        "#V#representation_contract_profile_person",
+    }
+    assert report["missing_concept_ids"] == []
+    assert report["unknown_canonical_profile_concept_ids"] == []
+    assert report["errors_by_concept_id"] == {}
+
+    created_ids = [entry["concept_id"] for entry in created_concepts]
+    assert created_ids[0] == "#V#representation_contract_profile"
+    assert set(created_ids[1:]) == {
+        "#V#representation_contract_profile_paper",
+        "#V#representation_contract_profile_person",
+    }
+    assert set(persisted_profiles) == {
+        "#V#representation_contract_profile_paper",
+        "#V#representation_contract_profile_person",
+    }

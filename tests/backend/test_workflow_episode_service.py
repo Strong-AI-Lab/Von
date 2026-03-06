@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import importlib
+from datetime import datetime, timezone
 
 import pytest
 
+from src.backend.db.mongo_client import get_db
 from src.backend.db.repositories.concepts_repository import ConceptsRepository
 from src.backend.services import concept_service
 from src.backend.services.workflow_episode_service import (
     build_workflow_episode_stable_key,
     finalise_workflow_use_episode,
+    get_latest_workflow_use_episode,
     get_workflow_episode_counts_for_workflows,
     get_workflow_usage_aggregates_for_workflows,
     list_workflow_use_episodes,
@@ -259,3 +262,69 @@ def test_namespace_equivalence_includes_user_only_and_default_legacy_forms():
         namespace="#V#michael_witbrock@university_of_auckland_strong_ai_lab",
     )
     assert counts[workflow_id] == 2
+
+
+def test_get_latest_workflow_use_episode_returns_newest_session_episode():
+    workflow_id = "#V#workflow_episode_latest_lookup"
+    namespace = "#V#michael_witbrock/#V#university_of_auckland_strong_ai_lab"
+
+    first = start_workflow_use_episode(
+        workflow_id=workflow_id,
+        source="chat_turn_workflow",
+        stable_key=build_workflow_episode_stable_key(
+            workflow_id=workflow_id,
+            source="chat_turn_workflow",
+            turn_id="turn-old",
+            session_id="session-latest",
+            stage="tool_calling",
+        ),
+        namespace=namespace,
+        turn_id="turn-old",
+        session_id="session-latest",
+    )
+    second = start_workflow_use_episode(
+        workflow_id=workflow_id,
+        source="chat_turn_workflow",
+        stable_key=build_workflow_episode_stable_key(
+            workflow_id=workflow_id,
+            source="chat_turn_workflow",
+            turn_id="turn-new",
+            session_id="session-latest",
+            stage="tool_calling",
+        ),
+        namespace=namespace,
+        turn_id="turn-new",
+        session_id="session-latest",
+    )
+
+    assert first is not None
+    assert second is not None
+
+    db = get_db()
+    assert db is not None
+    coll = db["workflow_use_episodes"]
+    coll.update_one(
+        {"episode_id": first["episode_id"]},
+        {
+            "$set": {
+                "attempt_started_at": datetime(2026, 3, 5, 12, 0, tzinfo=timezone.utc)
+            }
+        },
+    )
+    coll.update_one(
+        {"episode_id": second["episode_id"]},
+        {
+            "$set": {
+                "attempt_started_at": datetime(2026, 3, 5, 12, 5, tzinfo=timezone.utc)
+            }
+        },
+    )
+
+    latest = get_latest_workflow_use_episode(
+        namespace="#V#michael_witbrock@university_of_auckland_strong_ai_lab",
+        session_id="session-latest",
+    )
+    assert latest is not None
+    assert latest["episode_id"] == second["episode_id"]
+    assert latest["turn_id"] == "turn-new"
+    assert latest["workflow_id"] == workflow_id

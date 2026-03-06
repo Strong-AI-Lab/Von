@@ -3327,6 +3327,86 @@ def test_write_intent_memory_rehydrates_for_low_risk_confirm_structure_prompt(
     assert gate_entry.get("continuation_context_reused") is True
 
 
+def test_selector_receives_authoritative_workflow_continuation_context(monkeypatch):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_continuation_service.get_session_workflow_continuation_context",
+        lambda **_kwargs: {
+            "session_id": "session-1380",
+            "selected_workflow_id": "#V#scholarly_paper_representation_workflow",
+            "completion_gate_decision": "escalation_required",
+            "requires_follow_up": True,
+            "safe_to_claim_completion": False,
+            "has_unresolved_required_effects": True,
+            "unresolved_required_effects": [
+                {
+                    "effect_id": "effect_paper_representation_1",
+                    "effect_type": "scholarly_representation",
+                    "description": "Represent the corresponding scholarly paper.",
+                    "required_tools": ["interpret_file_copy"],
+                    "targets": ["#V#uploaded_file_copy_abc123"],
+                }
+            ],
+            "required_effects_contract": {
+                "schema_version": "required_effects_contract.v1",
+                "intent_class": "representation",
+                "domain_profile_id": "paper",
+                "artefact_context": {
+                    "file_copy_ids": ["#V#uploaded_file_copy_abc123"],
+                    "urls": [],
+                },
+            },
+        },
+    )
+
+    llm = _CapturingLLM(
+        [
+            "tool_seeking",
+            "I'll continue the representation work.",
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt="Please proceed.",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+        conversation_session_id="session-1380",
+    )
+
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.verdict == "tool_seeking"
+
+    selector_context = llm.calls[0]["context"] or []
+    selector_prompt = "\n".join(
+        str(message.get("content") or "")
+        for message in selector_context
+        if isinstance(message, dict)
+    )
+    assert "ACTIVE WORKFLOW CONTINUATION CONTEXT" in selector_prompt
+    assert "#V#scholarly_paper_representation_workflow" in selector_prompt
+    assert "#V#uploaded_file_copy_abc123" in selector_prompt
+    assert "Please proceed." in selector_prompt
+
+    continuation_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_continuation_context"
+        ),
+        None,
+    )
+    assert continuation_entry is not None
+    assert continuation_entry.get("applied") is True
+    assert continuation_entry.get("reason") in {
+        "short_follow_up_prompt",
+        "explicit_follow_up_or_repair_prompt",
+    }
+
+
 # ---------------------------------------------------------------------------
 # JVNAUTOSCI-825: Routing info on tool-calling path.
 # ---------------------------------------------------------------------------

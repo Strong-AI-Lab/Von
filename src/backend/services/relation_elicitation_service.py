@@ -160,7 +160,13 @@ class RelationElicitationService:
     def process_and_store_hypothesis(
         self, instance_id: str, predicate: str, answer: str
     ) -> Optional[Dict[str, Any]]:
-        """Process user answer and store as hypothesized relation."""
+        """Process user answer and store a canonical uncertain assertion.
+
+        Legacy ``hypothesized_relations`` writes are intentionally avoided here.
+        Workflow-governed acquisition should persist through the canonical
+        ``uncertain_relationship_assertions`` pathway so promotion, auditing,
+        and low-imposition policy all operate on the same source of truth.
+        """
         understanding_prompt_concept = concept_service.get_concept_by_concept_id(
             "understand_user_response_for_relation"
         )
@@ -187,7 +193,7 @@ class RelationElicitationService:
             "source": "llm_extraction",
             "evidence_count": 1,
         }
-        upsert_uncertain_relationship_assertion(
+        upsert_result = upsert_uncertain_relationship_assertion(
             source_id=instance_id,
             predicate=predicate,
             target=hypothesis["value"],
@@ -199,11 +205,21 @@ class RelationElicitationService:
             },
             evidence_count=int(hypothesis.get("evidence_count", 1)),
         )
-        ConceptsRepository.update_one(
-            {"concept_id": instance_id},
-            {"$push": {f"hypothesized_relations.{predicate}": hypothesis}},
-        )
-        return hypothesis
+        if not bool(upsert_result.get("success")):
+            return None
+
+        assertion = upsert_result.get("assertion")
+        assertion = dict(assertion) if isinstance(assertion, dict) else {}
+        return {
+            "assertion_id": assertion.get("assertion_id"),
+            "value": hypothesis["value"],
+            "confidence_score": float(hypothesis["confidence_score"]),
+            "source_interaction_id": hypothesis["source_interaction_id"],
+            "source": hypothesis["source"],
+            "evidence_count": int(hypothesis.get("evidence_count", 1)),
+            "status": assertion.get("status", "proposed"),
+            "stored_in": "uncertain_relationship_assertions",
+        }
 
     def elicit_relation(
         self, instance_id: str, predicate: str
