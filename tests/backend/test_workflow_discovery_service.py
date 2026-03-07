@@ -112,17 +112,25 @@ class TestWorkflowDiscoveryResult:
             matches=matches,
             search_time_ms=123.456,
             query="test query",
+            requested_query="requested test query",
             threshold=0.7,
             errors=["minor warning"],
+            search_sources=["semantic", "vontology"],
+            keyword_fallback_queries=["workflow fallback"],
+            allow_non_executable=True,
         )
         output = result.to_dict()
 
         assert len(output["matches"]) == 2
         assert output["search_time_ms"] == 123.46  # Rounded to 2 decimal places
         assert output["query"] == "test query"
+        assert output["requested_query"] == "requested test query"
         assert output["threshold"] == 0.7
         assert output["match_count"] == 2
         assert output["candidate_count"] == 2
+        assert output["search_sources"] == ["semantic", "vontology"]
+        assert output["keyword_fallback_queries"] == ["workflow fallback"]
+        assert output["allow_non_executable"] is True
         assert output["errors"] == ["minor warning"]
 
     def test_to_dict_errors_none_when_empty(self) -> None:
@@ -485,6 +493,7 @@ class TestDiscoverWorkflowsForTurn:
         assert result is not None
         assert result["match_count"] == 1
         assert len(result["matches"]) == 1
+        assert result["requested_query"] == "test query input"
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_name_fallback")

@@ -253,9 +253,12 @@ def test_workflow_discovery_progress_payload_preserves_explicit_no_match_state()
     payload = von_routes._normalise_workflow_discovery_progress_payload(
         None,
         query="find a workflow for this task",
+        namespace="#V#test_user",
     )
 
     assert payload["query"] == "find a workflow for this task"
+    assert payload["requested_query"] == "find a workflow for this task"
+    assert payload["namespace"] == "#V#test_user"
     assert payload["matches"] == []
     assert payload["routing_matches"] == []
     assert payload["candidates"] == []
@@ -453,6 +456,16 @@ def test_turn_execution_diagnostics_rebuilds_phase_and_tool_history(monkeypatch)
     ]
     assert workflow_stage_path.get("has_unmapped_runtime_stages") is False
 
+    stage_diagnostics = diagnostics.get("stage_diagnostics")
+    assert isinstance(stage_diagnostics, list)
+    assert [entry.get("stage_id") for entry in stage_diagnostics] == [
+        "workflow_discovery",
+        "tool_execute",
+    ]
+    tool_stage_diagnostics = stage_diagnostics[-1]
+    assert tool_stage_diagnostics.get("tool_history")
+    assert tool_stage_diagnostics.get("event_count") == 3
+
     timing = diagnostics.get("timing_breakdown")
     assert isinstance(timing, dict)
     assert timing.get("schema_version") == "conversation_turn_timing_breakdown.v1"
@@ -513,6 +526,9 @@ def test_turn_execution_diagnostics_stage_path_fallback_for_unknown_phase(
     assert len(path) == 1
     assert path[0].get("mapping_status") == "fallback_unmapped_runtime_stage"
     assert path[0].get("runtime_stage_normalised") == "new_stage_not_in_catalogue"
+    stage_diagnostics = diagnostics.get("stage_diagnostics")
+    assert isinstance(stage_diagnostics, list)
+    assert stage_diagnostics[0].get("stage_id") == "new_stage_not_in_catalogue"
 
 
 def test_latest_turn_completion_gate_uses_latest_entry() -> None:

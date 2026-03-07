@@ -6728,7 +6728,7 @@ footer {
 }
 
 .thinking-card-wrapper.has-tools.is-expanded .thinking-card-body {
-    max-height: 180px;
+    max-height: 360px;
     opacity: 1;
     padding: 10px 14px;
     overflow-y: auto;
@@ -6751,6 +6751,27 @@ footer {
 
 .thinking-card-tool:not(:last-child) {
     border-bottom: 1px solid #f1f5f9;
+}
+
+.thinking-card-diagnostic-row {
+    border-bottom: 1px solid #f1f5f9;
+}
+
+.thinking-card-diagnostic-row:last-child {
+    border-bottom: none;
+}
+
+.thinking-card-diagnostic-row>summary {
+    list-style: none;
+    cursor: pointer;
+}
+
+.thinking-card-diagnostic-row>summary.thinking-card-tool:not(:last-child) {
+    border-bottom: none;
+}
+
+.thinking-card-diagnostic-row>summary::-webkit-details-marker {
+    display: none;
 }
 
 .thinking-card-tool-status {
@@ -6791,6 +6812,95 @@ footer {
 .thinking-card-tool-result::before {
     content: '→ ';
     opacity: 0.5;
+}
+
+.thinking-card-diagnostic-toggle-indicator {
+    margin-left: auto;
+    color: #94a3b8;
+    transition: transform 0.16s ease, color 0.16s ease;
+}
+
+.thinking-card-diagnostic-row[open] .thinking-card-diagnostic-toggle-indicator {
+    transform: rotate(90deg);
+    color: #64748b;
+}
+
+.thinking-card-diagnostic-panel {
+    margin: 0 0 8px 20px;
+    padding: 10px 12px;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    background: #f8fafc;
+}
+
+.thinking-card-diagnostic-facts {
+    display: grid;
+    grid-template-columns: minmax(0, 140px) minmax(0, 1fr);
+    gap: 6px 10px;
+    margin: 0;
+}
+
+.thinking-card-diagnostic-fact {
+    display: contents;
+}
+
+.thinking-card-diagnostic-fact dt {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: #475569;
+}
+
+.thinking-card-diagnostic-fact dd {
+    margin: 0;
+    color: #1f2937;
+    word-break: break-word;
+}
+
+.thinking-card-diagnostic-inline-code {
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 0.72rem;
+    white-space: pre-wrap;
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    border-radius: 6px;
+    padding: 1px 6px;
+}
+
+.thinking-card-diagnostic-section {
+    margin-top: 10px;
+}
+
+.thinking-card-diagnostic-section-title {
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #64748b;
+    margin-bottom: 6px;
+}
+
+.thinking-card-diagnostic-list,
+.thinking-card-diagnostic-candidates {
+    margin: 0;
+    padding-left: 18px;
+    display: grid;
+    gap: 6px;
+}
+
+.thinking-card-diagnostic-candidate {
+    padding: 2px 0;
+}
+
+.thinking-card-diagnostic-candidate-name {
+    font-weight: 600;
+    color: #1e40af;
+}
+
+.thinking-card-diagnostic-candidate-meta,
+.thinking-card-diagnostic-candidate-text {
+    font-size: 0.72rem;
+    color: #64748b;
+    margin-top: 2px;
 }
 
 .thinking-card-activity.is-low-level .thinking-card-tool-name {
@@ -6860,6 +6970,14 @@ footer {
 
     .thinking-card-meta {
         margin-left: 0;
+    }
+
+    .thinking-card-diagnostic-panel {
+        margin-left: 0;
+    }
+
+    .thinking-card-diagnostic-facts {
+        grid-template-columns: 1fr;
     }
 }
 

@@ -1213,6 +1213,7 @@ describe('thinking activity history normalisation', () => {
         expect(html).toContain('Workflow discovery');
         expect(html).toContain('No direct workflow match found');
         expect(html).toContain('thinking-card-tool-status failure');
+        expect(html).toContain('data-thinking-diagnostic-key="stage::workflow_discovery"');
     });
 
     test('renders workflow candidates as a successful discovery row when routing is excluded', () => {
@@ -1240,6 +1241,73 @@ describe('thinking activity history normalisation', () => {
         expect(html).toContain('Found candidate <button');
         expect(html).toContain('Scholarly paper representation workflow (#V#scholarly_paper_representation_workflow)');
         expect(html).toContain('thinking-card-tool-status success');
+    });
+
+    test('renders workflow discovery search trace and rejection reasons in expandable diagnostics', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            workflowStagePath: {
+                path: [
+                    { stage_id: 'workflow_discovery', stage_label: 'Workflow discovery' }
+                ]
+            },
+            workflowDiscovery: {
+                requested_query: 'Represent this uploaded paper',
+                query: 'Represent this uploaded paper\nArtefact typing context: route_hint=scholarly',
+                search_sources: ['semantic', 'vontology', 'name_fallback'],
+                keyword_fallback_queries: ['scholarly workflow', 'paper representation workflow'],
+                threshold: 0.7,
+                search_time_ms: 44,
+                match_count: 0,
+                candidate_count: 1,
+                candidates: [
+                    {
+                        concept_id: '#V#scholarly_paper_representation_workflow',
+                        name: 'Scholarly paper representation workflow',
+                        match_source: 'semantic',
+                        relevance_score: 0.91,
+                        routing_eligible: false,
+                        routing_exclusion_reason: 'graph_incomplete',
+                        is_executable: false,
+                        executability_reason: 'graph_incomplete',
+                        executability_detail: 'Missing terminal node.'
+                    }
+                ]
+            },
+            latestProgress: {
+                phase: 'workflow_discovery_complete'
+            }
+        });
+
+        expect(html).toContain('Requested search');
+        expect(html).toContain('Executed search');
+        expect(html).toContain('Represent this uploaded paper');
+        expect(html).toContain('route_hint=scholarly');
+        expect(html).toContain('semantic, vontology, name_fallback');
+        expect(html).toContain('Fallback queries');
+        expect(html).toContain('Workflow candidates');
+        expect(html).toContain('Routing excluded: Graph incomplete');
+        expect(html).toContain('Missing terminal node.');
+    });
+
+    test('renders fallback activity rows as expandable diagnostics entries', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            activityHistory: [{
+                sequenceNo: 7,
+                label: 'Tool call failed: fetch_concept',
+                detail: 'Timeout while fetching',
+                state: 'failure',
+                status: 'tool_failed',
+                stage: 'tool_execute',
+                eventKind: 'tool_failed',
+                groupCount: 1,
+                model: 'gpt-test'
+            }]
+        });
+
+        expect(html).toContain('Tool call failed: fetch_concept');
+        expect(html).toContain('data-thinking-diagnostic-key="activity::7::tool_failed::tool_execute"');
+        expect(html).toContain('Sequence');
+        expect(html).toContain('Timeout while fetching');
     });
 });
 

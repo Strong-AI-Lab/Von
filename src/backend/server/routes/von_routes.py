@@ -533,6 +533,7 @@ def _normalise_workflow_discovery_progress_payload(
     workflow_discovery: Mapping[str, Any] | None,
     *,
     query: str | None = None,
+    namespace: str | None = None,
     error: str | None = None,
 ) -> dict[str, Any]:
     """Return a stable workflow-discovery payload for live progress rendering.
@@ -577,6 +578,10 @@ def _normalise_workflow_discovery_progress_payload(
 
     if isinstance(query, str) and query.strip():
         payload.setdefault("query", query.strip())
+        payload.setdefault("requested_query", query.strip())
+
+    if isinstance(namespace, str) and namespace.strip():
+        payload["namespace"] = namespace.strip()
 
     errors: list[str] = []
     existing_errors = payload.get("errors")
@@ -968,6 +973,99 @@ def _build_timing_breakdown(
     }
 
 
+def _canonicalise_turn_execution_stage_id(stage: Any) -> str | None:
+    clean_stage = _progress_str(stage)
+    if not clean_stage:
+        return None
+    if clean_stage == "workflow_discovery_complete":
+        return "workflow_discovery"
+    if clean_stage in {"orchestrator_start", "orchestrator_end"}:
+        return "workflow_dispatch"
+    return clean_stage
+
+
+def _build_turn_execution_stage_diagnostics(
+    *,
+    diagnostic_events: list[dict[str, Any]],
+    workflow_stage_path: Mapping[str, Any] | None,
+    tool_history: list[dict[str, Any]],
+    workflow_discovery: Mapping[str, Any] | None,
+    latest_progress: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    path_entries_raw = (
+        workflow_stage_path.get("path")
+        if isinstance(workflow_stage_path, Mapping)
+        else None
+    )
+    path_entries = (
+        [entry for entry in path_entries_raw if isinstance(entry, Mapping)]
+        if isinstance(path_entries_raw, list)
+        else []
+    )
+    if not path_entries:
+        return []
+
+    latest_progress_payload = (
+        latest_progress if isinstance(latest_progress, Mapping) else {}
+    )
+    stage_diagnostics: list[dict[str, Any]] = []
+
+    for stage_entry in path_entries:
+        stage_id = _progress_str(stage_entry.get("stage_id")) or _progress_str(
+            stage_entry.get("runtime_stage_normalised")
+        )
+        if not stage_id:
+            continue
+
+        stage_events = [
+            entry
+            for entry in diagnostic_events
+            if _canonicalise_turn_execution_stage_id(
+                entry.get("phase") or entry.get("stage")
+            )
+            == stage_id
+        ]
+        latest_stage_event = stage_events[-1] if stage_events else None
+        stage_payload: dict[str, Any] = {
+            "stage_id": stage_id,
+            "stage_label": _progress_str(stage_entry.get("stage_label"))
+            or stage_id.replace("_", " ").strip().title(),
+            "event_count": len(stage_events),
+            "latest_status": (
+                _progress_str(latest_stage_event.get("status"))
+                if isinstance(latest_stage_event, Mapping)
+                else None
+            ),
+            "latest_at_utc": (
+                _progress_str(latest_stage_event.get("at_utc"))
+                if isinstance(latest_stage_event, Mapping)
+                else None
+            ),
+        }
+
+        if stage_id == "workflow_discovery" and isinstance(workflow_discovery, Mapping):
+            stage_payload["workflow_discovery"] = dict(workflow_discovery)
+        if stage_id == "tool_execute" and tool_history:
+            stage_payload["tool_history"] = [dict(entry) for entry in tool_history]
+        if stage_id in {"workflow_dispatch", "plain_response"}:
+            stage_payload["selected_workflow_id"] = _progress_str(
+                latest_progress_payload.get("selected_workflow_id")
+            )
+            stage_payload["selected_workflow_name"] = _progress_str(
+                latest_progress_payload.get("selected_workflow_name")
+            )
+            stage_payload["workflow_selector_verdict"] = _progress_str(
+                latest_progress_payload.get("workflow_selector_verdict")
+            )
+            stage_payload["workflow_selector_source"] = _progress_str(
+                latest_progress_payload.get("workflow_selector_source")
+            )
+
+        stage_diagnostics.append(stage_payload)
+
+    return stage_diagnostics
+
+
 def _build_turn_execution_diagnostics(
     *,
     request_id: str | None,
@@ -1027,11 +1125,19 @@ def _build_turn_execution_diagnostics(
         for entry in (llm_calls or [])
         if isinstance(entry, dict)
     ]
+    tool_history = _derive_tool_history_from_diagnostic_events(diagnostic_events)
     timing_breakdown = _build_timing_breakdown(
         diagnostic_events=diagnostic_events,
         phase_history=phase_history,
         llm_calls=llm_call_entries,
         elapsed_ms_value=elapsed_ms_value,
+    )
+    stage_diagnostics = _build_turn_execution_stage_diagnostics(
+        diagnostic_events=diagnostic_events,
+        workflow_stage_path=workflow_stage_path,
+        tool_history=tool_history,
+        workflow_discovery=workflow_payload,
+        latest_progress=latest_progress,
     )
 
     return {
@@ -1044,10 +1150,11 @@ def _build_turn_execution_diagnostics(
             diagnostic_events
         ),
         "phase_history": phase_history,
-        "tool_history": _derive_tool_history_from_diagnostic_events(diagnostic_events),
+        "tool_history": tool_history,
         "workflow_discovery": workflow_payload,
         "workflow_stage_model": build_conversation_turn_stage_model_snapshot(),
         "workflow_stage_path": workflow_stage_path,
+        "stage_diagnostics": stage_diagnostics,
         "timing_breakdown": timing_breakdown,
     }
 
@@ -5787,6 +5894,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 workflow_discovery_progress = _normalise_workflow_discovery_progress_payload(
                     workflow_discovery_result,
                     query=workflow_discovery_query,
+                    namespace=user_namespace,
                 )
                 if workflow_discovery_result:
                     current_app.logger.info(
@@ -5837,6 +5945,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             "workflow_discovery": _normalise_workflow_discovery_progress_payload(
                                 None,
                                 query=workflow_discovery_query,
+                                namespace=user_namespace,
                                 error=str(e),
                             ),
                             "workflow_match_count": 0,

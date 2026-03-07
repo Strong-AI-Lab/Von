@@ -616,6 +616,7 @@ const THINKING_STATUS_TERMINATED = 'terminated';
 const THINKING_CARD_TOGGLE_ARIA_LABEL_EXPANDED = 'Collapse thinking details';
 const THINKING_CARD_TOGGLE_ARIA_LABEL_COLLAPSED = 'Expand thinking details';
 const THINKING_ACTIVITY_LOW_LEVEL_EVENT_KINDS = new Set(['llm_call_chunk', 'heartbeat']);
+const THINKING_DIAGNOSTIC_DETAILS_SELECTOR = 'details[data-thinking-diagnostic-key]';
 const THINKING_TERMINAL_PROGRESS_STATUSES = new Set([
     'completed',
     'complete',
@@ -701,12 +702,15 @@ function setLoadingIndicatorDetailHtml(html) {
     if (!detailEl) {
         return;
     }
+    const request = getThinkingCardDisplayRequest();
+    snapshotThinkingDiagnosticExpansionState(detailEl, request);
     const value = String(html ?? '').trim();
     detailEl.innerHTML = value;
     bindConceptSelectionClicks(detailEl, {
         selector: '.thinking-card-concept-link',
         datasetKey: 'conceptLinkBound'
     });
+    bindThinkingDiagnosticToggles(detailEl, request);
 
     // Update wrapper to show/hide tool list
     const wrapper = document.getElementById('thinkingCardWrapper');
@@ -978,6 +982,18 @@ function createThinkingCardHistorySnapshot(request) {
             ...request.workflowDiscovery,
             matches: Array.isArray(request.workflowDiscovery.matches)
                 ? request.workflowDiscovery.matches.map((match) => ({ ...match }))
+                : [],
+            candidates: Array.isArray(request.workflowDiscovery.candidates)
+                ? request.workflowDiscovery.candidates.map((match) => ({ ...match }))
+                : [],
+            routing_matches: Array.isArray(request.workflowDiscovery.routing_matches)
+                ? request.workflowDiscovery.routing_matches.map((match) => ({ ...match }))
+                : [],
+            search_sources: Array.isArray(request.workflowDiscovery.search_sources)
+                ? request.workflowDiscovery.search_sources.slice()
+                : [],
+            keyword_fallback_queries: Array.isArray(request.workflowDiscovery.keyword_fallback_queries)
+                ? request.workflowDiscovery.keyword_fallback_queries.slice()
                 : []
         }
         : null;
@@ -1002,6 +1018,11 @@ function createThinkingCardHistorySnapshot(request) {
         workflowDiscovery,
         workflowStagePath,
         latestProgress,
+        expandedThinkingDiagnosticKeys: request.expandedThinkingDiagnosticKeys instanceof Set
+            ? Array.from(request.expandedThinkingDiagnosticKeys)
+            : (Array.isArray(request.expandedThinkingDiagnosticKeys)
+                ? request.expandedThinkingDiagnosticKeys.slice()
+                : []),
         thinkingStartedAtMs: Number.isFinite(request.thinkingStartedAtMs) ? Number(request.thinkingStartedAtMs) : null,
         thinkingFinishedAtMs: Date.now(),
         thinkingCardDisplayState: completedDisplayState
@@ -1891,26 +1912,17 @@ function renderThinkingActivityHistoryHTML(request) {
             continue;
         }
 
-        const statusClass = (entry.state === 'success' || entry.state === 'failure') ? entry.state : 'pending';
-        const statusIcon = statusClass === 'success' ? '✓' : (statusClass === 'failure' ? '✗' : '');
-        const detailHtmlParts = [];
-        if (Number.isFinite(entry.groupCount) && Number(entry.groupCount) > 1) {
-            detailHtmlParts.push(escapeHtml(`${Number(entry.groupCount)} updates`));
-        }
-        if (normaliseThinkingActivityString(entry.detailHtml)) {
-            detailHtmlParts.push(entry.detailHtml);
-        } else if (normaliseThinkingActivityString(entry.detail)) {
-            detailHtmlParts.push(escapeHtml(normaliseThinkingActivityString(entry.detail)));
-        }
-        const detailLabel = detailHtmlParts.length > 0
-            ? `<span class="thinking-card-tool-result">${detailHtmlParts.join(' · ')}</span>`
-            : '';
-
         const rowClass = entry.isLowLevel ? 'thinking-card-tool thinking-card-activity is-low-level' : 'thinking-card-tool thinking-card-activity';
-        items.push(`<div class="${rowClass}">
-            <span class="thinking-card-tool-status ${statusClass}">${statusIcon}</span>
-            <span class="thinking-card-tool-name">${escapeHtml(label)}</span>${detailLabel}
-        </div>`);
+        items.push(renderThinkingDiagnosticRowHTML({
+            ...entry,
+            diagnosticKey: buildThinkingDiagnosticKey(
+                'activity',
+                entry.sequenceNo || '',
+                entry.status || label,
+                entry.stage || entry.subtask || ''
+            ),
+            diagnosticHtml: buildThinkingActivityDiagnosticsHTML(entry)
+        }, rowClass));
     }
 
     return items.join('');
@@ -1955,27 +1967,24 @@ function renderToolHistoryHTML(request) {
         const success = entry.success;
 
         // Status icon and class
-        let statusIcon = '';
         let statusClass = 'pending';
         if (success === true) {
-            statusIcon = '✓';
             statusClass = 'success';
         } else if (success === false) {
-            statusIcon = '✗';
             statusClass = 'failure';
         }
 
         const toolLabel = tool
             ? `Tool call: ${tool}`
             : (workflowTask ? `Workflow task: ${workflowTask}` : '');
-        const toolName = escapeHtml(toolLabel);
-        const batchLabel = batchSize !== null ? `<span class="thinking-card-tool-batch">(batch ${batchSize})</span>` : '';
-        const resultLabel = resultSummary ? `<span class="thinking-card-tool-result">${escapeHtml(resultSummary)}</span>` : '';
-
-        items.push(`<div class="thinking-card-tool">
-            <span class="thinking-card-tool-status ${statusClass}">${statusIcon}</span>
-            <span class="thinking-card-tool-name">${toolName}</span>${batchLabel}${resultLabel}
-        </div>`);
+        items.push(renderThinkingDiagnosticRowHTML({
+            label: toolLabel,
+            detail: resultSummary,
+            detailHtml: '',
+            state: statusClass,
+            diagnosticKey: buildThinkingDiagnosticKey('tool', tool || workflowTask, batchSize || ''),
+            diagnosticHtml: buildToolHistoryDiagnosticsHTML(entry)
+        }, 'thinking-card-tool'));
     }
 
     return items.join('');
@@ -2063,6 +2072,551 @@ function renderWorkflowDisplayHtml(workflowId, workflowName, workflowDiscovery =
 
 function formatWorkflowDisplayText(workflowId, workflowName, workflowDiscovery = null) {
     return resolveWorkflowDisplayDescriptor(workflowId, workflowName, workflowDiscovery).label;
+}
+
+function buildThinkingDiagnosticKey(...parts) {
+    return parts
+        .map((value) => {
+            if (Number.isFinite(value)) {
+                return String(value);
+            }
+            if (typeof value === 'boolean') {
+                return value ? 'true' : 'false';
+            }
+            return normaliseThinkingActivityString(value);
+        })
+        .map((value) => value.toLowerCase())
+        .map((value) => value.replace(/[^a-z0-9#:_-]+/g, '-').replace(/^-+|-+$/g, ''))
+        .filter(Boolean)
+        .join('::');
+}
+
+function ensureThinkingDiagnosticExpansionState(request) {
+    if (!request || typeof request !== 'object') {
+        return new Set();
+    }
+
+    if (request.expandedThinkingDiagnosticKeys instanceof Set) {
+        return request.expandedThinkingDiagnosticKeys;
+    }
+
+    const next = new Set(
+        Array.isArray(request.expandedThinkingDiagnosticKeys)
+            ? request.expandedThinkingDiagnosticKeys
+                .map((value) => normaliseThinkingActivityString(value))
+                .filter(Boolean)
+            : []
+    );
+    request.expandedThinkingDiagnosticKeys = next;
+    return next;
+}
+
+function snapshotThinkingDiagnosticExpansionState(container, request = getThinkingCardDisplayRequest()) {
+    if (!(container instanceof HTMLElement) || !request || typeof request !== 'object') {
+        return;
+    }
+
+    const expandedKeys = new Set();
+    const openRows = container.querySelectorAll(`${THINKING_DIAGNOSTIC_DETAILS_SELECTOR}[open]`);
+    openRows.forEach((detailsEl) => {
+        const key = normaliseThinkingActivityString(detailsEl.dataset.thinkingDiagnosticKey);
+        if (key) {
+            expandedKeys.add(key);
+        }
+    });
+    request.expandedThinkingDiagnosticKeys = expandedKeys;
+}
+
+function bindThinkingDiagnosticToggles(container, request = getThinkingCardDisplayRequest()) {
+    if (!(container instanceof HTMLElement)) {
+        return;
+    }
+
+    const expandedKeys = ensureThinkingDiagnosticExpansionState(request);
+    const rows = container.querySelectorAll(THINKING_DIAGNOSTIC_DETAILS_SELECTOR);
+    rows.forEach((detailsEl) => {
+        const key = normaliseThinkingActivityString(detailsEl.dataset.thinkingDiagnosticKey);
+        if (!key) {
+            return;
+        }
+
+        detailsEl.open = expandedKeys.has(key);
+        if (detailsEl.dataset.thinkingDiagnosticToggleBound === 'true') {
+            return;
+        }
+
+        detailsEl.addEventListener('toggle', () => {
+            const currentRequest = getThinkingCardDisplayRequest() || request;
+            const currentExpandedKeys = ensureThinkingDiagnosticExpansionState(currentRequest);
+            if (detailsEl.open) {
+                currentExpandedKeys.add(key);
+            } else {
+                currentExpandedKeys.delete(key);
+            }
+        });
+        detailsEl.dataset.thinkingDiagnosticToggleBound = 'true';
+    });
+}
+
+function formatThinkingDiagnosticFactValue(value) {
+    if (typeof value === 'boolean') {
+        return value ? 'Yes' : 'No';
+    }
+    if (Number.isFinite(value)) {
+        return String(value);
+    }
+    if (Array.isArray(value)) {
+        return value
+            .map((entry) => formatThinkingDiagnosticFactValue(entry))
+            .filter(Boolean)
+            .join(', ');
+    }
+    return normaliseThinkingActivityString(value);
+}
+
+function buildThinkingDiagnosticFactsHTML(facts) {
+    if (!Array.isArray(facts) || facts.length === 0) {
+        return '';
+    }
+
+    const items = facts
+        .map((fact) => {
+            if (!fact || typeof fact !== 'object') {
+                return '';
+            }
+            const label = normaliseThinkingActivityString(fact.label);
+            const htmlValue = normaliseThinkingActivityString(fact.html);
+            const textValue = formatThinkingDiagnosticFactValue(fact.value);
+            if (!label || (!htmlValue && !textValue)) {
+                return '';
+            }
+            return `<div class="thinking-card-diagnostic-fact">
+                <dt>${escapeHtml(label)}</dt>
+                <dd>${htmlValue || escapeHtml(textValue)}</dd>
+            </div>`;
+        })
+        .filter(Boolean);
+
+    if (items.length === 0) {
+        return '';
+    }
+
+    return `<dl class="thinking-card-diagnostic-facts">${items.join('')}</dl>`;
+}
+
+function buildThinkingDiagnosticListHTML(title, values, options = {}) {
+    const items = Array.isArray(values)
+        ? values
+            .map((value) => normaliseThinkingActivityString(value))
+            .filter(Boolean)
+        : [];
+    if (items.length === 0) {
+        return '';
+    }
+
+    const cleanTitle = normaliseThinkingActivityString(title) || 'Details';
+    const codeValues = options.code === true;
+    const renderedItems = items.map((value) => {
+        const content = codeValues
+            ? `<code class="thinking-card-diagnostic-inline-code">${escapeHtml(value)}</code>`
+            : escapeHtml(value);
+        return `<li>${content}</li>`;
+    });
+    return `<div class="thinking-card-diagnostic-section">
+        <div class="thinking-card-diagnostic-section-title">${escapeHtml(cleanTitle)}</div>
+        <ul class="thinking-card-diagnostic-list">${renderedItems.join('')}</ul>
+    </div>`;
+}
+
+function renderThinkingDiagnosticWorkflowCandidatesHTML(candidates, workflowDiscovery = null) {
+    const candidateList = Array.isArray(candidates)
+        ? candidates.filter((candidate) => candidate && typeof candidate === 'object')
+        : [];
+    if (candidateList.length === 0) {
+        return '';
+    }
+
+    const items = candidateList.map((candidate) => {
+        const nameHtml = renderWorkflowDisplayHtml(
+            candidate.concept_id,
+            candidate.name,
+            workflowDiscovery,
+            { classNames: ['thinking-card-diagnostic-workflow-link'] }
+        ) || escapeHtml(formatWorkflowDisplayText(candidate.concept_id, candidate.name, workflowDiscovery) || candidate.concept_id || 'Workflow candidate');
+        const summaryBits = [];
+
+        const matchSource = normaliseThinkingActivityString(candidate.match_source);
+        if (matchSource) {
+            summaryBits.push(`Source: ${formatThinkingActivityFallbackLabel(matchSource)}`);
+        }
+        if (Number.isFinite(candidate.relevance_score)) {
+            summaryBits.push(`Relevance ${Math.round(Number(candidate.relevance_score) * 100)}%`);
+        }
+        if (Number.isFinite(candidate.confidence_score) && Number(candidate.confidence_score) > 0) {
+            summaryBits.push(`Confidence ${Math.round(Number(candidate.confidence_score) * 100)}%`);
+        }
+        if (candidate.routing_eligible === true) {
+            summaryBits.push('Routing eligible');
+        } else if (candidate.routing_eligible === false) {
+            const reason = formatThinkingActivityFallbackLabel(candidate.routing_exclusion_reason);
+            summaryBits.push(reason ? `Routing excluded: ${reason}` : 'Routing excluded');
+        }
+        if (candidate.is_executable === true) {
+            summaryBits.push('Executable');
+        } else if (candidate.is_executable === false) {
+            const reason = formatThinkingActivityFallbackLabel(candidate.executability_reason);
+            summaryBits.push(reason ? `Non-executable: ${reason}` : 'Non-executable');
+        }
+        if (candidate.is_policy_safe === false) {
+            summaryBits.push('Policy blocked');
+        }
+
+        const description = normaliseThinkingActivityString(candidate.description);
+        const executabilityDetail = normaliseThinkingActivityString(candidate.executability_detail);
+        return `<li class="thinking-card-diagnostic-candidate">
+            <div class="thinking-card-diagnostic-candidate-name">${nameHtml}</div>
+            ${summaryBits.length > 0 ? `<div class="thinking-card-diagnostic-candidate-meta">${escapeHtml(summaryBits.join(' · '))}</div>` : ''}
+            ${description ? `<div class="thinking-card-diagnostic-candidate-text">${escapeHtml(description)}</div>` : ''}
+            ${executabilityDetail ? `<div class="thinking-card-diagnostic-candidate-text">${escapeHtml(executabilityDetail)}</div>` : ''}
+        </li>`;
+    });
+
+    return `<div class="thinking-card-diagnostic-section">
+        <div class="thinking-card-diagnostic-section-title">Workflow candidates</div>
+        <ul class="thinking-card-diagnostic-candidates">${items.join('')}</ul>
+    </div>`;
+}
+
+function renderThinkingDiagnosticPanelHTML({ facts = [], sections = [] } = {}) {
+    const factsHtml = buildThinkingDiagnosticFactsHTML(facts);
+    const extraSections = Array.isArray(sections)
+        ? sections.filter((section) => normaliseThinkingActivityString(section))
+        : [];
+    if (!factsHtml && extraSections.length === 0) {
+        return '';
+    }
+
+    return `<div class="thinking-card-diagnostic-panel">${factsHtml}${extraSections.join('')}</div>`;
+}
+
+function renderThinkingDiagnosticRowHTML(entry, rowClass = 'thinking-card-tool') {
+    if (!entry || typeof entry !== 'object') {
+        return '';
+    }
+
+    const label = normaliseThinkingActivityString(entry.label);
+    if (!label) {
+        return '';
+    }
+
+    const statusClass = (entry.state === 'success' || entry.state === 'failure') ? entry.state : 'pending';
+    const statusIcon = statusClass === 'success' ? '✓' : (statusClass === 'failure' ? '✗' : '');
+    const detailHtmlParts = [];
+    if (Number.isFinite(entry.groupCount) && Number(entry.groupCount) > 1) {
+        detailHtmlParts.push(escapeHtml(`${Number(entry.groupCount)} updates`));
+    }
+    if (normaliseThinkingActivityString(entry.detailHtml)) {
+        detailHtmlParts.push(entry.detailHtml);
+    } else if (normaliseThinkingActivityString(entry.detail)) {
+        detailHtmlParts.push(escapeHtml(normaliseThinkingActivityString(entry.detail)));
+    }
+    const detailLabel = detailHtmlParts.length > 0
+        ? `<span class="thinking-card-tool-result">${detailHtmlParts.join(' · ')}</span>`
+        : '';
+
+    const summaryHtml = `<span class="thinking-card-tool-status ${statusClass}">${statusIcon}</span>
+        <span class="thinking-card-tool-name">${escapeHtml(label)}</span>${detailLabel}`;
+    const diagnosticHtml = normaliseThinkingActivityString(entry.diagnosticHtml);
+    if (!diagnosticHtml) {
+        return `<div class="${rowClass}">${summaryHtml}</div>`;
+    }
+
+    const diagnosticKey = normaliseThinkingActivityString(entry.diagnosticKey)
+        || buildThinkingDiagnosticKey(label, entry.detail, statusClass);
+    return `<details class="thinking-card-diagnostic-row${entry.isLowLevel ? ' is-low-level' : ''}" data-thinking-diagnostic-key="${escapeHtml(diagnosticKey)}">
+        <summary class="${rowClass}">${summaryHtml}<span class="thinking-card-diagnostic-toggle-indicator" aria-hidden="true">▸</span></summary>
+        ${diagnosticHtml}
+    </details>`;
+}
+
+function canonicaliseThinkingDiagnosticStageId(stageId) {
+    const cleanStageId = normaliseThinkingActivityString(stageId);
+    if (cleanStageId === 'workflow_discovery_complete') {
+        return 'workflow_discovery';
+    }
+    return cleanStageId;
+}
+
+function getThinkingDiagnosticEvents(request) {
+    const diagnosticEvents = request?.latestProgress?.diagnostic_events;
+    return Array.isArray(diagnosticEvents)
+        ? diagnosticEvents.filter((entry) => entry && typeof entry === 'object')
+        : [];
+}
+
+function getThinkingDiagnosticEventsForStage(request, stageId) {
+    const cleanStageId = canonicaliseThinkingDiagnosticStageId(stageId);
+    if (!cleanStageId) {
+        return [];
+    }
+
+    return getThinkingDiagnosticEvents(request).filter((entry) => (
+        canonicaliseThinkingDiagnosticStageId(entry.phase || entry.stage) === cleanStageId
+    ));
+}
+
+function buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request) {
+    const cleanStageId = canonicaliseThinkingDiagnosticStageId(stageId);
+    if (!cleanStageId) {
+        return null;
+    }
+
+    const stageEvents = getThinkingDiagnosticEventsForStage(request, cleanStageId);
+    const latestStageEvent = stageEvents.length > 0 ? stageEvents[stageEvents.length - 1] : null;
+    const workflowDiscovery = (request?.workflowDiscovery && typeof request.workflowDiscovery === 'object')
+        ? request.workflowDiscovery
+        : null;
+    const latestProgress = (request?.latestProgress && typeof request.latestProgress === 'object')
+        ? request.latestProgress
+        : null;
+    const toolHistory = Array.isArray(request?.toolUseProgressHistory)
+        ? request.toolUseProgressHistory
+            .filter((entry) => entry && typeof entry === 'object')
+            .map((entry) => ({ ...entry }))
+        : [];
+
+    const data = {
+        stage_id: cleanStageId,
+        stage_label: normaliseThinkingActivityString(stageLabel) || formatThinkingActivityFallbackLabel(cleanStageId) || 'Workflow step',
+        stage_event_count: stageEvents.length,
+        latest_status: normaliseThinkingActivityString(latestStageEvent?.status) || null,
+        latest_at_utc: normaliseThinkingActivityString(latestStageEvent?.at_utc) || null,
+        latest_result_summary: normaliseThinkingActivityString(latestStageEvent?.result_summary) || null,
+        latest_error: normaliseThinkingActivityString(latestStageEvent?.error) || null
+    };
+
+    if (cleanStageId === 'workflow_discovery' && workflowDiscovery) {
+        data.requested_query = normaliseThinkingActivityString(workflowDiscovery.requested_query) || null;
+        data.query = normaliseThinkingActivityString(workflowDiscovery.query) || null;
+        data.search_sources = Array.isArray(workflowDiscovery.search_sources)
+            ? workflowDiscovery.search_sources
+                .map((value) => normaliseThinkingActivityString(value))
+                .filter(Boolean)
+            : [];
+        data.keyword_fallback_queries = Array.isArray(workflowDiscovery.keyword_fallback_queries)
+            ? workflowDiscovery.keyword_fallback_queries
+                .map((value) => normaliseThinkingActivityString(value))
+                .filter(Boolean)
+            : [];
+        data.threshold = Number.isFinite(workflowDiscovery.threshold) ? Number(workflowDiscovery.threshold) : null;
+        data.search_time_ms = Number.isFinite(workflowDiscovery.search_time_ms) ? Math.round(Number(workflowDiscovery.search_time_ms)) : null;
+        data.namespace = normaliseThinkingActivityString(workflowDiscovery.namespace) || null;
+        data.allow_non_executable = workflowDiscovery.allow_non_executable === true;
+        data.match_count = getWorkflowDiscoveryMatchCount(workflowDiscovery);
+        data.candidate_count = getWorkflowDiscoveryCandidateCount(workflowDiscovery);
+        data.errors = Array.isArray(workflowDiscovery.errors)
+            ? workflowDiscovery.errors
+                .map((value) => normaliseThinkingActivityString(value))
+                .filter(Boolean)
+            : [];
+        data.candidates = normaliseWorkflowDiscoveryCandidates(workflowDiscovery).map((candidate) => ({ ...candidate }));
+    }
+
+    if (cleanStageId === 'workflow_dispatch' || cleanStageId === 'plain_response') {
+        data.selected_workflow_id = normaliseThinkingActivityString(latestProgress?.selected_workflow_id) || null;
+        data.selected_workflow_name = normaliseThinkingActivityString(latestProgress?.selected_workflow_name) || null;
+        data.workflow_selector_verdict = normaliseThinkingActivityString(latestProgress?.workflow_selector_verdict) || null;
+        data.workflow_selector_source = normaliseThinkingActivityString(latestProgress?.workflow_selector_source) || null;
+        data.workflow_match_count = Number.isFinite(latestProgress?.workflow_match_count)
+            ? Number(latestProgress.workflow_match_count)
+            : getWorkflowDiscoveryMatchCount(workflowDiscovery);
+        data.workflow_candidate_count = Number.isFinite(latestProgress?.workflow_candidate_count)
+            ? Number(latestProgress.workflow_candidate_count)
+            : getWorkflowDiscoveryCandidateCount(workflowDiscovery);
+    }
+
+    if (cleanStageId === 'tool_execute') {
+        const successCount = toolHistory.filter((entry) => entry.success === true).length;
+        const failureCount = toolHistory.filter((entry) => entry.success === false).length;
+        data.tool_history = toolHistory;
+        data.tool_call_count = toolHistory.length;
+        data.tool_success_count = successCount;
+        data.tool_failure_count = failureCount;
+        data.tool_pending_count = Math.max(0, toolHistory.length - successCount - failureCount);
+    }
+
+    return data;
+}
+
+function renderThinkingWorkflowStageDiagnosticDataHTML(data, workflowDiscovery = null) {
+    if (!data || typeof data !== 'object') {
+        return '';
+    }
+
+    const facts = [
+        { label: 'Stage id', value: data.stage_id },
+        { label: 'Observed updates', value: data.stage_event_count },
+        { label: 'Latest status', value: data.latest_status ? formatThinkingActivityFallbackLabel(data.latest_status) : '' },
+        { label: 'Latest update', value: data.latest_at_utc },
+        { label: 'Latest result', value: data.latest_result_summary }
+    ];
+    const sections = [];
+
+    if (data.stage_id === 'workflow_discovery') {
+        facts.push(
+            {
+                label: 'Requested search',
+                value: data.requested_query,
+                html: data.requested_query
+                    ? `<code class="thinking-card-diagnostic-inline-code">${escapeHtml(data.requested_query)}</code>`
+                    : ''
+            },
+            {
+                label: 'Executed search',
+                value: data.query,
+                html: data.query
+                    ? `<code class="thinking-card-diagnostic-inline-code">${escapeHtml(data.query)}</code>`
+                    : ''
+            },
+            { label: 'Search sources', value: data.search_sources },
+            { label: 'Namespace', value: data.namespace },
+            { label: 'Threshold', value: data.threshold },
+            { label: 'Search time', value: Number.isFinite(data.search_time_ms) ? `${data.search_time_ms} ms` : '' },
+            { label: 'Routing matches', value: data.match_count },
+            { label: 'Candidates considered', value: data.candidate_count },
+            { label: 'Allow non-executable', value: data.allow_non_executable }
+        );
+        sections.push(buildThinkingDiagnosticListHTML('Fallback queries', data.keyword_fallback_queries, { code: true }));
+        sections.push(buildThinkingDiagnosticListHTML('Errors', data.errors));
+        sections.push(renderThinkingDiagnosticWorkflowCandidatesHTML(data.candidates, workflowDiscovery));
+    } else if (data.stage_id === 'workflow_dispatch' || data.stage_id === 'plain_response') {
+        const selectedWorkflowHtml = renderWorkflowDisplayHtml(
+            data.selected_workflow_id,
+            data.selected_workflow_name,
+            workflowDiscovery
+        );
+        facts.push(
+            {
+                label: 'Selected workflow',
+                value: formatWorkflowDisplayText(
+                    data.selected_workflow_id,
+                    data.selected_workflow_name,
+                    workflowDiscovery
+                ),
+                html: selectedWorkflowHtml
+            },
+            {
+                label: 'Selector verdict',
+                value: data.workflow_selector_verdict
+                    ? formatThinkingActivityFallbackLabel(data.workflow_selector_verdict)
+                    : ''
+            },
+            {
+                label: 'Selector source',
+                value: data.workflow_selector_source
+                    ? formatThinkingActivityFallbackLabel(data.workflow_selector_source)
+                    : ''
+            },
+            { label: 'Routing matches', value: data.workflow_match_count },
+            { label: 'Candidates considered', value: data.workflow_candidate_count }
+        );
+    } else if (data.stage_id === 'tool_execute') {
+        facts.push(
+            { label: 'Tool calls observed', value: data.tool_call_count },
+            { label: 'Successful', value: data.tool_success_count },
+            { label: 'Failed', value: data.tool_failure_count },
+            { label: 'Pending', value: data.tool_pending_count }
+        );
+        const toolLines = Array.isArray(data.tool_history)
+            ? data.tool_history.map((entry) => {
+                const target = normaliseThinkingActivityString(entry.tool || entry.workflowTask);
+                if (!target) {
+                    return '';
+                }
+                const bits = [target];
+                if (Number.isFinite(entry.batchSize)) {
+                    bits.push(`batch ${Number(entry.batchSize)}`);
+                }
+                if (typeof entry.success === 'boolean') {
+                    bits.push(entry.success ? 'success' : 'failed');
+                }
+                const resultSummary = normaliseThinkingActivityString(entry.resultSummary);
+                if (resultSummary) {
+                    bits.push(resultSummary);
+                }
+                return bits.join(' · ');
+            }).filter(Boolean)
+            : [];
+        sections.push(buildThinkingDiagnosticListHTML('Observed tool calls', toolLines));
+    }
+
+    if (data.latest_error) {
+        sections.push(buildThinkingDiagnosticListHTML('Latest error', [data.latest_error]));
+    }
+
+    return renderThinkingDiagnosticPanelHTML({ facts, sections });
+}
+
+function buildThinkingActivityDiagnosticsHTML(entry) {
+    if (!entry || typeof entry !== 'object') {
+        return '';
+    }
+
+    const facts = [
+        { label: 'Sequence', value: entry.sequenceNo },
+        { label: 'Stage', value: entry.stage ? formatThinkingActivityFallbackLabel(entry.stage) : '' },
+        { label: 'Status', value: entry.status ? formatThinkingActivityFallbackLabel(entry.status) : '' },
+        { label: 'Event kind', value: entry.eventKind ? formatThinkingActivityFallbackLabel(entry.eventKind) : '' },
+        { label: 'Merged updates', value: entry.groupCount && Number(entry.groupCount) > 1 ? Number(entry.groupCount) : '' },
+        { label: 'Model', value: entry.model },
+        { label: 'Subtask', value: entry.subtask },
+        { label: 'Timestamp', value: entry.atUtc },
+        {
+            label: 'Detail',
+            value: entry.detail,
+            html: normaliseThinkingActivityString(entry.detailHtml)
+                ? entry.detailHtml
+                : ''
+        }
+    ];
+
+    return renderThinkingDiagnosticPanelHTML({ facts });
+}
+
+function buildToolHistoryDiagnosticsHTML(entry) {
+    if (!entry || typeof entry !== 'object') {
+        return '';
+    }
+
+    const tool = normaliseThinkingActivityString(entry.tool);
+    const workflowTask = normaliseThinkingActivityString(entry.workflowTask);
+    const facts = [
+        { label: 'Tool', value: tool },
+        { label: 'Workflow task', value: workflowTask },
+        { label: 'Phase', value: entry.phase ? formatThinkingActivityFallbackLabel(entry.phase) : '' },
+        { label: 'Batch size', value: entry.batchSize },
+        { label: 'Result', value: entry.resultSummary },
+        {
+            label: 'Outcome',
+            value: typeof entry.success === 'boolean'
+                ? (entry.success ? 'Success' : 'Failed')
+                : 'Pending'
+        }
+    ];
+
+    return renderThinkingDiagnosticPanelHTML({ facts });
+}
+
+function buildThinkingStageDiagnosticsSnapshot(request) {
+    return buildThinkingWorkflowStageRows(request)
+        .map((entry) => ({
+            stage_id: entry.stageId || null,
+            label: entry.label || null,
+            detail: entry.detail || null,
+            state: entry.state || null,
+            diagnostics: entry.diagnosticData || null
+        }))
+        .filter((entry) => entry.stage_id || entry.label);
 }
 
 function buildWorkflowStageDetailPresentation(stageId, request) {
@@ -2237,12 +2791,20 @@ function buildThinkingWorkflowStageRows(request) {
         : null;
     if (path.length === 0) {
         if (workflowDiscovery) {
+            const diagnosticData = buildThinkingWorkflowStageDiagnosticData(
+                'workflow_discovery',
+                'Workflow discovery',
+                request
+            );
             const detailPresentation = buildWorkflowStageDetailPresentation('workflow_discovery', request);
             return [{
+                stageId: 'workflow_discovery',
                 label: 'Workflow discovery',
                 detail: detailPresentation.text,
                 detailHtml: detailPresentation.html,
-                state: getWorkflowDiscoveryMatchCount(workflowDiscovery) > 0 ? 'success' : 'failure'
+                state: getWorkflowDiscoveryMatchCount(workflowDiscovery) > 0 ? 'success' : 'failure',
+                diagnosticKey: buildThinkingDiagnosticKey('stage', 'workflow_discovery'),
+                diagnosticData
             }];
         }
         return [];
@@ -2264,6 +2826,7 @@ function buildThinkingWorkflowStageRows(request) {
         const stageLabel = normaliseThinkingActivityString(entry.stage_label)
             || formatThinkingActivityFallbackLabel(stageId)
             || 'Workflow step';
+        const diagnosticData = buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request);
         const detailPresentation = buildWorkflowStageDetailPresentation(stageId, request);
         const detail = detailPresentation.text;
         let state = 'success';
@@ -2286,10 +2849,13 @@ function buildThinkingWorkflowStageRows(request) {
         }
 
         return {
+            stageId,
             label: stageLabel,
             detail,
             detailHtml: detailPresentation.html,
-            state
+            state,
+            diagnosticKey: buildThinkingDiagnosticKey('stage', stageId),
+            diagnosticData
         };
     });
 }
@@ -2300,17 +2866,13 @@ function renderThinkingWorkflowStageHistoryHTML(request) {
         return '';
     }
 
-    return rows.map((entry) => {
-        const statusClass = (entry.state === 'success' || entry.state === 'failure') ? entry.state : 'pending';
-        const statusIcon = statusClass === 'success' ? '✓' : (statusClass === 'failure' ? '✗' : '');
-        const detailLabel = normaliseThinkingActivityString(entry.detailHtml || entry.detail)
-            ? `<span class="thinking-card-tool-result">${entry.detailHtml || escapeHtml(entry.detail)}</span>`
-            : '';
-        return `<div class="thinking-card-tool thinking-card-activity">
-            <span class="thinking-card-tool-status ${statusClass}">${statusIcon}</span>
-            <span class="thinking-card-tool-name">${escapeHtml(entry.label)}</span>${detailLabel}
-        </div>`;
-    }).join('');
+    return rows.map((entry) => renderThinkingDiagnosticRowHTML({
+        ...entry,
+        diagnosticHtml: renderThinkingWorkflowStageDiagnosticDataHTML(
+            entry.diagnosticData,
+            request?.workflowDiscovery || null
+        )
+    }, 'thinking-card-tool thinking-card-activity')).join('');
 }
 
 /**
@@ -17788,7 +18350,8 @@ function buildThinkingDiagnosticsPayload(request) {
         phase_history: Array.isArray(request.phaseHistory) ? request.phaseHistory.slice(-40) : [],
         tool_history: Array.isArray(request.toolUseProgressHistory) ? request.toolUseProgressHistory.slice(-40) : [],
         workflow_discovery: request.workflowDiscovery || null,
-        workflow_stage_path: request.workflowStagePath || null
+        workflow_stage_path: request.workflowStagePath || null,
+        stage_diagnostics: buildThinkingStageDiagnosticsSnapshot(request)
     };
 }
 

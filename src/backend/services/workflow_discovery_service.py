@@ -198,8 +198,12 @@ class WorkflowDiscoveryResult:
     routing_matches: Optional[List[WorkflowMatch]] = None
     search_time_ms: float = 0.0
     query: str = ""
+    requested_query: str = ""
     threshold: float = DEFAULT_RELEVANCE_THRESHOLD
     errors: List[str] = field(default_factory=list)
+    search_sources: List[str] = field(default_factory=list)
+    keyword_fallback_queries: List[str] = field(default_factory=list)
+    allow_non_executable: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialisation."""
@@ -219,9 +223,13 @@ class WorkflowDiscoveryResult:
             "routing_matches": routing_payload,
             "search_time_ms": round(self.search_time_ms, 2),
             "query": self.query,
+            "requested_query": self.requested_query or self.query,
             "threshold": self.threshold,
             "match_count": len(routing_payload),
             "candidate_count": len(candidate_payload),
+            "search_sources": list(self.search_sources),
+            "keyword_fallback_queries": list(self.keyword_fallback_queries),
+            "allow_non_executable": self.allow_non_executable,
             "errors": self.errors if self.errors else None,
         }
 
@@ -855,6 +863,7 @@ def discover_workflows(
     start_time = time.perf_counter()
     all_matches: List[WorkflowMatch] = _seed_workflow_creation_candidate(query)
     errors: List[str] = []
+    search_sources: List[str] = []
     file_copy_contexts, context_errors = _resolve_query_file_copy_contexts(query)
     errors.extend(context_errors)
     search_query = _augment_query_with_file_copy_context(query, file_copy_contexts)
@@ -862,6 +871,7 @@ def discover_workflows(
 
     # Search both sources
     try:
+        search_sources.append("semantic")
         semantic_matches = _search_workflows_semantic(
             search_query, limit=max_results * 2
         )
@@ -874,6 +884,7 @@ def discover_workflows(
     elapsed = time.perf_counter() - start_time
     if elapsed < timeout_seconds:
         try:
+            search_sources.append("vontology")
             vontology_matches = _search_workflows_vontology(
                 search_query, limit=max_results * 2
             )
@@ -884,6 +895,7 @@ def discover_workflows(
 
     if elapsed < timeout_seconds and keyword_fallback_queries:
         try:
+            search_sources.append("name_fallback")
             fallback_matches = _search_workflows_name_fallback(
                 keyword_fallback_queries,
                 limit=max_results * 2,
@@ -939,8 +951,12 @@ def discover_workflows(
         routing_matches=routing_matches,
         search_time_ms=elapsed_ms,
         query=search_query,
+        requested_query=query,
         threshold=relevance_threshold,
         errors=errors if errors else [],
+        search_sources=search_sources,
+        keyword_fallback_queries=keyword_fallback_queries,
+        allow_non_executable=allow_non_executable,
     )
 
 
