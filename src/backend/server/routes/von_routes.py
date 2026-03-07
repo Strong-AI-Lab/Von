@@ -2077,8 +2077,25 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
             else:
                 merged.pop("error", None)
         else:
-            # Avoid stale-provider error leakage into later unrelated progress events.
+            # Avoid stale failure metadata leaking into later unrelated progress
+            # events after a subsequent success or neutral heartbeat.
             merged.pop("error", None)
+        if "error_class" in safe_update:
+            error_class = _progress_str(safe_update.get("error_class"))
+            if error_class:
+                merged["error_class"] = error_class
+            else:
+                merged.pop("error_class", None)
+        else:
+            merged.pop("error_class", None)
+        if "failure_kind" in safe_update:
+            failure_kind = _progress_str(safe_update.get("failure_kind"))
+            if failure_kind:
+                merged["failure_kind"] = failure_kind
+            else:
+                merged.pop("failure_kind", None)
+        else:
+            merged.pop("failure_kind", None)
         merged["request_id"] = request_id
         merged["status"] = status
         merged["stage"] = stage
@@ -2705,7 +2722,7 @@ def _derive_llm_debug_warnings(debug_info: dict) -> list[str]:
         )
         if looks_like_tool_call:
             warnings.append(
-                f"Reached max tool invocation limit ({max_invocations}); additional tool calls were not executed."
+                f"Configured tool-invocation cap ({max_invocations}) was reached; later tool-shaped output was not executed."
             )
 
     # Check presenter channel health (screen/spoken routes)

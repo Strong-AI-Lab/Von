@@ -72,6 +72,10 @@ from ..services.mongo_startup_config import (
     run_mongo_startup_probe,
     validate_mongo_startup_or_raise,
 )
+from ..services.settings_service import (
+    get_internal_mcp_max_tool_invocations,
+    get_internal_mcp_tool_batch_cap,
+)
 
 # Define a version string
 APP_VERSION = "v20250421_1015_backend"  # Updated version
@@ -679,10 +683,21 @@ def create_flask_app(
                 "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
             }
             try:
+                try:
+                    bootstrap_max_tool_invocations = (
+                        get_internal_mcp_max_tool_invocations()
+                    )
+                except Exception:
+                    bootstrap_max_tool_invocations = 30
+                try:
+                    bootstrap_tool_batch_cap = get_internal_mcp_tool_batch_cap()
+                except Exception:
+                    bootstrap_tool_batch_cap = 10
                 orchestrator_instance = InternalMCPChatOrchestrator(
                     gateway=gateway_instance,
                     logger=orchestrator_logger,
-                    max_tool_invocations=8,  # JVNAUTOSCI-699: Allow complex chained workflows
+                    max_tool_invocations=bootstrap_max_tool_invocations,
+                    tool_batch_cap=bootstrap_tool_batch_cap,
                     default_gmail_profile=os.getenv("VON_GMAIL_DEFAULT_PROFILE") or None,
                 )
                 duration_ms = int((time.perf_counter() - start_perf) * 1000)

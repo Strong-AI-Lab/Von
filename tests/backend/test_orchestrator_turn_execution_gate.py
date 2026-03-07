@@ -764,7 +764,9 @@ def test_turn_completion_gate_stops_repeat_when_stall_latency_budget_exhausted()
     assert int(result.outputs.get("completion_gate_loop_stall_elapsed_ms") or 0) >= 500
     final_response = result.outputs.get("final_response")
     assert isinstance(final_response, str)
-    assert "Escalation trigger: stall_latency_budget_exhausted." in final_response
+    assert "Execution status:" in final_response
+    assert "Escalation trigger:" not in final_response
+    assert "stall_latency_budget_exhausted" not in final_response
     evidence_payload = result.outputs.get("completion_gate_evidence_payload")
     assert isinstance(evidence_payload, dict)
     assert evidence_payload.get("terminal_outcome") == "stall_latency_budget_exhausted"

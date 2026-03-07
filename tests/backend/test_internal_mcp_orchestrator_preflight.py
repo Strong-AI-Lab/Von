@@ -37,6 +37,28 @@ class _CapturingLLM:
         return "ok"
 
 
+def test_instruction_message_uses_internal_guardrail_wording_without_budget_leak(
+    monkeypatch,
+):
+    orchestrator = object.__new__(InternalMCPChatOrchestrator)
+    orchestrator._gateway = cast(Any, _CapturingGateway())
+    orchestrator._max_tool_invocations = 30
+    orchestrator._tool_batch_cap = 10
+    orchestrator._last_base_system_prompt_telemetry = None
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_load_base_system_prompt_from_vontology",
+        lambda preferred_language=None: (None, None),
+    )
+
+    instruction = orchestrator._instruction_message(preferred_language="en")
+
+    assert "Server limits:" not in instruction
+    assert "INTERNAL EXECUTION GUARDRAILS:" in instruction
+    assert "Do NOT mention budgets, caps, or internal limits" in instruction
+
+
 def test_orchestrator_injects_deterministic_preflight_context(monkeypatch):
     def _fake_search_concepts(
         *, query="", instance_of=None, filter_kind=None, **_kwargs

@@ -19,6 +19,9 @@ from ...services.concept_service import (
     get_concept_by_concept_id,
 )
 from ...services.prompt_template_service import PromptTemplateService
+from ...services.settings_service import (
+    INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT,
+)
 from ...services.text_value_service import upsert_singleton_text_relation
 from ...services.workflow_gap_vontology_service import (
     render_workflow_gap_analysis_prompt,
@@ -902,9 +905,18 @@ def _handle_execute_candidate(request: WorkflowActionRequest) -> WorkflowActionR
     from ...integrations.internal_mcp.orchestrator import InternalMCPChatOrchestrator
 
     dry_run = _coerce_bool(inputs.get("workflow_gap_dry_run"))
-    max_tool_invocations = (
-        0 if dry_run else int(request.environment.max_tool_invocations or 8)
-    )
+    if dry_run:
+        max_tool_invocations = 0
+    else:
+        raw_max_tool_invocations = request.environment.max_tool_invocations
+        try:
+            max_tool_invocations = (
+                INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT
+                if raw_max_tool_invocations is None
+                else int(raw_max_tool_invocations)
+            )
+        except Exception:
+            max_tool_invocations = INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT
     orchestrator = InternalMCPChatOrchestrator(
         gateway=gateway,
         max_tool_invocations=max_tool_invocations,

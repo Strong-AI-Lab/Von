@@ -479,7 +479,7 @@ def _supplemental_surface_only_contracts() -> dict[str, CanonicalMCPToolContract
                     },
                     "max_tool_invocations": {
                         "type": "integer",
-                        "default": 8,
+                        "default": 30,
                         "description": "Maximum number of tool calls in one run",
                     },
                     "dry_run": {

@@ -2775,7 +2775,7 @@ describe('LLM debug warnings (presenter channel health)', () => {
         });
 
         expect(warnings).toContain(
-            'Reached max tool invocation limit (2); additional tool calls were not executed.'
+            'Configured tool-invocation cap (2) was reached; later tool-shaped output was not executed.'
         );
     });
 });

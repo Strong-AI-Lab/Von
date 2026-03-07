@@ -166,9 +166,73 @@ def test_execute_candidate_disables_recursive_gap_recovery(monkeypatch) -> None:
     assert result.status == "success"
     assert result.outputs["response_text"] == "Retried response."
     assert captured["max_tool_invocations"] == 0
-    run_kwargs = captured["run_kwargs"]
+    run_kwargs = cast(dict[str, Any], captured["run_kwargs"])
     assert run_kwargs["workflow_gap_recovery_enabled"] is False
     assert run_kwargs["prompt"] == "Please recover this workflow gap."
+
+
+def test_execute_candidate_uses_canonical_cap_default_when_env_cap_missing(
+    monkeypatch,
+) -> None:
+    import src.backend.workflows.durable.workflow_gap_recovery_workflow as mod
+
+    captured: dict[str, object] = {}
+
+    class _FakePromptService:
+        def __init__(self, *, default_max_chars: int = 0) -> None:
+            self.default_max_chars = default_max_chars
+
+        def render_prompt(self, *_args, **_kwargs):
+            return SimpleNamespace(text="Candidate prompt")
+
+    class _FakeOrchestrator:
+        def __init__(
+            self,
+            *,
+            gateway,
+            max_tool_invocations,
+            default_gmail_profile=None,
+        ) -> None:
+            captured["max_tool_invocations"] = max_tool_invocations
+
+        def run(self, **kwargs):
+            return OrchestratorResult(
+                response_text="Retried response.",
+                extra_messages=(),
+                tool_invocations=(),
+                aux_llm_calls=(),
+                llm_calls=(),
+            )
+
+    monkeypatch.setattr(mod, "PromptTemplateService", _FakePromptService)
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.InternalMCPChatOrchestrator",
+        _FakeOrchestrator,
+    )
+
+    registry = ActionRegistry()
+    register_workflow_gap_recovery_actions(registry)
+    result = registry.execute(
+        WORKFLOW_GAP_EXECUTE_CANDIDATE_ACTION_ID,
+        inputs={
+            "prompt_concept_id": "#V#candidate_gap_prompt",
+            "workflow_gap_dry_run": False,
+            "prompt": "Please recover this workflow gap.",
+        },
+        context={},
+        env=WorkflowEnvironment(
+            llm_client=object(),
+            gateway=SimpleNamespace(enabled=True),
+            model="gpt-5.2-chat-latest",
+            max_tool_invocations=None,
+        ),
+    )
+
+    assert result.status == "success"
+    assert (
+        captured["max_tool_invocations"]
+        == mod.INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT
+    )
 
 
 def test_workflow_gap_recovery_workflows_publish_authoritatively(monkeypatch) -> None:

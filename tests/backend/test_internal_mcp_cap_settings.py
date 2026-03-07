@@ -60,6 +60,21 @@ def test_get_internal_mcp_tool_batch_cap_clamps(raw: Any, expected: int, monkeyp
     assert settings_service.get_internal_mcp_tool_batch_cap() == expected
 
 
+def test_get_all_settings_batch_uses_canonical_internal_mcp_defaults(monkeypatch):
+    monkeypatch.setattr(settings_service, "get_settings_batch", lambda _names: {})
+
+    result = settings_service.get_all_settings_batch()
+
+    assert (
+        result["internal_mcp_max_tool_invocations"]
+        == settings_service.INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT
+    )
+    assert (
+        result["internal_mcp_tool_batch_cap"]
+        == settings_service.INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT
+    )
+
+
 def test_set_internal_mcp_max_tool_invocations_persists_clamped_value(monkeypatch):
     captured = {}
 

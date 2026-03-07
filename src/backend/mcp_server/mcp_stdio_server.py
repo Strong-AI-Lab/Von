@@ -98,6 +98,10 @@ from src.backend.services.settings_service import (
     resolve_llm_setting,
     get_preferred_language,
     get_setting,
+    INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT,
+    INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX,
+    INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MIN,
+    INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT,
 )
 from src.backend.integrations.internal_mcp.catalogue import _add_relationship
 from src.backend.integrations.internal_mcp.catalogue import _jira_add_comment
@@ -730,10 +734,17 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
     )
 
     try:
-        max_tool_invocations = int(arguments.get("max_tool_invocations", 8))
+        max_tool_invocations = int(
+            arguments.get(
+                "max_tool_invocations", INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT
+            )
+        )
     except Exception:
-        max_tool_invocations = 8
-    max_tool_invocations = max(0, min(16, max_tool_invocations))
+        max_tool_invocations = INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT
+    max_tool_invocations = max(
+        INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MIN,
+        min(INTERNAL_MCP_MAX_TOOL_INVOCATIONS_MAX, max_tool_invocations),
+    )
 
     dry_run = bool(arguments.get("dry_run", True))
     allow_writes = bool(arguments.get("allow_writes", False))
@@ -796,6 +807,7 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
         gateway=gateway,  # type: ignore[arg-type]
         logger=_LOG.getChild("von_chat_run"),
         max_tool_invocations=max_tool_invocations,
+        tool_batch_cap=INTERNAL_MCP_TOOL_BATCH_CAP_DEFAULT,
         default_gmail_profile=None,
         max_context_chars=max_context_chars,
         max_tool_result_chars=max_tool_result_chars,

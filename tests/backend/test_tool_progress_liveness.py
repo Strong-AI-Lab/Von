@@ -292,6 +292,7 @@ def test_progress_clears_stale_error_on_subsequent_success(monkeypatch) -> None:
             "success": False,
             "error": "Ollama unexpected error: failed to connect",
             "error_class": "RuntimeError",
+            "failure_kind": "provider_unreachable",
         },
     )
     clock["now"] += 0.2
@@ -310,11 +311,17 @@ def test_progress_clears_stale_error_on_subsequent_success(monkeypatch) -> None:
     state = von_routes._get_tool_progress("scope-stale", "req-stale")
     assert state is not None
     assert "error" not in state
+    assert "error_class" not in state
+    assert "failure_kind" not in state
 
     events = state.get("diagnostic_events")
     assert isinstance(events, list)
     assert events[0].get("error") == "Ollama unexpected error: failed to connect"
+    assert events[0].get("error_class") == "RuntimeError"
+    assert events[0].get("failure_kind") == "provider_unreachable"
     assert "error" not in events[-1]
+    assert "error_class" not in events[-1]
+    assert "failure_kind" not in events[-1]
 
 
 def test_progress_clears_stale_success_on_error(monkeypatch) -> None:

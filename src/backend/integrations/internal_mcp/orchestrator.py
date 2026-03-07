@@ -1004,6 +1004,22 @@ class InternalMCPChatOrchestrator:
             ),
         }
 
+    def _resolve_environment_max_tool_invocations(self, env: Any) -> int:
+        """Resolve the per-turn tool cap without reviving retired fallback values.
+
+        A configured ``0`` must remain ``0`` so callers can intentionally disable
+        tool execution. Falling back with ``or 8`` reintroduced the legacy cap and
+        made the runtime disagree with Settings/JVNAUTOSCI-1392 diagnostics.
+        """
+
+        raw_value = getattr(env, "max_tool_invocations", None)
+        if raw_value is None:
+            return int(self._max_tool_invocations)
+        try:
+            return max(0, min(50, int(raw_value)))
+        except Exception:
+            return int(self._max_tool_invocations)
+
     def set_progress_callback(
         self, callback: Callable[[Mapping[str, Any]], None] | None
     ) -> None:
@@ -4085,7 +4101,7 @@ class InternalMCPChatOrchestrator:
         conversation_session_id = data.get("conversation_session_id")
         emit_progress = data.get("emit_progress")
         check_cancellation = data.get("check_cancellation")
-        max_tool_invocations = env.max_tool_invocations or 8
+        max_tool_invocations = self._resolve_environment_max_tool_invocations(env)
         batch_cap = max(1, int(getattr(self, "_tool_batch_cap", 4)))
         aux_llm_calls = data.get("aux_llm_calls")
         continuation_context_reused = bool(data.get("write_intent_context_reused", False))
@@ -4520,7 +4536,7 @@ class InternalMCPChatOrchestrator:
         aux_llm_calls = data["aux_llm_calls"]
         llm_calls = data["llm_calls"]
         iteration_count = data.get("iteration_count", 0)
-        max_tool_invocations = env.max_tool_invocations or 8
+        max_tool_invocations = self._resolve_environment_max_tool_invocations(env)
         missing_tool_call_retry_attempts = self._coerce_non_negative_int(
             data.get("missing_tool_call_retry_attempts"),
             default=0,
@@ -5456,20 +5472,10 @@ class InternalMCPChatOrchestrator:
             terminal_outcome = repeat_stop_reason
         elif requires_follow_up:
             terminal_outcome = "follow_up_required"
-        escalation_signal = bool(requires_follow_up and not repeat_iteration and repeat_stop_reason)
+        escalation_signal = bool(
+            requires_follow_up and not repeat_iteration and repeat_stop_reason
+        )
         escalation_reason = repeat_stop_reason if escalation_signal else None
-        if escalation_signal:
-            escalation_line = (
-                f"Escalation trigger: {repeat_stop_reason}. "
-                f"Loop attempts {loop_attempts}/{loop_max_attempts}; "
-                f"loop elapsed {loop_elapsed_ms}ms/{loop_max_elapsed_ms}ms; "
-                f"stall elapsed {loop_stall_elapsed_ms}ms/{loop_stall_max_elapsed_ms}ms."
-            )
-            if isinstance(final_response, str) and final_response.strip():
-                if "Escalation trigger:" not in final_response:
-                    final_response = f"{final_response.rstrip()}\n\n{escalation_line}"
-            else:
-                final_response = escalation_line
 
         completion_gate_evidence_payload: dict[str, Any] = dict(record_evidence_payload)
         completion_gate_evidence_payload.update(
@@ -6441,7 +6447,6 @@ class InternalMCPChatOrchestrator:
                 "- DO NOT output JSON as an example or description - only output JSON when you want to invoke a tool NOW\n"
                 "- DO NOT say 'I will call' or 'Let me call' - just call it\n"
                 "- You MAY batch multiple tool calls in ONE message as a JSON array (keep it to <= {batch_cap} calls)\n"
-                "- Server limits: max tool invocations per turn = {max_tool_invocations}; tool calls per batch = {batch_cap}\n"
                 "- After you receive the tool result (role 'tool'), respond naturally to the user\n\n"
                 "VONTOLOGY KINDS & PREDICATES (MUST FOLLOW):\n"
                 "- Predicates are a distinct logical kind. A usable predicate MUST satisfy: is_an_instance_of #V#predicate (or a predicate subtype).\n"
@@ -6480,6 +6485,14 @@ class InternalMCPChatOrchestrator:
         base_message = self._inject_prompt_variable(
             base_message, key="listing", value=listing
         )
+        if "INTERNAL EXECUTION GUARDRAILS:" not in base_message:
+            base_message = (
+                f"{base_message.rstrip()}\n\n"
+                "INTERNAL EXECUTION GUARDRAILS:\n"
+                "- Treat tool-invocation and batch caps as internal loop-safety guardrails, not as a user-facing reason to stop.\n"
+                "- Do NOT mention budgets, caps, or internal limits unless the user explicitly asks for diagnostics.\n"
+                "- If work remains unresolved, explain the concrete blocker or next best action instead of citing internal caps.\n"
+            )
 
         self._last_base_system_prompt_telemetry = {
             "type": "base_system_prompt",

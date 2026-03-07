@@ -10978,7 +10978,7 @@ function deriveLlmDebugWarnings(debugData) {
             && trimmed.includes('"tool"');
         if (looksLikeToolCall) {
             warnings.push(
-                `Reached max tool invocation limit (${maxToolInvocations}); additional tool calls were not executed.`
+                `Configured tool-invocation cap (${maxToolInvocations}) was reached; later tool-shaped output was not executed.`
             );
         }
     }
