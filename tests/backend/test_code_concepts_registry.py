@@ -63,3 +63,15 @@ def test_workflow_prompt_contract_predicates_are_registered():
     assert "#V#hasPromptVariables" in ids
     assert "#V#hasPromptSource" in ids
     assert "#V#hasToolResolutionPriority" in ids
+
+
+def test_skill_interop_predicates_are_registered():
+    ids = set(list_code_predicate_ids())
+
+    assert "#V#has_skill_name" in ids
+    assert "#V#has_skill_description" in ids
+    assert "#V#has_skill_argument_hint" in ids
+    assert "#V#is_user_invokable" in ids
+    assert "#V#disables_model_invocation" in ids
+    assert "#V#has_skill_source_scope" in ids
+    assert "#V#has_skill_discovery_location" in ids

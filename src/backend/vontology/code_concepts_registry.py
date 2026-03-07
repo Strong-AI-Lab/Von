@@ -131,6 +131,16 @@ _WORKFLOW_PROMPT_PREDICATE_IDS = [
     "#V#has_tool_resolution_priority",
 ]
 
+_SKILL_INTEROP_PREDICATE_IDS = [
+    "#V#has_skill_name",
+    "#V#has_skill_description",
+    "#V#has_skill_argument_hint",
+    "#V#is_user_invokable",
+    "#V#disables_model_invocation",
+    "#V#has_skill_source_scope",
+    "#V#has_skill_discovery_location",
+]
+
 _WORKFLOW_BACKGROUND_POLICY_PREDICATE_IDS = [
     "#V#hasBackgroundLaunchPolicyJson",
     "#V#has_background_launch_policy_json",
@@ -215,6 +225,7 @@ _CODE_PREDICATE_IDS = _unique_ids(
         *_FILE_METADATA_PREDICATE_IDS,
         *_WORKFLOW_PREDICATE_IDS,
         *_WORKFLOW_PROMPT_PREDICATE_IDS,
+        *_SKILL_INTEROP_PREDICATE_IDS,
         *_WORKFLOW_BACKGROUND_POLICY_PREDICATE_IDS,
         *_RELATION_META_PREDICATE_IDS,
         *_STRUCTURAL_PREDICATE_IDS,
