@@ -480,6 +480,8 @@ def test_workflow_list_definitions_exists_and_returns_data():
     assert "#V#file_copy_upload_classification_workflow" in def_ids
     assert "#V#file_copy_upload_handler_workflow" in def_ids
     assert "#V#file_copy_interpretation_workflow" in def_ids
+    assert "#V#workflow_discovery_gap_recovery_workflow" in def_ids
+    assert "#V#workflow_gap_test_workflow" in def_ids
     assert any("description_source" in d for d in result["definitions"])
     assert any("definition_identity" in d for d in result["definitions"])
     assert any("background_launch_policy_source" in d for d in result["definitions"])

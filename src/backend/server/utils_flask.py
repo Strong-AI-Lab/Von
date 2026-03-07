@@ -248,6 +248,24 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             )
 
         try:
+            from ..services.workflow_gap_vontology_service import (
+                ensure_workflow_gap_prompt_support,
+            )
+
+            workflow_gap_prompt_report = ensure_workflow_gap_prompt_support()
+            result["workflow_gap_prompt_bootstrap"] = workflow_gap_prompt_report
+            if not bool(workflow_gap_prompt_report.get("success", False)):
+                app_logger.warning(
+                    "[durable_workflows] workflow-gap prompt bootstrap failed: %s",
+                    workflow_gap_prompt_report,
+                )
+        except Exception as prompt_exc:
+            app_logger.warning(
+                "[durable_workflows] workflow-gap prompt bootstrap error: %s",
+                prompt_exc,
+            )
+
+        try:
             from ..services.parent_specificity_schedule_bootstrap_service import (
                 ensure_parent_specificity_background_schedule,
             )

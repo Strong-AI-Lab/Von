@@ -65,6 +65,9 @@ from ...workflows.durable.registry_factory import (
     build_workflow_registry,
     build_durable_action_registry,
 )
+from ...workflows.workflow_gap_workflow_contracts import (
+    WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
+)
 
 from src.backend.workflows.write_tool_policy import (
     compute_allowed_write_tools,
@@ -17976,6 +17979,7 @@ class InternalMCPChatOrchestrator:
         turn_id: Optional[str] = None,
         workflow_discovery_result: Mapping[str, Any] | None = None,
         workflow_continuation_context: Mapping[str, Any] | None = None,
+        workflow_gap_recovery_enabled: bool = True,
     ) -> OrchestratorResult:
         aux_llm_calls: List[Mapping[str, Any]] = []
         llm_calls: list[dict[str, Any]] = []
@@ -23231,6 +23235,143 @@ class InternalMCPChatOrchestrator:
             extra=workflow_dispatch_progress,
         )
 
+        def _coerce_message_sequence(
+            value: Any,
+        ) -> tuple[Mapping[str, Any], ...]:
+            if not isinstance(value, (list, tuple)):
+                return ()
+            return tuple(item for item in value if isinstance(item, Mapping))
+
+        def _maybe_apply_workflow_gap_recovery(
+            base_result: OrchestratorResult,
+        ) -> OrchestratorResult:
+            if not workflow_gap_recovery_enabled:
+                return base_result
+            if not isinstance(user_namespace, str) or not user_namespace.strip():
+                return base_result
+            if not isinstance(workflow_discovery_result, Mapping):
+                return base_result
+            if discovered_matches:
+                return base_result
+
+            recovery_request = {
+                "prompt": prompt,
+                "workflow_gap_request_text": prompt,
+                "context": list(context or []),
+                "augmented_context": list(augmented_context or []),
+                "workflow_discovery_result": dict(workflow_discovery_result),
+                "workflow_routing": (
+                    asdict(routing_info)
+                    if isinstance(routing_info, WorkflowRoutingInfo)
+                    else None
+                ),
+                "selected_workflow_id": selected_workflow_id_text,
+                "selected_workflow_name": selected_workflow_name,
+                "workflow_selector_verdict": selector_verdict or None,
+                "workflow_selector_source": (
+                    routing_info.source
+                    if isinstance(routing_info, WorkflowRoutingInfo)
+                    else None
+                ),
+                "workflow_gap_base_response_text": base_result.response_text,
+                "workflow_gap_base_extra_messages": list(base_result.extra_messages),
+                "workflow_gap_base_tool_invocations": list(base_result.tool_invocations),
+                "workflow_gap_discovery_candidate_count": len(discovered_matches)
+                + len(excluded_discovered_matches),
+                "workflow_gap_discovery_excluded_count": len(
+                    excluded_discovered_matches
+                ),
+                "workflow_gap_discovery_excluded_candidates": [
+                    dict(item)
+                    for item in excluded_discovered_matches
+                    if isinstance(item, Mapping)
+                ],
+                "user_concept_id": user_concept_id,
+                "org_concept_id": org_concept_id,
+                "conversation_session_id": conversation_session_id,
+                "turn_id": turn_id,
+                "workflow_episode_source": "chat_turn_workflow",
+                "workflow_episode_stage": "workflow_gap_recovery",
+            }
+            try:
+                recovery_result = self.execute_workflow(
+                    WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
+                    data=recovery_request,
+                    llm_client=llm_client,
+                    model=model,
+                    user_namespace=user_namespace,
+                    auxiliary_system_prompt=auxiliary_system_prompt,
+                    trace=trace if trace_enabled else None,
+                    conversation_session_id=conversation_session_id,
+                    turn_id=turn_id,
+                    episode_source="chat_turn_workflow",
+                )
+            except Exception as exc:
+                aux_payload = list(base_result.aux_llm_calls)
+                aux_payload.append(
+                    {
+                        "type": "workflow_gap_recovery",
+                        "status": "failed",
+                        "error": str(exc),
+                        "error_class": type(exc).__name__,
+                    }
+                )
+                return OrchestratorResult(
+                    response_text=base_result.response_text,
+                    extra_messages=base_result.extra_messages,
+                    tool_invocations=base_result.tool_invocations,
+                    aux_llm_calls=tuple(aux_payload),
+                    llm_calls=base_result.llm_calls,
+                    llm_usage=base_result.llm_usage,
+                    orchestrator_duration_ms=_orchestrator_duration_ms(),
+                    workflow_routing=base_result.workflow_routing,
+                    render_plan=base_result.render_plan,
+                )
+
+            if recovery_result is None:
+                return base_result
+
+            final_response_text = recovery_result.data.get(
+                "workflow_gap_final_response_text"
+            )
+            if not isinstance(final_response_text, str) or not final_response_text.strip():
+                return base_result
+
+            final_extra_messages = _coerce_message_sequence(
+                recovery_result.data.get("workflow_gap_final_extra_messages")
+            ) or tuple(base_result.extra_messages)
+            final_tool_invocations = _coerce_message_sequence(
+                recovery_result.data.get("workflow_gap_final_tool_invocations")
+            ) or tuple(base_result.tool_invocations)
+
+            aux_payload = list(base_result.aux_llm_calls)
+            aux_payload.append(
+                {
+                    "type": "workflow_gap_recovery",
+                    "status": "applied",
+                    "workflow_id": WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
+                    "final_state": recovery_result.final_state,
+                    "completed": recovery_result.completed,
+                    "recovery_outcome": recovery_result.data.get(
+                        "workflow_gap_recovery_outcome"
+                    ),
+                    "candidate_workflow_id": recovery_result.data.get(
+                        "workflow_gap_candidate_workflow_id"
+                    ),
+                }
+            )
+            return OrchestratorResult(
+                response_text=final_response_text.strip(),
+                extra_messages=final_extra_messages,
+                tool_invocations=final_tool_invocations,
+                aux_llm_calls=tuple(aux_payload),
+                llm_calls=base_result.llm_calls,
+                llm_usage=base_result.llm_usage,
+                orchestrator_duration_ms=_orchestrator_duration_ms(),
+                workflow_routing=base_result.workflow_routing,
+                render_plan=base_result.render_plan,
+            )
+
         selected_uses_tool_pipeline_contract = _workflow_matches_action_contract(
             selected_workflow_id_text,
             required_action_ids=_TOOL_PIPELINE_ACTION_IDS,
@@ -23299,6 +23440,7 @@ class InternalMCPChatOrchestrator:
                 workflow_routing=routing_info,
                 render_plan=_result_render_plan(),
             )
+            result = _maybe_apply_workflow_gap_recovery(result)
             _persist_trace(status="completed")
             return result
 
@@ -23343,13 +23485,19 @@ class InternalMCPChatOrchestrator:
                         wf_response = (
                             f"Workflow {selected_workflow_id_text} completed "
                             f"(state: {wf_result.final_state})."
-                        )
+                    )
                     wf_response = self._sanitise_user_visible_action_output(
                         wf_response,
                         aux_log=aux_llm_calls if isinstance(aux_llm_calls, list) else None,
                         source_stage="run.custom_workflow",
                     )
                     wf_response = _maybe_append_completion_claim_validation(wf_response)
+                    wf_extra_messages = _coerce_message_sequence(
+                        wf_result.data.get("extra_messages")
+                    )
+                    wf_tool_invocations = _coerce_message_sequence(
+                        wf_result.data.get("tool_invocations")
+                    )
                     aux_llm_calls.append(
                         {
                             "type": "workflow_execution",
@@ -23360,14 +23508,16 @@ class InternalMCPChatOrchestrator:
                     )
                     result = OrchestratorResult(
                         response_text=wf_response,
-                        extra_messages=(),
-                        tool_invocations=(),
+                        extra_messages=wf_extra_messages,
+                        tool_invocations=wf_tool_invocations,
                         aux_llm_calls=tuple(aux_llm_calls),
                         llm_calls=tuple(llm_calls),
                         llm_usage=_aggregate_usage_total(),
                         orchestrator_duration_ms=_orchestrator_duration_ms(),
                         workflow_routing=routing_info,
+                        render_plan=_result_render_plan(),
                     )
+                    result = _maybe_apply_workflow_gap_recovery(result)
                     _persist_trace(status="completed")
                     return result
                 self._logger.warning(
@@ -23618,6 +23768,7 @@ class InternalMCPChatOrchestrator:
             workflow_routing=routing_info,
             render_plan=_result_render_plan(),
         )
+        result = _maybe_apply_workflow_gap_recovery(result)
         _persist_trace(status=terminal_trace_status)
         return result
 

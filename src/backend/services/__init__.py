@@ -16,6 +16,7 @@ from . import (
     text_value_service,
     vontology_service,
     workflow_continuation_service,
+    workflow_gap_vontology_service,
 )
 
 __all__ = [
@@ -31,4 +32,5 @@ __all__ = [
     "text_value_service",
     "vontology_service",
     "workflow_continuation_service",
+    "workflow_gap_vontology_service",
 ]

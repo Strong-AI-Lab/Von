@@ -33,10 +33,43 @@ from .parent_specificity_workflow_contracts import (
     PARENT_SPECIFICITY_DOSSIER_WRITES_CONTEXT_KEYS,
     ParentSpecificityToolOutputMappingSpec,
 )
+from .workflow_gap_workflow_contracts import (
+    WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
+    WORKFLOW_GAP_COLLECT_CONTEXT_ACTION_ID,
+    WORKFLOW_GAP_CREATE_TEST_INPUTS_MAPPING_ID,
+    WORKFLOW_GAP_CREATE_TOOL_OUTPUT_MAPPINGS,
+    WORKFLOW_GAP_CREATE_WORKFLOW_SPEC_MAPPING_ID,
+    WORKFLOW_GAP_CREATE_WRITES_CONTEXT_KEYS,
+    WORKFLOW_GAP_CREATION_FAILURE_MODE_BINDINGS,
+    WORKFLOW_GAP_DECIDE_TEST_ACTION_ID,
+    WORKFLOW_GAP_FINALISE_RECOVERY_ACTION_ID,
+    WORKFLOW_GAP_PREPARE_CANDIDATE_ACTION_ID,
+    WORKFLOW_GAP_RUN_CANDIDATE_TEST_ACTION_ID,
+    WORKFLOW_GAP_TEST_ACCEPTANCE_MAPPING_ID,
+    WORKFLOW_GAP_TEST_BASE_RESPONSE_MAPPING_ID,
+    WORKFLOW_GAP_TEST_FAILURE_MODE_BINDINGS,
+    WORKFLOW_GAP_TEST_ORG_CONCEPT_MAPPING_ID,
+    WORKFLOW_GAP_TEST_PROMPT_MAPPING_ID,
+    WORKFLOW_GAP_TEST_RECENT_TURNS_MAPPING_ID,
+    WORKFLOW_GAP_TEST_SESSION_ID_MAPPING_ID,
+    WORKFLOW_GAP_TEST_TOOL_OUTPUT_MAPPINGS,
+    WORKFLOW_GAP_TEST_TURN_ID_MAPPING_ID,
+    WORKFLOW_GAP_TEST_USER_CONCEPT_MAPPING_ID,
+    WORKFLOW_GAP_TEST_WORKFLOW_ID,
+    WORKFLOW_GAP_TEST_WORKFLOW_ID_MAPPING_ID,
+    WORKFLOW_GAP_TEST_WRITES_CONTEXT_KEYS,
+    WorkflowGapOutputMappingSpec,
+)
 from .vontology_loader import (
     WORKFLOW_GRAPH_PREDICATE_ALIASES,
     build_workflow_process_graph,
     load_workflow_definition_from_vontology,
+)
+from .engine import (
+    WorkflowActionInvocation,
+    WorkflowDefinition,
+    WorkflowStateSpec,
+    WorkflowTransitionSpec,
 )
 from .workflow_definition_identity_service import (
     collect_workflow_action_ids,
@@ -126,6 +159,8 @@ CANONICAL_DURABLE_WORKFLOW_IDS: tuple[str, ...] = (
     FILE_COPY_INTERPRETATION_WORKFLOW_ID,
     PARENT_SPECIFICITY_DOSSIER_WORKFLOW_ID,
     PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID,
+    WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
+    WORKFLOW_GAP_TEST_WORKFLOW_ID,
     RUMINATION_WORKFLOW_ID,
 )
 
@@ -182,7 +217,9 @@ class _CanonicalStepPublicationSpec:
     static_input_bindings: tuple[tuple[str, str], ...] = ()
     context_input_mappings: tuple[str, ...] = ()
     tool_output_context_mappings: tuple[str, ...] = ()
-    tool_output_mapping_specs: tuple[ParentSpecificityToolOutputMappingSpec, ...] = ()
+    tool_output_mapping_specs: tuple[
+        ParentSpecificityToolOutputMappingSpec | WorkflowGapOutputMappingSpec, ...
+    ] = ()
     writes_context_keys: tuple[str, ...] = ()
     next_state: str | None = None
     on_true_state: str | None = None
@@ -517,6 +554,89 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
             _CanonicalStepPublicationSpec(state_id="failed"),
         ),
     ),
+    WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state="collect_context",
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id="collect_context",
+                action_id=WORKFLOW_GAP_COLLECT_CONTEXT_ACTION_ID,
+                next_state="analyse_gap",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="analyse_gap",
+                action_id="workflow_gap.analyse_recovery",
+                on_true_state="prepare_candidate",
+                on_false_state="complete",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="prepare_candidate",
+                action_id=WORKFLOW_GAP_PREPARE_CANDIDATE_ACTION_ID,
+                next_state="create_candidate",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="create_candidate",
+                action_id=WORKFLOW_SUBWORKFLOW_ACTION_ID,
+                invoked_workflow_id=WORKFLOW_CREATION_WORKFLOW_ID,
+                static_input_bindings=WORKFLOW_GAP_CREATION_FAILURE_MODE_BINDINGS,
+                context_input_mappings=(
+                    WORKFLOW_GAP_CREATE_WORKFLOW_SPEC_MAPPING_ID,
+                    WORKFLOW_GAP_CREATE_TEST_INPUTS_MAPPING_ID,
+                ),
+                tool_output_context_mappings=tuple(
+                    item.concept_id for item in WORKFLOW_GAP_CREATE_TOOL_OUTPUT_MAPPINGS
+                ),
+                tool_output_mapping_specs=WORKFLOW_GAP_CREATE_TOOL_OUTPUT_MAPPINGS,
+                writes_context_keys=WORKFLOW_GAP_CREATE_WRITES_CONTEXT_KEYS,
+                next_state="decide_test",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="decide_test",
+                action_id=WORKFLOW_GAP_DECIDE_TEST_ACTION_ID,
+                on_true_state="test_candidate",
+                on_false_state="complete",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="test_candidate",
+                action_id=WORKFLOW_SUBWORKFLOW_ACTION_ID,
+                invoked_workflow_id=WORKFLOW_GAP_TEST_WORKFLOW_ID,
+                static_input_bindings=WORKFLOW_GAP_TEST_FAILURE_MODE_BINDINGS,
+                context_input_mappings=(
+                    WORKFLOW_GAP_TEST_WORKFLOW_ID_MAPPING_ID,
+                    WORKFLOW_GAP_TEST_PROMPT_MAPPING_ID,
+                    WORKFLOW_GAP_TEST_RECENT_TURNS_MAPPING_ID,
+                    WORKFLOW_GAP_TEST_ACCEPTANCE_MAPPING_ID,
+                    WORKFLOW_GAP_TEST_BASE_RESPONSE_MAPPING_ID,
+                    WORKFLOW_GAP_TEST_USER_CONCEPT_MAPPING_ID,
+                    WORKFLOW_GAP_TEST_ORG_CONCEPT_MAPPING_ID,
+                    WORKFLOW_GAP_TEST_SESSION_ID_MAPPING_ID,
+                    WORKFLOW_GAP_TEST_TURN_ID_MAPPING_ID,
+                ),
+                tool_output_context_mappings=tuple(
+                    item.concept_id for item in WORKFLOW_GAP_TEST_TOOL_OUTPUT_MAPPINGS
+                ),
+                tool_output_mapping_specs=WORKFLOW_GAP_TEST_TOOL_OUTPUT_MAPPINGS,
+                writes_context_keys=WORKFLOW_GAP_TEST_WRITES_CONTEXT_KEYS,
+                next_state="complete",
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="complete",
+                action_id=WORKFLOW_GAP_FINALISE_RECOVERY_ACTION_ID,
+            ),
+            _CanonicalStepPublicationSpec(state_id="failed"),
+        ),
+    ),
+    WORKFLOW_GAP_TEST_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state="run_test",
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id="run_test",
+                action_id=WORKFLOW_GAP_RUN_CANDIDATE_TEST_ACTION_ID,
+                next_state="complete",
+            ),
+            _CanonicalStepPublicationSpec(state_id="complete"),
+            _CanonicalStepPublicationSpec(state_id="failed"),
+        ),
+    ),
     RUMINATION_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
         initial_state="assess",
         steps=(
@@ -592,6 +712,97 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
         ),
     ),
 }
+
+
+def _build_definition_from_publication_spec(
+    *,
+    workflow_id: str,
+    spec: _CanonicalWorkflowPublicationSpec,
+) -> WorkflowDefinition:
+    states: dict[str, WorkflowStateSpec] = {}
+    termination_states: list[str] = []
+    for step in spec.steps:
+        action_inputs: dict[str, Any] = {}
+        if step.invoked_workflow_id:
+            action_inputs["workflow_id"] = step.invoked_workflow_id
+        if step.static_input_bindings:
+            action_inputs.update(
+                {
+                    key: value
+                    for key, value in step.static_input_bindings
+                    if isinstance(key, str)
+                    and key.strip()
+                    and isinstance(value, str)
+                    and value.strip()
+                }
+            )
+        actions = (
+            (
+                WorkflowActionInvocation(
+                    action_id=step.action_id,
+                    inputs=action_inputs,
+                ),
+            )
+            if isinstance(step.action_id, str) and step.action_id.strip()
+            else ()
+        )
+        transitions: list[WorkflowTransitionSpec] = []
+        if isinstance(step.next_state, str) and step.next_state.strip():
+            transitions.append(
+                WorkflowTransitionSpec(
+                    to_state=step.next_state,
+                    condition=lambda _ctx: True,
+                    reason="next",
+                )
+            )
+        if isinstance(step.on_true_state, str) and step.on_true_state.strip():
+            transitions.append(
+                WorkflowTransitionSpec(
+                    to_state=step.on_true_state,
+                    condition=lambda ctx: bool(ctx.get("last_action_succeeded")),
+                    reason="on_true",
+                )
+            )
+        if isinstance(step.on_false_state, str) and step.on_false_state.strip():
+            transitions.append(
+                WorkflowTransitionSpec(
+                    to_state=step.on_false_state,
+                    condition=lambda ctx: bool(ctx.get("last_action_failed")),
+                    reason="on_false",
+                )
+            )
+        if isinstance(step.on_failure_state, str) and step.on_failure_state.strip():
+            transitions.append(
+                WorkflowTransitionSpec(
+                    to_state=step.on_failure_state,
+                    condition=lambda ctx: bool(ctx.get("last_action_failed")),
+                    reason="on_failure",
+                )
+            )
+        if isinstance(step.on_unknown_state, str) and step.on_unknown_state.strip():
+            transitions.append(
+                WorkflowTransitionSpec(
+                    to_state=step.on_unknown_state,
+                    condition=lambda ctx: bool(ctx.get("last_action_unknown")),
+                    reason="on_unknown",
+                )
+            )
+        is_terminal = not transitions
+        if is_terminal:
+            termination_states.append(step.state_id)
+        states[step.state_id] = WorkflowStateSpec(
+            state_id=step.state_id,
+            actions=actions,
+            transitions=tuple(transitions),
+            terminal=is_terminal,
+        )
+    return WorkflowDefinition(
+        workflow_id=workflow_id,
+        initial_state=spec.initial_state,
+        states=states,
+        termination_states=tuple(dict.fromkeys(termination_states)),
+        purpose=f"Synthetic canonical workflow definition for {workflow_id}.",
+    )
 
 
 def _slugify_token(value: str) -> str:
@@ -676,7 +887,7 @@ def _ensure_tool_output_mapping_concept(
     *,
     step_concept_id: str,
     mapping_target_id: str,
-    mapping_spec: ParentSpecificityToolOutputMappingSpec,
+    mapping_spec: ParentSpecificityToolOutputMappingSpec | WorkflowGapOutputMappingSpec,
 ) -> tuple[bool, str | None]:
     mapping_concept_id = str(mapping_spec.concept_id or "").strip()
     if not mapping_concept_id:
@@ -847,6 +1058,8 @@ def publish_canonical_chat_workflow_graphs(
                 for item in registry.all_workflow_ids()
                 if isinstance(item, str) and str(item).strip()
             }
+            .union(CANONICAL_VONTOLOGY_GOVERNANCE_WORKFLOW_IDS)
+            .union(_CANONICAL_WORKFLOW_PUBLICATION_SPECS.keys())
         )
     )
 
@@ -859,7 +1072,16 @@ def publish_canonical_chat_workflow_graphs(
         authoritative_definition = load_workflow_definition_from_vontology(candidate_id)
         if authoritative_definition is not None:
             return authoritative_definition
-        return registry.get(candidate_id)
+        registered_definition = registry.get(candidate_id)
+        if registered_definition is not None:
+            return registered_definition
+        canonical_spec = _CANONICAL_WORKFLOW_PUBLICATION_SPECS.get(candidate_id)
+        if canonical_spec is not None:
+            return _build_definition_from_publication_spec(
+                workflow_id=candidate_id,
+                spec=canonical_spec,
+            )
+        return None
 
     for workflow_id in target_workflow_ids:
         spec = _CANONICAL_WORKFLOW_PUBLICATION_SPECS.get(workflow_id)

@@ -19,6 +19,7 @@ init to avoid hanging on MongoDB connections.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any, Mapping, Optional, Sequence, cast
 from unittest.mock import MagicMock, patch
 
@@ -35,6 +36,9 @@ from src.backend.workflows.definitions import (
     CHAT_NARRATION_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
     TODO_REFRESH_WORKFLOW_ID,
+)
+from src.backend.workflows.workflow_gap_workflow_contracts import (
+    WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
 )
 from src.backend.workflows.workflow_selector import WorkflowSelection, WorkflowSelector
 
@@ -3524,6 +3528,146 @@ def test_no_routing_info_when_selector_disabled(monkeypatch):
     )
 
     assert result.workflow_routing is None
+
+
+def test_discovery_miss_invokes_gap_recovery_after_plain_fallback(monkeypatch):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+
+    monkeypatch.setattr(
+        orchestrator._workflow_selector,
+        "select_workflow",
+        lambda **_kwargs: WorkflowSelection(
+            workflow_id=CHAT_ASSISTANT_WORKFLOW_ID,
+            verdict="plain_response",
+            prompt_id=None,
+            prompt_used=None,
+            raw_response="plain_response",
+            discovered_workflow_ids=(),
+        ),
+    )
+
+    recovery_calls: list[tuple[str, Mapping[str, Any]]] = []
+
+    def _fake_execute_workflow(workflow_id: str, **kwargs):
+        recovery_calls.append((workflow_id, dict(kwargs)))
+        return SimpleNamespace(
+            data={
+                "workflow_gap_final_response_text": "Recovered through workflow-gap analysis.",
+                "workflow_gap_final_extra_messages": [
+                    {"role": "tool", "content": "gap recovery tool output"}
+                ],
+                "workflow_gap_final_tool_invocations": [
+                    {"tool": "workflow_gap.execute_candidate"}
+                ],
+                "workflow_gap_recovery_outcome": "candidate_retried_successfully",
+                "workflow_gap_candidate_workflow_id": "#V#candidate_recovery_workflow",
+            },
+            final_state="complete",
+            completed=True,
+        )
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _fake_execute_workflow)
+
+    llm = _CapturingLLM(["Fallback response."])
+    result = orchestrator.run(
+        prompt="Handle this missing workflow.",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result={"matches": [], "candidates": []},
+    )
+
+    assert recovery_calls
+    workflow_id, payload = recovery_calls[0]
+    assert workflow_id == WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID
+    assert payload["data"]["workflow_gap_base_response_text"] == "Fallback response."
+    assert result.response_text == "Recovered through workflow-gap analysis."
+    assert result.extra_messages == (
+        {"role": "tool", "content": "gap recovery tool output"},
+    )
+    assert result.tool_invocations == (
+        {"tool": "workflow_gap.execute_candidate"},
+    )
+    recovery_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_gap_recovery"
+        ),
+        None,
+    )
+    assert recovery_entry is not None
+    assert recovery_entry.get("status") == "applied"
+    assert recovery_entry.get("candidate_workflow_id") == "#V#candidate_recovery_workflow"
+
+
+def test_custom_workflow_result_preserves_messages_and_invocations(monkeypatch):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = "#V#custom_gap_analysis_workflow"
+    monkeypatch.setenv("VON_WORKFLOW_SELECTOR_ALLOW_POLICY_UNSAFE", "1")
+
+    monkeypatch.setattr(
+        orchestrator._workflow_selector,
+        "select_workflow",
+        lambda **_kwargs: WorkflowSelection(
+            workflow_id=selected_workflow_id,
+            verdict=selected_workflow_id,
+            prompt_id=None,
+            prompt_used=None,
+            raw_response=selected_workflow_id,
+            discovered_workflow_ids=(selected_workflow_id,),
+        ),
+    )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "execute_workflow",
+        lambda workflow_id, **_kwargs: (
+            SimpleNamespace(
+                data={
+                    "response_text": "Custom workflow response.",
+                    "extra_messages": [{"role": "tool", "content": "custom output"}],
+                    "tool_invocations": [{"tool": "search_concepts"}],
+                },
+                final_state="complete",
+                completed=True,
+            )
+            if workflow_id == selected_workflow_id
+            else pytest.fail(f"unexpected workflow execution: {workflow_id}")
+        ),
+    )
+
+    result = orchestrator.run(
+        prompt="Use the discovered workflow.",
+        context=[],
+        llm_client=_CapturingLLM([]),
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Custom gap workflow",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Custom gap workflow",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                }
+            ],
+        },
+    )
+
+    assert result.response_text == "Custom workflow response."
+    assert result.extra_messages == ({"role": "tool", "content": "custom output"},)
+    assert result.tool_invocations == ({"tool": "search_concepts"},)
 
 
 

@@ -397,6 +397,7 @@ def detect_vacuous_workflow_steps(
             step_order[step_id] = index
 
     incoming: Dict[str, List[Dict[str, Any]]] = {key: [] for key in step_by_id}
+    outgoing_count: Dict[str, int] = {key: 0 for key in step_by_id}
     if isinstance(edges, list):
         for edge in edges:
             if not isinstance(edge, dict):
@@ -405,6 +406,7 @@ def detect_vacuous_workflow_steps(
             to_step_id = str(edge.get("to", "") or "").strip()
             predicate = edge.get("predicate")
             if from_step_id and to_step_id:
+                outgoing_count[from_step_id] = outgoing_count.get(from_step_id, 0) + 1
                 incoming.setdefault(to_step_id, []).append(
                     {
                         "from_step_id": from_step_id,
@@ -444,6 +446,12 @@ def detect_vacuous_workflow_steps(
             or writes_context_keys
         )
         if has_contract:
+            continue
+        if step_id != initial_step and outgoing_count.get(step_id, 0) <= 0:
+            # Terminal marker states are intentionally actionless. Treat the
+            # leaf-node shape as authoritative rather than flagging them as
+            # vacuous, or executable workflows get misclassified as design
+            # artefacts during discovery/routing.
             continue
 
         previous_steps = incoming.get(step_id, [])

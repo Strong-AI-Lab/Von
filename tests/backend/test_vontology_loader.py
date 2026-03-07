@@ -1717,6 +1717,26 @@ class TestSubworkflowCompositionContracts:
 
         assert issues == []
 
+    def test_detect_vacuous_steps_ignores_terminal_marker_leaf_step(self):
+        graph = _make_graph(
+            initial_step="#V#start",
+            steps=[
+                _make_step(
+                    "#V#start",
+                    invokes_action="tool.perform",
+                    next_step="#V#completed",
+                ),
+                _make_step("#V#completed"),
+            ],
+        )
+
+        issues = detect_vacuous_workflow_steps(
+            workflow_id="#V#parent_workflow",
+            graph=graph,
+        )
+
+        assert issues == []
+
 
 # ---------------------------------------------------------------------------
 # Preconditions/effects metadata.

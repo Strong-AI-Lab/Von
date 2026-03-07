@@ -27,6 +27,7 @@ from ..workflow_definition_identity_service import (
     collect_workflow_action_ids,
     validate_workflow_definition_contract,
 )
+from .workflow_gap_recovery_workflow import register_workflow_gap_recovery_actions
 
 WORKFLOW_CREATION_WORKFLOW_ID = "#V#von_workflow_creation_workflow"
 
@@ -1908,6 +1909,10 @@ def _handle_ground_phd_student_text(request: WorkflowActionRequest) -> WorkflowA
 
 def _build_verification_registry(environment: WorkflowEnvironment) -> ActionRegistry:
     registry = ActionRegistry()
+    # Candidate workflows created by workflow-gap recovery must verify through
+    # the same action registry they will later execute under, or verification
+    # can incorrectly reject otherwise runnable workflows.
+    register_workflow_gap_recovery_actions(registry)
     registry.register_if_absent(
         ActionSpec(
             action_id=WORKFLOW_CREATION_ACTION_EMIT_MARKER,
@@ -1966,6 +1971,7 @@ def _supported_action_ids_for_verification(
 ) -> set[str]:
     supported: set[str] = set()
     local_actions = {
+        "workflow_gap.execute_candidate",
         WORKFLOW_CREATION_ACTION_EMIT_MARKER,
         WORKFLOW_CREATION_ACTION_RESOLVE_SCHOLARLY_AUTHORS,
         WORKFLOW_CREATION_ACTION_RESOLVE_PHD_STUDENT_CANDIDATE,
