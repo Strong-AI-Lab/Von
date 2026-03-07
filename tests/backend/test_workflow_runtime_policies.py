@@ -207,3 +207,65 @@ def test_idempotency_policy_reuses_prior_success_outputs() -> None:
     idempotency_events = second_result.data.get("workflow_idempotency_events")
     assert isinstance(idempotency_events, list)
     assert any(event.get("status") == "idempotent_reuse" for event in idempotency_events)
+
+
+def test_completion_gate_blocks_false_terminal_success_and_records_plan_state() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#completion_gate_workflow",
+        initial_state="dispatch",
+        states={
+            "dispatch": WorkflowStateSpec(
+                state_id="dispatch",
+                actions=(WorkflowActionInvocation(action_id="dispatch.action"),),
+                terminal=True,
+                metadata={
+                    "checkpoint_policy": {
+                        "schema_version": "workflow_step_checkpoint_policy.v1",
+                        "plan_item_updates": [
+                            {"item_id": "dispatch", "status": "done"}
+                        ],
+                        "progress_message": "Dispatching",
+                    }
+                },
+            ),
+        },
+        termination_states=("dispatch",),
+        metadata={
+            "plan_state_policy": {
+                "schema_version": "workflow_plan_state_policy.v1",
+                "plan_items": ["dispatch", "finalise"],
+            },
+            "completion_gate": {
+                "schema_version": "workflow_completion_gate.v1",
+                "required_done_plan_items": ["dispatch", "finalise"],
+                "required_context_keys": ["dispatch.completed"],
+            },
+        },
+    )
+
+    registry = ActionRegistry()
+    registry.register(
+        ActionSpec(
+            action_id="dispatch.action",
+            handler=lambda _request: WorkflowActionResult(outputs={}),
+        )
+    )
+
+    result = WorkflowExecutor(registry=registry, max_transitions=5).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={},
+    )
+
+    assert result.completed is False
+    assert result.error is not None
+    assert result.error.startswith("workflow_completion_gate_unmet")
+    plan_state = result.data.get("workflow_plan_state")
+    assert isinstance(plan_state, dict)
+    assert plan_state["items"]["dispatch"]["status"] == "done"
+    assert plan_state["items"]["finalise"]["status"] == "pending"
+    gate = result.data.get("workflow_completion_gate")
+    assert isinstance(gate, dict)
+    assert gate["safe_to_claim_completion"] is False
+    assert "required_plan_items_unmet" in gate["blocking_reason_codes"]
+    assert "missing_required_context_keys" in gate["blocking_reason_codes"]

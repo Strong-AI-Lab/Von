@@ -292,6 +292,7 @@ Per-state metadata keys currently used:
 - `retry_policy`
 - `approval_gate`
 - `idempotency_policy`
+- `checkpoint_policy`
 - `loop_scope_id`
 - `fork_id`
 - `join_fork_id`
@@ -303,19 +304,31 @@ Canonical workflow-step runtime policy payloads are stored as singleton text rel
 - `#V#hasWorkflowStepRetryPolicyJson`
 - `#V#hasWorkflowStepApprovalGateJson`
 - `#V#hasWorkflowStepIdempotencyPolicyJson`
+- `#V#hasWorkflowStepCheckpointPolicyJson`
+
+Workflow-level long-horizon policy payloads are stored as singleton text relations on the workflow concept:
+
+- `#V#hasWorkflowPlanStatePolicyJson`
+- `#V#hasWorkflowCompletionGateJson`
 
 Current schema versions:
 
 - `workflow_step_retry_policy.v1`
 - `workflow_step_approval_gate.v1`
 - `workflow_step_idempotency_policy.v1`
+- `workflow_step_checkpoint_policy.v1`
+- `workflow_plan_state_policy.v1`
+- `workflow_completion_gate.v1`
 
 Normative semantics:
 
 - invalid policy payloads MUST fail workflow loading with deterministic error codes;
 - retry and idempotency policies currently apply only to single-action states;
 - approval gates MUST fail closed when the required approval context key is absent or falsey;
-- approval-gated mutative states SHOULD provide an explicit `on_approval_required` route to a blocked terminal or escalation state.
+- approval-gated mutative states SHOULD provide an explicit `on_approval_required` route to a blocked terminal or escalation state;
+- checkpoint policies update the shared runtime plan-state artefact rather than introducing workflow-specific Python persistence logic;
+- plan-state items support `pending|in_progress|blocked|done` statuses, bounded checkpoint history, periodic summary snapshots, resumable cursor snapshots, and resume telemetry;
+- completion gates MUST fail closed before terminal success when required plan items or required context keys are not satisfied.
 
 Validation phases:
 
@@ -777,9 +790,15 @@ Unless explicitly implemented in runtime code, items below are normative plannin
 
 ### 16.3 Long-Horizon Workflow State
 
-- VWL SHOULD support durable plan-state artefacts for multi-hour workflows.
-- Recommended plan state includes step status (`pending|in_progress|blocked|done`), checkpoint timestamps, and resumable cursors.
-- Long-running workflows SHOULD expose periodic summary hooks and completion gates that verify declared deliverables before terminal success.
+VWL now supports KB-authored long-horizon execution state through workflow-level plan-state and completion-gate policies plus per-step checkpoint policies.
+
+Implemented semantics:
+
+- plan-state items are declared in `workflow_plan_state_policy.v1` and recorded in the shared `workflow_plan_state` runtime artefact;
+- item status is limited to `pending|in_progress|blocked|done`;
+- step checkpoints can update named plan items, emit progress messages, capture summary snapshots, and persist resumable cursor snapshots from declared context paths;
+- resumptions increment runtime resume telemetry and preserve bounded checkpoint history;
+- terminal success is blocked by `workflow_completion_gate.v1` unless all required plan items and required context keys are satisfied.
 
 ### 16.4 Gate and Policy Semantics
 

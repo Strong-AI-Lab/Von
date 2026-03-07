@@ -43,6 +43,11 @@ from .execution_contracts import (
     set_workflow_result_envelope,
     stamp_control_signal_context,
 )
+from .plan_state_runtime import (
+    apply_workflow_step_checkpoint,
+    evaluate_workflow_completion_gate,
+    mark_workflow_plan_state_entry,
+)
 from .trace_model import WorkflowExecutionTrace
 
 _CONTEXT_BINDING_KEYS: tuple[str, ...] = (
@@ -1143,6 +1148,38 @@ class WorkflowExecutor:
                 result_envelope=result_envelope,
             )
 
+        def _complete_with_gate(final_state: str) -> WorkflowResult:
+            gate_ok, gate_result = evaluate_workflow_completion_gate(
+                context=context,
+                workflow_id=definition.workflow_id,
+                definition_metadata=definition.metadata,
+                final_state=final_state,
+            )
+            if not gate_ok:
+                blocking_reasons = []
+                if isinstance(gate_result, Mapping):
+                    blocking_reasons = [
+                        str(item).strip()
+                        for item in gate_result.get("blocking_reason_codes") or []
+                        if str(item).strip()
+                    ]
+                error = "workflow_completion_gate_unmet"
+                if blocking_reasons:
+                    error = f"{error}:{'|'.join(blocking_reasons)}"
+                if trace is not None:
+                    trace.finish_failed(error)
+                return _build_result(
+                    completed=False,
+                    final_state=final_state,
+                    error=error,
+                )
+            if trace is not None:
+                trace.finish_completed()
+            return _build_result(
+                completed=True,
+                final_state=final_state,
+            )
+
         while transitions < self._max_transitions:
             transitions += 1
             state_spec = definition.states.get(current_state)
@@ -1153,6 +1190,14 @@ class WorkflowExecutor:
                     final_state=current_state,
                     error=error,
                 )
+
+            mark_workflow_plan_state_entry(
+                context=context,
+                workflow_id=definition.workflow_id,
+                state_id=current_state,
+                definition_metadata=definition.metadata,
+                state_metadata=state_spec.metadata,
+            )
 
             if trace is not None:
                 trace.record_state_transition(
@@ -1688,21 +1733,21 @@ class WorkflowExecutor:
                     error=error,
                 )
 
+            apply_workflow_step_checkpoint(
+                context=context,
+                workflow_id=definition.workflow_id,
+                state_id=current_state,
+                step_index=transitions,
+                definition_metadata=definition.metadata,
+                state_metadata=state_spec.metadata,
+                blocked=approval_blocked,
+            )
+
             if control_signal == WORKFLOW_CONTROL_SIGNAL_RETURN:
-                if trace is not None:
-                    trace.finish_completed()
-                return _build_result(
-                    completed=True,
-                    final_state=current_state,
-                )
+                return _complete_with_gate(current_state)
 
             if current_state in termination_states:
-                if trace is not None:
-                    trace.finish_completed()
-                return _build_result(
-                    completed=True,
-                    final_state=current_state,
-                )
+                return _complete_with_gate(current_state)
 
             next_state = None
             transition_reason = None
