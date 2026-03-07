@@ -1,7 +1,7 @@
 # Von Workflow Language (VWL) Manual
 
 Status: Draft (current implementation-aligned)
-Last updated: 2026-03-06 (Pacific/Auckland)
+Last updated: 2026-03-07 (Pacific/Auckland)
 Audience: Human engineers and AI agents
 
 ## 1. Purpose and Scope
@@ -791,6 +791,46 @@ After analysis and manual refinement are complete, maintainers SHOULD create lin
 - scope each capability increment separately,
 - define acceptance checks and sequencing,
 - and preserve traceability back to analysis sources.
+
+### 16.9 Canonical Design-Only Workflow Artefacts
+
+Some workflows are intentionally represented first as design-only KB artefacts before the language/runtime can execute them directly. In those cases:
+
+- the canonical artefact SHOULD still be created in Vontology,
+- the concept SHOULD keep the final workflow identity if it is expected to become executable later,
+- and the artefact SHOULD fail closed as a design document rather than inviting bespoke Python orchestration.
+
+Preferred pattern:
+
+- create the workflow concept in Vontology as the target durable or AI workflow identity,
+- attach narrative contract text via `hasContent`/`hasDescription`,
+- and, where useful, also type it as `#V#workflow_description_document`.
+
+### 16.10 Worked Example: Jira-GitHub Autofix Loop (`JVNAUTOSCI-1338`)
+
+Canonical concept:
+
+- `#V#jira_github_autofix_loop_workflow`
+
+Current status:
+
+- design-only canonical VWL artefact,
+- intended to become a durable workflow once iterator, approval, idempotency, and checkpoint semantics are available.
+
+Normative design requirements:
+
+- discover explicitly labelled Jira issues via bounded JQL;
+- map each issue to an allow-listed repository and base branch;
+- use guarded internal GitHub MCP methods for branch, PR, or Copilot delegation paths;
+- persist per-issue outcomes and run summary under stable context keys;
+- comment resulting GitHub metadata back to Jira;
+- fail closed on missing auth, allow-list mismatch, missing approval, or missing loop semantics.
+
+This example MUST NOT be implemented as a bespoke Python polling service. Supporting code may add generic VWL capabilities, validators, and telemetry, but the autofix-loop behaviour itself belongs in the Vontology workflow representation.
+
+Reference design document:
+
+- `docs/engineering/jira_github_autofix_loop_workflow.md`
 
 ---
 
