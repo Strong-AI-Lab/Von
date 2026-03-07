@@ -215,3 +215,65 @@ def test_build_transition_condition_rejects_invalid_control_signal() -> None:
     with pytest.raises(ValueError) as exc_info:
         build_transition_condition({"kind": "control_signal", "signal": "pause"})
     assert "workflow_condition_invalid:control_signal_invalid" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("spec", "context", "expected"),
+    [
+        (
+            {"kind": "context_exists", "path": "current_item.key", "expected": True},
+            {"current_item": {"key": "JVNAUTOSCI-1"}},
+            True,
+        ),
+        (
+            {"kind": "context_exists", "path": "current_item.key", "expected": False},
+            {"current_item": {}},
+            True,
+        ),
+        (
+            {"kind": "context_is_null", "path": "current_item.pull_request_url"},
+            {"current_item": {"pull_request_url": None}},
+            True,
+        ),
+        (
+            {
+                "kind": "context_compare",
+                "path": "candidate_issue_count",
+                "operator": "gt",
+                "value": 0,
+            },
+            {"candidate_issue_count": 3},
+            True,
+        ),
+        (
+            {
+                "kind": "context_cardinality",
+                "path": "candidate_issues",
+                "operator": "gte",
+                "value": 2,
+            },
+            {"candidate_issues": ["A", "B"]},
+            True,
+        ),
+    ],
+)
+def test_transition_conditions_support_nested_paths_and_comparators(
+    spec, context, expected
+) -> None:
+    _normalised, condition = build_transition_condition(spec)
+    assert condition(context) is expected
+
+
+def test_build_transition_condition_rejects_invalid_compare_operator() -> None:
+    with pytest.raises(ValueError) as exc_info:
+        build_transition_condition(
+            {
+                "kind": "context_compare",
+                "path": "candidate_issue_count",
+                "operator": "approx",
+                "value": 1,
+            }
+        )
+    assert "workflow_condition_invalid:compare_operator_invalid" in str(
+        exc_info.value
+    )

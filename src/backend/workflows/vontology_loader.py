@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..services.text_value_service import (
@@ -19,6 +19,9 @@ from .engine import (
     WorkflowStateSpec,
     WorkflowActionInvocation,
     WorkflowTransitionSpec,
+    _normalise_approval_gate_spec,
+    _normalise_idempotency_policy_spec,
+    _normalise_retry_policy_spec,
     build_transition_condition,
 )
 
@@ -80,6 +83,12 @@ WORKFLOW_GRAPH_PREDICATE_ALIASES: Dict[str, Tuple[str, ...]] = {
         "onUnknownNextStep",
         "#V#on_unknown_next_step",
         "on_unknown_next_step",
+    ),
+    "onApprovalRequiredNextStep": (
+        "#V#onApprovalRequiredNextStep",
+        "onApprovalRequiredNextStep",
+        "#V#on_approval_required_next_step",
+        "on_approval_required_next_step",
     ),
     "onBreakNextStep": (
         "#V#onBreakNextStep",
@@ -161,6 +170,32 @@ WORKFLOW_DESCRIPTION_SOURCE_DEFINITION = "definition.purpose"
 WORKFLOW_BACKGROUND_LAUNCH_POLICY_SOURCE_NONE = "none"
 WORKFLOW_BACKGROUND_LAUNCH_POLICY_SCHEMA_VERSION = (
     "workflow_background_launch_policy.v1"
+)
+WORKFLOW_STEP_RETRY_POLICY_TEXT_PREDICATE_PRECEDENCE: Tuple[Tuple[str, ...], ...] = (
+    (
+        "#V#hasWorkflowStepRetryPolicyJson",
+        "hasWorkflowStepRetryPolicyJson",
+        "#V#has_workflow_step_retry_policy_json",
+        "has_workflow_step_retry_policy_json",
+    ),
+)
+WORKFLOW_STEP_APPROVAL_GATE_TEXT_PREDICATE_PRECEDENCE: Tuple[Tuple[str, ...], ...] = (
+    (
+        "#V#hasWorkflowStepApprovalGateJson",
+        "hasWorkflowStepApprovalGateJson",
+        "#V#has_workflow_step_approval_gate_json",
+        "has_workflow_step_approval_gate_json",
+    ),
+)
+WORKFLOW_STEP_IDEMPOTENCY_POLICY_TEXT_PREDICATE_PRECEDENCE: Tuple[
+    Tuple[str, ...], ...
+] = (
+    (
+        "#V#hasWorkflowStepIdempotencyPolicyJson",
+        "hasWorkflowStepIdempotencyPolicyJson",
+        "#V#has_workflow_step_idempotency_policy_json",
+        "has_workflow_step_idempotency_policy_json",
+    ),
 )
 WORKFLOW_BACKGROUND_LAUNCH_POLICY_TEXT_PREDICATE_PRECEDENCE: Tuple[
     Tuple[str, ...], ...
@@ -1109,6 +1144,100 @@ def resolve_workflow_background_launch_policy(
     return None, WORKFLOW_BACKGROUND_LAUNCH_POLICY_SOURCE_NONE
 
 
+def _parse_json_object_text_value(text_value: Any) -> dict[str, Any] | None:
+    text = _normalise_non_empty_text(text_value)
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return None
+    if isinstance(parsed, Mapping):
+        return dict(parsed)
+    return None
+
+
+def _resolve_step_policy_from_text_relations(
+    *,
+    step_id: str,
+    predicate_precedence: Tuple[Tuple[str, ...], ...],
+    normaliser: Callable[[Any], dict[str, Any] | None],
+) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        raw_texts = get_texts_for_concept(step_id)
+    except Exception:
+        raw_texts = []
+    texts = [item for item in raw_texts if isinstance(item, Mapping)]
+    invalid_sources: list[str] = []
+
+    for predicate_aliases in predicate_precedence:
+        for item in texts:
+            predicate = str(item.get("predicate") or "").strip()
+            if predicate not in predicate_aliases:
+                continue
+            parsed = _parse_json_object_text_value(item.get("text"))
+            if parsed is None:
+                invalid_sources.append(f"text_relation_invalid:{predicate}:json_invalid")
+                continue
+            try:
+                normalised = normaliser(parsed)
+            except ValueError as exc:
+                invalid_sources.append(f"text_relation_invalid:{predicate}:{exc}")
+                continue
+            if normalised is not None:
+                return normalised, f"text_relation:{predicate}"
+
+    if invalid_sources:
+        return None, invalid_sources[0]
+    return None, None
+
+
+def resolve_workflow_step_runtime_policies(
+    step_id: str,
+) -> tuple[dict[str, Any], list[str]]:
+    policies: dict[str, Any] = {}
+    warnings: list[str] = []
+    if not isinstance(step_id, str) or not step_id.strip():
+        return policies, warnings
+
+    retry_policy, retry_source = _resolve_step_policy_from_text_relations(
+        step_id=step_id,
+        predicate_precedence=WORKFLOW_STEP_RETRY_POLICY_TEXT_PREDICATE_PRECEDENCE,
+        normaliser=_normalise_retry_policy_spec,
+    )
+    if retry_policy is not None:
+        policies["retry_policy"] = retry_policy
+    elif isinstance(retry_source, str) and retry_source:
+        warnings.append(f"workflow_step_retry_policy_invalid:{step_id}:{retry_source}")
+
+    approval_gate, approval_source = _resolve_step_policy_from_text_relations(
+        step_id=step_id,
+        predicate_precedence=WORKFLOW_STEP_APPROVAL_GATE_TEXT_PREDICATE_PRECEDENCE,
+        normaliser=_normalise_approval_gate_spec,
+    )
+    if approval_gate is not None:
+        policies["approval_gate"] = approval_gate
+    elif isinstance(approval_source, str) and approval_source:
+        warnings.append(
+            f"workflow_step_approval_gate_invalid:{step_id}:{approval_source}"
+        )
+
+    idempotency_policy, idempotency_source = _resolve_step_policy_from_text_relations(
+        step_id=step_id,
+        predicate_precedence=WORKFLOW_STEP_IDEMPOTENCY_POLICY_TEXT_PREDICATE_PRECEDENCE,
+        normaliser=_normalise_idempotency_policy_spec,
+    )
+    if idempotency_policy is not None:
+        policies["idempotency_policy"] = idempotency_policy
+    elif isinstance(idempotency_source, str) and idempotency_source:
+        warnings.append(
+            "workflow_step_idempotency_policy_invalid:"
+            f"{step_id}:{idempotency_source}"
+        )
+
+    return policies, warnings
+
+
 def resolve_workflow_description(
     workflow_id: str,
     *,
@@ -1352,6 +1481,21 @@ def build_workflow_process_graph(
             matched_predicates=(on_unknown_predicate,),
         )
 
+        on_approval_required_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES[
+            "onApprovalRequiredNextStep"
+        ]
+        on_approval_required, on_approval_required_predicate = (
+            _first_relationship_target_with_predicate(
+                step_rels,
+                on_approval_required_candidates,
+            )
+        )
+        _record_legacy_alias_use(
+            legacy_aliases=legacy_aliases,
+            canonical_predicate=on_approval_required_candidates[0],
+            matched_predicates=(on_approval_required_predicate,),
+        )
+
         on_break_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES["onBreakNextStep"]
         on_break, on_break_predicate = _first_relationship_target_with_predicate(
             step_rels,
@@ -1463,6 +1607,11 @@ def build_workflow_process_graph(
             matched_predicates=output_mapping_predicates,
         )
 
+        runtime_policies, policy_warnings = resolve_workflow_step_runtime_policies(
+            step_id
+        )
+        warnings.extend(policy_warnings)
+
         step_items.append(
             {
                 "step_id": step_id,
@@ -1476,12 +1625,14 @@ def build_workflow_process_graph(
                 "context_input_mappings": context_input_mappings,
                 "tool_output_context_mappings": tool_output_context_mappings,
                 "writes_context_keys": writes_context_keys,
+                **runtime_policies,
                 "control_flow": {
                     "next": next_step,
                     "on_true": on_true,
                     "on_false": on_false,
                     "on_failure": on_failure,
                     "on_unknown": on_unknown,
+                    "on_approval_required": on_approval_required,
                     "on_break": on_break,
                     "on_continue": on_continue,
                 },
@@ -1493,6 +1644,7 @@ def build_workflow_process_graph(
         _edge(step_id, "onFalseNextStep", on_false)
         _edge(step_id, "onFailureNextStep", on_failure)
         _edge(step_id, "onUnknownNextStep", on_unknown)
+        _edge(step_id, "onApprovalRequiredNextStep", on_approval_required)
         _edge(step_id, "onBreakNextStep", on_break)
         _edge(step_id, "onContinueNextStep", on_continue)
 
@@ -1547,6 +1699,14 @@ def load_workflow_definition_from_vontology(
     graph, warnings = build_workflow_process_graph(workflow_id)
     if not graph:
         return None
+    fatal_warning_prefixes = (
+        "workflow_step_retry_policy_invalid:",
+        "workflow_step_approval_gate_invalid:",
+        "workflow_step_idempotency_policy_invalid:",
+    )
+    for warning in warnings:
+        if isinstance(warning, str) and warning.startswith(fatal_warning_prefixes):
+            raise ValueError(warning)
 
     # Correct key from build_workflow_process_graph output.
     initial_state_id = graph.get("initial_step")
@@ -1725,6 +1885,7 @@ def load_workflow_definition_from_vontology(
 
         on_failure_target = control_flow.get("on_failure")
         on_unknown_target = control_flow.get("on_unknown")
+        on_approval_required_target = control_flow.get("on_approval_required")
         on_break_target = control_flow.get("on_break")
         on_continue_target = control_flow.get("on_continue")
         on_true_target = control_flow.get("on_true")
@@ -1803,7 +1964,7 @@ def load_workflow_definition_from_vontology(
                     condition_spec=raw_condition_spec,
                 )
 
-        # Priority: on_failure → on_unknown → on_break/on_continue →
+        # Priority: on_failure → on_unknown → on_approval_required → on_break/on_continue →
         # on_true/on_false → next.
         # Canonical Vontology workflows rely on this deterministic ordering.
         if on_failure_target:
@@ -1824,6 +1985,17 @@ def load_workflow_definition_from_vontology(
                 condition_spec={
                     "kind": "context_flag",
                     "key": "last_action_unknown",
+                    "expected": True,
+                },
+            )
+
+        if on_approval_required_target:
+            _append_transition_from_spec(
+                to_state=on_approval_required_target,
+                reason="on_approval_required",
+                condition_spec={
+                    "kind": "context_flag",
+                    "key": "approval_required",
                     "expected": True,
                 },
             )
@@ -1884,6 +2056,9 @@ def load_workflow_definition_from_vontology(
         reads_vars = step.get("reads_variables")
         writes_vars = step.get("writes_variables")
         writes_context_keys = step.get("writes_context_keys")
+        retry_policy = step.get("retry_policy")
+        approval_gate = step.get("approval_gate")
+        idempotency_policy = step.get("idempotency_policy")
         if preconditions:
             step_metadata["preconditions"] = preconditions
         if effects:
@@ -1896,6 +2071,12 @@ def load_workflow_definition_from_vontology(
             step_metadata["writes_variables"] = writes_vars
         if writes_context_keys:
             step_metadata["writes_context_keys"] = writes_context_keys
+        if retry_policy:
+            step_metadata["retry_policy"] = retry_policy
+        if approval_gate:
+            step_metadata["approval_gate"] = approval_gate
+        if idempotency_policy:
+            step_metadata["idempotency_policy"] = idempotency_policy
         if is_subworkflow_action:
             workflow_target = str(invokes_workflow or "").strip()
             workflow_id_context_key = ""

@@ -87,10 +87,18 @@ _WORKFLOW_PREDICATE_IDS = [
     "#V#on_false_next_step",
     "#V#onFailureNextStep",
     "#V#on_failure_next_step",
+    "#V#onApprovalRequiredNextStep",
+    "#V#on_approval_required_next_step",
     "#V#readsVariable",
     "#V#reads_variable",
     "#V#writesVariable",
     "#V#writes_variable",
+    "#V#hasWorkflowStepRetryPolicyJson",
+    "#V#has_workflow_step_retry_policy_json",
+    "#V#hasWorkflowStepApprovalGateJson",
+    "#V#has_workflow_step_approval_gate_json",
+    "#V#hasWorkflowStepIdempotencyPolicyJson",
+    "#V#has_workflow_step_idempotency_policy_json",
 ]
 
 _WORKFLOW_BACKGROUND_POLICY_PREDICATE_IDS = [

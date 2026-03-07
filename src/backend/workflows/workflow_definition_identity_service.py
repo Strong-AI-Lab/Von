@@ -19,8 +19,10 @@ from .subworkflow_contracts import (
 from .execution_contracts import (
     WORKFLOW_CONTROL_BREAK_ACTION_IDS,
     WORKFLOW_CONTROL_CONTINUE_ACTION_IDS,
+    WORKFLOW_CONTROL_FOR_EACH_ACTION_IDS,
     WORKFLOW_CONTROL_FORK_ACTION_IDS,
     WORKFLOW_CONTROL_JOIN_ACTION_IDS,
+    WORKFLOW_FOR_EACH_ALLOWED_SUCCESS_POLICIES,
 )
 
 WORKFLOW_DEFINITION_IDENTITY_SCHEMA_VERSION = "workflow_definition_identity.v1"
@@ -41,6 +43,9 @@ _STATE_METADATA_CONTRACT_KEYS: tuple[str, ...] = (
     "loop_scope_id",
     "fork_id",
     "join_fork_id",
+    "retry_policy",
+    "approval_gate",
+    "idempotency_policy",
 )
 
 
@@ -624,6 +629,9 @@ def validate_workflow_definition_contract(
     subworkflow_contract_issues: list[dict[str, Any]] = []
     control_signal_issues: list[dict[str, Any]] = []
     fork_join_issues: list[dict[str, Any]] = []
+    iterator_issues: list[dict[str, Any]] = []
+    approval_gate_issues: list[dict[str, Any]] = []
+    runtime_policy_issues: list[dict[str, Any]] = []
     declared_fork_ids: set[str] = set()
 
     supported_action_set: set[str] = set()
@@ -711,7 +719,33 @@ def validate_workflow_definition_contract(
             == "on_continue"
             for transition in transitions
         )
+        has_on_approval_required_transition = any(
+            str(getattr(transition, "reason", "") or "").strip().lower()
+            == "on_approval_required"
+            for transition in transitions
+        )
         loop_scope_id = str(metadata.get("loop_scope_id") or "").strip()
+        if metadata.get("approval_gate") and not has_on_approval_required_transition:
+            approval_gate_issues.append(
+                {
+                    "state_id": state_id,
+                    "reason_code": "approval_transition_missing",
+                }
+            )
+        if metadata.get("retry_policy") and len(actions) > 1:
+            runtime_policy_issues.append(
+                {
+                    "state_id": state_id,
+                    "reason_code": "retry_policy_multi_action_state_unsupported",
+                }
+            )
+        if metadata.get("idempotency_policy") and len(actions) > 1:
+            runtime_policy_issues.append(
+                {
+                    "state_id": state_id,
+                    "reason_code": "idempotency_policy_multi_action_state_unsupported",
+                }
+            )
         for action_id, action_inputs in action_specs:
             if action_id in WORKFLOW_CONTROL_BREAK_ACTION_IDS:
                 action_scope = str(
@@ -772,6 +806,52 @@ def validate_workflow_definition_contract(
                             "action_id": action_id,
                             "fork_id": join_fork_id,
                             "reason_code": "join_without_matching_fork",
+                        }
+                    )
+            if action_id in WORKFLOW_CONTROL_FOR_EACH_ACTION_IDS:
+                workflow_id = str(
+                    action_inputs.get("workflow_id")
+                    or action_inputs.get("workflow")
+                    or ""
+                ).strip()
+                if not workflow_id:
+                    iterator_issues.append(
+                        {
+                            "state_id": state_id,
+                            "action_id": action_id,
+                            "reason_code": "for_each_workflow_id_missing",
+                        }
+                    )
+                explicit_items = action_inputs.get("items")
+                if not (
+                    (
+                        _is_sequence_like(explicit_items)
+                        and not isinstance(explicit_items, (str, bytes, bytearray))
+                    )
+                    or str(
+                        action_inputs.get("items_context_key")
+                        or action_inputs.get("items_path")
+                        or action_inputs.get("context_key")
+                        or ""
+                    ).strip()
+                ):
+                    iterator_issues.append(
+                        {
+                            "state_id": state_id,
+                            "action_id": action_id,
+                            "reason_code": "for_each_items_missing",
+                        }
+                    )
+                success_policy = str(action_inputs.get("success_policy") or "").strip()
+                if success_policy and success_policy not in set(
+                    WORKFLOW_FOR_EACH_ALLOWED_SUCCESS_POLICIES
+                ):
+                    iterator_issues.append(
+                        {
+                            "state_id": state_id,
+                            "action_id": action_id,
+                            "reason_code": "for_each_success_policy_invalid",
+                            "success_policy": success_policy,
                         }
                     )
 
@@ -1022,6 +1102,28 @@ def validate_workflow_definition_contract(
             str(item.get("reason_code") or ""),
         ),
     )
+    iterator_issues = sorted(
+        iterator_issues,
+        key=lambda item: (
+            str(item.get("state_id") or ""),
+            str(item.get("action_id") or ""),
+            str(item.get("reason_code") or ""),
+        ),
+    )
+    approval_gate_issues = sorted(
+        approval_gate_issues,
+        key=lambda item: (
+            str(item.get("state_id") or ""),
+            str(item.get("reason_code") or ""),
+        ),
+    )
+    runtime_policy_issues = sorted(
+        runtime_policy_issues,
+        key=lambda item: (
+            str(item.get("state_id") or ""),
+            str(item.get("reason_code") or ""),
+        ),
+    )
 
     errors: list[str] = []
     if vacuous_state_ids:
@@ -1042,6 +1144,12 @@ def validate_workflow_definition_contract(
         errors.append("workflow_control_signal_invalid")
     if fork_join_issues:
         errors.append("workflow_fork_join_invalid")
+    if iterator_issues:
+        errors.append("workflow_iterator_invalid")
+    if approval_gate_issues:
+        errors.append("workflow_approval_gate_invalid")
+    if runtime_policy_issues:
+        errors.append("workflow_runtime_policy_invalid")
     if subworkflow_contract_issues:
         unresolved_reason_codes = {
             "subworkflow_workflow_not_found",
@@ -1082,6 +1190,9 @@ def validate_workflow_definition_contract(
         "subworkflow_contract_issues": subworkflow_contract_issues,
         "control_signal_issues": control_signal_issues,
         "fork_join_issues": fork_join_issues,
+        "iterator_issues": iterator_issues,
+        "approval_gate_issues": approval_gate_issues,
+        "runtime_policy_issues": runtime_policy_issues,
     }
 
 

@@ -18,14 +18,18 @@ from ..action_registry import (
     WorkflowActionResult,
 )
 from ..engine import WorkflowDefinition, WorkflowExecutor
+from ..context_paths import resolve_context_path
 from ..execution_contracts import (
     LAST_WORKFLOW_STEP_RESULT_ENVELOPE_KEY,
     WORKFLOW_CONTROL_ACTION_BREAK_ID,
     WORKFLOW_CONTROL_ACTION_CONTINUE_ID,
+    WORKFLOW_CONTROL_ACTION_FOR_EACH_ID,
     WORKFLOW_CONTROL_ACTION_FORK_ID,
     WORKFLOW_CONTROL_ACTION_JOIN_ID,
     WORKFLOW_CONTROL_SIGNAL_BREAK,
     WORKFLOW_CONTROL_SIGNAL_CONTINUE,
+    WORKFLOW_FOR_EACH_ALLOWED_SUCCESS_POLICIES,
+    WORKFLOW_FOR_EACH_SUCCESS_POLICY_ALL_MUST_SUCCEED,
     WORKFLOW_FORK_ALLOWED_FAILURE_POLICIES,
     WORKFLOW_FORK_ALLOWED_MERGE_POLICIES,
     WORKFLOW_FORK_CONTEXTS_KEY,
@@ -43,8 +47,11 @@ _DEFAULT_FORK_BRANCH_LIMIT = 8
 _MAX_FORK_BRANCH_LIMIT = 32
 _DEFAULT_BRANCH_MAX_TRANSITIONS = 40
 _MAX_BRANCH_MAX_TRANSITIONS = 200
+_DEFAULT_FOR_EACH_ITEM_LIMIT = 16
+_MAX_FOR_EACH_ITEM_LIMIT = 256
 _FORK_BRANCH_LIMIT_ENV = "VON_WORKFLOW_FORK_MAX_BRANCHES"
 _FORK_BRANCH_TRANSITIONS_ENV = "VON_WORKFLOW_FORK_BRANCH_MAX_TRANSITIONS"
+_FOR_EACH_ITEM_LIMIT_ENV = "VON_WORKFLOW_FOR_EACH_MAX_ITEMS"
 
 
 def _normalise_text(value: Any) -> str:
@@ -65,6 +72,21 @@ def _coerce_branch_limit() -> int:
         default=_DEFAULT_FORK_BRANCH_LIMIT,
         min_value=1,
         max_value=_MAX_FORK_BRANCH_LIMIT,
+    )
+
+
+def _coerce_for_each_limit(value: Any) -> int:
+    default_limit = _coerce_int(
+        os.getenv(_FOR_EACH_ITEM_LIMIT_ENV),
+        default=_DEFAULT_FOR_EACH_ITEM_LIMIT,
+        min_value=1,
+        max_value=_MAX_FOR_EACH_ITEM_LIMIT,
+    )
+    return _coerce_int(
+        value,
+        default=default_limit,
+        min_value=1,
+        max_value=_MAX_FOR_EACH_ITEM_LIMIT,
     )
 
 
@@ -97,6 +119,13 @@ def _normalise_merge_policy(value: Any) -> str:
     return WORKFLOW_FORK_MERGE_POLICY_LAST_WRITER_WINS
 
 
+def _normalise_for_each_success_policy(value: Any) -> str:
+    text = _normalise_text(value).lower()
+    if text in WORKFLOW_FOR_EACH_ALLOWED_SUCCESS_POLICIES:
+        return text
+    return WORKFLOW_FOR_EACH_SUCCESS_POLICY_ALL_MUST_SUCCEED
+
+
 def _normalise_branch_specs(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
@@ -121,6 +150,32 @@ def _normalise_branch_specs(value: Any) -> list[dict[str, Any]]:
             }
         )
     return sorted(specs, key=lambda spec: spec["branch_id"])
+
+
+def _resolve_items_sequence(
+    *,
+    request: WorkflowActionRequest,
+) -> tuple[list[Any] | None, str | None, str | None]:
+    explicit_items = request.inputs.get("items")
+    if isinstance(explicit_items, Sequence) and not isinstance(
+        explicit_items, (str, bytes, bytearray)
+    ):
+        return list(explicit_items), "inputs.items", None
+
+    items_path = _normalise_text(
+        request.inputs.get("items_context_key")
+        or request.inputs.get("items_path")
+        or request.inputs.get("context_key")
+    )
+    if not items_path:
+        return None, None, "for_each_items_missing"
+
+    found, value = resolve_context_path(context=request.data, path=items_path)
+    if not found:
+        return None, items_path, f"for_each_items_path_not_found:{items_path}"
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return None, items_path, f"for_each_items_not_sequence:{items_path}"
+    return list(value), items_path, None
 
 
 def _emit_signal_result(
@@ -325,6 +380,148 @@ def _build_fork_handler(
     return _handle
 
 
+def _build_for_each_handler(
+    *,
+    registry: ActionRegistry,
+    definition_loader: Callable[[str], WorkflowDefinition | None],
+) -> Callable[[WorkflowActionRequest], WorkflowActionResult]:
+    def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
+        child_workflow_id = _normalise_text(
+            request.inputs.get("workflow_id") or request.inputs.get("workflow")
+        )
+        if not child_workflow_id:
+            return WorkflowActionResult(
+                status="failed",
+                error="for_each_workflow_id_missing",
+            )
+
+        child_definition = definition_loader(child_workflow_id)
+        if child_definition is None:
+            return WorkflowActionResult(
+                status="failed",
+                error=f"for_each_definition_not_found:{child_workflow_id}",
+            )
+
+        items, items_source, items_error = _resolve_items_sequence(request=request)
+        if items_error:
+            return WorkflowActionResult(status="failed", error=items_error)
+        items = items or []
+
+        item_limit = _coerce_for_each_limit(request.inputs.get("max_items"))
+        selected_items = list(items[:item_limit])
+        item_context_key = (
+            _normalise_text(request.inputs.get("item_context_key")) or "current_item"
+        )
+        index_context_key = (
+            _normalise_text(request.inputs.get("index_context_key")) or "index"
+        )
+        success_policy = _normalise_for_each_success_policy(
+            request.inputs.get("success_policy")
+        )
+        max_transitions = _coerce_branch_max_transitions(
+            request.inputs.get("max_transitions")
+        )
+
+        iteration_results: list[dict[str, Any]] = []
+        for index, item in enumerate(selected_items):
+            child_context = dict(request.data)
+            child_context[item_context_key] = item
+            child_context[index_context_key] = index
+            child_context["__workflow_for_each_parent_workflow_id"] = _normalise_text(
+                request.inputs.get("__parent_workflow_id")
+            )
+            child_context["__workflow_for_each_parent_state_id"] = _normalise_text(
+                request.inputs.get("__parent_state_id")
+            )
+            child_context["__workflow_for_each_items_source"] = items_source or None
+
+            child_trace = WorkflowExecutionTrace(
+                workflow_id=child_workflow_id,
+                user_namespace=request.environment.user_namespace,
+                metadata={
+                    "for_each_parent_workflow_id": _normalise_text(
+                        request.inputs.get("__parent_workflow_id")
+                    )
+                    or None,
+                    "for_each_parent_state_id": _normalise_text(
+                        request.inputs.get("__parent_state_id")
+                    )
+                    or None,
+                    "items_source": items_source or None,
+                    "item_context_key": item_context_key,
+                    "index_context_key": index_context_key,
+                    "item_index": index,
+                    "success_policy": success_policy,
+                },
+            )
+            child_result = WorkflowExecutor(
+                registry=registry,
+                max_transitions=max_transitions,
+            ).run(
+                child_definition,
+                environment=request.environment,
+                data=child_context,
+                trace=child_trace,
+            )
+            iteration_results.append(
+                {
+                    "index": index,
+                    "item": item,
+                    "completed": bool(child_result.completed),
+                    "final_state": _normalise_text(child_result.final_state),
+                    "error": _normalise_text(child_result.error) or None,
+                    "result": _extract_declared_output_payload(child_result),
+                    "result_envelope": (
+                        dict(child_result.result_envelope)
+                        if isinstance(child_result.result_envelope, Mapping)
+                        else None
+                    ),
+                }
+            )
+
+        success_count = len([item for item in iteration_results if item["completed"]])
+        error_count = len(iteration_results) - success_count
+        outputs: Dict[str, Any] = {
+            "items_source": items_source or None,
+            "for_each_item_count": len(iteration_results),
+            "for_each_item_limit": item_limit,
+            "for_each_success_policy": success_policy,
+            "for_each_success_count": success_count,
+            "for_each_error_count": error_count,
+            "for_each_partial_success": success_count > 0 and error_count > 0,
+            "iteration_results": iteration_results,
+        }
+
+        increment_runtime_metric(context=request.data, key="for_each_invocations")
+        append_runtime_event(
+            context=request.data,
+            event={
+                "status": "for_each_executed",
+                "workflow_id": child_workflow_id,
+                "item_count": len(iteration_results),
+                "item_limit": item_limit,
+                "success_count": success_count,
+                "error_count": error_count,
+                "success_policy": success_policy,
+                "items_source": items_source or None,
+            },
+        )
+
+        if (
+            success_policy == WORKFLOW_FOR_EACH_SUCCESS_POLICY_ALL_MUST_SUCCEED
+            and error_count > 0
+        ):
+            return WorkflowActionResult(
+                status="failed",
+                error=f"for_each_item_failed:{child_workflow_id}",
+                outputs=outputs,
+            )
+
+        return WorkflowActionResult(status="success", outputs=outputs)
+
+    return _handle
+
+
 def _build_join_handler() -> Callable[[WorkflowActionRequest], WorkflowActionResult]:
     def _handle(request: WorkflowActionRequest) -> WorkflowActionResult:
         fork_id = _normalise_text(request.inputs.get("fork_id"))
@@ -422,7 +619,7 @@ def register_control_flow_actions(
     *,
     definition_loader: Callable[[str], WorkflowDefinition | None] | None = None,
 ) -> None:
-    """Register break/continue/fork/join primitives in the action registry."""
+    """Register reusable control-flow primitives in the action registry."""
 
     loader = definition_loader or load_workflow_definition_from_vontology
     registry.register_if_absent(
@@ -448,6 +645,19 @@ def register_control_flow_actions(
             description=(
                 "Execute independent child workflow branches with deterministic "
                 "failure and merge policy semantics."
+            ),
+        )
+    )
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=WORKFLOW_CONTROL_ACTION_FOR_EACH_ID,
+            handler=_build_for_each_handler(
+                registry=registry,
+                definition_loader=loader,
+            ),
+            description=(
+                "Execute one child workflow per item in a deterministic input "
+                "sequence and collect structured per-item outcomes."
             ),
         )
     )
