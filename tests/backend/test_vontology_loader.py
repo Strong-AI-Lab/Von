@@ -39,6 +39,7 @@ from src.backend.workflows.vontology_loader import (
     resolve_workflow_background_launch_policy,
     resolve_workflow_description,
     resolve_workflow_narrative_text,
+    resolve_workflow_step_runtime_policies,
 )
 from src.backend.workflows.subworkflow_contracts import (
     WORKFLOW_SUBWORKFLOW_ACTION_ID,
@@ -79,6 +80,7 @@ def _make_step(
     on_false: str | None = None,
     on_failure: str | None = None,
     on_unknown: str | None = None,
+    on_approval_required: str | None = None,
     on_break: str | None = None,
     on_continue: str | None = None,
     preconditions: List[str] | None = None,
@@ -88,6 +90,9 @@ def _make_step(
     context_input_mappings: List[str] | None = None,
     tool_output_context_mappings: List[str] | None = None,
     writes_context_keys: List[str] | None = None,
+    retry_policy: Dict[str, Any] | None = None,
+    approval_gate: Dict[str, Any] | None = None,
+    idempotency_policy: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     return {
         "step_id": step_id,
@@ -101,12 +106,16 @@ def _make_step(
         "context_input_mappings": context_input_mappings or [],
         "tool_output_context_mappings": tool_output_context_mappings or [],
         "writes_context_keys": writes_context_keys or [],
+        "retry_policy": retry_policy,
+        "approval_gate": approval_gate,
+        "idempotency_policy": idempotency_policy,
         "control_flow": {
             "next": next_step,
             "on_true": on_true,
             "on_false": on_false,
             "on_failure": on_failure,
             "on_unknown": on_unknown,
+            "on_approval_required": on_approval_required,
             "on_break": on_break,
             "on_continue": on_continue,
         },
@@ -270,6 +279,42 @@ class TestWorkflowDescriptionResolution:
 
         assert description == "Narrative from relation"
         assert source == "text_relation:hasContent"
+
+
+class TestWorkflowStepRuntimePolicyResolution:
+    def test_resolve_workflow_step_runtime_policies_reads_text_relations(self):
+        with patch(
+            "src.backend.workflows.vontology_loader.get_texts_for_concept",
+            return_value=[
+                {
+                    "predicate": "#V#hasWorkflowStepRetryPolicyJson",
+                    "text": (
+                        '{"schema_version":"workflow_step_retry_policy.v1",'
+                        '"max_attempts":3,"retry_on_outcomes":["failure"]}'
+                    ),
+                },
+                {
+                    "predicate": "#V#hasWorkflowStepApprovalGateJson",
+                    "text": (
+                        '{"schema_version":"workflow_step_approval_gate.v1",'
+                        '"approval_context_key":"write_approved"}'
+                    ),
+                },
+                {
+                    "predicate": "#V#hasWorkflowStepIdempotencyPolicyJson",
+                    "text": (
+                        '{"schema_version":"workflow_step_idempotency_policy.v1",'
+                        '"key_paths":["request_id"]}'
+                    ),
+                },
+            ],
+        ):
+            policies, warnings = resolve_workflow_step_runtime_policies("#V#step")
+
+        assert warnings == []
+        assert policies["retry_policy"]["max_attempts"] == 3
+        assert policies["approval_gate"]["approval_context_key"] == "write_approved"
+        assert policies["idempotency_policy"]["key_paths"] == ["request_id"]
 
 
 class TestWorkflowBackgroundLaunchPolicyResolution:
@@ -930,6 +975,38 @@ class TestOnUnknownTransitions:
         transitions = defn.states["#V#step"].transitions
         assert transitions[0].reason == "on_unknown"
         assert transitions[1].reason == "next_step"
+
+
+class TestOnApprovalRequiredTransitions:
+    def test_on_approval_required_becomes_transition(self):
+        steps = [
+            _make_step(
+                "#V#mutate",
+                invokes_action="write.action",
+                on_approval_required="#V#blocked",
+                next_step="#V#done",
+                approval_gate={
+                    "schema_version": "workflow_step_approval_gate.v1",
+                    "approval_context_key": "write_approved",
+                },
+            ),
+            _make_step("#V#blocked"),
+            _make_step("#V#done"),
+        ]
+        graph = _make_graph(initial_step="#V#mutate", steps=steps)
+
+        with _stub_fetch_concepts(), _stub_narrative():
+            with patch(
+                "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+                return_value=(graph, []),
+            ):
+                defn = load_workflow_definition_from_vontology("#V#test_workflow")
+
+        assert defn is not None
+        mutate = defn.states["#V#mutate"]
+        reasons = [transition.reason for transition in mutate.transitions]
+        assert reasons == ["on_approval_required", "next_step"]
+        assert mutate.metadata["approval_gate"]["approval_context_key"] == "write_approved"
 
 
 class TestOnBreakContinueTransitions:

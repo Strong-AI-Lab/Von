@@ -9,6 +9,7 @@ from src.backend.workflows.action_registry import (
 from src.backend.workflows.durable.control_flow_actions import register_control_flow_actions
 from src.backend.workflows.execution_contracts import (
     WORKFLOW_CONTROL_ACTION_BREAK_ID,
+    WORKFLOW_CONTROL_ACTION_FOR_EACH_ID,
     WORKFLOW_CONTROL_ACTION_FORK_ID,
     WORKFLOW_CONTROL_ACTION_JOIN_ID,
 )
@@ -117,3 +118,85 @@ def test_join_action_fails_without_matching_fork() -> None:
 
     assert result.status == "failed"
     assert "join_without_matching_fork" in str(result.error or "")
+
+
+def test_for_each_action_executes_child_workflow_per_item() -> None:
+    registry = ActionRegistry()
+
+    def _emit_item(request):
+        return WorkflowActionResult(
+            outputs={
+                "item_value": request.data.get("current_item"),
+                "item_index": request.data.get("index"),
+            }
+        )
+
+    registry.register(ActionSpec(action_id="child.emit_item", handler=_emit_item))
+    definitions = {
+        "#V#child_each": _child_definition("#V#child_each", "child.emit_item"),
+    }
+    register_control_flow_actions(
+        registry,
+        definition_loader=lambda workflow_id: definitions.get(workflow_id),
+    )
+
+    context: dict[str, object] = {"candidate_items": ["A", "B", "C"]}
+    result = registry.execute(
+        WORKFLOW_CONTROL_ACTION_FOR_EACH_ID,
+        inputs={
+            "workflow_id": "#V#child_each",
+            "items_context_key": "candidate_items",
+            "max_items": 2,
+            "success_policy": "all_must_succeed",
+        },
+        context=context,
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    assert result.outputs.get("for_each_item_count") == 2
+    assert result.outputs.get("for_each_success_count") == 2
+    assert result.outputs.get("for_each_error_count") == 0
+    results = result.outputs.get("iteration_results")
+    assert isinstance(results, list)
+    assert results[0]["result"] == {"item_value": "A", "item_index": 0}
+    assert results[1]["result"] == {"item_value": "B", "item_index": 1}
+
+
+def test_for_each_action_respects_partial_success_policy() -> None:
+    registry = ActionRegistry()
+
+    def _conditionally_fail(request):
+        if request.data.get("current_item") == "bad":
+            return WorkflowActionResult(status="failed", error="child_failed")
+        return WorkflowActionResult(outputs={"item_value": request.data.get("current_item")})
+
+    registry.register(
+        ActionSpec(action_id="child.maybe_fail", handler=_conditionally_fail)
+    )
+    definitions = {
+        "#V#child_each_partial": _child_definition(
+            "#V#child_each_partial",
+            "child.maybe_fail",
+        ),
+    }
+    register_control_flow_actions(
+        registry,
+        definition_loader=lambda workflow_id: definitions.get(workflow_id),
+    )
+
+    result = registry.execute(
+        WORKFLOW_CONTROL_ACTION_FOR_EACH_ID,
+        inputs={
+            "workflow_id": "#V#child_each_partial",
+            "items": ["good", "bad"],
+            "success_policy": "allow_partial",
+        },
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    assert result.outputs.get("for_each_success_count") == 1
+    assert result.outputs.get("for_each_error_count") == 1
+    assert result.outputs.get("for_each_partial_success") is True

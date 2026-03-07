@@ -14,6 +14,7 @@ from src.backend.workflows.subworkflow_contracts import (
 )
 from src.backend.workflows.execution_contracts import (
     WORKFLOW_CONTROL_ACTION_BREAK_ID,
+    WORKFLOW_CONTROL_ACTION_FOR_EACH_ID,
     WORKFLOW_CONTROL_ACTION_FORK_ID,
     WORKFLOW_CONTROL_ACTION_JOIN_ID,
 )
@@ -422,4 +423,76 @@ def test_validate_contract_detects_recursive_subworkflow_cycle() -> None:
     assert any(
         issue.get("reason_code") == "subworkflow_recursive_cycle"
         for issue in validation.get("subworkflow_contract_issues", [])
+    )
+
+
+def test_validate_contract_rejects_for_each_without_required_inputs() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#for_each_invalid_workflow",
+        initial_state="fan_out",
+        states={
+            "fan_out": WorkflowStateSpec(
+                state_id="fan_out",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id=WORKFLOW_CONTROL_ACTION_FOR_EACH_ID,
+                        inputs={"success_policy": "all_must_succeed"},
+                    ),
+                ),
+                terminal=True,
+            )
+        },
+        termination_states=("fan_out",),
+    )
+
+    validation = validate_workflow_definition_contract(definition=definition)
+
+    assert validation["valid"] is False
+    assert "workflow_iterator_invalid" in (validation.get("errors") or [])
+    iterator_issues = validation.get("iterator_issues") or []
+    assert any(
+        issue.get("reason_code") == "for_each_workflow_id_missing"
+        for issue in iterator_issues
+    )
+    assert any(
+        issue.get("reason_code") == "for_each_items_missing"
+        for issue in iterator_issues
+    )
+
+
+def test_validate_contract_rejects_approval_gate_without_route() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#approval_invalid_workflow",
+        initial_state="write",
+        states={
+            "write": WorkflowStateSpec(
+                state_id="write",
+                actions=(WorkflowActionInvocation(action_id="write.action"),),
+                transitions=(
+                    WorkflowTransitionSpec(
+                        to_state="done",
+                        condition=lambda _ctx: True,
+                        reason="next_step",
+                    ),
+                ),
+                metadata={
+                    "approval_gate": {
+                        "schema_version": "workflow_step_approval_gate.v1",
+                        "approval_context_key": "write_approved",
+                    }
+                },
+            ),
+            "done": WorkflowStateSpec(state_id="done", terminal=True),
+        },
+        termination_states=("done",),
+    )
+
+    validation = validate_workflow_definition_contract(definition=definition)
+
+    assert validation["valid"] is False
+    assert "workflow_approval_gate_invalid" in (validation.get("errors") or [])
+    approval_gate_issues = validation.get("approval_gate_issues") or []
+    assert any(
+        issue.get("reason_code") == "approval_transition_missing"
+        for issue in approval_gate_issues
     )

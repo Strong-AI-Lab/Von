@@ -92,6 +92,7 @@ Canonical graph families include:
 - `workflowStepInvokesTool`
 - `nextStep`
 - `onTrueNextStep`, `onFalseNextStep`, `onFailureNextStep`, `onUnknownNextStep`
+- `onApprovalRequiredNextStep`
 - `onBreakNextStep`, `onContinueNextStep`
 - `hasPrecondition`, `hasEffect`
 - `readsVariable`, `writesVariable`
@@ -114,6 +115,7 @@ A VWL program is a workflow concept graph:
   - `next`
   - `on_true`, `on_false`
   - `on_failure`, `on_unknown`.
+  - `on_approval_required`.
   - `on_break`, `on_continue`.
 - Optional metadata and mapping contracts.
 
@@ -126,6 +128,10 @@ Supported kinds:
 - `always`
 - `context_flag`
 - `context_value_equals`
+- `context_exists`
+- `context_is_null`
+- `context_compare`
+- `context_cardinality`
 - `transition_result_truth`
 - `control_signal`
 - `all`
@@ -138,6 +144,10 @@ Canonical forms:
 {"kind":"always"}
 {"kind":"context_flag","key":"last_action_failed","expected":true}
 {"kind":"context_value_equals","key":"mode","value":"strict"}
+{"kind":"context_exists","path":"current_item.pull_request_url","expected":false}
+{"kind":"context_is_null","path":"current_item.pull_request_url","expected":true}
+{"kind":"context_compare","path":"candidate_issue_count","operator":"gt","value":0}
+{"kind":"context_cardinality","path":"candidate_issues","operator":"gte","value":1}
 {"kind":"transition_result_truth","expected":false}
 {"kind":"control_signal","signal":"break"}
 {"kind":"control_signal","signal":"continue","scope":"main_loop"}
@@ -169,12 +179,14 @@ Important deterministic ordering:
 - Generated branch precedence for implicit branch links is:
   - `on_failure`
   - `on_unknown`
+  - `on_approval_required`
   - `on_break`
   - `on_continue`
   - `on_true`/`on_false`
   - `next_step`
 
 `on_failure` and `on_unknown` compile to context-flag conditions (`last_action_failed`, `last_action_unknown`).
+`on_approval_required` compiles to a context-flag condition (`approval_required == true`).
 `on_break`/`on_continue` compile to control-signal conditions (`last_control_signal == break|continue`).
 
 ## 7. Execution Semantics
@@ -274,9 +286,33 @@ Per-state metadata keys currently used:
 - `tool_output_context_mappings`
 - `subworkflow_contract`
 - `invokes_workflow`
+- `retry_policy`
+- `approval_gate`
+- `idempotency_policy`
 - `loop_scope_id`
 - `fork_id`
 - `join_fork_id`
+
+### 8.1 Runtime Policy Metadata
+
+Canonical workflow-step runtime policy payloads are stored as singleton text relations on the step concept:
+
+- `#V#hasWorkflowStepRetryPolicyJson`
+- `#V#hasWorkflowStepApprovalGateJson`
+- `#V#hasWorkflowStepIdempotencyPolicyJson`
+
+Current schema versions:
+
+- `workflow_step_retry_policy.v1`
+- `workflow_step_approval_gate.v1`
+- `workflow_step_idempotency_policy.v1`
+
+Normative semantics:
+
+- invalid policy payloads MUST fail workflow loading with deterministic error codes;
+- retry and idempotency policies currently apply only to single-action states;
+- approval gates MUST fail closed when the required approval context key is absent or falsey;
+- approval-gated mutative states SHOULD provide an explicit `on_approval_required` route to a blocked terminal or escalation state.
 
 Validation phases:
 
@@ -326,6 +362,7 @@ Control-flow action IDs:
 - `workflow_control.continue`
 - `workflow_control.fork`
 - `workflow_control.join`
+- `workflow_control.for_each`
 
 ### 10.1 Break/Continue
 
@@ -381,6 +418,33 @@ Nested propagation:
 
 - child workflow envelopes are surfaced through `subworkflow_result_envelope`,
 - non-`none` child control signals propagate to parent action outputs.
+
+### 10.13 For Each Fan-Out
+
+`workflow_control.for_each` is the canonical sequential fan-out primitive for bounded collection processing.
+
+Required inputs:
+
+- `workflow_id`
+- one of `items`, `items_context_key`, or `items_path`
+
+Optional inputs:
+
+- `item_context_key` (default `current_item`)
+- `index_context_key` (default `index`)
+- `max_items`
+- `max_transitions`
+- `success_policy` (`all_must_succeed` or `allow_partial`)
+
+Runtime semantics:
+
+- items are processed in deterministic source order;
+- each item executes the declared child workflow in an isolated child context;
+- the child context receives the bound item and index keys;
+- per-item results are returned in `iteration_results`;
+- aggregate counts are returned in `for_each_success_count`, `for_each_error_count`, and `for_each_partial_success`;
+- `all_must_succeed` returns failure when any child execution fails;
+- `allow_partial` returns success while preserving structured failure details.
 
 ### 10.4 File-Copy Upload Routing Workflows (JVNAUTOSCI-1309)
 
@@ -831,6 +895,35 @@ This example MUST NOT be implemented as a bespoke Python polling service. Suppor
 Reference design document:
 
 - `docs/engineering/jira_github_autofix_loop_workflow.md`
+
+### 16.11 Canonical Fan-Out Example (`JVNAUTOSCI-1339`)
+
+Minimal per-item dispatch shape:
+
+1. `discover_candidates`
+   Action writes `candidate_issues`.
+
+2. `dispatch_per_issue`
+   Uses `workflow_control.for_each` with:
+   - `items_context_key=candidate_issues`
+   - `workflow_id=#V#jira_github_autofix_issue_workflow`
+   - `item_context_key=current_item`
+   - `index_context_key=index`
+   - `max_items` set explicitly
+   - `success_policy=all_must_succeed` or `allow_partial`
+
+3. `dispatch_per_issue` step metadata MAY also declare:
+   - retry policy via `#V#hasWorkflowStepRetryPolicyJson`
+   - approval gate via `#V#hasWorkflowStepApprovalGateJson`
+   - idempotency policy via `#V#hasWorkflowStepIdempotencyPolicyJson`
+
+4. `summarise_dispatch`
+   Reads `iteration_results`, `for_each_success_count`, and `for_each_error_count`.
+
+Blocked-state routing:
+
+- mutative child-dispatch steps SHOULD declare `on_approval_required` to an explicit blocked or escalation state;
+- blocked runs MUST preserve `approval_required`, `approval_state`, and approval-gate event diagnostics rather than silently continuing.
 
 ---
 

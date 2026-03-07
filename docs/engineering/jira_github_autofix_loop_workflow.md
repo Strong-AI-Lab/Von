@@ -126,7 +126,8 @@ Conceptual behaviour:
 
 Current status:
 
-- this is the major declarative gap in current VWL and should be implemented via `JVNAUTOSCI-1339`, not by hand-written Python control flow.
+- implemented generically in VWL via `workflow_control.for_each`, richer transition conditions, approval-gate metadata, retry policies, and idempotency policies (`JVNAUTOSCI-1339`),
+- and therefore no longer a justification for hand-written Python control flow.
 
 ### 4. Per-issue subworkflow
 
@@ -201,7 +202,7 @@ The workflow MUST no-op with explicit diagnostics when any of the following are 
 - namespace,
 - label guard,
 - required workflow metadata,
-- durable per-issue loop support.
+- or required prompt-resolution / completion-gate capabilities from later follow-on tasks.
 
 Blocked states are valid outcomes. Silent degradation is not.
 
@@ -257,21 +258,21 @@ Executable today with existing surfaces:
 - scheduled and manual launch,
 - Jira discovery and Jira commenting,
 - guarded GitHub proxy invocation,
+- issue-level sequential fan-out via `workflow_control.for_each`,
+- declarative per-step approval gating,
+- declarative retry/backoff policy execution,
+- declarative per-step idempotency reuse,
 - durable workflow instance management,
 - high-level run summary persistence.
 
 Not cleanly expressible yet without follow-on VWL work:
 
-- issue-level `for_each` fan-out,
-- declarative per-step approval gates,
-- explicit retry/backoff policy declarations,
-- declarative idempotency annotations,
 - long-horizon resumable per-issue checkpoints,
+- prompt/tool metadata resolution from workflow-authored prompt metadata,
 - completion gates that prove all declared deliverables were met.
 
 ## Follow-on Mapping
 
-- `JVNAUTOSCI-1339`: iterator semantics, richer conditions, approval gates, retries, idempotency declarations.
 - `JVNAUTOSCI-1358`: prompt and tool metadata resolution for deterministic workflow authoring.
 - `JVNAUTOSCI-1359`: plan-state, resumable checkpoints, and completion gates for long-running runs.
 - `JVNAUTOSCI-1360`: optional future import or execution of external SKILL artefacts against the stabilised VWL surface.

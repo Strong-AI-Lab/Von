@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from .action_registry import (
     ActionRegistry,
+    WORKFLOW_ACTION_OUTCOME_SUCCESS,
     WORKFLOW_ACTION_OUTCOME_FAILURE,
     WORKFLOW_ACTION_OUTCOME_UNKNOWN,
     WorkflowActionResult,
@@ -24,6 +26,7 @@ from .metadata_validation import (
     validate_state_metadata_post_action,
     validate_state_metadata_pre_action,
 )
+from .context_paths import measure_cardinality, resolve_context_path
 from .execution_contracts import (
     WORKFLOW_CONTROL_SIGNAL_BREAK,
     WORKFLOW_CONTROL_SIGNAL_CONTINUE,
@@ -36,7 +39,9 @@ from .execution_contracts import (
     clear_control_signal_context,
     get_last_control_signal,
     get_last_control_signal_scope,
+    resolve_control_signal_from_outputs,
     set_workflow_result_envelope,
+    stamp_control_signal_context,
 )
 from .trace_model import WorkflowExecutionTrace
 
@@ -59,6 +64,17 @@ WORKFLOW_TOOL_OUTPUT_MAPPING_EVENTS_KEY = "workflow_tool_output_mapping_events"
 LAST_WORKFLOW_TOOL_OUTPUT_MAPPING_EVENT_KEY = "last_workflow_tool_output_mapping_event"
 WORKFLOW_TERMINAL_EFFECT_EVENTS_KEY = "workflow_terminal_effect_events"
 LAST_WORKFLOW_TERMINAL_EFFECT_EVENT_KEY = "last_workflow_terminal_effect_event"
+WORKFLOW_APPROVAL_GATE_EVENTS_KEY = "workflow_approval_gate_events"
+LAST_WORKFLOW_APPROVAL_GATE_KEY = "last_workflow_approval_gate"
+WORKFLOW_RETRY_EVENTS_KEY = "workflow_retry_events"
+LAST_WORKFLOW_RETRY_EVENT_KEY = "last_workflow_retry_event"
+WORKFLOW_IDEMPOTENCY_EVENTS_KEY = "workflow_idempotency_events"
+LAST_WORKFLOW_IDEMPOTENCY_EVENT_KEY = "last_workflow_idempotency_event"
+WORKFLOW_IDEMPOTENCY_RECORDS_KEY = "workflow_idempotency_records"
+
+WORKFLOW_RETRY_POLICY_SCHEMA_VERSION = "workflow_step_retry_policy.v1"
+WORKFLOW_APPROVAL_GATE_SCHEMA_VERSION = "workflow_step_approval_gate.v1"
+WORKFLOW_IDEMPOTENCY_POLICY_SCHEMA_VERSION = "workflow_step_idempotency_policy.v1"
 
 
 def _extract_context_binding_symbol(value: Any) -> str | None:
@@ -354,6 +370,167 @@ def materialise_terminal_effect_context(
     return events
 
 
+def _append_context_event(
+    *,
+    context: Dict[str, Any],
+    key: str,
+    last_key: str,
+    event: Mapping[str, Any],
+) -> None:
+    existing = context.get(key)
+    if not isinstance(existing, list):
+        existing = []
+        context[key] = existing
+    existing.append(dict(event))
+    context[last_key] = dict(event)
+
+
+def _apply_action_result_context(
+    *,
+    context: Dict[str, Any],
+    action_id: str,
+    result: WorkflowActionResult,
+) -> str:
+    """Mirror ActionRegistry outcome stamping for synthetic engine-side results."""
+
+    action_outcome = normalise_action_outcome(result.status)
+    context["last_action_id"] = action_id
+    context["last_action_status"] = result.status
+    context["last_action_outcome"] = action_outcome
+    context["last_action_succeeded"] = action_outcome == WORKFLOW_ACTION_OUTCOME_SUCCESS
+    context["last_action_failed"] = action_outcome == WORKFLOW_ACTION_OUTCOME_FAILURE
+    context["last_action_unknown"] = action_outcome == WORKFLOW_ACTION_OUTCOME_UNKNOWN
+    context["last_step_ok"] = action_outcome == WORKFLOW_ACTION_OUTCOME_SUCCESS
+    context["last_step_outcome"] = action_outcome
+    context["last_action_error"] = result.error
+    context["last_action_call_id"] = result.call_id
+    context["last_action_duration_ms"] = result.duration_ms
+
+    control_signal, control_scope, return_payload = resolve_control_signal_from_outputs(
+        action_outcome=action_outcome,
+        outputs=result.outputs,
+    )
+    stamp_control_signal_context(
+        context=context,
+        signal=control_signal,
+        scope=control_scope,
+        return_payload=return_payload,
+    )
+    return action_outcome
+
+
+def _resolve_condition_path_key(condition_spec: Mapping[str, Any]) -> str:
+    candidate = condition_spec.get("path")
+    if candidate is None:
+        candidate = condition_spec.get("key")
+    return str(candidate or "").strip()
+
+
+def _normalise_condition_path_key(
+    condition_spec: Mapping[str, Any],
+    *,
+    missing_reason_code: str,
+) -> str:
+    key = _resolve_condition_path_key(condition_spec)
+    if not key:
+        raise ValueError(f"workflow_condition_invalid:{missing_reason_code}")
+    return key
+
+
+def _normalise_compare_operator(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    aliases = {
+        "==": "eq",
+        "=": "eq",
+        "eq": "eq",
+        "!=": "ne",
+        "<>": "ne",
+        "ne": "ne",
+        ">": "gt",
+        "gt": "gt",
+        ">=": "gte",
+        "gte": "gte",
+        "<": "lt",
+        "lt": "lt",
+        "<=": "lte",
+        "lte": "lte",
+    }
+    operator = aliases.get(raw, "")
+    if not operator:
+        raise ValueError("workflow_condition_invalid:compare_operator_invalid")
+    return operator
+
+
+def _normalise_positive_int(
+    value: Any,
+    *,
+    field_name: str,
+    min_value: int = 0,
+) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"workflow_condition_invalid:{field_name}_not_int") from exc
+    if parsed < min_value:
+        raise ValueError(f"workflow_condition_invalid:{field_name}_below_minimum")
+    return parsed
+
+
+def _coerce_numeric(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return float(int(value))
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+    return None
+
+
+def _evaluate_compare(
+    *,
+    left: Any,
+    operator: str,
+    right: Any,
+) -> bool:
+    left_num = _coerce_numeric(left)
+    right_num = _coerce_numeric(right)
+    if left_num is not None and right_num is not None:
+        if operator == "eq":
+            return left_num == right_num
+        if operator == "ne":
+            return left_num != right_num
+        if operator == "gt":
+            return left_num > right_num
+        if operator == "gte":
+            return left_num >= right_num
+        if operator == "lt":
+            return left_num < right_num
+        if operator == "lte":
+            return left_num <= right_num
+
+    left_text = "" if left is None else str(left)
+    right_text = "" if right is None else str(right)
+    if operator == "eq":
+        return left_text == right_text
+    if operator == "ne":
+        return left_text != right_text
+    if operator == "gt":
+        return left_text > right_text
+    if operator == "gte":
+        return left_text >= right_text
+    if operator == "lt":
+        return left_text < right_text
+    if operator == "lte":
+        return left_text <= right_text
+    return False
+
+
 def _coerce_bool_like(
     value: Any,
     *,
@@ -385,10 +562,10 @@ def _normalise_transition_condition_spec(
         return {"kind": "always"}
 
     if kind == "context_flag":
-        raw_key = condition_spec.get("key")
-        key = str(raw_key or "").strip()
-        if not key:
-            raise ValueError("workflow_condition_invalid:context_flag_key_missing")
+        key = _normalise_condition_path_key(
+            condition_spec,
+            missing_reason_code="context_flag_key_missing",
+        )
         expected = _coerce_bool_like(
             condition_spec.get("expected", True),
             field_name="context_flag_expected",
@@ -396,16 +573,72 @@ def _normalise_transition_condition_spec(
         return {"kind": "context_flag", "key": key, "expected": expected}
 
     if kind == "context_value_equals":
-        raw_key = condition_spec.get("key")
-        key = str(raw_key or "").strip()
-        if not key:
-            raise ValueError("workflow_condition_invalid:context_value_key_missing")
+        key = _normalise_condition_path_key(
+            condition_spec,
+            missing_reason_code="context_value_key_missing",
+        )
         if "value" not in condition_spec:
             raise ValueError("workflow_condition_invalid:context_value_missing")
         return {
             "kind": "context_value_equals",
             "key": key,
             "value": condition_spec.get("value"),
+        }
+
+    if kind == "context_exists":
+        key = _normalise_condition_path_key(
+            condition_spec,
+            missing_reason_code="context_exists_key_missing",
+        )
+        expected = _coerce_bool_like(
+            condition_spec.get("expected", True),
+            field_name="context_exists_expected",
+        )
+        return {"kind": "context_exists", "key": key, "expected": expected}
+
+    if kind == "context_is_null":
+        key = _normalise_condition_path_key(
+            condition_spec,
+            missing_reason_code="context_is_null_key_missing",
+        )
+        expected = _coerce_bool_like(
+            condition_spec.get("expected", True),
+            field_name="context_is_null_expected",
+        )
+        return {"kind": "context_is_null", "key": key, "expected": expected}
+
+    if kind == "context_compare":
+        key = _normalise_condition_path_key(
+            condition_spec,
+            missing_reason_code="context_compare_key_missing",
+        )
+        if "value" not in condition_spec:
+            raise ValueError("workflow_condition_invalid:context_compare_value_missing")
+        return {
+            "kind": "context_compare",
+            "key": key,
+            "operator": _normalise_compare_operator(condition_spec.get("operator")),
+            "value": condition_spec.get("value"),
+        }
+
+    if kind == "context_cardinality":
+        key = _normalise_condition_path_key(
+            condition_spec,
+            missing_reason_code="context_cardinality_key_missing",
+        )
+        if "value" not in condition_spec:
+            raise ValueError(
+                "workflow_condition_invalid:context_cardinality_value_missing"
+            )
+        return {
+            "kind": "context_cardinality",
+            "key": key,
+            "operator": _normalise_compare_operator(condition_spec.get("operator")),
+            "value": _normalise_positive_int(
+                condition_spec.get("value"),
+                field_name="context_cardinality_value",
+                min_value=0,
+            ),
         }
 
     if kind == "transition_result_truth":
@@ -495,10 +728,49 @@ def evaluate_transition_condition_spec(
     if kind == "context_flag":
         key = str(condition_spec.get("key") or "")
         expected = bool(condition_spec.get("expected", True))
-        return bool(context.get(key)) is expected
+        found, value = resolve_context_path(context=context, path=key)
+        if not found:
+            return (False) is expected
+        return bool(value) is expected
     if kind == "context_value_equals":
         key = str(condition_spec.get("key") or "")
-        return context.get(key) == condition_spec.get("value")
+        found, value = resolve_context_path(context=context, path=key)
+        if not found:
+            return False
+        return value == condition_spec.get("value")
+    if kind == "context_exists":
+        key = str(condition_spec.get("key") or "")
+        expected = bool(condition_spec.get("expected", True))
+        found, _value = resolve_context_path(context=context, path=key)
+        return found is expected
+    if kind == "context_is_null":
+        key = str(condition_spec.get("key") or "")
+        expected = bool(condition_spec.get("expected", True))
+        found, value = resolve_context_path(context=context, path=key)
+        return (found and value is None) is expected
+    if kind == "context_compare":
+        key = str(condition_spec.get("key") or "")
+        found, value = resolve_context_path(context=context, path=key)
+        if not found:
+            return False
+        return _evaluate_compare(
+            left=value,
+            operator=str(condition_spec.get("operator") or ""),
+            right=condition_spec.get("value"),
+        )
+    if kind == "context_cardinality":
+        key = str(condition_spec.get("key") or "")
+        found, value = resolve_context_path(context=context, path=key)
+        if not found:
+            return False
+        cardinality = measure_cardinality(value)
+        if cardinality is None:
+            return False
+        return _evaluate_compare(
+            left=cardinality,
+            operator=str(condition_spec.get("operator") or ""),
+            right=condition_spec.get("value"),
+        )
     if kind == "transition_result_truth":
         expected = bool(condition_spec.get("expected", True))
         return _evaluate_transition_result_truth(context) is expected
@@ -637,6 +909,12 @@ def state_has_on_continue_transition(state_spec: WorkflowStateSpec) -> bool:
     return state_has_transition_reason(state_spec, "on_continue")
 
 
+def state_has_on_approval_required_transition(state_spec: WorkflowStateSpec) -> bool:
+    """Return True when a state declares an explicit approval-blocked route."""
+
+    return state_has_transition_reason(state_spec, "on_approval_required")
+
+
 def state_has_transition_reason(state_spec: WorkflowStateSpec, reason: str) -> bool:
     """Return True when a state declares a transition with `reason`."""
     desired_reason = str(reason or "").strip().lower()
@@ -648,6 +926,169 @@ def state_has_transition_reason(state_spec: WorkflowStateSpec, reason: str) -> b
         ):
             return True
     return False
+
+
+def _normalise_retry_policy_spec(value: Any) -> Dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+
+    schema_version = str(value.get("schema_version") or "").strip()
+    if schema_version and schema_version != WORKFLOW_RETRY_POLICY_SCHEMA_VERSION:
+        raise ValueError("workflow_retry_policy_invalid:schema_version_unsupported")
+
+    try:
+        max_attempts = int(value.get("max_attempts") or value.get("attempts") or 1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("workflow_retry_policy_invalid:max_attempts_not_int") from exc
+    if max_attempts < 1:
+        raise ValueError("workflow_retry_policy_invalid:max_attempts_below_minimum")
+
+    backoff_policy = str(
+        value.get("backoff_policy") or value.get("backoff") or "none"
+    ).strip().lower()
+    if backoff_policy not in {"none", "fixed", "exponential"}:
+        raise ValueError("workflow_retry_policy_invalid:backoff_policy_invalid")
+
+    try:
+        initial_delay_ms = int(
+            value.get("initial_delay_ms") or value.get("delay_ms") or 0
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("workflow_retry_policy_invalid:delay_ms_not_int") from exc
+    if initial_delay_ms < 0:
+        raise ValueError("workflow_retry_policy_invalid:delay_ms_negative")
+
+    try:
+        max_delay_ms = int(value.get("max_delay_ms") or initial_delay_ms or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("workflow_retry_policy_invalid:max_delay_ms_not_int") from exc
+    if max_delay_ms < 0:
+        raise ValueError("workflow_retry_policy_invalid:max_delay_ms_negative")
+
+    outcomes = value.get("retry_on_outcomes") or value.get("outcomes")
+    if outcomes is None:
+        outcomes = ["failure"]
+    if not isinstance(outcomes, Sequence) or isinstance(
+        outcomes, (str, bytes, bytearray)
+    ):
+        raise ValueError("workflow_retry_policy_invalid:retry_on_outcomes_not_list")
+    normalised_outcomes = sorted(
+        {
+            str(item or "").strip().lower()
+            for item in outcomes
+            if str(item or "").strip().lower()
+            in {
+                WORKFLOW_ACTION_OUTCOME_FAILURE,
+                WORKFLOW_ACTION_OUTCOME_UNKNOWN,
+            }
+        }
+    )
+    if not normalised_outcomes:
+        raise ValueError("workflow_retry_policy_invalid:retry_on_outcomes_empty")
+
+    return {
+        "schema_version": WORKFLOW_RETRY_POLICY_SCHEMA_VERSION,
+        "max_attempts": max_attempts,
+        "backoff_policy": backoff_policy,
+        "initial_delay_ms": initial_delay_ms,
+        "max_delay_ms": max_delay_ms,
+        "retry_on_outcomes": normalised_outcomes,
+    }
+
+
+def _normalise_approval_gate_spec(value: Any) -> Dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+
+    schema_version = str(value.get("schema_version") or "").strip()
+    if schema_version and schema_version != WORKFLOW_APPROVAL_GATE_SCHEMA_VERSION:
+        raise ValueError("workflow_approval_gate_invalid:schema_version_unsupported")
+
+    approval_context_key = str(
+        value.get("approval_context_key")
+        or value.get("context_key")
+        or value.get("key")
+        or ""
+    ).strip()
+    if not approval_context_key:
+        raise ValueError("workflow_approval_gate_invalid:approval_context_key_missing")
+
+    expected = _coerce_bool_like(
+        value.get("expected", True),
+        field_name="approval_gate_expected",
+    )
+    return {
+        "schema_version": WORKFLOW_APPROVAL_GATE_SCHEMA_VERSION,
+        "approval_context_key": approval_context_key,
+        "expected": expected,
+        "approval_label": str(value.get("approval_label") or "").strip() or None,
+    }
+
+
+def _normalise_idempotency_policy_spec(value: Any) -> Dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+
+    schema_version = str(value.get("schema_version") or "").strip()
+    if schema_version and schema_version != WORKFLOW_IDEMPOTENCY_POLICY_SCHEMA_VERSION:
+        raise ValueError(
+            "workflow_idempotency_policy_invalid:schema_version_unsupported"
+        )
+
+    raw_paths = value.get("key_paths") or value.get("context_keys") or value.get("paths")
+    if not isinstance(raw_paths, Sequence) or isinstance(
+        raw_paths, (str, bytes, bytearray)
+    ):
+        raise ValueError("workflow_idempotency_policy_invalid:key_paths_not_list")
+    key_paths = [
+        str(item or "").strip()
+        for item in raw_paths
+        if isinstance(item, str) and str(item or "").strip()
+    ]
+    if not key_paths:
+        raise ValueError("workflow_idempotency_policy_invalid:key_paths_empty")
+
+    return {
+        "schema_version": WORKFLOW_IDEMPOTENCY_POLICY_SCHEMA_VERSION,
+        "key_paths": list(dict.fromkeys(key_paths)),
+        "namespace": str(value.get("namespace") or "").strip() or None,
+    }
+
+
+def _compute_retry_delay_ms(
+    *,
+    retry_policy: Mapping[str, Any],
+    attempt_number: int,
+) -> int:
+    initial_delay_ms = int(retry_policy.get("initial_delay_ms") or 0)
+    max_delay_ms = int(retry_policy.get("max_delay_ms") or initial_delay_ms or 0)
+    backoff_policy = str(retry_policy.get("backoff_policy") or "none").strip().lower()
+    if backoff_policy == "none" or initial_delay_ms <= 0:
+        return 0
+    if backoff_policy == "fixed":
+        return min(initial_delay_ms, max_delay_ms)
+    multiplier = max(0, attempt_number - 1)
+    return min(initial_delay_ms * (2**multiplier), max_delay_ms)
+
+
+def _build_idempotency_key(
+    *,
+    workflow_id: str,
+    state_id: str,
+    action_id: str,
+    context: Mapping[str, Any],
+    idempotency_policy: Mapping[str, Any],
+) -> str:
+    parts: list[str] = [workflow_id, state_id, action_id]
+    namespace = str(idempotency_policy.get("namespace") or "").strip()
+    if namespace:
+        parts.append(namespace)
+    for path in idempotency_policy.get("key_paths", []):
+        found, value = resolve_context_path(context=context, path=str(path))
+        if not found:
+            raise ValueError(f"workflow_idempotency_key_missing:{path}")
+        parts.append(f"{path}={repr(value)}")
+    return "::".join(parts)
 
 
 class WorkflowExecutor:
@@ -766,109 +1207,380 @@ class WorkflowExecutor:
 
             state_has_failure_route = state_has_on_failure_transition(state_spec)
             state_has_unknown_route = state_has_on_unknown_transition(state_spec)
+            state_has_approval_route = state_has_on_approval_required_transition(
+                state_spec
+            )
             state_has_break_route = state_has_on_break_transition(state_spec)
             state_has_continue_route = state_has_on_continue_transition(state_spec)
-            context_before_actions = dict(context)
-            for action in state_spec.actions:
-                context_before_action = dict(context)
-                resolved_inputs = resolve_action_inputs_from_context(
-                    action_inputs=action.inputs,
-                    context=context,
+            try:
+                retry_policy = _normalise_retry_policy_spec(
+                    state_spec.metadata.get("retry_policy")
                 )
-                result = self._registry.execute(
-                    action.action_id,
-                    inputs=resolved_inputs,
-                    context=context,
-                    env=environment,
-                    trace=trace,
+                approval_gate = _normalise_approval_gate_spec(
+                    state_spec.metadata.get("approval_gate")
+                )
+                idempotency_policy = _normalise_idempotency_policy_spec(
+                    state_spec.metadata.get("idempotency_policy")
+                )
+            except ValueError as exc:
+                if trace is not None:
+                    trace.finish_failed(str(exc))
+                return _build_result(
+                    completed=False,
+                    final_state=current_state,
+                    error=str(exc),
+                )
+
+            if retry_policy is not None and len(state_spec.actions) > 1:
+                error = "workflow_retry_policy_invalid:multi_action_state_unsupported"
+                if trace is not None:
+                    trace.finish_failed(error)
+                return _build_result(
+                    completed=False,
+                    final_state=current_state,
+                    error=error,
+                )
+            if idempotency_policy is not None and len(state_spec.actions) > 1:
+                error = (
+                    "workflow_idempotency_policy_invalid:"
+                    "multi_action_state_unsupported"
                 )
                 if trace is not None:
-                    trace.record_action(
-                        action_id=action.action_id,
-                        inputs=resolved_inputs,
-                        outputs=result.outputs,
-                        status=result.status,
-                        error=result.error,
-                        call_id=result.call_id,
-                        duration_ms=result.duration_ms,
-                    )
-                action_outcome = normalise_action_outcome(result.status)
-                if (
-                    action_outcome != WORKFLOW_ACTION_OUTCOME_FAILURE
-                    and isinstance(result.outputs, Mapping)
-                ):
-                    context.update(result.outputs)
-                    apply_tool_output_context_mappings(
+                    trace.finish_failed(error)
+                return _build_result(
+                    completed=False,
+                    final_state=current_state,
+                    error=error,
+                )
+
+            context_before_actions = dict(context)
+            approval_blocked = False
+            if approval_gate is not None:
+                context["approval_required"] = False
+                context["approval_state"] = None
+
+            state_attempt = 0
+            while True:
+                state_attempt += 1
+                retry_requested = False
+                for action in state_spec.actions:
+                    context_before_action = dict(context)
+                    resolved_inputs = resolve_action_inputs_from_context(
+                        action_inputs=action.inputs,
                         context=context,
-                        metadata=state_spec.metadata,
-                        action_outputs=result.outputs,
+                    )
+                    result: WorkflowActionResult
+                    action_outcome: str
+
+                    idempotency_key: str | None = None
+                    raw_records: dict[str, Any] | None = None
+                    existing_record: Mapping[str, Any] | None = None
+                    if idempotency_policy is not None:
+                        try:
+                            idempotency_key = _build_idempotency_key(
+                                workflow_id=definition.workflow_id,
+                                state_id=current_state,
+                                action_id=action.action_id,
+                                context=context,
+                                idempotency_policy=idempotency_policy,
+                            )
+                        except ValueError as exc:
+                            if trace is not None:
+                                trace.finish_failed(str(exc))
+                            return _build_result(
+                                completed=False,
+                                final_state=current_state,
+                                error=str(exc),
+                            )
+                        raw_records = context.get(WORKFLOW_IDEMPOTENCY_RECORDS_KEY)
+                        if not isinstance(raw_records, dict):
+                            raw_records = {}
+                            context[WORKFLOW_IDEMPOTENCY_RECORDS_KEY] = raw_records
+                        existing_record_raw = raw_records.get(idempotency_key)
+                        if isinstance(existing_record_raw, Mapping):
+                            existing_record = existing_record_raw
+                    if existing_record is not None:
+                        cached_outputs_raw = existing_record.get("outputs")
+                        cached_outputs = (
+                            {
+                                str(key): value
+                                for key, value in cached_outputs_raw.items()
+                                if isinstance(key, str) and key
+                            }
+                            if isinstance(cached_outputs_raw, Mapping)
+                            else {}
+                        )
+                        result = WorkflowActionResult(
+                            status="success",
+                            outputs=cached_outputs,
+                            call_id=str(existing_record.get("call_id") or "") or None,
+                            duration_ms=0.0,
+                        )
+                        action_outcome = _apply_action_result_context(
+                            context=context,
+                            action_id=action.action_id,
+                            result=result,
+                        )
+                        if trace is not None:
+                            trace.record_action(
+                                action_id=action.action_id,
+                                inputs=resolved_inputs,
+                                outputs=result.outputs,
+                                status=result.status,
+                                error=result.error,
+                                call_id=result.call_id,
+                                duration_ms=result.duration_ms,
+                            )
+                        if cached_outputs:
+                            context.update(cached_outputs)
+                            apply_tool_output_context_mappings(
+                                context=context,
+                                metadata=state_spec.metadata,
+                                action_outputs=cached_outputs,
+                                state_id=current_state,
+                                action_id=action.action_id,
+                            )
+                        idempotency_event = {
+                            "status": "idempotent_reuse",
+                            "workflow_id": definition.workflow_id,
+                            "state_id": current_state,
+                            "action_id": action.action_id,
+                            "idempotency_key": idempotency_key,
+                        }
+                        _append_context_event(
+                            context=context,
+                            key=WORKFLOW_IDEMPOTENCY_EVENTS_KEY,
+                            last_key=LAST_WORKFLOW_IDEMPOTENCY_EVENT_KEY,
+                            event=idempotency_event,
+                        )
+                        append_runtime_event(
+                            context=context,
+                            event=idempotency_event,
+                        )
+                        if trace is not None:
+                            trace.record_state_transition(
+                                current_state,
+                                current_state,
+                                verdict=idempotency_event,
+                            )
+                    else:
+                        if approval_gate is not None:
+                            found, approval_value = resolve_context_path(
+                                context=context,
+                                path=str(
+                                    approval_gate.get("approval_context_key") or ""
+                                ),
+                            )
+                            approved = found and (
+                                bool(approval_value)
+                                is bool(approval_gate.get("expected", True))
+                            )
+                            approval_event = {
+                                "status": "approval_gate_checked",
+                                "workflow_id": definition.workflow_id,
+                                "state_id": current_state,
+                                "action_id": action.action_id,
+                                "approval_context_key": approval_gate.get(
+                                    "approval_context_key"
+                                ),
+                                "approval_label": approval_gate.get("approval_label"),
+                                "approval_state": "approved"
+                                if approved
+                                else "blocked",
+                                "approval_required": not approved,
+                            }
+                            _append_context_event(
+                                context=context,
+                                key=WORKFLOW_APPROVAL_GATE_EVENTS_KEY,
+                                last_key=LAST_WORKFLOW_APPROVAL_GATE_KEY,
+                                event=approval_event,
+                            )
+                            append_runtime_event(
+                                context=context,
+                                event=approval_event,
+                            )
+                            if trace is not None:
+                                trace.record_state_transition(
+                                    current_state,
+                                    current_state,
+                                    verdict=approval_event,
+                                )
+                            if not approved:
+                                context["approval_required"] = True
+                                context["approval_state"] = "blocked"
+                                approval_blocked = True
+                                break
+                            context["approval_required"] = False
+                            context["approval_state"] = "approved"
+
+                        result = self._registry.execute(
+                            action.action_id,
+                            inputs=resolved_inputs,
+                            context=context,
+                            env=environment,
+                            trace=trace,
+                        )
+                        if trace is not None:
+                            trace.record_action(
+                                action_id=action.action_id,
+                                inputs=resolved_inputs,
+                                outputs=result.outputs,
+                                status=result.status,
+                                error=result.error,
+                                call_id=result.call_id,
+                                duration_ms=result.duration_ms,
+                            )
+                        action_outcome = normalise_action_outcome(result.status)
+                        if (
+                            action_outcome != WORKFLOW_ACTION_OUTCOME_FAILURE
+                            and isinstance(result.outputs, Mapping)
+                        ):
+                            context.update(result.outputs)
+                            apply_tool_output_context_mappings(
+                                context=context,
+                                metadata=state_spec.metadata,
+                                action_outputs=result.outputs,
+                                state_id=current_state,
+                                action_id=action.action_id,
+                            )
+                            if (
+                                idempotency_policy is not None
+                                and raw_records is not None
+                                and idempotency_key is not None
+                                and action_outcome
+                                == WORKFLOW_ACTION_OUTCOME_SUCCESS
+                            ):
+                                raw_records[idempotency_key] = {
+                                    "outputs": dict(result.outputs),
+                                    "call_id": result.call_id,
+                                }
+                                idempotency_event = {
+                                    "status": "idempotent_recorded",
+                                    "workflow_id": definition.workflow_id,
+                                    "state_id": current_state,
+                                    "action_id": action.action_id,
+                                    "idempotency_key": idempotency_key,
+                                }
+                                _append_context_event(
+                                    context=context,
+                                    key=WORKFLOW_IDEMPOTENCY_EVENTS_KEY,
+                                    last_key=LAST_WORKFLOW_IDEMPOTENCY_EVENT_KEY,
+                                    event=idempotency_event,
+                                )
+                                append_runtime_event(
+                                    context=context,
+                                    event=idempotency_event,
+                                )
+
+                    step_envelope = build_step_result_envelope(
+                        workflow_id=definition.workflow_id,
                         state_id=current_state,
                         action_id=action.action_id,
+                        action_status=result.status,
+                        action_outcome=action_outcome,
+                        action_error=result.error,
+                        action_outputs=result.outputs
+                        if isinstance(result.outputs, Mapping)
+                        else {},
+                        control_signal=get_last_control_signal(context),
+                        control_signal_scope=get_last_control_signal_scope(context),
+                        duration_ms=result.duration_ms,
+                        context_before=context_before_action,
+                        context_after=context,
                     )
-                step_envelope = build_step_result_envelope(
-                    workflow_id=definition.workflow_id,
-                    state_id=current_state,
-                    action_id=action.action_id,
-                    action_status=result.status,
-                    action_outcome=action_outcome,
-                    action_error=result.error,
-                    action_outputs=result.outputs if isinstance(result.outputs, Mapping) else {},
-                    control_signal=get_last_control_signal(context),
-                    control_signal_scope=get_last_control_signal_scope(context),
-                    duration_ms=result.duration_ms,
-                    context_before=context_before_action,
-                    context_after=context,
-                )
-                append_step_result_envelope(context=context, envelope=step_envelope)
-                if trace is not None and step_envelope["control_signal"] != "none":
-                    event = {
-                        "status": "control_signal",
-                        "workflow_id": definition.workflow_id,
-                        "state_id": current_state,
-                        "action_id": action.action_id,
-                        "control_signal": step_envelope["control_signal"],
-                        "control_signal_scope": step_envelope.get(
-                            "control_signal_scope"
-                        ),
-                    }
-                    append_runtime_event(context=context, event=event)
-                    trace.record_state_transition(
-                        current_state,
-                        current_state,
-                        verdict=event,
-                    )
-                if action_outcome == WORKFLOW_ACTION_OUTCOME_FAILURE:
-                    if state_has_failure_route:
-                        # Safety envelope (JVNAUTOSCI-1087): preserve the failure
-                        # in context and let transition rules decide recovery.
-                        break
-                    if trace is not None:
-                        trace.finish_failed(result.error or "action_failed")
-                    return _build_result(
-                        completed=False,
-                        final_state=current_state,
-                        error=result.error or "action_failed",
-                    )
-                if action_outcome == WORKFLOW_ACTION_OUTCOME_UNKNOWN:
-                    if state_has_unknown_route:
-                        # Explicit unknown-routing is required to avoid silent
-                        # progression on ambiguous action outcomes.
-                        break
-                    unknown_error = result.error or "action_unknown"
-                    if trace is not None:
-                        trace.finish_failed(unknown_error)
-                    return _build_result(
-                        completed=False,
-                        final_state=current_state,
-                        error=unknown_error,
-                    )
+                    step_envelope["state_attempt"] = state_attempt
+                    append_step_result_envelope(context=context, envelope=step_envelope)
+                    if trace is not None and step_envelope["control_signal"] != "none":
+                        event = {
+                            "status": "control_signal",
+                            "workflow_id": definition.workflow_id,
+                            "state_id": current_state,
+                            "action_id": action.action_id,
+                            "control_signal": step_envelope["control_signal"],
+                            "control_signal_scope": step_envelope.get(
+                                "control_signal_scope"
+                            ),
+                        }
+                        append_runtime_event(context=context, event=event)
+                        trace.record_state_transition(
+                            current_state,
+                            current_state,
+                            verdict=event,
+                        )
 
-                control_signal = get_last_control_signal(context)
-                if control_signal in {
-                    WORKFLOW_CONTROL_SIGNAL_BREAK,
-                    WORKFLOW_CONTROL_SIGNAL_CONTINUE,
-                    WORKFLOW_CONTROL_SIGNAL_RETURN,
-                }:
+                    if (
+                        retry_policy is not None
+                        and action_outcome
+                        in set(retry_policy.get("retry_on_outcomes") or [])
+                        and state_attempt < int(retry_policy.get("max_attempts") or 1)
+                    ):
+                        delay_ms = _compute_retry_delay_ms(
+                            retry_policy=retry_policy,
+                            attempt_number=state_attempt,
+                        )
+                        retry_event = {
+                            "status": "retry_scheduled",
+                            "workflow_id": definition.workflow_id,
+                            "state_id": current_state,
+                            "action_id": action.action_id,
+                            "attempt_number": state_attempt,
+                            "next_attempt_number": state_attempt + 1,
+                            "delay_ms": delay_ms,
+                            "action_outcome": action_outcome,
+                        }
+                        _append_context_event(
+                            context=context,
+                            key=WORKFLOW_RETRY_EVENTS_KEY,
+                            last_key=LAST_WORKFLOW_RETRY_EVENT_KEY,
+                            event=retry_event,
+                        )
+                        append_runtime_event(context=context, event=retry_event)
+                        if trace is not None:
+                            trace.record_state_transition(
+                                current_state,
+                                current_state,
+                                verdict=retry_event,
+                            )
+                        if delay_ms > 0:
+                            time.sleep(delay_ms / 1000.0)
+                        retry_requested = True
+                        break
+
+                    if action_outcome == WORKFLOW_ACTION_OUTCOME_FAILURE:
+                        if state_has_failure_route:
+                            # Safety envelope (JVNAUTOSCI-1087): preserve the failure
+                            # in context and let transition rules decide recovery.
+                            break
+                        if trace is not None:
+                            trace.finish_failed(result.error or "action_failed")
+                        return _build_result(
+                            completed=False,
+                            final_state=current_state,
+                            error=result.error or "action_failed",
+                        )
+                    if action_outcome == WORKFLOW_ACTION_OUTCOME_UNKNOWN:
+                        if state_has_unknown_route:
+                            # Explicit unknown-routing is required to avoid silent
+                            # progression on ambiguous action outcomes.
+                            break
+                        unknown_error = result.error or "action_unknown"
+                        if trace is not None:
+                            trace.finish_failed(unknown_error)
+                        return _build_result(
+                            completed=False,
+                            final_state=current_state,
+                            error=unknown_error,
+                        )
+
+                    control_signal = get_last_control_signal(context)
+                    if control_signal in {
+                        WORKFLOW_CONTROL_SIGNAL_BREAK,
+                        WORKFLOW_CONTROL_SIGNAL_CONTINUE,
+                        WORKFLOW_CONTROL_SIGNAL_RETURN,
+                    }:
+                        break
+
+                if approval_blocked or not retry_requested:
                     break
 
             if current_state in termination_states:
@@ -899,7 +1611,23 @@ class WorkflowExecutor:
                     error="workflow_continue_outside_loop_scope",
                 )
 
-            if state_has_unknown_route and bool(context.get("last_action_unknown")):
+            if approval_blocked and not state_has_approval_route:
+                if trace is not None:
+                    trace.finish_failed("approval_required")
+                return _build_result(
+                    completed=False,
+                    final_state=current_state,
+                    error="approval_required",
+                )
+
+            if approval_blocked and state_has_approval_route:
+                post_validation = skipped_metadata_validation(
+                    state_id=current_state,
+                    phase="post_action",
+                    reason="approval_required_with_on_approval_required_route",
+                    mode=validation_mode,
+                )
+            elif state_has_unknown_route and bool(context.get("last_action_unknown")):
                 post_validation = skipped_metadata_validation(
                     state_id=current_state,
                     phase="post_action",
@@ -997,12 +1725,13 @@ class WorkflowExecutor:
                     continue
 
             if next_state is None:
+                error = "approval_required" if approval_blocked else "no_transition"
                 if trace is not None:
-                    trace.finish_failed("no_transition")
+                    trace.finish_failed(error)
                 return _build_result(
                     completed=False,
                     final_state=current_state,
-                    error="no_transition",
+                    error=error,
                 )
 
             if trace is not None:
