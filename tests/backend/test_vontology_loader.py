@@ -317,6 +317,146 @@ class TestWorkflowStepRuntimePolicyResolution:
         assert policies["idempotency_policy"]["key_paths"] == ["request_id"]
 
 
+class TestWorkflowPromptContracts:
+    def test_build_workflow_process_graph_resolves_prompt_contract(self):
+        workflow_doc = {
+            "concept_id": "#V#test_workflow",
+            "relationships": {
+                "#V#hasInitialStep": ["#V#prompt_step"],
+                "#V#hasStep": ["#V#prompt_step"],
+            },
+        }
+        step_docs = {
+            "#V#prompt_step": {
+                "concept_id": "#V#prompt_step",
+                "name": "Prompt step",
+                "relationships": {
+                    "#V#invokesAction": ["llm.action"],
+                    "#V#workflow_step_uses_llm_prompt": ["#V#issue_prompt"],
+                    "#V#hasInputMap": [
+                        '__prompt_defaults={"prompt_source":"workflow_default"}'
+                    ],
+                },
+            }
+        }
+        prompt_texts = {
+            "#V#prompt_step": [],
+            "#V#issue_prompt": [
+                {"predicate": "#V#hasContent", "text": "Fix issue {issue_key}"},
+                {"predicate": "#V#hasPromptName", "text": "Issue fixer"},
+            ],
+            "#V#default_agent_profile": [
+                {"predicate": "#V#hasPromptDescription", "text": "Agent description"}
+            ],
+        }
+
+        def _fake_find_one(query, projection=None):
+            concept_id = query.get("concept_id") if isinstance(query, dict) else None
+            if concept_id == "#V#test_workflow":
+                return workflow_doc
+            if concept_id == "#V#issue_prompt":
+                return {
+                    "concept_id": "#V#issue_prompt",
+                    "relationships": {
+                        "#V#usesAgentProfile": ["#V#default_agent_profile"],
+                    },
+                }
+            if concept_id == "#V#default_agent_profile":
+                return {
+                    "concept_id": "#V#default_agent_profile",
+                    "relationships": {},
+                }
+            return None
+
+        with patch(
+            "src.backend.workflows.vontology_loader.ConceptsRepository.find_one",
+            side_effect=_fake_find_one,
+        ), patch(
+            "src.backend.workflows.vontology_loader._fetch_concepts_by_id",
+            return_value=step_docs,
+        ), patch(
+            "src.backend.workflows.prompt_metadata_resolution.get_texts_for_concept",
+            side_effect=lambda concept_id, *args, **kwargs: prompt_texts.get(
+                concept_id, []
+            ),
+        ), patch(
+            "src.backend.services.prompt_template_service.get_texts_for_concept",
+            side_effect=lambda concept_id, *args, **kwargs: prompt_texts.get(
+                concept_id, []
+            ),
+        ):
+            graph, warnings = build_workflow_process_graph("#V#test_workflow")
+
+        assert warnings == []
+        assert graph is not None
+        step = graph["steps"][0]
+        assert step["prompt_contract"]["resolved_prompt_concept_id"] == "#V#issue_prompt"
+        assert step["prompt_contract"]["metadata"]["prompt_name"] == "Issue fixer"
+        assert (
+            step["prompt_contract"]["metadata"]["prompt_description"]
+            == "Agent description"
+        )
+        assert step["prompt_contract"]["metadata"]["prompt_source"] == "workflow_default"
+        assert step["prompt_contract"]["metadata"]["prompt_variables"] == ["issue_key"]
+        assert step["prompt_resolution_diagnostics"]["status"] == "ok"
+
+    def test_load_workflow_definition_carries_prompt_contract_into_action_inputs(self):
+        steps = [
+            {
+                **_make_step(
+                    "#V#prompt_step",
+                    invokes_action="llm.action",
+                    next_step="#V#done",
+                ),
+                "prompt_contract": {
+                    "validation_policy": "warn",
+                    "requested_prompt_concept_ids": ["#V#issue_prompt"],
+                    "resolved_prompt_concept_id": "#V#issue_prompt",
+                    "metadata": {"prompt_name": "Issue fixer"},
+                },
+                "prompt_resolution_diagnostics": {
+                    "status": "warning",
+                    "errors": [],
+                    "warnings": [
+                        "prompt_allowed_tools_unavailable:missing.tool",
+                    ],
+                },
+            },
+            _make_step("#V#done"),
+        ]
+        graph = _make_graph(initial_step="#V#prompt_step", steps=steps)
+        step_docs = {
+            "#V#prompt_step": {
+                "relationships": {
+                    "#V#hasInputMap": [
+                        "ticket_id=JVNAUTOSCI-1358",
+                        '__prompt_defaults={"prompt_source":"workflow_default"}',
+                    ]
+                }
+            }
+        }
+
+        with _stub_fetch_concepts(step_docs), _stub_narrative():
+            with patch(
+                "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+                return_value=(graph, []),
+            ):
+                definition = load_workflow_definition_from_vontology("#V#test_workflow")
+
+        assert definition is not None
+        prompt_state = definition.states["#V#prompt_step"]
+        assert prompt_state.metadata["prompt_contract"]["resolved_prompt_concept_id"] == (
+            "#V#issue_prompt"
+        )
+        action_inputs = prompt_state.actions[0].inputs
+        assert action_inputs["ticket_id"] == "JVNAUTOSCI-1358"
+        assert "__prompt_defaults" not in action_inputs
+        assert action_inputs["__prompt_contract"]["metadata"]["prompt_name"] == (
+            "Issue fixer"
+        )
+        assert action_inputs["__prompt_resolution_diagnostics"]["status"] == "warning"
+
+
 class TestWorkflowBackgroundLaunchPolicyResolution:
     def test_prefers_canonical_json_policy_relation(self):
         with patch(

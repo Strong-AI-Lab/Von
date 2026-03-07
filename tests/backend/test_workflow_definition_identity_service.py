@@ -358,6 +358,92 @@ def test_validate_contract_rejects_join_without_matching_fork() -> None:
     )
 
 
+def test_validate_contract_reports_prompt_contract_errors() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#prompt_contract_invalid_workflow",
+        initial_state="prompted",
+        states={
+            "prompted": WorkflowStateSpec(
+                state_id="prompted",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id="llm.action",
+                        inputs={
+                            "__prompt_resolution_diagnostics": {
+                                "errors": ["prompt_text_missing_or_empty"],
+                                "warnings": [],
+                            }
+                        },
+                    ),
+                ),
+                terminal=True,
+                metadata={
+                    "prompt_contract": {
+                        "validation_policy": "fail",
+                        "requested_prompt_concept_ids": ["#V#missing_prompt"],
+                        "resolved_prompt_concept_id": "#V#missing_prompt",
+                    }
+                },
+            ),
+        },
+        termination_states=("prompted",),
+    )
+
+    validation = validate_workflow_definition_contract(definition=definition)
+
+    assert validation["valid"] is False
+    assert "workflow_prompt_contract_invalid" in (validation.get("errors") or [])
+    assert any(
+        issue.get("reason_code") == "prompt_text_missing_or_empty"
+        and issue.get("severity") == "error"
+        for issue in validation.get("prompt_contract_issues", [])
+    )
+
+
+def test_validate_contract_keeps_prompt_contract_warnings_non_blocking() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#prompt_contract_warning_workflow",
+        initial_state="prompted",
+        states={
+            "prompted": WorkflowStateSpec(
+                state_id="prompted",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id="llm.action",
+                        inputs={
+                            "__prompt_resolution_diagnostics": {
+                                "errors": [],
+                                "warnings": [
+                                    "prompt_allowed_tools_unavailable:missing.tool"
+                                ],
+                            }
+                        },
+                    ),
+                ),
+                terminal=True,
+                metadata={
+                    "prompt_contract": {
+                        "validation_policy": "warn",
+                        "requested_prompt_concept_ids": ["#V#prompt"],
+                        "resolved_prompt_concept_id": "#V#prompt",
+                    }
+                },
+            ),
+        },
+        termination_states=("prompted",),
+    )
+
+    validation = validate_workflow_definition_contract(definition=definition)
+
+    assert validation["valid"] is True
+    assert "workflow_prompt_contract_invalid" not in (validation.get("errors") or [])
+    assert any(
+        issue.get("reason_code") == "prompt_allowed_tools_unavailable:missing.tool"
+        and issue.get("severity") == "warning"
+        for issue in validation.get("prompt_contract_issues", [])
+    )
+
+
 def test_validate_contract_accepts_join_with_declared_fork() -> None:
     definition = WorkflowDefinition(
         workflow_id="#V#join_valid_workflow",

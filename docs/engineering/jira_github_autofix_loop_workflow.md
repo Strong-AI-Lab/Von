@@ -262,18 +262,17 @@ Executable today with existing surfaces:
 - declarative per-step approval gating,
 - declarative retry/backoff policy execution,
 - declarative per-step idempotency reuse,
+- prompt and tool metadata resolution from workflow-authored prompt concepts,
 - durable workflow instance management,
 - high-level run summary persistence.
 
 Not cleanly expressible yet without follow-on VWL work:
 
 - long-horizon resumable per-issue checkpoints,
-- prompt/tool metadata resolution from workflow-authored prompt metadata,
 - completion gates that prove all declared deliverables were met.
 
 ## Follow-on Mapping
 
-- `JVNAUTOSCI-1358`: prompt and tool metadata resolution for deterministic workflow authoring.
 - `JVNAUTOSCI-1359`: plan-state, resumable checkpoints, and completion gates for long-running runs.
 - `JVNAUTOSCI-1360`: optional future import or execution of external SKILL artefacts against the stabilised VWL surface.
 

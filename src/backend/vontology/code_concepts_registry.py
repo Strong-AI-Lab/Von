@@ -101,6 +101,30 @@ _WORKFLOW_PREDICATE_IDS = [
     "#V#has_workflow_step_idempotency_policy_json",
 ]
 
+_WORKFLOW_PROMPT_PREDICATE_IDS = [
+    "#V#workflow_step_uses_llm_prompt",
+    "#V#hasPromptName",
+    "#V#has_prompt_name",
+    "#V#hasPromptDescription",
+    "#V#has_prompt_description",
+    "#V#hasArgumentHint",
+    "#V#has_argument_hint",
+    "#V#usesAgentProfile",
+    "#V#uses_agent_profile",
+    "#V#usesModelPreference",
+    "#V#uses_model_preference",
+    "#V#allowsTool",
+    "#V#allows_tool",
+    "#V#hasPromptScope",
+    "#V#has_prompt_scope",
+    "#V#hasPromptVariables",
+    "#V#has_prompt_variables",
+    "#V#hasPromptSource",
+    "#V#has_prompt_source",
+    "#V#hasToolResolutionPriority",
+    "#V#has_tool_resolution_priority",
+]
+
 _WORKFLOW_BACKGROUND_POLICY_PREDICATE_IDS = [
     "#V#hasBackgroundLaunchPolicyJson",
     "#V#has_background_launch_policy_json",
@@ -184,6 +208,7 @@ _CODE_PREDICATE_IDS = _unique_ids(
         *_TEXT_PREDICATE_IDS,
         *_FILE_METADATA_PREDICATE_IDS,
         *_WORKFLOW_PREDICATE_IDS,
+        *_WORKFLOW_PROMPT_PREDICATE_IDS,
         *_WORKFLOW_BACKGROUND_POLICY_PREDICATE_IDS,
         *_RELATION_META_PREDICATE_IDS,
         *_STRUCTURAL_PREDICATE_IDS,

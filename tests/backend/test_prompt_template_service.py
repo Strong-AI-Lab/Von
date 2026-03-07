@@ -29,3 +29,19 @@ def test_render_prompt_missing_variable_raises(monkeypatch):
     service = pts.PromptTemplateService()
     with pytest.raises(ValueError):
         service.render_prompt(["#V#demo_prompt"], variables={})
+
+
+def test_resolve_prompt_text_supports_v_prefixed_text_relations(monkeypatch):
+    monkeypatch.setattr(
+        pts,
+        "get_texts_for_concept",
+        lambda concept_id: [
+            {"predicate": "#V#hasContent", "text": "Canonical prompt body"}
+        ],
+    )
+    service = pts.PromptTemplateService()
+
+    prompt_id, prompt_text = service.resolve_prompt_text(["#V#demo_prompt"])
+
+    assert prompt_id == "#V#demo_prompt"
+    assert prompt_text == "Canonical prompt body"

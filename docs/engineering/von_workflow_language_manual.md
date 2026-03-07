@@ -90,6 +90,7 @@ Canonical graph families include:
 - `hasInitialStep`, `hasStep`
 - `invokesAction`, `invokesWorkflow`
 - `workflowStepInvokesTool`
+- `workflowStepUsesLlmPrompt`
 - `nextStep`
 - `onTrueNextStep`, `onFalseNextStep`, `onFailureNextStep`, `onUnknownNextStep`
 - `onApprovalRequiredNextStep`
@@ -111,6 +112,8 @@ A VWL program is a workflow concept graph:
 - Per-step invocation target:
   - tool/action (`invokesAction` or `workflow_step_invokes_tool`), or
   - subworkflow (`invokesWorkflow`).
+- Optional per-step prompt contract link:
+  - `workflow_step_uses_llm_prompt` (legacy aliases accepted for compatibility).
 - Per-step control flow links:
   - `next`
   - `on_true`, `on_false`
@@ -786,9 +789,16 @@ Unless explicitly implemented in runtime code, items below are normative plannin
 
 ### 16.5 Prompt Metadata Contract Extensions
 
-For prompt-bearing workflow or prompt concepts, VWL planning SHOULD support metadata fields equivalent to modern prompt-file ecosystems.
+Prompt-bearing workflow steps now support a first-class KB-authored prompt contract. The canonical step-level prompt link is:
 
-Candidate predicate set (planning):
+- `#V#workflow_step_uses_llm_prompt`
+
+Accepted legacy aliases remain:
+
+- `#V#uses_prompt`
+- `#V#hasPromptTemplate`
+
+Prompt or prompt-related concepts MAY declare the following metadata predicates:
 
 - `#V#hasPromptName`
 - `#V#hasPromptDescription`
@@ -801,7 +811,30 @@ Candidate predicate set (planning):
 - `#V#hasPromptSource`
 - `#V#hasToolResolutionPriority`
 
-Conflict handling for prompt metadata SHOULD be deterministic, with documented precedence (for example prompt-level over agent defaults).
+Step-local defaults MAY be supplied through reserved `hasInputMap` entries:
+
+- `__prompt_defaults=<json object>` (or `prompt_defaults=<json object>`)
+- `__prompt_validation_policy=warn|fail` (or `prompt_validation_policy=warn|fail`)
+
+Deterministic merge precedence is:
+
+1. prompt concept metadata,
+2. metadata on the first resolved `#V#usesAgentProfile`,
+3. step-local defaults from `hasInputMap`.
+
+Conflict handling is field-wise rather than union-based. In particular:
+
+- scalar fields use first-non-empty precedence,
+- list-valued fields (`allowed_tools`, `prompt_variables`, `tool_resolution_priority`, `agent_profile_ids`) use the first populated source wholesale,
+- `hasToolResolutionPriority` reorders the selected `allowed_tools` subset without expanding it.
+
+Validation and fail-closed behaviour:
+
+- missing prompt text for a declared prompt is always an error,
+- unavailable tools or agent profiles follow the declared validation policy (`warn` or `fail`),
+- stable merged prompt state is carried in workflow-state metadata as `prompt_contract`,
+- runtime diagnostics are attached to action inputs as `__prompt_resolution_diagnostics`,
+- fail-policy violations reject workflow loading with deterministic `workflow_prompt_contract_invalid` errors.
 
 ### 16.6 External SKILL Interoperability
 

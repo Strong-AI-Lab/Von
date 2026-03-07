@@ -46,6 +46,7 @@ _STATE_METADATA_CONTRACT_KEYS: tuple[str, ...] = (
     "retry_policy",
     "approval_gate",
     "idempotency_policy",
+    "prompt_contract",
 )
 
 
@@ -605,6 +606,7 @@ def validate_workflow_definition_contract(
             "subworkflow_contract_issues": [],
             "control_signal_issues": [],
             "fork_join_issues": [],
+            "prompt_contract_issues": [],
         }
 
     states_raw = getattr(definition, "states", {})
@@ -632,6 +634,7 @@ def validate_workflow_definition_contract(
     iterator_issues: list[dict[str, Any]] = []
     approval_gate_issues: list[dict[str, Any]] = []
     runtime_policy_issues: list[dict[str, Any]] = []
+    prompt_contract_issues: list[dict[str, Any]] = []
     declared_fork_ids: set[str] = set()
 
     supported_action_set: set[str] = set()
@@ -725,6 +728,10 @@ def validate_workflow_definition_contract(
             for transition in transitions
         )
         loop_scope_id = str(metadata.get("loop_scope_id") or "").strip()
+        raw_prompt_contract = metadata.get("prompt_contract")
+        prompt_contract: Mapping[str, Any] = (
+            raw_prompt_contract if isinstance(raw_prompt_contract, Mapping) else {}
+        )
         if metadata.get("approval_gate") and not has_on_approval_required_transition:
             approval_gate_issues.append(
                 {
@@ -746,7 +753,54 @@ def validate_workflow_definition_contract(
                     "reason_code": "idempotency_policy_multi_action_state_unsupported",
                 }
             )
+        requested_prompt_concept_ids = _normalise_symbol_list(
+            prompt_contract.get("requested_prompt_concept_ids")
+        )
+        resolved_prompt_concept_id = str(
+            prompt_contract.get("resolved_prompt_concept_id") or ""
+        ).strip()
+        if prompt_contract and not actions:
+            prompt_contract_issues.append(
+                {
+                    "state_id": state_id,
+                    "reason_code": "prompt_contract_without_action",
+                    "severity": "error",
+                }
+            )
+        if requested_prompt_concept_ids and not resolved_prompt_concept_id:
+            prompt_contract_issues.append(
+                {
+                    "state_id": state_id,
+                    "reason_code": "prompt_resolution_missing",
+                    "severity": "error",
+                    "requested_prompt_concept_ids": requested_prompt_concept_ids,
+                }
+            )
         for action_id, action_inputs in action_specs:
+            raw_prompt_diagnostics = action_inputs.get("__prompt_resolution_diagnostics")
+            prompt_diagnostics: Mapping[str, Any] = (
+                raw_prompt_diagnostics
+                if isinstance(raw_prompt_diagnostics, Mapping)
+                else {}
+            )
+            for reason_code in _normalise_symbol_list(prompt_diagnostics.get("errors")):
+                prompt_contract_issues.append(
+                    {
+                        "state_id": state_id,
+                        "action_id": action_id,
+                        "reason_code": reason_code,
+                        "severity": "error",
+                    }
+                )
+            for reason_code in _normalise_symbol_list(prompt_diagnostics.get("warnings")):
+                prompt_contract_issues.append(
+                    {
+                        "state_id": state_id,
+                        "action_id": action_id,
+                        "reason_code": reason_code,
+                        "severity": "warning",
+                    }
+                )
             if action_id in WORKFLOW_CONTROL_BREAK_ACTION_IDS:
                 action_scope = str(
                     action_inputs.get("loop_scope_id")
@@ -1124,6 +1178,15 @@ def validate_workflow_definition_contract(
             str(item.get("reason_code") or ""),
         ),
     )
+    prompt_contract_issues = sorted(
+        prompt_contract_issues,
+        key=lambda item: (
+            str(item.get("state_id") or ""),
+            str(item.get("action_id") or ""),
+            str(item.get("severity") or ""),
+            str(item.get("reason_code") or ""),
+        ),
+    )
 
     errors: list[str] = []
     if vacuous_state_ids:
@@ -1150,6 +1213,11 @@ def validate_workflow_definition_contract(
         errors.append("workflow_approval_gate_invalid")
     if runtime_policy_issues:
         errors.append("workflow_runtime_policy_invalid")
+    if any(
+        str(item.get("severity") or "").strip().lower() == "error"
+        for item in prompt_contract_issues
+    ):
+        errors.append("workflow_prompt_contract_invalid")
     if subworkflow_contract_issues:
         unresolved_reason_codes = {
             "subworkflow_workflow_not_found",
@@ -1193,6 +1261,7 @@ def validate_workflow_definition_contract(
         "iterator_issues": iterator_issues,
         "approval_gate_issues": approval_gate_issues,
         "runtime_policy_issues": runtime_policy_issues,
+        "prompt_contract_issues": prompt_contract_issues,
     }
 
 

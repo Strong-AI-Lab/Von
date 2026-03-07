@@ -10,6 +10,13 @@ from ..services.text_value_service import (
     get_preferred_text_for_concept,
     get_texts_for_concept,
 )
+from .prompt_metadata_resolution import (
+    WORKFLOW_STEP_PROMPT_LINK_PREDICATE_ALIASES,
+    build_workflow_prompt_contract,
+    normalise_prompt_metadata_defaults,
+    normalise_prompt_validation_policy,
+    resolve_workflow_prompt_metadata,
+)
 from .subworkflow_contracts import (
     WORKFLOW_SUBWORKFLOW_ACTION_ID,
     build_subworkflow_contract,
@@ -59,6 +66,7 @@ WORKFLOW_GRAPH_PREDICATE_ALIASES: Dict[str, Tuple[str, ...]] = {
         "#V#workflowStepInvokesTool",
         "workflowStepInvokesTool",
     ),
+    "workflowStepUsesLlmPrompt": WORKFLOW_STEP_PROMPT_LINK_PREDICATE_ALIASES,
     "nextStep": ("#V#nextStep", "nextStep", "#V#next_step", "next_step"),
     "onTrueNextStep": (
         "#V#onTrueNextStep",
@@ -259,6 +267,16 @@ _WORKFLOW_MAPPING_ID_RE = re.compile(
 _WORKFLOW_MAPPING_DESCRIPTION_RE = re.compile(
     r"context key\s+['\"]([^'\"]+)['\"].*?['\"]([^'\"]+)['\"]\s+parameter",
     re.IGNORECASE,
+)
+_WORKFLOW_PROMPT_DEFAULTS_INPUT_KEYS: tuple[str, ...] = (
+    "__prompt_defaults",
+    "prompt_defaults",
+    "__prompt_defaults_json",
+    "prompt_defaults_json",
+)
+_WORKFLOW_PROMPT_VALIDATION_POLICY_INPUT_KEYS: tuple[str, ...] = (
+    "__prompt_validation_policy",
+    "prompt_validation_policy",
 )
 _WORKFLOW_OUTPUT_MAPPING_ID_RE = re.compile(
     r"^#V#workflow_mapping_tool_field_([a-z0-9_]+)_to_([a-z0-9_]+)$",
@@ -755,6 +773,52 @@ def _mapping_description_text(
                 return raw_value.strip()
 
     return ""
+
+
+def _parse_step_input_map(step_relationships: Mapping[str, Any]) -> Dict[str, Any]:
+    input_map: Dict[str, Any] = {}
+    if not isinstance(step_relationships, Mapping):
+        return input_map
+
+    raw_inputs = _all_relationship_targets(
+        dict(step_relationships),
+        WORKFLOW_GRAPH_PREDICATE_ALIASES["hasInputMap"],
+    )
+    for entry in raw_inputs:
+        if "=" in entry:
+            key, _, value = entry.partition("=")
+        elif ":" in entry:
+            key, _, value = entry.partition(":")
+        else:
+            continue
+        key = key.strip()
+        value = value.strip()
+        if key:
+            input_map[key] = value
+    return input_map
+
+
+def _extract_step_prompt_resolution_config(
+    input_map: Dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    defaults_raw: Any = None
+    for key in _WORKFLOW_PROMPT_DEFAULTS_INPUT_KEYS:
+        if key not in input_map:
+            continue
+        defaults_raw = input_map.pop(key)
+        break
+
+    policy_raw: Any = None
+    for key in _WORKFLOW_PROMPT_VALIDATION_POLICY_INPUT_KEYS:
+        if key not in input_map:
+            continue
+        policy_raw = input_map.pop(key)
+        break
+
+    return (
+        normalise_prompt_metadata_defaults(defaults_raw),
+        normalise_prompt_validation_policy(policy_raw),
+    )
 
 
 def _extract_tool_output_mapping(
@@ -1386,6 +1450,7 @@ def build_workflow_process_graph(
         step_rels = doc.get("relationships") or {}
         if not isinstance(step_rels, dict):
             step_rels = {}
+        step_input_map = _parse_step_input_map(step_rels)
 
         invokes_action_candidates = (
             *WORKFLOW_GRAPH_PREDICATE_ALIASES["invokesAction"],
@@ -1401,6 +1466,43 @@ def build_workflow_process_graph(
             canonical_predicate=WORKFLOW_GRAPH_PREDICATE_ALIASES["invokesAction"][0],
             matched_predicates=(invokes_action_predicate,),
         )
+
+        prompt_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES["workflowStepUsesLlmPrompt"]
+        prompt_concept_ids, prompt_predicates = _all_relationship_targets_with_predicates(
+            step_rels,
+            prompt_candidates,
+        )
+        _record_legacy_alias_use(
+            legacy_aliases=legacy_aliases,
+            canonical_predicate=prompt_candidates[0],
+            matched_predicates=prompt_predicates,
+        )
+        prompt_defaults, prompt_validation_policy = (
+            _extract_step_prompt_resolution_config(dict(step_input_map))
+        )
+        prompt_contract: dict[str, Any] | None = None
+        prompt_resolution_diagnostics: dict[str, Any] | None = None
+        if prompt_concept_ids:
+            prompt_resolution = resolve_workflow_prompt_metadata(
+                prompt_concept_ids=prompt_concept_ids,
+                defaults=prompt_defaults,
+                validation_policy=prompt_validation_policy,
+            )
+            prompt_contract = build_workflow_prompt_contract(
+                resolution=prompt_resolution,
+                validation_policy=prompt_validation_policy,
+            )
+            prompt_resolution_diagnostics = dict(prompt_resolution.diagnostics)
+            prompt_errors = prompt_resolution.diagnostics.get("errors") or []
+            if prompt_errors:
+                raise ValueError(
+                    "workflow_prompt_contract_invalid:"
+                    f"{workflow_id}:{step_id}:{'|'.join(str(item) for item in prompt_errors)}"
+                )
+            for warning in prompt_resolution.diagnostics.get("warnings") or []:
+                warnings.append(
+                    f"workflow_prompt_contract_warning:{workflow_id}:{step_id}:{warning}"
+                )
 
         invokes_workflow_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES[
             "invokesWorkflow"
@@ -1625,6 +1727,8 @@ def build_workflow_process_graph(
                 "context_input_mappings": context_input_mappings,
                 "tool_output_context_mappings": tool_output_context_mappings,
                 "writes_context_keys": writes_context_keys,
+                "prompt_contract": prompt_contract,
+                "prompt_resolution_diagnostics": prompt_resolution_diagnostics,
                 **runtime_policies,
                 "control_flow": {
                     "next": next_step,
@@ -1768,25 +1872,22 @@ def load_workflow_definition_from_vontology(
         subworkflow_failure_mode = ""
         if invocation_action_id:
             # Read input mapping from Vontology (hasInputMap relationships).
-            input_map: Dict[str, Any] = {}
             doc = step_docs.get(step_id, {})
             step_rels = doc.get("relationships") or {}
-            if isinstance(step_rels, dict):
-                raw_inputs = _all_relationship_targets(
-                    step_rels,
-                    WORKFLOW_GRAPH_PREDICATE_ALIASES["hasInputMap"],
-                )
-                # Input maps are stored as "key=value" or "key:value" strings.
-                for entry in raw_inputs:
-                    if "=" in entry:
-                        k, _, v = entry.partition("=")
-                    elif ":" in entry:
-                        k, _, v = entry.partition(":")
-                    else:
-                        continue
-                    k, v = k.strip(), v.strip()
-                    if k:
-                        input_map[k] = v
+            if not isinstance(step_rels, dict):
+                step_rels = {}
+            input_map = _parse_step_input_map(step_rels)
+            _extract_step_prompt_resolution_config(input_map)
+            prompt_contract = (
+                dict(step.get("prompt_contract"))
+                if isinstance(step.get("prompt_contract"), Mapping)
+                else None
+            )
+            prompt_resolution_diagnostics = (
+                dict(step.get("prompt_resolution_diagnostics"))
+                if isinstance(step.get("prompt_resolution_diagnostics"), Mapping)
+                else None
+            )
 
             # Read semantic context mappings from dedicated mapping concepts.
             semantic_mapping_ids = step.get("context_input_mappings") or []
@@ -1832,6 +1933,12 @@ def load_workflow_definition_from_vontology(
                 input_map["workflow_id"] = str(invokes_workflow).strip()
                 input_map["__parent_workflow_id"] = str(workflow_id or "").strip()
                 input_map["__parent_state_id"] = str(step_id or "").strip()
+            if prompt_contract:
+                input_map["__prompt_contract"] = prompt_contract
+            if prompt_resolution_diagnostics:
+                input_map["__prompt_resolution_diagnostics"] = (
+                    prompt_resolution_diagnostics
+                )
 
             actions.append(
                 WorkflowActionInvocation(
@@ -2059,6 +2166,7 @@ def load_workflow_definition_from_vontology(
         retry_policy = step.get("retry_policy")
         approval_gate = step.get("approval_gate")
         idempotency_policy = step.get("idempotency_policy")
+        prompt_contract = step.get("prompt_contract")
         if preconditions:
             step_metadata["preconditions"] = preconditions
         if effects:
@@ -2077,6 +2185,8 @@ def load_workflow_definition_from_vontology(
             step_metadata["approval_gate"] = approval_gate
         if idempotency_policy:
             step_metadata["idempotency_policy"] = idempotency_policy
+        if prompt_contract:
+            step_metadata["prompt_contract"] = prompt_contract
         if is_subworkflow_action:
             workflow_target = str(invokes_workflow or "").strip()
             workflow_id_context_key = ""

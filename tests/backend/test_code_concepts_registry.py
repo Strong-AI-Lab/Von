@@ -42,3 +42,18 @@ def test_workflow_runtime_policy_predicates_are_registered():
     assert "#V#has_workflow_step_approval_gate_json" in ids
     assert "#V#hasWorkflowStepIdempotencyPolicyJson" in ids
     assert "#V#has_workflow_step_idempotency_policy_json" in ids
+
+
+def test_workflow_prompt_contract_predicates_are_registered():
+    ids = set(list_code_predicate_ids())
+
+    assert "#V#workflow_step_uses_llm_prompt" in ids
+    assert "#V#hasPromptName" in ids
+    assert "#V#has_prompt_name" in ids
+    assert "#V#usesAgentProfile" in ids
+    assert "#V#usesModelPreference" in ids
+    assert "#V#allowsTool" in ids
+    assert "#V#hasPromptScope" in ids
+    assert "#V#hasPromptVariables" in ids
+    assert "#V#hasPromptSource" in ids
+    assert "#V#hasToolResolutionPriority" in ids

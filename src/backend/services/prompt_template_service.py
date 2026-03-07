@@ -14,10 +14,10 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from src.backend.services.text_value_service import get_texts_for_concept
 
 
-_PREFERRED_PREDICATES: Tuple[str, ...] = (
-    "hasContent",
-    "hasDefinition",
-    "hasDescription",
+_PREFERRED_PREDICATE_ALIASES: Tuple[Tuple[str, ...], ...] = (
+    ("hasContent", "#V#hasContent"),
+    ("hasDefinition", "#V#hasDefinition"),
+    ("hasDescription", "#V#hasDescription"),
 )
 
 
@@ -62,11 +62,11 @@ def _best_effort_text_for_concept(concept_id: str) -> Optional[str]:
     if not isinstance(texts, list):
         return None
 
-    for predicate in _PREFERRED_PREDICATES:
+    for predicate_aliases in _PREFERRED_PREDICATE_ALIASES:
         for item in texts:
             if not isinstance(item, dict):
                 continue
-            if item.get("predicate") != predicate:
+            if item.get("predicate") not in predicate_aliases:
                 continue
             text_value = item.get("text")
             if isinstance(text_value, str) and text_value.strip():
