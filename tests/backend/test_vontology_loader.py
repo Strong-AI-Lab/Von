@@ -38,6 +38,7 @@ from src.backend.workflows.vontology_loader import (
     _all_relationship_targets,
     resolve_workflow_background_launch_policy,
     resolve_workflow_description,
+    resolve_workflow_long_horizon_policies,
     resolve_workflow_narrative_text,
     resolve_workflow_step_runtime_policies,
 )
@@ -58,12 +59,14 @@ def _make_graph(
     initial_step: str = "#V#step_a",
     steps: List[Dict[str, Any]] | None = None,
     edges: List[Dict[str, Any]] | None = None,
+    workflow_metadata: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Build a raw process graph dict matching build_workflow_process_graph output."""
     return {
         "representation": "vontology_process_graph_v1",
         "workflow_id": workflow_id,
         "initial_step": initial_step,
+        "workflow_metadata": workflow_metadata or {},
         "steps": steps or [],
         "edges": edges or [],
         "warnings": [],
@@ -93,6 +96,7 @@ def _make_step(
     retry_policy: Dict[str, Any] | None = None,
     approval_gate: Dict[str, Any] | None = None,
     idempotency_policy: Dict[str, Any] | None = None,
+    checkpoint_policy: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     return {
         "step_id": step_id,
@@ -109,6 +113,7 @@ def _make_step(
         "retry_policy": retry_policy,
         "approval_gate": approval_gate,
         "idempotency_policy": idempotency_policy,
+        "checkpoint_policy": checkpoint_policy,
         "control_flow": {
             "next": next_step,
             "on_true": on_true,
@@ -307,6 +312,14 @@ class TestWorkflowStepRuntimePolicyResolution:
                         '"key_paths":["request_id"]}'
                     ),
                 },
+                {
+                    "predicate": "#V#hasWorkflowStepCheckpointPolicyJson",
+                    "text": (
+                        '{"schema_version":"workflow_step_checkpoint_policy.v1",'
+                        '"plan_item_updates":[{"item_id":"dispatch","status":"done"}],'
+                        '"summary_context_keys":["dispatch.summary"]}'
+                    ),
+                },
             ],
         ):
             policies, warnings = resolve_workflow_step_runtime_policies("#V#step")
@@ -315,6 +328,61 @@ class TestWorkflowStepRuntimePolicyResolution:
         assert policies["retry_policy"]["max_attempts"] == 3
         assert policies["approval_gate"]["approval_context_key"] == "write_approved"
         assert policies["idempotency_policy"]["key_paths"] == ["request_id"]
+        assert policies["checkpoint_policy"]["plan_item_updates"] == [
+            {"item_id": "dispatch", "status": "done"}
+        ]
+        assert policies["checkpoint_policy"]["summary_context_keys"] == [
+            "dispatch.summary"
+        ]
+
+
+class TestWorkflowLongHorizonPolicyResolution:
+    def test_resolve_workflow_long_horizon_policies_reads_text_relations(self):
+        with patch(
+            "src.backend.workflows.vontology_loader.get_texts_for_concept",
+            return_value=[
+                {
+                    "predicate": "#V#hasWorkflowPlanStatePolicyJson",
+                    "text": (
+                        '{"schema_version":"workflow_plan_state_policy.v1",'
+                        '"plan_items":["discover","dispatch"],'
+                        '"summary_interval_steps":2,'
+                        '"cursor_context_keys":["page_cursor"]}'
+                    ),
+                },
+                {
+                    "predicate": "#V#hasWorkflowCompletionGateJson",
+                    "text": (
+                        '{"schema_version":"workflow_completion_gate.v1",'
+                        '"required_done_plan_items":["discover","dispatch"],'
+                        '"required_context_keys":["dispatch.completed"]}'
+                    ),
+                },
+            ],
+        ):
+            policies, warnings = resolve_workflow_long_horizon_policies(
+                "#V#long_horizon_workflow"
+            )
+
+        assert warnings == []
+        assert policies["plan_state_policy"]["plan_items"] == [
+            {
+                "item_id": "discover",
+                "label": "discover",
+                "description": "",
+                "default_status": "pending",
+            },
+            {
+                "item_id": "dispatch",
+                "label": "dispatch",
+                "description": "",
+                "default_status": "pending",
+            },
+        ]
+        assert policies["completion_gate"]["required_plan_item_statuses"] == {
+            "discover": "done",
+            "dispatch": "done",
+        }
 
 
 class TestWorkflowPromptContracts:
@@ -890,6 +958,74 @@ class TestInitialStepKey:
             metadata["background_launch_policy_source"]
             == "text_relation:#V#hasBackgroundLaunchPolicyJson"
         )
+
+    def test_load_definition_carries_long_horizon_metadata(self):
+        graph = _make_graph(
+            initial_step="#V#start",
+            workflow_metadata={
+                "plan_state_policy": {
+                    "schema_version": "workflow_plan_state_policy.v1",
+                    "plan_items": [
+                        {
+                            "item_id": "discover",
+                            "label": "Discover",
+                            "description": "",
+                            "default_status": "pending",
+                        }
+                    ],
+                    "summary_interval_steps": 2,
+                    "max_checkpoint_history": 10,
+                    "summary_context_keys": ["discover.summary"],
+                    "cursor_context_keys": ["discover.cursor"],
+                    "default_item_status": "pending",
+                },
+                "completion_gate": {
+                    "schema_version": "workflow_completion_gate.v1",
+                    "required_plan_item_statuses": {"discover": "done"},
+                    "required_context_keys": ["discover.completed"],
+                    "blocked_statuses": ["blocked"],
+                    "require_declared_plan_items_done": True,
+                    "allow_missing_plan_state": False,
+                },
+            },
+            steps=[
+                _make_step(
+                    "#V#start",
+                    invokes_action="test.action",
+                    checkpoint_policy={
+                        "schema_version": "workflow_step_checkpoint_policy.v1",
+                        "plan_item_updates": [
+                            {"item_id": "discover", "status": "done"}
+                        ],
+                        "checkpoint_label": "discover_step",
+                        "summary_context_keys": ["discover.summary"],
+                        "cursor_context_keys": ["discover.cursor"],
+                        "progress_message": "Discovering",
+                        "force_summary": True,
+                    },
+                )
+            ],
+        )
+
+        with _stub_fetch_concepts(), _stub_narrative():
+            with patch(
+                "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+                return_value=(graph, []),
+            ):
+                with patch(
+                    "src.backend.workflows.vontology_loader.resolve_workflow_background_launch_policy",
+                    return_value=(None, "none"),
+                ):
+                    defn = load_workflow_definition_from_vontology("#V#test_workflow")
+
+        assert defn is not None
+        assert defn.metadata["plan_state_policy"]["summary_interval_steps"] == 2
+        assert defn.metadata["completion_gate"]["required_context_keys"] == [
+            "discover.completed"
+        ]
+        assert defn.states["#V#start"].metadata["checkpoint_policy"]["plan_item_updates"] == [
+            {"item_id": "discover", "status": "done"}
+        ]
 
 
 # ---------------------------------------------------------------------------

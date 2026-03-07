@@ -54,6 +54,13 @@ from ..execution_contracts import (
     get_last_control_signal_scope,
     set_workflow_result_envelope,
 )
+from ..plan_state_runtime import (
+    apply_workflow_step_checkpoint,
+    compute_plan_state_progress,
+    evaluate_workflow_completion_gate,
+    mark_workflow_plan_state_entry,
+    mark_workflow_plan_state_resume,
+)
 from .instance_manager import WorkflowInstanceManager
 from .models import WorkflowInstance, WorkflowInstanceStatus
 
@@ -148,6 +155,13 @@ class DurableWorkflowExecutor:
             context = dict(instance.workflow_data)
             current_state = instance.current_state or definition.initial_state
             step_index = instance.step_index
+            mark_workflow_plan_state_resume(
+                context=context,
+                workflow_id=definition.workflow_id,
+                definition_metadata=definition.metadata,
+                current_state=current_state,
+                retry_count=int(instance.retry_count),
+            )
         else:
             context = dict(instance.inputs)
             current_state = definition.initial_state
@@ -209,6 +223,14 @@ class DurableWorkflowExecutor:
             )
             set_workflow_result_envelope(context=context, envelope=result_envelope)
             if checkpoint:
+                progress_current_value, progress_total_value, progress_message_value = (
+                    compute_plan_state_progress(
+                        context=context,
+                        fallback_current=step_index,
+                        fallback_total=total_steps,
+                        fallback_message=final_state,
+                    )
+                )
                 self._instance_manager.checkpoint(
                     instance_id,
                     current_state=final_state,
@@ -216,9 +238,9 @@ class DurableWorkflowExecutor:
                     step_index=step_index,
                     error=error,
                     error_step=error_step,
-                    progress_current=step_index,
-                    progress_total=total_steps,
-                    progress_message=final_state,
+                    progress_current=progress_current_value,
+                    progress_total=progress_total_value,
+                    progress_message=progress_message_value,
                 )
             return DurableWorkflowResult(
                 instance_id=instance_id,
@@ -228,6 +250,38 @@ class DurableWorkflowExecutor:
                 error=error,
                 step_count=step_index,
                 result_envelope=result_envelope,
+            )
+
+        def _complete_with_gate(final_state: str) -> DurableWorkflowResult:
+            gate_ok, gate_result = evaluate_workflow_completion_gate(
+                context=context,
+                workflow_id=definition.workflow_id,
+                definition_metadata=definition.metadata,
+                final_state=final_state,
+            )
+            if not gate_ok:
+                blocking_reasons = []
+                if isinstance(gate_result, Mapping):
+                    blocking_reasons = [
+                        str(item).strip()
+                        for item in gate_result.get("blocking_reason_codes") or []
+                        if str(item).strip()
+                    ]
+                error = "workflow_completion_gate_unmet"
+                if blocking_reasons:
+                    error = f"{error}:{'|'.join(blocking_reasons)}"
+                trace.finish_failed(error)
+                return _build_result(
+                    completed=False,
+                    final_state=final_state,
+                    error=error,
+                    checkpoint=True,
+                )
+            trace.finish_completed()
+            return _build_result(
+                completed=True,
+                final_state=final_state,
+                checkpoint=True,
             )
 
         while transitions < self._max_transitions:
@@ -257,6 +311,14 @@ class DurableWorkflowExecutor:
                     error=error,
                     checkpoint=True,
                 )
+
+            mark_workflow_plan_state_entry(
+                context=context,
+                workflow_id=definition.workflow_id,
+                state_id=current_state,
+                definition_metadata=definition.metadata,
+                state_metadata=state_spec.metadata,
+            )
 
             # Record state entry in trace
             trace.record_state_transition(
@@ -507,22 +569,22 @@ class DurableWorkflowExecutor:
                     checkpoint=True,
                 )
 
+            apply_workflow_step_checkpoint(
+                context=context,
+                workflow_id=definition.workflow_id,
+                state_id=current_state,
+                step_index=step_index,
+                definition_metadata=definition.metadata,
+                state_metadata=state_spec.metadata,
+                blocked=False,
+            )
+
             if control_signal == WORKFLOW_CONTROL_SIGNAL_RETURN:
-                trace.finish_completed()
-                return _build_result(
-                    completed=True,
-                    final_state=current_state,
-                    checkpoint=True,
-                )
+                return _complete_with_gate(current_state)
 
             # Check for terminal state
             if current_state in termination_states:
-                trace.finish_completed()
-                return _build_result(
-                    completed=True,
-                    final_state=current_state,
-                    checkpoint=True,
-                )
+                return _complete_with_gate(current_state)
 
             # Evaluate transitions
             next_state = None
@@ -561,14 +623,22 @@ class DurableWorkflowExecutor:
                 )
 
             # CHECKPOINT after successful step (before transitioning)
+            progress_current_value, progress_total_value, progress_message_value = (
+                compute_plan_state_progress(
+                    context=context,
+                    fallback_current=step_index,
+                    fallback_total=total_steps,
+                    fallback_message=next_state,
+                )
+            )
             self._instance_manager.checkpoint(
                 instance_id,
                 current_state=next_state,
                 workflow_data=context,
                 step_index=step_index,
-                progress_current=step_index,
-                progress_total=total_steps,
-                progress_message=next_state,
+                progress_current=progress_current_value,
+                progress_total=progress_total_value,
+                progress_message=progress_message_value,
             )
 
             trace.record_state_transition(

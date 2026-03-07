@@ -16,6 +16,11 @@ from .subworkflow_contracts import (
     WORKFLOW_SUBWORKFLOW_ACTION_ID,
     normalise_subworkflow_contract,
 )
+from .plan_state_runtime import (
+    normalise_workflow_completion_gate_spec,
+    normalise_workflow_plan_state_policy_spec,
+    normalise_workflow_step_checkpoint_policy_spec,
+)
 from .execution_contracts import (
     WORKFLOW_CONTROL_BREAK_ACTION_IDS,
     WORKFLOW_CONTROL_CONTINUE_ACTION_IDS,
@@ -46,6 +51,7 @@ _STATE_METADATA_CONTRACT_KEYS: tuple[str, ...] = (
     "retry_policy",
     "approval_gate",
     "idempotency_policy",
+    "checkpoint_policy",
     "prompt_contract",
 )
 
@@ -406,12 +412,21 @@ def _normalise_workflow_contract_shape_from_graph(
             }
         )
 
+    graph_metadata_raw = graph.get("workflow_metadata")
+    if not isinstance(graph_metadata_raw, Mapping):
+        graph_metadata_raw = graph.get("metadata")
+    graph_metadata = (
+        _normalise_json_like(dict(graph_metadata_raw))
+        if isinstance(graph_metadata_raw, Mapping)
+        else {}
+    )
+
     return {
         "schema_version": WORKFLOW_CONTRACT_SHAPE_SCHEMA_VERSION,
         "workflow_id": workflow_id,
         "initial_state": str(graph.get("initial_step") or "").strip(),
         "termination_states": sorted(set(termination_states)),
-        "metadata": {},
+        "metadata": graph_metadata,
         "states": step_entries,
     }
 
@@ -606,6 +621,8 @@ def validate_workflow_definition_contract(
             "subworkflow_contract_issues": [],
             "control_signal_issues": [],
             "fork_join_issues": [],
+            "plan_state_issues": [],
+            "completion_gate_issues": [],
             "prompt_contract_issues": [],
         }
 
@@ -634,6 +651,8 @@ def validate_workflow_definition_contract(
     iterator_issues: list[dict[str, Any]] = []
     approval_gate_issues: list[dict[str, Any]] = []
     runtime_policy_issues: list[dict[str, Any]] = []
+    plan_state_issues: list[dict[str, Any]] = []
+    completion_gate_issues: list[dict[str, Any]] = []
     prompt_contract_issues: list[dict[str, Any]] = []
     declared_fork_ids: set[str] = set()
 
@@ -651,6 +670,37 @@ def validate_workflow_definition_contract(
             for workflow_id in known_workflow_ids
             if isinstance(workflow_id, str) and str(workflow_id).strip()
         }
+
+    definition_metadata_raw = getattr(definition, "metadata", {})
+    definition_metadata = (
+        dict(definition_metadata_raw)
+        if isinstance(definition_metadata_raw, Mapping)
+        else {}
+    )
+    try:
+        plan_state_policy = normalise_workflow_plan_state_policy_spec(
+            definition_metadata.get("plan_state_policy")
+        )
+    except ValueError as exc:
+        plan_state_policy = None
+        plan_state_issues.append(
+            {
+                "scope": "workflow",
+                "reason_code": str(exc),
+            }
+        )
+    try:
+        completion_gate = normalise_workflow_completion_gate_spec(
+            definition_metadata.get("completion_gate")
+        )
+    except ValueError as exc:
+        completion_gate = None
+        completion_gate_issues.append(
+            {
+                "scope": "workflow",
+                "reason_code": str(exc),
+            }
+        )
 
     for scan_state_id in sorted(str(item) for item in states.keys()):
         scan_state_spec = states[scan_state_id]
@@ -751,6 +801,18 @@ def validate_workflow_definition_contract(
                 {
                     "state_id": state_id,
                     "reason_code": "idempotency_policy_multi_action_state_unsupported",
+                }
+            )
+        try:
+            normalise_workflow_step_checkpoint_policy_spec(
+                metadata.get("checkpoint_policy")
+            )
+        except ValueError as exc:
+            plan_state_issues.append(
+                {
+                    "scope": "state",
+                    "state_id": state_id,
+                    "reason_code": str(exc),
                 }
             )
         requested_prompt_concept_ids = _normalise_symbol_list(
@@ -1097,9 +1159,9 @@ def validate_workflow_definition_contract(
                                     "state_id": state_id,
                                     "workflow_id": child_workflow_id,
                                     "reason_code": "subworkflow_output_contract_mismatch",
-                                    "unknown_outputs": unknown_output_fields,
-                                }
-                            )
+                                "unknown_outputs": unknown_output_fields,
+                            }
+                        )
 
         if enforce_supported_actions:
             for action_id in actions:
@@ -1178,6 +1240,22 @@ def validate_workflow_definition_contract(
             str(item.get("reason_code") or ""),
         ),
     )
+    plan_state_issues = sorted(
+        plan_state_issues,
+        key=lambda item: (
+            str(item.get("scope") or ""),
+            str(item.get("state_id") or ""),
+            str(item.get("reason_code") or ""),
+        ),
+    )
+    completion_gate_issues = sorted(
+        completion_gate_issues,
+        key=lambda item: (
+            str(item.get("scope") or ""),
+            str(item.get("state_id") or ""),
+            str(item.get("reason_code") or ""),
+        ),
+    )
     prompt_contract_issues = sorted(
         prompt_contract_issues,
         key=lambda item: (
@@ -1213,6 +1291,10 @@ def validate_workflow_definition_contract(
         errors.append("workflow_approval_gate_invalid")
     if runtime_policy_issues:
         errors.append("workflow_runtime_policy_invalid")
+    if plan_state_issues:
+        errors.append("workflow_plan_state_policy_invalid")
+    if completion_gate_issues:
+        errors.append("workflow_completion_gate_invalid")
     if any(
         str(item.get("severity") or "").strip().lower() == "error"
         for item in prompt_contract_issues
@@ -1261,6 +1343,8 @@ def validate_workflow_definition_contract(
         "iterator_issues": iterator_issues,
         "approval_gate_issues": approval_gate_issues,
         "runtime_policy_issues": runtime_policy_issues,
+        "plan_state_issues": plan_state_issues,
+        "completion_gate_issues": completion_gate_issues,
         "prompt_contract_issues": prompt_contract_issues,
     }
 

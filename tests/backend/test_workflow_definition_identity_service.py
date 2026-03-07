@@ -444,6 +444,66 @@ def test_validate_contract_keeps_prompt_contract_warnings_non_blocking() -> None
     )
 
 
+def test_validate_contract_reports_invalid_checkpoint_policy() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#checkpoint_policy_invalid_workflow",
+        initial_state="dispatch",
+        states={
+            "dispatch": WorkflowStateSpec(
+                state_id="dispatch",
+                actions=(WorkflowActionInvocation(action_id="dispatch.action"),),
+                terminal=True,
+                metadata={
+                    "checkpoint_policy": {
+                        "schema_version": "workflow_step_checkpoint_policy.v1",
+                        "plan_item_updates": [
+                            {"item_id": "dispatch", "status": "invalid_status"}
+                        ],
+                    }
+                },
+            ),
+        },
+        termination_states=("dispatch",),
+    )
+
+    validation = validate_workflow_definition_contract(definition=definition)
+
+    assert validation["valid"] is False
+    assert "workflow_plan_state_policy_invalid" in (validation.get("errors") or [])
+    assert any(
+        issue.get("state_id") == "dispatch"
+        and issue.get("reason_code") == "plan_item_update_status_0_invalid"
+        for issue in validation.get("plan_state_issues", [])
+    )
+
+
+def test_validate_contract_accepts_context_only_completion_gate() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#completion_gate_context_only_workflow",
+        initial_state="done",
+        states={
+            "done": WorkflowStateSpec(
+                state_id="done",
+                actions=(WorkflowActionInvocation(action_id="mark.done"),),
+                terminal=True,
+            ),
+        },
+        termination_states=("done",),
+        metadata={
+            "completion_gate": {
+                "schema_version": "workflow_completion_gate.v1",
+                "required_context_keys": ["deliverable_ready"],
+                "require_declared_plan_items_done": False,
+            }
+        },
+    )
+
+    validation = validate_workflow_definition_contract(definition=definition)
+
+    assert validation["valid"] is True
+    assert validation.get("completion_gate_issues") == []
+
+
 def test_validate_contract_accepts_join_with_declared_fork() -> None:
     definition = WorkflowDefinition(
         workflow_id="#V#join_valid_workflow",

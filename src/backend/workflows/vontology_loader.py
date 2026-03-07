@@ -17,6 +17,11 @@ from .prompt_metadata_resolution import (
     normalise_prompt_validation_policy,
     resolve_workflow_prompt_metadata,
 )
+from .plan_state_runtime import (
+    normalise_workflow_completion_gate_spec,
+    normalise_workflow_plan_state_policy_spec,
+    normalise_workflow_step_checkpoint_policy_spec,
+)
 from .subworkflow_contracts import (
     WORKFLOW_SUBWORKFLOW_ACTION_ID,
     build_subworkflow_contract,
@@ -205,6 +210,16 @@ WORKFLOW_STEP_IDEMPOTENCY_POLICY_TEXT_PREDICATE_PRECEDENCE: Tuple[
         "has_workflow_step_idempotency_policy_json",
     ),
 )
+WORKFLOW_STEP_CHECKPOINT_POLICY_TEXT_PREDICATE_PRECEDENCE: Tuple[
+    Tuple[str, ...], ...
+] = (
+    (
+        "#V#hasWorkflowStepCheckpointPolicyJson",
+        "hasWorkflowStepCheckpointPolicyJson",
+        "#V#has_workflow_step_checkpoint_policy_json",
+        "has_workflow_step_checkpoint_policy_json",
+    ),
+)
 WORKFLOW_BACKGROUND_LAUNCH_POLICY_TEXT_PREDICATE_PRECEDENCE: Tuple[
     Tuple[str, ...], ...
 ] = (
@@ -225,6 +240,24 @@ WORKFLOW_BACKGROUND_LAUNCH_POLICY_TEXT_PREDICATE_PRECEDENCE: Tuple[
         "hasBackgroundRunPolicyJson",
         "#V#has_background_run_policy_json",
         "has_background_run_policy_json",
+    ),
+)
+WORKFLOW_PLAN_STATE_POLICY_TEXT_PREDICATE_PRECEDENCE: Tuple[Tuple[str, ...], ...] = (
+    (
+        "#V#hasWorkflowPlanStatePolicyJson",
+        "hasWorkflowPlanStatePolicyJson",
+        "#V#has_workflow_plan_state_policy_json",
+        "has_workflow_plan_state_policy_json",
+    ),
+)
+WORKFLOW_COMPLETION_GATE_TEXT_PREDICATE_PRECEDENCE: Tuple[
+    Tuple[str, ...], ...
+] = (
+    (
+        "#V#hasWorkflowCompletionGateJson",
+        "hasWorkflowCompletionGateJson",
+        "#V#has_workflow_completion_gate_json",
+        "has_workflow_completion_gate_json",
     ),
 )
 WORKFLOW_BACKGROUND_LAUNCH_INTERVAL_SECONDS_TEXT_PREDICATE_PRECEDENCE: Tuple[
@@ -1221,14 +1254,14 @@ def _parse_json_object_text_value(text_value: Any) -> dict[str, Any] | None:
     return None
 
 
-def _resolve_step_policy_from_text_relations(
+def _resolve_policy_from_text_relations(
     *,
-    step_id: str,
+    concept_id: str,
     predicate_precedence: Tuple[Tuple[str, ...], ...],
     normaliser: Callable[[Any], dict[str, Any] | None],
 ) -> tuple[dict[str, Any] | None, str | None]:
     try:
-        raw_texts = get_texts_for_concept(step_id)
+        raw_texts = get_texts_for_concept(concept_id)
     except Exception:
         raw_texts = []
     texts = [item for item in raw_texts if isinstance(item, Mapping)]
@@ -1264,8 +1297,8 @@ def resolve_workflow_step_runtime_policies(
     if not isinstance(step_id, str) or not step_id.strip():
         return policies, warnings
 
-    retry_policy, retry_source = _resolve_step_policy_from_text_relations(
-        step_id=step_id,
+    retry_policy, retry_source = _resolve_policy_from_text_relations(
+        concept_id=step_id,
         predicate_precedence=WORKFLOW_STEP_RETRY_POLICY_TEXT_PREDICATE_PRECEDENCE,
         normaliser=_normalise_retry_policy_spec,
     )
@@ -1274,8 +1307,8 @@ def resolve_workflow_step_runtime_policies(
     elif isinstance(retry_source, str) and retry_source:
         warnings.append(f"workflow_step_retry_policy_invalid:{step_id}:{retry_source}")
 
-    approval_gate, approval_source = _resolve_step_policy_from_text_relations(
-        step_id=step_id,
+    approval_gate, approval_source = _resolve_policy_from_text_relations(
+        concept_id=step_id,
         predicate_precedence=WORKFLOW_STEP_APPROVAL_GATE_TEXT_PREDICATE_PRECEDENCE,
         normaliser=_normalise_approval_gate_spec,
     )
@@ -1286,8 +1319,8 @@ def resolve_workflow_step_runtime_policies(
             f"workflow_step_approval_gate_invalid:{step_id}:{approval_source}"
         )
 
-    idempotency_policy, idempotency_source = _resolve_step_policy_from_text_relations(
-        step_id=step_id,
+    idempotency_policy, idempotency_source = _resolve_policy_from_text_relations(
+        concept_id=step_id,
         predicate_precedence=WORKFLOW_STEP_IDEMPOTENCY_POLICY_TEXT_PREDICATE_PRECEDENCE,
         normaliser=_normalise_idempotency_policy_spec,
     )
@@ -1297,6 +1330,55 @@ def resolve_workflow_step_runtime_policies(
         warnings.append(
             "workflow_step_idempotency_policy_invalid:"
             f"{step_id}:{idempotency_source}"
+        )
+
+    checkpoint_policy, checkpoint_source = _resolve_policy_from_text_relations(
+        concept_id=step_id,
+        predicate_precedence=WORKFLOW_STEP_CHECKPOINT_POLICY_TEXT_PREDICATE_PRECEDENCE,
+        normaliser=normalise_workflow_step_checkpoint_policy_spec,
+    )
+    if checkpoint_policy is not None:
+        policies["checkpoint_policy"] = checkpoint_policy
+    elif isinstance(checkpoint_source, str) and checkpoint_source:
+        warnings.append(
+            "workflow_step_checkpoint_policy_invalid:"
+            f"{step_id}:{checkpoint_source}"
+        )
+
+    return policies, warnings
+
+
+def resolve_workflow_long_horizon_policies(
+    workflow_id: str,
+) -> tuple[dict[str, Any], list[str]]:
+    policies: dict[str, Any] = {}
+    warnings: list[str] = []
+    if not isinstance(workflow_id, str) or not workflow_id.strip():
+        return policies, warnings
+
+    plan_state_policy, plan_state_source = _resolve_policy_from_text_relations(
+        concept_id=workflow_id,
+        predicate_precedence=WORKFLOW_PLAN_STATE_POLICY_TEXT_PREDICATE_PRECEDENCE,
+        normaliser=normalise_workflow_plan_state_policy_spec,
+    )
+    if plan_state_policy is not None:
+        policies["plan_state_policy"] = plan_state_policy
+    elif isinstance(plan_state_source, str) and plan_state_source:
+        warnings.append(
+            f"workflow_plan_state_policy_invalid:{workflow_id}:{plan_state_source}"
+        )
+
+    completion_gate, completion_gate_source = _resolve_policy_from_text_relations(
+        concept_id=workflow_id,
+        predicate_precedence=WORKFLOW_COMPLETION_GATE_TEXT_PREDICATE_PRECEDENCE,
+        normaliser=normalise_workflow_completion_gate_spec,
+    )
+    if completion_gate is not None:
+        policies["completion_gate"] = completion_gate
+    elif isinstance(completion_gate_source, str) and completion_gate_source:
+        warnings.append(
+            "workflow_completion_gate_invalid:"
+            f"{workflow_id}:{completion_gate_source}"
         )
 
     return policies, warnings
@@ -1398,6 +1480,11 @@ def build_workflow_process_graph(
     relationships = workflow_doc.get("relationships") or {}
     if not isinstance(relationships, dict):
         relationships = {}
+
+    workflow_runtime_policies, workflow_policy_warnings = (
+        resolve_workflow_long_horizon_policies(workflow_id)
+    )
+    warnings.extend(workflow_policy_warnings)
 
     legacy_aliases: set[str] = set()
 
@@ -1761,6 +1848,7 @@ def build_workflow_process_graph(
         "representation": "vontology_process_graph_v1",
         "workflow_id": workflow_id,
         "initial_step": initial_step,
+        "workflow_metadata": workflow_runtime_policies,
         "steps": step_items,
         "edges": edges,
         "warnings": warnings,
@@ -1807,6 +1895,9 @@ def load_workflow_definition_from_vontology(
         "workflow_step_retry_policy_invalid:",
         "workflow_step_approval_gate_invalid:",
         "workflow_step_idempotency_policy_invalid:",
+        "workflow_step_checkpoint_policy_invalid:",
+        "workflow_plan_state_policy_invalid:",
+        "workflow_completion_gate_invalid:",
     )
     for warning in warnings:
         if isinstance(warning, str) and warning.startswith(fatal_warning_prefixes):
@@ -2166,6 +2257,7 @@ def load_workflow_definition_from_vontology(
         retry_policy = step.get("retry_policy")
         approval_gate = step.get("approval_gate")
         idempotency_policy = step.get("idempotency_policy")
+        checkpoint_policy = step.get("checkpoint_policy")
         prompt_contract = step.get("prompt_contract")
         if preconditions:
             step_metadata["preconditions"] = preconditions
@@ -2185,6 +2277,8 @@ def load_workflow_definition_from_vontology(
             step_metadata["approval_gate"] = approval_gate
         if idempotency_policy:
             step_metadata["idempotency_policy"] = idempotency_policy
+        if checkpoint_policy:
+            step_metadata["checkpoint_policy"] = checkpoint_policy
         if prompt_contract:
             step_metadata["prompt_contract"] = prompt_contract
         if is_subworkflow_action:
@@ -2238,6 +2332,9 @@ def load_workflow_definition_from_vontology(
         resolve_workflow_background_launch_policy(workflow_id)
     )
     workflow_metadata: Dict[str, Any] = {}
+    graph_workflow_metadata = graph.get("workflow_metadata")
+    if isinstance(graph_workflow_metadata, Mapping):
+        workflow_metadata.update(dict(graph_workflow_metadata))
     if background_launch_policy is not None:
         workflow_metadata["background_launch_policy"] = background_launch_policy
     if (

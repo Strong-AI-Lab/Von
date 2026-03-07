@@ -99,6 +99,12 @@ _WORKFLOW_PREDICATE_IDS = [
     "#V#has_workflow_step_approval_gate_json",
     "#V#hasWorkflowStepIdempotencyPolicyJson",
     "#V#has_workflow_step_idempotency_policy_json",
+    "#V#hasWorkflowStepCheckpointPolicyJson",
+    "#V#has_workflow_step_checkpoint_policy_json",
+    "#V#hasWorkflowPlanStatePolicyJson",
+    "#V#has_workflow_plan_state_policy_json",
+    "#V#hasWorkflowCompletionGateJson",
+    "#V#has_workflow_completion_gate_json",
 ]
 
 _WORKFLOW_PROMPT_PREDICATE_IDS = [

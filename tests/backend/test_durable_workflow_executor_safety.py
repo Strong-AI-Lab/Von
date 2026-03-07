@@ -623,3 +623,163 @@ def test_durable_executor_populates_result_envelope_for_return_signal() -> None:
     assert result.result_envelope.get("control_signal") == "return"
     assert result.result_envelope.get("declared_output_payload") == {"answer": "done"}
 
+
+def test_durable_executor_records_plan_state_checkpoint_progress() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#durable_plan_state_progress",
+        initial_state="dispatch",
+        states={
+            "dispatch": WorkflowStateSpec(
+                state_id="dispatch",
+                actions=(WorkflowActionInvocation(action_id="dispatch.action"),),
+                terminal=True,
+                metadata={
+                    "checkpoint_policy": {
+                        "schema_version": "workflow_step_checkpoint_policy.v1",
+                        "plan_item_updates": [
+                            {"item_id": "dispatch", "status": "done"}
+                        ],
+                        "summary_context_keys": ["dispatch.completed"],
+                        "cursor_context_keys": ["page_cursor"],
+                        "progress_message": "Dispatching",
+                        "force_summary": True,
+                    }
+                },
+            ),
+        },
+        termination_states=("dispatch",),
+        metadata={
+            "plan_state_policy": {
+                "schema_version": "workflow_plan_state_policy.v1",
+                "plan_items": ["dispatch"],
+                "summary_interval_steps": 1,
+            },
+            "completion_gate": {
+                "schema_version": "workflow_completion_gate.v1",
+                "required_done_plan_items": ["dispatch"],
+                "required_context_keys": ["dispatch.completed"],
+            },
+        },
+    )
+
+    registry = ActionRegistry()
+    registry.register(
+        ActionSpec(
+            action_id="dispatch.action",
+            handler=lambda _request: WorkflowActionResult(
+                outputs={
+                    "dispatch": {"completed": True},
+                    "page_cursor": "cursor-2",
+                }
+            ),
+        )
+    )
+
+    instance = _build_instance(definition.workflow_id)
+    instance.inputs = {"page_cursor": "cursor-1"}
+
+    manager = MagicMock()
+    manager.get_instance.return_value = instance
+    manager.is_cancelled.return_value = False
+    manager.extend_lock.return_value = True
+    manager.checkpoint.return_value = True
+
+    executor = DurableWorkflowExecutor(registry=registry, instance_manager=manager)
+    with (
+        patch(
+            "src.backend.languagemodels.llm_interface.get_llm_client",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "src.backend.languagemodels.llm_interface.get_active_model_name",
+            return_value="test-model",
+        ),
+    ):
+        result = executor.run_durable(
+            "instance-1",
+            definition,
+            resume_from_checkpoint=False,
+        )
+
+    assert result.completed is True
+    plan_state = result.data.get("workflow_plan_state")
+    assert isinstance(plan_state, dict)
+    assert plan_state["items"]["dispatch"]["status"] == "done"
+    gate = result.data.get("workflow_completion_gate")
+    assert isinstance(gate, dict)
+    assert gate["safe_to_claim_completion"] is True
+    assert manager.checkpoint.call_args_list
+    assert any(
+        call.kwargs.get("progress_current") == 1
+        and call.kwargs.get("progress_total") == 1
+        and call.kwargs.get("progress_message") == "Dispatching"
+        for call in manager.checkpoint.call_args_list
+        if isinstance(call.kwargs, dict)
+    )
+
+
+def test_durable_executor_blocks_false_terminal_success_when_completion_gate_unmet() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#durable_completion_gate_unmet",
+        initial_state="dispatch",
+        states={
+            "dispatch": WorkflowStateSpec(
+                state_id="dispatch",
+                actions=(WorkflowActionInvocation(action_id="dispatch.action"),),
+                terminal=True,
+            ),
+        },
+        termination_states=("dispatch",),
+        metadata={
+            "plan_state_policy": {
+                "schema_version": "workflow_plan_state_policy.v1",
+                "plan_items": ["dispatch", "finalise"],
+            },
+            "completion_gate": {
+                "schema_version": "workflow_completion_gate.v1",
+                "required_done_plan_items": ["dispatch", "finalise"],
+                "required_context_keys": ["dispatch.completed"],
+            },
+        },
+    )
+
+    registry = ActionRegistry()
+    registry.register(
+        ActionSpec(
+            action_id="dispatch.action",
+            handler=lambda _request: WorkflowActionResult(outputs={}),
+        )
+    )
+
+    manager = MagicMock()
+    manager.get_instance.return_value = _build_instance(definition.workflow_id)
+    manager.is_cancelled.return_value = False
+    manager.extend_lock.return_value = True
+    manager.checkpoint.return_value = True
+
+    executor = DurableWorkflowExecutor(registry=registry, instance_manager=manager)
+    with (
+        patch(
+            "src.backend.languagemodels.llm_interface.get_llm_client",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "src.backend.languagemodels.llm_interface.get_active_model_name",
+            return_value="test-model",
+        ),
+    ):
+        result = executor.run_durable(
+            "instance-1",
+            definition,
+            resume_from_checkpoint=False,
+        )
+
+    assert result.completed is False
+    assert result.error is not None
+    assert result.error.startswith("workflow_completion_gate_unmet")
+    gate = result.data.get("workflow_completion_gate")
+    assert isinstance(gate, dict)
+    assert gate["safe_to_claim_completion"] is False
+    assert "required_plan_items_unmet" in gate["blocking_reason_codes"]
+    assert "missing_required_context_keys" in gate["blocking_reason_codes"]
+
