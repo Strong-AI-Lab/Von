@@ -138,6 +138,137 @@ def test_bootstrap_workflow_concepts_creates_missing(monkeypatch):
     assert payload["create_as_instance"] is True
 
 
+def test_ensure_concept_exists_recovers_from_duplicate_key(monkeypatch):
+    load_results = iter(
+        [
+            (None, None),
+            ({"concept_id": "#V#duplicate_concept"}, None),
+        ]
+    )
+
+    monkeypatch.setattr(
+        authority_service,
+        "_load_concept",
+        lambda _concept_id: next(load_results),
+    )
+
+    def _raise_duplicate(**_kwargs):
+        raise RuntimeError("E11000 duplicate key error collection: von_db.concepts")
+
+    monkeypatch.setattr(
+        authority_service.concept_service,
+        "create_concept",
+        _raise_duplicate,
+    )
+
+    concept_doc, created, error = authority_service._ensure_concept_exists(
+        concept_id="#V#duplicate_concept",
+        name="Duplicate concept",
+    )
+
+    assert concept_doc == {"concept_id": "#V#duplicate_concept"}
+    assert created is False
+    assert error is None
+
+
+def test_ensure_tool_output_mapping_concept_recovers_from_duplicate_key(monkeypatch):
+    mapping_id = "#V#workflow_mapping_tool_field_test_to_parent_output"
+    load_results = iter(
+        [
+            (None, None),
+            (
+                {
+                    "concept_id": mapping_id,
+                    "concept_data": {},
+                },
+                None,
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(
+        authority_service,
+        "_load_concept",
+        lambda _concept_id: next(load_results),
+    )
+
+    def _raise_duplicate(**_kwargs):
+        raise RuntimeError("E11000 duplicate key error collection: von_db.concepts")
+
+    monkeypatch.setattr(
+        authority_service.concept_service,
+        "create_concept",
+        _raise_duplicate,
+    )
+    monkeypatch.setattr(
+        authority_service.concept_service,
+        "update_concept",
+        lambda *_args, **_kwargs: {"updated": True},
+    )
+
+    created, error = authority_service._ensure_tool_output_mapping_concept(
+        step_concept_id="#V#workflow_step_test",
+        mapping_target_id="#V#child_workflow",
+        mapping_spec=authority_service._CanonicalToolOutputMappingSpec(
+            concept_id=mapping_id,
+            tool_output_field="result.test",
+            context_key="parent_output",
+        ),
+    )
+
+    assert created is False
+    assert error is None
+
+
+def test_ensure_context_input_mapping_concept_recovers_from_duplicate_key(monkeypatch):
+    mapping_id = "#V#workflow_mapping_context_key_test_to_tool_parameter"
+    load_results = iter(
+        [
+            (None, None),
+            (
+                {
+                    "concept_id": mapping_id,
+                    "concept_data": {},
+                },
+                None,
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(
+        authority_service,
+        "_load_concept",
+        lambda _concept_id: next(load_results),
+    )
+
+    def _raise_duplicate(**_kwargs):
+        raise RuntimeError("E11000 duplicate key error collection: von_db.concepts")
+
+    monkeypatch.setattr(
+        authority_service.concept_service,
+        "create_concept",
+        _raise_duplicate,
+    )
+    monkeypatch.setattr(
+        authority_service.concept_service,
+        "update_concept",
+        lambda *_args, **_kwargs: {"updated": True},
+    )
+
+    created, error = authority_service._ensure_context_input_mapping_concept(
+        step_concept_id="#V#workflow_step_test",
+        mapping_target_id="#V#child_workflow",
+        mapping_spec=authority_service._CanonicalContextInputMappingSpec(
+            concept_id=mapping_id,
+            context_key="test_context_key",
+            tool_param="workflow_id",
+        ),
+    )
+
+    assert created is False
+    assert error is None
+
+
 def test_bootstrap_workflow_concepts_enforces_required_type(monkeypatch):
     registry = _DummyRegistry(workflow_ids=["#V#wf_retype"])
 
@@ -366,6 +497,79 @@ def test_bootstrap_publishes_canonical_chat_graphs_with_loader_runtime_parity(
         )
         assert is_executable is True, f"{workflow_id}: {reason}: {detail}"
         assert reason == EXECUTABILITY_EXECUTABLE_NOW
+
+
+def test_bootstrap_publishes_file_copy_upload_handler_dynamic_subworkflow_contract(
+    _reset_mock_workflow_graph_db,
+):
+    from src.backend.workflows.durable.file_copy_interpretation_workflow import (
+        FILE_COPY_INTERPRETATION_WORKFLOW_ID,
+        get_file_copy_interpretation_workflow_registration,
+    )
+    from src.backend.workflows.durable.file_copy_typing_workflow import (
+        get_file_copy_typing_workflow_registration,
+    )
+    from src.backend.workflows.durable.file_copy_upload_classification_workflow import (
+        get_file_copy_upload_classification_workflow_registration,
+    )
+    from src.backend.workflows.durable.file_copy_upload_handler_workflow import (
+        FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
+        get_file_copy_upload_handler_workflow_registration,
+    )
+    from src.backend.workflows.vontology_loader import (
+        load_workflow_definition_from_vontology,
+    )
+    from src.backend.workflows.workflow_registry import WorkflowRegistry
+
+    registry = WorkflowRegistry()
+    for registration in (
+        get_file_copy_typing_workflow_registration(),
+        get_file_copy_interpretation_workflow_registration(),
+        get_file_copy_upload_classification_workflow_registration(),
+        get_file_copy_upload_handler_workflow_registration(),
+    ):
+        registry.register(registration)
+
+    report = authority_service.bootstrap_workflow_concepts(registry=cast(Any, registry))
+    graph_publication = report.get("graph_publication") or {}
+    errors = graph_publication.get("errors_by_workflow_id") or {}
+    assert FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID not in errors
+
+    loaded_definition = load_workflow_definition_from_vontology(
+        FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID
+    )
+    assert loaded_definition is not None
+
+    specialised_state_id = authority_service._step_concept_id(
+        workflow_id=FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
+        state_id="specialised",
+    )
+    specialised_state = loaded_definition.states[specialised_state_id]
+    specialised_contract = specialised_state.metadata["subworkflow_contract"]
+    assert specialised_contract["workflow_id"] == ""
+    assert specialised_contract["workflow_id_context_key"] == "upload_target_workflow_id"
+    assert set(specialised_contract["provided_inputs"]) == {
+        "concept_id",
+        "content_type",
+        "original_filename",
+        "size_bytes",
+        "sha256",
+        "blob_uri",
+        "uploaded_at",
+        "index_in_rag",
+        "workflow_id",
+        "file_copy_concept_id",
+    }
+
+    interpret_state_id = authority_service._step_concept_id(
+        workflow_id=FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
+        state_id="interpret",
+    )
+    interpret_state = loaded_definition.states[interpret_state_id]
+    interpret_contract = interpret_state.metadata["subworkflow_contract"]
+    assert interpret_contract["workflow_id"] == FILE_COPY_INTERPRETATION_WORKFLOW_ID
+    assert "concept_id" in interpret_contract["provided_inputs"]
+    assert "file_copy_concept_id" in interpret_contract["provided_inputs"]
 
 
 def test_canonical_workflow_runtime_identity_matches_authoritative_loader(

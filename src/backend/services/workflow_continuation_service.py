@@ -10,13 +10,10 @@ from __future__ import annotations
 import re
 from typing import Any, Mapping
 
+from .file_copy_reference_service import is_file_copy_concept_id
 from .turn_execution_record_service import get_latest_turn_execution_record_projection
 from .workflow_episode_service import get_latest_workflow_use_episode
 
-_FILE_COPY_CONCEPT_ID_PATTERN = re.compile(
-    r"#V#[A-Za-z0-9][A-Za-z0-9._-]*file_copy[A-Za-z0-9._-]*",
-    flags=re.IGNORECASE,
-)
 _CONCEPT_ID_PATTERN = re.compile(
     r"#V#[A-Za-z0-9][A-Za-z0-9._-]*",
     flags=re.IGNORECASE,
@@ -315,7 +312,7 @@ def extract_file_copy_targets_from_continuation_context(
 
     def _add(candidate: str | None) -> None:
         text = _safe_str(candidate)
-        if not text or not _FILE_COPY_CONCEPT_ID_PATTERN.fullmatch(text):
+        if not text or not is_file_copy_concept_id(text):
             return
         lowered = text.lower()
         if lowered in seen:

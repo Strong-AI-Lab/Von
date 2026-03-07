@@ -59,6 +59,16 @@ def test_classification_selects_specialised_route_when_confident(monkeypatch) ->
     assert result.outputs["mutation_route"] is True
     assert result.outputs["target_workflow_available"] is True
     assert result.outputs["target_workflow_id"] == DEFAULT_SCHOLARLY_WORKFLOW_ID
+    assert (
+        result.outputs["typing_primary_type_concept_id"]
+        == "#V#scholarly_paper_file_copy"
+    )
+    assert (
+        result.outputs["typing_format_type_concept_id"] == "#V#pdf_computer_file_copy"
+    )
+    assert "#V#scholarly_paper_file_copy" in result.outputs[
+        "typing_asserted_type_concept_ids"
+    ]
 
 
 def test_classification_fail_closes_low_confidence_mutation_route(monkeypatch) -> None:
@@ -120,6 +130,48 @@ def test_classification_marks_unsupported_specialised_route_when_unavailable(
     assert "specialised_workflow_unavailable" in result.outputs["route_reasons"]
 
 
+def test_classification_prefers_supplied_typing_result_for_meeting_route(
+    monkeypatch,
+) -> None:
+    registry = ActionRegistry()
+    register_file_copy_upload_classification_actions(registry)
+
+    context: dict[str, object] = {
+        "file_copy_concept_id": "#V#file_copy_meeting_1",
+        "original_filename": "generic-upload.bin",
+        "content_type": "application/octet-stream",
+        "meeting_workflow_id": "#V#file_copy_meeting_representation_workflow",
+        "available_workflow_ids": ["#V#file_copy_meeting_representation_workflow"],
+        "typing_result": {
+            "schema_version": "file_copy_typing.v1",
+            "route_hint": "meeting",
+            "route_confidence": 0.91,
+            "route_scores": {"meeting": 0.91},
+            "primary_type_concept_id": "#V#meeting_transcript_file_copy",
+            "semantic_type_concept_id": "#V#meeting_transcript_file_copy",
+            "format_type_concept_id": "#V#plain_text_computer_file_copy",
+            "asserted_type_concept_ids": [
+                "#V#meeting_transcript_file_copy",
+                "#V#plain_text_computer_file_copy",
+            ],
+        },
+    }
+    result = registry.execute(
+        "file_copy_upload.classify",
+        inputs={},
+        context=context,
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["route_key"] == "meeting"
+    assert result.outputs["route_mode"] == "specialised"
+    assert result.outputs["target_workflow_id"] == (
+        "#V#file_copy_meeting_representation_workflow"
+    )
+    assert "typed_file_copy_context" in result.outputs["route_reasons"]
+
+
 def test_persist_route_decision_writes_singleton_text_relation(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
 
@@ -144,6 +196,14 @@ def test_persist_route_decision_writes_singleton_text_relation(monkeypatch) -> N
         "target_workflow_available": True,
         "route_reasons": ["heuristic_classifier"],
         "scored_candidates": {"cv": 0.9},
+        "typing_schema_version": "file_copy_typing.v1",
+        "typing_primary_type_concept_id": "#V#curriculum_vitae_file_copy",
+        "typing_semantic_type_concept_id": "#V#curriculum_vitae_file_copy",
+        "typing_format_type_concept_id": "#V#pdf_computer_file_copy",
+        "typing_asserted_type_concept_ids": [
+            "#V#curriculum_vitae_file_copy",
+            "#V#pdf_computer_file_copy",
+        ],
     }
     result = registry.execute(
         "file_copy_upload.persist_decision",
@@ -161,3 +221,6 @@ def test_persist_route_decision_writes_singleton_text_relation(monkeypatch) -> N
     persisted = json.loads(str(calls[0]["text"]))
     assert persisted["route_key"] == "cv"
     assert persisted["route_mode"] == "specialised"
+    assert persisted["typing_schema_version"] == "file_copy_typing.v1"
+    assert persisted["typing_primary_type_concept_id"] == "#V#curriculum_vitae_file_copy"
+    assert persisted["typing_format_type_concept_id"] == "#V#pdf_computer_file_copy"

@@ -19,6 +19,8 @@ from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import OperationFailure, PyMongoError
 
 from ..db.mongo_client import get_db
+from .arxiv_paper_link_service import extract_arxiv_id_candidates
+from .file_copy_reference_service import extract_file_copy_concept_ids_from_text
 from .representation_contract_vontology_service import (
     canonical_representation_profile_concept_ids,
     ensure_canonical_representation_contract_profiles,
@@ -214,10 +216,6 @@ _DIAGNOSTIC_ONLY_PHRASES = (
     "why wasn't",
 )
 
-_FILE_COPY_CONCEPT_ID_PATTERN = re.compile(
-    r"#V#[A-Za-z0-9][A-Za-z0-9._-]*file_copy[A-Za-z0-9._-]*",
-    flags=re.IGNORECASE,
-)
 _URL_PATTERN = re.compile(r"https?://[^\s)>\"]+", flags=re.IGNORECASE)
 
 _ACTION_REQUEST_MUTATION_PATTERN = re.compile(
@@ -609,6 +607,45 @@ def _extract_completion_claim_signals(
     }
 
 
+def _extract_tool_invocation_payload(
+    invocation: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    payload_value = invocation.get("effective_payload")
+    if isinstance(payload_value, Mapping):
+        return payload_value
+    payload_value = invocation.get("payload")
+    if isinstance(payload_value, Mapping):
+        return payload_value
+    return None
+
+
+def _classify_tool_invocation_status(
+    *,
+    invocation: Mapping[str, Any],
+    payload: Mapping[str, Any] | None = None,
+) -> str:
+    payload_value = payload if isinstance(payload, Mapping) else _extract_tool_invocation_payload(invocation)
+    error_value = _safe_str(invocation.get("error"))
+    blocked = bool(invocation.get("blocked"))
+    payload_status = ""
+    payload_success: bool | None = None
+    if isinstance(payload_value, Mapping):
+        payload_status = (_safe_str(payload_value.get("status")) or "").lower()
+        raw_success = payload_value.get("success")
+        if isinstance(raw_success, bool):
+            payload_success = raw_success
+
+    if blocked:
+        return "blocked"
+    if (
+        error_value
+        or payload_status in {"error", "failed", "failure"}
+        or payload_success is False
+    ):
+        return "error"
+    return "ok"
+
+
 def _summarise_tool_invocations(
     tool_invocations: Sequence[Mapping[str, Any]] | None,
 ) -> tuple[
@@ -640,27 +677,8 @@ def _summarise_tool_invocations(
         if not isinstance(payload_value, Mapping):
             payload_value = invocation.get("payload")
 
+        status = _classify_tool_invocation_status(invocation=invocation, payload=payload_value)
         error_value = _safe_str(invocation.get("error"))
-        blocked = bool(invocation.get("blocked"))
-        payload_status = ""
-        payload_success: bool | None = None
-        if isinstance(payload_value, Mapping):
-            payload_status = (
-                _safe_str(payload_value.get("status")) or ""
-            ).lower()
-            raw_success = payload_value.get("success")
-            if isinstance(raw_success, bool):
-                payload_success = raw_success
-
-        status = "ok"
-        if blocked:
-            status = "blocked"
-        elif (
-            error_value
-            or payload_status in {"error", "failed", "failure"}
-            or payload_success is False
-        ):
-            status = "error"
 
         result_summary = _safe_str(invocation.get("result_summary"))
         if not result_summary and isinstance(payload_value, Mapping):
@@ -914,10 +932,7 @@ def _infer_tool_execution_required_effect(
 
 
 def _extract_file_copy_concept_ids_from_text(prompt_text: Any) -> list[str]:
-    if not isinstance(prompt_text, str) or not prompt_text.strip():
-        return []
-    matches = _FILE_COPY_CONCEPT_ID_PATTERN.findall(prompt_text)
-    return _dedupe_string_sequence(matches)
+    return extract_file_copy_concept_ids_from_text(prompt_text)
 
 
 def _dedupe_string_sequence(values: Sequence[Any]) -> list[str]:
@@ -1487,12 +1502,136 @@ def _is_representation_effect_type(effect_type: str | None) -> bool:
     return lowered == "scholarly_representation" or lowered.startswith("representation_")
 
 
+_REPRESENTATION_EFFECT_PAYLOAD_KEYS: dict[str, str] = {
+    "scholarly_representation": "scholarly_representation",
+    "representation_person": "person_representation",
+    "representation_company": "company_representation",
+    "representation_meeting": "meeting_representation",
+}
+
+
+def _extract_tool_invocation_target_ids(payload: Mapping[str, Any] | None) -> list[str]:
+    if not isinstance(payload, Mapping):
+        return []
+    return _normalise_representation_target_tokens(
+        payload.get("concept_id"),
+        payload.get("file_copy_concept_id"),
+        payload.get("computer_file_copy_concept_id"),
+        payload.get("url"),
+        payload.get("source_url"),
+        payload.get("arxiv_id"),
+    )
+
+
+def _normalise_representation_target_tokens(*raw_values: Any) -> list[str]:
+    direct_values = _dedupe_string_sequence(raw_values)
+    arxiv_ids = extract_arxiv_id_candidates(*raw_values)
+    return _dedupe_string_sequence([*direct_values, *arxiv_ids])
+
+
+def _collect_successful_tool_payloads(
+    *,
+    tool_invocations: Sequence[Mapping[str, Any]] | None,
+    tool_name: str,
+    targets: Sequence[str],
+) -> tuple[list[Mapping[str, Any]], int]:
+    target_lookup = {
+        target.lower() for target in _normalise_representation_target_tokens(*targets)
+    }
+    matched_payloads: list[Mapping[str, Any]] = []
+    successful_count = 0
+
+    for invocation in tool_invocations or ():
+        if not isinstance(invocation, Mapping):
+            continue
+        invocation_name = _safe_str(invocation.get("tool")) or _safe_str(
+            invocation.get("method")
+        )
+        if (invocation_name or "").lower() != tool_name.lower():
+            continue
+        payload = _extract_tool_invocation_payload(invocation)
+        if (
+            _classify_tool_invocation_status(invocation=invocation, payload=payload)
+            != "ok"
+        ):
+            continue
+        successful_count += 1
+        if not target_lookup:
+            if isinstance(payload, Mapping):
+                matched_payloads.append(payload)
+            continue
+        payload_target_ids = {
+            item.lower()
+            for item in _extract_tool_invocation_target_ids(payload)
+            if isinstance(item, str) and item.strip()
+        }
+        if payload_target_ids and payload_target_ids.intersection(target_lookup):
+            if isinstance(payload, Mapping):
+                matched_payloads.append(payload)
+
+    return matched_payloads, successful_count
+
+
+def _evaluate_representation_effect_payloads(
+    *,
+    effect: Mapping[str, Any],
+    tool_name: str,
+    payloads: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    if tool_name.lower() != "interpret_file_copy":
+        return None
+
+    effect_type = _safe_str(effect.get("effect_type"))
+    payload_key = _REPRESENTATION_EFFECT_PAYLOAD_KEYS.get(effect_type or "")
+    if not payload_key:
+        return None
+
+    domain_id = _safe_str(effect.get("representation_domain_id")) or "representation"
+    generic_reason = (
+        "Required representation tool ran but the requested representation was "
+        "not verified."
+    )
+
+    for payload in payloads:
+        representation_payload = payload.get(payload_key)
+        if not isinstance(representation_payload, Mapping):
+            continue
+        if bool(representation_payload.get("verified")):
+            return {
+                "status": "satisfied",
+                "status_reason": (
+                    _safe_str(representation_payload.get("reason"))
+                    or f"Verified {domain_id} representation from interpret_file_copy."
+                ),
+                "failure_codes": [],
+            }
+        if bool(representation_payload.get("attempted")) or isinstance(
+            representation_payload.get("reason"), str
+        ):
+            return {
+                "status": "not_satisfied",
+                "status_reason": _safe_str(representation_payload.get("reason"))
+                or _safe_str(representation_payload.get("metadata_error"))
+                or generic_reason,
+                "failure_codes": [f"{domain_id}_representation_not_verified"],
+            }
+
+    if payloads:
+        return {
+            "status": "not_satisfied",
+            "status_reason": generic_reason,
+            "failure_codes": [f"{domain_id}_representation_not_verified"],
+        }
+    return None
+
+
 def _materialise_required_effects_from_contract(
     *,
     contract: Mapping[str, Any] | None,
     successful_tools: Sequence[str],
     failed_tools: Sequence[str],
     blocked_tools: Sequence[str],
+    tool_invocations: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     if not isinstance(contract, Mapping):
         return []
@@ -1526,17 +1665,46 @@ def _materialise_required_effects_from_contract(
         if explicit_failure_code and explicit_failure_code not in failure_codes:
             failure_codes.append(explicit_failure_code)
 
-        first_success_tool = next(
-            (tool for tool in required_tools if tool.lower() in successful_lookup),
-            None,
-        )
-        if first_success_tool:
-            effect_status = "satisfied"
-            status_reason = (
-                "Observed required representation tool invocation: "
-                f"{first_success_tool}."
+        targets = _dedupe_string_sequence(effect.get("targets") or [])
+        first_success_tool: str | None = None
+        matching_success_payloads: list[Mapping[str, Any]] = []
+        successful_other_target = False
+        for tool in required_tools:
+            if tool.lower() not in successful_lookup:
+                continue
+            payloads, successful_count = _collect_successful_tool_payloads(
+                tool_invocations=tool_invocations,
+                tool_name=tool,
+                targets=targets,
             )
-            failure_codes = []
+            if payloads or not targets:
+                first_success_tool = tool
+                matching_success_payloads = payloads
+                break
+            if successful_count > 0:
+                successful_other_target = True
+
+        if first_success_tool:
+            payload_verdict = _evaluate_representation_effect_payloads(
+                effect=effect,
+                tool_name=first_success_tool,
+                payloads=matching_success_payloads,
+            )
+            if isinstance(payload_verdict, Mapping):
+                effect_status = _safe_str(payload_verdict.get("status")) or "not_satisfied"
+                status_reason = _safe_str(payload_verdict.get("status_reason")) or (
+                    "Representation payload verification failed."
+                )
+                failure_codes = _normalise_failure_codes(
+                    payload_verdict.get("failure_codes")
+                )
+            else:
+                effect_status = "satisfied"
+                status_reason = (
+                    "Observed required representation tool invocation: "
+                    f"{first_success_tool}."
+                )
+                failure_codes = []
         else:
             first_failed_tool = next(
                 (
@@ -1553,6 +1721,13 @@ def _materialise_required_effects_from_contract(
                     f"{first_failed_tool}."
                 )
                 failure_codes = [f"{domain_id}_representation_tool_failed"]
+            elif successful_other_target:
+                effect_status = "not_executed"
+                status_reason = (
+                    "Required representation tool ran, but not for the required "
+                    "artefact target."
+                )
+                failure_codes = [f"{domain_id}_representation_wrong_target"]
             elif not required_tools and not failure_codes:
                 failure_codes = [f"{domain_id}_representation_not_executed"]
             elif required_tools:
@@ -1889,6 +2064,17 @@ def _derive_completion_gate(
                 ),
                 None,
             )
+            first_representation_status_reason = next(
+                (
+                    _safe_str(entry.get("status_reason"))
+                    for entry in unresolved_preconditions
+                    if _is_representation_effect_type(
+                        _safe_str(entry.get("effect_type"))
+                    )
+                    and _safe_str(entry.get("status_reason"))
+                ),
+                None,
+            )
             if unresolved_effect_types == {"tool_execution"}:
                 decision_reason = "Required tool execution was not observed."
             elif (
@@ -1896,14 +2082,16 @@ def _derive_completion_gate(
                 and not representation_failure_reason
             ):
                 decision_reason = (
-                    "Required scholarly paper representation was not executed."
+                    first_representation_status_reason
+                    or "Required scholarly paper representation was not executed."
                 )
             elif unresolved_effect_types and all(
                 _is_representation_effect_type(effect_type)
                 for effect_type in unresolved_effect_types
             ):
                 decision_reason = (
-                    representation_failure_reason
+                    first_representation_status_reason
+                    or representation_failure_reason
                     or "Required representation was not executed."
                 )
             else:
@@ -2014,6 +2202,7 @@ def build_turn_execution_record(
         successful_tools=successful_tools,
         failed_tools=failed_tools,
         blocked_tools=blocked_tools,
+        tool_invocations=tool_invocations,
     )
 
     required_effects: list[dict[str, Any]] = []

@@ -44,6 +44,10 @@ from .file_copy_interpretation_workflow import (
     get_file_copy_interpretation_workflow_registration,
     register_file_copy_interpretation_actions,
 )
+from .file_copy_typing_workflow import (
+    get_file_copy_typing_workflow_registration,
+    register_file_copy_typing_actions,
+)
 from .file_copy_upload_classification_workflow import (
     get_file_copy_upload_classification_workflow_registration,
     register_file_copy_upload_classification_actions,
@@ -435,6 +439,7 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
     registry.register(get_rumination_workflow_registration())
     registry.register(get_planning_workflow_registration())
     registry.register(get_workflow_introspection_maintenance_registration())
+    registry.register(get_file_copy_typing_workflow_registration())
     registry.register(get_file_copy_upload_classification_workflow_registration())
     registry.register(get_file_copy_upload_handler_workflow_registration())
     registry.register(get_file_copy_interpretation_workflow_registration())
@@ -575,6 +580,7 @@ def build_durable_action_registry() -> ActionRegistry:
     register_rumination_actions(registry)
     register_planning_actions(registry)
     register_workflow_introspection_maintenance_actions(registry)
+    register_file_copy_typing_actions(registry)
     register_file_copy_upload_classification_actions(registry)
     register_file_copy_upload_handler_actions(registry)
     register_file_copy_interpretation_actions(registry)

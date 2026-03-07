@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from src.backend.services import workflow_event_integration_service as workflow_event_service
 from src.backend.workflows.durable.models import EventWorkflowBinding
 from src.backend.services.workflow_event_integration_service import (
     DEFAULT_FILE_COPY_UPLOADED_WORKFLOW_ID,
@@ -14,6 +15,7 @@ from src.backend.services.workflow_event_integration_service import (
     EVENT_TYPE_FILE_COPY_UPLOADED,
     EVENT_TYPE_TASK_CREATED,
     EVENT_TYPE_VONTOLOGY_MUTATED,
+    ensure_default_event_bindings,
     launch_event_workflow,
     maybe_launch_effort_unit_completed_workflow,
     maybe_launch_file_copy_uploaded_workflow,
@@ -208,6 +210,66 @@ def test_maybe_launch_task_status_workflow_triggers_configured_status(
     assert (
         called_args.kwargs["event_id"]
         == "#V#task_1:in_progress->completed:2026-02-08T10:00:00+00:00"
+    )
+
+
+@patch("src.backend.services.workflow_event_integration_service.get_instance_manager")
+def test_ensure_default_event_bindings_disables_conflicting_file_copy_routes(
+    mock_get_instance_manager: MagicMock,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_EVENT_BINDINGS_BOOTSTRAP_ENABLE", "1")
+    monkeypatch.setattr(workflow_event_service, "_DEFAULT_BINDINGS_ENSURED", False)
+
+    type_binding = EventWorkflowBinding.create(
+        event_type="type.created",
+        workflow_id="#V#salient_predicate_governance_workflow",
+        input_mapping={"type_concept_id": "event.concept_id"},
+        enabled=True,
+        actor="system.bootstrap",
+    )
+    canonical_upload_binding = EventWorkflowBinding.create(
+        event_type=EVENT_TYPE_FILE_COPY_UPLOADED,
+        workflow_id=DEFAULT_FILE_COPY_UPLOADED_WORKFLOW_ID,
+        input_mapping={"concept_id": "event.file_copy_concept_id"},
+        enabled=True,
+        actor="system.bootstrap",
+    )
+    conflicting_upload_binding = EventWorkflowBinding.create(
+        event_type=EVENT_TYPE_FILE_COPY_UPLOADED,
+        workflow_id="#V#legacy_upload_workflow",
+        input_mapping={"concept_id": "event.file_copy_concept_id"},
+        enabled=True,
+        actor="legacy.bootstrap",
+    )
+    disabled_conflict = EventWorkflowBinding.from_doc(
+        {
+            **conflicting_upload_binding.to_doc(),
+            "enabled": False,
+            "revision": conflicting_upload_binding.revision + 1,
+        }
+    )
+
+    mock_manager = MagicMock()
+    mock_manager.upsert_event_binding.side_effect = [
+        (type_binding, True, False),
+        (canonical_upload_binding, False, True),
+    ]
+    mock_manager.list_event_bindings.return_value = [
+        canonical_upload_binding,
+        conflicting_upload_binding,
+    ]
+    mock_manager.set_event_binding_enabled.return_value = disabled_conflict
+    mock_get_instance_manager.return_value = mock_manager
+
+    result = ensure_default_event_bindings()
+
+    assert result["success"] is True
+    assert result["disabled_conflicts"] == 1
+    mock_manager.set_event_binding_enabled.assert_called_once_with(
+        conflicting_upload_binding.binding_id,
+        enabled=False,
+        actor="system.bootstrap",
     )
 
 

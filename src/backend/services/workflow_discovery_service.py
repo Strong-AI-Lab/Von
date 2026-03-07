@@ -31,6 +31,9 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
+from .file_copy_reference_service import extract_file_copy_concept_ids_from_text
+from .file_copy_typing_service import build_file_copy_typing_context
+
 logger = logging.getLogger(__name__)
 
 # Workflow type concepts to search for instances.
@@ -366,6 +369,148 @@ def _search_workflows_vontology(
         logger.warning(f"Vontology workflow search failed: {e}")
 
     return []
+
+
+def _resolve_query_file_copy_contexts(query: str) -> tuple[list[dict[str, Any]], list[str]]:
+    contexts: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for concept_id in extract_file_copy_concept_ids_from_text(query):
+        try:
+            context = build_file_copy_typing_context(file_copy_concept_id=concept_id)
+        except Exception as exc:
+            errors.append(
+                f"file_copy_context_error:{concept_id}:{type(exc).__name__}"
+            )
+            continue
+        if isinstance(context, Mapping):
+            contexts.append(dict(context))
+    return contexts, errors
+
+
+def _augment_query_with_file_copy_context(
+    query: str,
+    contexts: List[dict[str, Any]],
+) -> str:
+    if not contexts:
+        return query
+
+    lines = [query, "", "Artefact typing context:"]
+    for context in contexts[:3]:
+        parts: list[str] = []
+        file_copy_concept_id = str(context.get("file_copy_concept_id") or "").strip()
+        if file_copy_concept_id:
+            parts.append(f"file_copy={file_copy_concept_id}")
+        route_hint = str(context.get("route_hint") or "").strip()
+        if route_hint:
+            parts.append(f"route_hint={route_hint}")
+        type_names = [
+            str(item).strip()
+            for item in (context.get("type_display_names") or [])
+            if isinstance(item, str) and str(item).strip()
+        ]
+        if type_names:
+            parts.append("types=" + ", ".join(type_names[:4]))
+        original_filename = str(context.get("original_filename") or "").strip()
+        if original_filename:
+            parts.append(f"filename={original_filename}")
+        content_type = str(context.get("content_type") or "").strip()
+        if content_type:
+            parts.append(f"content_type={content_type}")
+        if parts:
+            lines.append("- " + "; ".join(parts))
+    return "\n".join(lines)
+
+
+def _build_keyword_fallback_queries(
+    query: str,
+    contexts: List[dict[str, Any]],
+) -> list[str]:
+    candidates: list[str] = [query]
+    for context in contexts:
+        route_hint = str(context.get("route_hint") or "").strip()
+        if route_hint:
+            candidates.append(f"{route_hint} workflow")
+            candidates.append(f"{route_hint} representation workflow")
+        for type_name in context.get("type_display_names") or []:
+            if isinstance(type_name, str) and type_name.strip():
+                candidates.append(type_name.strip())
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        token = str(item or "").strip()
+        if not token or len(token) < 3:
+            continue
+        lowered = token.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        deduped.append(token)
+    return deduped
+
+
+def _search_workflows_name_fallback(
+    queries: List[str],
+    *,
+    limit: int = DEFAULT_MAX_RESULTS * 2,
+) -> List[WorkflowMatch]:
+    try:
+        from .concept_search_service import search_concepts
+    except Exception as exc:
+        logger.warning("Keyword workflow fallback unavailable: %s", exc)
+        return []
+
+    matches: list[WorkflowMatch] = []
+    seen_keys: set[tuple[str, str]] = set()
+    for search_query in queries:
+        for match_type, source_name, score_floor in (
+            ("exact", "exact_name", 0.99),
+            ("substring", "substring_name", 0.82),
+        ):
+            for workflow_type in WORKFLOW_TYPE_IDS:
+                try:
+                    result = search_concepts(
+                        query=search_query,
+                        match_type=match_type,
+                        instance_of=workflow_type,
+                        include_description=True,
+                        limit=limit,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Workflow name fallback search failed for %s (%s): %s",
+                        search_query,
+                        match_type,
+                        exc,
+                    )
+                    continue
+
+                for concept in result.get("results", []):
+                    concept_id = str(concept.get("concept_id") or "").strip()
+                    if not concept_id:
+                        continue
+                    dedupe_key = (concept_id.lower(), source_name)
+                    if dedupe_key in seen_keys:
+                        continue
+                    seen_keys.add(dedupe_key)
+                    score = concept.get("similarity_score", 0.0)
+                    if score <= 0:
+                        score = concept.get("relevance_score", 0.0) / 100.0
+                    score = max(float(score or 0.0), score_floor)
+                    matches.append(
+                        WorkflowMatch(
+                            concept_id=concept_id,
+                            name=concept.get("name", "Unknown"),
+                            description=None,
+                            relevance_score=score,
+                            match_source=source_name,
+                        )
+                    )
+                if matches:
+                    break
+            if matches:
+                break
+    return matches
 
 
 def _enrich_workflow_matches(matches: List[WorkflowMatch]) -> List[WorkflowMatch]:
@@ -710,10 +855,16 @@ def discover_workflows(
     start_time = time.perf_counter()
     all_matches: List[WorkflowMatch] = _seed_workflow_creation_candidate(query)
     errors: List[str] = []
+    file_copy_contexts, context_errors = _resolve_query_file_copy_contexts(query)
+    errors.extend(context_errors)
+    search_query = _augment_query_with_file_copy_context(query, file_copy_contexts)
+    keyword_fallback_queries = _build_keyword_fallback_queries(query, file_copy_contexts)
 
     # Search both sources
     try:
-        semantic_matches = _search_workflows_semantic(query, limit=max_results * 2)
+        semantic_matches = _search_workflows_semantic(
+            search_query, limit=max_results * 2
+        )
         all_matches.extend(semantic_matches)
     except Exception as e:
         errors.append(f"semantic_search_error: {e}")
@@ -724,12 +875,23 @@ def discover_workflows(
     if elapsed < timeout_seconds:
         try:
             vontology_matches = _search_workflows_vontology(
-                query, limit=max_results * 2
+                search_query, limit=max_results * 2
             )
             all_matches.extend(vontology_matches)
         except Exception as e:
             errors.append(f"vontology_search_error: {e}")
             logger.warning(f"Vontology workflow discovery failed: {e}")
+
+    if elapsed < timeout_seconds and keyword_fallback_queries:
+        try:
+            fallback_matches = _search_workflows_name_fallback(
+                keyword_fallback_queries,
+                limit=max_results * 2,
+            )
+            all_matches.extend(fallback_matches)
+        except Exception as e:
+            errors.append(f"workflow_name_fallback_error: {e}")
+            logger.warning("Workflow name fallback discovery failed: %s", e)
 
     # Deduplicate and rank (keep a larger pre-limit for executability-aware
     # ranking to avoid early relevance-only truncation).
@@ -776,7 +938,7 @@ def discover_workflows(
         matches=ranked_matches,
         routing_matches=routing_matches,
         search_time_ms=elapsed_ms,
-        query=query,
+        query=search_query,
         threshold=relevance_threshold,
         errors=errors if errors else [],
     )
@@ -821,15 +983,15 @@ def discover_workflows_for_turn(
             allow_non_executable=effective_allow_non_executable,
         )
 
-        # Wrapper contract: only return payload when routing-eligible candidates
-        # exist. Raw candidate matches may include non-executable artefacts that
-        # are intentionally excluded from selector routing.
+        # Return candidate payloads even when routing-eligible matches are empty.
+        # The caller needs visibility into near matches and exclusion reasons,
+        # not just the final dispatchable subset.
         routing_matches = (
             result.routing_matches
             if isinstance(result.routing_matches, list)
             else result.matches
         )
-        if not routing_matches:
+        if not routing_matches and not result.matches:
             return None
 
         return result.to_dict()

@@ -176,6 +176,86 @@ def ensure_arxiv_markdown_file_type_exists(*, logger: Any | None = None) -> None
             )
 
 
+def ensure_specific_computer_file_copy_type_exists(
+    *,
+    type_concept_id: str,
+    name: str,
+    description: str,
+    parent_type_concept_id: str = "#V#computer_file_copy",
+    notes: str | None = None,
+    system_tags: list[str] | None = None,
+    logger: Any | None = None,
+) -> None:
+    """Best-effort ensure a specific computer-file-copy subtype exists.
+
+    Keep subtype creation centralised here so typing, upload handling, and
+    interpretation flows share one authoritative pathway for file taxonomy.
+    """
+
+    clean_type_concept_id = (
+        type_concept_id.strip() if isinstance(type_concept_id, str) else ""
+    )
+    clean_parent_type_concept_id = (
+        parent_type_concept_id.strip()
+        if isinstance(parent_type_concept_id, str)
+        else "#V#computer_file_copy"
+    )
+    clean_name = name.strip() if isinstance(name, str) else ""
+    clean_description = description.strip() if isinstance(description, str) else ""
+    if (
+        not clean_type_concept_id
+        or not clean_parent_type_concept_id
+        or not clean_name
+        or not clean_description
+    ):
+        return
+
+    ensure_computer_file_copy_type_exists(logger=logger)
+
+    try:
+        from . import concept_service
+
+        def _concept_exists(concept_id: str) -> bool:
+            try:
+                return concept_service.get_concept_by_concept_id(concept_id) is not None
+            except Exception:
+                return False
+
+        if _concept_exists(clean_type_concept_id):
+            return
+
+        if (
+            clean_parent_type_concept_id != "#V#computer_file_copy"
+            and not _concept_exists(clean_parent_type_concept_id)
+        ):
+            ensure_specific_computer_file_copy_type_exists(
+                type_concept_id=clean_parent_type_concept_id,
+                name=clean_parent_type_concept_id[3:].replace("_", " ").strip().title(),
+                description=(
+                    "A more specific computer file copy subtype created as part of "
+                    "Von's reusable file-typing taxonomy."
+                ),
+                logger=logger,
+            )
+
+        concept_service.create_concept(
+            name=clean_name,
+            concept_id=clean_type_concept_id,
+            parent_concept_ids=[clean_parent_type_concept_id],
+            create_as_instance=False,
+            description=clean_description,
+            notes=notes,
+            system_tags=list(system_tags or []),
+        )
+    except Exception as exc:
+        if logger is not None:
+            logger.warning(
+                "[computer_file_copy] Specific subtype ensure failed for %s: %s",
+                clean_type_concept_id,
+                exc,
+            )
+
+
 def create_computer_file_copy_instance(
     *,
     type_concept_id: str = "#V#computer_file_copy",

@@ -448,10 +448,10 @@ class TestDiscoverWorkflowsForTurn:
         assert result is None
 
     @patch("src.backend.services.workflow_discovery_service.discover_workflows")
-    def test_returns_none_when_only_non_routing_candidates_exist(
+    def test_returns_candidate_payload_when_only_non_routing_candidates_exist(
         self, mock_discover: MagicMock
     ) -> None:
-        """Wrapper should suppress payloads when routing-eligible matches are empty."""
+        """Wrapper should surface non-routing candidates for telemetry and UX."""
         mock_discover.return_value = WorkflowDiscoveryResult(
             matches=[
                 WorkflowMatch(
@@ -466,7 +466,11 @@ class TestDiscoverWorkflowsForTurn:
         )
 
         result = discover_workflows_for_turn("test query input")
-        assert result is None
+        assert result is not None
+        assert result["match_count"] == 0
+        assert result["candidate_count"] == 1
+        assert len(result["candidates"]) == 1
+        assert result["matches"] == []
 
     @patch("src.backend.services.workflow_discovery_service.discover_workflows")
     def test_returns_dict_when_matches_found(self, mock_discover: MagicMock) -> None:
@@ -481,6 +485,69 @@ class TestDiscoverWorkflowsForTurn:
         assert result is not None
         assert result["match_count"] == 1
         assert len(result["matches"]) == 1
+
+    @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_name_fallback")
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_vontology")
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
+    @patch("src.backend.services.workflow_discovery_service.build_file_copy_typing_context")
+    def test_augments_discovery_query_with_typed_file_copy_context(
+        self,
+        mock_typing_context: MagicMock,
+        mock_semantic: MagicMock,
+        mock_vontology: MagicMock,
+        mock_name_fallback: MagicMock,
+        mock_enrich: MagicMock,
+    ) -> None:
+        mock_typing_context.return_value = {
+            "file_copy_concept_id": "#V#uploaded_file_copy_abc123",
+            "route_hint": "scholarly",
+            "type_display_names": ["Scholarly paper file copy", "PDF file copy"],
+            "original_filename": "2502.14996.pdf",
+            "content_type": "application/pdf",
+        }
+        mock_semantic.return_value = []
+        mock_vontology.return_value = []
+        mock_name_fallback.return_value = []
+        mock_enrich.side_effect = lambda matches: matches
+
+        result = discover_workflows(
+            "Fully represent #V#uploaded_file_copy_abc123 now.",
+            max_results=3,
+        )
+
+        semantic_query = mock_semantic.call_args.args[0]
+        assert "Artefact typing context:" in semantic_query
+        assert "route_hint=scholarly" in semantic_query
+        assert "types=Scholarly paper file copy, PDF file copy" in semantic_query
+        fallback_queries = mock_name_fallback.call_args.args[0]
+        assert "scholarly workflow" in fallback_queries
+        assert "scholarly representation workflow" in fallback_queries
+        assert "Scholarly paper file copy" in fallback_queries
+        assert "PDF file copy" in fallback_queries
+        assert "route_hint=scholarly" in result.query
+
+    @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_name_fallback")
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_vontology")
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
+    def test_name_fallback_runs_even_when_semantic_search_returns_candidates(
+        self,
+        mock_semantic: MagicMock,
+        mock_vontology: MagicMock,
+        mock_name_fallback: MagicMock,
+        mock_enrich: MagicMock,
+    ) -> None:
+        mock_semantic.return_value = [
+            WorkflowMatch("#V#semantic_candidate", "Semantic candidate", relevance_score=0.81)
+        ]
+        mock_vontology.return_value = []
+        mock_name_fallback.return_value = []
+        mock_enrich.side_effect = lambda matches: matches
+
+        discover_workflows("Represent the uploaded paper now", max_results=1)
+
+        assert mock_name_fallback.called is True
 
     @patch("src.backend.services.workflow_discovery_service.discover_workflows")
     def test_catches_exceptions(self, mock_discover: MagicMock) -> None:
@@ -595,7 +662,10 @@ def test_classify_workflow_treats_completely_vacuous_steps_as_non_executable() -
                 "writes_variables": [],
             },
         ],
-        "edges": [],
+        "edges": [
+            {"from": "#V#step_one", "to": "#V#step_two", "predicate": "next_step"},
+            {"from": "#V#step_two", "to": "#V#step_one", "predicate": "retry_step"},
+        ],
         "warnings": [],
     }
 

@@ -8,6 +8,8 @@ Audience: Human engineers and AI agents
 
 Von Workflow Language (VWL) is the executable workflow language used by Von for LLM-era agent behaviour orchestration. VWL is not a standalone parser language. It is a graph-native language represented in Vontology concepts and predicates, then compiled into runtime workflow definitions.
 
+VWL workflow creation and modification are implementation activities, not documentation-only activities. When a behaviour can be expressed in VWL, engineers and AI agents SHOULD create or update the workflow directly in Vontology as part of the task, rather than deferring it to later bespoke code.
+
 This manual documents:
 
 - the authoritative VWL vocabulary in Vontology,
@@ -46,6 +48,12 @@ Primary implementation anchors:
 - `src/backend/workflows/durable/workflow_instance_submission_service.py`
 - `src/backend/server/utils_flask.py`
 - `src/backend/integrations/internal_mcp/catalogue.py`
+
+Authoring policy:
+
+- Vontology workflow graphs, mappings, schedules, and event bindings are first-class implementation artefacts.
+- When behaviour can be expressed in VWL, preferred implementation is to materialise it in Vontology and then add only the supporting code/tooling needed for execution, validation, and telemetry.
+- Backend code SHOULD primarily supply reusable actions, validators, loaders, and telemetry for workflows, rather than embedding task-specific orchestration that VWL could already express.
 
 ## 3. VWL Ontology Vocabulary
 

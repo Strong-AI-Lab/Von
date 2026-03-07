@@ -703,6 +703,10 @@ function setLoadingIndicatorDetailHtml(html) {
     }
     const value = String(html ?? '').trim();
     detailEl.innerHTML = value;
+    bindConceptSelectionClicks(detailEl, {
+        selector: '.thinking-card-concept-link',
+        datasetKey: 'conceptLinkBound'
+    });
 
     // Update wrapper to show/hide tool list
     const wrapper = document.getElementById('thinkingCardWrapper');
@@ -1296,6 +1300,9 @@ function buildThinkingProgressPresentation(progress, request = null) {
     const stageLabel = (typeof progress.stage_label === 'string' && progress.stage_label.trim())
         ? progress.stage_label.trim()
         : null;
+    const goalLabel = (typeof progress.goal_label === 'string' && progress.goal_label.trim())
+        ? progress.goal_label.trim()
+        : null;
     const tool = (typeof progress.tool === 'string' && progress.tool.trim()) ? progress.tool.trim() : null;
     let subtask = (typeof progress.subtask === 'string' && progress.subtask.trim())
         ? progress.subtask.trim()
@@ -1312,8 +1319,19 @@ function buildThinkingProgressPresentation(progress, request = null) {
         ) || subtask;
     } else if (stage === 'workflow_discovery_complete') {
         const matchCount = getWorkflowDiscoveryMatchCount(workflowDiscovery);
-        if (matchCount === 0) {
-            subtask = 'No applicable workflow found';
+        const candidateCount = getWorkflowDiscoveryCandidateCount(workflowDiscovery);
+        if (matchCount === 0 && candidateCount > 0) {
+            const primaryCandidate = normaliseWorkflowDiscoveryCandidates(workflowDiscovery)[0] || null;
+            const primaryCandidateLabel = formatWorkflowDisplayText(
+                primaryCandidate?.concept_id,
+                primaryCandidate?.name,
+                workflowDiscovery
+            );
+            subtask = primaryCandidateLabel
+                ? `Candidate found: ${primaryCandidateLabel}`
+                : 'Relevant workflow candidates found';
+        } else if (matchCount === 0) {
+            subtask = 'No direct workflow match found';
         } else if (matchCount > 0 && !subtask) {
             const primaryMatch = normaliseWorkflowDiscoveryMatches(workflowDiscovery)[0] || null;
             subtask = formatWorkflowDisplayText(
@@ -1328,6 +1346,9 @@ function buildThinkingProgressPresentation(progress, request = null) {
     const detail = tool || subtask;
     if (detail && !stageText.toLowerCase().includes(detail.toLowerCase())) {
         stageText = `${stageText}: ${detail}`;
+    }
+    if (goalLabel && !stageText.toLowerCase().includes(goalLabel.toLowerCase())) {
+        stageText = stageText ? `Goal: ${goalLabel} | ${stageText}` : `Goal: ${goalLabel}`;
     }
 
     if (terminalStatus) {
@@ -1371,6 +1392,14 @@ export function __testOnly_normaliseThinkingActivityHistory(diagnosticEvents = [
 
 export function __testOnly_renderThinkingCardBodyHTML(request = null) {
     return renderThinkingCardBodyHTML(request);
+}
+
+export function __testOnly_bindConceptSelectionClicks(container, options = {}) {
+    bindConceptSelectionClicks(container, options);
+}
+
+export function __testOnly_updateThinkingCardMeta(request, progress) {
+    updateThinkingCardMeta(request, progress);
 }
 
 function updateThinkingCardStatusBadge(progress) {
@@ -1426,7 +1455,17 @@ function updateThinkingCardMeta(request, progress) {
     const cap = effectiveProgress && Number.isFinite(effectiveProgress.tool_calls_cap)
         ? Number(effectiveProgress.tool_calls_cap)
         : null;
-    if (done !== null && cap !== null && cap > 0) {
+    const stage = effectiveProgress && typeof effectiveProgress.stage === 'string'
+        ? effectiveProgress.stage.trim().toLowerCase()
+        : '';
+    const activeToolName = effectiveProgress && typeof effectiveProgress.tool === 'string'
+        ? effectiveProgress.tool.trim()
+        : '';
+    const shouldShowToolCount = done !== null
+        && cap !== null
+        && cap > 0
+        && (done > 0 || Boolean(activeToolName) || stage.includes('tool'));
+    if (shouldShowToolCount) {
         bits.push(`${done}/${cap} tools`);
     }
 
@@ -1523,6 +1562,55 @@ function normaliseThinkingActivityString(value) {
     return (typeof value === 'string') ? value.trim() : '';
 }
 
+function renderConceptSelectionButtonHTML(conceptId, label, options = {}) {
+    const cleanConceptId = _normalisePotentialConceptId(conceptId);
+    const cleanLabel = normaliseThinkingActivityString(label);
+    if (!cleanLabel) {
+        return '';
+    }
+    if (!cleanConceptId) {
+        return escapeHtml(cleanLabel);
+    }
+
+    const classNames = Array.isArray(options.classNames)
+        ? options.classNames.filter((value) => typeof value === 'string' && value.trim())
+        : [];
+    const buttonClass = ['concept-selection-link', ...classNames].join(' ');
+    const title = normaliseThinkingActivityString(options.title) || 'Open concept tab';
+    return `<button type="button" class="${escapeHtml(buttonClass)}" data-concept-id="${escapeHtml(cleanConceptId)}" title="${escapeHtml(title)}">${escapeHtml(cleanLabel)}</button>`;
+}
+
+function bindConceptSelectionClicks(container, options = {}) {
+    if (!(container instanceof HTMLElement)) {
+        return;
+    }
+
+    const selector = normaliseThinkingActivityString(options.selector) || '.concept-selection-link';
+    const datasetKey = normaliseThinkingActivityString(options.datasetKey) || 'conceptSelectionBound';
+    if (container.dataset?.[datasetKey] === 'true') {
+        return;
+    }
+
+    container.addEventListener('click', (event) => {
+        const target = event.target;
+        if (!target || !(target instanceof HTMLElement)) {
+            return;
+        }
+        const button = target.closest(selector);
+        if (!button) {
+            return;
+        }
+        event.preventDefault();
+        const conceptId = button.dataset.conceptId;
+        if (!conceptId) {
+            return;
+        }
+        dispatchSelectConceptByIdEvent(conceptId, event);
+    });
+
+    container.dataset[datasetKey] = 'true';
+}
+
 function formatThinkingActivityFallbackLabel(value) {
     const raw = normaliseThinkingActivityString(value);
     if (!raw) {
@@ -1574,12 +1662,16 @@ function buildThinkingActivityLabelAndDetail(entry) {
     const workflowMatchCount = Number.isFinite(entry.workflow_match_count)
         ? Math.max(0, Number(entry.workflow_match_count))
         : null;
+    const workflowCandidateCount = Number.isFinite(entry.workflow_candidate_count)
+        ? Math.max(0, Number(entry.workflow_candidate_count))
+        : null;
     const batchSize = Number.isFinite(entry.batch_size) ? Number(entry.batch_size) : null;
 
     const stageText = stageLabel || formatThinkingActivityFallbackLabel(stage);
     const toolName = tool || workflowTask || subtask;
     const modelText = [model, provider].filter(Boolean).join(' · ');
     const detailParts = [];
+    let detailHtml = '';
     let label = '';
 
     if (status === 'phase_transition') {
@@ -1592,8 +1684,14 @@ function buildThinkingActivityLabelAndDetail(entry) {
         detailParts.push('Searching applicable workflows');
     } else if (status === 'workflow_discovery_complete') {
         label = 'Workflow discovery';
-        if (workflowMatchCount === 0) {
-            detailParts.push('No applicable workflow found');
+        if (workflowMatchCount === 0 && workflowCandidateCount && workflowCandidateCount > 0) {
+            detailParts.push(
+                workflowCandidateCount > 1
+                    ? `${workflowCandidateCount} workflow candidates found`
+                    : 'Relevant workflow candidate found'
+            );
+        } else if (workflowMatchCount === 0) {
+            detailParts.push('No direct workflow match found');
         } else if (workflowMatchCount && workflowMatchCount > 0) {
             detailParts.push(
                 workflowMatchCount > 1
@@ -1609,11 +1707,17 @@ function buildThinkingActivityLabelAndDetail(entry) {
         );
         if (workflowLabel) {
             detailParts.push(`Selected ${workflowLabel}`);
+            const workflowLabelHtml = renderWorkflowDisplayHtml(selectedWorkflowId, selectedWorkflowName);
+            if (workflowLabelHtml) {
+                detailHtml = `Selected ${workflowLabelHtml}`;
+            }
         }
     } else if (status === 'orchestrator_end') {
         label = 'Finished orchestrator';
     } else if (status === 'llm_call_start') {
-        label = 'Starting LLM call';
+        label = stage === 'workflow_dispatch' && stageText
+            ? stageText
+            : 'Starting LLM call';
         if (modelText) {
             detailParts.push(modelText);
         }
@@ -1623,7 +1727,9 @@ function buildThinkingActivityLabelAndDetail(entry) {
             detailParts.push(modelText);
         }
     } else if (status === 'llm_call_end') {
-        label = 'Completed LLM call';
+        label = stage === 'workflow_dispatch' && stageText
+            ? stageText
+            : 'Completed LLM call';
         if (modelText) {
             detailParts.push(modelText);
         }
@@ -1679,7 +1785,8 @@ function buildThinkingActivityLabelAndDetail(entry) {
 
     return {
         label,
-        detail: detailParts.join(' · ')
+        detail: detailParts.join(' · '),
+        detailHtml
     };
 }
 
@@ -1725,6 +1832,7 @@ function normaliseThinkingActivityHistory(diagnosticEvents) {
             eventKind,
             label: labelAndDetail.label,
             detail: labelAndDetail.detail,
+            detailHtml: labelAndDetail.detailHtml,
             state,
             isLowLevel,
             groupCount: 1,
@@ -1745,6 +1853,9 @@ function normaliseThinkingActivityHistory(diagnosticEvents) {
                 }
                 if (entry.detail) {
                     previous.detail = entry.detail;
+                }
+                if (entry.detailHtml) {
+                    previous.detailHtml = entry.detailHtml;
                 }
                 continue;
             }
@@ -1782,15 +1893,17 @@ function renderThinkingActivityHistoryHTML(request) {
 
         const statusClass = (entry.state === 'success' || entry.state === 'failure') ? entry.state : 'pending';
         const statusIcon = statusClass === 'success' ? '✓' : (statusClass === 'failure' ? '✗' : '');
-        const detailParts = [];
+        const detailHtmlParts = [];
         if (Number.isFinite(entry.groupCount) && Number(entry.groupCount) > 1) {
-            detailParts.push(`${Number(entry.groupCount)} updates`);
+            detailHtmlParts.push(escapeHtml(`${Number(entry.groupCount)} updates`));
         }
-        if (normaliseThinkingActivityString(entry.detail)) {
-            detailParts.push(normaliseThinkingActivityString(entry.detail));
+        if (normaliseThinkingActivityString(entry.detailHtml)) {
+            detailHtmlParts.push(entry.detailHtml);
+        } else if (normaliseThinkingActivityString(entry.detail)) {
+            detailHtmlParts.push(escapeHtml(normaliseThinkingActivityString(entry.detail)));
         }
-        const detailLabel = detailParts.length > 0
-            ? `<span class="thinking-card-tool-result">${escapeHtml(detailParts.join(' · '))}</span>`
+        const detailLabel = detailHtmlParts.length > 0
+            ? `<span class="thinking-card-tool-result">${detailHtmlParts.join(' · ')}</span>`
             : '';
 
         const rowClass = entry.isLowLevel ? 'thinking-card-tool thinking-card-activity is-low-level' : 'thinking-card-tool thinking-card-activity';
@@ -1877,6 +1990,15 @@ function normaliseWorkflowDiscoveryMatches(workflowDiscovery) {
     return matches.filter((match) => match && typeof match === 'object');
 }
 
+function normaliseWorkflowDiscoveryCandidates(workflowDiscovery) {
+    if (!workflowDiscovery || typeof workflowDiscovery !== 'object') {
+        return [];
+    }
+
+    const candidates = Array.isArray(workflowDiscovery.candidates) ? workflowDiscovery.candidates : [];
+    return candidates.filter((match) => match && typeof match === 'object');
+}
+
 function getWorkflowDiscoveryMatchCount(workflowDiscovery) {
     if (!workflowDiscovery || typeof workflowDiscovery !== 'object') {
         return null;
@@ -1887,6 +2009,18 @@ function getWorkflowDiscoveryMatchCount(workflowDiscovery) {
     }
 
     return normaliseWorkflowDiscoveryMatches(workflowDiscovery).length;
+}
+
+function getWorkflowDiscoveryCandidateCount(workflowDiscovery) {
+    if (!workflowDiscovery || typeof workflowDiscovery !== 'object') {
+        return null;
+    }
+
+    if (Number.isFinite(workflowDiscovery.candidate_count)) {
+        return Math.max(0, Number(workflowDiscovery.candidate_count));
+    }
+
+    return normaliseWorkflowDiscoveryCandidates(workflowDiscovery).length;
 }
 
 function findWorkflowDiscoveryMatchById(workflowDiscovery, workflowId) {
@@ -1900,7 +2034,7 @@ function findWorkflowDiscoveryMatchById(workflowDiscovery, workflowId) {
     )) || null;
 }
 
-function formatWorkflowDisplayText(workflowId, workflowName, workflowDiscovery = null) {
+function resolveWorkflowDisplayDescriptor(workflowId, workflowName, workflowDiscovery = null) {
     const cleanWorkflowId = normaliseThinkingActivityString(workflowId);
     let cleanWorkflowName = normaliseThinkingActivityString(workflowName);
 
@@ -1909,14 +2043,29 @@ function formatWorkflowDisplayText(workflowId, workflowName, workflowDiscovery =
         cleanWorkflowName = normaliseThinkingActivityString(match?.name);
     }
 
-    if (cleanWorkflowName && cleanWorkflowId && cleanWorkflowName !== cleanWorkflowId) {
-        return `${cleanWorkflowName} (${cleanWorkflowId})`;
-    }
-
-    return cleanWorkflowName || cleanWorkflowId || '';
+    return {
+        conceptId: _normalisePotentialConceptId(cleanWorkflowId),
+        workflowId: cleanWorkflowId,
+        workflowName: cleanWorkflowName,
+        label: cleanWorkflowName && cleanWorkflowId && cleanWorkflowName !== cleanWorkflowId
+            ? `${cleanWorkflowName} (${cleanWorkflowId})`
+            : (cleanWorkflowName || cleanWorkflowId || '')
+    };
 }
 
-function buildWorkflowStageDetail(stageId, request) {
+function renderWorkflowDisplayHtml(workflowId, workflowName, workflowDiscovery = null, options = {}) {
+    const descriptor = resolveWorkflowDisplayDescriptor(workflowId, workflowName, workflowDiscovery);
+    return renderConceptSelectionButtonHTML(descriptor.conceptId, descriptor.label, {
+        classNames: ['thinking-card-concept-link', ...(Array.isArray(options.classNames) ? options.classNames : [])],
+        title: options.title || 'Open concept tab'
+    });
+}
+
+function formatWorkflowDisplayText(workflowId, workflowName, workflowDiscovery = null) {
+    return resolveWorkflowDisplayDescriptor(workflowId, workflowName, workflowDiscovery).label;
+}
+
+function buildWorkflowStageDetailPresentation(stageId, request) {
     const workflowDiscovery = (request?.workflowDiscovery && typeof request.workflowDiscovery === 'object')
         ? request.workflowDiscovery
         : null;
@@ -1930,15 +2079,56 @@ function buildWorkflowStageDetail(stageId, request) {
             ? workflowDiscovery.errors.filter((item) => typeof item === 'string' && item.trim())
             : [];
         if (errors.length > 0) {
-            return errors[0].trim();
+            return {
+                text: errors[0].trim(),
+                html: escapeHtml(errors[0].trim())
+            };
         }
 
         const matchCount = getWorkflowDiscoveryMatchCount(workflowDiscovery);
+        const candidateCount = getWorkflowDiscoveryCandidateCount(workflowDiscovery);
         if (matchCount === null) {
-            return 'Searching applicable workflows';
+            return {
+                text: 'Searching applicable workflows',
+                html: 'Searching applicable workflows'
+            };
+        }
+        if (matchCount <= 0 && candidateCount > 0) {
+            const primaryCandidate = normaliseWorkflowDiscoveryCandidates(workflowDiscovery)[0] || null;
+            const primaryLabel = formatWorkflowDisplayText(
+                primaryCandidate?.concept_id,
+                primaryCandidate?.name,
+                workflowDiscovery
+            );
+            const primaryLabelHtml = renderWorkflowDisplayHtml(
+                primaryCandidate?.concept_id,
+                primaryCandidate?.name,
+                workflowDiscovery
+            );
+            if (primaryLabel) {
+                return {
+                    text: candidateCount > 1
+                        ? `Found candidate ${primaryLabel} · ${candidateCount} candidates`
+                        : `Found candidate ${primaryLabel}`,
+                    html: candidateCount > 1
+                        ? `Found candidate ${primaryLabelHtml || escapeHtml(primaryLabel)} · ${candidateCount} candidates`
+                        : `Found candidate ${primaryLabelHtml || escapeHtml(primaryLabel)}`
+                };
+            }
+            return {
+                text: candidateCount > 1
+                    ? `Found ${candidateCount} workflow candidates`
+                    : 'Found 1 workflow candidate',
+                html: candidateCount > 1
+                    ? `Found ${candidateCount} workflow candidates`
+                    : 'Found 1 workflow candidate'
+            };
         }
         if (matchCount <= 0) {
-            return 'No applicable workflow found';
+            return {
+                text: 'No direct workflow match found',
+                html: 'No direct workflow match found'
+            };
         }
 
         const primaryMatch = normaliseWorkflowDiscoveryMatches(workflowDiscovery)[0] || null;
@@ -1947,14 +2137,29 @@ function buildWorkflowStageDetail(stageId, request) {
             primaryMatch?.name,
             workflowDiscovery
         );
+        const primaryLabelHtml = renderWorkflowDisplayHtml(
+            primaryMatch?.concept_id,
+            primaryMatch?.name,
+            workflowDiscovery
+        );
         if (primaryLabel) {
-            return matchCount > 1
-                ? `Found ${primaryLabel} · ${matchCount} matches`
-                : `Found ${primaryLabel}`;
+            return {
+                text: matchCount > 1
+                    ? `Found ${primaryLabel} · ${matchCount} matches`
+                    : `Found ${primaryLabel}`,
+                html: matchCount > 1
+                    ? `Found ${primaryLabelHtml || escapeHtml(primaryLabel)} · ${matchCount} matches`
+                    : `Found ${primaryLabelHtml || escapeHtml(primaryLabel)}`
+            };
         }
-        return matchCount > 1
-            ? `Found ${matchCount} applicable workflows`
-            : 'Found 1 applicable workflow';
+        return {
+            text: matchCount > 1
+                ? `Found ${matchCount} applicable workflows`
+                : 'Found 1 applicable workflow',
+            html: matchCount > 1
+                ? `Found ${matchCount} applicable workflows`
+                : 'Found 1 applicable workflow'
+        };
     }
 
     if (cleanStageId === 'workflow_dispatch' || cleanStageId === 'plain_response') {
@@ -1963,15 +2168,27 @@ function buildWorkflowStageDetail(stageId, request) {
             latestProgress?.selected_workflow_name,
             workflowDiscovery
         );
+        const workflowLabelHtml = renderWorkflowDisplayHtml(
+            latestProgress?.selected_workflow_id,
+            latestProgress?.selected_workflow_name,
+            workflowDiscovery
+        );
         const verdict = normaliseThinkingActivityString(latestProgress?.workflow_selector_verdict);
         const detailParts = [];
+        const detailHtmlParts = [];
         if (workflowLabel) {
             detailParts.push(`Selected ${workflowLabel}`);
+            detailHtmlParts.push(`Selected ${workflowLabelHtml || escapeHtml(workflowLabel)}`);
         }
         if (verdict) {
-            detailParts.push(formatThinkingActivityFallbackLabel(verdict));
+            const verdictLabel = formatThinkingActivityFallbackLabel(verdict);
+            detailParts.push(verdictLabel);
+            detailHtmlParts.push(escapeHtml(verdictLabel));
         }
-        return detailParts.join(' · ');
+        return {
+            text: detailParts.join(' · '),
+            html: detailHtmlParts.join(' · ')
+        };
     }
 
     if (cleanStageId === 'tool_execute') {
@@ -1983,13 +2200,24 @@ function buildWorkflowStageDetail(stageId, request) {
         const uniqueToolNames = [...new Set(toolNames)];
         if (uniqueToolNames.length > 0) {
             const preview = uniqueToolNames.slice(0, 3).join(', ');
-            return uniqueToolNames.length > 3
+            const text = uniqueToolNames.length > 3
                 ? `Tools: ${preview} +${uniqueToolNames.length - 3} more`
                 : `Tools: ${preview}`;
+            return {
+                text,
+                html: escapeHtml(text)
+            };
         }
     }
 
-    return '';
+    return {
+        text: '',
+        html: ''
+    };
+}
+
+function buildWorkflowStageDetail(stageId, request) {
+    return buildWorkflowStageDetailPresentation(stageId, request).text;
 }
 
 function buildThinkingWorkflowStageRows(request) {
@@ -2009,9 +2237,11 @@ function buildThinkingWorkflowStageRows(request) {
         : null;
     if (path.length === 0) {
         if (workflowDiscovery) {
+            const detailPresentation = buildWorkflowStageDetailPresentation('workflow_discovery', request);
             return [{
                 label: 'Workflow discovery',
-                detail: buildWorkflowStageDetail('workflow_discovery', request),
+                detail: detailPresentation.text,
+                detailHtml: detailPresentation.html,
                 state: getWorkflowDiscoveryMatchCount(workflowDiscovery) > 0 ? 'success' : 'failure'
             }];
         }
@@ -2034,16 +2264,18 @@ function buildThinkingWorkflowStageRows(request) {
         const stageLabel = normaliseThinkingActivityString(entry.stage_label)
             || formatThinkingActivityFallbackLabel(stageId)
             || 'Workflow step';
-        const detail = buildWorkflowStageDetail(stageId, request);
+        const detailPresentation = buildWorkflowStageDetailPresentation(stageId, request);
+        const detail = detailPresentation.text;
         let state = 'success';
 
         if (stageId === 'workflow_discovery') {
             const matchCount = getWorkflowDiscoveryMatchCount(workflowDiscovery);
+            const candidateCount = getWorkflowDiscoveryCandidateCount(workflowDiscovery);
             const discoveryErrors = Array.isArray(workflowDiscovery?.errors)
                 ? workflowDiscovery.errors.filter((item) => typeof item === 'string' && item.trim())
                 : [];
             if (discoveryErrors.length > 0 || matchCount === 0) {
-                state = 'failure';
+                state = candidateCount > 0 ? 'success' : 'failure';
             } else if (matchCount === null) {
                 state = 'pending';
             }
@@ -2056,6 +2288,7 @@ function buildThinkingWorkflowStageRows(request) {
         return {
             label: stageLabel,
             detail,
+            detailHtml: detailPresentation.html,
             state
         };
     });
@@ -2070,8 +2303,8 @@ function renderThinkingWorkflowStageHistoryHTML(request) {
     return rows.map((entry) => {
         const statusClass = (entry.state === 'success' || entry.state === 'failure') ? entry.state : 'pending';
         const statusIcon = statusClass === 'success' ? '✓' : (statusClass === 'failure' ? '✗' : '');
-        const detailLabel = normaliseThinkingActivityString(entry.detail)
-            ? `<span class="thinking-card-tool-result">${escapeHtml(entry.detail)}</span>`
+        const detailLabel = normaliseThinkingActivityString(entry.detailHtml || entry.detail)
+            ? `<span class="thinking-card-tool-result">${entry.detailHtml || escapeHtml(entry.detail)}</span>`
             : '';
         return `<div class="thinking-card-tool thinking-card-activity">
             <span class="thinking-card-tool-status ${statusClass}">${statusIcon}</span>
@@ -2090,7 +2323,12 @@ function renderWorkflowDiscoveryHTML(workflows) {
     }
 
     const items = workflows.map(wf => {
-        const name = escapeHtml(wf.name || wf.concept_id || 'Unknown workflow');
+        const name = renderWorkflowDisplayHtml(
+            wf?.concept_id,
+            wf?.name,
+            null,
+            { classNames: ['thinking-card-workflow-link'] }
+        ) || escapeHtml(wf.name || wf.concept_id || 'Unknown workflow');
         const score = typeof wf.relevance_score === 'number'
             ? `<span class="thinking-card-workflow-score">${Math.round(wf.relevance_score * 100)}%</span>`
             : '';
@@ -6182,21 +6420,9 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
     root.style.cssText = 'margin-top: 10px; border: 1px solid #dce3ea; border-radius: 6px; background: #fff; padding: 8px;';
     root.dataset.relationTruthStateSource = relationTruthStateSource;
     root.dataset.relationTripleParseCount = String(relationTripleParseCount);
-    root.addEventListener('click', (event) => {
-        const target = event.target;
-        if (!target || !(target instanceof HTMLElement)) {
-            return;
-        }
-        const conceptButton = target.closest('.chat-display-elements-concept-link');
-        if (!conceptButton) {
-            return;
-        }
-        event.preventDefault();
-        const conceptId = conceptButton.dataset.conceptId;
-        if (!conceptId) {
-            return;
-        }
-        dispatchSelectConceptByIdEvent(conceptId, event);
+    bindConceptSelectionClicks(root, {
+        selector: '.chat-display-elements-concept-link',
+        datasetKey: 'conceptLinkBound'
     });
 
     tableElements.forEach((tableElement, tableIndex) => {
@@ -16061,9 +16287,10 @@ function renderWorkflowStatusList(items) {
         const workflowIdRaw = typeof item?.workflow_id === 'string' ? item.workflow_id.trim() : '';
         const workflowNameText = formatWorkflowName(workflowIdRaw);
         const workflowConceptId = _normalisePotentialConceptId(workflowIdRaw);
-        const workflowName = workflowConceptId
-            ? `<button type="button" class="workflow-status-concept-link" data-concept-id="${escapeHtml(workflowConceptId)}">${escapeHtml(workflowNameText)}</button>`
-            : escapeHtml(workflowNameText);
+        const workflowName = renderConceptSelectionButtonHTML(workflowConceptId, workflowNameText, {
+            classNames: ['workflow-status-concept-link'],
+            title: 'Open concept tab'
+        });
         const statusLabel = escapeHtml(formatWorkflowStatusLabel(item.status));
         const statusClass = escapeHtml(item.status || 'unknown');
         const currentState = escapeHtml(item.current_state || '');
@@ -16158,12 +16385,14 @@ function renderWorkflowDefinitionsList(items) {
         const workflowIdRaw = typeof item?.workflow_id === 'string' ? item.workflow_id.trim() : '';
         const workflowNameText = formatWorkflowName(workflowIdRaw);
         const workflowConceptId = _normalisePotentialConceptId(workflowIdRaw);
-        const workflowName = workflowConceptId
-            ? `<button type="button" class="workflow-status-concept-link" data-concept-id="${escapeHtml(workflowConceptId)}">${escapeHtml(workflowNameText)}</button>`
-            : escapeHtml(workflowNameText);
-        const workflowId = workflowConceptId
-            ? `<button type="button" class="workflow-status-concept-link workflow-status-id-link" data-concept-id="${escapeHtml(workflowConceptId)}">${escapeHtml(workflowIdRaw)}</button>`
-            : escapeHtml(workflowIdRaw);
+        const workflowName = renderConceptSelectionButtonHTML(workflowConceptId, workflowNameText, {
+            classNames: ['workflow-status-concept-link'],
+            title: 'Open concept tab'
+        });
+        const workflowId = renderConceptSelectionButtonHTML(workflowConceptId, workflowIdRaw, {
+            classNames: ['workflow-status-concept-link', 'workflow-status-id-link'],
+            title: 'Open concept tab'
+        });
         const description = escapeHtml(item.description || 'No description available.');
         const initialState = escapeHtml(item.initial_state || '—');
         const source = escapeHtml(formatWorkflowStatusLabel(item.source || 'unknown'));
@@ -16217,7 +16446,14 @@ function renderWorkflowDefinitionsList(items) {
 
 function bindWorkflowStatusConceptLinks() {
     const { body } = getWorkflowStatusElements();
-    if (!body || body.dataset.conceptLinkBound === 'true') {
+    if (!body) {
+        return;
+    }
+    bindConceptSelectionClicks(body, {
+        selector: '.workflow-status-concept-link',
+        datasetKey: 'conceptLinkBound'
+    });
+    if (body.dataset.workflowStatusActionBound === 'true') {
         return;
     }
 
@@ -16249,19 +16485,9 @@ function bindWorkflowStatusConceptLinks() {
             }
             return;
         }
-        const button = target.closest('.workflow-status-concept-link');
-        if (!button) {
-            return;
-        }
-        event.preventDefault();
-        const conceptId = button.dataset.conceptId;
-        if (!conceptId) {
-            return;
-        }
-        dispatchSelectConceptByIdEvent(conceptId, event);
     });
 
-    body.dataset.conceptLinkBound = 'true';
+    body.dataset.workflowStatusActionBound = 'true';
 }
 
 function renderWorkflowStatusBody() {
@@ -19343,25 +19569,10 @@ async function showLlmDebugPopup(turnId, options = {}) {
 
     metaDiv.innerHTML = metadataHtml;
 
-    if (!metaDiv.dataset.promptLinkBound) {
-        metaDiv.addEventListener('click', (event) => {
-            const target = event.target;
-            if (!target || !(target instanceof HTMLElement)) {
-                return;
-            }
-            const button = target.closest('.llm-debug-prompt-link');
-            if (!button) {
-                return;
-            }
-            event.preventDefault();
-            const conceptId = button.dataset.conceptId;
-            if (!conceptId) {
-                return;
-            }
-            dispatchSelectConceptByIdEvent(conceptId, event);
-        });
-        metaDiv.dataset.promptLinkBound = 'true';
-    }
+    bindConceptSelectionClicks(metaDiv, {
+        selector: '.llm-debug-prompt-link',
+        datasetKey: 'promptLinkBound'
+    });
 
     // Display messages
     try {

@@ -18666,10 +18666,65 @@ class InternalMCPChatOrchestrator:
 
         routing_info: WorkflowRoutingInfo | None = None
 
+        def _resolve_selected_workflow_name(workflow_id: str | None) -> str | None:
+            clean_workflow_id = (
+                workflow_id.strip()
+                if isinstance(workflow_id, str) and workflow_id.strip()
+                else None
+            )
+            if not clean_workflow_id:
+                return None
+
+            for match in (*discovered_matches, *excluded_discovered_matches):
+                if not isinstance(match, Mapping):
+                    continue
+                match_id = match.get("concept_id")
+                if (
+                    isinstance(match_id, str)
+                    and match_id.strip() == clean_workflow_id
+                ):
+                    match_name = match.get("name")
+                    if isinstance(match_name, str) and match_name.strip():
+                        return match_name.strip()
+
+            pretty_name = clean_workflow_id
+            if pretty_name.startswith("#V#"):
+                pretty_name = pretty_name[3:]
+            pretty_name = pretty_name.replace("_", " ").strip()
+            return (
+                pretty_name[:1].upper() + pretty_name[1:]
+                if pretty_name
+                else clean_workflow_id
+            )
+
         if user_namespace and self._workflow_selector.enabled():
+            _emit_progress_local(
+                {
+                    "status": "phase_transition",
+                    "stage": "workflow_dispatch",
+                    "phase": "workflow_dispatch",
+                    "phase_label": "Selecting workflow",
+                    "subtask": "Choose the best workflow for this turn",
+                    "workflow_match_count": len(discovered_matches),
+                    "workflow_candidate_count": len(discovered_matches)
+                    + len(excluded_discovered_matches),
+                }
+            )
             selector_start = time.perf_counter()
+            classifier_model = _model_for_stage("classifier")
+            _emit_progress_local(
+                {
+                    "status": "llm_call_start",
+                    "stage": "workflow_dispatch",
+                    "phase": "workflow_dispatch",
+                    "phase_label": "Evaluating workflow candidates",
+                    "model": classifier_model,
+                    "workflow_match_count": len(discovered_matches),
+                    "workflow_candidate_count": len(discovered_matches)
+                    + len(excluded_discovered_matches),
+                }
+            )
             try:
-                classifier_model = _model_for_stage("classifier")
                 selector_selection = self._workflow_selector.select_workflow(
                     llm_client=llm_client,
                     model=classifier_model,
@@ -18677,6 +18732,33 @@ class InternalMCPChatOrchestrator:
                     discovered_workflows=discovered_matches or None,
                 )
                 routing_duration_ms = (time.perf_counter() - selector_start) * 1000.0
+                selected_workflow_name = _resolve_selected_workflow_name(
+                    selector_selection.workflow_id
+                )
+                _emit_progress_local(
+                    {
+                        "status": "llm_call_end",
+                        "stage": "workflow_dispatch",
+                        "phase": "workflow_dispatch",
+                        "phase_label": "Evaluated workflow candidates",
+                        "model": classifier_model,
+                        "duration_ms": int(routing_duration_ms),
+                        "success": True,
+                        "workflow_selector_verdict": selector_selection.verdict,
+                        "selected_workflow_id": selector_selection.workflow_id,
+                        "selected_workflow_name": selected_workflow_name,
+                        "workflow_match_count": len(discovered_matches),
+                        "workflow_candidate_count": len(discovered_matches)
+                        + len(excluded_discovered_matches),
+                    }
+                )
+                _record_llm_call(
+                    call_type="workflow_selector",
+                    model_name=classifier_model,
+                    duration_ms=routing_duration_ms,
+                    note=selector_selection.verdict,
+                    stage="workflow_dispatch",
+                )
                 if selector_selection.workflow_id:
                     selected_workflow_id = selector_selection.workflow_id
                 routing_info = WorkflowRoutingInfo(
@@ -18686,6 +18768,22 @@ class InternalMCPChatOrchestrator:
                     discovered_workflow_ids=selector_selection.discovered_workflow_ids,
                     routing_duration_ms=routing_duration_ms,
                     source="selector",
+                )
+                _emit_progress_local(
+                    {
+                        "status": "thinking",
+                        "stage": "workflow_dispatch",
+                        "phase": "workflow_dispatch",
+                        "phase_label": "Workflow selected",
+                        "workflow_selector_verdict": selector_selection.verdict,
+                        "selected_workflow_id": selector_selection.workflow_id,
+                        "selected_workflow_name": selected_workflow_name,
+                        "workflow_task": selector_selection.workflow_id
+                        or selector_selection.verdict,
+                        "workflow_match_count": len(discovered_matches),
+                        "workflow_candidate_count": len(discovered_matches)
+                        + len(excluded_discovered_matches),
+                    }
                 )
                 aux_llm_calls.append(
                     {
@@ -18720,7 +18818,24 @@ class InternalMCPChatOrchestrator:
                         ],
                         "routing_duration_ms": routing_duration_ms,
                     }
-            except Exception:
+            except Exception as exc:
+                routing_duration_ms = (time.perf_counter() - selector_start) * 1000.0
+                _emit_progress_local(
+                    {
+                        "status": "llm_call_end",
+                        "stage": "workflow_dispatch",
+                        "phase": "workflow_dispatch",
+                        "phase_label": "Workflow selection failed",
+                        "model": classifier_model,
+                        "duration_ms": int(routing_duration_ms),
+                        "success": False,
+                        "error": str(exc),
+                        "error_class": type(exc).__name__,
+                        "workflow_match_count": len(discovered_matches),
+                        "workflow_candidate_count": len(discovered_matches)
+                        + len(excluded_discovered_matches),
+                    }
+                )
                 selected_workflow_id = CHAT_ASSISTANT_WORKFLOW_ID
                 routing_info = WorkflowRoutingInfo(
                     workflow_id=CHAT_ASSISTANT_WORKFLOW_ID,
@@ -18728,6 +18843,20 @@ class InternalMCPChatOrchestrator:
                     prompt_id=None,
                     discovered_workflow_ids=(),
                     source="default",
+                )
+                _emit_progress_local(
+                    {
+                        "status": "thinking",
+                        "stage": "workflow_dispatch",
+                        "phase": "workflow_dispatch",
+                        "phase_label": "Workflow selection fallback",
+                        "workflow_selector_verdict": "fallback",
+                        "selected_workflow_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                        "selected_workflow_name": _resolve_selected_workflow_name(
+                            CHAT_ASSISTANT_WORKFLOW_ID
+                        ),
+                        "workflow_task": CHAT_ASSISTANT_WORKFLOW_ID,
+                    }
                 )
 
         _STATIC_SELECTOR_VERDICTS = frozenset(
@@ -18754,33 +18883,6 @@ class InternalMCPChatOrchestrator:
             if isinstance(selected_workflow_id, str) and selected_workflow_id.strip()
             else None
         )
-
-        def _resolve_selected_workflow_name(workflow_id: str | None) -> str | None:
-            clean_workflow_id = (
-                workflow_id.strip()
-                if isinstance(workflow_id, str) and workflow_id.strip()
-                else None
-            )
-            if not clean_workflow_id:
-                return None
-
-            for match in (*discovered_matches, *excluded_discovered_matches):
-                if not isinstance(match, Mapping):
-                    continue
-                match_id = match.get("concept_id")
-                if (
-                    isinstance(match_id, str)
-                    and match_id.strip() == clean_workflow_id
-                ):
-                    match_name = match.get("name")
-                    if isinstance(match_name, str) and match_name.strip():
-                        return match_name.strip()
-
-            pretty_name = clean_workflow_id
-            if pretty_name.startswith("#V#"):
-                pretty_name = pretty_name[3:]
-            pretty_name = pretty_name.replace("_", " ").strip()
-            return pretty_name[:1].upper() + pretty_name[1:] if pretty_name else clean_workflow_id
 
         selector_verdict = (
             routing_info.verdict.strip().lower()

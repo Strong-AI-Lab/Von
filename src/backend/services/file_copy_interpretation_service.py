@@ -122,49 +122,75 @@ def infer_uploaded_file_subtype(
     original_filename: str | None,
 ) -> dict[str, Any]:
     """Infer a specific uploaded file-copy subtype when evidence is sufficient."""
+    try:
+        from .file_copy_typing_service import infer_file_copy_typing
 
-    content_type_token = _normalise_content_type_token(content_type)
-    extension = _normalise_filename_extension(original_filename)
-
-    for rule in _FILE_SUBTYPE_RULES:
-        mime_types = {
-            item.strip().lower()
-            for item in (rule.get("mime_types") or ())
-            if isinstance(item, str) and item.strip()
-        }
-        extensions = {
-            item.strip().lower()
-            for item in (rule.get("extensions") or ())
-            if isinstance(item, str) and item.strip()
-        }
-        mime_match = (
-            isinstance(content_type_token, str) and content_type_token in mime_types
+        typing_result = infer_file_copy_typing(
+            content_type=content_type,
+            original_filename=original_filename,
         )
-        extension_match = isinstance(extension, str) and extension in extensions
-        if not (mime_match or extension_match):
-            continue
-        matched_signals: list[str] = []
-        if mime_match:
-            matched_signals.append("mime_type")
-        if extension_match:
-            matched_signals.append("filename_extension")
+        matched_rule_ids = typing_result.get("matched_rule_ids")
+        rule_id = (
+            matched_rule_ids[0]
+            if isinstance(matched_rule_ids, list) and matched_rule_ids
+            else None
+        )
         return {
-            "determinable": True,
-            "type_concept_id": rule.get("type_concept_id"),
-            "rule_id": rule.get("rule_id"),
-            "matched_signals": matched_signals,
+            "determinable": bool(typing_result.get("determinable")),
+            "type_concept_id": typing_result.get("primary_type_concept_id"),
+            "rule_id": rule_id,
+            "matched_signals": list(typing_result.get("matched_signals") or []),
+            "content_type_token": typing_result.get("content_type_token"),
+            "filename_extension": typing_result.get("filename_extension"),
+            "semantic_type_concept_id": typing_result.get("semantic_type_concept_id"),
+            "format_type_concept_id": typing_result.get("format_type_concept_id"),
+            "asserted_type_concept_ids": list(
+                typing_result.get("asserted_type_concept_ids") or []
+            ),
+        }
+    except Exception:
+        content_type_token = _normalise_content_type_token(content_type)
+        extension = _normalise_filename_extension(original_filename)
+
+        for rule in _FILE_SUBTYPE_RULES:
+            mime_types = {
+                item.strip().lower()
+                for item in (rule.get("mime_types") or ())
+                if isinstance(item, str) and item.strip()
+            }
+            extensions = {
+                item.strip().lower()
+                for item in (rule.get("extensions") or ())
+                if isinstance(item, str) and item.strip()
+            }
+            mime_match = (
+                isinstance(content_type_token, str) and content_type_token in mime_types
+            )
+            extension_match = isinstance(extension, str) and extension in extensions
+            if not (mime_match or extension_match):
+                continue
+            matched_signals: list[str] = []
+            if mime_match:
+                matched_signals.append("mime_type")
+            if extension_match:
+                matched_signals.append("filename_extension")
+            return {
+                "determinable": True,
+                "type_concept_id": rule.get("type_concept_id"),
+                "rule_id": rule.get("rule_id"),
+                "matched_signals": matched_signals,
+                "content_type_token": content_type_token,
+                "filename_extension": extension,
+            }
+
+        return {
+            "determinable": False,
+            "type_concept_id": None,
+            "rule_id": None,
+            "matched_signals": [],
             "content_type_token": content_type_token,
             "filename_extension": extension,
         }
-
-    return {
-        "determinable": False,
-        "type_concept_id": None,
-        "rule_id": None,
-        "matched_signals": [],
-        "content_type_token": content_type_token,
-        "filename_extension": extension,
-    }
 
 
 def _normalise_whitespace(value: str) -> str:

@@ -111,7 +111,17 @@ def normalise_subworkflow_contract(
         return None, "subworkflow_contract_schema_unsupported"
 
     workflow_id = _normalise_text(value.get("workflow_id"))
-    if not workflow_id:
+    workflow_id_context_key = _normalise_text(
+        value.get("workflow_id_context_key")
+        or value.get("workflow_id_from_context_key")
+    )
+    workflow_id_mapping_concept_id = _normalise_text(
+        value.get("workflow_id_mapping_concept_id")
+    )
+    candidate_workflow_ids = _normalise_string_list(
+        value.get("candidate_workflow_ids")
+    )
+    if not workflow_id and not workflow_id_context_key:
         return None, "subworkflow_workflow_id_missing"
 
     failure_mode = (
@@ -138,6 +148,9 @@ def normalise_subworkflow_contract(
         {
             "schema_version": WORKFLOW_SUBWORKFLOW_CONTRACT_SCHEMA_VERSION,
             "workflow_id": workflow_id,
+            "workflow_id_context_key": workflow_id_context_key,
+            "workflow_id_mapping_concept_id": workflow_id_mapping_concept_id,
+            "candidate_workflow_ids": candidate_workflow_ids,
             "failure_mode": failure_mode,
             "input_mappings": input_mappings,
             "output_mappings": output_mappings,
@@ -152,7 +165,10 @@ def normalise_subworkflow_contract(
 
 def build_subworkflow_contract(
     *,
-    workflow_id: str,
+    workflow_id: str | None = None,
+    workflow_id_context_key: str | None = None,
+    workflow_id_mapping_concept_id: str | None = None,
+    candidate_workflow_ids: List[str] | None = None,
     input_mappings: List[Dict[str, str]],
     output_mappings: List[Dict[str, str]],
     failure_mode: str = WORKFLOW_SUBWORKFLOW_FAILURE_MODE_PROPAGATE,
@@ -162,7 +178,12 @@ def build_subworkflow_contract(
     contract, _ = normalise_subworkflow_contract(
         {
             "schema_version": WORKFLOW_SUBWORKFLOW_CONTRACT_SCHEMA_VERSION,
-            "workflow_id": workflow_id,
+            "workflow_id": _normalise_text(workflow_id),
+            "workflow_id_context_key": _normalise_text(workflow_id_context_key),
+            "workflow_id_mapping_concept_id": _normalise_text(
+                workflow_id_mapping_concept_id
+            ),
+            "candidate_workflow_ids": list(candidate_workflow_ids or []),
             "failure_mode": failure_mode,
             "input_mappings": input_mappings,
             "output_mappings": output_mappings,
@@ -172,6 +193,11 @@ def build_subworkflow_contract(
         return {
             "schema_version": WORKFLOW_SUBWORKFLOW_CONTRACT_SCHEMA_VERSION,
             "workflow_id": _normalise_text(workflow_id),
+            "workflow_id_context_key": _normalise_text(workflow_id_context_key),
+            "workflow_id_mapping_concept_id": _normalise_text(
+                workflow_id_mapping_concept_id
+            ),
+            "candidate_workflow_ids": list(candidate_workflow_ids or []),
             "failure_mode": WORKFLOW_SUBWORKFLOW_FAILURE_MODE_PROPAGATE,
             "input_mappings": [],
             "output_mappings": [],

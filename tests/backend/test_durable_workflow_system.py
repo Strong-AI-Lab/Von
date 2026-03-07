@@ -814,6 +814,30 @@ class TestWorkflowInstanceManager:
         assert replaced.revision == original.revision + 1
         assert replaced.enabled is False
 
+    def test_set_event_binding_enabled_updates_revision(self) -> None:
+        manager = WorkflowInstanceManager()
+
+        binding, created, updated = manager.upsert_event_binding(
+            event_type="file_copy.uploaded",
+            workflow_id="#V#file_copy_upload_handler_workflow",
+            input_mapping={"concept_id": "event.file_copy_concept_id"},
+            enabled=True,
+            actor="test_user",
+        )
+        assert created is True
+        assert updated is False
+
+        disabled = manager.set_event_binding_enabled(
+            binding.binding_id,
+            enabled=False,
+            actor="test_user",
+        )
+
+        assert disabled is not None
+        assert disabled.binding_id == binding.binding_id
+        assert disabled.enabled is False
+        assert disabled.revision == binding.revision + 1
+
     def test_find_and_claim_instance(self) -> None:
         """find_and_claim_instance() should atomically claim a pending instance."""
         manager = WorkflowInstanceManager()

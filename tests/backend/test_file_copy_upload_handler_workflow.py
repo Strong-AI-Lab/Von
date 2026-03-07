@@ -9,14 +9,18 @@ from src.backend.workflows.durable.file_copy_upload_handler_workflow import (
     build_file_copy_upload_handler_workflow,
     register_file_copy_upload_handler_actions,
 )
+from src.backend.workflows.durable.file_copy_typing_workflow import (
+    FILE_COPY_TYPING_WORKFLOW_ID,
+)
 
 
 def test_build_file_copy_upload_handler_workflow_definition_shape() -> None:
     workflow = build_file_copy_upload_handler_workflow()
 
     assert workflow.workflow_id == FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID
-    assert workflow.initial_state == "classify"
+    assert workflow.initial_state == "typing"
     assert set(workflow.states.keys()) == {
+        "typing",
         "classify",
         "specialised",
         "specialised_failed",
@@ -28,6 +32,19 @@ def test_build_file_copy_upload_handler_workflow_definition_shape() -> None:
         "failed",
     }
     assert workflow.termination_states == ("complete", "failed")
+    assert workflow.states["typing"].actions[0].inputs["workflow_id"] == (
+        FILE_COPY_TYPING_WORKFLOW_ID
+    )
+    assert (
+        workflow.states["typing"].metadata["subworkflow_contract"]["workflow_id"]
+        == FILE_COPY_TYPING_WORKFLOW_ID
+    )
+    assert (
+        workflow.states["specialised"].metadata["subworkflow_contract"][
+            "workflow_id_context_key"
+        ]
+        == "upload_target_workflow_id"
+    )
     assert [a.action_id for a in workflow.states["fail_closed"].actions] == [
         "file_copy_upload.mark_fail_closed"
     ]

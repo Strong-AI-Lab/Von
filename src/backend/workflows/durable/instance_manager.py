@@ -1084,6 +1084,27 @@ class WorkflowInstanceManager:
     # Event Binding CRUD
     # -------------------------------------------------------------------------
 
+    def _invalidate_event_binding_verification_cache(
+        self,
+        binding_workflow_id: str,
+    ) -> None:
+        """Invalidate runnable verification after event-binding mutations."""
+
+        try:
+            from .workflow_instance_submission_service import (
+                invalidate_workflow_runnable_verification_cache,
+            )
+
+            invalidate_workflow_runnable_verification_cache(
+                reason="event_binding_mutated",
+                workflow_id=binding_workflow_id,
+            )
+        except Exception:
+            logger.debug(
+                "[durable_workflow] Event binding cache invalidation skipped",
+                exc_info=True,
+            )
+
     def upsert_event_binding(
         self,
         *,
@@ -1109,27 +1130,6 @@ class WorkflowInstanceManager:
         coll = self._get_event_bindings_collection()
         if coll is None:
             raise RuntimeError("Database unavailable for event binding persistence")
-
-        def _invalidate_verification_cache(binding_workflow_id: str) -> None:
-            # Keep verification cache invalidation centralised in the durable
-            # event-binding write path so all callers (MCP/routes/bootstrap)
-            # invalidate consistently.
-            try:
-                from .workflow_instance_submission_service import (
-                    invalidate_workflow_runnable_verification_cache,
-                )
-
-                invalidate_workflow_runnable_verification_cache(
-                    reason="event_binding_mutated",
-                    workflow_id=binding_workflow_id,
-                )
-            except Exception:
-                # Binding persistence must remain available even if cache
-                # invalidation is temporarily unavailable.
-                logger.debug(
-                    "[durable_workflow] Event binding cache invalidation skipped",
-                    exc_info=True,
-                )
 
         event_type_clean = str(event_type or "").strip()
         workflow_id_clean = str(workflow_id or "").strip()
@@ -1180,7 +1180,9 @@ class WorkflowInstanceManager:
             if updated_doc is None:
                 raise RuntimeError("binding_update_failed")
             updated_binding = EventWorkflowBinding.from_doc(updated_doc)
-            _invalidate_verification_cache(updated_binding.workflow_id)
+            self._invalidate_event_binding_verification_cache(
+                updated_binding.workflow_id
+            )
             return updated_binding, False, True
 
         binding = EventWorkflowBinding.create(
@@ -1192,7 +1194,7 @@ class WorkflowInstanceManager:
         )
         try:
             coll.insert_one(binding.to_doc())
-            _invalidate_verification_cache(binding.workflow_id)
+            self._invalidate_event_binding_verification_cache(binding.workflow_id)
             return binding, True, False
         except DuplicateKeyError:
             # Concurrent upsert: re-read and apply deterministic conflict rules.
@@ -1225,8 +1227,58 @@ class WorkflowInstanceManager:
             if updated_doc is None:
                 raise RuntimeError("binding_update_failed")
             updated_binding = EventWorkflowBinding.from_doc(updated_doc)
-            _invalidate_verification_cache(updated_binding.workflow_id)
+            self._invalidate_event_binding_verification_cache(
+                updated_binding.workflow_id
+            )
             return updated_binding, False, True
+
+    def set_event_binding_enabled(
+        self,
+        binding_id: str,
+        *,
+        enabled: bool,
+        actor: str | None = None,
+    ) -> EventWorkflowBinding | None:
+        """Enable or disable an existing event-workflow binding."""
+
+        binding_id_clean = str(binding_id or "").strip()
+        if not binding_id_clean:
+            raise ValueError("binding_id is required")
+
+        coll = self._get_event_bindings_collection()
+        if coll is None:
+            raise RuntimeError("Database unavailable for event binding persistence")
+
+        existing_doc = coll.find_one({"binding_id": binding_id_clean})
+        if existing_doc is None:
+            return None
+
+        existing = EventWorkflowBinding.from_doc(existing_doc)
+        if bool(existing.enabled) == bool(enabled):
+            return existing
+
+        actor_clean = (
+            actor.strip() if isinstance(actor, str) and actor.strip() else None
+        )
+        now = datetime.now(timezone.utc)
+        next_revision = max(1, int(existing.revision)) + 1
+        coll.update_one(
+            {"binding_id": binding_id_clean},
+            {
+                "$set": {
+                    "enabled": bool(enabled),
+                    "updated_at": now,
+                    "updated_by": actor_clean,
+                    "revision": next_revision,
+                }
+            },
+        )
+        updated_doc = coll.find_one({"binding_id": binding_id_clean})
+        if updated_doc is None:
+            raise RuntimeError("binding_update_failed")
+        updated_binding = EventWorkflowBinding.from_doc(updated_doc)
+        self._invalidate_event_binding_verification_cache(updated_binding.workflow_id)
+        return updated_binding
 
     def list_event_bindings(
         self,

@@ -158,6 +158,10 @@ def _collect_subworkflow_children(definition: Any) -> set[str]:
             workflow_id = str(contract.get("workflow_id") or "").strip()
             if workflow_id:
                 children.add(workflow_id)
+            for candidate_id in contract.get("candidate_workflow_ids", []):
+                candidate_text = str(candidate_id or "").strip()
+                if candidate_text:
+                    children.add(candidate_text)
         for action in actions:
             action_id = str(getattr(action, "action_id", "") or "").strip()
             if action_id != WORKFLOW_SUBWORKFLOW_ACTION_ID:
@@ -815,6 +819,14 @@ def validate_workflow_definition_contract(
                 )
             else:
                 child_workflow_id = str(normalised_contract.get("workflow_id") or "").strip()
+                workflow_id_context_key = str(
+                    normalised_contract.get("workflow_id_context_key") or ""
+                ).strip()
+                candidate_workflow_ids = {
+                    str(item or "").strip()
+                    for item in normalised_contract.get("candidate_workflow_ids", [])
+                    if isinstance(item, str) and str(item or "").strip()
+                }
                 if (
                     parent_workflow_id
                     and child_workflow_id
@@ -825,6 +837,49 @@ def validate_workflow_definition_contract(
                             "state_id": state_id,
                             "workflow_id": child_workflow_id,
                             "reason_code": "subworkflow_recursive_self_reference",
+                        }
+                    )
+
+                provided_inputs = {
+                    item
+                    for item in normalised_contract.get("provided_inputs", [])
+                    if isinstance(item, str) and item.strip()
+                }
+                mapped_outputs = {
+                    item
+                    for item in normalised_contract.get("mapped_outputs", [])
+                    if isinstance(item, str) and item.strip()
+                }
+                required_outputs = {
+                    item
+                    for item in normalised_contract.get("required_outputs", [])
+                    if isinstance(item, str) and item.strip()
+                }
+
+                missing_required_outputs = sorted(required_outputs - mapped_outputs)
+                if missing_required_outputs:
+                    subworkflow_contract_issues.append(
+                        {
+                            "state_id": state_id,
+                            "workflow_id": child_workflow_id,
+                            "reason_code": "subworkflow_required_outputs_unmapped",
+                            "missing_outputs": missing_required_outputs,
+                        }
+                    )
+
+                workflow_id_input_mappings = {
+                    str(item.get("parent_context_key") or "").strip()
+                    for item in normalised_contract.get("input_mappings", [])
+                    if isinstance(item, Mapping)
+                    and str(item.get("child_input_key") or "").strip() == "workflow_id"
+                    and str(item.get("parent_context_key") or "").strip()
+                }
+                if workflow_id_context_key and workflow_id_context_key not in workflow_id_input_mappings:
+                    subworkflow_contract_issues.append(
+                        {
+                            "state_id": state_id,
+                            "reason_code": "subworkflow_workflow_id_context_unmapped",
+                            "workflow_id_context_key": workflow_id_context_key,
                         }
                     )
 
@@ -867,33 +922,15 @@ def validate_workflow_definition_contract(
                             "reason_code": "subworkflow_workflow_not_found",
                         }
                     )
-
-                provided_inputs = {
-                    item
-                    for item in normalised_contract.get("provided_inputs", [])
-                    if isinstance(item, str) and item.strip()
-                }
-                mapped_outputs = {
-                    item
-                    for item in normalised_contract.get("mapped_outputs", [])
-                    if isinstance(item, str) and item.strip()
-                }
-                required_outputs = {
-                    item
-                    for item in normalised_contract.get("required_outputs", [])
-                    if isinstance(item, str) and item.strip()
-                }
-
-                missing_required_outputs = sorted(required_outputs - mapped_outputs)
-                if missing_required_outputs:
-                    subworkflow_contract_issues.append(
-                        {
-                            "state_id": state_id,
-                            "workflow_id": child_workflow_id,
-                            "reason_code": "subworkflow_required_outputs_unmapped",
-                            "missing_outputs": missing_required_outputs,
-                        }
-                    )
+                for candidate_workflow_id in sorted(candidate_workflow_ids):
+                    if known_workflow_set and candidate_workflow_id not in known_workflow_set:
+                        subworkflow_contract_issues.append(
+                            {
+                                "state_id": state_id,
+                                "workflow_id": candidate_workflow_id,
+                                "reason_code": "subworkflow_candidate_workflow_not_found",
+                            }
+                        )
 
                 if child_definition is not None:
                     child_required_inputs = _extract_initial_required_inputs(

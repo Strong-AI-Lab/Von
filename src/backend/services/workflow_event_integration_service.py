@@ -72,6 +72,8 @@ _DEFAULT_EVENT_BINDINGS: tuple[dict[str, Any], ...] = (
             "index_in_rag": "event.index_in_rag",
         },
         "enabled": True,
+        "replace_existing": True,
+        "exclusive": True,
     },
 )
 
@@ -269,8 +271,10 @@ def ensure_default_event_bindings() -> dict[str, Any]:
     created_count = 0
     updated_count = 0
     unchanged_count = 0
+    disabled_conflicts = 0
     skipped_conflicts = 0
     errors: list[str] = []
+    exclusive_targets: list[tuple[str, str]] = []
 
     try:
         manager = get_instance_manager()
@@ -294,8 +298,12 @@ def ensure_default_event_bindings() -> dict[str, Any]:
                     input_mapping=binding.get("input_mapping"),
                     enabled=bool(binding.get("enabled", True)),
                     actor="system.bootstrap",
-                    replace_existing=False,
+                    replace_existing=bool(binding.get("replace_existing", False)),
                 )
+                if bool(binding.get("exclusive")):
+                    exclusive_targets.append(
+                        (_saved_binding.event_type, _saved_binding.binding_id)
+                    )
                 if created:
                     created_count += 1
                 elif updated:
@@ -309,6 +317,42 @@ def ensure_default_event_bindings() -> dict[str, Any]:
                 errors.append(str(exc))
             except Exception as exc:  # pragma: no cover - defensive
                 errors.append(str(exc))
+
+        if hasattr(manager, "list_event_bindings") and hasattr(
+            manager, "set_event_binding_enabled"
+        ):
+            for event_type, canonical_binding_id in exclusive_targets:
+                try:
+                    bindings = manager.list_event_bindings(
+                        event_type=event_type,
+                        enabled_only=True,
+                        limit=500,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    errors.append(
+                        f"exclusive_binding_list_failed:{event_type}:{exc}"
+                    )
+                    continue
+                for existing in bindings:
+                    if not isinstance(existing, EventWorkflowBinding):
+                        continue
+                    if existing.binding_id == canonical_binding_id:
+                        continue
+                    if not bool(existing.enabled):
+                        continue
+                    try:
+                        updated_binding = manager.set_event_binding_enabled(
+                            existing.binding_id,
+                            enabled=False,
+                            actor="system.bootstrap",
+                        )
+                    except Exception as exc:  # pragma: no cover - defensive
+                        errors.append(
+                            f"exclusive_binding_disable_failed:{event_type}:{existing.binding_id}:{exc}"
+                        )
+                        continue
+                    if isinstance(updated_binding, EventWorkflowBinding):
+                        disabled_conflicts += 1
     except Exception as exc:  # pragma: no cover - defensive
         errors.append(str(exc))
 
@@ -321,6 +365,7 @@ def ensure_default_event_bindings() -> dict[str, Any]:
         "created_count": created_count,
         "updated_count": updated_count,
         "unchanged_count": unchanged_count,
+        "disabled_conflicts": disabled_conflicts,
         "skipped_conflicts": skipped_conflicts,
         "errors": errors,
     }

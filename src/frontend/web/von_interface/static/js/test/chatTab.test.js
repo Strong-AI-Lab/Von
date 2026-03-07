@@ -31,6 +31,8 @@ import {
     __testOnly_reduceThinkingCardDisplayState,
     __testOnly_normaliseThinkingActivityHistory,
     __testOnly_renderThinkingCardBodyHTML,
+    __testOnly_bindConceptSelectionClicks,
+    __testOnly_updateThinkingCardMeta,
     __testOnly_resetChatConceptMetaCaches,
     formatChatTimestamp,
     sendMessage
@@ -842,6 +844,43 @@ describe('thinking liveness presentation', () => {
         expect(presentation.stageText).toBe('Follow-up required');
         expect(presentation.lastActivityText).toContain('Last activity');
     });
+
+    test('surfaces workflow candidates when no direct routing match is available', () => {
+        const presentation = __testOnly_buildThinkingProgressPresentation(
+            {
+                stage: 'workflow_discovery_complete',
+                phase_label: 'Evaluating workflow applicability',
+                workflow_discovery: {
+                    match_count: 0,
+                    candidate_count: 1,
+                    candidates: [
+                        {
+                            concept_id: '#V#scholarly_paper_representation_workflow',
+                            name: 'Scholarly paper representation workflow'
+                        }
+                    ]
+                }
+            }
+        );
+
+        expect(presentation.stageText).toContain('Evaluating workflow applicability');
+        expect(presentation.stageText).toContain(
+            'Candidate found: Scholarly paper representation workflow (#V#scholarly_paper_representation_workflow)'
+        );
+    });
+
+    test('prefixes the current goal when teleological progress is available', () => {
+        const presentation = __testOnly_buildThinkingProgressPresentation({
+            stage: 'workflow_discovery',
+            phase_label: 'Searching for workflows',
+            goal_label: 'Fully represent the paper #V#uploaded_file_copy_123'
+        });
+
+        expect(presentation.stageText).toContain(
+            'Goal: Fully represent the paper #V#uploaded_file_copy_123'
+        );
+        expect(presentation.stageText).toContain('Searching for workflows');
+    });
 });
 
 describe('thinking card display state reducer', () => {
@@ -1021,6 +1060,39 @@ describe('thinking activity history normalisation', () => {
         expect(rows[1].label).toBe('Waiting for updates');
     });
 
+    test('treats candidate-only workflow discovery as informative rather than a miss', () => {
+        const rows = __testOnly_normaliseThinkingActivityHistory([
+            {
+                sequence_no: 1,
+                status: 'workflow_discovery_complete',
+                stage: 'workflow_discovery_complete',
+                workflow_match_count: 0,
+                workflow_candidate_count: 1
+            }
+        ]);
+
+        expect(rows).toHaveLength(1);
+        expect(rows[0].label).toBe('Workflow discovery');
+        expect(rows[0].detail).toContain('Relevant workflow candidate found');
+        expect(rows[0].state).toBe('success');
+    });
+
+    test('uses teleological selector labels for workflow-dispatch LLM calls', () => {
+        const rows = __testOnly_normaliseThinkingActivityHistory([
+            {
+                sequence_no: 1,
+                status: 'llm_call_start',
+                stage: 'workflow_dispatch',
+                phase_label: 'Evaluating workflow candidates',
+                model: 'gpt-test'
+            }
+        ]);
+
+        expect(rows).toHaveLength(1);
+        expect(rows[0].label).toBe('Evaluating workflow candidates');
+        expect(rows[0].detail).toContain('gpt-test');
+    });
+
     test('prefers activity history rendering and falls back to tool history', () => {
         const activityHtml = __testOnly_renderThinkingCardBodyHTML({
             activityHistory: [{
@@ -1076,10 +1148,50 @@ describe('thinking activity history normalisation', () => {
         });
 
         expect(html).toContain('Workflow discovery');
-        expect(html).toContain('Found Tool calling workflow (#V#tool_calling_workflow)');
+        expect(html).toContain('Found <button');
+        expect(html).toContain('Tool calling workflow (#V#tool_calling_workflow)');
         expect(html).toContain('Workflow dispatch');
-        expect(html).toContain('Selected Tool calling workflow (#V#tool_calling_workflow)');
+        expect(html).toContain('Selected <button');
+        expect(html).toContain('thinking-card-concept-link');
+        expect(html).toContain('data-concept-id="#V#tool_calling_workflow"');
         expect(html).toContain('Plan tool calls');
+    });
+
+    test('dispatches concept selection from thinking card workflow links', () => {
+        document.body.innerHTML = '<div id="thinkingCardDetailTest"></div>';
+        const onSelect = jest.fn();
+        document.addEventListener('von:selectConceptById', onSelect);
+
+        const container = document.getElementById('thinkingCardDetailTest');
+        container.innerHTML = __testOnly_renderThinkingCardBodyHTML({
+            workflowStagePath: {
+                path: [
+                    { stage_id: 'workflow_dispatch', stage_label: 'Workflow dispatch' }
+                ]
+            },
+            latestProgress: {
+                phase: 'workflow_dispatch',
+                selected_workflow_id: '#V#chat_assistant_workflow',
+                selected_workflow_name: 'Chat assistant workflow'
+            }
+        });
+        __testOnly_bindConceptSelectionClicks(container, {
+            selector: '.thinking-card-concept-link',
+            datasetKey: 'conceptLinkBound'
+        });
+
+        const button = container.querySelector('.thinking-card-concept-link');
+        expect(button).toBeTruthy();
+        expect(button.dataset.conceptId).toBe('#V#chat_assistant_workflow');
+
+        button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+        expect(onSelect).toHaveBeenCalledTimes(1);
+        const eventArg = onSelect.mock.calls[0][0];
+        expect(eventArg.detail.conceptId).toBe('#V#chat_assistant_workflow');
+        expect(eventArg.detail.createConceptTab).toBe(true);
+
+        document.removeEventListener('von:selectConceptById', onSelect);
     });
 
     test('renders explicit no-workflow-found state as a failure row', () => {
@@ -1099,8 +1211,69 @@ describe('thinking activity history normalisation', () => {
         });
 
         expect(html).toContain('Workflow discovery');
-        expect(html).toContain('No applicable workflow found');
+        expect(html).toContain('No direct workflow match found');
         expect(html).toContain('thinking-card-tool-status failure');
+    });
+
+    test('renders workflow candidates as a successful discovery row when routing is excluded', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            workflowStagePath: {
+                path: [
+                    { stage_id: 'workflow_discovery', stage_label: 'Workflow discovery' }
+                ]
+            },
+            workflowDiscovery: {
+                match_count: 0,
+                candidate_count: 1,
+                candidates: [
+                    {
+                        concept_id: '#V#scholarly_paper_representation_workflow',
+                        name: 'Scholarly paper representation workflow'
+                    }
+                ]
+            },
+            latestProgress: {
+                phase: 'workflow_discovery_complete'
+            }
+        });
+
+        expect(html).toContain('Found candidate <button');
+        expect(html).toContain('Scholarly paper representation workflow (#V#scholarly_paper_representation_workflow)');
+        expect(html).toContain('thinking-card-tool-status success');
+    });
+});
+
+describe('thinking card meta telemetry', () => {
+    beforeEach(() => {
+        document.body.innerHTML = '<span id="thinkingCardMeta"></span><span id="thinkingCardStatusBadge"></span>';
+    });
+
+    test('hides tool counts when no tool execution is active', () => {
+        const request = {
+            thinkingStartedAtMs: Date.now() - 1000
+        };
+        __testOnly_updateThinkingCardMeta(request, {
+            stage: 'workflow_dispatch',
+            tool_calls_done: 0,
+            tool_calls_cap: 8,
+            last_activity_at_utc: '2026-03-06T22:39:48.399497Z'
+        });
+
+        expect(document.getElementById('thinkingCardMeta').textContent).not.toContain('0/8 tools');
+    });
+
+    test('shows tool counts once tool execution is active', () => {
+        const request = {
+            thinkingStartedAtMs: Date.now() - 1000
+        };
+        __testOnly_updateThinkingCardMeta(request, {
+            stage: 'tool_execute',
+            tool_calls_done: 1,
+            tool_calls_cap: 8,
+            last_activity_at_utc: '2026-03-06T22:39:48.399497Z'
+        });
+
+        expect(document.getElementById('thinkingCardMeta').textContent).toContain('1/8 tools');
     });
 });
 

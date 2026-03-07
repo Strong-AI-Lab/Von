@@ -5531,7 +5531,8 @@ footer {
     font-size: 14px;
 }
 
-.workflow-status-concept-link {
+.workflow-status-concept-link,
+.thinking-card-concept-link {
     display: inline;
     background: transparent;
     border: 1px solid transparent;
@@ -5548,16 +5549,23 @@ footer {
     cursor: pointer;
 }
 
-.workflow-status-concept-link:hover {
+.workflow-status-concept-link:hover,
+.thinking-card-concept-link:hover {
     background: #dbeafe;
     border-color: #93c5fd;
     text-decoration-color: #1d4ed8;
 }
 
-.workflow-status-concept-link:focus-visible {
+.workflow-status-concept-link:focus-visible,
+.thinking-card-concept-link:focus-visible {
     outline: none;
     box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.25);
     border-color: #93c5fd;
+}
+
+.thinking-card-concept-link {
+    color: inherit;
+    font-weight: inherit;
 }
 
 .workflow-status-id-link {

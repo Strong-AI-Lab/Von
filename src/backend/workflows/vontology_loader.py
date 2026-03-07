@@ -620,6 +620,15 @@ def _extract_mapping_pair(
             action_id=action_id,
         )
         if validation_error:
+            context_key, tool_param = _mapping_pair_from_concept_id(mapping_concept_id)
+            if context_key and tool_param:
+                return context_key, tool_param, None
+            description = _mapping_description_text(mapping_concept_id, mapping_doc)
+            context_key, tool_param = _mapping_pair_from_description(
+                str(description or "")
+            )
+            if context_key and tool_param:
+                return context_key, tool_param, None
             return None, None, validation_error
         context_key = _normalise_context_key_symbol(
             str(structured_spec.get("context_key_concept_id") or "")
@@ -731,6 +740,17 @@ def _extract_tool_output_mapping(
             action_id=action_id,
         )
         if validation_error:
+            tool_output_field, context_key = _tool_output_mapping_pair_from_concept_id(
+                mapping_concept_id
+            )
+            if tool_output_field and context_key:
+                return tool_output_field, context_key, None
+            description = _mapping_description_text(mapping_concept_id, mapping_doc)
+            tool_output_field, context_key = _tool_output_mapping_pair_from_description(
+                str(description or "")
+            )
+            if tool_output_field and context_key:
+                return tool_output_field, context_key, None
             return None, None, validation_error
         tool_output_field = str(
             structured_spec.get("tool_output_field_name") or ""
@@ -1561,13 +1581,19 @@ def load_workflow_definition_from_vontology(
         step_id = step.get("step_id")
         invokes_action = step.get("invokes_action")
         invokes_workflow = step.get("invokes_workflow")
-        has_workflow_invocation = isinstance(invokes_workflow, str) and bool(
+        has_static_workflow_invocation = isinstance(invokes_workflow, str) and bool(
             invokes_workflow.strip()
         )
-        invocation_action_id = (
-            WORKFLOW_SUBWORKFLOW_ACTION_ID if has_workflow_invocation else invokes_action
+        is_subworkflow_action = (
+            (str(invokes_action or "").strip() == WORKFLOW_SUBWORKFLOW_ACTION_ID)
+            or has_static_workflow_invocation
         )
-        mapping_target_id = invokes_workflow if has_workflow_invocation else invokes_action
+        invocation_action_id = (
+            WORKFLOW_SUBWORKFLOW_ACTION_ID if is_subworkflow_action else invokes_action
+        )
+        mapping_target_id = (
+            invokes_workflow if has_static_workflow_invocation else invocation_action_id
+        )
         control_flow = step.get("control_flow", {})
 
         actions: list[WorkflowActionInvocation] = []
@@ -1629,7 +1655,7 @@ def load_workflow_definition_from_vontology(
                         "$mapping_concept_id": mapping_concept_id,
                     }
                     reads_context_keys.append(context_key)
-                    if has_workflow_invocation:
+                    if is_subworkflow_action:
                         subworkflow_input_mappings.append(
                             {
                                 "child_input_key": tool_param,
@@ -1637,12 +1663,12 @@ def load_workflow_definition_from_vontology(
                                 "mapping_concept_id": mapping_concept_id,
                             }
                         )
-            if has_workflow_invocation:
+            if is_subworkflow_action:
                 subworkflow_failure_mode = str(
                     input_map.get("failure_mode") or input_map.get("__failure_mode") or ""
                 ).strip()
 
-            if has_workflow_invocation:
+            if has_static_workflow_invocation:
                 input_map["workflow_id"] = str(invokes_workflow).strip()
                 input_map["__parent_workflow_id"] = str(workflow_id or "").strip()
                 input_map["__parent_state_id"] = str(step_id or "").strip()
@@ -1682,7 +1708,7 @@ def load_workflow_definition_from_vontology(
                             "mapping_concept_id": mapping_concept_id,
                         }
                     )
-                    if has_workflow_invocation and tool_output_field.startswith("result."):
+                    if is_subworkflow_action and tool_output_field.startswith("result."):
                         child_output_field = tool_output_field[len("result.") :].strip()
                         if not child_output_field:
                             continue
@@ -1870,12 +1896,27 @@ def load_workflow_definition_from_vontology(
             step_metadata["writes_variables"] = writes_vars
         if writes_context_keys:
             step_metadata["writes_context_keys"] = writes_context_keys
-        if has_workflow_invocation:
+        if is_subworkflow_action:
             workflow_target = str(invokes_workflow or "").strip()
+            workflow_id_context_key = ""
+            workflow_id_mapping_concept_id = ""
+            workflow_id_input = input_map.get("workflow_id")
+            if isinstance(workflow_id_input, Mapping):
+                workflow_id_context_key = str(
+                    workflow_id_input.get("$context_key") or ""
+                ).strip()
+                workflow_id_mapping_concept_id = str(
+                    workflow_id_input.get("$mapping_concept_id") or ""
+                ).strip()
             if workflow_target:
                 step_metadata["invokes_workflow"] = workflow_target
+            if workflow_target or workflow_id_context_key:
                 step_metadata["subworkflow_contract"] = build_subworkflow_contract(
-                    workflow_id=workflow_target,
+                    workflow_id=workflow_target or None,
+                    workflow_id_context_key=workflow_id_context_key or None,
+                    workflow_id_mapping_concept_id=(
+                        workflow_id_mapping_concept_id or None
+                    ),
                     input_mappings=subworkflow_input_mappings,
                     output_mappings=subworkflow_output_mappings,
                     failure_mode=subworkflow_failure_mode,

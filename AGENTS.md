@@ -29,11 +29,13 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 23. In docs/examples for secret env vars, use explicit placeholders like `<YOUR-CLIENT-SECRET-HERE>` and avoid token-like sample strings that can trigger secret scanners.
 24. **Workflow-first behaviours**: strongly prefer Vontology workflows (definitions, instances, event bindings, schedules) to drive Von behaviour instead of adding specialised orchestration code. Add bespoke code only when workflow primitives cannot express the behaviour, and document the gap in Jira.
 25. **Policy over task wording**: if a Jira issue suggests implementation in specialised orchestration code but the behaviour can be expressed as a Vontology workflow, enforce workflow-first policy and reinterpret/revise the task accordingly. In these cases, limit code changes to missing tools/validators/telemetry needed by the workflow, and add a Jira comment documenting the reinterpretation.
-26. If you are reasonably confident task implementation is complete, proactively merge and close the task (commit/push, create PR, merge to `main`, and transition Jira) unless the user explicitly asks to hold.
-27. **Definition of fully complete Jira task**: implementation committed and pushed, PR created, PR merged to `main`, and Jira transitioned/commented accordingly.
-28. **Fail closed when Vontology is unavailable for Vontology-governed behaviour**: do not silently fall back to in-code prompts, stale context reuse, or heuristic hacks. If required Vontology prompts/workflow data cannot be resolved, no-op that transformation and emit a clear user-visible and telemetry-visible reason.
-29. **Minimal-imposition principle**: exhaust existing context/data/search first; ask humans only when necessary, and then only for concise, low-effort, high-value inputs they are likely to know without extra work.
-30. When the user asks whether something is "finished" or "complete", do not treat Jira status alone as the answer. Verify effective implementation state in both code and Vontology, then report whether it is unimplemented, partly implemented, or fully implemented (with concise evidence).
+26. **Creating/editing workflows in Vontology is implementation work**: treat Vontology workflow definitions, mappings, schedules, and event bindings as first-class artefacts to create/update directly, exactly as you would code. Prefer making the behaviour real in Vontology over describing it abstractly or deferring it to later.
+27. **Default to materialising workflows, not just discussing them**: when a task requires new behaviour and VWL can express it, create or update the workflow in Vontology during the task unless a concrete blocker prevents it.
+28. If you are reasonably confident task implementation is complete, proactively merge and close the task (commit/push, create PR, merge to `main`, and transition Jira) unless the user explicitly asks to hold.
+29. **Definition of fully complete Jira task**: implementation committed and pushed, PR created, PR merged to `main`, Jira transitioned/commented accordingly, and any required Vontology workflow/state changes actually materialised.
+30. **Fail closed when Vontology is unavailable for Vontology-governed behaviour**: do not silently fall back to in-code prompts, stale context reuse, or heuristic hacks. If required Vontology prompts/workflow data cannot be resolved, no-op that transformation and emit a clear user-visible and telemetry-visible reason.
+31. **Minimal-imposition principle**: exhaust existing context/data/search first; ask humans only when necessary, and then only for concise, low-effort, high-value inputs they are likely to know without extra work.
+32. When the user asks whether something is "finished" or "complete", do not treat Jira status alone as the answer. Verify effective implementation state in both code and Vontology, then report whether it is unimplemented, partly implemented, or fully implemented (with concise evidence).
 
 ## Core AI-Focused Documents
 - `docs/AINotes.md`: short-term memory and tactical log.
@@ -88,11 +90,12 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 	4. Record the chosen canonical IDs in the Jira issue.
 - **Workflow-first behaviour checklist (mandatory for behaviour/orchestration changes):**
 	1. Inspect existing workflow definitions before coding (`workflow_list_definitions`).
-	2. Prefer creating/updating workflow instances and definitions over adding task-specific Python orchestration (`workflow_create_instance`, `workflow_get_instance`, `workflow_list_instances`).
+	2. Prefer creating/updating workflow instances and definitions in Vontology over adding task-specific Python orchestration (`workflow_create_instance`, `workflow_get_instance`, `workflow_list_instances`).
 	3. Prefer durable bindings/schedules for repeat behaviour (`workflow_bind_event`, `workflow_create_schedule`, `workflow_set_schedule_enabled`, `workflow_trigger_schedule`).
 	4. Use operational controls instead of ad-hoc runtime flags (`workflow_cancel_instance`, `workflow_retry_instance`, `workflow_delete_schedule`).
-	5. If Jira wording conflicts with this policy, treat the workflow-first policy as authoritative: reinterpret the Jira task, leave a note in Jira, and proceed with workflow definitions plus supporting tool work.
-	6. If workflow tools still cannot express the requirement, explicitly document the constraint and create/link a Jira capability-gap issue before introducing specialised code.
+	5. Treat workflow creation/editing in Vontology as normal implementation work. Do it during the task whenever the behaviour can be expressed there; do not stop at design prose if the workflow can be materialised.
+	6. If Jira wording conflicts with this policy, treat the workflow-first policy as authoritative: reinterpret the Jira task, leave a note in Jira, and proceed with workflow definitions plus supporting tool work.
+	7. If workflow tools still cannot express the requirement, explicitly document the constraint and create/link a Jira capability-gap issue before introducing specialised code.
 - For fairly complex capability improvements, run a background search for related Jira issues, Confluence design docs, and existing Vontology concepts before proposing a plan.
 - **No hard-coded ontology lists**: do not add fixed lists of predicate/type IDs or names in code. If you believe a hard-coded list is unavoidable, you must:
 	- explain why Vontology lookup is not viable,

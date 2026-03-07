@@ -16,9 +16,9 @@ from datetime import datetime, timezone
 from functools import lru_cache
 import json
 import os
-import re
 from typing import Any, Mapping
 
+from ...services.file_copy_typing_service import infer_file_copy_typing
 from ...services.text_value_service import upsert_singleton_text_relation
 from ..action_registry import (
     ActionRegistry,
@@ -50,6 +50,7 @@ DEFAULT_BUSINESS_CARD_WORKFLOW_ID = "#V#file_copy_business_card_representation_w
 ROUTE_KEY_SCHOLARLY = "scholarly"
 ROUTE_KEY_CV = "cv"
 ROUTE_KEY_BUSINESS_CARD = "business_card"
+ROUTE_KEY_MEETING = "meeting"
 ROUTE_KEY_INTERPRET = "interpret"
 ROUTE_KEY_NOOP = "noop"
 
@@ -57,20 +58,6 @@ ROUTE_MODE_SPECIALISED = "specialised"
 ROUTE_MODE_INTERPRET = "interpret"
 ROUTE_MODE_FAIL_CLOSED = "fail_closed"
 ROUTE_MODE_NOOP = "noop"
-
-_ARXIV_FILENAME_RE = re.compile(r"(?<!\d)\d{4}\.\d{4,5}(?:v\d+)?", re.IGNORECASE)
-_SCHOLARLY_TOKEN_RE = re.compile(
-    r"\b(arxiv|paper|preprint|manuscript|journal|conference|doi)\b",
-    re.IGNORECASE,
-)
-_CV_TOKEN_RE = re.compile(
-    r"\b(cv|resume|résumé|curriculum[\s\-_]*vitae)\b",
-    re.IGNORECASE,
-)
-_BUSINESS_CARD_TOKEN_RE = re.compile(
-    r"\b(business[\s\-_]*card|biz[\s\-_]*card|contact[\s\-_]*card)\b",
-    re.IGNORECASE,
-)
 
 
 def _utc_now_iso() -> str:
@@ -135,6 +122,7 @@ def _extract_route_from_force_override(value: Any) -> str | None:
         ROUTE_KEY_SCHOLARLY,
         ROUTE_KEY_CV,
         ROUTE_KEY_BUSINESS_CARD,
+        ROUTE_KEY_MEETING,
         ROUTE_KEY_INTERPRET,
         ROUTE_KEY_NOOP,
     }:
@@ -226,6 +214,12 @@ def _resolve_specialised_candidates(
         if env_value:
             candidates.append(env_value)
         candidates.append(DEFAULT_BUSINESS_CARD_WORKFLOW_ID)
+    elif route_key == ROUTE_KEY_MEETING:
+        candidates.extend(_candidate_list_from_any(payload.get("meeting_workflow_id")))
+        candidates.extend(_candidate_list_from_any(nested_map.get("meeting")))
+        env_value = _clean_text(os.getenv("VON_FILE_COPY_MEETING_WORKFLOW_ID"))
+        if env_value:
+            candidates.append(env_value)
 
     deduped: list[str] = []
     seen: set[str] = set()
@@ -238,63 +232,37 @@ def _resolve_specialised_candidates(
     return deduped
 
 
-def _resolve_score_candidates(
-    *,
-    filename: str,
-    content_type: str,
-    size_bytes: int | None,
-) -> dict[str, float]:
-    is_pdf = content_type == "application/pdf" or filename.endswith(".pdf")
-    is_image = content_type.startswith("image/") or filename.endswith(
-        (
-            ".png",
-            ".jpg",
-            ".jpeg",
-            ".webp",
-            ".gif",
-            ".bmp",
-            ".tif",
-            ".tiff",
-            ".heic",
-            ".heif",
+def _resolve_typing_result(raw: Mapping[str, Any]) -> dict[str, Any]:
+    supplied = raw.get("typing_result")
+    if isinstance(supplied, Mapping):
+        typing_result = dict(supplied)
+    else:
+        typing_result = infer_file_copy_typing(
+            content_type=_clean_text(raw.get("content_type")) or None,
+            original_filename=_clean_text(raw.get("original_filename")) or None,
+            size_bytes=_coerce_int(raw.get("size_bytes")),
         )
-    )
 
-    scholarly_score = 0.0
-    if is_pdf:
-        scholarly_score += 0.2
-    if _ARXIV_FILENAME_RE.search(filename):
-        scholarly_score += 0.65
-    if _SCHOLARLY_TOKEN_RE.search(filename):
-        scholarly_score += 0.2
-    scholarly_score = min(0.99, scholarly_score)
+    route_scores = typing_result.get("route_scores")
+    if not isinstance(route_scores, Mapping):
+        route_scores = {}
 
-    cv_score = 0.0
-    if _CV_TOKEN_RE.search(filename):
-        cv_score += 0.72
-    if is_pdf:
-        cv_score += 0.2
-    if content_type in {
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/msword",
-    }:
-        cv_score += 0.15
-    cv_score = min(0.99, cv_score)
+    typed_route_hint = _clean_text(typing_result.get("route_hint")).lower()
+    if typed_route_hint and typed_route_hint not in route_scores:
+        try:
+            route_scores = dict(route_scores)
+            route_scores[typed_route_hint] = float(
+                typing_result.get("route_confidence") or 0.0
+            )
+        except Exception:
+            route_scores = dict(route_scores)
 
-    business_card_score = 0.0
-    if _BUSINESS_CARD_TOKEN_RE.search(filename):
-        business_card_score += 0.78
-    if is_image:
-        business_card_score += 0.16
-    if isinstance(size_bytes, int) and size_bytes > 0 and size_bytes < 3_000_000:
-        business_card_score += 0.05
-    business_card_score = min(0.99, business_card_score)
-
-    return {
-        ROUTE_KEY_SCHOLARLY: round(scholarly_score, 4),
-        ROUTE_KEY_CV: round(cv_score, 4),
-        ROUTE_KEY_BUSINESS_CARD: round(business_card_score, 4),
+    typing_result["route_scores"] = {
+        _clean_text(key): round(float(value), 4)
+        for key, value in dict(route_scores).items()
+        if _clean_text(key)
     }
+    return typing_result
 
 
 def _select_primary_route(
@@ -335,11 +303,12 @@ def _build_classification_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
     )
 
     forced_route = _extract_route_from_force_override(raw.get("force_route_key"))
-    scored = _resolve_score_candidates(
-        filename=filename,
-        content_type=content_type,
-        size_bytes=size_bytes,
-    )
+    typing_result = _resolve_typing_result(raw)
+    scored = {
+        str(key).strip(): round(float(value), 4)
+        for key, value in dict(typing_result.get("route_scores") or {}).items()
+        if str(key).strip()
+    }
     route_key: str
     route_confidence: float
     reasons: list[str] = []
@@ -348,11 +317,24 @@ def _build_classification_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
         route_confidence = 1.0
         reasons.append("forced_route_override")
     else:
-        route_key, route_confidence = _select_primary_route(
-            scored,
-            minimum_score=min_route_score,
+        typed_route_hint = _clean_text(typing_result.get("route_hint")).lower()
+        typed_route_confidence = round(
+            float(typing_result.get("route_confidence") or 0.0), 4
         )
-        reasons.append("heuristic_classifier")
+        if typed_route_hint and typed_route_confidence >= min_route_score:
+            route_key = typed_route_hint
+            route_confidence = typed_route_confidence
+            reasons.append("typed_file_copy_context")
+        else:
+            route_key, route_confidence = _select_primary_route(
+                scored,
+                minimum_score=min_route_score,
+            )
+            reasons.append(
+                "typed_route_hint_below_threshold"
+                if typed_route_hint
+                else "typed_file_copy_context_missing_route_hint"
+            )
 
     available_workflow_ids = set(_resolve_available_workflow_ids(raw))
     target_workflow_id: str | None = None
@@ -363,6 +345,7 @@ def _build_classification_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
         ROUTE_KEY_SCHOLARLY,
         ROUTE_KEY_CV,
         ROUTE_KEY_BUSINESS_CARD,
+        ROUTE_KEY_MEETING,
     }
 
     route_mode = ROUTE_MODE_INTERPRET
@@ -424,6 +407,16 @@ def _build_classification_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
         "filename": filename or None,
         "content_type": content_type or None,
         "size_bytes": size_bytes,
+        "typing_result": typing_result,
+        "typing_schema_version": typing_result.get("schema_version"),
+        "typing_primary_type_concept_id": typing_result.get("primary_type_concept_id"),
+        "typing_semantic_type_concept_id": typing_result.get(
+            "semantic_type_concept_id"
+        ),
+        "typing_format_type_concept_id": typing_result.get("format_type_concept_id"),
+        "typing_asserted_type_concept_ids": list(
+            typing_result.get("asserted_type_concept_ids") or []
+        ),
     }
 
 
@@ -471,6 +464,19 @@ def _handle_persist_route_decision(request: WorkflowActionRequest) -> WorkflowAc
         "scored_candidates": dict(request.data.get("scored_candidates") or {}),
         "filename": request.data.get("filename"),
         "content_type": request.data.get("content_type"),
+        "typing_schema_version": request.data.get("typing_schema_version"),
+        "typing_primary_type_concept_id": request.data.get(
+            "typing_primary_type_concept_id"
+        ),
+        "typing_semantic_type_concept_id": request.data.get(
+            "typing_semantic_type_concept_id"
+        ),
+        "typing_format_type_concept_id": request.data.get(
+            "typing_format_type_concept_id"
+        ),
+        "typing_asserted_type_concept_ids": list(
+            request.data.get("typing_asserted_type_concept_ids") or []
+        ),
     }
 
     try:
@@ -512,6 +518,31 @@ def _handle_persist_route_decision(request: WorkflowActionRequest) -> WorkflowAc
 
 
 def build_file_copy_upload_classification_workflow() -> WorkflowDefinition:
+    classify_writes_context_keys = [
+        "classification_version",
+        "route_key",
+        "route_mode",
+        "route_confidence",
+        "minimum_mutation_confidence",
+        "minimum_route_score",
+        "route_reasons",
+        "mutation_route",
+        "fail_closed",
+        "target_workflow_id",
+        "target_workflow_available",
+        "unsupported_specialised_route",
+        "unsupported_route_reason",
+        "allow_interpret_fallback",
+        "available_workflow_ids",
+        "typing_result",
+    ]
+    persist_decision_writes_context_keys = [
+        "route_decision_persisted",
+        "route_decision_predicate",
+        "route_decision_relation_id",
+        "route_decision_replaced_count",
+        "route_decision_persist_error",
+    ]
     classify = WorkflowStateSpec(
         state_id="classify",
         actions=(
@@ -523,6 +554,7 @@ def build_file_copy_upload_classification_workflow() -> WorkflowDefinition:
                 ),
             ),
         ),
+        metadata={"writes_context_keys": classify_writes_context_keys},
         transitions=(
             WorkflowTransitionSpec(
                 to_state="persist_decision",
@@ -543,6 +575,7 @@ def build_file_copy_upload_classification_workflow() -> WorkflowDefinition:
                 ),
             ),
         ),
+        metadata={"writes_context_keys": persist_decision_writes_context_keys},
         transitions=(
             WorkflowTransitionSpec(
                 to_state="complete",

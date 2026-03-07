@@ -28,6 +28,7 @@ import pytest
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
     OrchestratorResult,
+    ProgressTracker,
     WorkflowRoutingInfo,
 )
 from src.backend.workflows import WorkflowDefinition, WorkflowRegistration
@@ -2774,6 +2775,75 @@ def test_non_executable_discovered_workflow_can_be_overridden(monkeypatch):
     )
     assert execution_entry is not None
     assert execution_entry["workflow_id"] == TODO_REFRESH_WORKFLOW_ID
+
+
+def test_workflow_selector_emits_dispatch_progress_events(monkeypatch):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    llm = _CapturingLLM(["tool_seeking", "Fallback response."])
+    captured_progress: list[dict[str, Any]] = []
+    tracker = ProgressTracker(callback=lambda info: captured_progress.append(dict(info)))
+
+    discovery_result = {
+        "matches": [
+            {
+                "concept_id": TOOL_CALLING_WORKFLOW_ID,
+                "name": "Tool calling workflow",
+                "description": "Default tool-calling route.",
+                "is_executable": True,
+                "executability_reason": "executable_now",
+            }
+        ],
+        "candidates": [
+            {
+                "concept_id": TOOL_CALLING_WORKFLOW_ID,
+                "name": "Tool calling workflow",
+                "description": "Default tool-calling route.",
+                "is_executable": True,
+                "executability_reason": "executable_now",
+            }
+        ],
+        "match_count": 1,
+        "candidate_count": 1,
+    }
+
+    result = orchestrator.run(
+        prompt="Use the best workflow for this request.",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result=discovery_result,
+        progress_tracker=tracker,
+    )
+
+    workflow_dispatch_events = [
+        entry for entry in captured_progress if entry.get("stage") == "workflow_dispatch"
+    ]
+    assert workflow_dispatch_events
+    assert any(
+        entry.get("phase_label") == "Selecting workflow"
+        and entry.get("workflow_candidate_count") == 1
+        for entry in workflow_dispatch_events
+    )
+    assert any(
+        entry.get("status") == "llm_call_start"
+        for entry in workflow_dispatch_events
+    )
+    assert any(
+        entry.get("status") == "llm_call_end"
+        and entry.get("success") is True
+        for entry in workflow_dispatch_events
+    )
+    selected_event = next(
+        entry
+        for entry in workflow_dispatch_events
+        if entry.get("workflow_selector_verdict") == "tool_seeking"
+        and entry.get("status") == "thinking"
+    )
+    assert selected_event.get("phase_label") == "Workflow selected"
+    assert selected_event.get("selected_workflow_id") == TOOL_CALLING_WORKFLOW_ID
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.verdict == "tool_seeking"
 
 
 # ---------------------------------------------------------------------------

@@ -165,6 +165,51 @@ def test_validate_contract_accepts_compatible_subworkflow_contract() -> None:
     assert "workflow_subworkflow_unresolved" not in (validation.get("errors") or [])
 
 
+def test_validate_contract_accepts_dynamic_subworkflow_contract() -> None:
+    dynamic_parent = WorkflowDefinition(
+        workflow_id="#V#dynamic_parent_workflow",
+        initial_state="start",
+        states={
+            "start": WorkflowStateSpec(
+                state_id="start",
+                actions=(WorkflowActionInvocation(action_id=WORKFLOW_SUBWORKFLOW_ACTION_ID),),
+                terminal=True,
+                metadata={
+                    "subworkflow_contract": build_subworkflow_contract(
+                        workflow_id_context_key="selected_workflow_id",
+                        input_mappings=[
+                            {
+                                "child_input_key": "workflow_id",
+                                "parent_context_key": "selected_workflow_id",
+                            },
+                            {
+                                "child_input_key": "child_input",
+                                "parent_context_key": "parent_input",
+                            },
+                        ],
+                        output_mappings=[
+                            {
+                                "child_output_field": "child_output",
+                                "parent_context_key": "parent_output",
+                            }
+                        ],
+                    )
+                },
+            ),
+        },
+        termination_states=("start",),
+        purpose="dynamic parent",
+    )
+
+    validation = validate_workflow_definition_contract(definition=dynamic_parent)
+
+    assert validation["valid"] is True
+    assert validation["subworkflow_contract_issues"] == []
+    assert "workflow_subworkflow_contract_invalid" not in (
+        validation.get("errors") or []
+    )
+
+
 def test_validate_contract_reports_unresolved_subworkflow_workflow() -> None:
     parent = _parent_with_subworkflow_contract(child_workflow_id="#V#missing_child")
 

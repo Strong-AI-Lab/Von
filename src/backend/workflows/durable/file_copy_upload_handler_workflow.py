@@ -29,9 +29,11 @@ from ..engine import (
 from ..subworkflow_contracts import (
     WORKFLOW_SUBWORKFLOW_ACTION_ID,
     WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE,
+    build_subworkflow_contract,
 )
 from ..workflow_registry import WorkflowRegistration
 from .file_copy_interpretation_workflow import FILE_COPY_INTERPRETATION_WORKFLOW_ID
+from .file_copy_typing_workflow import FILE_COPY_TYPING_WORKFLOW_ID
 from .file_copy_upload_classification_workflow import (
     FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID,
     FILE_COPY_UPLOAD_CLASSIFICATION_VERSION,
@@ -58,6 +60,50 @@ _FILE_COPY_CONTEXT_INPUTS = {
     "uploaded_at": {"$context_key": "uploaded_at"},
     "index_in_rag": {"$context_key": "index_in_rag"},
 }
+
+
+def _subworkflow_input_mappings_from_inputs(
+    inputs: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    mappings: list[dict[str, str]] = []
+    for child_input_key, raw_value in inputs.items():
+        if not isinstance(raw_value, Mapping):
+            continue
+        context_key = str(raw_value.get("$context_key") or "").strip()
+        if not context_key:
+            continue
+        mapping: dict[str, str] = {
+            "child_input_key": str(child_input_key).strip(),
+            "parent_context_key": context_key,
+        }
+        mapping_concept_id = str(raw_value.get("$mapping_concept_id") or "").strip()
+        if mapping_concept_id:
+            mapping["mapping_concept_id"] = mapping_concept_id
+        mappings.append(mapping)
+    return mappings
+
+
+def _subworkflow_output_mappings_from_context_mappings(
+    mappings: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    for item in mappings:
+        tool_output_field = str(item.get("tool_output_field") or "").strip()
+        context_key = str(item.get("context_key") or "").strip()
+        if not tool_output_field.startswith("result.") or not context_key:
+            continue
+        child_output_field = tool_output_field[len("result.") :].strip()
+        if not child_output_field:
+            continue
+        mapping: dict[str, str] = {
+            "child_output_field": child_output_field,
+            "parent_context_key": context_key,
+        }
+        mapping_concept_id = str(item.get("mapping_concept_id") or "").strip()
+        if mapping_concept_id:
+            mapping["mapping_concept_id"] = mapping_concept_id
+        result.append(mapping)
+    return result
 
 
 def _utc_now_iso() -> str:
@@ -304,31 +350,114 @@ def _handle_persist_route_outcome(request: WorkflowActionRequest) -> WorkflowAct
 
 
 def build_file_copy_upload_handler_workflow() -> WorkflowDefinition:
+    typing_inputs = {
+        **dict(_FILE_COPY_CONTEXT_INPUTS),
+        "workflow_id": FILE_COPY_TYPING_WORKFLOW_ID,
+        "failure_mode": WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE,
+    }
+    typing_output_mappings = [
+        {"tool_output_field": "result.typing_version", "context_key": "typing_version"},
+        {"tool_output_field": "result.typing_schema_version", "context_key": "typing_schema_version"},
+        {"tool_output_field": "result.typing_result", "context_key": "typing_result"},
+        {"tool_output_field": "result.typing_determinable", "context_key": "typing_determinable"},
+        {"tool_output_field": "result.primary_type_concept_id", "context_key": "typing_primary_type_concept_id"},
+        {"tool_output_field": "result.semantic_type_concept_id", "context_key": "typing_semantic_type_concept_id"},
+        {"tool_output_field": "result.format_type_concept_id", "context_key": "typing_format_type_concept_id"},
+        {"tool_output_field": "result.asserted_type_concept_ids", "context_key": "typing_asserted_type_concept_ids"},
+        {"tool_output_field": "result.route_hint", "context_key": "typing_route_hint"},
+        {"tool_output_field": "result.route_confidence", "context_key": "typing_route_confidence"},
+        {"tool_output_field": "result.route_scores", "context_key": "typing_route_scores"},
+        {"tool_output_field": "result.typing_persisted", "context_key": "typing_persisted"},
+        {"tool_output_field": "result.typing_relation_id", "context_key": "typing_relation_id"},
+        {"tool_output_field": "result.typing_relation_errors", "context_key": "typing_relation_errors"},
+        {"tool_output_field": "child_workflow_failed", "context_key": "typing_child_failed"},
+        {"tool_output_field": "subworkflow_error", "context_key": "typing_subworkflow_error"},
+    ]
+    typing = WorkflowStateSpec(
+        state_id="typing",
+        actions=(
+            WorkflowActionInvocation(
+                action_id=WORKFLOW_SUBWORKFLOW_ACTION_ID,
+                inputs=typing_inputs,
+                description=(
+                    "Invoke reusable file-copy typing subworkflow to persist "
+                    "authoritative artefact taxonomy before route selection."
+                ),
+            ),
+        ),
+        metadata={
+            "subworkflow_contract": build_subworkflow_contract(
+                workflow_id=FILE_COPY_TYPING_WORKFLOW_ID,
+                input_mappings=_subworkflow_input_mappings_from_inputs(typing_inputs),
+                output_mappings=_subworkflow_output_mappings_from_context_mappings(
+                    typing_output_mappings
+                ),
+                failure_mode=WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE,
+            ),
+            "tool_output_context_mappings": typing_output_mappings,
+        },
+        transitions=(
+            WorkflowTransitionSpec(
+                to_state="classify",
+                condition=lambda _ctx: True,
+                reason="typing_completed",
+            ),
+        ),
+    )
+
+    classify_inputs = {
+        **dict(_FILE_COPY_CONTEXT_INPUTS),
+        "workflow_id": FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID,
+        "failure_mode": WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE,
+        "minimum_route_score": {"$context_key": "minimum_route_score"},
+        "minimum_mutation_confidence": {"$context_key": "minimum_mutation_confidence"},
+        "force_route_key": {"$context_key": "force_route_key"},
+        "allow_interpret_fallback": {"$context_key": "allow_interpret_fallback"},
+        "scholarly_workflow_id": {"$context_key": "scholarly_workflow_id"},
+        "cv_workflow_id": {"$context_key": "cv_workflow_id"},
+        "business_card_workflow_id": {"$context_key": "business_card_workflow_id"},
+        "meeting_workflow_id": {"$context_key": "meeting_workflow_id"},
+        "typing_result": {"$context_key": "typing_result"},
+        "typing_schema_version": {"$context_key": "typing_schema_version"},
+        "route_hint": {"$context_key": "typing_route_hint"},
+        "route_confidence": {"$context_key": "typing_route_confidence"},
+        "route_scores": {"$context_key": "typing_route_scores"},
+        "primary_type_concept_id": {"$context_key": "typing_primary_type_concept_id"},
+        "semantic_type_concept_id": {"$context_key": "typing_semantic_type_concept_id"},
+        "format_type_concept_id": {"$context_key": "typing_format_type_concept_id"},
+        "asserted_type_concept_ids": {"$context_key": "typing_asserted_type_concept_ids"},
+    }
+    classify_output_mappings = [
+        {"tool_output_field": "result.classification_version", "context_key": "classification_version"},
+        {"tool_output_field": "result.route_key", "context_key": "upload_route_key"},
+        {"tool_output_field": "result.route_mode", "context_key": "upload_route_mode"},
+        {"tool_output_field": "result.route_confidence", "context_key": "upload_route_confidence"},
+        {"tool_output_field": "result.minimum_mutation_confidence", "context_key": "upload_minimum_mutation_confidence"},
+        {"tool_output_field": "result.minimum_route_score", "context_key": "upload_minimum_route_score"},
+        {"tool_output_field": "result.route_reasons", "context_key": "upload_route_reasons"},
+        {"tool_output_field": "result.mutation_route", "context_key": "upload_mutation_route"},
+        {"tool_output_field": "result.fail_closed", "context_key": "upload_fail_closed"},
+        {"tool_output_field": "result.target_workflow_id", "context_key": "upload_target_workflow_id"},
+        {"tool_output_field": "result.target_workflow_available", "context_key": "upload_target_workflow_available"},
+        {
+            "tool_output_field": "result.unsupported_specialised_route",
+            "context_key": "upload_unsupported_specialised_route",
+        },
+        {
+            "tool_output_field": "result.unsupported_route_reason",
+            "context_key": "upload_unsupported_route_reason",
+        },
+        {"tool_output_field": "result.allow_interpret_fallback", "context_key": "upload_allow_interpret_fallback"},
+        {"tool_output_field": "result.route_decision_persisted", "context_key": "upload_route_decision_persisted"},
+        {"tool_output_field": "child_workflow_failed", "context_key": "upload_classifier_child_failed"},
+        {"tool_output_field": "subworkflow_error", "context_key": "upload_classifier_error"},
+    ]
     classify = WorkflowStateSpec(
         state_id="classify",
         actions=(
             WorkflowActionInvocation(
                 action_id=WORKFLOW_SUBWORKFLOW_ACTION_ID,
-                inputs={
-                    **dict(_FILE_COPY_CONTEXT_INPUTS),
-                    "workflow_id": FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID,
-                    "failure_mode": WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE,
-                    "minimum_route_score": {"$context_key": "minimum_route_score"},
-                    "minimum_mutation_confidence": {
-                        "$context_key": "minimum_mutation_confidence"
-                    },
-                    "force_route_key": {"$context_key": "force_route_key"},
-                    "allow_interpret_fallback": {
-                        "$context_key": "allow_interpret_fallback"
-                    },
-                    "scholarly_workflow_id": {
-                        "$context_key": "scholarly_workflow_id"
-                    },
-                    "cv_workflow_id": {"$context_key": "cv_workflow_id"},
-                    "business_card_workflow_id": {
-                        "$context_key": "business_card_workflow_id"
-                    },
-                },
+                inputs=classify_inputs,
                 description=(
                     "Invoke file-copy upload classification subworkflow to "
                     "determine route mode and confidence."
@@ -336,31 +465,15 @@ def build_file_copy_upload_handler_workflow() -> WorkflowDefinition:
             ),
         ),
         metadata={
-            "tool_output_context_mappings": [
-                {"tool_output_field": "result.classification_version", "context_key": "classification_version"},
-                {"tool_output_field": "result.route_key", "context_key": "upload_route_key"},
-                {"tool_output_field": "result.route_mode", "context_key": "upload_route_mode"},
-                {"tool_output_field": "result.route_confidence", "context_key": "upload_route_confidence"},
-                {"tool_output_field": "result.minimum_mutation_confidence", "context_key": "upload_minimum_mutation_confidence"},
-                {"tool_output_field": "result.minimum_route_score", "context_key": "upload_minimum_route_score"},
-                {"tool_output_field": "result.route_reasons", "context_key": "upload_route_reasons"},
-                {"tool_output_field": "result.mutation_route", "context_key": "upload_mutation_route"},
-                {"tool_output_field": "result.fail_closed", "context_key": "upload_fail_closed"},
-                {"tool_output_field": "result.target_workflow_id", "context_key": "upload_target_workflow_id"},
-                {"tool_output_field": "result.target_workflow_available", "context_key": "upload_target_workflow_available"},
-                {
-                    "tool_output_field": "result.unsupported_specialised_route",
-                    "context_key": "upload_unsupported_specialised_route",
-                },
-                {
-                    "tool_output_field": "result.unsupported_route_reason",
-                    "context_key": "upload_unsupported_route_reason",
-                },
-                {"tool_output_field": "result.allow_interpret_fallback", "context_key": "upload_allow_interpret_fallback"},
-                {"tool_output_field": "result.route_decision_persisted", "context_key": "upload_route_decision_persisted"},
-                {"tool_output_field": "child_workflow_failed", "context_key": "upload_classifier_child_failed"},
-                {"tool_output_field": "subworkflow_error", "context_key": "upload_classifier_error"},
-            ]
+            "subworkflow_contract": build_subworkflow_contract(
+                workflow_id=FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID,
+                input_mappings=_subworkflow_input_mappings_from_inputs(classify_inputs),
+                output_mappings=_subworkflow_output_mappings_from_context_mappings(
+                    classify_output_mappings
+                ),
+                failure_mode=WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE,
+            ),
+            "tool_output_context_mappings": classify_output_mappings,
         },
         transitions=(
             WorkflowTransitionSpec(
@@ -407,16 +520,23 @@ def build_file_copy_upload_handler_workflow() -> WorkflowDefinition:
         ),
     )
 
+    specialised_inputs = {
+        **dict(_FILE_COPY_CONTEXT_INPUTS),
+        "workflow_id": {"$context_key": "upload_target_workflow_id"},
+        "failure_mode": WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE,
+    }
+    specialised_output_mappings = [
+        {"tool_output_field": "child_workflow_failed", "context_key": "upload_specialised_child_failed"},
+        {"tool_output_field": "subworkflow_error", "context_key": "upload_specialised_error"},
+        {"tool_output_field": "subworkflow_invocation.child_workflow_id", "context_key": "upload_specialised_workflow_id"},
+        {"tool_output_field": "subworkflow_invocation.child_final_state", "context_key": "upload_specialised_final_state"},
+    ]
     specialised = WorkflowStateSpec(
         state_id="specialised",
         actions=(
             WorkflowActionInvocation(
                 action_id=WORKFLOW_SUBWORKFLOW_ACTION_ID,
-                inputs={
-                    **dict(_FILE_COPY_CONTEXT_INPUTS),
-                    "workflow_id": {"$context_key": "upload_target_workflow_id"},
-                    "failure_mode": WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE,
-                },
+                inputs=specialised_inputs,
                 description=(
                     "Invoke specialised workflow selected by upload "
                     "classification route."
@@ -424,12 +544,17 @@ def build_file_copy_upload_handler_workflow() -> WorkflowDefinition:
             ),
         ),
         metadata={
-            "tool_output_context_mappings": [
-                {"tool_output_field": "child_workflow_failed", "context_key": "upload_specialised_child_failed"},
-                {"tool_output_field": "subworkflow_error", "context_key": "upload_specialised_error"},
-                {"tool_output_field": "subworkflow_invocation.child_workflow_id", "context_key": "upload_specialised_workflow_id"},
-                {"tool_output_field": "subworkflow_invocation.child_final_state", "context_key": "upload_specialised_final_state"},
-            ]
+            "subworkflow_contract": build_subworkflow_contract(
+                workflow_id_context_key="upload_target_workflow_id",
+                input_mappings=_subworkflow_input_mappings_from_inputs(
+                    specialised_inputs
+                ),
+                output_mappings=_subworkflow_output_mappings_from_context_mappings(
+                    specialised_output_mappings
+                ),
+                failure_mode=WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE,
+            ),
+            "tool_output_context_mappings": specialised_output_mappings,
         },
         transitions=(
             WorkflowTransitionSpec(
@@ -473,16 +598,23 @@ def build_file_copy_upload_handler_workflow() -> WorkflowDefinition:
         ),
     )
 
+    interpret_inputs = {
+        **dict(_FILE_COPY_CONTEXT_INPUTS),
+        "workflow_id": FILE_COPY_INTERPRETATION_WORKFLOW_ID,
+        "failure_mode": WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE,
+    }
+    interpret_output_mappings = [
+        {"tool_output_field": "child_workflow_failed", "context_key": "upload_interpret_child_failed"},
+        {"tool_output_field": "subworkflow_error", "context_key": "upload_interpret_error"},
+        {"tool_output_field": "subworkflow_invocation.child_workflow_id", "context_key": "upload_interpret_workflow_id"},
+        {"tool_output_field": "subworkflow_invocation.child_final_state", "context_key": "upload_interpret_final_state"},
+    ]
     interpret = WorkflowStateSpec(
         state_id="interpret",
         actions=(
             WorkflowActionInvocation(
                 action_id=WORKFLOW_SUBWORKFLOW_ACTION_ID,
-                inputs={
-                    **dict(_FILE_COPY_CONTEXT_INPUTS),
-                    "workflow_id": FILE_COPY_INTERPRETATION_WORKFLOW_ID,
-                    "failure_mode": WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE,
-                },
+                inputs=interpret_inputs,
                 description=(
                     "Invoke baseline file-copy interpretation workflow for "
                     "safe non-specialised handling."
@@ -490,12 +622,17 @@ def build_file_copy_upload_handler_workflow() -> WorkflowDefinition:
             ),
         ),
         metadata={
-            "tool_output_context_mappings": [
-                {"tool_output_field": "child_workflow_failed", "context_key": "upload_interpret_child_failed"},
-                {"tool_output_field": "subworkflow_error", "context_key": "upload_interpret_error"},
-                {"tool_output_field": "subworkflow_invocation.child_workflow_id", "context_key": "upload_interpret_workflow_id"},
-                {"tool_output_field": "subworkflow_invocation.child_final_state", "context_key": "upload_interpret_final_state"},
-            ]
+            "subworkflow_contract": build_subworkflow_contract(
+                workflow_id=FILE_COPY_INTERPRETATION_WORKFLOW_ID,
+                input_mappings=_subworkflow_input_mappings_from_inputs(
+                    interpret_inputs
+                ),
+                output_mappings=_subworkflow_output_mappings_from_context_mappings(
+                    interpret_output_mappings
+                ),
+                failure_mode=WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE,
+            ),
+            "tool_output_context_mappings": interpret_output_mappings,
         },
         transitions=(
             WorkflowTransitionSpec(
@@ -565,8 +702,9 @@ def build_file_copy_upload_handler_workflow() -> WorkflowDefinition:
 
     return WorkflowDefinition(
         workflow_id=FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
-        initial_state="classify",
+        initial_state="typing",
         states={
+            "typing": typing,
             "classify": classify,
             "specialised": specialised,
             "specialised_failed": specialised_failed,
@@ -579,8 +717,9 @@ def build_file_copy_upload_handler_workflow() -> WorkflowDefinition:
         },
         termination_states=("complete", "failed"),
         purpose=(
-            "Workflow-first file upload handler with classification subworkflow, "
-            "specialised routing, fail-closed guardrails, and inspectable outcomes."
+            "Workflow-first file upload handler with authoritative typing, "
+            "classification subworkflow, specialised routing, fail-closed "
+            "guardrails, and inspectable outcomes."
         ),
     )
 

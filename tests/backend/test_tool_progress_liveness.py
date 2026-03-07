@@ -167,6 +167,44 @@ def test_progress_event_contains_required_telemetry_fields(monkeypatch) -> None:
     assert isinstance(serialised["activity_idle_ms"], int)
 
 
+def test_progress_goal_label_and_candidate_count_are_serialised(monkeypatch) -> None:
+    clock = _set_clock(monkeypatch, start=4100.0)
+
+    von_routes._set_tool_progress(
+        "scope-goal",
+        "req-goal",
+        {
+            "status": "thinking",
+            "phase": "workflow_discovery_complete",
+            "request_id": "req-goal",
+            "goal_label": "Fully represent the paper #V#uploaded_file_copy_123",
+            "workflow_match_count": 0,
+            "workflow_candidate_count": 1,
+        },
+    )
+
+    state = von_routes._get_tool_progress("scope-goal", "req-goal")
+    assert state is not None
+
+    serialised = von_routes._serialise_tool_progress_state(state, now_epoch=clock["now"])
+    assert (
+        serialised["goal_label"]
+        == "Fully represent the paper #V#uploaded_file_copy_123"
+    )
+
+    events = serialised.get("diagnostic_events")
+    assert isinstance(events, list)
+    assert events[-1].get("goal_label") == serialised["goal_label"]
+    assert events[-1].get("workflow_candidate_count") == 1
+
+    progress_events = von_routes._normalise_progress_events_from_diagnostic_events(events)
+    assert progress_events[-1].get("goal_label") == serialised["goal_label"]
+
+    summary = von_routes._build_tool_progress_compact_summary(serialised)
+    assert isinstance(summary, dict)
+    assert summary.get("goal_label") == serialised["goal_label"]
+
+
 def test_live_progress_serialisation_includes_workflow_stage_path(monkeypatch) -> None:
     clock = _set_clock(monkeypatch, start=4200.0)
 

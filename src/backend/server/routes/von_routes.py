@@ -206,20 +206,106 @@ def _progress_number(value: Any) -> float | None:
     return None
 
 
+def _normalise_progress_goal_label(
+    value: Any,
+    *,
+    limit: int = 160,
+) -> str | None:
+    if not isinstance(value, str):
+        return None
+    collapsed = re.sub(r"\s+", " ", value).strip()
+    if not collapsed:
+        return None
+    if len(collapsed) <= limit:
+        return collapsed
+    if limit <= 3:
+        return collapsed[:limit]
+    return f"{collapsed[: limit - 3].rstrip()}..."
+
+
+def _summarise_progress_goal_targets(values: Any) -> str | None:
+    if not isinstance(values, (list, tuple)):
+        return None
+    targets: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        target = _normalise_progress_goal_label(value, limit=80)
+        if not target:
+            continue
+        lowered = target.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        targets.append(target)
+        if len(targets) >= 2:
+            break
+    if not targets:
+        return None
+    return ", ".join(targets)
+
+
+def _build_continuation_progress_goal_label(
+    continuation_context: Mapping[str, Any] | None,
+) -> str | None:
+    if not isinstance(continuation_context, Mapping):
+        return None
+    if continuation_context.get("applied") is not True:
+        return None
+
+    unresolved_effects = continuation_context.get("unresolved_required_effects")
+    if isinstance(unresolved_effects, list):
+        for effect in unresolved_effects:
+            if not isinstance(effect, Mapping):
+                continue
+            description = _normalise_progress_goal_label(effect.get("description"))
+            status_reason = _normalise_progress_goal_label(effect.get("status_reason"))
+            effect_type = _progress_str(effect.get("effect_type"))
+            target_text = _summarise_progress_goal_targets(effect.get("targets"))
+
+            goal = description or status_reason
+            if not goal and effect_type:
+                goal = _normalise_progress_goal_label(
+                    effect_type.replace("_", " ").strip()
+                )
+            if not goal:
+                continue
+            if target_text and target_text.lower() not in goal.lower():
+                goal = _normalise_progress_goal_label(f"{goal} [{target_text}]")
+            if goal:
+                return goal
+
+    selected_workflow_id = _progress_str(continuation_context.get("selected_workflow_id"))
+    if selected_workflow_id:
+        return _normalise_progress_goal_label(f"Continue {selected_workflow_id}")
+    return None
+
+
+def _build_progress_goal_label(
+    *,
+    prompt_text: str | None,
+    continuation_context: Mapping[str, Any] | None = None,
+) -> str | None:
+    continuation_goal = _build_continuation_progress_goal_label(continuation_context)
+    if continuation_goal:
+        return continuation_goal
+    return _normalise_progress_goal_label(prompt_text)
+
+
 def _default_stage_label(stage: str) -> str:
     mapping = {
-        "context_build": "Building context",
-        "workflow_discovery": "Searching for workflows",
-        "workflow_discovery_complete": "Found workflows",
-        "tool_plan": "Planning tool calls",
-        "tool_execute": "Executing tools",
-        "screen_backfill": "Generating response",
+        "context_build": "Understanding request",
+        "workflow_discovery": "Looking for relevant workflows",
+        "workflow_discovery_complete": "Evaluating workflow applicability",
+        "workflow_dispatch": "Selecting workflow",
+        "tool_plan": "Deciding next actions",
+        "tool_execute": "Applying actions",
+        "screen_backfill": "Composing response",
         "narration": "Generating narration",
         "buttonify": "Generating quick replies",
         "response_finalising": "Finalising response",
         "tool_recovery": "Recovering tool call",
-        "orchestrator_start": "Starting orchestrator",
-        "orchestrator_end": "Finishing orchestrator",
+        "orchestrator_start": "Planning response approach",
+        "orchestrator_end": "Finishing orchestration",
         "completed": "Complete",
         "follow_up_required": "Follow-up required",
         "error": "Error",
@@ -406,6 +492,7 @@ def _build_tool_progress_compact_summary(state: dict[str, Any] | None) -> dict[s
         "sequence_no": state.get("sequence_no"),
         "status": state.get("status"),
         "stage": state.get("stage"),
+        "goal_label": state.get("goal_label"),
         "subtask": state.get("subtask"),
         "elapsed_ms": state.get("elapsed_ms"),
         "idle_ms": state.get("activity_idle_ms", state.get("idle_ms")),
@@ -592,6 +679,7 @@ def _normalise_progress_events_from_diagnostic_events(
                 "status": _progress_str(entry.get("status")),
                 "stage": stage,
                 "sequence_no": sequence_no,
+                "goal_label": _progress_str(entry.get("goal_label")),
                 "liveness_state": _progress_str(entry.get("liveness_state")),
                 "idle_ms": idle_ms,
                 "subtask": subtask,
@@ -1888,6 +1976,11 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
         merged["status"] = status
         merged["stage"] = stage
         merged["event_kind"] = event_kind
+        goal_label = _normalise_progress_goal_label(merged.get("goal_label"))
+        if goal_label:
+            merged["goal_label"] = goal_label
+        else:
+            merged.pop("goal_label", None)
         merged["sequence_no"] = sequence_no
         merged["elapsed_ms"] = elapsed_ms
         merged["idle_ms"] = idle_ms
@@ -1928,6 +2021,7 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
             "phase": _progress_str(merged.get("phase")) or stage,
             "phase_label": _progress_str(merged.get("phase_label")),
             "stage_label": _progress_str(merged.get("stage_label")),
+            "goal_label": goal_label,
             "subtask": subtask,
             "tool": _progress_str(merged.get("tool")),
             "workflow_task": _progress_str(merged.get("workflow_task")),
@@ -1987,6 +2081,13 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
         workflow_match_count = _progress_number(merged.get("workflow_match_count"))
         if workflow_match_count is not None:
             event_entry["workflow_match_count"] = int(max(0.0, workflow_match_count))
+        workflow_candidate_count = _progress_number(
+            merged.get("workflow_candidate_count")
+        )
+        if workflow_candidate_count is not None:
+            event_entry["workflow_candidate_count"] = int(
+                max(0.0, workflow_candidate_count)
+            )
         trimmed_events = [
             *existing_events[-(_TOOL_PROGRESS_DIAGNOSTIC_EVENT_LIMIT - 1) :],
             event_entry,
@@ -5148,6 +5249,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             batch_cap = int(get_internal_mcp_tool_batch_cap())
         except Exception:
             batch_cap = 4
+        progress_goal_label = _build_progress_goal_label(prompt_text=prompt_text)
         _set_tool_progress(
             progress_scope_key,
             request_id,
@@ -5155,6 +5257,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 "status": "thinking",
                 "phase": "context_build",
                 "phase_label": "Building context",
+                "goal_label": progress_goal_label,
                 "request_id": request_id,
                 "tool": None,
                 "batch_size": None,
@@ -5164,6 +5267,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 "tool_batch_cap": batch_cap,
             },
         )
+    else:
+        progress_goal_label = None
 
     try:
         llm_client = get_llm_client(
@@ -5630,6 +5735,23 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             workflow_continuation_context = None
             workflow_discovery_query = prompt_text
 
+        progress_goal_label = _build_progress_goal_label(
+            prompt_text=prompt_text,
+            continuation_context=workflow_continuation_context,
+        )
+        if show_tool_use_progress and progress_goal_label:
+            _set_tool_progress(
+                progress_scope_key,
+                request_id,
+                {
+                    "status": "thinking",
+                    "phase": "context_build",
+                    "phase_label": "Building context",
+                    "goal_label": progress_goal_label,
+                    "request_id": request_id,
+                },
+            )
+
         # ---------------------------------------------------------
         # JVNAUTOSCI-1076: Workflow discovery during conversation turn
         # ---------------------------------------------------------
@@ -5650,6 +5772,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             "status": "thinking",
                             "phase": "workflow_discovery",
                             "phase_label": "Searching for workflows",
+                            "goal_label": progress_goal_label,
                             "request_id": request_id,
                         },
                     )
@@ -5675,6 +5798,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 # "no workflow found" step instead of silently skipping it.
                 if show_tool_use_progress:
                     match_count = int(workflow_discovery_progress.get("match_count", 0))
+                    candidate_count = int(
+                        workflow_discovery_progress.get("candidate_count", 0)
+                    )
                     _set_tool_progress(
                         progress_scope_key,
                         request_id,
@@ -5684,11 +5810,15 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             "phase_label": (
                                 "Found workflows"
                                 if match_count > 0
+                                else "Found workflow candidates"
+                                if candidate_count > 0
                                 else "No workflows found"
                             ),
+                            "goal_label": progress_goal_label,
                             "request_id": request_id,
                             "workflow_discovery": workflow_discovery_progress,
                             "workflow_match_count": match_count,
+                            "workflow_candidate_count": candidate_count,
                         },
                     )
             except Exception as e:
@@ -5702,6 +5832,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             "status": "thinking",
                             "phase": "workflow_discovery_complete",
                             "phase_label": "Workflow discovery failed",
+                            "goal_label": progress_goal_label,
                             "request_id": request_id,
                             "workflow_discovery": _normalise_workflow_discovery_progress_payload(
                                 None,
@@ -6566,6 +6697,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             "status": "orchestrator_start",
                             "stage": "orchestrator_start",
                             "phase_label": "Starting orchestrator",
+                            "goal_label": progress_goal_label,
                             "request_id": request_id,
                         },
                     )

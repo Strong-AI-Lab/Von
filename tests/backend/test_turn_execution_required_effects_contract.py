@@ -170,6 +170,7 @@ def test_person_representation_marks_completion_when_verified(monkeypatch) -> No
                 "tool": "interpret_file_copy",
                 "payload": {
                     "success": True,
+                    "concept_id": "#V#uploaded_file_copy_person_1",
                     "person_representation": {
                         "attempted": True,
                         "verified": True,
@@ -190,6 +191,54 @@ def test_person_representation_marks_completion_when_verified(monkeypatch) -> No
     completion_gate = record.get("completion_gate") or {}
     assert completion_gate.get("decision") == "completed"
     assert completion_gate.get("safe_to_claim_completion") is True
+
+
+def test_paper_representation_requires_matching_file_copy_target(monkeypatch) -> None:
+    _patch_representation_profile_loader(
+        monkeypatch, profiles=_representation_profiles()
+    )
+    record = _build_record(
+        prompt_text=(
+            "Fully represent the corresponding paper from "
+            "#V#uploaded_file_copy_abc123."
+        ),
+        response_text="Representation done.",
+        tool_invocations=[
+            {
+                "tool": "interpret_file_copy",
+                "payload": {
+                    "success": True,
+                    "file_copy_concept_id": "#V#uploaded_file_copy_other999",
+                    "scholarly_representation": {
+                        "attempted": True,
+                        "verified": True,
+                        "paper_concept_id": "#V#paper_other999",
+                    },
+                },
+            }
+        ],
+    )
+
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    assert required_effects
+    effect = required_effects[0]
+    assert effect.get("effect_type") == "scholarly_representation"
+    assert effect.get("status") == "not_executed"
+    assert effect.get("failure_code") == "paper_representation_wrong_target"
+    assert (
+        effect.get("status_reason")
+        == "Required representation tool ran, but not for the required artefact target."
+    )
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "escalation_required"
+    assert completion_gate.get("requires_follow_up") is True
+    assert completion_gate.get("safe_to_claim_completion") is False
+    assert (
+        completion_gate.get("decision_reason")
+        == "Required representation tool ran, but not for the required artefact target."
+    )
 
 
 def test_company_representation_blocks_completion_when_identity_unresolved(
@@ -242,6 +291,7 @@ def test_company_representation_marks_completion_when_verified(monkeypatch) -> N
                 "tool": "interpret_file_copy",
                 "payload": {
                     "success": True,
+                    "concept_id": "#V#uploaded_file_copy_company_1",
                     "company_representation": {
                         "attempted": True,
                         "verified": True,
@@ -314,6 +364,7 @@ def test_meeting_representation_marks_completion_when_verified(monkeypatch) -> N
                 "tool": "interpret_file_copy",
                 "payload": {
                     "success": True,
+                    "concept_id": "#V#uploaded_file_copy_meeting_1",
                     "meeting_representation": {
                         "attempted": True,
                         "verified": True,
