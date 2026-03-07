@@ -91,7 +91,13 @@ describe('LLM debug popup workflow execution hook', () => {
                 latest_progress: { status: 'completed' },
                 progress_events: [],
                 phase_history: [],
-                tool_history: []
+                tool_history: [],
+                stage_diagnostics: [
+                    {
+                        stage_id: 'workflow_discovery',
+                        event_count: 1
+                    }
+                ]
             }
         });
 
@@ -104,6 +110,12 @@ describe('LLM debug popup workflow execution hook', () => {
         expect(payload.request_id).toBe('req-456');
         expect(payload.prompt_preview).toBe('hello');
         expect(payload.workflow_discovery).toEqual({ matches: [{ concept_id: '#V#demo' }] });
+        expect(payload.stage_diagnostics).toEqual([
+            expect.objectContaining({
+                stage_id: 'workflow_discovery',
+                event_count: 1
+            })
+        ]);
         expect(payload.model).toBeUndefined();
         expect(payload.messages).toBeUndefined();
     });
