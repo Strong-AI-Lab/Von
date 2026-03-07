@@ -73,6 +73,7 @@ from .workflow_gap_recovery_workflow import (
     get_workflow_gap_test_workflow_registration,
     register_workflow_gap_recovery_actions,
 )
+from ..skill_interop import register_skill_interop_actions
 from .subworkflow_actions import register_subworkflow_actions
 from .control_flow_actions import register_control_flow_actions
 from .workflow_creation_workflow import register_workflow_creation_actions
@@ -591,6 +592,7 @@ def build_durable_action_registry() -> ActionRegistry:
     register_control_flow_actions(registry, definition_loader=_resolve_subworkflow_definition)
     register_subworkflow_actions(registry, definition_loader=_resolve_subworkflow_definition)
     register_workflow_creation_actions(registry)
+    register_skill_interop_actions(registry)
     # Keep durable action routing aligned with orchestrator routing: if an
     # action ID is not explicitly registered, treat it as an MCP tool name.
     registry.set_fallback_handler(_durable_mcp_fallback_action)

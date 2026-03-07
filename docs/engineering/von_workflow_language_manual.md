@@ -857,36 +857,37 @@ Validation and fail-closed behaviour:
 
 ### 16.6 External SKILL Interoperability
 
-VWL planning supports a dual interoperability direction for external SKILL artefacts:
+VWL now supports a constrained markdown-SKILL interoperability layer with two aligned modes:
 
-1. direct execution of supported SKILL formats through a constrained adapter runtime, and
-2. deterministic import/transpile of SKILL artefacts into VWL workflow definitions.
+1. direct execution by transpiling a compatible `SKILL.md` artefact into an ephemeral VWL definition and executing it through the ordinary workflow runtime, and
+2. deterministic transpilation of that artefact into a reusable VWL workflow definition for later materialisation in Vontology.
 
-Both modes SHOULD enforce:
+Current supported dialect contract:
 
-- capability and side-effect allowlists,
-- provenance capture from source artefact to runtime instance,
-- and canonical-task traceability across external projections.
+- canonical `SKILL.md` frontmatter is parsed deterministically using scalar-only YAML-style key/value fields;
+- required fields: `name`, `description`;
+- optional fields: `argument-hint`, `user-invokable`, `disable-model-invocation`;
+- `name` MUST be lowercase kebab-case and MUST match the parent skill directory;
+- the current direct-execution adapter is intentionally conservative: it supports instruction-body execution plus explicit deferred resource loads, but does not execute arbitrary scripts or autonomous side effects outside the workflow runtime.
 
-For compatibility with the VS Code Agent Skills model, SKILL interoperability SHOULD also support:
+Direct-execution semantics:
 
-- canonical `SKILL.md` YAML frontmatter ingestion and validation,
-- required fields: `name`, `description`,
-- optional fields: `argument-hint`, `user-invokable`, `disable-model-invocation`,
-- directory/name consistency validation (`name` MUST match parent directory),
-- and source-location provenance for project and personal skill search roots.
+- compatible skills are executed through the reusable `skill.execute_markdown` workflow action;
+- `disable-model-invocation=true` blocks automatic invocation and fails closed unless the run is explicitly manual;
+- provenance (`source_scope`, discovery root, skill directory, skill file, referenced resources) is carried into workflow metadata and runtime outputs;
+- transpiled skill workflows use ordinary VWL checkpoint and completion-gate semantics, so they remain visible to the same lightweight runtime and observability surface as any other workflow.
 
-Candidate predicate set (planning) for skill concepts:
+Skill metadata projection for Vontology now uses the following predicate set:
 
-- `#V#hasSkillName`
-- `#V#hasSkillDescription`
-- `#V#hasSkillArgumentHint`
-- `#V#isUserInvokable`
-- `#V#disablesModelInvocation`
-- `#V#hasSkillSourceScope` (`project|personal|extension|shared`)
-- `#V#hasSkillDiscoveryLocation`
+- `#V#has_skill_name`
+- `#V#has_skill_description`
+- `#V#has_skill_argument_hint`
+- `#V#is_user_invokable`
+- `#V#disables_model_invocation`
+- `#V#has_skill_source_scope` (`project|personal|extension|shared`)
+- `#V#has_skill_discovery_location`
 
-Skill loading SHOULD preserve progressive disclosure semantics:
+Skill loading preserves progressive disclosure semantics:
 
 1. discovery by lightweight metadata (`name`/`description`),
 2. instruction-body load on relevance or explicit invocation,
