@@ -414,6 +414,114 @@ def _fetch_persistent_bindings(
     return payload
 
 
+def build_event_workflow_binding_diagnostics(
+    bindings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Summarise event-binding health for operator-facing workflow tooling.
+
+    The diagnostics are intentionally conservative:
+    - flag multiple enabled bindings for one event as a conflict,
+    - surface disabled historical bindings so obsolete routes remain visible, and
+    - flag events whose persistent bindings are all disabled.
+    """
+
+    grouped: dict[str, dict[str, Any]] = {}
+    for binding in bindings:
+        if not isinstance(binding, dict):
+            continue
+        event_type = str(binding.get("event_type") or "").strip()
+        if not event_type:
+            continue
+        group = grouped.setdefault(
+            event_type,
+            {
+                "binding_ids": [],
+                "enabled_binding_ids": [],
+                "disabled_binding_ids": [],
+                "workflow_ids": [],
+                "persistent_count": 0,
+                "environment_count": 0,
+            },
+        )
+        binding_id = str(binding.get("binding_id") or "").strip()
+        if binding_id:
+            group["binding_ids"].append(binding_id)
+        workflow_id = str(binding.get("workflow_id") or "").strip()
+        if workflow_id and workflow_id not in group["workflow_ids"]:
+            group["workflow_ids"].append(workflow_id)
+        source = str(binding.get("source") or "").strip().lower()
+        enabled = bool(binding.get("enabled"))
+        if source == "persistent":
+            group["persistent_count"] += 1
+            if enabled:
+                if binding_id:
+                    group["enabled_binding_ids"].append(binding_id)
+            else:
+                if binding_id:
+                    group["disabled_binding_ids"].append(binding_id)
+        elif source == "environment":
+            group["environment_count"] += 1
+
+    diagnostics: list[dict[str, Any]] = []
+    for event_type in sorted(grouped):
+        group = grouped[event_type]
+        enabled_count = len(group["enabled_binding_ids"])
+        disabled_count = len(group["disabled_binding_ids"])
+        persistent_count = int(group["persistent_count"])
+        environment_count = int(group["environment_count"])
+        severity = ""
+        reason_code = ""
+        hint = ""
+        if enabled_count > 1:
+            severity = "warning"
+            reason_code = "multiple_enabled_bindings"
+            hint = (
+                "More than one persistent binding is enabled for this event. "
+                "Disable or delete obsolete bindings so routing remains authoritative."
+            )
+        elif persistent_count > 0 and enabled_count == 0:
+            severity = "warning"
+            reason_code = "all_persistent_bindings_disabled"
+            hint = (
+                "Persistent bindings exist but none are enabled. Enable the canonical "
+                "binding or create a new authoritative binding before relying on this event."
+            )
+        elif disabled_count > 0:
+            severity = "info"
+            reason_code = "historical_bindings_present"
+            hint = (
+                "Disabled historical bindings remain for this event. Delete them when "
+                "they are no longer needed for audit or rollback."
+            )
+        elif environment_count > 0 and persistent_count > 0:
+            severity = "info"
+            reason_code = "persistent_bindings_override_environment"
+            hint = (
+                "Persistent bindings exist alongside environment fallback wiring. "
+                "Persistent bindings are authoritative for normal operation."
+            )
+        if not reason_code:
+            continue
+        diagnostics.append(
+            {
+                "event_type": event_type,
+                "severity": severity,
+                "reason_code": reason_code,
+                "binding_count": len(group["binding_ids"]),
+                "persistent_count": persistent_count,
+                "enabled_binding_count": enabled_count,
+                "disabled_binding_count": disabled_count,
+                "environment_binding_count": environment_count,
+                "binding_ids": list(group["binding_ids"]),
+                "enabled_binding_ids": list(group["enabled_binding_ids"]),
+                "disabled_binding_ids": list(group["disabled_binding_ids"]),
+                "workflow_ids": list(group["workflow_ids"]),
+                "hint": hint,
+            }
+        )
+    return diagnostics
+
+
 def list_event_workflow_bindings(
     *,
     event_type: str | None = None,

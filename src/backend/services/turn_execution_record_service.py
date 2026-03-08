@@ -86,7 +86,9 @@ _WRITE_TOOL_NAMES = {
     "workflow_bind_event",
     "workflow_create_instance",
     "workflow_create_schedule",
+    "workflow_delete_event_binding",
     "workflow_delete_schedule",
+    "workflow_set_event_binding_enabled",
     "workflow_set_schedule_enabled",
 }
 

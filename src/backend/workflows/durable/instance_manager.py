@@ -1280,6 +1280,33 @@ class WorkflowInstanceManager:
         self._invalidate_event_binding_verification_cache(updated_binding.workflow_id)
         return updated_binding
 
+    def delete_event_binding(self, binding_id: str) -> EventWorkflowBinding | None:
+        """Delete an existing event-workflow binding.
+
+        Delete is intentionally explicit and binding-id scoped so callers can
+        review current bindings first, then remove one exact obsolete entry
+        without guessing at event/workflow pairs.
+        """
+
+        binding_id_clean = str(binding_id or "").strip()
+        if not binding_id_clean:
+            raise ValueError("binding_id is required")
+
+        coll = self._get_event_bindings_collection()
+        if coll is None:
+            raise RuntimeError("Database unavailable for event binding persistence")
+
+        existing_doc = coll.find_one({"binding_id": binding_id_clean})
+        if existing_doc is None:
+            return None
+
+        existing = EventWorkflowBinding.from_doc(existing_doc)
+        result = coll.delete_one({"binding_id": binding_id_clean})
+        if result.deleted_count <= 0:
+            raise RuntimeError("binding_delete_failed")
+        self._invalidate_event_binding_verification_cache(existing.workflow_id)
+        return existing
+
     def list_event_bindings(
         self,
         *,

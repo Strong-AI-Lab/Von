@@ -9580,7 +9580,10 @@ def _workflow_bind_event(**kwargs):
 def _workflow_list_event_bindings(**kwargs):
     """List event -> workflow bindings (persistent + optional env fallback)."""
 
-    from ...services.workflow_event_integration_service import list_event_workflow_bindings
+    from ...services.workflow_event_integration_service import (
+        build_event_workflow_binding_diagnostics,
+        list_event_workflow_bindings,
+    )
 
     event_type = kwargs.get("event_type")
     enabled_only = kwargs.get("enabled_only", False)
@@ -9604,10 +9607,125 @@ def _workflow_list_event_bindings(**kwargs):
         include_env_fallback=include_env_fallback,
         limit=limit,
     )
+    diagnostics = build_event_workflow_binding_diagnostics(bindings)
     return {
         "success": True,
         "bindings": bindings,
         "count": len(bindings),
+        "diagnostics": diagnostics,
+        "has_conflicts": any(
+            str(item.get("severity") or "").strip().lower() == "warning"
+            for item in diagnostics
+            if isinstance(item, dict)
+        ),
+    }
+
+
+def _workflow_set_event_binding_enabled(**kwargs):
+    """Enable or disable a persisted event -> workflow binding."""
+
+    from ...services.workflow_event_integration_service import (
+        resolve_event_actor_context,
+    )
+    from ...workflows.durable import WorkflowInstanceManager
+
+    binding_id = kwargs.get("binding_id")
+    if not isinstance(binding_id, str) or not binding_id.strip():
+        return make_error_response(
+            "missing_parameter",
+            "binding_id is required",
+            details={"missing": ["binding_id"]},
+        )
+
+    enabled = kwargs.get("enabled")
+    if not isinstance(enabled, bool):
+        return make_error_response(
+            "missing_parameter",
+            "enabled (boolean) is required",
+            details={"missing": ["enabled"]},
+        )
+
+    actor = kwargs.get("actor")
+    actor_clean = actor.strip() if isinstance(actor, str) and actor.strip() else None
+    if actor_clean is None:
+        actor_id, _actor_org = resolve_event_actor_context()
+        actor_clean = actor_id
+
+    manager = WorkflowInstanceManager()
+    existing = manager.get_event_binding(binding_id.strip())
+    if existing is None:
+        return make_error_response(
+            "not_found",
+            f"Event binding not found: {binding_id}",
+        )
+    prior_enabled = bool(existing.enabled)
+    prior_revision = int(existing.revision)
+
+    try:
+        binding = manager.set_event_binding_enabled(
+            binding_id.strip(),
+            enabled=enabled,
+            actor=actor_clean,
+        )
+    except Exception as exc:
+        return make_error_response(
+            "update_failed",
+            f"Failed to update event binding: {exc}",
+            details={"binding_id": binding_id},
+        )
+
+    if binding is None:
+        return make_error_response(
+            "not_found",
+            f"Event binding not found: {binding_id}",
+        )
+
+    return {
+        "success": True,
+        "binding": binding.to_status_dict(),
+        "binding_id": binding.binding_id,
+        "enabled": bool(binding.enabled),
+        "updated": bool(
+            prior_enabled != bool(binding.enabled)
+            or prior_revision != int(binding.revision)
+        ),
+    }
+
+
+def _workflow_delete_event_binding(**kwargs):
+    """Delete a persisted event -> workflow binding by binding_id."""
+
+    from ...workflows.durable import WorkflowInstanceManager
+
+    binding_id = kwargs.get("binding_id")
+    if not isinstance(binding_id, str) or not binding_id.strip():
+        return make_error_response(
+            "missing_parameter",
+            "binding_id is required",
+            details={"missing": ["binding_id"]},
+        )
+
+    manager = WorkflowInstanceManager()
+    try:
+        deleted = manager.delete_event_binding(binding_id.strip())
+    except Exception as exc:
+        return make_error_response(
+            "delete_failed",
+            f"Failed to delete event binding: {exc}",
+            details={"binding_id": binding_id},
+        )
+
+    if deleted is None:
+        return make_error_response(
+            "not_found",
+            f"Event binding not found: {binding_id}",
+        )
+
+    return {
+        "success": True,
+        "deleted": True,
+        "binding_id": deleted.binding_id,
+        "binding": deleted.to_status_dict(),
     }
 
 
@@ -20456,7 +20574,12 @@ def build_default_catalogue() -> MethodCatalogue:
             ),
             output_schema=Schema(
                 required={"success": bool, "bindings": list, "count": int},
-                optional={"error": str, "error_code": str},
+                optional={
+                    "diagnostics": list,
+                    "has_conflicts": bool,
+                    "error": str,
+                    "error_code": str,
+                },
                 allow_unknown=True,
                 description="List of event->workflow bindings.",
             ),
@@ -20464,6 +20587,61 @@ def build_default_catalogue() -> MethodCatalogue:
             description=(
                 "List event bindings from persistent storage, with optional environment fallback "
                 "entries for legacy compatibility."
+            ),
+        ),
+        MethodDefinition(
+            name="workflow_set_event_binding_enabled",
+            handler=_workflow_set_event_binding_enabled,
+            input_schema=Schema(
+                required={"binding_id": str, "enabled": bool},
+                optional={"actor": (str, type(None))},
+                allow_unknown=True,
+                description="Enable or disable an event->workflow binding by binding_id.",
+            ),
+            output_schema=Schema(
+                required={"success": bool},
+                optional={
+                    "binding": dict,
+                    "binding_id": str,
+                    "enabled": bool,
+                    "updated": bool,
+                    "error": str,
+                    "error_code": str,
+                },
+                allow_unknown=True,
+                description="Event binding enabled/disabled result.",
+            ),
+            category="write",
+            description=(
+                "Enable or disable an existing event binding without deleting it. "
+                "Use workflow_list_event_bindings first to identify binding_id values."
+            ),
+        ),
+        MethodDefinition(
+            name="workflow_delete_event_binding",
+            handler=_workflow_delete_event_binding,
+            input_schema=Schema(
+                required={"binding_id": str},
+                optional={},
+                allow_unknown=True,
+                description="Delete an event->workflow binding by binding_id.",
+            ),
+            output_schema=Schema(
+                required={"success": bool},
+                optional={
+                    "deleted": bool,
+                    "binding_id": str,
+                    "binding": dict,
+                    "error": str,
+                    "error_code": str,
+                },
+                allow_unknown=True,
+                description="Event binding deletion result.",
+            ),
+            category="write",
+            description=(
+                "Delete a persisted event binding permanently. Use workflow_list_event_bindings "
+                "to review bindings and diagnostics before removal."
             ),
         ),
         MethodDefinition(

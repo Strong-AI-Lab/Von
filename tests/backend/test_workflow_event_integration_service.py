@@ -273,6 +273,84 @@ def test_ensure_default_event_bindings_disables_conflicting_file_copy_routes(
     )
 
 
+def test_build_event_workflow_binding_diagnostics_reports_operator_actions() -> None:
+    multiple_enabled_a = EventWorkflowBinding.create(
+        event_type="file_copy.uploaded",
+        workflow_id="#V#file_copy_upload_handler_workflow",
+        input_mapping={"concept_id": "event.file_copy_concept_id"},
+        enabled=True,
+        actor="test",
+    )
+    multiple_enabled_b = EventWorkflowBinding.create(
+        event_type="file_copy.uploaded",
+        workflow_id="#V#legacy_upload_workflow",
+        input_mapping={"concept_id": "event.file_copy_concept_id"},
+        enabled=True,
+        actor="test",
+    )
+    disabled_only = EventWorkflowBinding.create(
+        event_type="task.created",
+        workflow_id="#V#task_followup_workflow",
+        input_mapping={"task_concept_id": "event.task_concept_id"},
+        enabled=False,
+        actor="test",
+    )
+    historical_enabled = EventWorkflowBinding.create(
+        event_type="concept.updated",
+        workflow_id="#V#enrichment_workflow",
+        input_mapping={"concept_id": "event.concept_id"},
+        enabled=True,
+        actor="test",
+    )
+    historical_disabled = EventWorkflowBinding.create(
+        event_type="concept.updated",
+        workflow_id="#V#legacy_enrichment_workflow",
+        input_mapping={"concept_id": "event.concept_id"},
+        enabled=False,
+        actor="test",
+    )
+    persistent_with_env = EventWorkflowBinding.create(
+        event_type="vontology.mutated",
+        workflow_id="#V#vontology_mutation_governance_workflow",
+        input_mapping={"concept_id": "event.concept_id"},
+        enabled=True,
+        actor="test",
+    )
+
+    bindings = [
+        {**multiple_enabled_a.to_status_dict(), "source": "persistent"},
+        {**multiple_enabled_b.to_status_dict(), "source": "persistent"},
+        {**disabled_only.to_status_dict(), "source": "persistent"},
+        {**historical_enabled.to_status_dict(), "source": "persistent"},
+        {**historical_disabled.to_status_dict(), "source": "persistent"},
+        {**persistent_with_env.to_status_dict(), "source": "persistent"},
+        {
+            "binding_id": "env:vontology.mutated",
+            "event_type": "vontology.mutated",
+            "workflow_id": "#V#env_fallback_workflow",
+            "enabled": True,
+            "source": "environment",
+        },
+    ]
+
+    diagnostics = workflow_event_service.build_event_workflow_binding_diagnostics(
+        bindings
+    )
+
+    by_event = {item["event_type"]: item for item in diagnostics}
+    assert by_event["file_copy.uploaded"]["reason_code"] == "multiple_enabled_bindings"
+    assert by_event["file_copy.uploaded"]["severity"] == "warning"
+    assert by_event["task.created"]["reason_code"] == "all_persistent_bindings_disabled"
+    assert by_event["task.created"]["severity"] == "warning"
+    assert by_event["concept.updated"]["reason_code"] == "historical_bindings_present"
+    assert by_event["concept.updated"]["severity"] == "info"
+    assert (
+        by_event["vontology.mutated"]["reason_code"]
+        == "persistent_bindings_override_environment"
+    )
+    assert by_event["vontology.mutated"]["environment_binding_count"] == 1
+
+
 @patch("src.backend.services.workflow_event_integration_service.get_instance_manager")
 def test_launch_event_workflow_uses_persistent_binding_input_mapping(
     mock_get_instance_manager: MagicMock,

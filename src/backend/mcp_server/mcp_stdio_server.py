@@ -143,6 +143,7 @@ from src.backend.integrations.internal_mcp.catalogue import _workflow_bind_event
 from src.backend.integrations.internal_mcp.catalogue import _workflow_cancel_instance
 from src.backend.integrations.internal_mcp.catalogue import _workflow_create_instance
 from src.backend.integrations.internal_mcp.catalogue import _workflow_create_schedule
+from src.backend.integrations.internal_mcp.catalogue import _workflow_delete_event_binding
 from src.backend.integrations.internal_mcp.catalogue import _workflow_delete_schedule
 from src.backend.integrations.internal_mcp.catalogue import _workflow_get_instance
 from src.backend.integrations.internal_mcp.catalogue import _workflow_get_schedule
@@ -152,6 +153,9 @@ from src.backend.integrations.internal_mcp.catalogue import _workflow_list_insta
 from src.backend.integrations.internal_mcp.catalogue import _workflow_list_schedules
 from src.backend.integrations.internal_mcp.catalogue import _workflow_mcp_health_check
 from src.backend.integrations.internal_mcp.catalogue import _workflow_retry_instance
+from src.backend.integrations.internal_mcp.catalogue import (
+    _workflow_set_event_binding_enabled,
+)
 from src.backend.integrations.internal_mcp.catalogue import (
     _workflow_set_schedule_enabled,
 )
@@ -2667,6 +2671,26 @@ async def _handle_workflow_list_event_bindings(
     )
 
 
+async def _handle_workflow_set_event_binding_enabled(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _workflow_set_event_binding_enabled,
+        arguments,
+        tool_family_label="Workflow",
+    )
+
+
+async def _handle_workflow_delete_event_binding(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _workflow_delete_event_binding,
+        arguments,
+        tool_family_label="Workflow",
+    )
+
+
 async def _handle_workflow_mcp_health_check(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
@@ -3032,6 +3056,8 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "workflow_list_definitions": _handle_workflow_list_definitions,
     "workflow_bind_event": _handle_workflow_bind_event,
     "workflow_list_event_bindings": _handle_workflow_list_event_bindings,
+    "workflow_set_event_binding_enabled": _handle_workflow_set_event_binding_enabled,
+    "workflow_delete_event_binding": _handle_workflow_delete_event_binding,
     "workflow_mcp_health_check": _handle_workflow_mcp_health_check,
     "workflow_create_instance": _handle_workflow_create_instance,
     "workflow_list_instances": _handle_workflow_list_instances,

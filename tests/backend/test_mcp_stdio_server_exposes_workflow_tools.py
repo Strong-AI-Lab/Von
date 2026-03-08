@@ -6,6 +6,8 @@ WORKFLOW_TOOL_NAMES = {
     "workflow_list_definitions",
     "workflow_bind_event",
     "workflow_list_event_bindings",
+    "workflow_set_event_binding_enabled",
+    "workflow_delete_event_binding",
     "workflow_mcp_health_check",
     "workflow_create_instance",
     "workflow_list_instances",
