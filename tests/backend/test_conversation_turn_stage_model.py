@@ -1,11 +1,93 @@
+import pytest
+
+from src.backend.workflows import conversation_turn_stage_model as stage_model
 from src.backend.workflows.conversation_turn_stage_model import (
     build_conversation_turn_stage_model_snapshot,
     build_conversation_turn_stage_path,
 )
 from src.backend.workflows.definitions import (
     CHAT_BUTTONIFY_WORKFLOW_ID,
+    CHAT_ASSISTANT_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
+    TURN_COMPLETION_GATE_WORKFLOW_ID,
 )
+
+
+@pytest.fixture(autouse=True)
+def _patch_stage_catalogue(monkeypatch: pytest.MonkeyPatch) -> None:
+    specs = (
+        stage_model._StageSpec(
+            stage_id="workflow_discovery",
+            stage_label="Workflow discovery",
+            order=20,
+            stage_kind="non_formal",
+            boundary_type="routing",
+            stage_concept_id="#V#conversation_turn_stage_workflow_discovery",
+            runtime_aliases=("workflow_discovery",),
+        ),
+        stage_model._StageSpec(
+            stage_id="workflow_dispatch",
+            stage_label="Workflow dispatch",
+            order=30,
+            stage_kind="non_formal",
+            boundary_type="routing",
+            stage_concept_id="#V#conversation_turn_stage_workflow_dispatch",
+            runtime_aliases=("workflow_dispatch",),
+        ),
+        stage_model._StageSpec(
+            stage_id="tool_execute",
+            stage_label="Execute tool calls",
+            order=70,
+            stage_kind="formal",
+            boundary_type="execution",
+            stage_concept_id="#V#conversation_turn_stage_tool_execute",
+            workflow_id=TOOL_CALLING_WORKFLOW_ID,
+            workflow_state_id="execute",
+            runtime_aliases=("tool_execute", "execute"),
+        ),
+        stage_model._StageSpec(
+            stage_id="completion_gate",
+            stage_label="Completion gate",
+            order=100,
+            stage_kind="formal",
+            boundary_type="completion_gate",
+            stage_concept_id="#V#conversation_turn_stage_completion_gate",
+            workflow_id=TURN_COMPLETION_GATE_WORKFLOW_ID,
+            workflow_state_id="completion_gate",
+            runtime_aliases=("completion_gate",),
+        ),
+        stage_model._StageSpec(
+            stage_id="buttonify",
+            stage_label="Buttonify output transformation",
+            order=125,
+            stage_kind="non_formal",
+            boundary_type="render",
+            stage_concept_id="#V#conversation_turn_stage_buttonify",
+            workflow_id=CHAT_BUTTONIFY_WORKFLOW_ID,
+            runtime_aliases=("buttonify",),
+        ),
+        stage_model._StageSpec(
+            stage_id="response_finalising",
+            stage_label="Finalising response",
+            order=128,
+            stage_kind="non_formal",
+            boundary_type="postprocess",
+            stage_concept_id="#V#conversation_turn_stage_response_finalising",
+            runtime_aliases=("response_finalising",),
+        ),
+        stage_model._StageSpec(
+            stage_id="completed",
+            stage_label="Completed",
+            order=190,
+            stage_kind="formal",
+            boundary_type="terminal",
+            stage_concept_id="#V#conversation_turn_stage_completed",
+            runtime_aliases=("completed",),
+        ),
+    )
+    alias_index = stage_model._build_alias_index(specs)
+    monkeypatch.setattr(stage_model, "_load_stage_specs", lambda: specs)
+    monkeypatch.setattr(stage_model, "_load_alias_index", lambda: alias_index)
 
 
 def test_stage_model_snapshot_exposes_formal_and_non_formal_stages() -> None:
@@ -82,3 +164,19 @@ def test_stage_path_maps_response_finalising_runtime_stage() -> None:
     assert len(path) == 1
     assert path[0]["stage_id"] == "response_finalising"
     assert path[0]["runtime_stage_normalised"] == "response_finalising"
+
+
+def test_stage_path_prefers_mapped_execution_workflow_over_route_hint() -> None:
+    result = build_conversation_turn_stage_path(
+        runtime_stages=["workflow_dispatch", "tool_execute"],
+        workflow_id=CHAT_ASSISTANT_WORKFLOW_ID,
+    )
+
+    assert result["workflow_id"] == TOOL_CALLING_WORKFLOW_ID
+    assert result["workflow_id_source"] == "mapped_stage_consensus"
+    assert result["observed_workflow_ids"] == [TOOL_CALLING_WORKFLOW_ID]
+    path = result["path"]
+    assert len(path) == 2
+    assert path[0]["stage_id"] == "workflow_dispatch"
+    assert path[1]["stage_id"] == "tool_execute"
+    assert path[1]["workflow_id"] == TOOL_CALLING_WORKFLOW_ID

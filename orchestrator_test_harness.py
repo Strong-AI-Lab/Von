@@ -36,13 +36,15 @@ def _stub_stage_model_snapshot() -> dict[str, Any]:
     }
 
 
-def _stub_stage_path(*, runtime_stages: Any, **_kwargs) -> dict[str, Any]:
+def _stub_stage_path(*, runtime_stages: Any, **kwargs) -> dict[str, Any]:
     snapshot = _stub_stage_model_snapshot()
     stage_lookup = {
         str(entry.get("stage_id")): dict(entry)
         for entry in snapshot["stages"]
         if isinstance(entry, dict) and isinstance(entry.get("stage_id"), str)
     }
+    workflow_hint = kwargs.get("workflow_id")
+    workflow_hint = workflow_hint.strip() if isinstance(workflow_hint, str) and workflow_hint.strip() else None
     ordered_runtime_stages: list[str] = []
     for item in runtime_stages or []:
         if not isinstance(item, str):
@@ -57,6 +59,8 @@ def _stub_stage_path(*, runtime_stages: Any, **_kwargs) -> dict[str, Any]:
         ordered_runtime_stages.append(cleaned)
 
     path = []
+    observed_workflow_ids: list[str] = []
+    observed_workflow_keys: set[str] = set()
     for sequence_no, stage_id in enumerate(ordered_runtime_stages):
         entry: dict[str, Any] = dict(
             stage_lookup.get(stage_id) or {"stage_id": stage_id}
@@ -67,12 +71,30 @@ def _stub_stage_path(*, runtime_stages: Any, **_kwargs) -> dict[str, Any]:
         entry["runtime_stage_normalised"] = stage_id
         entry["mapping_status"] = "mapped"
         path.append(entry)
+        mapped_workflow_id = entry.get("workflow_id")
+        if isinstance(mapped_workflow_id, str) and mapped_workflow_id.strip():
+            dedupe_key = mapped_workflow_id.strip().lower()
+            if dedupe_key not in observed_workflow_keys:
+                observed_workflow_keys.add(dedupe_key)
+                observed_workflow_ids.append(mapped_workflow_id.strip())
+
+    if len(observed_workflow_ids) == 1:
+        root_workflow_id = observed_workflow_ids[0]
+        workflow_id_source = "mapped_stage_consensus"
+    elif observed_workflow_ids:
+        root_workflow_id = None
+        workflow_id_source = "mixed_stage_membership"
+    else:
+        root_workflow_id = workflow_hint
+        workflow_id_source = "route_hint" if workflow_hint else None
 
     return {
         "schema_version": "conversation_turn_stage_path.v1",
         "stage_model_schema_version": snapshot["schema_version"],
         "workflow_representation_id": snapshot["workflow_representation_id"],
-        "workflow_id": None,
+        "workflow_id": root_workflow_id,
+        "workflow_id_source": workflow_id_source,
+        "observed_workflow_ids": observed_workflow_ids,
         "has_unmapped_runtime_stages": False,
         "unmapped_runtime_stages": [],
         "path": path,
