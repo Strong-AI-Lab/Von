@@ -35,15 +35,58 @@
 			"group": "test"
 		},
 		{
-			"label": "pytest:backend (test db)",
+			"label": "pytest:backend recommend (git diff)",
 			"type": "shell",
-			"command": "& { $env:VON_DB_NAME = 'test_von_db'; pdm run pytest tests/backend -q }",
+			"command": "pdm run python scripts/pytest_lanes.py recommend --git-diff origin/main --risk normal",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "pytest:backend lane",
+			"type": "shell",
+			"command": "pdm run python scripts/pytest_lanes.py run-lane ${input:pytestLane}",
 			"isBackground": false,
 			"problemMatcher": [],
 			"group": {
 				"kind": "test",
 				"isDefault": true
 			}
+		},
+		{
+			"label": "pytest:backend aggregate plan",
+			"type": "shell",
+			"command": "pdm run python scripts/pytest_lanes.py aggregate-plan",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "pytest:backend (test db)",
+			"type": "shell",
+			"command": "& { $env:VON_DB_NAME = 'test_von_db'; pdm run pytest tests/backend -q }",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		}
+	],
+	"inputs": [
+		{
+			"id": "pytestLane",
+			"type": "pickString",
+			"description": "Select the deterministic pytest lane to run",
+			"options": [
+				"backend-core",
+				"backend-routes",
+				"backend-mcp",
+				"backend-workflows",
+				"backend-integration",
+				"backend-external-like",
+				"backend-heavy",
+				"infra",
+				"manual"
+			],
+			"default": "backend-core"
 		}
 	]
 }

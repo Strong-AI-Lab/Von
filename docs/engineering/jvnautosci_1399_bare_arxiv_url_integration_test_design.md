@@ -7,15 +7,16 @@ workflow-governed scholarly-paper representation from arXiv URLs.
 It exists because adjacent coverage already passes while the real route can
 still fail before any tool executes, as shown by `JVNAUTOSCI-1394`. It also
 takes account of the recent provider-aware dispatch fix in `JVNAUTOSCI-1396`
-and the targeted-testing constraint tracked in `JVNAUTOSCI-1400`.
+and the deterministic targeted-lane pytest workflow established by
+`JVNAUTOSCI-1400`.
 
 ## Linked Work
 
 - `JVNAUTOSCI-1394`: implementation bug for arXiv URL representation turns
 - `JVNAUTOSCI-1369`: required-effects and completion-gate groundwork
 - `JVNAUTOSCI-1396`: provider-aware workflow-dispatch fix already merged
-- `JVNAUTOSCI-1400`: full pytest suite is currently operationally infeasible;
-  validation should stay targeted
+- `JVNAUTOSCI-1400`: deterministic targeted and aggregate lane strategy;
+  validation should follow `docs/engineering/pytest_lane_strategy.md`
 
 ## Authoritative Behaviour Decision
 
@@ -400,8 +401,8 @@ This protects the explicit-denial boundary.
 
 ## Validation Scope
 
-Per `JVNAUTOSCI-1400`, validation for the eventual implementation should stay
-targeted:
+Per `JVNAUTOSCI-1400` and `docs/engineering/pytest_lane_strategy.md`,
+validation for the eventual implementation should stay targeted:
 
 - the new route-level arXiv integration test module
 - adjacent required-effects/turn-record tests only if the implementation

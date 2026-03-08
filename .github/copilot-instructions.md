@@ -19,7 +19,7 @@ Follow these instructions to be productive and compliant with project standards.
   - JS: `npm` (e.g., `npm run test`).
 - **Running the App**: `./run.ps1` (starts Flask + frontend).
 - **Testing**:
-  - Backend: `pdm run pytest tests/backend` (Use `pytest:backend (test db)` task for safety).
+  - Backend: `pdm run python scripts/pytest_lanes.py recommend --git-diff origin/main --risk normal`, then run the suggested lane(s) or direct targets. Use `pdm run python scripts/pytest_lanes.py aggregate-plan` for broader shard coverage.
   - Frontend: `npm run test:frontend`.
   - **Critical**: Never run tests against accessing the production `von_db`.
 
