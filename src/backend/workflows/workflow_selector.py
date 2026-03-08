@@ -13,8 +13,8 @@ user's intent matches.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+from dataclasses import dataclass
+from typing import Any, Mapping, Optional, Sequence
 
 from src.backend.services.prompt_template_service import PromptTemplateService
 
@@ -47,6 +47,13 @@ class WorkflowSelection:
     prompt_id: Optional[str]
     prompt_used: str | None
     raw_response: str
+    discovered_workflow_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class WorkflowSelectionPrompt:
+    prompt_id: Optional[str]
+    prompt_text: str
     discovered_workflow_ids: tuple[str, ...] = ()
 
 
@@ -104,6 +111,29 @@ class WorkflowSelector:
                 ``discover_workflows_for_turn()``.  Each entry should have
                 ``concept_id``, ``name``, and optionally ``description``.
         """
+        selection_prompt = self.prepare_selection_prompt(
+            turn_text=turn_text,
+            discovered_workflows=discovered_workflows,
+        )
+        response = llm_client.generate(
+            prompt="Select workflow",
+            context=[{"role": "system", "content": selection_prompt.prompt_text}],
+            model=model,
+        )
+        return self.resolve_selection(
+            raw_response=response,
+            prompt_id=selection_prompt.prompt_id,
+            prompt_used=selection_prompt.prompt_text,
+            discovered_workflow_ids=selection_prompt.discovered_workflow_ids,
+        )
+
+    def prepare_selection_prompt(
+        self,
+        *,
+        turn_text: str,
+        discovered_workflows: Sequence[Mapping[str, Any]] | None = None,
+    ) -> WorkflowSelectionPrompt:
+        """Build the classifier prompt and discovered-workflow context."""
         prompt = self._prompt_service.render_prompt(
             self._classifier_prompt_ids,
             variables={"turn_text": turn_text},
@@ -133,12 +163,25 @@ class WorkflowSelector:
                     discovered_workflows="\n".join(lines)
                 )
 
-        response = llm_client.generate(
-            prompt="Select workflow",
-            context=[{"role": "system", "content": prompt_text}],
-            model=model,
+        return WorkflowSelectionPrompt(
+            prompt_id=prompt_id,
+            prompt_text=prompt_text,
+            discovered_workflow_ids=tuple(discovered_ids),
         )
-        verdict = str(response or "").strip().lower()
+
+    def resolve_selection(
+        self,
+        *,
+        raw_response: Any,
+        prompt_id: Optional[str],
+        prompt_used: str | None,
+        discovered_workflow_ids: Sequence[str] = (),
+    ) -> WorkflowSelection:
+        """Resolve a raw classifier response into a workflow selection."""
+        verdict = str(raw_response or "").strip().lower()
+        discovered_ids = tuple(
+            item for item in discovered_workflow_ids if isinstance(item, str) and item
+        )
 
         # Resolve verdict → workflow_id.
         # 1. Check static verdict mapping.
@@ -173,7 +216,7 @@ class WorkflowSelector:
             workflow_id=workflow_id or "",
             verdict=verdict or "",
             prompt_id=prompt_id,
-            prompt_used=prompt_text,
-            raw_response=str(response or ""),
+            prompt_used=prompt_used,
+            raw_response=str(raw_response or ""),
             discovered_workflow_ids=tuple(discovered_ids),
         )
