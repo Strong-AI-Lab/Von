@@ -1,6 +1,17 @@
 import pytest
 from flask import Flask
 
+_VERSION_INFO = {
+    "schema_version": "runtime_code_version.v1",
+    "version": "test-version+gabcd1234",
+    "source": "test",
+    "legacy_app_version": "legacy-test-version",
+    "git_commit": "abcd1234abcd1234abcd1234abcd1234abcd1234",
+    "git_short_commit": "abcd1234",
+    "git_branch": "test-branch",
+    "git_dirty": False,
+}
+
 
 class _StubLLM:
     def __init__(self):
@@ -24,6 +35,10 @@ def app(monkeypatch):
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.get_active_model_name",
         lambda: "test-model",
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_runtime_code_version_info",
+        lambda: dict(_VERSION_INFO),
     )
 
     monkeypatch.setattr(
@@ -87,6 +102,10 @@ def test_generate_debug_stored_context_uses_persisted_history_for_authenticated_
     assert isinstance(diagnostics, dict)
     assert diagnostics.get("request_id") == body.get("request_id")
     assert diagnostics.get("prompt_preview") == "Hello"
+    assert llm_debug.get("code_version") == _VERSION_INFO["version"]
+    assert llm_debug.get("code_version_details") == _VERSION_INFO
+    assert diagnostics.get("code_version") == _VERSION_INFO["version"]
+    assert diagnostics.get("code_version_details") == _VERSION_INFO
     assert isinstance(diagnostics.get("progress_events"), list)
     assert isinstance(diagnostics.get("phase_history"), list)
     assert isinstance(diagnostics.get("tool_history"), list)

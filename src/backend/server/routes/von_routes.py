@@ -65,6 +65,9 @@ from ...services.response_transformation_telemetry import (
 from ...services.turn_execution_diagnostic_event_service import (
     derive_tool_observations_from_diagnostic_events,
 )
+from ...services.runtime_code_version_service import (
+    get_runtime_code_version_info,
+)
 from ...services.turn_execution_record_service import build_turn_execution_record
 from ...workflows import (
     CHAT_BUTTONIFY_WORKFLOW_ID,
@@ -1058,6 +1061,8 @@ def _build_turn_execution_diagnostics(
     generated_at_utc: str | None = None,
     llm_calls: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    code_version_details = get_runtime_code_version_info()
+
     prompt_preview = (
         prompt_text[:_TURN_EXECUTION_DIAGNOSTICS_PROMPT_PREVIEW_LIMIT]
         if isinstance(prompt_text, str)
@@ -1134,6 +1139,8 @@ def _build_turn_execution_diagnostics(
     return {
         "generated_at_utc": _progress_str(generated_at_utc) or _now_utc_iso(),
         "request_id": effective_request_id,
+        "code_version": _progress_str(code_version_details.get("version")),
+        "code_version_details": code_version_details,
         "elapsed_ms": elapsed_ms_value,
         "prompt_preview": prompt_preview,
         "latest_progress": latest_progress,
@@ -2947,6 +2954,16 @@ def _finalise_llm_debug_info(
 ) -> dict[str, Any]:
     if not isinstance(llm_debug_info, dict):
         return llm_debug_info
+
+    code_version_details = get_runtime_code_version_info()
+    llm_debug_info["code_version"] = _progress_str(code_version_details.get("version"))
+    llm_debug_info["code_version_details"] = code_version_details
+    diagnostics_payload = llm_debug_info.get("turn_execution_diagnostics")
+    if isinstance(diagnostics_payload, dict):
+        diagnostics_payload["code_version"] = _progress_str(
+            code_version_details.get("version")
+        )
+        diagnostics_payload["code_version_details"] = code_version_details
 
     workflow_discovery_payload = workflow_discovery
     if workflow_discovery_payload is None:
