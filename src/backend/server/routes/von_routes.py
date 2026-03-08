@@ -64,6 +64,7 @@ from ...services.response_transformation_telemetry import (
 )
 from ...services.turn_execution_diagnostic_event_service import (
     derive_tool_observations_from_diagnostic_events,
+    update_tool_observation_summary,
 )
 from ...services.runtime_code_version_service import (
     get_runtime_code_version_info,
@@ -747,6 +748,61 @@ def _derive_tool_history_from_diagnostic_events(
     )
 
 
+def _extract_tool_observation_summary_from_progress(
+    progress_state: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(progress_state, Mapping):
+        return None
+
+    has_tool_history = isinstance(progress_state.get("tool_history"), list)
+    has_tool_counts = any(
+        key in progress_state
+        for key in (
+            "tool_call_count",
+            "tool_success_count",
+            "tool_failure_count",
+            "tool_pending_count",
+            "tool_call_start_count",
+            "tool_call_end_count",
+        )
+    )
+    if not has_tool_history and not has_tool_counts:
+        return None
+
+    return update_tool_observation_summary(
+        progress_state,
+        None,
+        limit=_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT,
+    )
+
+
+def _extract_workflow_stage_path_from_progress(
+    progress_state: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(progress_state, Mapping):
+        return None
+
+    raw_stage_path = progress_state.get("workflow_stage_path")
+    if not isinstance(raw_stage_path, Mapping):
+        return None
+
+    raw_path = raw_stage_path.get("path")
+    if not isinstance(raw_path, list):
+        return None
+
+    path = [
+        dict(entry)
+        for entry in raw_path
+        if isinstance(entry, Mapping)
+    ]
+    if not path:
+        return None
+
+    stage_path = dict(raw_stage_path)
+    stage_path["path"] = path
+    return stage_path
+
+
 def _latest_event_timestamp_ms(events: list[dict[str, Any]]) -> int | None:
     for entry in reversed(events):
         timestamp = _iso_utc_to_epoch_ms(entry.get("at_utc"))
@@ -1004,6 +1060,16 @@ def _build_turn_execution_stage_diagnostics(
                 if isinstance(latest_stage_event, Mapping)
                 else None
             ),
+            "latest_result_summary": (
+                _progress_str(latest_stage_event.get("result_summary"))
+                if isinstance(latest_stage_event, Mapping)
+                else None
+            ),
+            "latest_error": (
+                _progress_str(latest_stage_event.get("error"))
+                if isinstance(latest_stage_event, Mapping)
+                else None
+            ),
         }
 
         if stage_id == "workflow_discovery" and isinstance(workflow_discovery, Mapping):
@@ -1103,10 +1169,12 @@ def _build_turn_execution_diagnostics(
         if isinstance(latest_progress, dict)
         else None
     )
-    workflow_stage_path = build_conversation_turn_stage_path(
-        runtime_stages=runtime_stages,
-        workflow_id=selected_workflow_id,
-    )
+    workflow_stage_path = _extract_workflow_stage_path_from_progress(latest_progress)
+    if workflow_stage_path is None:
+        workflow_stage_path = build_conversation_turn_stage_path(
+            runtime_stages=runtime_stages,
+            workflow_id=selected_workflow_id,
+        )
     llm_call_entries = [
         cast(dict[str, Any], entry)
         for entry in (llm_calls or [])
@@ -1116,6 +1184,11 @@ def _build_turn_execution_diagnostics(
         diagnostic_events,
         limit=_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT,
     )
+    progress_tool_observation_summary = _extract_tool_observation_summary_from_progress(
+        latest_progress
+    )
+    if progress_tool_observation_summary is not None:
+        tool_observation_summary = progress_tool_observation_summary
     tool_history = [
         cast(dict[str, Any], entry)
         for entry in (tool_observation_summary.get("tool_history") or [])
@@ -2165,6 +2238,9 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
             "liveness_reason": liveness.get("liveness_reason"),
             "stall_detected": liveness.get("stall_detected"),
         }
+        call_id = _progress_str(safe_update.get("call_id"))
+        if call_id:
+            event_entry["call_id"] = call_id
         duration_ms = _progress_number(safe_update.get("duration_ms"))
         if duration_ms is not None:
             event_entry["duration_ms"] = int(max(0.0, duration_ms))
@@ -2225,6 +2301,13 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
             event_entry,
         ]
         merged["diagnostic_events"] = trimmed_events
+        merged.update(
+            update_tool_observation_summary(
+                merged,
+                event_entry,
+                limit=_TOOL_PROGRESS_DIAGNOSTIC_EVENT_LIMIT,
+            )
+        )
         merged["diagnostic_summary"] = {
             "request_id": request_id,
             "event_count": len(trimmed_events),

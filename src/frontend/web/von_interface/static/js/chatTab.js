@@ -963,6 +963,42 @@ function toggleThinkingCardExpanded(request = getThinkingCardDisplayRequest()) {
     applyThinkingCardDisplayStateUpdate(request, { type: 'manual_toggle' });
 }
 
+function cloneThinkingToolHistory(history) {
+    if (!Array.isArray(history)) {
+        return [];
+    }
+    return history
+        .filter((entry) => entry && typeof entry === 'object')
+        .map((entry) => ({ ...entry }));
+}
+
+function getCanonicalThinkingToolHistory(request) {
+    if (!request || typeof request !== 'object') {
+        return [];
+    }
+
+    const latestProgress = (request.latestProgress && typeof request.latestProgress === 'object')
+        ? request.latestProgress
+        : null;
+    if (latestProgress && Array.isArray(latestProgress.tool_history)) {
+        return cloneThinkingToolHistory(latestProgress.tool_history);
+    }
+
+    return cloneThinkingToolHistory(request.toolUseProgressHistory);
+}
+
+function syncThinkingToolHistoryFromProgress(request, progress) {
+    if (!request || typeof request !== 'object' || !progress || typeof progress !== 'object') {
+        return false;
+    }
+    if (!Array.isArray(progress.tool_history)) {
+        return false;
+    }
+
+    request.toolUseProgressHistory = cloneThinkingToolHistory(progress.tool_history);
+    return true;
+}
+
 function createThinkingCardHistorySnapshot(request) {
     if (!request || typeof request !== 'object') {
         return null;
@@ -974,9 +1010,7 @@ function createThinkingCardHistorySnapshot(request) {
     const activityHistory = Array.isArray(request.activityHistory)
         ? request.activityHistory.map((entry) => ({ ...entry }))
         : [];
-    const toolHistory = Array.isArray(request.toolUseProgressHistory)
-        ? request.toolUseProgressHistory.map((entry) => ({ ...entry }))
-        : [];
+    const toolHistory = getCanonicalThinkingToolHistory(request);
     const workflowDiscovery = (request.workflowDiscovery && typeof request.workflowDiscovery === 'object')
         ? {
             ...request.workflowDiscovery,
@@ -1395,6 +1429,10 @@ export function __testOnly_buildThinkingProgressPresentation(progress, request =
     return buildThinkingProgressPresentation(progress, request);
 }
 
+export function __testOnly_buildThinkingDiagnosticsPayload(request = null) {
+    return buildThinkingDiagnosticsPayload(request);
+}
+
 export function __testOnly_formatThinkingEtaText(progress) {
     return formatThinkingEtaText(progress);
 }
@@ -1544,6 +1582,11 @@ function recordToolUseHistory(request, progress) {
                 timestamp: Date.now(),
             });
         }
+    }
+
+    const syncedCanonicalHistory = syncThinkingToolHistoryFromProgress(request, progress);
+    if (syncedCanonicalHistory) {
+        return;
     }
 
     // Original tool/task tracking.
@@ -1949,7 +1992,7 @@ function renderToolHistoryHTML(request) {
         return '';
     }
 
-    const toolHistory = Array.isArray(request.toolUseProgressHistory) ? request.toolUseProgressHistory : [];
+    const toolHistory = getCanonicalThinkingToolHistory(request);
 
     if (toolHistory.length === 0) {
         return '';
@@ -2379,11 +2422,7 @@ function buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request) 
     const latestProgress = (request?.latestProgress && typeof request.latestProgress === 'object')
         ? request.latestProgress
         : null;
-    const toolHistory = Array.isArray(request?.toolUseProgressHistory)
-        ? request.toolUseProgressHistory
-            .filter((entry) => entry && typeof entry === 'object')
-            .map((entry) => ({ ...entry }))
-        : [];
+    const toolHistory = getCanonicalThinkingToolHistory(request);
 
     const data = {
         stage_id: cleanStageId,
@@ -2746,11 +2785,9 @@ function buildWorkflowStageDetailPresentation(stageId, request) {
     }
 
     if (cleanStageId === 'tool_execute') {
-        const toolNames = Array.isArray(request?.toolUseProgressHistory)
-            ? request.toolUseProgressHistory
-                .map((entry) => normaliseThinkingActivityString(entry?.tool || entry?.workflowTask))
-                .filter(Boolean)
-            : [];
+        const toolNames = getCanonicalThinkingToolHistory(request)
+            .map((entry) => normaliseThinkingActivityString(entry?.tool || entry?.workflowTask))
+            .filter(Boolean);
         const uniqueToolNames = [...new Set(toolNames)];
         if (uniqueToolNames.length > 0) {
             const preview = uniqueToolNames.slice(0, 3).join(', ');
@@ -18348,7 +18385,7 @@ function buildThinkingDiagnosticsPayload(request) {
         activity_history: Array.isArray(request.activityHistory) ? request.activityHistory.slice(-40) : [],
         progress_events: Array.isArray(request.progressEvents) ? request.progressEvents.slice(-40) : [],
         phase_history: Array.isArray(request.phaseHistory) ? request.phaseHistory.slice(-40) : [],
-        tool_history: Array.isArray(request.toolUseProgressHistory) ? request.toolUseProgressHistory.slice(-40) : [],
+        tool_history: getCanonicalThinkingToolHistory(request).slice(-40),
         workflow_discovery: request.workflowDiscovery || null,
         workflow_stage_path: request.workflowStagePath || null,
         stage_diagnostics: buildThinkingStageDiagnosticsSnapshot(request)

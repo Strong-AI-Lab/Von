@@ -1,5 +1,6 @@
 import {
     __testOnly_buildThinkingProgressPresentation,
+    __testOnly_buildThinkingDiagnosticsPayload,
     __testOnly_buildWorkflowMonitorExportPayload,
     __testOnly_refreshAvailableWorkflowDefinitions,
     __testOnly_resetWorkflowDefinitionsState,
@@ -1119,6 +1120,57 @@ describe('thinking activity history normalisation', () => {
         });
         expect(fallbackHtml).toContain('fetch_concept');
         expect(fallbackHtml).toContain('Fetched');
+    });
+
+    test('prefers canonical latest progress tool history over stale local tool history', () => {
+        const request = {
+            toolUseProgressHistory: [{
+                tool: 'download_paper',
+                resultSummary: 'Downloaded: 2510.06018',
+                success: null
+            }],
+            latestProgress: {
+                tool_history: [{
+                    tool: 'download_paper',
+                    resultSummary: 'Downloaded: 2510.06018',
+                    success: true
+                }],
+                tool_call_count: 1,
+                tool_success_count: 1,
+                tool_failure_count: 0,
+                tool_pending_count: 0
+            },
+            workflowStagePath: {
+                path: [
+                    { stage_id: 'tool_execute', stage_label: 'Execute tool calls' }
+                ]
+            }
+        };
+
+        const html = __testOnly_renderThinkingCardBodyHTML(request);
+        expect(html).toContain('download_paper');
+        expect(html).toContain('Downloaded: 2510.06018');
+        expect(html).toContain('thinking-card-tool-status success');
+
+        const diagnosticsPayload = __testOnly_buildThinkingDiagnosticsPayload(request);
+        expect(diagnosticsPayload.tool_history).toEqual([
+            expect.objectContaining({
+                tool: 'download_paper',
+                resultSummary: 'Downloaded: 2510.06018',
+                success: true
+            })
+        ]);
+        expect(diagnosticsPayload.stage_diagnostics).toEqual([
+            expect.objectContaining({
+                stage_id: 'tool_execute',
+                diagnostics: expect.objectContaining({
+                    tool_call_count: 1,
+                    tool_success_count: 1,
+                    tool_failure_count: 0,
+                    tool_pending_count: 0
+                })
+            })
+        ]);
     });
 
     test('renders canonical workflow stages with selected workflow details', () => {
