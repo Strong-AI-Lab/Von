@@ -62,6 +62,9 @@ from ...services.response_transformation_telemetry import (
     build_response_transformation_telemetry_payload,
     record_response_transformation_event,
 )
+from ...services.turn_execution_diagnostic_event_service import (
+    derive_tool_observations_from_diagnostic_events,
+)
 from ...services.turn_execution_record_service import build_turn_execution_record
 from ...workflows import (
     CHAT_BUTTONIFY_WORKFLOW_ID,
@@ -729,60 +732,16 @@ def _derive_phase_history_from_diagnostic_events(
 def _derive_tool_history_from_diagnostic_events(
     events: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    tool_history: list[dict[str, Any]] = []
-
-    for entry in events:
-        tool = _progress_str(entry.get("tool")) or ""
-        workflow_task = _progress_str(entry.get("workflow_task")) or ""
-        if not tool and not workflow_task:
-            continue
-
-        phase = _progress_str(entry.get("phase")) or _progress_str(entry.get("stage")) or ""
-        result_summary = _progress_str(entry.get("result_summary")) or ""
-        status = (_progress_str(entry.get("status")) or "").lower()
-
-        batch_size_raw = _progress_number(entry.get("batch_size"))
-        batch_size: int | float | None
-        if batch_size_raw is None:
-            batch_size = None
-        elif float(batch_size_raw).is_integer():
-            batch_size = int(batch_size_raw)
-        else:
-            batch_size = float(batch_size_raw)
-
-        last = tool_history[-1] if tool_history else None
-        if (
-            isinstance(last, dict)
-            and last.get("tool") == tool
-            and last.get("workflowTask") == workflow_task
-            and last.get("batchSize") == batch_size
-        ):
-            if result_summary:
-                last["resultSummary"] = result_summary
-            if status == "tool_invoked":
-                last["success"] = True
-            elif status in {"tool_failed", "tool_blocked", "error"}:
-                last["success"] = False
-            continue
-
-        success: bool | None = None
-        if status == "tool_invoked":
-            success = True
-        elif status in {"tool_failed", "tool_blocked", "error"}:
-            success = False
-
-        tool_history.append(
-            {
-                "tool": tool,
-                "workflowTask": workflow_task,
-                "batchSize": batch_size,
-                "phase": phase,
-                "resultSummary": result_summary,
-                "success": success,
-            }
-        )
-
-    return tool_history[-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT :]
+    tool_observations = derive_tool_observations_from_diagnostic_events(
+        events,
+        limit=_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT,
+    )
+    tool_history = tool_observations.get("tool_history")
+    return (
+        [cast(dict[str, Any], entry) for entry in tool_history if isinstance(entry, dict)]
+        if isinstance(tool_history, list)
+        else []
+    )
 
 
 def _latest_event_timestamp_ms(events: list[dict[str, Any]]) -> int | None:
@@ -989,6 +948,7 @@ def _build_turn_execution_stage_diagnostics(
     diagnostic_events: list[dict[str, Any]],
     workflow_stage_path: Mapping[str, Any] | None,
     tool_history: list[dict[str, Any]],
+    tool_observation_summary: Mapping[str, Any] | None,
     workflow_discovery: Mapping[str, Any] | None,
     latest_progress: Mapping[str, Any] | None,
 ) -> list[dict[str, Any]]:
@@ -1045,8 +1005,30 @@ def _build_turn_execution_stage_diagnostics(
 
         if stage_id == "workflow_discovery" and isinstance(workflow_discovery, Mapping):
             stage_payload["workflow_discovery"] = dict(workflow_discovery)
-        if stage_id == "tool_execute" and tool_history:
-            stage_payload["tool_history"] = [dict(entry) for entry in tool_history]
+        if stage_id == "tool_execute":
+            summary_payload = (
+                tool_observation_summary if isinstance(tool_observation_summary, Mapping) else {}
+            )
+            stage_payload["tool_call_count"] = int(
+                _progress_number(summary_payload.get("tool_call_count")) or 0
+            )
+            stage_payload["tool_success_count"] = int(
+                _progress_number(summary_payload.get("tool_success_count")) or 0
+            )
+            stage_payload["tool_failure_count"] = int(
+                _progress_number(summary_payload.get("tool_failure_count")) or 0
+            )
+            stage_payload["tool_pending_count"] = int(
+                _progress_number(summary_payload.get("tool_pending_count")) or 0
+            )
+            stage_payload["tool_call_start_count"] = int(
+                _progress_number(summary_payload.get("tool_call_start_count")) or 0
+            )
+            stage_payload["tool_call_end_count"] = int(
+                _progress_number(summary_payload.get("tool_call_end_count")) or 0
+            )
+            if tool_history:
+                stage_payload["tool_history"] = [dict(entry) for entry in tool_history]
         if stage_id in {"workflow_dispatch", "plain_response"}:
             stage_payload["selected_workflow_id"] = _progress_str(
                 latest_progress_payload.get("selected_workflow_id")
@@ -1125,7 +1107,15 @@ def _build_turn_execution_diagnostics(
         for entry in (llm_calls or [])
         if isinstance(entry, dict)
     ]
-    tool_history = _derive_tool_history_from_diagnostic_events(diagnostic_events)
+    tool_observation_summary = derive_tool_observations_from_diagnostic_events(
+        diagnostic_events,
+        limit=_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT,
+    )
+    tool_history = [
+        cast(dict[str, Any], entry)
+        for entry in (tool_observation_summary.get("tool_history") or [])
+        if isinstance(entry, dict)
+    ]
     timing_breakdown = _build_timing_breakdown(
         diagnostic_events=diagnostic_events,
         phase_history=phase_history,
@@ -1136,6 +1126,7 @@ def _build_turn_execution_diagnostics(
         diagnostic_events=diagnostic_events,
         workflow_stage_path=workflow_stage_path,
         tool_history=tool_history,
+        tool_observation_summary=tool_observation_summary,
         workflow_discovery=workflow_payload,
         latest_progress=latest_progress,
     )
@@ -1151,6 +1142,16 @@ def _build_turn_execution_diagnostics(
         ),
         "phase_history": phase_history,
         "tool_history": tool_history,
+        "tool_call_count": int(_progress_number(tool_observation_summary.get("tool_call_count")) or 0),
+        "tool_success_count": int(_progress_number(tool_observation_summary.get("tool_success_count")) or 0),
+        "tool_failure_count": int(_progress_number(tool_observation_summary.get("tool_failure_count")) or 0),
+        "tool_pending_count": int(_progress_number(tool_observation_summary.get("tool_pending_count")) or 0),
+        "tool_call_start_count": int(
+            _progress_number(tool_observation_summary.get("tool_call_start_count")) or 0
+        ),
+        "tool_call_end_count": int(
+            _progress_number(tool_observation_summary.get("tool_call_end_count")) or 0
+        ),
         "workflow_discovery": workflow_payload,
         "workflow_stage_model": build_conversation_turn_stage_model_snapshot(),
         "workflow_stage_path": workflow_stage_path,

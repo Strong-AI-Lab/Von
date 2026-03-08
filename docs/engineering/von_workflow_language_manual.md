@@ -242,9 +242,12 @@ For chat progress payloads consumed by the thinking card:
 For live chat progress payloads used by workflow-aware thinking-card rendering:
 
 - the payload SHOULD include `workflow_stage_path` derived from the canonical conversation-turn stage model, not just raw internal event/status labels;
+- `workflow_stage_path.workflow_id` SHOULD represent the mapped execution-stage consensus when the observed stage path yields one unambiguous workflow, and SHOULD fall back to the selected-route hint only when the stage path itself carries no workflow membership;
+- `workflow_stage_path.observed_workflow_ids` SHOULD expose the workflow IDs actually observed in the mapped stage path so route selection (`selected_workflow_id`) and execution-stage membership can be compared without ambiguity;
 - workflow discovery SHOULD emit an explicit completion payload even when zero workflows match, so the UI can render a visible "no applicable workflow found" step rather than silently omitting discovery outcome;
 - live workflow-dispatch progress SHOULD expose `selected_workflow_id` and SHOULD expose a human-readable `selected_workflow_name` when available;
 - selector metadata such as `workflow_selector_verdict` and `workflow_selector_source` SHOULD be preserved in the live payload so the UI can explain why a workflow route was chosen;
+- tool history and tool success/failure/pending counters SHOULD be derived from concrete tool lifecycle events (`tool_call_start` / terminal tool events) rather than route-selection metadata such as `workflow_task`;
 - thinking-card step labels SHOULD prefer canonical workflow-stage labels (for example `Workflow discovery`, `Workflow dispatch`, `Plan tool calls`) over transport/internal labels such as `orchestrator_start`.
 
 ### 7.3 Completion-Gate Terminal Semantics (JVNAUTOSCI-1380)

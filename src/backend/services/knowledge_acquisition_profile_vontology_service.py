@@ -290,6 +290,8 @@ def ensure_canonical_knowledge_acquisition_profiles(
         _normalise_strings(concept_ids) or canonical_knowledge_acquisition_profile_concept_ids()
     )
     workflow_ids = _normalise_strings(link_workflow_ids)
+    provenance_payload = dict(provenance) if isinstance(provenance, Mapping) else None
+    context_payload = dict(context) if isinstance(context, Mapping) else None
     type_created = False
     created_profile_concept_ids: list[str] = []
     persisted_profile_concept_ids: list[str] = []
@@ -358,8 +360,8 @@ def ensure_canonical_knowledge_acquisition_profiles(
                 lang=language,
                 text=profile_json,
                 policy=policy,
-                provenance=provenance,
-                context=context,
+                provenance=provenance_payload,
+                context=context_payload,
                 garbage_collect=garbage_collect,
             )
             persisted_profile_concept_ids.append(concept_id)
@@ -380,8 +382,8 @@ def ensure_canonical_knowledge_acquisition_profiles(
                     lang=language,
                     text=link_target_id,
                     policy=policy,
-                    provenance=provenance,
-                    context=context,
+                    provenance=provenance_payload,
+                    context=context_payload,
                     garbage_collect=garbage_collect,
                 )
                 linked_workflow_ids.append(workflow_id)

@@ -26,6 +26,9 @@ from .representation_contract_vontology_service import (
     ensure_canonical_representation_contract_profiles,
     load_representation_contract_profiles_from_concept_ids,
 )
+from .turn_execution_diagnostic_event_service import (
+    derive_tool_observations_from_diagnostic_events,
+)
 from ..workflows.write_tool_policy import prompt_explicitly_denies_write
 from ..workflows.conversation_turn_stage_model import (
     build_conversation_turn_stage_model_snapshot,
@@ -790,17 +793,23 @@ def _summarise_tool_execution_context(
                 event for event in raw_events if isinstance(event, Mapping)
             ]
 
+    tool_observation_summary = derive_tool_observations_from_diagnostic_events(
+        diagnostic_events
+    )
+    tool_call_start_event_count = _safe_non_negative_int(
+        tool_observation_summary.get("tool_call_start_count")
+    )
+    tool_call_end_event_count = _safe_non_negative_int(
+        tool_observation_summary.get("tool_call_end_count")
+    )
+
     worker_unavailable_event_count = 0
-    tool_call_start_event_count = 0
     tool_plan_stage_event_count = 0
     tool_execute_stage_event_count = 0
     for event in diagnostic_events:
         liveness_reason = (_safe_str(event.get("liveness_reason")) or "").lower()
         if liveness_reason == "worker_unavailable":
             worker_unavailable_event_count += 1
-        event_kind = (_safe_str(event.get("event_kind")) or "").lower()
-        if event_kind == "tool_call_start":
-            tool_call_start_event_count += 1
         stage = (_safe_str(event.get("stage")) or "").lower()
         phase = (_safe_str(event.get("phase")) or "").lower()
         if "tool_plan" in {stage, phase}:
@@ -844,7 +853,11 @@ def _summarise_tool_execution_context(
 
     invocation_count = len(serialised_invocations)
     observed_started_count = max(progress_tools_started, tool_call_start_event_count)
-    observed_executed_count = max(progress_tools_completed, invocation_count)
+    observed_executed_count = max(
+        progress_tools_completed,
+        tool_call_end_event_count,
+        invocation_count,
+    )
 
     failure_codes: list[str] = []
     worker_unavailable_with_tool_expectation = (

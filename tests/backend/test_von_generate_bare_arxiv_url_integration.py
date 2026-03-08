@@ -18,6 +18,10 @@ from src.backend.integrations.internal_mcp.gateway import (
     MethodDefinition,
 )
 from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
+from src.backend.workflows.definitions import (
+    CHAT_ASSISTANT_WORKFLOW_ID,
+    TOOL_CALLING_WORKFLOW_ID,
+)
 from orchestrator_test_harness import (
     _stub_stage_model_snapshot,
     _stub_stage_path,
@@ -236,6 +240,65 @@ def test_generate_bare_arxiv_url_auto_represents_paper(monkeypatch):
     completion_gate = turn_record.get("completion_gate") or {}
     assert completion_gate.get("decision") == "completed"
     assert completion_gate.get("safe_to_claim_completion") is True
+
+
+def test_generate_fallback_route_keeps_route_selection_separate_from_tool_execution(
+    monkeypatch,
+):
+    llm = _LLMSequence(
+        [
+            "fallback",
+            '{"action":"call_tool","tool":"download_paper","payload":{"arxiv_id":"2510.06248"}}',
+            "Downloaded and represented the paper.",
+        ]
+    )
+    app = _make_app(monkeypatch, llm=llm)
+
+    client = app.test_client()
+    response = client.post("/von/generate", json={"prompt": "https://arxiv.org/abs/2510.06248"})
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    llm_debug = body.get("llm_debug") or {}
+
+    workflow_routing = llm_debug.get("workflow_routing") or {}
+    assert workflow_routing.get("workflow_id") == CHAT_ASSISTANT_WORKFLOW_ID
+    assert workflow_routing.get("verdict") == "fallback"
+
+    diagnostics = llm_debug.get("turn_execution_diagnostics") or {}
+    assert diagnostics.get("tool_call_count") == 1
+    assert diagnostics.get("tool_success_count") == 1
+    assert diagnostics.get("tool_failure_count") == 0
+    assert diagnostics.get("tool_pending_count") == 0
+
+    tool_history = diagnostics.get("tool_history") or []
+    assert [entry.get("tool") for entry in tool_history] == ["download_paper"]
+    assert all(entry.get("tool") for entry in tool_history)
+
+    workflow_stage_path = diagnostics.get("workflow_stage_path") or {}
+    assert workflow_stage_path.get("workflow_id") != CHAT_ASSISTANT_WORKFLOW_ID
+    assert TOOL_CALLING_WORKFLOW_ID in list(
+        workflow_stage_path.get("observed_workflow_ids") or []
+    )
+    path = workflow_stage_path.get("path") or []
+    tool_execute_entry = next(
+        entry
+        for entry in path
+        if isinstance(entry, dict) and entry.get("stage_id") == "tool_execute"
+    )
+    assert tool_execute_entry.get("workflow_id") == TOOL_CALLING_WORKFLOW_ID
+
+    stage_diagnostics = diagnostics.get("stage_diagnostics") or []
+    tool_stage = next(
+        entry
+        for entry in stage_diagnostics
+        if isinstance(entry, dict) and entry.get("stage_id") == "tool_execute"
+    )
+    assert tool_stage.get("tool_call_count") == 1
+    assert tool_stage.get("tool_success_count") == 1
+    assert tool_stage.get("tool_failure_count") == 0
+    assert tool_stage.get("tool_pending_count") == 0
 
 
 def test_generate_bare_arxiv_url_with_explicit_denial_stays_non_mutating(monkeypatch):

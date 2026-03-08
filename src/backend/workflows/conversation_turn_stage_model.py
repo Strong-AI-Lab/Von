@@ -456,10 +456,19 @@ def build_conversation_turn_stage_path(
     runtime_stages: Sequence[Any],
     workflow_id: str | None = None,
 ) -> dict[str, Any]:
-    """Map a runtime stage sequence into stage catalogue entries."""
+    """Map a runtime stage sequence into stage catalogue entries.
+
+    ``workflow_id`` is treated as a route/mapping hint, not as authoritative
+    proof that every runtime stage belongs to that workflow. The returned root
+    ``workflow_id`` therefore reflects the mapped stage membership when the path
+    yields a single unambiguous workflow, and falls back to the caller-provided
+    hint only when the path itself carries no workflow membership.
+    """
 
     path: list[dict[str, Any]] = []
     unmapped_runtime_stages: list[str] = []
+    observed_workflow_ids: list[str] = []
+    observed_workflow_id_keys: set[str] = set()
     last_dedupe_key: str | None = None
 
     for raw_stage in runtime_stages:
@@ -472,6 +481,13 @@ def build_conversation_turn_stage_path(
             workflow_id=workflow_id,
         )
         if isinstance(resolved, dict):
+            resolved_workflow_id = resolved.get("workflow_id")
+            if isinstance(resolved_workflow_id, str) and resolved_workflow_id.strip():
+                dedupe_workflow_id = resolved_workflow_id.strip()
+                dedupe_workflow_key = dedupe_workflow_id.lower()
+                if dedupe_workflow_key not in observed_workflow_id_keys:
+                    observed_workflow_id_keys.add(dedupe_workflow_key)
+                    observed_workflow_ids.append(dedupe_workflow_id)
             dedupe_key = f"mapped:{resolved.get('stage_id')}:{resolved.get('workflow_id')}"
             if dedupe_key == last_dedupe_key:
                 continue
@@ -511,11 +527,25 @@ def build_conversation_turn_stage_path(
         if normalised_stage not in unmapped_runtime_stages:
             unmapped_runtime_stages.append(normalised_stage)
 
+    root_workflow_id: str | None
+    workflow_id_source: str | None
+    if len(observed_workflow_ids) == 1:
+        root_workflow_id = observed_workflow_ids[0]
+        workflow_id_source = "mapped_stage_consensus"
+    elif observed_workflow_ids:
+        root_workflow_id = None
+        workflow_id_source = "mixed_stage_membership"
+    else:
+        root_workflow_id = workflow_id
+        workflow_id_source = "route_hint" if workflow_id else None
+
     return {
         "schema_version": CONVERSATION_TURN_STAGE_PATH_SCHEMA_VERSION,
         "stage_model_schema_version": CONVERSATION_TURN_STAGE_MODEL_SCHEMA_VERSION,
         "workflow_representation_id": CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
-        "workflow_id": workflow_id,
+        "workflow_id": root_workflow_id,
+        "workflow_id_source": workflow_id_source,
+        "observed_workflow_ids": observed_workflow_ids,
         "path": path,
         "has_unmapped_runtime_stages": bool(unmapped_runtime_stages),
         "unmapped_runtime_stages": unmapped_runtime_stages,
