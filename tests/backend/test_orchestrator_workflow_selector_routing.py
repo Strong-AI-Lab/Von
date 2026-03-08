@@ -43,6 +43,7 @@ from src.backend.workflows.workflow_gap_workflow_contracts import (
     WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
 )
 from src.backend.workflows.workflow_selector import WorkflowSelection, WorkflowSelector
+from orchestrator_test_harness import build_db_independent_orchestrator
 
 
 # ---------------------------------------------------------------------------
@@ -92,77 +93,12 @@ def _build_orchestrator(
     *,
     selector_enabled: bool = False,
 ) -> InternalMCPChatOrchestrator:
-    """Build an orchestrator with DB-dependent methods stubbed out.
-
-    This avoids hanging on MongoDB connections during unit tests.
-    """
-    env_val = "1" if selector_enabled else "0"
-    monkeypatch.setenv("VON_CHAT_WORKFLOW_SELECTOR_ENABLED", env_val)
-
-    # Keep this unit-test harness DB-independent even if the production
-    # registry factory discovers workflows from Vontology.
-    from src.backend.workflows import WorkflowRegistry, register_default_workflows
-
-    def _build_test_registry() -> WorkflowRegistry:
-        registry = WorkflowRegistry()
-        register_default_workflows(registry)
-        return registry
-
-    monkeypatch.setattr(
-        "src.backend.integrations.internal_mcp.orchestrator.build_workflow_registry",
-        _build_test_registry,
-    )
-
-    gateway = cast(Any, _StubGateway())
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=gateway,
+    return build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, _StubGateway()),
+        selector_enabled=selector_enabled,
         max_tool_invocations=1,
     )
-
-    # Stub DB-dependent methods to avoid blocking on MongoDB.
-    from src.backend.integrations.internal_mcp.orchestrator import (
-        _WorkflowModelPolicyState,
-    )
-
-    monkeypatch.setattr(
-        orchestrator,
-        "_load_workflow_model_policy",
-        lambda *_a, **_kw: (
-            _WorkflowModelPolicyState(
-                enabled=False,
-                policy=None,
-                policy_id=None,
-                predicate_id=None,
-                errors=[],
-            ),
-            None,
-        ),
-    )
-    monkeypatch.setattr(
-        orchestrator,
-        "_build_ontology_preflight",
-        lambda *_a, **_kw: type(
-            "_Preflight", (), {"telemetry": None, "message": None}
-        )(),
-    )
-    monkeypatch.setattr(
-        orchestrator,
-        "_resolve_concept_id_by_name",
-        lambda *_a, **_kw: None,
-    )
-    monkeypatch.setattr(
-        orchestrator,
-        "_load_base_system_prompt_from_vontology",
-        lambda *_a, **_kw: (None, None),
-    )
-
-    # Prevent get_model_registry_snapshot from reaching MongoDB.
-    monkeypatch.setattr(
-        "src.backend.services.model_registry_service.get_model_registry_snapshot",
-        lambda *_a, **_kw: None,
-    )
-
-    return orchestrator
 
 
 # ---------------------------------------------------------------------------
@@ -3483,7 +3419,8 @@ def test_write_intent_memory_rejects_cross_session_continuation(monkeypatch):
     )
     assert gate_entry is not None
     assert gate_entry.get("gate_state") == "pending"
-    assert gate_entry.get("reason") == "no_explicit_write_intent_detected"
+    assert gate_entry.get("reason") == "default_allow_additive_low_risk"
+    assert gate_entry.get("low_risk_additive_routing_evidence") is False
     assert gate_entry.get("continuation_context_reused") is False
 
 

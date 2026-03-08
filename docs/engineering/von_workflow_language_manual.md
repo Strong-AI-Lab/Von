@@ -1,7 +1,7 @@
 # Von Workflow Language (VWL) Manual
 
 Status: Draft (current implementation-aligned)
-Last updated: 2026-03-07 (Pacific/Auckland)
+Last updated: 2026-03-08 (Pacific/Auckland)
 Audience: Human engineers and AI agents
 
 ## 1. Purpose and Scope
@@ -325,7 +325,7 @@ Normative semantics:
 - invalid policy payloads MUST fail workflow loading with deterministic error codes;
 - retry and idempotency policies currently apply only to single-action states;
 - approval gates MUST fail closed when the required approval context key is absent or falsey;
-- approval-gated mutative states SHOULD provide an explicit `on_approval_required` route to a blocked terminal or escalation state;
+- destructive or otherwise high-risk approval-gated states SHOULD provide an explicit `on_approval_required` route to a blocked terminal or escalation state;
 - checkpoint policies update the shared runtime plan-state artefact rather than introducing workflow-specific Python persistence logic;
 - plan-state items support `pending|in_progress|blocked|done` statuses, bounded checkpoint history, periodic summary snapshots, resumable cursor snapshots, and resume telemetry;
 - completion gates MUST fail closed before terminal success when required plan items or required context keys are not satisfied.
@@ -512,9 +512,16 @@ Canonical paper profile source expectations:
 
 Intent boundary for URL inputs:
 
-- A bare arXiv URL on its own does **not** authorise artefact download or ontology mutation.
-- URL-driven scholarly materialisation requires explicit download/store/representation intent in the user turn.
+- A canonical arXiv abstract URL or ID on its own **does** authorise low-risk additive `download_paper` execution and scholarly representation, unless the user explicitly denies mutation.
+- Explicit phrasing such as "represent that paper" remains an equivalent positive signal, but it is not required.
+- Explicit denial (for example "do not download/store this") MUST block mutation even when a canonical arXiv source is present.
 - Deterministic route-level coverage for this boundary is tracked by `JVNAUTOSCI-1399`; the current URL-first regression to fix is `JVNAUTOSCI-1394`.
+
+Minimal-imposition rationale:
+
+- a pasted canonical source URL is sufficient evidence for this low-risk additive representation path;
+- workflow policy SHOULD prefer acting on that evidence over asking the user for redundant permission language;
+- the fail-closed boundary for this path is explicit denial, not absence of verbs such as `download` or `store`.
 
 Important runtime contract note:
 
@@ -631,6 +638,14 @@ Normative policy semantics:
 - high-risk or ambiguous changes MUST require explicit user confirmation;
 - relation-completion runs SHOULD ask at most one focused clarification question per run when machine-side evidence is insufficient;
 - if the linked acquisition profile cannot be resolved, the workflow MUST fail closed with explicit `knowledge_acquisition_profile_unavailable` diagnostics rather than falling back to ad hoc prompting.
+
+Minimal-imposition mutation semantics:
+
+- human interruption is an exception path, not the default operational posture for ordinary Von workflows;
+- low-risk additive Vontology writes SHOULD default-allow when the workflow has evidence-backed inputs and there is no explicit user denial;
+- non-delete mutations of existing state MAY proceed when the user has clearly requested them;
+- destructive mutations MUST branch through explicit `on_approval_required` confirmation/escalation states rather than relying on blanket pre-emptive hesitation;
+- approval gates are targeted risk controls for destructive/high-risk actions, not a default doctrine for all mutations.
 
 Persistence semantics:
 
@@ -984,7 +999,7 @@ Minimal per-item dispatch shape:
 
 Blocked-state routing:
 
-- mutative child-dispatch steps SHOULD declare `on_approval_required` to an explicit blocked or escalation state;
+- destructive or otherwise approval-gated child-dispatch steps SHOULD declare `on_approval_required` to an explicit blocked or escalation state;
 - blocked runs MUST preserve `approval_required`, `approval_state`, and approval-gate event diagnostics rather than silently continuing.
 
 ---

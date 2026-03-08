@@ -70,10 +70,14 @@ from ...workflows.workflow_gap_workflow_contracts import (
 )
 
 from src.backend.workflows.write_tool_policy import (
+    classify_write_tool_risk,
     compute_allowed_write_tools,
-    is_high_impact_vontology_write_tool,
+    prompt_has_low_risk_additive_write_evidence,
     prompt_grants_high_impact_kb_write_approval,
     prompt_explicitly_denies_write,
+    REASON_DEFAULT_ALLOW_ADDITIVE_LOW_RISK,
+    tool_requires_confirmation,
+    write_policy_reason_is_session_memory_eligible,
 )
 from ...services.turn_execution_record_service import build_turn_execution_record
 from src.backend.services.buttonify_service import (
@@ -233,6 +237,18 @@ class _StructuredToolCandidateResolution:
     truncation_applied: bool
     write_policy_reason: str
     warnings: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _ResolvedWritePolicyDecision:
+    allowed_tools: frozenset[str]
+    reason: str
+    decision_basis: str
+    user_denial_detected: bool
+    risk_classes: Mapping[str, str]
+    blocked_reasons: Mapping[str, str]
+    confirmation_required_tools: frozenset[str]
+    confirmation_prompts: Mapping[str, str]
 
 
 class ProgressTracker:
@@ -764,8 +780,6 @@ class InternalMCPChatOrchestrator:
         "source_concept_not_found": ("source_id",),
         "predicate_concept_not_found": ("predicate",),
     }
-    _HIGH_IMPACT_REVIEW_REASON = "high_impact_kb_write_requires_human_review"
-    _HIGH_IMPACT_NAMESPACE_REASON = "high_impact_kb_write_requires_namespace"
     _WRITE_INTENT_SESSION_MEMORY_TTL_SECONDS = 900
     _WRITE_INTENT_SESSION_MEMORY_MAX_SESSIONS = 256
     _WRITE_INTENT_SESSION_MEMORY_FOLLOW_UP_TURNS = 2
@@ -1666,6 +1680,10 @@ class InternalMCPChatOrchestrator:
             if get_disable_write_tool_conservatism():
                 if not prompt_explicitly_denies_write(prompt):
                     allowed = sorted({str(tool) for tool in requested_tools if tool})
+                    risk_classes = {
+                        tool_name: classify_write_tool_risk(tool_name)
+                        for tool_name in allowed
+                    }
                     try:
                         from ...workflows.workflow_baseline_telemetry import (
                             record_write_policy_decision,
@@ -1681,6 +1699,12 @@ class InternalMCPChatOrchestrator:
                         outputs={
                             "allowed_write_tools": allowed,
                             "write_policy_reason": "write_conservatism_disabled_by_admin_setting",
+                            "write_policy_decision_basis": "write_conservatism_disabled_by_admin_setting",
+                            "write_policy_user_denial_detected": False,
+                            "write_policy_risk_classes": risk_classes,
+                            "write_policy_blocked_reasons": {},
+                            "write_policy_requires_confirmation": [],
+                            "approval_required": False,
                         }
                     )
         except Exception:
@@ -1710,6 +1734,25 @@ class InternalMCPChatOrchestrator:
             outputs={
                 "allowed_write_tools": sorted(decision.allowed_tools),
                 "write_policy_reason": decision.reason,
+                "write_policy_decision_basis": decision.decision_basis,
+                "write_policy_user_denial_detected": decision.user_denial_detected,
+                "write_policy_risk_classes": {
+                    item.tool_name: item.risk_class for item in decision.tool_decisions
+                },
+                "write_policy_blocked_reasons": {
+                    item.tool_name: item.blocked_reason
+                    for item in decision.tool_decisions
+                    if isinstance(item.blocked_reason, str) and item.blocked_reason
+                },
+                "write_policy_requires_confirmation": [
+                    item.tool_name
+                    for item in decision.tool_decisions
+                    if item.requires_confirmation
+                ],
+                "approval_required": any(
+                    item.requires_confirmation and not item.allowed
+                    for item in decision.tool_decisions
+                ),
             }
         )
 
@@ -3965,19 +4008,25 @@ class InternalMCPChatOrchestrator:
         gmail_profile = data.get("gmail_profile") or env.default_gmail_profile
         conversation_session_id = data.get("conversation_session_id")
 
-        # Build method catalogue on first validation pass.
-        if "method_catalogue" not in data:
+        # Build method catalogue on first validation pass. Keep tool category
+        # derivation independent so earlier prompt-requirement seeding of
+        # method_catalogue cannot silently skip write-gate enforcement.
+        method_catalogue = data.get("method_catalogue")
+        if not isinstance(method_catalogue, Mapping):
             method_catalogue = self._gateway.describe_methods()
-            tool_categories: dict[str, str] = {}
+            data["method_catalogue"] = method_catalogue
+
+        tool_categories = data.get("tool_categories")
+        if not isinstance(tool_categories, Mapping):
+            resolved_categories: dict[str, str] = {}
             for name, meta in method_catalogue.items():
                 if not isinstance(meta, Mapping):
                     continue
                 category = meta.get("category")
                 if isinstance(category, str):
-                    tool_categories[name] = category
-            data["method_catalogue"] = method_catalogue
-            data["tool_categories"] = tool_categories
-        method_catalogue = data["method_catalogue"]
+                    resolved_categories[name] = category
+            tool_categories = resolved_categories
+            data["tool_categories"] = resolved_categories
 
         preflight = self._preflight_tool_calls(
             cast(list, tool_calls),
@@ -4189,6 +4238,27 @@ class InternalMCPChatOrchestrator:
                 )
 
         write_policy_reason = data.get("write_policy_reason", "")
+        write_policy_decision_basis = data.get(
+            "write_policy_decision_basis", write_policy_reason
+        )
+        write_policy_user_denial_detected = bool(
+            data.get("write_policy_user_denial_detected")
+        )
+        write_policy_risk_classes = (
+            dict(data.get("write_policy_risk_classes"))
+            if isinstance(data.get("write_policy_risk_classes"), Mapping)
+            else {}
+        )
+        write_policy_blocked_reasons = (
+            dict(data.get("write_policy_blocked_reasons"))
+            if isinstance(data.get("write_policy_blocked_reasons"), Mapping)
+            else {}
+        )
+        write_policy_requires_confirmation = {
+            str(item)
+            for item in (data.get("write_policy_requires_confirmation") or [])
+            if isinstance(item, str) and str(item).strip()
+        }
         turn_id = data.get("turn_id")
 
         for tool_request in tool_calls:
@@ -4232,35 +4302,52 @@ class InternalMCPChatOrchestrator:
                     turn_id=turn_id if isinstance(turn_id, str) else None,
                 )
             if tool_category == "write" and tool_name not in allowed_write_tools:
-                allowed_write_tools, write_policy_reason = (
-                    self._resolve_allowed_write_tools(
-                        prompt=prompt,
-                        requested_write_tools=[tool_name],
-                        recent_user_prompts=recent_user_prompts,
-                        llm_client=llm_client,
-                        model=env.model,
-                        user_namespace=env.user_namespace,
-                        auxiliary_system_prompt=env.auxiliary_system_prompt,
-                        trace=request.trace,
-                        conversation_session_id=conversation_session_id,
-                        turn_id=data.get("turn_id"),
-                        aux_llm_calls=data.get("aux_llm_calls"),
-                    )
+                resolved_write_policy = self._resolve_allowed_write_tools(
+                    prompt=prompt,
+                    requested_write_tools=[tool_name],
+                    recent_user_prompts=recent_user_prompts,
+                    llm_client=llm_client,
+                    model=env.model,
+                    user_namespace=env.user_namespace,
+                    auxiliary_system_prompt=env.auxiliary_system_prompt,
+                    trace=request.trace,
+                    conversation_session_id=conversation_session_id,
+                    turn_id=data.get("turn_id"),
+                    aux_llm_calls=data.get("aux_llm_calls"),
                 )
+                allowed_write_tools = set(resolved_write_policy.allowed_tools)
+                write_policy_reason = resolved_write_policy.reason
+                write_policy_decision_basis = resolved_write_policy.decision_basis
+                write_policy_user_denial_detected = (
+                    resolved_write_policy.user_denial_detected
+                )
+                write_policy_risk_classes = dict(resolved_write_policy.risk_classes)
+                write_policy_blocked_reasons = dict(
+                    resolved_write_policy.blocked_reasons
+                )
+                write_policy_requires_confirmation = set(
+                    resolved_write_policy.confirmation_required_tools
+                )
+
+            tool_write_risk_class = str(
+                write_policy_risk_classes.get(tool_name)
+                or classify_write_tool_risk(tool_name)
+            )
+            tool_blocked_reason = str(
+                write_policy_blocked_reasons.get(tool_name) or write_policy_reason or ""
+            ).strip()
+            tool_requires_confirmation = tool_name in write_policy_requires_confirmation
 
             if tool_category == "write" and tool_name not in allowed_write_tools:
                 _record_write_gate_decision(
                     tool_name=tool_name,
                     allowed=False,
-                    reason=(
-                        write_policy_reason
-                        if isinstance(write_policy_reason, str)
-                        else None
-                    ),
+                    reason=tool_blocked_reason or None,
                 )
                 message = self._build_blocked_write_message(
                     tool_name=tool_name,
-                    reason=write_policy_reason if isinstance(write_policy_reason, str) else None,
+                    reason=tool_blocked_reason or None,
+                    payload=payload,
                 )
                 tool_payload = self._format_tool_result(
                     tool_name, None, None, "error", message
@@ -4270,9 +4357,21 @@ class InternalMCPChatOrchestrator:
                     "payload": dict(payload),
                     "error": message,
                     "blocked": True,
+                    "write_policy_risk_class": tool_write_risk_class,
+                    "write_policy_decision_basis": write_policy_decision_basis,
+                    "write_policy_requires_confirmation": tool_requires_confirmation,
+                    "write_policy_blocked_reason": tool_blocked_reason or None,
+                    "write_policy_user_denial_detected": write_policy_user_denial_detected,
                 }
                 if write_policy_reason:
                     blocked_record["write_policy_reason"] = write_policy_reason
+                if tool_requires_confirmation:
+                    blocked_record["confirmation_prompt"] = (
+                        self._build_destructive_confirmation_prompt(
+                            tool_name=tool_name,
+                            payload=payload,
+                        )
+                    )
                 if write_interaction_metadata:
                     blocked_record["knowledge_interaction"] = write_interaction_metadata
                 if call_id:
@@ -4291,62 +4390,8 @@ class InternalMCPChatOrchestrator:
                             ),
                             "call_id": call_id,
                             "error": message,
-                        }
-                    )
-                augmented_context.append({"role": "tool", "content": tool_payload})
-                tool_messages.append({"role": "tool", "content": tool_payload})
-                continue
-
-            high_impact_guard_reason: str | None = None
-            if tool_category == "write":
-                high_impact_guard_reason = self._evaluate_high_impact_write_guard(
-                    tool_name=tool_name,
-                    prompt=prompt if isinstance(prompt, str) else "",
-                    recent_user_prompts=list(recent_user_prompts or []),
-                    user_namespace=env.user_namespace,
-                )
-
-            if tool_category == "write" and high_impact_guard_reason:
-                _record_write_gate_decision(
-                    tool_name=tool_name,
-                    allowed=False,
-                    reason=high_impact_guard_reason,
-                )
-                message = self._build_blocked_write_message(
-                    tool_name=tool_name,
-                    reason=high_impact_guard_reason,
-                )
-                tool_payload = self._format_tool_result(
-                    tool_name, None, None, "error", message
-                )
-                blocked_record = {
-                    "tool": tool_name,
-                    "payload": dict(payload),
-                    "error": message,
-                    "blocked": True,
-                    "write_policy_reason": high_impact_guard_reason,
-                }
-                if write_interaction_metadata:
-                    blocked_record["knowledge_interaction"] = {
-                        **write_interaction_metadata,
-                        "guard_reason": high_impact_guard_reason,
-                    }
-                if call_id:
-                    blocked_record["call_id"] = call_id
-                invocations.append(blocked_record)
-                if callable(emit_progress):
-                    emit_progress(
-                        {
-                            "status": "tool_blocked",
-                            "tool": tool_name,
-                            "batch_size": current_batch_size,
-                            "tool_calls_done": iteration_count,
-                            "tool_calls_cap": int(max_tool_invocations),
-                            "tool_calls_remaining": max(
-                                0, max_tool_invocations - iteration_count
-                            ),
-                            "call_id": call_id,
-                            "error": message,
+                            "blocked_reason": tool_blocked_reason or None,
+                            "requires_confirmation": tool_requires_confirmation,
                         }
                     )
                 augmented_context.append({"role": "tool", "content": tool_payload})
@@ -4358,11 +4403,7 @@ class InternalMCPChatOrchestrator:
                     _record_write_gate_decision(
                         tool_name=tool_name,
                         allowed=True,
-                        reason=(
-                            write_policy_reason
-                            if isinstance(write_policy_reason, str)
-                            else "allowed"
-                        ),
+                        reason=tool_blocked_reason or write_policy_reason or "allowed",
                     )
                 payload_before_invoke = dict(payload)
                 schema = self._tool_schema_for_name(tool_name, method_catalogue)
@@ -4431,6 +4472,11 @@ class InternalMCPChatOrchestrator:
                     invocation_record["auto_retry"] = auto_retry_details
                 if write_interaction_metadata:
                     invocation_record["knowledge_interaction"] = write_interaction_metadata
+                if tool_category == "write":
+                    invocation_record["write_policy_risk_class"] = tool_write_risk_class
+                    invocation_record["write_policy_decision_basis"] = (
+                        write_policy_decision_basis
+                    )
                 if call_id:
                     invocation_record["call_id"] = call_id
                 invocations.append(invocation_record)
@@ -5987,6 +6033,11 @@ class InternalMCPChatOrchestrator:
             for tool_name in write_policy_decision.allowed_tools
             if isinstance(tool_name, str) and str(tool_name).strip()
         }
+        confirmation_required_write_tools = {
+            item.tool_name.strip().lower()
+            for item in write_policy_decision.tool_decisions
+            if item.requires_confirmation and item.tool_name.strip()
+        }
         write_explicitly_denied = prompt_explicitly_denies_write(prompt)
         if write_explicitly_denied:
             allowed_write_tools = set()
@@ -6019,7 +6070,10 @@ class InternalMCPChatOrchestrator:
                 if write_explicitly_denied:
                     _mark_excluded(tool_name, "write_tool_explicitly_denied")
                     return
-                if key not in allowed_write_tools:
+                if (
+                    key not in allowed_write_tools
+                    and key not in confirmation_required_write_tools
+                ):
                     _mark_excluded(tool_name, "write_tool_not_allowed_for_prompt")
                     return
             included_lookup.add(key)
@@ -7345,6 +7399,11 @@ class InternalMCPChatOrchestrator:
         )
         if not _tool_available("create_concepts"):
             required_create_type_name = None
+        prompt_text = user_prompt if isinstance(user_prompt, str) else ""
+        prompt_arxiv_id = cls._extract_arxiv_id_from_text(prompt_text)
+        allow_default_arxiv_download = bool(prompt_arxiv_id) and not (
+            prompt_explicitly_denies_write(prompt_text)
+        )
         has_prompt_url = (
             isinstance(user_prompt, str)
             and bool(re.search(r"https?://\S+", user_prompt, re.IGNORECASE))
@@ -7355,7 +7414,11 @@ class InternalMCPChatOrchestrator:
             for tool_name in required_tools
             if isinstance(tool_name, str) and tool_name.strip()
         }
-        if has_prompt_url:
+        if allow_default_arxiv_download and _tool_available("download_paper"):
+            if "download_paper" not in seen_required:
+                required_tools.append("download_paper")
+                seen_required.add("download_paper")
+        elif has_prompt_url:
             url_tool_name: str | None = None
             if _tool_available("resilient_extract_url"):
                 url_tool_name = "resilient_extract_url"
@@ -10914,59 +10977,87 @@ class InternalMCPChatOrchestrator:
         user_part = cleaned.split("@", 1)[0].strip()
         return user_part or None
 
-    @staticmethod
-    def _is_high_impact_review_mode_enabled() -> bool:
-        try:
-            from src.backend.services.settings_service import (
-                get_require_human_review_for_high_impact_kb_writes,
-            )
+    def _summarise_write_target_for_confirmation(
+        self,
+        *,
+        payload: Mapping[str, Any] | None,
+    ) -> str | None:
+        if not isinstance(payload, Mapping):
+            return None
 
-            return bool(get_require_human_review_for_high_impact_kb_writes())
-        except Exception:
-            return False
+        ordered_keys = (
+            "concept_id",
+            "source_id",
+            "target_id",
+            "relation_id",
+            "task_concept_id",
+            "issue_key",
+            "schedule_id",
+            "binding_id",
+            "instance_id",
+            "arxiv_id",
+        )
+        parts: list[str] = []
+        for key in ordered_keys:
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(f"{key}={value.strip()}")
+        predicate = payload.get("predicate")
+        target = payload.get("target")
+        if isinstance(predicate, str) and predicate.strip():
+            parts.append(f"predicate={predicate.strip()}")
+        if isinstance(target, str) and target.strip():
+            parts.append(f"target={target.strip()}")
+        if not parts:
+            return None
+        return ", ".join(parts[:4])
 
-    def _evaluate_high_impact_write_guard(
+    def _build_destructive_confirmation_prompt(
         self,
         *,
         tool_name: str,
-        prompt: str,
-        recent_user_prompts: list[str],
-        user_namespace: str | None,
-    ) -> str | None:
-        if not self._is_high_impact_review_mode_enabled():
-            return None
-        if not is_high_impact_vontology_write_tool(tool_name):
-            return None
-        if not (isinstance(user_namespace, str) and user_namespace.strip()):
-            return self._HIGH_IMPACT_NAMESPACE_REASON
-        approved = prompt_grants_high_impact_kb_write_approval(
-            prompt=prompt,
-            recent_user_prompts=recent_user_prompts,
+        payload: Mapping[str, Any] | None,
+    ) -> str:
+        target_summary = self._summarise_write_target_for_confirmation(payload=payload)
+        if target_summary:
+            return (
+                f"Confirmation required before running {tool_name!r} "
+                f"({target_summary}). Reply with a clear confirmation such as "
+                f"'Confirm {tool_name} {target_summary}'."
+            )
+        return (
+            f"Confirmation required before running {tool_name!r}. "
+            f"Reply with a clear confirmation such as 'Confirm {tool_name}'."
         )
-        if not approved:
-            return self._HIGH_IMPACT_REVIEW_REASON
-        return None
 
     def _build_blocked_write_message(
         self,
         *,
         tool_name: str,
         reason: str | None,
+        payload: Mapping[str, Any] | None = None,
     ) -> str:
-        if reason == self._HIGH_IMPACT_NAMESPACE_REASON:
+        if reason == "explicit_write_denial_detected":
             return (
-                f"Blocked high-impact Vontology write tool {tool_name!r}: "
-                "an authenticated namespace is required to preserve namespace isolation."
+                f"Blocked write tool {tool_name!r}: the user explicitly denied write "
+                "side-effects for this turn."
             )
-        if reason == self._HIGH_IMPACT_REVIEW_REASON:
+        if reason == "destructive_confirmation_required":
+            return self._build_destructive_confirmation_prompt(
+                tool_name=tool_name,
+                payload=payload,
+            )
+        if reason in {
+            "mutative_non_destructive_request_required",
+            "external_write_requires_explicit_request",
+        }:
             return (
-                f"Blocked high-impact Vontology write tool {tool_name!r}: "
-                "human review approval is required. Include explicit approval wording "
-                "for the Vontology mutation and retry."
+                f"Blocked write tool {tool_name!r}: restate the requested write "
+                "explicitly if you want this non-default mutation to proceed."
             )
         return (
-            f"Blocked write tool {tool_name!r}: the user request appears read-only. "
-            "If you intended to perform a write, restate the request explicitly."
+            f"Blocked write tool {tool_name!r}: the write policy did not allow this "
+            "tool for the current turn."
         )
 
     @staticmethod
@@ -10980,14 +11071,12 @@ class InternalMCPChatOrchestrator:
 
         lowered_reason = str(reason or "").strip().lower()
         if lowered_reason in {
-            "no_explicit_write_intent_detected",
-            "recent_vontology_mutation_request_without_confirmation",
+            "default_allow_additive_low_risk",
+            "mutative_non_destructive_request_required",
+            "external_write_requires_explicit_request",
+            "destructive_confirmation_required",
             "workflow_unavailable",
             "no_write_tools_available",
-        }:
-            return "pending"
-        if lowered_reason in {
-            "high_impact_kb_write_requires_human_review",
         }:
             return "pending"
         return "denied"
@@ -12614,15 +12703,15 @@ class InternalMCPChatOrchestrator:
                 additions.append(candidate)
                 seen_recent.add(candidate.lower())
 
-        high_impact_approval_from_continuation = False
-        if bool(memory_entry.get("has_high_impact_tools")):
+        confirmation_from_continuation = False
+        if bool(memory_entry.get("has_confirmation_required_tools")):
             synthetic_approval_prompt = (
-                "Approved Vontology mutation continuation for the current context."
+                "Confirmed destructive Vontology mutation continuation for the current context."
             )
             if synthetic_approval_prompt.lower() not in seen_recent:
                 additions.append(synthetic_approval_prompt)
                 seen_recent.add(synthetic_approval_prompt.lower())
-            high_impact_approval_from_continuation = True
+            confirmation_from_continuation = True
 
         cleaned_recent.extend(additions)
         remaining_after = max(0, remaining_before - 1)
@@ -12640,7 +12729,7 @@ class InternalMCPChatOrchestrator:
             "added_prompts": len(additions),
             "remaining_before": remaining_before,
             "remaining_after": remaining_after,
-            "high_impact_approval_from_continuation": high_impact_approval_from_continuation,
+            "confirmation_from_continuation": confirmation_from_continuation,
         }
 
     def _persist_write_intent_session_memory(
@@ -12667,13 +12756,7 @@ class InternalMCPChatOrchestrator:
         )
 
         policy_reason = str(write_policy_reason or "").strip()
-        explicit_or_recent_reason = policy_reason in {
-            "explicit_vontology_mutation_request",
-            "recent_vontology_mutation_request",
-            "explicit_artefact_download_request",
-            "recent_artefact_download_request",
-        }
-        if not explicit_or_recent_reason:
+        if not write_policy_reason_is_session_memory_eligible(policy_reason):
             return {
                 "type": "write_intent_session_memory",
                 "stage": "persist",
@@ -12718,10 +12801,10 @@ class InternalMCPChatOrchestrator:
                 anchor_prompt = cleaned
                 break
 
-        has_high_impact_tools = any(
-            is_high_impact_vontology_write_tool(tool_name) for tool_name in tools_to_store
+        has_confirmation_required_tools = any(
+            tool_requires_confirmation(tool_name) for tool_name in tools_to_store
         )
-        approval_detected = prompt_grants_high_impact_kb_write_approval(
+        confirmation_granted = prompt_grants_high_impact_kb_write_approval(
             prompt=prompt,
             recent_user_prompts=[
                 str(item).strip()
@@ -12729,15 +12812,15 @@ class InternalMCPChatOrchestrator:
                 if isinstance(item, str) and str(item).strip()
             ],
         )
-        # A bounded continuation prompt ("yes", "do it") should carry approval
-        # only when a compatible high-impact write intent was already established.
-        if continuation_prompt and has_high_impact_tools and policy_reason.startswith(
-            "recent_"
+        if (
+            continuation_prompt
+            and has_confirmation_required_tools
+            and policy_reason.startswith("recent_")
         ):
-            approval_detected = True
-        high_impact_approved = bool(existing_mapping.get("high_impact_approved")) or bool(
-            approval_detected
-        )
+            confirmation_granted = True
+        confirmation_granted = bool(
+            existing_mapping.get("confirmation_granted")
+        ) or bool(confirmation_granted)
 
         self._write_intent_session_memory[session_key] = {
             "timestamp": now,
@@ -12747,8 +12830,8 @@ class InternalMCPChatOrchestrator:
             ),
             "intent_anchor_prompt": anchor_prompt,
             "write_tools": tools_to_store,
-            "has_high_impact_tools": has_high_impact_tools,
-            "high_impact_approved": high_impact_approved,
+            "has_confirmation_required_tools": has_confirmation_required_tools,
+            "confirmation_granted": confirmation_granted,
             "write_policy_reason": policy_reason,
         }
 
@@ -12758,8 +12841,8 @@ class InternalMCPChatOrchestrator:
             "updated": True,
             "write_policy_reason": policy_reason,
             "write_tool_count": len(tools_to_store),
-            "has_high_impact_tools": has_high_impact_tools,
-            "high_impact_approved": high_impact_approved,
+            "has_confirmation_required_tools": has_confirmation_required_tools,
+            "confirmation_granted": confirmation_granted,
         }
 
     def _get_topic_vocabulary_cache_key(self, keywords: list[str]) -> str:
@@ -15993,8 +16076,9 @@ class InternalMCPChatOrchestrator:
         return (
             "Your previous message described an action that requires MCP tools, but you did not emit a tool call. "
             "NOW respond with ONLY a tool-call JSON object or a JSON array of tool-call objects. "
-            "Choose a tool that matches the user's request; do NOT call write tools unless the user explicitly asked for the write-side effect (e.g., Vontology changes or downloading/storing an artefact). "
-            "If the user provided an arXiv ID/URL and asked to download/store/upload/finalise an artefact, call download_paper or finalise_cached_paper with the arxiv_id (do NOT call list_papers). "
+            "Choose a tool that matches the user's request. Low-risk additive Vontology writes may proceed by default unless the user explicitly denied them. "
+            "If the user provided a canonical arXiv ID/URL, treat that as sufficient permission for additive scholarly-paper materialisation and call download_paper with the arxiv_id (do NOT call list_papers). "
+            "Destructive writes still require explicit confirmation. "
             "No prose. No Markdown. Do NOT wrap the JSON in ``` fences (including ```json). "
             "The first character MUST be an opening curly brace or an opening square bracket, and the response must contain only valid JSON."
         )
@@ -16249,6 +16333,19 @@ class InternalMCPChatOrchestrator:
                     )
                 continue
 
+            if name in {"download_paper", "finalise_cached_paper"}:
+                arxiv_id = self._extract_arxiv_id_from_text(user_text)
+                if not arxiv_id:
+                    continue
+                forced_calls.append(
+                    {
+                        "action": "call_tool",
+                        "tool": name,
+                        "payload": {"arxiv_id": arxiv_id},
+                    }
+                )
+                continue
+
             if name == "interpret_file_copy":
                 scholarly_file_copy_ids = list(
                     missing_required_scholarly_representation_file_copy_ids
@@ -16285,8 +16382,9 @@ class InternalMCPChatOrchestrator:
     ) -> list[_ToolCallRequest] | None:
         """Best-effort deterministic recovery for common missing-tool-call cases.
 
-        This is intentionally narrow: we only force a write tool when the user
-        explicitly requests the write-side effect.
+        This is intentionally narrow: we force write tools only when the prompt
+        itself establishes a deterministic required-effect path, such as
+        additive arXiv materialisation from a canonical source.
         """
 
         last_user_text: str | None = None
@@ -16406,7 +16504,7 @@ class InternalMCPChatOrchestrator:
         conversation_session_id: str | None = None,
         turn_id: str | None = None,
         aux_llm_calls: list[Mapping[str, Any]] | None = None,
-    ) -> tuple[set[str], str]:
+    ) -> _ResolvedWritePolicyDecision:
         workflow_result = self.execute_workflow(
             WRITE_TOOL_POLICY_WORKFLOW_ID,
             data={
@@ -16429,15 +16527,75 @@ class InternalMCPChatOrchestrator:
             episode_source="chat_turn_workflow",
         )
         if workflow_result is None:
-            return set(), "workflow_unavailable"
+            blocked_reasons = {
+                str(tool_name): "workflow_unavailable"
+                for tool_name in requested_write_tools
+                if isinstance(tool_name, str) and str(tool_name).strip()
+            }
+            return _ResolvedWritePolicyDecision(
+                allowed_tools=frozenset(),
+                reason="workflow_unavailable",
+                decision_basis="workflow_unavailable",
+                user_denial_detected=False,
+                risk_classes={
+                    str(tool_name): classify_write_tool_risk(str(tool_name))
+                    for tool_name in requested_write_tools
+                    if isinstance(tool_name, str) and str(tool_name).strip()
+                },
+                blocked_reasons=blocked_reasons,
+                confirmation_required_tools=frozenset(),
+                confirmation_prompts={},
+            )
         allowed = workflow_result.data.get("allowed_write_tools")
         reason = workflow_result.data.get("write_policy_reason")
+        decision_basis = workflow_result.data.get("write_policy_decision_basis")
+        user_denial_detected = workflow_result.data.get(
+            "write_policy_user_denial_detected"
+        )
+        risk_classes = workflow_result.data.get("write_policy_risk_classes")
+        blocked_reasons = workflow_result.data.get("write_policy_blocked_reasons")
+        confirmation_required = workflow_result.data.get(
+            "write_policy_requires_confirmation"
+        )
         allowed_set: set[str] = set()
         if isinstance(allowed, list):
             allowed_set = {
                 str(item) for item in allowed if isinstance(item, str) and item
             }
-        return allowed_set, str(reason or "")
+        confirmation_required_tools = frozenset(
+            str(item)
+            for item in (confirmation_required or [])
+            if isinstance(item, str) and str(item).strip()
+        )
+        confirmation_prompts = {
+            tool_name: self._build_destructive_confirmation_prompt(
+                tool_name=tool_name,
+                payload=None,
+            )
+            for tool_name in confirmation_required_tools
+        }
+        return _ResolvedWritePolicyDecision(
+            allowed_tools=frozenset(allowed_set),
+            reason=str(reason or ""),
+            decision_basis=str(decision_basis or reason or ""),
+            user_denial_detected=bool(user_denial_detected),
+            risk_classes=(
+                dict(risk_classes)
+                if isinstance(risk_classes, Mapping)
+                else {
+                    str(tool_name): classify_write_tool_risk(str(tool_name))
+                    for tool_name in requested_write_tools
+                    if isinstance(tool_name, str) and str(tool_name).strip()
+                }
+            ),
+            blocked_reasons=(
+                dict(blocked_reasons)
+                if isinstance(blocked_reasons, Mapping)
+                else {}
+            ),
+            confirmation_required_tools=confirmation_required_tools,
+            confirmation_prompts=confirmation_prompts,
+        )
 
     def execute_workflow(
         self,
@@ -18981,14 +19139,41 @@ class InternalMCPChatOrchestrator:
             write_routing_policy_reason = str(
                 write_routing_policy_decision.reason or ""
             ).strip()
-            mutative_intent_requires_tool_routing = bool(
-                write_routing_policy_decision.allowed_tools
-            ) and not prompt_explicitly_denies_write(prompt)
+            low_risk_additive_routing_evidence = (
+                prompt_has_low_risk_additive_write_evidence(prompt)
+                or bool(
+                    isinstance(write_intent_rehydrate_telemetry, Mapping)
+                    and write_intent_rehydrate_telemetry.get("reused")
+                )
+            )
+            routing_gate_allowed = any(
+                item.allowed
+                and (
+                    item.decision_basis != REASON_DEFAULT_ALLOW_ADDITIVE_LOW_RISK
+                    or low_risk_additive_routing_evidence
+                )
+                for item in write_routing_policy_decision.tool_decisions
+            ) or any(
+                item.requires_confirmation
+                for item in write_routing_policy_decision.tool_decisions
+            )
+            mutative_intent_requires_tool_routing = routing_gate_allowed
+            if prompt_explicitly_denies_write(prompt):
+                mutative_intent_requires_tool_routing = False
             write_gate_state = self._classify_write_gate_state(
-                allowed=bool(write_routing_policy_decision.allowed_tools),
+                allowed=routing_gate_allowed,
                 reason=write_routing_policy_reason,
             )
             if isinstance(aux_llm_calls, list):
+                routing_risk_classes = {
+                    item.tool_name: item.risk_class
+                    for item in write_routing_policy_decision.tool_decisions
+                }
+                confirmation_required_tools = [
+                    item.tool_name
+                    for item in write_routing_policy_decision.tool_decisions
+                    if item.requires_confirmation
+                ]
                 try:
                     aux_llm_calls.append(
                         {
@@ -18996,6 +19181,17 @@ class InternalMCPChatOrchestrator:
                             "stage": "routing",
                             "gate_state": write_gate_state,
                             "reason": write_routing_policy_reason,
+                            "decision_basis": write_routing_policy_decision.decision_basis,
+                            "risk_classes": routing_risk_classes,
+                            "requires_confirmation": bool(
+                                confirmation_required_tools
+                            ),
+                            "confirmation_required_tools": confirmation_required_tools,
+                            "blocked_reason": write_routing_policy_reason
+                            if not write_routing_policy_decision.allowed_tools
+                            else None,
+                            "user_denial_detected": write_routing_policy_decision.user_denial_detected,
+                            "low_risk_additive_routing_evidence": low_risk_additive_routing_evidence,
                             "requested_write_tools_count": len(
                                 write_tool_candidates_for_routing
                             ),

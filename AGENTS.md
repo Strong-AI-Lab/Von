@@ -37,6 +37,10 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 29. **Definition of fully complete Jira task**: implementation committed and pushed, PR created, PR merged to `main`, Jira transitioned/commented accordingly, and any required Vontology workflow/state changes actually materialised.
 30. **Fail closed when Vontology is unavailable for Vontology-governed behaviour**: do not silently fall back to in-code prompts, stale context reuse, or heuristic hacks. If required Vontology prompts/workflow data cannot be resolved, no-op that transformation and emit a clear user-visible and telemetry-visible reason.
 31. **Minimal-imposition principle**: exhaust existing context/data/search first; ask humans only when necessary, and then only for concise, low-effort, high-value inputs they are likely to know without extra work.
+31A. **Minimal-imposition mutation policy**: low-risk additive Vontology writes should default-allow when evidence-backed inputs make the intended additive action clear and the user has not explicitly denied it.
+31B. **Canonical identifiers/URLs can be permission**: pasted canonical sources such as arXiv abstract URLs/IDs can constitute sufficient permission for low-risk additive representation work; do not require redundant verbs like `download`, `store`, or `represent`.
+31C. **Destructive actions require workflow confirmation**: deletes, removals, and other destructive mutations should branch to explicit workflow confirmation/escalation rather than being executed immediately.
+31D. **Human in the loop is not the default doctrine**: outside genuinely safety-critical cases, do not interrupt users or route to human approval without evidence that it is necessary.
 32. When the user asks whether something is "finished" or "complete", do not treat Jira status alone as the answer. Verify effective implementation state in both code and Vontology, then report whether it is unimplemented, partly implemented, or fully implemented (with concise evidence).
 
 ## Core AI-Focused Documents
@@ -57,6 +61,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 - **Telemetry correctness is mandatory**: diagnostic payloads, stage paths, counters, and progress summaries are operational interfaces, not optional polish. If they are internally inconsistent with the underlying event stream, treat that as a bug and fix it with the same urgency as a behavioural regression.
 - When fixing reliability issues, prefer **systemic, general fixes** over point fixes: update shared pipelines, validators, and policies so that behaviour remains stable across model changes and configuration drift.
 - For question-generation or elicitation flows, apply the minimal-imposition principle explicitly in prompts/fallbacks: avoid broad requests, and prefer one focused ask only when machine-side retrieval cannot close the gap.
+- For write-policy work, treat minimal imposition as a risk-class decision rule: additive low-risk Vontology mutations should usually proceed, while destructive mutations should route to explicit confirmation workflows.
 - **DRY refactoring discipline** (CRITICAL — WET code is unacceptable):
 	1. **Search first, always**: Before writing ANY function that might exist elsewhere, run `grep_search` or `semantic_search`. This is not optional.
 	2. **3-strike rule**: If you're about to write similar code for the 3rd time, STOP. Do not proceed. Create a central helper first.

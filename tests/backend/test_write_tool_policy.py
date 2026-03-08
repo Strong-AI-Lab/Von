@@ -3,138 +3,156 @@
 from __future__ import annotations
 
 
-def test_recent_prompt_allows_vontology_write():
-    from src.backend.workflows.write_tool_policy import compute_allowed_write_tools
-
-    decision = compute_allowed_write_tools(
-        prompt="These predicates are just instances of #V#nearly_functional_binary_predicate.",
-        requested_tools=["create_concepts"],
-        recent_user_prompts=[
-            "Please create the predicate has_blob_key in the ontology.",
-        ],
+def test_classify_write_tool_risk_covers_policy_classes():
+    from src.backend.workflows.write_tool_policy import (
+        WRITE_RISK_ADDITIVE_LOW_RISK,
+        WRITE_RISK_DESTRUCTIVE,
+        WRITE_RISK_EXTERNAL_NON_VONTOLOGY,
+        WRITE_RISK_MUTATIVE_NON_DESTRUCTIVE,
+        classify_write_tool_risk,
     )
 
-    assert "create_concepts" in decision.allowed_tools
-    assert decision.reason == "recent_vontology_mutation_request"
-
-
-def test_recent_prompt_allows_artefact_download():
-    from src.backend.workflows.write_tool_policy import compute_allowed_write_tools
-
-    decision = compute_allowed_write_tools(
-        prompt="What is arxiv 1234.5678 about?",
-        requested_tools=["download_paper"],
-        recent_user_prompts=["Download and store the arxiv 1234.5678 PDF."],
+    assert classify_write_tool_risk("add_relationship") == WRITE_RISK_ADDITIVE_LOW_RISK
+    assert (
+        classify_write_tool_risk("update_concept")
+        == WRITE_RISK_MUTATIVE_NON_DESTRUCTIVE
+    )
+    assert classify_write_tool_risk("delete_concept") == WRITE_RISK_DESTRUCTIVE
+    assert (
+        classify_write_tool_risk("jira_create_issue")
+        == WRITE_RISK_EXTERNAL_NON_VONTOLOGY
     )
 
-    assert "download_paper" in decision.allowed_tools
-    assert decision.reason == "recent_artefact_download_request"
 
-
-def test_recent_prompt_allows_cached_paper_finalise():
-    from src.backend.workflows.write_tool_policy import compute_allowed_write_tools
-
-    decision = compute_allowed_write_tools(
-        prompt="What is arxiv 1234.5678 about?",
-        requested_tools=["finalise_cached_paper"],
-        recent_user_prompts=["Finalise and store the cached arxiv 1234.5678 PDF."],
+def test_bare_arxiv_url_allows_additive_download_by_default():
+    from src.backend.workflows.write_tool_policy import (
+        REASON_DEFAULT_ALLOW_ADDITIVE_LOW_RISK,
+        compute_allowed_write_tools,
     )
 
-    assert "finalise_cached_paper" in decision.allowed_tools
-    assert decision.reason == "recent_artefact_download_request"
-
-
-def test_explicit_get_arxiv_paper_allows_download():
-    from src.backend.workflows.write_tool_policy import compute_allowed_write_tools
-
     decision = compute_allowed_write_tools(
-        prompt="2512.23959 get that arxiv paper",
+        prompt="https://arxiv.org/abs/2510.06248",
         requested_tools=["download_paper"],
         recent_user_prompts=[],
     )
 
     assert "download_paper" in decision.allowed_tools
-    assert decision.reason == "explicit_artefact_download_request"
+    assert decision.reason == REASON_DEFAULT_ALLOW_ADDITIVE_LOW_RISK
+    tool_decision = decision.decision_for_tool("download_paper")
+    assert tool_decision is not None
+    assert tool_decision.allowed is True
+    assert tool_decision.requires_confirmation is False
 
 
-def test_explicit_finalise_cached_arxiv_paper_allows_write():
-    from src.backend.workflows.write_tool_policy import compute_allowed_write_tools
-
-    decision = compute_allowed_write_tools(
-        prompt="Finalise cached arXiv:2512.23959 and store it.",
-        requested_tools=["finalise_cached_paper"],
-        recent_user_prompts=[],
-    )
-
-    assert "finalise_cached_paper" in decision.allowed_tools
-    assert decision.reason == "explicit_artefact_download_request"
-
-
-def test_minimal_finalise_arxiv_id_allows_write():
-    from src.backend.workflows.write_tool_policy import compute_allowed_write_tools
-
-    decision = compute_allowed_write_tools(
-        prompt="finalise 2505.12477",
-        requested_tools=["finalise_cached_paper"],
-        recent_user_prompts=[],
-    )
-
-    assert "finalise_cached_paper" in decision.allowed_tools
-    assert decision.reason == "explicit_artefact_download_request"
-
-
-def test_no_recent_write_intent_blocks():
-    from src.backend.workflows.write_tool_policy import compute_allowed_write_tools
-
-    decision = compute_allowed_write_tools(
-        prompt="These predicates are just instances of #V#nearly_functional_binary_predicate.",
-        requested_tools=["create_concepts"],
-        recent_user_prompts=["Explain how predicates relate to instances."],
-    )
-
-    assert "create_concepts" not in decision.allowed_tools
-    assert decision.reason == "no_explicit_write_intent_detected"
-
-
-def test_explicit_note_request_allows_text_relation_write():
-    from src.backend.workflows.write_tool_policy import compute_allowed_write_tools
-
-    decision = compute_allowed_write_tools(
-        prompt="Add the note now.",
-        requested_tools=["upsert_text_relation"],
-        recent_user_prompts=[],
-    )
-
-    assert "upsert_text_relation" in decision.allowed_tools
-    assert decision.reason == "explicit_vontology_mutation_request"
-
-
-def test_high_impact_tool_detection():
+def test_explicit_denial_blocks_additive_write():
     from src.backend.workflows.write_tool_policy import (
-        is_high_impact_vontology_write_tool,
+        REASON_EXPLICIT_WRITE_DENIAL_DETECTED,
+        compute_allowed_write_tools,
     )
 
-    assert is_high_impact_vontology_write_tool("create_concepts") is True
-    assert is_high_impact_vontology_write_tool("add_relationship") is True
-    assert is_high_impact_vontology_write_tool("upsert_text_relation") is False
+    decision = compute_allowed_write_tools(
+        prompt="Do not download or store this arXiv paper: https://arxiv.org/abs/2510.06248",
+        requested_tools=["download_paper"],
+        recent_user_prompts=[],
+    )
+
+    assert "download_paper" not in decision.allowed_tools
+    assert decision.reason == REASON_EXPLICIT_WRITE_DENIAL_DETECTED
+    assert decision.user_denial_detected is True
 
 
-def test_prompt_grants_high_impact_kb_write_approval():
+def test_mutative_non_destructive_write_requires_explicit_request():
     from src.backend.workflows.write_tool_policy import (
-        prompt_grants_high_impact_kb_write_approval,
+        REASON_MUTATIVE_NON_DESTRUCTIVE_REQUEST_REQUIRED,
+        compute_allowed_write_tools,
+    )
+
+    decision = compute_allowed_write_tools(
+        prompt="Tell me about this concept.",
+        requested_tools=["update_concept"],
+        recent_user_prompts=[],
+    )
+
+    assert "update_concept" not in decision.allowed_tools
+    assert decision.reason == REASON_MUTATIVE_NON_DESTRUCTIVE_REQUEST_REQUIRED
+
+
+def test_recent_prompt_allows_mutative_non_destructive_write():
+    from src.backend.workflows.write_tool_policy import (
+        REASON_RECENT_NON_DESTRUCTIVE_MUTATION_REQUEST,
+        compute_allowed_write_tools,
+    )
+
+    decision = compute_allowed_write_tools(
+        prompt="Yes, do it.",
+        requested_tools=["update_concept"],
+        recent_user_prompts=["Update the Vontology concept description now."],
+    )
+
+    assert "update_concept" in decision.allowed_tools
+    assert decision.reason == REASON_RECENT_NON_DESTRUCTIVE_MUTATION_REQUEST
+
+
+def test_destructive_write_requires_confirmation():
+    from src.backend.workflows.write_tool_policy import (
+        REASON_DESTRUCTIVE_CONFIRMATION_REQUIRED,
+        compute_allowed_write_tools,
+    )
+
+    decision = compute_allowed_write_tools(
+        prompt="Delete concept #V#paper_on_arxiv_2510_06248.",
+        requested_tools=["delete_concept"],
+        recent_user_prompts=[],
+    )
+
+    assert "delete_concept" not in decision.allowed_tools
+    assert decision.reason == REASON_DESTRUCTIVE_CONFIRMATION_REQUIRED
+    tool_decision = decision.decision_for_tool("delete_concept")
+    assert tool_decision is not None
+    assert tool_decision.requires_confirmation is True
+
+
+def test_recent_confirmation_allows_destructive_write():
+    from src.backend.workflows.write_tool_policy import (
+        REASON_RECENT_DESTRUCTIVE_CONFIRMATION,
+        compute_allowed_write_tools,
+    )
+
+    decision = compute_allowed_write_tools(
+        prompt="Yes, do it.",
+        requested_tools=["delete_concept"],
+        recent_user_prompts=["Delete concept #V#paper_on_arxiv_2510_06248."],
+    )
+
+    assert "delete_concept" in decision.allowed_tools
+    assert decision.reason == REASON_RECENT_DESTRUCTIVE_CONFIRMATION
+
+
+def test_external_write_requires_explicit_request():
+    from src.backend.workflows.write_tool_policy import (
+        REASON_EXTERNAL_WRITE_REQUIRES_EXPLICIT_REQUEST,
+        compute_allowed_write_tools,
+    )
+
+    decision = compute_allowed_write_tools(
+        prompt="Summarise the Jira issue state.",
+        requested_tools=["jira_update_issue"],
+        recent_user_prompts=[],
+    )
+
+    assert "jira_update_issue" not in decision.allowed_tools
+    assert decision.reason == REASON_EXTERNAL_WRITE_REQUIRES_EXPLICIT_REQUEST
+
+
+def test_prompt_has_low_risk_additive_write_evidence_for_arxiv_url():
+    from src.backend.workflows.write_tool_policy import (
+        prompt_has_low_risk_additive_write_evidence,
     )
 
     assert (
-        prompt_grants_high_impact_kb_write_approval(
-            prompt="Approved. Proceed with the Vontology concept write.",
-            recent_user_prompts=[],
+        prompt_has_low_risk_additive_write_evidence(
+            "https://arxiv.org/abs/2510.06248"
         )
         is True
     )
-    assert (
-        prompt_grants_high_impact_kb_write_approval(
-            prompt="Please create a concept in the ontology.",
-            recent_user_prompts=[],
-        )
-        is False
-    )
+    assert prompt_has_low_risk_additive_write_evidence("Yes, do it.") is False

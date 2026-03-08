@@ -202,6 +202,26 @@ Across all subsystems, the following **workflow primitives** emerge:
 - **Real-Time Workflow Modification**: Runtime changes require explicit API (future feature)
 - **Cross-System Orchestration**: External system integrations (beyond MCP) not covered
 
+### 3.3 Minimal-Imposition Mutation Policy
+
+Workflow policy should minimise unnecessary interruption, not default to
+hesitation.
+
+Normative implications:
+
+- low-risk additive Vontology writes should default-allow when the workflow has
+  evidence-backed inputs and no explicit user denial;
+- canonical identifiers or URLs may themselves constitute sufficient permission
+  for low-risk additive representation or artefact-ingestion work;
+- write-policy decisions should be based on risk class, not primarily on
+  whether the prompt happened to include verbs such as `download`, `store`, or
+  `create`;
+- destructive or otherwise high-risk mutations should route to explicit
+  approval/confirmation workflow states;
+- human interruption is an exception path for destructive, ambiguous, or
+  genuinely safety-critical cases, not the default doctrine for ordinary Von
+  operation.
+
 ---
 
 ## 4. Conceptual Model

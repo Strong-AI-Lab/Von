@@ -338,6 +338,11 @@ def build_write_tool_policy_workflow() -> WorkflowDefinition:
             ),
         ),
         transitions=(
+            _transition_if_flag_set(
+                "approval_required",
+                to_state="approval_required",
+                reason="on_approval_required",
+            ),
             WorkflowTransitionSpec(
                 to_state="completed",
                 condition=lambda ctx: True,
@@ -346,6 +351,7 @@ def build_write_tool_policy_workflow() -> WorkflowDefinition:
         ),
     )
 
+    approval_required = WorkflowStateSpec(state_id="approval_required", terminal=True)
     completed = WorkflowStateSpec(state_id="completed", terminal=True)
 
     return WorkflowDefinition(
@@ -353,9 +359,10 @@ def build_write_tool_policy_workflow() -> WorkflowDefinition:
         initial_state="decide",
         states={
             "decide": decide,
+            "approval_required": approval_required,
             "completed": completed,
         },
-        termination_states=("completed",),
+        termination_states=("approval_required", "completed"),
         purpose="Determine which write tools are allowed for a chat prompt.",
     )
 

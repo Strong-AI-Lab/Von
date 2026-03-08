@@ -26,6 +26,7 @@ from .representation_contract_vontology_service import (
     ensure_canonical_representation_contract_profiles,
     load_representation_contract_profiles_from_concept_ids,
 )
+from ..workflows.write_tool_policy import prompt_explicitly_denies_write
 from ..workflows.conversation_turn_stage_model import (
     build_conversation_turn_stage_model_snapshot,
     build_conversation_turn_stage_path,
@@ -618,6 +619,12 @@ def _extract_tool_invocation_payload(
     payload_value = invocation.get("payload")
     if isinstance(payload_value, Mapping):
         return payload_value
+    payload_value = invocation.get("effective_arguments")
+    if isinstance(payload_value, Mapping):
+        return payload_value
+    payload_value = invocation.get("arguments")
+    if isinstance(payload_value, Mapping):
+        return payload_value
     return None
 
 
@@ -1169,6 +1176,46 @@ def _prompt_requests_representation_action(prompt_text: str) -> bool:
     )
 
 
+def _prompt_implies_low_risk_arxiv_representation(
+    prompt_text: str,
+    *,
+    aux_llm_calls: Sequence[Mapping[str, Any]] | None = None,
+) -> bool:
+    if not prompt_text:
+        return False
+    lowered = prompt_text.lower()
+    if _looks_like_diagnostic_only_prompt(lowered):
+        return False
+    if prompt_explicitly_denies_write(prompt_text):
+        return False
+
+    arxiv_ids = extract_arxiv_id_candidates(prompt_text)
+    if not arxiv_ids:
+        return False
+
+    urls = _extract_urls_from_text(prompt_text)
+    if any("arxiv.org/" in url.lower() for url in urls):
+        return True
+
+    if "arxiv" in lowered:
+        return True
+
+    for entry in aux_llm_calls or ():
+        if not isinstance(entry, Mapping):
+            continue
+        if _safe_str(entry.get("type")) != "write_policy_gate":
+            continue
+        if _safe_str(entry.get("reason")) != "default_allow_additive_low_risk":
+            continue
+        risk_classes = entry.get("risk_classes")
+        if not isinstance(risk_classes, Mapping):
+            continue
+        if _safe_str(risk_classes.get("download_paper")) == "additive_low_risk":
+            return True
+
+    return False
+
+
 def _compile_representation_intent_patterns(patterns: Any) -> list[re.Pattern[str]]:
     if not isinstance(patterns, Sequence) or isinstance(patterns, (str, bytes)):
         return []
@@ -1341,7 +1388,12 @@ def _build_representation_required_effects_contract(
     continuation_contract = _representation_contract_from_continuation_context(
         continuation_context
     )
-    if not _prompt_requests_representation_action(prompt_clean):
+    if not _prompt_requests_representation_action(
+        prompt_clean
+    ) and not _prompt_implies_low_risk_arxiv_representation(
+        prompt_clean,
+        aux_llm_calls=aux_llm_calls,
+    ):
         return continuation_contract
 
     file_copy_ids = _extract_required_file_copy_ids_from_aux(aux_llm_calls)
@@ -1512,16 +1564,30 @@ _REPRESENTATION_EFFECT_PAYLOAD_KEYS: dict[str, str] = {
 }
 
 
-def _extract_tool_invocation_target_ids(payload: Mapping[str, Any] | None) -> list[str]:
-    if not isinstance(payload, Mapping):
-        return []
+def _extract_tool_invocation_target_ids(invocation: Mapping[str, Any]) -> list[str]:
+    payload = _extract_tool_invocation_payload(invocation)
+    arguments = invocation.get("effective_arguments")
+    if not isinstance(arguments, Mapping):
+        raw_arguments = invocation.get("arguments")
+        arguments = raw_arguments if isinstance(raw_arguments, Mapping) else None
+
     return _normalise_representation_target_tokens(
-        payload.get("concept_id"),
-        payload.get("file_copy_concept_id"),
-        payload.get("computer_file_copy_concept_id"),
-        payload.get("url"),
-        payload.get("source_url"),
-        payload.get("arxiv_id"),
+        payload.get("concept_id") if isinstance(payload, Mapping) else None,
+        payload.get("file_copy_concept_id") if isinstance(payload, Mapping) else None,
+        payload.get("computer_file_copy_concept_id")
+        if isinstance(payload, Mapping)
+        else None,
+        payload.get("url") if isinstance(payload, Mapping) else None,
+        payload.get("source_url") if isinstance(payload, Mapping) else None,
+        payload.get("arxiv_id") if isinstance(payload, Mapping) else None,
+        arguments.get("concept_id") if isinstance(arguments, Mapping) else None,
+        arguments.get("file_copy_concept_id") if isinstance(arguments, Mapping) else None,
+        arguments.get("computer_file_copy_concept_id")
+        if isinstance(arguments, Mapping)
+        else None,
+        arguments.get("url") if isinstance(arguments, Mapping) else None,
+        arguments.get("source_url") if isinstance(arguments, Mapping) else None,
+        arguments.get("arxiv_id") if isinstance(arguments, Mapping) else None,
     )
 
 
@@ -1564,7 +1630,7 @@ def _collect_successful_tool_payloads(
             continue
         payload_target_ids = {
             item.lower()
-            for item in _extract_tool_invocation_target_ids(payload)
+            for item in _extract_tool_invocation_target_ids(invocation)
             if isinstance(item, str) and item.strip()
         }
         if payload_target_ids and payload_target_ids.intersection(target_lookup):
@@ -2210,12 +2276,14 @@ def build_turn_execution_record(
     required_effects: list[dict[str, Any]] = []
     required_effects.extend(representation_effects)
 
-    mutation_effect = _infer_mutation_required_effect(
-        prompt_text=prompt_text,
-        successful_write_tools=successful_write_tools,
-        failed_tools=failed_tools,
-        blocked_tools=blocked_tools,
-    )
+    mutation_effect = None
+    if not representation_effects:
+        mutation_effect = _infer_mutation_required_effect(
+            prompt_text=prompt_text,
+            successful_write_tools=successful_write_tools,
+            failed_tools=failed_tools,
+            blocked_tools=blocked_tools,
+        )
     if mutation_effect is not None:
         required_effects.append(mutation_effect)
     elif not successful_write_tools and not representation_effects:

@@ -1,13 +1,11 @@
-"""High-impact Vontology write guard tests (JVNAUTOSCI-925)."""
+"""Destructive-write confirmation guard tests."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Sequence, cast
 
-from src.backend.integrations.internal_mcp.orchestrator import (
-    InternalMCPChatOrchestrator,
-)
+from orchestrator_test_harness import build_db_independent_orchestrator
 from src.backend.services import settings_service
 
 
@@ -17,7 +15,7 @@ class _TransportResult:
     duration_ms: float
 
 
-class _CreateConceptsGateway:
+class _DeleteConceptGateway:
     enabled = True
 
     def __init__(self) -> None:
@@ -25,9 +23,9 @@ class _CreateConceptsGateway:
 
     def describe_methods(self) -> dict[str, Any]:
         return {
-            "create_concepts": {
+            "delete_concept": {
                 "category": "write",
-                "description": "Create one or more Vontology concepts.",
+                "description": "Delete a Vontology concept.",
             }
         }
 
@@ -57,129 +55,81 @@ class _CapturingLLM:
 
 def _tool_call() -> str:
     return (
-        '{"action":"call_tool","tool":"create_concepts","payload":'
-        '{"parent_id":"#V#thing","concepts":[{"name":"guarded concept"}]}}'
+        '{"action":"call_tool","tool":"delete_concept","payload":'
+        '{"concept_id":"#V#guarded_concept"}}'
     )
 
 
-def test_high_impact_guard_blocks_without_explicit_review_approval(monkeypatch):
+def test_destructive_write_blocks_pending_confirmation(monkeypatch):
     monkeypatch.setattr(
-        settings_service, "get_disable_write_tool_conservatism", lambda: True
-    )
-    monkeypatch.setattr(
-        settings_service,
-        "get_require_human_review_for_high_impact_kb_writes",
-        lambda: True,
+        settings_service, "get_disable_write_tool_conservatism", lambda: False
     )
 
-    gateway = _CreateConceptsGateway()
-    orchestrator = InternalMCPChatOrchestrator(
+    gateway = _DeleteConceptGateway()
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
         gateway=cast(Any, gateway),
         max_tool_invocations=1,
     )
     llm = _CapturingLLM([_tool_call(), "Done."])
 
     result = orchestrator.run(
-        prompt="Create a concept in the Vontology for guarded extension.",
+        prompt="Delete concept #V#guarded_concept.",
         context=[],
         llm_client=llm,
         model=None,
         user_namespace="#V#michael_witbrock@nao",
     )
 
-    create_invocations = [
-        call for call in gateway.invocations if call.get("tool") == "create_concepts"
-    ]
-    assert create_invocations == []
+    assert not any(
+        call.get("tool") == "delete_concept" for call in gateway.invocations
+    )
     blocked = [
         record
         for record in result.tool_invocations
-        if record.get("tool") == "create_concepts"
+        if record.get("tool") == "delete_concept"
     ]
     assert blocked
     assert blocked[0].get("blocked") is True
-    assert (
-        blocked[0].get("write_policy_reason")
-        == "high_impact_kb_write_requires_human_review"
+    assert blocked[0].get("write_policy_blocked_reason") == (
+        "destructive_confirmation_required"
     )
+    assert blocked[0].get("write_policy_requires_confirmation") is True
+    assert "Confirm delete_concept" in str(blocked[0].get("confirmation_prompt"))
 
 
-def test_high_impact_guard_blocks_when_namespace_missing(monkeypatch):
+def test_destructive_write_allows_recent_confirmation(monkeypatch):
     monkeypatch.setattr(
-        settings_service, "get_disable_write_tool_conservatism", lambda: True
-    )
-    monkeypatch.setattr(
-        settings_service,
-        "get_require_human_review_for_high_impact_kb_writes",
-        lambda: True,
+        settings_service, "get_disable_write_tool_conservatism", lambda: False
     )
 
-    gateway = _CreateConceptsGateway()
-    orchestrator = InternalMCPChatOrchestrator(
+    gateway = _DeleteConceptGateway()
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
         gateway=cast(Any, gateway),
         max_tool_invocations=1,
     )
     llm = _CapturingLLM([_tool_call(), "Done."])
 
     result = orchestrator.run(
-        prompt="Approved: proceed with the Vontology write.",
-        context=[],
-        llm_client=llm,
-        model=None,
-        user_namespace=None,
-    )
-
-    create_invocations = [
-        call for call in gateway.invocations if call.get("tool") == "create_concepts"
-    ]
-    assert create_invocations == []
-    blocked = [
-        record
-        for record in result.tool_invocations
-        if record.get("tool") == "create_concepts"
-    ]
-    assert blocked
-    assert blocked[0].get("blocked") is True
-    assert (
-        blocked[0].get("write_policy_reason")
-        == "high_impact_kb_write_requires_namespace"
-    )
-
-
-def test_high_impact_guard_allows_namespaced_approved_write(monkeypatch):
-    monkeypatch.setattr(
-        settings_service, "get_disable_write_tool_conservatism", lambda: True
-    )
-    monkeypatch.setattr(
-        settings_service,
-        "get_require_human_review_for_high_impact_kb_writes",
-        lambda: True,
-    )
-
-    gateway = _CreateConceptsGateway()
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=cast(Any, gateway),
-        max_tool_invocations=1,
-    )
-    llm = _CapturingLLM([_tool_call(), "Done."])
-
-    result = orchestrator.run(
-        prompt="Approved. Go ahead with the Vontology concept write now.",
-        context=[],
+        prompt="Yes, do it.",
+        context=[{"role": "user", "content": "Delete concept #V#guarded_concept."}],
         llm_client=llm,
         model=None,
         user_namespace="#V#michael_witbrock@nao",
     )
 
     create_invocations = [
-        call for call in gateway.invocations if call.get("tool") == "create_concepts"
+        call for call in gateway.invocations if call.get("tool") == "delete_concept"
     ]
     assert len(create_invocations) == 1
-    invoked = create_invocations[0]
     records = [
         record
         for record in result.tool_invocations
-        if record.get("tool") == "create_concepts"
+        if record.get("tool") == "delete_concept"
     ]
     assert records
     assert all(not record.get("blocked") for record in records)
+    assert all(
+        record.get("write_policy_risk_class") == "destructive" for record in records
+    )

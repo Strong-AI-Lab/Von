@@ -21,7 +21,7 @@ and the targeted-testing constraint tracked in `JVNAUTOSCI-1400`.
 
 Two cases must be separated.
 
-### 1. Bare URL only
+### 1. Bare canonical arXiv URL
 
 Prompt shape:
 
@@ -31,41 +31,49 @@ https://arxiv.org/abs/2510.06248
 
 Authoritative behaviour:
 
-- This is **not** enough to authorise `download_paper`.
-- The turn must remain read-only unless the user also expresses explicit
-  download/store/representation intent.
-- The route may choose plain response, clarification, or read-only URL
-  extraction, but it must not silently persist artefacts or mutate the
-  ontology.
-
-Why:
-
-- `download_paper` is a write-category tool and existing write-guard coverage
-  blocks it when the user does not explicitly ask for storage/download.
-- Auto-persisting from a pasted URL would currently conflict with the
-  minimal-imposition and fail-closed policies.
-
-### 2. URL plus explicit representation intent
-
-Prompt shape:
-
-```text
-https://arxiv.org/abs/2510.06248 represent that paper
-```
-
-Authoritative behaviour:
-
-- This is the positive mutation path that `JVNAUTOSCI-1394` must fix.
-- The turn must enter the workflow/tool pipeline rather than falling through to
-  plain response.
+- This **is** sufficient permission for `download_paper` and additive scholarly
+  representation.
+- The turn must enter the workflow/tool pipeline rather than collapsing into a
+  read-only or plain-response path.
 - The turn must carry a paper representation contract with
   `artefact_source="url"` and must require `download_paper`.
 - Successful completion requires real tool execution plus verified scholarly
   representation postconditions.
 
-This explicit-intent case is the canonical integration regression for
-`JVNAUTOSCI-1394`, because it exercises the failure boundary without violating
-the current write guard.
+Why:
+
+- A canonical arXiv abstract URL is evidence-backed, low-risk input for
+  additive representation work.
+- Minimal imposition means not making the user add extra phrasing such as
+  "download", "store", or "represent" when the intended low-risk additive
+  action is already clear from the supplied canonical source.
+- This is the primary positive mutation path that `JVNAUTOSCI-1394` must fix.
+
+Equivalent positive prompts MAY also include explicit phrasing such as:
+
+```text
+https://arxiv.org/abs/2510.06248 represent that paper
+```
+
+but that wording is no longer the sole authorising form.
+
+### 2. URL plus explicit denial
+
+Prompt shape:
+
+```text
+Do not download or store this: https://arxiv.org/abs/2510.06248
+```
+
+Authoritative behaviour:
+
+- Explicit user denial must block mutation.
+- The route may still answer read-only, but it must not invoke
+  `download_paper`, persist artefacts, or claim successful representation.
+
+This explicit-denial case is the canonical negative regression for
+`JVNAUTOSCI-1394`, because it preserves fail-closed behaviour where the user
+has provided direct contrary instruction.
 
 ## Runtime Boundary To Test
 
@@ -175,7 +183,7 @@ Assert:
 - `body["llm_debug"]["workflow_routing"]["verdict"]`
 - `body["llm_debug"]["workflow_routing"]["source"]`
 
-For the explicit-intent positive case, the expected selected workflow ID is:
+For the bare-URL positive case, the expected selected workflow ID is:
 
 - `#V#tool_calling_workflow`
 
@@ -227,7 +235,7 @@ The authoritative postconditions should match the deterministic arXiv
 materialisation helper in
 `src/backend/services/arxiv_paper_link_service.py`.
 
-For the positive explicit-intent case, assert:
+For the positive bare-URL case, assert:
 
 - a stable paper concept exists
 - the paper concept is an instance of `#V#scholarly_article`
@@ -349,32 +357,14 @@ authoritative cleanup mechanism should remain clone-DB deletion.
 
 ## Proposed Targeted Test Matrix
 
-### A. Negative safety case
+### A. Positive regression case
 
-`test_von_generate_bare_arxiv_url_only_remains_non_mutating`
+`test_von_generate_bare_arxiv_url_auto_represents_paper`
 
 Prompt:
 
 ```text
 https://arxiv.org/abs/2510.06248
-```
-
-Assert:
-
-- no `download_paper` invocation
-- no created paper/file-copy concepts for the fixture
-- no completion claim that implies successful representation
-
-This protects the write-guard and minimal-imposition boundary.
-
-### B. Positive regression case
-
-`test_von_generate_arxiv_url_with_explicit_representation_intent_executes_download_and_materialises_representation`
-
-Prompt:
-
-```text
-https://arxiv.org/abs/2510.06248 represent that paper
 ```
 
 Assert:
@@ -387,8 +377,26 @@ Assert:
 - completion gate is `completed` and `safe_to_claim_completion=True`
 - scholarly ontology postconditions exist
 
-This is the regression that should fail on the current `JVNAUTOSCI-1394`
+This is the regression that should fail on the broken `JVNAUTOSCI-1394`
 behaviour.
+
+### B. Negative safety case
+
+`test_von_generate_bare_arxiv_url_with_explicit_denial_stays_non_mutating`
+
+Prompt:
+
+```text
+Do not download or store this: https://arxiv.org/abs/2510.06248
+```
+
+Assert:
+
+- no `download_paper` invocation
+- no completion claim that implies successful representation
+- the turn remains non-mutating despite the canonical URL being present
+
+This protects the explicit-denial boundary.
 
 ## Validation Scope
 
@@ -403,8 +411,8 @@ Do not make the fix depend on a monolithic full-suite pytest run.
 
 ## Implementation Sequence For JVNAUTOSCI-1394
 
-1. Add the negative bare-URL safety test.
-2. Add the positive explicit-intent route-level integration test.
+1. Add the positive bare-URL route-level integration test.
+2. Add the explicit-denial negative regression.
 3. Fix the URL-first routing/tool-requirement gap until the positive test passes.
 4. Only then tighten any telemetry assertions that depend on
    `JVNAUTOSCI-1397`.
