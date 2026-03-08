@@ -58,3 +58,25 @@ Pilot validation now adds `pilot_validation` to the importer report with:
    - `SUPERSEDED` -> `cancelled`
    - `Won't Fix` -> `cancelled`
    - `SUSPENDED` -> `blocked`
+
+## JVNAUTOSCI-1407 Update (2026-03-09)
+
+The migration path now has a shared incremental runner in
+`src/backend/services/jira_task_migration_runner_service.py` so:
+
+1. `scripts/run_jira_task_migration.py`
+2. the durable workflow `#V#jira_task_incremental_import_workflow`
+3. persisted schedules / ad-hoc workflow instances
+
+all reuse the same discovery, batching, referenced-target repair, and
+reporting logic.
+
+New operational surfaces:
+
+1. Recent-window incremental sync via `--updated-within-hours N`
+2. One-off catch-up via `--min-issue-number` / `--max-issue-number`
+3. Durable workflow action `jira_task_incremental_import.run_sync`
+
+This keeps automation on the canonical Jira proxy -> `task_import_jira_issues`
+gateway path while allowing a persistent schedule to keep importing newly
+appearing Jira tasks without another bespoke sync mechanism.

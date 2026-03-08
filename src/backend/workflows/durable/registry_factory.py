@@ -60,6 +60,10 @@ from .entity_identity_resolution_workflow import (
     get_entity_identity_resolution_workflow_registration,
     register_entity_identity_resolution_actions,
 )
+from .jira_task_incremental_import_workflow import (
+    get_jira_task_incremental_import_workflow_registration,
+    register_jira_task_incremental_import_actions,
+)
 from .parent_specificity_concept_dossier_workflow import (
     get_parent_specificity_concept_dossier_workflow_registration,
     register_parent_specificity_concept_dossier_actions,
@@ -445,6 +449,7 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
     registry.register(get_file_copy_upload_handler_workflow_registration())
     registry.register(get_file_copy_interpretation_workflow_registration())
     registry.register(get_entity_identity_resolution_workflow_registration())
+    registry.register(get_jira_task_incremental_import_workflow_registration())
     registry.register(get_parent_specificity_concept_dossier_workflow_registration())
     registry.register(get_parent_specificity_rumination_workflow_registration())
     registry.register(get_workflow_discovery_gap_recovery_workflow_registration())
@@ -586,6 +591,7 @@ def build_durable_action_registry() -> ActionRegistry:
     register_file_copy_upload_handler_actions(registry)
     register_file_copy_interpretation_actions(registry)
     register_entity_identity_resolution_actions(registry)
+    register_jira_task_incremental_import_actions(registry)
     register_parent_specificity_concept_dossier_actions(registry)
     register_parent_specificity_rumination_actions(registry)
     register_workflow_gap_recovery_actions(registry)
