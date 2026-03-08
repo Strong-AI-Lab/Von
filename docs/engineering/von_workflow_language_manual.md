@@ -510,6 +510,12 @@ Canonical paper profile source expectations:
 - `url` source (including arXiv URLs/IDs): required tool set MUST include `download_paper`.
 - `mixed` source: required tool set SHOULD include both `download_paper` and `interpret_file_copy`.
 
+Intent boundary for URL inputs:
+
+- A bare arXiv URL on its own does **not** authorise artefact download or ontology mutation.
+- URL-driven scholarly materialisation requires explicit download/store/representation intent in the user turn.
+- Deterministic route-level coverage for this boundary is tracked by `JVNAUTOSCI-1399`; the current URL-first regression to fix is `JVNAUTOSCI-1394`.
+
 Important runtime contract note:
 
 - Current `required_effects_contract.v1` evaluates `required_tools` as an any-of set (one observed required tool can satisfy the effect), so source-specific tool lists MUST be authored to preserve mutation guarantees.
