@@ -9115,6 +9115,7 @@ class InternalMCPChatOrchestrator:
         self,
         *,
         stage: str,
+        policy_stage: str | None = None,
         prompt: str,
         context: Optional[Sequence[Mapping[str, Any]]],
         default_client: Any,
@@ -9128,9 +9129,10 @@ class InternalMCPChatOrchestrator:
         record_llm_call: Callable[..., Any],
         emit_progress: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> tuple[str, Optional[str], Mapping[str, Any]]:
+        candidate_stage = policy_stage or stage
 
         candidates = self._stage_model_candidates(
-            stage=stage,
+            stage=candidate_stage,
             default_model=default_model,
             policy_state=policy_state,
             registry_snapshot=registry_snapshot,
@@ -9308,6 +9310,7 @@ class InternalMCPChatOrchestrator:
                     {
                         "type": "workflow_model_policy_stage",
                         "stage": stage,
+                        "policy_stage": candidate_stage,
                         "selected": {
                             **telemetry,
                             "model_resolved": model_name,
@@ -9381,6 +9384,7 @@ class InternalMCPChatOrchestrator:
                 {
                     "type": "workflow_model_policy_stage",
                     "stage": stage,
+                    "policy_stage": candidate_stage,
                     "selected": None,
                     "fallback_used": True,
                     "fallback_attempt_count": len(fallback_attempts),
@@ -18724,53 +18728,74 @@ class InternalMCPChatOrchestrator:
                 }
             )
             selector_start = time.perf_counter()
-            classifier_model = _model_for_stage("classifier")
-            _emit_progress_local(
-                {
-                    "status": "llm_call_start",
-                    "stage": "workflow_dispatch",
-                    "phase": "workflow_dispatch",
-                    "phase_label": "Evaluating workflow candidates",
-                    "model": classifier_model,
-                    "workflow_match_count": len(discovered_matches),
-                    "workflow_candidate_count": len(discovered_matches)
-                    + len(excluded_discovered_matches),
-                }
+            selector_prompt = self._workflow_selector.prepare_selection_prompt(
+                turn_text=effective_prompt_for_routing,
+                discovered_workflows=discovered_matches or None,
             )
+
+            def _emit_selector_progress(info: Mapping[str, Any]) -> None:
+                payload = dict(info)
+                payload.setdefault("phase", "workflow_dispatch")
+                status = str(payload.get("status") or "").strip().lower()
+                if status == "llm_call_end":
+                    attempt_no = payload.get("fallback_attempt_no")
+                    attempt_count = payload.get("fallback_candidate_count")
+                    terminal_failure = (
+                        payload.get("success") is False
+                        and isinstance(attempt_no, int)
+                        and isinstance(attempt_count, int)
+                        and attempt_no >= attempt_count
+                    )
+                    payload.setdefault(
+                        "phase_label",
+                        (
+                            "Workflow selection failed"
+                            if terminal_failure
+                            else "Evaluating workflow candidates"
+                        ),
+                    )
+                else:
+                    payload.setdefault("phase_label", "Evaluating workflow candidates")
+                payload.setdefault("workflow_match_count", len(discovered_matches))
+                payload.setdefault(
+                    "workflow_candidate_count",
+                    len(discovered_matches) + len(excluded_discovered_matches),
+                )
+                _emit_progress_local(payload)
+
             try:
-                selector_selection = self._workflow_selector.select_workflow(
-                    llm_client=llm_client,
-                    model=classifier_model,
-                    turn_text=effective_prompt_for_routing,
-                    discovered_workflows=discovered_matches or None,
+                selector_response_text, classifier_model, selector_candidate = (
+                    self._run_llm_with_fallbacks(
+                        stage="workflow_dispatch",
+                        policy_stage="classifier",
+                        prompt="Select workflow",
+                        context=[
+                            {
+                                "role": "system",
+                                "content": selector_prompt.prompt_text,
+                            }
+                        ],
+                        default_client=llm_client,
+                        default_model=model,
+                        policy_state=policy_state,
+                        registry_snapshot=registry_snapshot,
+                        user_concept_id=user_concept_id,
+                        org_concept_id=org_concept_id,
+                        llm_calls_log=llm_calls,
+                        aux_log=aux_llm_calls,
+                        record_llm_call=_record_llm_call,
+                        emit_progress=_emit_selector_progress,
+                    )
+                )
+                selector_selection = self._workflow_selector.resolve_selection(
+                    raw_response=selector_response_text,
+                    prompt_id=selector_prompt.prompt_id,
+                    prompt_used=selector_prompt.prompt_text,
+                    discovered_workflow_ids=selector_prompt.discovered_workflow_ids,
                 )
                 routing_duration_ms = (time.perf_counter() - selector_start) * 1000.0
                 selected_workflow_name = _resolve_selected_workflow_name(
                     selector_selection.workflow_id
-                )
-                _emit_progress_local(
-                    {
-                        "status": "llm_call_end",
-                        "stage": "workflow_dispatch",
-                        "phase": "workflow_dispatch",
-                        "phase_label": "Evaluated workflow candidates",
-                        "model": classifier_model,
-                        "duration_ms": int(routing_duration_ms),
-                        "success": True,
-                        "workflow_selector_verdict": selector_selection.verdict,
-                        "selected_workflow_id": selector_selection.workflow_id,
-                        "selected_workflow_name": selected_workflow_name,
-                        "workflow_match_count": len(discovered_matches),
-                        "workflow_candidate_count": len(discovered_matches)
-                        + len(excluded_discovered_matches),
-                    }
-                )
-                _record_llm_call(
-                    call_type="workflow_selector",
-                    model_name=classifier_model,
-                    duration_ms=routing_duration_ms,
-                    note=selector_selection.verdict,
-                    stage="workflow_dispatch",
                 )
                 if selector_selection.workflow_id:
                     selected_workflow_id = selector_selection.workflow_id
@@ -18804,6 +18829,11 @@ class InternalMCPChatOrchestrator:
                         "workflow_id": selector_selection.workflow_id,
                         "verdict": selector_selection.verdict,
                         "prompt_id": selector_selection.prompt_id,
+                        "policy_stage": "classifier",
+                        "model_name": classifier_model,
+                        "candidate": dict(selector_candidate)
+                        if isinstance(selector_candidate, Mapping)
+                        else None,
                         "discovered_workflow_ids": list(
                             selector_selection.discovered_workflow_ids
                         ),
@@ -18818,6 +18848,11 @@ class InternalMCPChatOrchestrator:
                         "workflow_id": selector_selection.workflow_id,
                         "verdict": selector_selection.verdict,
                         "prompt_id": selector_selection.prompt_id,
+                        "policy_stage": "classifier",
+                        "model_name": classifier_model,
+                        "candidate": dict(selector_candidate)
+                        if isinstance(selector_candidate, Mapping)
+                        else None,
                         "discovered_workflow_ids": list(
                             selector_selection.discovered_workflow_ids
                         ),
@@ -18832,23 +18867,6 @@ class InternalMCPChatOrchestrator:
                         "routing_duration_ms": routing_duration_ms,
                     }
             except Exception as exc:
-                routing_duration_ms = (time.perf_counter() - selector_start) * 1000.0
-                _emit_progress_local(
-                    {
-                        "status": "llm_call_end",
-                        "stage": "workflow_dispatch",
-                        "phase": "workflow_dispatch",
-                        "phase_label": "Workflow selection failed",
-                        "model": classifier_model,
-                        "duration_ms": int(routing_duration_ms),
-                        "success": False,
-                        "error": str(exc),
-                        "error_class": type(exc).__name__,
-                        "workflow_match_count": len(discovered_matches),
-                        "workflow_candidate_count": len(discovered_matches)
-                        + len(excluded_discovered_matches),
-                    }
-                )
                 selected_workflow_id = CHAT_ASSISTANT_WORKFLOW_ID
                 routing_info = WorkflowRoutingInfo(
                     workflow_id=CHAT_ASSISTANT_WORKFLOW_ID,

@@ -30,6 +30,7 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     OrchestratorResult,
     ProgressTracker,
     WorkflowRoutingInfo,
+    _ModelCandidate,
 )
 from src.backend.workflows import WorkflowDefinition, WorkflowRegistration
 from src.backend.workflows.definitions import (
@@ -3109,6 +3110,164 @@ def test_plain_response_has_routing_info(monkeypatch):
     assert result.workflow_routing.verdict == "plain_response"
     assert result.workflow_routing.workflow_id == CHAT_ASSISTANT_WORKFLOW_ID
     assert result.workflow_routing.source == "selector"
+
+
+def test_workflow_selector_uses_provider_aware_classifier_fallback(monkeypatch):
+    """Selector classification should honour provider-aware stage candidates.
+
+    The classifier policy may prefer a local Ollama model for cheap routing.
+    When that candidate is unreachable, workflow dispatch must fall back to the
+    next candidate without trying the Ollama model name through the default
+    OpenAI client.
+    """
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    llm = _CapturingLLM(["Hello! How can I help?"])
+
+    ollama_candidate = _ModelCandidate(
+        provider="ollama",
+        model="granite3.3:2b",
+        raw="ollama:granite3.3:2b",
+        source="policy",
+        host="http://localhost:11434",
+    )
+    openai_candidate = _ModelCandidate(
+        provider="openai",
+        model="gpt-5.2-chat-latest",
+        raw="openai:gpt-5.2-chat-latest",
+        source="policy",
+    )
+
+    original_stage_model_candidates = orchestrator._stage_model_candidates
+    original_create_client_for_candidate = orchestrator._create_client_for_candidate
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_stage_model_candidates",
+        lambda **kwargs: (
+            [ollama_candidate, openai_candidate]
+            if kwargs.get("stage") == "classifier"
+            else original_stage_model_candidates(**kwargs)
+        ),
+    )
+
+    class _SelectorFallbackClient:
+        def generate(self, *_args: Any, **_kwargs: Any) -> str:
+            return "plain_response"
+
+    def _create_client_for_candidate(
+        candidate: _ModelCandidate,
+        **kwargs: Any,
+    ) -> tuple[Any, str | None, Mapping[str, Any]]:
+        if candidate.provider == "ollama":
+            return (
+                object(),
+                "granite3.3:2b",
+                {
+                    "provider": "ollama",
+                    "model": "granite3.3:2b",
+                    "raw": candidate.raw,
+                    "source": candidate.source,
+                    "host": "http://localhost:11434",
+                },
+            )
+        if candidate.provider == "openai":
+            return (
+                _SelectorFallbackClient(),
+                "gpt-5.2-chat-latest",
+                {
+                    "provider": "openai",
+                    "model": "gpt-5.2-chat-latest",
+                    "raw": candidate.raw,
+                    "source": candidate.source,
+                    "host": None,
+                },
+            )
+        return original_create_client_for_candidate(candidate, **kwargs)
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_create_client_for_candidate",
+        _create_client_for_candidate,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_probe_model_candidate_reachability",
+        lambda *, telemetry: (
+            {
+                "provider": "ollama",
+                "host": "http://localhost:11434",
+                "probe_url": "http://localhost:11434/api/tags",
+                "probe_timeout_ms": 1200,
+                "duration_ms": 7,
+                "reachable": False,
+                "error": "connection refused",
+                "error_class": "ConnectionError",
+            }
+            if telemetry.get("provider") == "ollama"
+            else None
+        ),
+    )
+
+    captured_progress: list[dict[str, Any]] = []
+    tracker = ProgressTracker(callback=lambda info: captured_progress.append(dict(info)))
+
+    result = orchestrator.run(
+        prompt="Hi there",
+        context=[],
+        llm_client=llm,
+        model="gpt-5.2-chat-latest",
+        user_namespace="#V#user",
+        progress_tracker=tracker,
+    )
+
+    assert result.response_text == "Hello! How can I help?"
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.verdict == "plain_response"
+    assert len(llm.calls) == 1
+    assert llm.calls[0]["prompt"] == "Hi there"
+
+    workflow_dispatch_events = [
+        entry for entry in captured_progress if entry.get("stage") == "workflow_dispatch"
+    ]
+    failed_attempt = next(
+        entry
+        for entry in workflow_dispatch_events
+        if entry.get("status") == "llm_call_end"
+        and entry.get("fallback_attempt_no") == 1
+    )
+    assert failed_attempt["success"] is False
+    assert failed_attempt["failure_kind"] == "provider_unreachable"
+    assert failed_attempt["provider"] == "ollama"
+
+    succeeded_attempt = next(
+        entry
+        for entry in workflow_dispatch_events
+        if entry.get("status") == "llm_call_end"
+        and entry.get("fallback_attempt_no") == 2
+    )
+    assert succeeded_attempt["success"] is True
+    assert succeeded_attempt["fallback_used"] is True
+    assert succeeded_attempt["provider"] == "openai"
+
+    stage_summary = next(
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict)
+        and entry.get("type") == "workflow_model_policy_stage"
+        and entry.get("stage") == "workflow_dispatch"
+    )
+    assert stage_summary["policy_stage"] == "classifier"
+    assert stage_summary["selected"]["provider"] == "openai"
+
+    selector_entry = next(
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict) and entry.get("type") == "workflow_selector"
+    )
+    assert selector_entry["policy_stage"] == "classifier"
+    assert selector_entry["candidate"]["provider"] == "openai"
+    assert selector_entry["model_name"] == "gpt-5.2-chat-latest"
 
 
 def test_plain_response_overridden_to_tool_pipeline_for_mutative_intent(monkeypatch):
