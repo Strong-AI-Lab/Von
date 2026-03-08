@@ -497,6 +497,120 @@ def test_turn_execution_diagnostics_rebuilds_phase_and_tool_history(monkeypatch)
     assert first_llm.get("duration_ms") == 125
 
 
+def test_canonical_tool_summary_survives_long_heartbeat_tail(monkeypatch) -> None:
+    clock = _set_clock(monkeypatch, start=5200.0)
+
+    von_routes._set_tool_progress(
+        "scope-heartbeat-tail",
+        "req-heartbeat-tail",
+        {
+            "status": "phase_transition",
+            "phase": "tool_execute",
+            "phase_label": "Executing tools",
+            "request_id": "req-heartbeat-tail",
+        },
+    )
+    clock["now"] += 0.1
+    von_routes._set_tool_progress(
+        "scope-heartbeat-tail",
+        "req-heartbeat-tail",
+        {
+            "status": "tool_call_start",
+            "phase": "tool_execute",
+            "tool": "download_paper",
+            "batch_size": 1,
+            "call_id": "call-download-paper",
+            "request_id": "req-heartbeat-tail",
+        },
+    )
+    clock["now"] += 0.1
+    von_routes._set_tool_progress(
+        "scope-heartbeat-tail",
+        "req-heartbeat-tail",
+        {
+            "status": "tool_invoked",
+            "phase": "tool_execute",
+            "tool": "download_paper",
+            "batch_size": 1,
+            "call_id": "call-download-paper",
+            "result_summary": "Downloaded: 2510.06018",
+            "request_id": "req-heartbeat-tail",
+        },
+    )
+
+    for _ in range(von_routes._TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT + 5):
+        clock["now"] += float(von_routes._TOOL_PROGRESS_HEARTBEAT_INTERVAL_SEC)
+        von_routes._set_tool_progress(
+            "scope-heartbeat-tail",
+            "req-heartbeat-tail",
+            {
+                "status": "heartbeat",
+                "request_id": "req-heartbeat-tail",
+            },
+        )
+
+    snapshot = von_routes._snapshot_tool_progress_for_request(
+        "scope-heartbeat-tail",
+        "req-heartbeat-tail",
+    )
+    assert snapshot is not None
+
+    diagnostic_events = snapshot.get("diagnostic_events")
+    assert isinstance(diagnostic_events, list)
+    assert len(diagnostic_events) == von_routes._TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT
+    assert all(event.get("status") != "tool_invoked" for event in diagnostic_events)
+
+    assert snapshot.get("tool_call_count") == 1
+    assert snapshot.get("tool_success_count") == 1
+    assert snapshot.get("tool_failure_count") == 0
+    assert snapshot.get("tool_pending_count") == 0
+    tool_history = snapshot.get("tool_history")
+    assert isinstance(tool_history, list)
+    assert tool_history == [
+        {
+            "tool": "download_paper",
+            "workflowTask": "",
+            "batchSize": 1,
+            "phase": "tool_execute",
+            "resultSummary": "Downloaded: 2510.06018",
+            "success": True,
+            "callId": "call-download-paper",
+        }
+    ]
+
+    diagnostics = von_routes._build_turn_execution_diagnostics(
+        request_id="req-heartbeat-tail",
+        prompt_text="https://arxiv.org/abs/2510.06018 represent that paper",
+        tool_progress_state=snapshot,
+    )
+    assert diagnostics["tool_call_count"] == 1
+    assert diagnostics["tool_success_count"] == 1
+    assert diagnostics["tool_failure_count"] == 0
+    assert diagnostics["tool_pending_count"] == 0
+    assert diagnostics["tool_history"] == tool_history
+
+    stage_diagnostics = diagnostics.get("stage_diagnostics")
+    assert isinstance(stage_diagnostics, list)
+    assert len(stage_diagnostics) == 1
+    assert stage_diagnostics[0] == {
+        **stage_diagnostics[0],
+        "stage_id": "tool_execute",
+        "stage_label": "Execute tool calls",
+        "event_count": von_routes._TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT,
+        "latest_status": "heartbeat",
+        "latest_at_utc": snapshot.get("updated_at"),
+        "latest_result_summary": "Downloaded: 2510.06018",
+        "latest_error": None,
+        "tool_call_count": 1,
+        "tool_success_count": 1,
+        "tool_failure_count": 0,
+        "tool_pending_count": 0,
+        "tool_call_start_count": 1,
+        "tool_call_end_count": 1,
+        "tool_history": tool_history,
+    }
+
+
 def test_turn_execution_diagnostics_stage_path_fallback_for_unknown_phase(
     monkeypatch,
 ) -> None:

@@ -9126,7 +9126,7 @@ class InternalMCPChatOrchestrator:
                 _coerce_float_env("VON_LLM_HEARTBEAT_INTERVAL_SEC", 5.0),
             ),
         )
-        if stage_name == "screen_backfill":
+        if stage_name in {"screen_backfill", "summariser", "summarizer"}:
             timeout_sec = max(
                 0.0,
                 _coerce_float_env("VON_SCREEN_BACKFILL_LLM_TIMEOUT_SEC", 180.0),

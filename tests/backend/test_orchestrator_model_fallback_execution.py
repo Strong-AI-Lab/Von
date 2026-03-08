@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import time
 from typing import Any, Mapping, cast
+
+import pytest
 
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
@@ -223,3 +226,31 @@ def test_probe_model_candidate_reachability_uses_failure_cooldown_cache(
     assert second.get("cooldown_hit") is True
     assert second.get("cached") is True
     assert request_calls["count"] == 1
+
+
+def test_invoke_with_llm_heartbeat_uses_backfill_timeout_for_summariser(
+    monkeypatch,
+) -> None:
+    orchestrator = object.__new__(InternalMCPChatOrchestrator)
+    monkeypatch.setenv("VON_LLM_HEARTBEAT_INTERVAL_SEC", "1")
+    monkeypatch.setenv("VON_SCREEN_BACKFILL_LLM_TIMEOUT_SEC", "1")
+    monkeypatch.delenv("VON_LLM_CALL_TIMEOUT_SEC", raising=False)
+
+    progress_events: list[dict[str, Any]] = []
+
+    def _slow_call() -> str:
+        time.sleep(2.0)
+        return "done"
+
+    with pytest.raises(TimeoutError, match=r"stage=summariser"):
+        orchestrator._invoke_with_llm_heartbeat(
+            call=_slow_call,
+            stage_name="summariser",
+            model_name="gpt-test",
+            emit_progress=lambda payload: progress_events.append(dict(payload)),
+        )
+
+    assert progress_events, "expected heartbeat progress before timeout"
+    assert progress_events[-1]["status"] == "heartbeat"
+    assert progress_events[-1]["stage"] == "summariser"
+    assert progress_events[-1]["liveness_reason"] == "llm_call_pending"
