@@ -750,6 +750,156 @@ def _slugify_concept_id_for_blob_key(concept_id: str) -> str:
     return cleaned or "unknown"
 
 
+def _safe_filename_for_blob_key(original_filename: str | None) -> str:
+    safe_filename = re.sub(
+        r"[^A-Za-z0-9._-]+", "_", str(original_filename or "").strip()
+    ).strip("._")
+    return safe_filename or "file.bin"
+
+
+def import_bytes_file_copy(
+    *,
+    data: bytes,
+    user_concept_id: str,
+    original_filename: str,
+    content_type: str | None = None,
+    type_concept_id: str = "#V#computer_file_copy",
+    source_system: str = "bytes_import",
+    source_identifier: str | None = None,
+    source_uri: str | None = None,
+    blob_key: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Persist bytes durably and register a blob-backed file-copy concept.
+
+    Keep this as the shared ingestion path for any flow that already has the
+    bytes in hand (filesystem imports, remote URL downloads, cached artefacts).
+    """
+
+    if not isinstance(data, (bytes, bytearray)) or not bytes(data):
+        return {"success": False, "error": "empty_file"}
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        return {"success": False, "error": "missing_user_concept_id"}
+    if not isinstance(original_filename, str) or not original_filename.strip():
+        return {"success": False, "error": "missing_original_filename"}
+
+    data_bytes = bytes(data)
+    user_concept_id = user_concept_id.strip()
+    original_filename = original_filename.strip()
+    content_type = _normalise_optional_text(content_type)
+    source_system = _normalise_optional_text(source_system) or "bytes_import"
+
+    sha256 = hashlib.sha256(data_bytes).hexdigest()
+    size_bytes = len(data_bytes)
+    uploaded_at = _now_utc_iso()
+    user_slug = _slugify_concept_id_for_blob_key(user_concept_id)
+    safe_filename = _safe_filename_for_blob_key(original_filename)
+
+    resolved_blob_key = (
+        blob_key.strip()
+        if isinstance(blob_key, str) and blob_key.strip()
+        else f"imports/{user_slug}/{sha256}/{safe_filename}"
+    )
+
+    persisted_metadata: dict[str, Any] = dict(metadata or {})
+    persisted_metadata.update(
+        {
+            "original_filename": original_filename,
+            "user_concept_id": user_concept_id,
+            "uploaded_at": uploaded_at,
+            "source_system": source_system,
+            "source_identifier": source_identifier,
+            "source_uri": source_uri,
+            "ingested_at": uploaded_at,
+        }
+    )
+
+    try:
+        from .blob_uploads import BlobUploadError, put_bytes_durable
+
+        stored = put_bytes_durable(
+            key=resolved_blob_key,
+            data=data_bytes,
+            content_type=content_type,
+            metadata=persisted_metadata,
+            sha256=sha256,
+            size_bytes=size_bytes,
+        )
+    except BlobUploadError as exc:
+        return {
+            "success": False,
+            "error": "blob_store_upload_failed",
+            "message": str(exc),
+            "blob_key": resolved_blob_key,
+        }
+
+    try:
+        created = create_computer_file_copy_instance(
+            type_concept_id=type_concept_id,
+            user_concept_id=user_concept_id,
+            name=original_filename,
+            sha256=sha256,
+            size_bytes=size_bytes,
+            content_type=content_type,
+            blob_backend=stored.ref.backend,
+            blob_key=stored.ref.key,
+            blob_uri=stored.ref.uri,
+            metadata=persisted_metadata,
+        )
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": "file_copy_register_failed",
+            "message": str(exc),
+            "blob_key": resolved_blob_key,
+        }
+
+    typing_result: dict[str, Any] | None = None
+    typing_persist_result: dict[str, Any] | None = None
+    try:
+        from .file_copy_typing_service import (
+            infer_file_copy_typing,
+            persist_file_copy_typing,
+        )
+
+        typing_result = infer_file_copy_typing(
+            content_type=content_type,
+            original_filename=original_filename,
+            size_bytes=size_bytes,
+        )
+        typing_persist_result = persist_file_copy_typing(
+            file_copy_concept_id=created.concept_id,
+            typing_result=typing_result,
+        )
+    except Exception as exc:
+        typing_persist_result = {
+            "success": False,
+            "typing_persisted": False,
+            "error": "typing_persist_failed",
+            "message": str(exc),
+        }
+
+    artifact_record = build_file_copy_artifact_record(file_copy_concept_id=created.concept_id)
+
+    return {
+        "success": True,
+        "concept_id": created.concept_id,
+        "type_concept_id": created.type_concept_id,
+        "uploaded_at": created.uploaded_at,
+        "storage": {
+            "backend": stored.ref.backend,
+            "key": stored.ref.key,
+            "uri": stored.ref.uri,
+            "content_type": stored.ref.content_type,
+            "size_bytes": stored.ref.size_bytes,
+            "metadata": stored.ref.metadata,
+        },
+        "artifact_record": artifact_record,
+        "typing": typing_persist_result,
+        "typing_result": typing_result,
+    }
+
+
 def import_local_file_copy(
     *,
     local_path: str,
@@ -800,88 +950,26 @@ def import_local_file_copy(
     if not data:
         return {"success": False, "error": "empty_file", "local_path": str(resolved)}
 
-    sha256 = hashlib.sha256(data).hexdigest()
-    size_bytes = len(data)
     original_filename = resolved.name
     content_type, _encoding = mimetypes.guess_type(original_filename)
-    user_slug = _slugify_concept_id_for_blob_key(user_concept_id)
-    safe_filename = re.sub(r"[^A-Za-z0-9._-]+", "_", original_filename).strip("._")
-    safe_filename = safe_filename or "file.bin"
-    uploaded_at = _now_utc_iso()
 
     try:
         resolved_uri = resolved.as_uri()
     except Exception:
         resolved_uri = None
 
-    metadata: dict[str, Any] = {
-        "original_filename": original_filename,
-        "user_concept_id": user_concept_id.strip(),
-        "uploaded_at": uploaded_at,
-        "source_system": source_system,
-        "source_identifier": source_identifier or str(resolved),
-        "source_uri": source_uri or resolved_uri,
-        "ingested_at": uploaded_at,
-    }
-
-    blob_key = f"imports/{user_slug}/{sha256}/{safe_filename}"
-    try:
-        from .blob_uploads import BlobUploadError, put_bytes_durable
-
-        stored = put_bytes_durable(
-            key=blob_key,
-            data=data,
-            content_type=content_type,
-            metadata=metadata,
-            sha256=sha256,
-            size_bytes=size_bytes,
-        )
-    except BlobUploadError as exc:
-        return {
-            "success": False,
-            "error": "blob_store_upload_failed",
-            "message": str(exc),
-            "local_path": str(resolved),
-            "blob_key": blob_key,
-        }
-
-    try:
-        created = create_computer_file_copy_instance(
-            type_concept_id=type_concept_id,
-            user_concept_id=user_concept_id,
-            name=original_filename,
-            sha256=sha256,
-            size_bytes=size_bytes,
-            content_type=content_type,
-            blob_backend=stored.ref.backend,
-            blob_key=stored.ref.key,
-            blob_uri=stored.ref.uri,
-            metadata=metadata,
-        )
-    except Exception as exc:
-        return {
-            "success": False,
-            "error": "file_copy_register_failed",
-            "message": str(exc),
-            "local_path": str(resolved),
-            "blob_key": blob_key,
-        }
-
-    artifact_record = build_file_copy_artifact_record(file_copy_concept_id=created.concept_id)
-
-    return {
-        "success": True,
-        "concept_id": created.concept_id,
-        "type_concept_id": created.type_concept_id,
-        "uploaded_at": created.uploaded_at,
-        "local_path": str(resolved),
-        "storage": {
-            "backend": stored.ref.backend,
-            "key": stored.ref.key,
-            "uri": stored.ref.uri,
-            "content_type": stored.ref.content_type,
-            "size_bytes": stored.ref.size_bytes,
-            "metadata": stored.ref.metadata,
-        },
-        "artifact_record": artifact_record,
-    }
+    result = import_bytes_file_copy(
+        data=data,
+        user_concept_id=user_concept_id,
+        original_filename=original_filename,
+        content_type=content_type,
+        type_concept_id=type_concept_id,
+        source_system=source_system,
+        source_identifier=source_identifier or str(resolved),
+        source_uri=source_uri or resolved_uri,
+        metadata={"local_path": str(resolved)},
+    )
+    if isinstance(result, dict):
+        result = dict(result)
+        result["local_path"] = str(resolved)
+    return result

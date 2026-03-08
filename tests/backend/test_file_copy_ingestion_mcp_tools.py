@@ -86,6 +86,84 @@ def test_import_local_file_copy_uses_authenticated_context(monkeypatch):
     assert result["namespace"] == "#V#user@org"
 
 
+def test_import_url_file_copy_uses_authenticated_context_and_triggers_workflow(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#user",
+    )
+    monkeypatch.setattr(
+        "src.backend.services.remote_file_copy_ingestion_service.import_remote_url_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "concept_id": "#V#imported_url_file",
+            "type_concept_id": "#V#computer_file_copy",
+            "uploaded_at": "2026-03-08T00:00:00+00:00",
+            "artifact_record": {
+                "artifact_id": "#V#imported_url_file",
+                "sha256": "deadbeef",
+                "size_bytes": 12,
+            },
+            "storage": {
+                "backend": "swift",
+                "key": "imports/user/hash/paper.pdf",
+                "uri": "swift://bucket/imports/user/hash/paper.pdf",
+                "size_bytes": 12,
+            },
+            "response": {
+                "status_code": 200,
+                "size_bytes": 12,
+                "headers": {"content_type": "application/pdf"},
+            },
+            "filename_resolution": {
+                "original_filename": "paper.pdf",
+                "source": "response.content_disposition",
+            },
+            "content_type_resolution": {
+                "effective_content_type": "application/pdf",
+                "source": "response.content_type",
+            },
+        },
+    )
+
+    workflow_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_event_integration_service.maybe_launch_file_copy_uploaded_workflow",
+        lambda **kwargs: workflow_calls.append(dict(kwargs))
+        or {"success": True, "triggered": True, "event_type": "file_copy.uploaded"},
+    )
+
+    result = cat._import_url_file_copy(
+        url="https://example.com/paper.pdf",
+        namespace="#V#user@org",
+        index_in_rag=True,
+    )
+
+    assert result["success"] is True
+    assert result["concept_id"] == "#V#imported_url_file"
+    assert result["namespace"] == "#V#user@org"
+    assert result["workflow_event_launch"]["triggered"] is True
+    assert workflow_calls == [
+        {
+            "file_copy_concept_id": "#V#imported_url_file",
+            "uploaded_by_concept_id": "#V#user",
+            "organisation_concept_id": "#V#org",
+            "namespace": "#V#user@org",
+            "content_type": "application/pdf",
+            "original_filename": "paper.pdf",
+            "size_bytes": 12,
+            "sha256": "deadbeef",
+            "blob_uri": "swift://bucket/imports/user/hash/paper.pdf",
+            "uploaded_at_iso": "2026-03-08T00:00:00+00:00",
+            "index_in_rag": True,
+        }
+    ]
+
+
 def test_interpret_file_copy_persists_image_interpretation(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue as cat
 
@@ -114,6 +192,10 @@ def test_interpret_file_copy_persists_image_interpretation(monkeypatch):
             "content_text": "OCR text from screenshot",
             "content_length": 24,
         },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.relationship_write_service.add_relationship",
+        lambda **_kwargs: {"success": True, "forward_modified": True},
     )
 
     writes: list[dict[str, object]] = []
@@ -607,6 +689,10 @@ def test_interpret_file_copy_includes_pdf_diagram_analysis(monkeypatch):
             ],
             "errors": [],
         },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.relationship_write_service.add_relationship",
+        lambda **_kwargs: {"success": True, "forward_modified": True},
     )
     monkeypatch.setattr(
         "src.backend.services.arxiv_paper_link_service.materialise_scholarly_representation_for_file_copy",

@@ -121,3 +121,68 @@ def test_import_local_file_copy_rejects_path_outside_allowed_root(tmp_path):
 
     assert result["success"] is False
     assert result["error"] == "path_outside_allowed_root"
+
+
+def test_import_bytes_file_copy_persists_typing(monkeypatch):
+    from src.backend.services import computer_file_copy_service as svc
+    from src.backend.services.blob_store import BlobRef
+    from src.backend.services.blob_uploads import StoredBytes
+
+    monkeypatch.setattr(
+        "src.backend.services.blob_uploads.put_bytes_durable",
+        lambda **kwargs: StoredBytes(
+            ref=BlobRef(
+                backend="local",
+                key=str(kwargs["key"]),
+                uri=f"local://{kwargs['key']}",
+                content_type=kwargs.get("content_type"),
+                size_bytes=len(kwargs["data"]),
+                metadata=dict(kwargs.get("metadata") or {}),
+            ),
+            sha256="typed123",
+            size_bytes=len(kwargs["data"]),
+        ),
+    )
+
+    class _Record:
+        concept_id = "#V#typed_file_copy"
+        type_concept_id = "#V#computer_file_copy"
+        uploaded_at = "2026-01-01T00:00:00+00:00"
+
+    monkeypatch.setattr(
+        "src.backend.services.computer_file_copy_service.create_computer_file_copy_instance",
+        lambda **_kwargs: _Record(),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.computer_file_copy_service.build_file_copy_artifact_record",
+        lambda **_kwargs: {"artifact_id": "#V#typed_file_copy", "sha256": "typed123"},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.file_copy_typing_service.infer_file_copy_typing",
+        lambda **_kwargs: {
+            "success": True,
+            "detected_type_concept_ids": ["#V#mspowerpoint_pptx_computer_file_copy"],
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.file_copy_typing_service.persist_file_copy_typing",
+        lambda **_kwargs: {"success": True, "typing_persisted": True},
+    )
+
+    result = svc.import_bytes_file_copy(
+        data=b"pptx-bytes",
+        user_concept_id="#V#user",
+        original_filename="deck.pptx",
+        content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        source_system="remote_url_import",
+        source_identifier="https://example.com/deck.pptx",
+        source_uri="https://cdn.example.com/deck.pptx",
+    )
+
+    assert result["success"] is True
+    assert result["concept_id"] == "#V#typed_file_copy"
+    assert result["storage"]["key"].endswith("/deck.pptx")
+    assert result["typing"]["typing_persisted"] is True
+    assert result["typing_result"]["detected_type_concept_ids"] == [
+        "#V#mspowerpoint_pptx_computer_file_copy"
+    ]

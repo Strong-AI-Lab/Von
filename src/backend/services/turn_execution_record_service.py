@@ -60,6 +60,7 @@ _WRITE_TOOL_NAMES = {
     "delete_text_relation",
     "download_paper",
     "finalise_cached_paper",
+    "import_url_file_copy",
     "gmail_modify_labels",
     "issue_write",
     "jira_add_attachment",

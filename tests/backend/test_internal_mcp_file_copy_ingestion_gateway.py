@@ -62,6 +62,10 @@ def test_file_copy_ingestion_tools_gateway_invoke(monkeypatch):
         },
     )
     monkeypatch.setattr(
+        "src.backend.services.relationship_write_service.add_relationship",
+        lambda **_kwargs: {"success": True, "forward_modified": True},
+    )
+    monkeypatch.setattr(
         "src.backend.services.text_value_service.upsert_singleton_text_relation",
         lambda **_kwargs: {"relation_id": "rel-test"},
     )
@@ -183,6 +187,61 @@ def test_interpret_file_copy_gateway_asserts_docx_subtype(monkeypatch):
             "target": "#V#msword_docx_computer_file_copy",
         }
     ]
+
+
+def test_import_url_file_copy_gateway_invoke(monkeypatch):
+    gateway = _build_gateway()
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#user",
+    )
+    monkeypatch.setattr(
+        "src.backend.services.remote_file_copy_ingestion_service.import_remote_url_file_copy",
+        lambda **_kwargs: {
+            "success": True,
+            "concept_id": "#V#imported_url_file_gateway",
+            "type_concept_id": "#V#computer_file_copy",
+            "uploaded_at": "2026-03-08T00:00:00+00:00",
+            "artifact_record": {
+                "artifact_id": "#V#imported_url_file_gateway",
+                "sha256": "feedface",
+                "size_bytes": 24,
+            },
+            "storage": {
+                "backend": "swift",
+                "key": "imports/user/hash/deck.pptx",
+                "uri": "swift://bucket/imports/user/hash/deck.pptx",
+                "size_bytes": 24,
+            },
+            "response": {
+                "status_code": 200,
+                "size_bytes": 24,
+                "headers": {"content_type": "application/octet-stream"},
+            },
+            "filename_resolution": {
+                "original_filename": "deck.pptx",
+                "source": "response.content_disposition",
+            },
+            "content_type_resolution": {
+                "effective_content_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "source": "filename.extension",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_event_integration_service.maybe_launch_file_copy_uploaded_workflow",
+        lambda **_kwargs: {"success": True, "triggered": True},
+    )
+
+    payload = gateway.invoke(
+        "import_url_file_copy",
+        {"url": "https://example.com/deck.pptx", "namespace": "#V#user@org"},
+    ).payload
+
+    assert payload.get("success") is True
+    assert payload.get("concept_id") == "#V#imported_url_file_gateway"
+    assert payload.get("workflow_event_launch", {}).get("triggered") is True
 
 
 def test_interpret_file_copy_gateway_fails_closed_on_unverified_person_representation(
@@ -446,6 +505,10 @@ def test_interpret_file_copy_gateway_returns_pdf_diagram_candidates(monkeypatch)
             "page_summaries": [{"page_number": 1, "diagram_candidate": True}],
             "errors": [],
         },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.relationship_write_service.add_relationship",
+        lambda **_kwargs: {"success": True, "forward_modified": True},
     )
     monkeypatch.setattr(
         "src.backend.services.arxiv_paper_link_service.materialise_scholarly_representation_for_file_copy",

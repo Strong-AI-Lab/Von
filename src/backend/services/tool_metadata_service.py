@@ -408,6 +408,11 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "category": "vontology",
         "display_template": "Imported local file",
     },
+    "import_url_file_copy": {
+        "salience": "medium",
+        "category": "vontology",
+        "display_template": "Imported URL file",
+    },
     "generate_concept_description": {
         "salience": "medium",
         "category": "vontology",

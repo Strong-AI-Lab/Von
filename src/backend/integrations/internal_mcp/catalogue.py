@@ -4375,6 +4375,231 @@ def _import_local_file_copy(**kwargs):
         return _run_import()
 
 
+def _import_url_file_copy(**kwargs):
+    from ...security.access_control import get_effective_user_concept_id
+    from ...services.remote_file_copy_ingestion_service import (
+        import_remote_url_file_copy,
+    )
+    from ...services.workflow_event_integration_service import (
+        maybe_launch_file_copy_uploaded_workflow,
+    )
+
+    url = kwargs.get("url")
+    if not isinstance(url, str) or not url.strip():
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: url",
+            details={"missing": ["url"]},
+            suggestions=["Provide a direct http or https artefact URL to ingest"],
+        )
+    url = url.strip()
+
+    ns_report = _resolve_rag_namespace_from_kwargs(kwargs)
+    ns_error = _rag_namespace_resolution_error(ns_report)
+    if ns_error is not None:
+        return ns_error
+    ns = ns_report.get("namespace")
+    if not isinstance(ns, str) or not ns.strip():
+        return make_error_response(
+            "namespace_required",
+            "Remote URL file import requires authenticated user context (namespace)",
+            details={"namespace_report": ns_report},
+        )
+    ns = ns.strip()
+
+    filename_raw = kwargs.get("filename")
+    filename = (
+        filename_raw.strip()
+        if isinstance(filename_raw, str) and filename_raw.strip()
+        else None
+    )
+    type_concept_id_raw = kwargs.get("type_concept_id")
+    type_concept_id = (
+        type_concept_id_raw.strip()
+        if isinstance(type_concept_id_raw, str) and type_concept_id_raw.strip()
+        else "#V#computer_file_copy"
+    )
+    source_system_raw = kwargs.get("source_system")
+    source_system = (
+        source_system_raw.strip()
+        if isinstance(source_system_raw, str) and source_system_raw.strip()
+        else "remote_url_import"
+    )
+
+    max_bytes = kwargs.get("max_bytes")
+    if max_bytes is not None:
+        try:
+            max_bytes = int(max_bytes)
+        except (TypeError, ValueError):
+            return make_error_response(
+                "invalid_parameter",
+                "Invalid max_bytes: must be an integer",
+                details={"max_bytes": max_bytes},
+                suggestions=["Provide max_bytes as a positive integer"],
+            )
+        if max_bytes <= 0:
+            return make_error_response(
+                "invalid_parameter",
+                "max_bytes must be positive",
+                details={"max_bytes": max_bytes},
+                suggestions=["Provide max_bytes as a positive integer"],
+            )
+
+    max_redirects = kwargs.get("max_redirects")
+    if max_redirects is not None:
+        try:
+            max_redirects = int(max_redirects)
+        except (TypeError, ValueError):
+            return make_error_response(
+                "invalid_parameter",
+                "Invalid max_redirects: must be an integer",
+                details={"max_redirects": max_redirects},
+                suggestions=["Provide max_redirects as a non-negative integer"],
+            )
+        if max_redirects < 0:
+            return make_error_response(
+                "invalid_parameter",
+                "max_redirects must be zero or greater",
+                details={"max_redirects": max_redirects},
+                suggestions=["Provide max_redirects as zero or a positive integer"],
+            )
+
+    index_in_rag = _coerce_bool_input(kwargs.get("index_in_rag"), default=False)
+
+    def _run_import():
+        user_concept_id = get_effective_user_concept_id()
+        if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+            return make_error_response(
+                "authentication_required",
+                "User authentication required to import remote URL artefacts",
+                suggestions=["Ensure user context is set before calling this tool"],
+            )
+
+        result = import_remote_url_file_copy(
+            url=url,
+            user_concept_id=user_concept_id.strip(),
+            filename=filename,
+            type_concept_id=type_concept_id,
+            source_system=source_system,
+            max_bytes=max_bytes,
+            max_redirects=max_redirects,
+        )
+        if not isinstance(result, dict):
+            return result
+
+        result = dict(result)
+        result.setdefault("namespace", ns)
+        result.update(ns_report)
+
+        if result.get("success") is not True:
+            return result
+
+        file_copy_concept_id = result.get("concept_id")
+        user_scope_concept_id, organisation_concept_id = _resolve_rag_actor_scope_ids(
+            ns_report
+        )
+        if isinstance(file_copy_concept_id, str) and file_copy_concept_id.strip():
+            try:
+                artifact_record_raw = result.get("artifact_record")
+                artifact_record: dict[str, Any] = (
+                    dict(artifact_record_raw)
+                    if isinstance(artifact_record_raw, Mapping)
+                    else {}
+                )
+                response_payload_raw = result.get("response")
+                response_payload: dict[str, Any] = (
+                    dict(response_payload_raw)
+                    if isinstance(response_payload_raw, Mapping)
+                    else {}
+                )
+                response_headers_raw = response_payload.get("headers")
+                response_headers: dict[str, Any] = (
+                    dict(response_headers_raw)
+                    if isinstance(response_headers_raw, Mapping)
+                    else {}
+                )
+                filename_resolution_raw = result.get("filename_resolution")
+                filename_resolution: dict[str, Any] = (
+                    dict(filename_resolution_raw)
+                    if isinstance(filename_resolution_raw, Mapping)
+                    else {}
+                )
+                content_type_resolution_raw = result.get("content_type_resolution")
+                content_type_resolution: dict[str, Any] = (
+                    dict(content_type_resolution_raw)
+                    if isinstance(content_type_resolution_raw, Mapping)
+                    else {}
+                )
+                storage_payload_raw = result.get("storage")
+                storage_payload: dict[str, Any] = (
+                    dict(storage_payload_raw)
+                    if isinstance(storage_payload_raw, Mapping)
+                    else {}
+                )
+                workflow_event_launch = maybe_launch_file_copy_uploaded_workflow(
+                    file_copy_concept_id=file_copy_concept_id.strip(),
+                    uploaded_by_concept_id=user_scope_concept_id,
+                    organisation_concept_id=organisation_concept_id,
+                    namespace=ns,
+                    content_type=str(
+                        (
+                            content_type_resolution.get("effective_content_type")
+                            or response_headers.get("content_type")
+                            or artifact_record.get("content_type")
+                            or ""
+                        )
+                    ).strip()
+                    or None,
+                    original_filename=(
+                        str(filename_resolution.get("original_filename")).strip()
+                        if isinstance(
+                            filename_resolution.get("original_filename"), str
+                        )
+                        and str(filename_resolution.get("original_filename")).strip()
+                        else None
+                    ),
+                    size_bytes=_coerce_int_or_none(
+                        response_payload.get("size_bytes")
+                        or artifact_record.get("size_bytes")
+                        or storage_payload.get("size_bytes")
+                    ),
+                    sha256=(
+                        str(artifact_record.get("sha256")).strip()
+                        if isinstance(artifact_record.get("sha256"), str)
+                        and str(artifact_record.get("sha256")).strip()
+                        else None
+                    ),
+                    blob_uri=(
+                        str(storage_payload.get("uri")).strip()
+                        if isinstance(storage_payload.get("uri"), str)
+                        and str(storage_payload.get("uri")).strip()
+                        else None
+                    ),
+                    uploaded_at_iso=(
+                        str(result.get("uploaded_at")).strip()
+                        if isinstance(result.get("uploaded_at"), str)
+                        and str(result.get("uploaded_at")).strip()
+                        else None
+                    ),
+                    index_in_rag=index_in_rag,
+                )
+            except Exception as exc:
+                workflow_event_launch = {
+                    "success": False,
+                    "triggered": False,
+                    "outcome": "not_triggered",
+                    "event_type": "file_copy.uploaded",
+                    "reason": "workflow_event_launch_failed",
+                    "error": str(exc),
+                }
+            result["workflow_event_launch"] = workflow_event_launch
+
+        return result
+
+    with _with_namespace_actor_override(ns):
+        return _run_import()
+
+
 def _list_recent_screenshots(**kwargs):
     import base64
     import mimetypes
@@ -6785,6 +7010,63 @@ def _import_local_file_copy_output_schema() -> Schema:
         description=(
             "import_local_file_copy output: blob-store registration result with created "
             "#V#computer_file_copy concept and canonical artifact_record."
+        ),
+    )
+
+
+def _import_url_file_copy_input_schema() -> Schema:
+    return Schema(
+        required={
+            "url": str,
+        },
+        optional={
+            "namespace": (str, type(None)),
+            "filename": (str, type(None)),
+            "type_concept_id": (str, type(None)),
+            "source_system": (str, type(None)),
+            "max_bytes": (int, type(None)),
+            "max_redirects": (int, type(None)),
+            "index_in_rag": (bool, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "import_url_file_copy input: direct http/https artefact URL plus namespace "
+            "user@org context; optional filename override, file-copy type, remote fetch "
+            "limits, and workflow-trigger indexing hint."
+        ),
+    )
+
+
+def _import_url_file_copy_output_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "success": (bool, type(None)),
+            "error": (str, type(None)),
+            "message": (str, type(None)),
+            "concept_id": (str, type(None)),
+            "type_concept_id": (str, type(None)),
+            "uploaded_at": (str, type(None)),
+            "requested_url": (str, type(None)),
+            "final_url": (str, type(None)),
+            "redirect_count": (int, type(None)),
+            "redirects": (list, type(None)),
+            "download_hops": (list, type(None)),
+            "storage": (dict, type(None)),
+            "artifact_record": (dict, type(None)),
+            "response": (dict, type(None)),
+            "filename_resolution": (dict, type(None)),
+            "content_type_resolution": (dict, type(None)),
+            "typing": (dict, type(None)),
+            "typing_result": (dict, type(None)),
+            "workflow_event_launch": (dict, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "import_url_file_copy output: remote download plus blob-store registration "
+            "result with created #V#computer_file_copy concept, provenance, and "
+            "resolution diagnostics."
         ),
     )
 
@@ -18855,6 +19137,20 @@ def build_default_catalogue() -> MethodCatalogue:
             description=(
                 "Import a local workspace file into the configured blob store and register a "
                 "#V#computer_file_copy concept with canonical provenance metadata."
+            ),
+        ),
+        MethodDefinition(
+            name="import_url_file_copy",
+            handler=_import_url_file_copy,
+            input_schema=_import_url_file_copy_input_schema(),
+            output_schema=_import_url_file_copy_output_schema(),
+            category="write",
+            timeout_sec=45.0,
+            description=(
+                "Fetch a remote artefact directly from an http/https URL, persist its bytes "
+                "to the configured blob store, and register a #V#computer_file_copy concept "
+                "with provenance, MIME, and redirect diagnostics. Use this for binary/file "
+                "ingestion; do not use extract_url when the goal is durable file-copy import."
             ),
         ),
         MethodDefinition(

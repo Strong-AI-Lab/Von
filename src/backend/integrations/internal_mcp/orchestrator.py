@@ -6475,7 +6475,8 @@ class InternalMCPChatOrchestrator:
                 'If user mentions specific dates (2024+, 2025+, "this year", "this month") → USE search_web\n'
                 'If user explicitly says "search", "look up", "find information on" → USE search_web\n'
                 'If user asks "what\'s new", "recent developments", "latest research" → USE search_web\n'
-                "If user provides a URL to analyse or extract content from → USE extract_url (or resilient_extract_url for JS-heavy/blocked pages)\n"
+                "If user provides a URL to analyse or extract page content from → USE extract_url (or resilient_extract_url for JS-heavy/blocked pages)\n"
+                "If user provides a direct file/download URL and wants durable artefact ingestion or file-copy registration → USE import_url_file_copy, not extract_url\n"
                 "If user asks a direct factual question needing verification → USE qna_search\n"
                 "If searching within specific domain/context (e.g., site:example.com) → USE context_search\n"
                 "ARXIV TOOL ROUTING:\n"

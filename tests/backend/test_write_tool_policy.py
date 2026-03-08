@@ -22,6 +22,10 @@ def test_classify_write_tool_risk_covers_policy_classes():
         classify_write_tool_risk("jira_create_issue")
         == WRITE_RISK_EXTERNAL_NON_VONTOLOGY
     )
+    assert (
+        classify_write_tool_risk("import_url_file_copy")
+        == WRITE_RISK_ADDITIVE_LOW_RISK
+    )
 
 
 def test_bare_arxiv_url_allows_additive_download_by_default():
