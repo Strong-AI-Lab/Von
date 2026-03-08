@@ -53,6 +53,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 - Add a regression test for every state/format-loss bug (load -> edit -> save -> re-edit).
 - **Test through the real call path**: When modifying MCP tool handlers, don't just test the handler function directly—also test through the gateway layer (`InternalMCPGateway.invoke()`). Early-return error paths may bypass output schema validation, and handlers may produce response shapes that don't match expected schemas. If a tool has an `output_schema`, verify error responses work end-to-end.
 - Prefer lightweight telemetry where practical (timings, counters, and error summaries) to support UX and future introspection.
+- **Telemetry correctness is mandatory**: diagnostic payloads, stage paths, counters, and progress summaries are operational interfaces, not optional polish. If they are internally inconsistent with the underlying event stream, treat that as a bug and fix it with the same urgency as a behavioural regression.
 - When fixing reliability issues, prefer **systemic, general fixes** over point fixes: update shared pipelines, validators, and policies so that behaviour remains stable across model changes and configuration drift.
 - For question-generation or elicitation flows, apply the minimal-imposition principle explicitly in prompts/fallbacks: avoid broad requests, and prefer one focused ask only when machine-side retrieval cannot close the gap.
 - **DRY refactoring discipline** (CRITICAL — WET code is unacceptable):
@@ -339,6 +340,7 @@ Embed diagnostic payloads throughout the system (like the `aux_llm_calls` JSON).
 - Include `stage`, `type`, `error`, and `context` fields in diagnostic records
 - Prefer structured dicts over free-form log strings
 - Make introspection endpoints (like `chat_introspect`) available for debugging
+- If route selection, workflow membership, stage mapping, or tool accounting disagree with each other, the telemetry is wrong; either reconcile the fields against one authoritative event stream or omit the derived field and emit an explicit reason.
 
 ### Convention Over Configuration
 Reduce the number of valid ways to accomplish a task. Fewer choices = fewer agent mistakes.
