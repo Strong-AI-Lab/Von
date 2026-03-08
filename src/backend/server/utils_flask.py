@@ -62,6 +62,11 @@ from ..services.annotation_extraction_service import (
     prompt_concept_health_status,
     PROMPT_CONCEPT_ID,
 )
+from ..services.runtime_code_version_service import (
+    DEFAULT_APP_VERSION,
+    get_runtime_code_version,
+    get_runtime_code_version_info,
+)
 from ..services.google_oauth_config import (
     google_oauth_strict_startup_enabled,
     validate_google_oauth_startup_or_raise,
@@ -77,8 +82,8 @@ from ..services.settings_service import (
     get_internal_mcp_tool_batch_cap,
 )
 
-# Define a version string
-APP_VERSION = "v20250421_1015_backend"  # Updated version
+# Legacy fallback version string retained for backwards compatibility.
+APP_VERSION = DEFAULT_APP_VERSION
 
 
 # --- Durable Workflow System Globals ---
@@ -609,12 +614,15 @@ def create_flask_app(
 
     # --- Log App Version ---
     # Use app.logger if available, otherwise print
+    runtime_code_version = get_runtime_code_version()
     try:
         app.logger.setLevel(logging.INFO)  # Ensure INFO level is logged
-        app.logger.info(f"--- Flask App Initializing - Version: {APP_VERSION} ---")
+        app.logger.info(
+            f"--- Flask App Initializing - Version: {runtime_code_version} ---"
+        )
     except Exception:
         print(
-            f"--- Flask App Initializing - Version: {APP_VERSION} ---"
+            f"--- Flask App Initializing - Version: {runtime_code_version} ---"
         )  # Fallback print
 
     # Internal MCP gateway bootstrap (disabled by default until flag flipped)
@@ -970,10 +978,12 @@ def create_flask_app(
         # do not cancel server work. If a DB call hangs, it can occupy Waitress
         # threads and block *all* endpoints (including /health) for minutes.
         rag_pending_count = None
+        version_info = get_runtime_code_version_info()
 
         return jsonify(
             status="healthy",
-            version=APP_VERSION,
+            version=version_info.get("version"),
+            version_details=version_info,
             pid=os.getpid(),
             start_time=app.config["SERVER_START_TIME"],
             local_ip=local_ip,
@@ -2414,9 +2424,12 @@ def create_flask_app(
         except Exception as exc:  # pragma: no cover - defensive
             search_proxy_stats = {"error": str(exc)}
 
+        version_info = get_runtime_code_version_info()
+
         diag = {
             "status": "ok",
-            "version": APP_VERSION,
+            "version": version_info.get("version"),
+            "version_details": version_info,
             "pid": os.getpid(),
             "rss_mb": rss_mb,
             "thread_count": thread_count,
@@ -2554,7 +2567,7 @@ def create_flask_app(
     @app.route("/api/version")
     def get_version():
         """API endpoint to get the version of the app."""
-        return jsonify(version=APP_VERSION)
+        return jsonify(get_runtime_code_version_info())
 
     # --- Graceful Shutdown Endpoint (admin) ---
     @app.route("/admin/shutdown", methods=["POST"])
