@@ -15,6 +15,8 @@ from typing import Any, Iterable
 WORKFLOW_MANAGEMENT_TOOL_NAMES: tuple[str, ...] = (
     "workflow_list_definitions",
     "workflow_bind_event",
+    "workflow_set_event_binding_enabled",
+    "workflow_delete_event_binding",
     "workflow_list_event_bindings",
     "workflow_create_instance",
     "workflow_list_instances",

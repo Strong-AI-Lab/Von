@@ -838,6 +838,36 @@ class TestWorkflowInstanceManager:
         assert disabled.enabled is False
         assert disabled.revision == binding.revision + 1
 
+    def test_delete_event_binding_removes_record_and_invalidates_cache(
+        self, monkeypatch
+    ) -> None:
+        manager = WorkflowInstanceManager()
+        invalidations: list[dict[str, Any]] = []
+
+        monkeypatch.setattr(
+            "src.backend.workflows.durable.workflow_instance_submission_service.invalidate_workflow_runnable_verification_cache",
+            lambda **kwargs: invalidations.append(dict(kwargs)) or {"success": True},
+        )
+
+        binding, created, updated = manager.upsert_event_binding(
+            event_type="file_copy.uploaded",
+            workflow_id="#V#file_copy_upload_handler_workflow",
+            input_mapping={"concept_id": "event.file_copy_concept_id"},
+            enabled=True,
+            actor="test_user",
+        )
+        assert created is True
+        assert updated is False
+
+        deleted = manager.delete_event_binding(binding.binding_id)
+
+        assert deleted is not None
+        assert deleted.binding_id == binding.binding_id
+        assert manager.get_event_binding(binding.binding_id) is None
+        assert invalidations
+        assert invalidations[-1].get("workflow_id") == "#V#file_copy_upload_handler_workflow"
+        assert invalidations[-1].get("reason") == "event_binding_mutated"
+
     def test_find_and_claim_instance(self) -> None:
         """find_and_claim_instance() should atomically claim a pending instance."""
         manager = WorkflowInstanceManager()

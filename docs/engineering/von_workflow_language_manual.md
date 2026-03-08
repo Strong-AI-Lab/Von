@@ -487,6 +487,7 @@ Event-launch semantics:
 
 - `file_copy.uploaded` launches use a single selected workflow strategy (`#V#file_copy_upload_handler_workflow` by default) to avoid duplicate uncontrolled launches.
 - Default event bindings are bootstrapped idempotently; conflicting bindings are not overwritten.
+- Operators should resolve obsolete `file_copy.uploaded` routes through workflow binding governance (`workflow_list_event_bindings`, `workflow_set_event_binding_enabled`, `workflow_delete_event_binding`) rather than by adding Python-side routing switches.
 
 ### 10.5 PDF Diagram-Aware Organisation Extraction (JVNAUTOSCI-1017)
 
@@ -740,6 +741,8 @@ Operational cadence controls include:
 
 - `workflow_bind_event`
 - `workflow_list_event_bindings`
+- `workflow_set_event_binding_enabled`
+- `workflow_delete_event_binding`
 
 ### 14.4 Schedule Control
 

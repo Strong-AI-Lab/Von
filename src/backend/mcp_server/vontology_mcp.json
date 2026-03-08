@@ -2729,6 +2729,23 @@
             }
         },
         {
+            "name": "workflow_delete_event_binding",
+            "description": "Delete a persisted event binding permanently. Use workflow_list_event_bindings to review bindings and diagnostics before removal.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "binding_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "binding_id"
+                ],
+                "additionalProperties": true,
+                "description": "Delete an event->workflow binding by binding_id."
+            }
+        },
+        {
             "name": "workflow_delete_schedule",
             "description": "Delete a workflow schedule permanently.",
             "inputSchema": {
@@ -2962,6 +2979,33 @@
                 ],
                 "additionalProperties": true,
                 "description": "Retry a failed workflow instance."
+            }
+        },
+        {
+            "name": "workflow_set_event_binding_enabled",
+            "description": "Enable or disable an existing event binding without deleting it. Use workflow_list_event_bindings first to identify binding_id values.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "binding_id": {
+                        "type": "string"
+                    },
+                    "enabled": {
+                        "type": "boolean"
+                    },
+                    "actor": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "binding_id",
+                    "enabled"
+                ],
+                "additionalProperties": true,
+                "description": "Enable or disable an event->workflow binding by binding_id."
             }
         },
         {

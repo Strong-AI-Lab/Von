@@ -20,6 +20,8 @@ available. It prevents ambiguous "missing tool" behaviour across MCP surfaces.
 | `workflow_list_definitions` | Yes | Yes | No |
 | `workflow_bind_event` | Yes | Yes | No |
 | `workflow_list_event_bindings` | Yes | Yes | No |
+| `workflow_set_event_binding_enabled` | Yes | Yes | No |
+| `workflow_delete_event_binding` | Yes | Yes | No |
 | `workflow_create_instance` | Yes | Yes | No |
 | `workflow_list_instances` | Yes | Yes | No |
 | `workflow_get_instance` | Yes | Yes | No |

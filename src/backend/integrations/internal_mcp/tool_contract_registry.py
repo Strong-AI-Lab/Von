@@ -115,6 +115,7 @@ VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES: tuple[str, ...] = (
     "workflow_cancel_instance",
     "workflow_create_instance",
     "workflow_create_schedule",
+    "workflow_delete_event_binding",
     "workflow_delete_schedule",
     "workflow_get_instance",
     "workflow_get_schedule",
@@ -124,6 +125,7 @@ VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES: tuple[str, ...] = (
     "workflow_list_schedules",
     "workflow_mcp_health_check",
     "workflow_retry_instance",
+    "workflow_set_event_binding_enabled",
     "workflow_set_schedule_enabled",
     "workflow_trigger_schedule",
 )

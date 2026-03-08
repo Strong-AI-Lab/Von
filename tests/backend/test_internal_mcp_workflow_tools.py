@@ -79,6 +79,17 @@ def _patch_submit_verified_instance_success(monkeypatch) -> None:
     )
 
 
+def _patch_read_only_registry(monkeypatch, *workflow_ids: str) -> None:
+    class _StubRegistry:
+        def all_workflow_ids(self) -> list[str]:
+            return [wid for wid in workflow_ids if isinstance(wid, str) and wid.strip()]
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.registry_factory.build_durable_workflow_registry_read_only",
+        lambda: _StubRegistry(),
+    )
+
+
 class _StubInstance:
     def __init__(
         self,
@@ -317,6 +328,40 @@ class _StubWorkflowManager:
         if enabled_only:
             values = [item for item in values if bool(item.enabled)]
         return values[:limit]
+
+    def get_event_binding(self, binding_id: str) -> EventWorkflowBinding | None:
+        binding_id_clean = str(binding_id or "").strip()
+        if not binding_id_clean:
+            return None
+        for binding in self.bindings.values():
+            if binding.binding_id == binding_id_clean:
+                return binding
+        return None
+
+    def set_event_binding_enabled(
+        self,
+        binding_id: str,
+        *,
+        enabled: bool,
+        actor: str | None = None,
+    ) -> EventWorkflowBinding | None:
+        existing = self.get_event_binding(binding_id)
+        if existing is None:
+            return None
+        if bool(existing.enabled) == bool(enabled):
+            return existing
+        existing.enabled = bool(enabled)
+        existing.updated_by = actor
+        existing.revision += 1
+        return existing
+
+    def delete_event_binding(self, binding_id: str) -> EventWorkflowBinding | None:
+        existing = self.get_event_binding(binding_id)
+        if existing is None:
+            return None
+        key = (existing.event_type, existing.workflow_id)
+        self.bindings.pop(key, None)
+        return existing
 
 
 class _InMemoryScheduleWorkflowManager:
@@ -891,6 +936,7 @@ def test_workflow_surface_capability_tools_exist_in_internal_catalogue():
 
 def test_workflow_bind_event_and_list_event_bindings_gateway_paths(monkeypatch):
     manager = _StubWorkflowManager()
+    _patch_read_only_registry(monkeypatch, "#V#enrichment_workflow")
     monkeypatch.setattr(
         "src.backend.workflows.durable.WorkflowInstanceManager",
         lambda: manager,
@@ -922,10 +968,13 @@ def test_workflow_bind_event_and_list_event_bindings_gateway_paths(monkeypatch):
     assert listed.get("success") is True
     assert listed.get("count") == 1
     assert listed.get("bindings")[0]["workflow_id"] == "#V#enrichment_workflow"
+    assert listed.get("diagnostics") == []
+    assert listed.get("has_conflicts") is False
 
 
 def test_workflow_bind_event_conflict_requires_replace(monkeypatch):
     manager = _StubWorkflowManager()
+    _patch_read_only_registry(monkeypatch, "#V#enrichment_workflow")
     monkeypatch.setattr(
         "src.backend.workflows.durable.WorkflowInstanceManager",
         lambda: manager,
@@ -965,6 +1014,73 @@ def test_workflow_bind_event_conflict_requires_replace(monkeypatch):
     ).payload
     assert replaced.get("success") is True
     assert replaced.get("updated") is True
+
+
+def test_workflow_event_binding_enable_disable_and_delete_gateway_paths(monkeypatch):
+    manager = _StubWorkflowManager()
+    _patch_read_only_registry(monkeypatch, "#V#file_copy_upload_handler_workflow")
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_event_integration_service.get_instance_manager",
+        lambda: manager,
+    )
+    gateway = _build_gateway()
+
+    created = gateway.invoke(
+        "workflow_bind_event",
+        {
+            "event_type": "file_copy.uploaded",
+            "workflow_id": "#V#file_copy_upload_handler_workflow",
+            "input_mapping": {"concept_id": "event.file_copy_concept_id"},
+        },
+    ).payload
+    assert created.get("success") is True
+    binding = created.get("binding") or {}
+    binding_id = binding.get("binding_id")
+    assert isinstance(binding_id, str) and binding_id
+
+    disabled = gateway.invoke(
+        "workflow_set_event_binding_enabled",
+        {
+            "binding_id": binding_id,
+            "enabled": False,
+            "actor": "test.operator",
+        },
+    ).payload
+    assert disabled.get("success") is True
+    assert disabled.get("binding_id") == binding_id
+    assert disabled.get("enabled") is False
+    assert disabled.get("updated") is True
+
+    listed = gateway.invoke(
+        "workflow_list_event_bindings",
+        {"event_type": "file_copy.uploaded"},
+    ).payload
+    assert listed.get("success") is True
+    diagnostics = listed.get("diagnostics") or []
+    assert any(
+        item.get("reason_code") == "all_persistent_bindings_disabled"
+        for item in diagnostics
+    )
+    assert listed.get("has_conflicts") is True
+
+    deleted = gateway.invoke(
+        "workflow_delete_event_binding",
+        {"binding_id": binding_id},
+    ).payload
+    assert deleted.get("success") is True
+    assert deleted.get("deleted") is True
+    assert deleted.get("binding_id") == binding_id
+
+    missing = gateway.invoke(
+        "workflow_delete_event_binding",
+        {"binding_id": binding_id},
+    ).payload
+    assert missing.get("success") is False
+    assert missing.get("error_code") == "not_found"
 
 
 def test_workflow_schedule_gateway_tools_integrate_with_scheduler(monkeypatch):
