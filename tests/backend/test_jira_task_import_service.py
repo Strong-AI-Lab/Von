@@ -429,57 +429,31 @@ def test_import_jira_issues_preserves_participant_concepts_from_account_map(monk
 
 
 def test_list_imported_jira_issue_keys_scans_repository_with_org_and_legacy_scope(monkeypatch):
-    docs = [
-        {
-            "metadata": {
-                "external_references": {
-                    "jira": {"external_id": "JVNAUTOSCI-301"},
-                },
-                "organisation_concept_id": "#V#sail_org",
-            }
-        },
-        {
-            "metadata": {
-                "external_references": {
-                    "jira": {"external_id": "JVNAUTOSCI-302"},
-                },
-                "organisation_concept_id": None,
-            }
-        },
-        {
-            "metadata": {
-                "external_references": {
-                    "jira": {"external_id": "JVNAUTOSCI-301"},
-                },
-                "organisation_concept_id": None,
-            }
-        },
+    raw_keys = [
+        "JVNAUTOSCI-301",
+        "JVNAUTOSCI-302",
+        "jvnautosci-301",
+        "  JVNAUTOSCI-303  ",
+        None,
     ]
     captured_queries: list[dict[str, Any]] = []
 
-    def _fake_find(
-        query: dict[str, Any],
-        projection=None,  # noqa: ARG001
-        sort=None,  # noqa: ARG001
-        skip: int = 0,
-        limit: int = 0,
+    def _fake_distinct(
+        field: str,
+        query: dict[str, Any] | None = None,
     ):
-        captured_queries.append(query)
-        rows = list(docs)
-        if skip:
-            rows = rows[skip:]
-        if limit:
-            rows = rows[:limit]
-        return rows
+        assert field == "metadata.external_references.jira.external_id"
+        captured_queries.append(query or {})
+        return list(raw_keys)
 
-    monkeypatch.setattr(import_service.ConceptsRepository, "find", _fake_find)
+    monkeypatch.setattr(import_service.ConceptsRepository, "distinct", _fake_distinct)
 
     keys = import_service.list_imported_jira_issue_keys(
         organisation_concept_id="#V#sail_org",
         limit=10,
     )
 
-    assert keys == ["JVNAUTOSCI-301", "JVNAUTOSCI-302"]
+    assert keys == ["JVNAUTOSCI-301", "JVNAUTOSCI-302", "JVNAUTOSCI-303"]
     assert captured_queries
     assert "$or" in captured_queries[0]
     assert {

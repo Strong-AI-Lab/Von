@@ -661,6 +661,31 @@ def get_concepts_collection() -> Collection | None:
                 concepts_coll.create_index(
                     [("names.text", ASCENDING)], name="names.text_1"
                 )
+            # Task import and incremental Jira sync rely on exact Jira issue-key
+            # lookups plus organisation-scoped replays.
+            if "task_jira_external_id_lookup" not in existing_indexes:
+                concepts_coll.create_index(
+                    [
+                        ("relationships.is_an_instance_of", ASCENDING),
+                        (
+                            "metadata.external_references.jira.external_id",
+                            ASCENDING,
+                        ),
+                    ],
+                    name="task_jira_external_id_lookup",
+                )
+            if "task_jira_external_id_org_lookup" not in existing_indexes:
+                concepts_coll.create_index(
+                    [
+                        ("relationships.is_an_instance_of", ASCENDING),
+                        ("metadata.organisation_concept_id", ASCENDING),
+                        (
+                            "metadata.external_references.jira.external_id",
+                            ASCENDING,
+                        ),
+                    ],
+                    name="task_jira_external_id_org_lookup",
+                )
 
             # Timestamp indexes
             if "timestamps.created_at_-1" not in existing_indexes:

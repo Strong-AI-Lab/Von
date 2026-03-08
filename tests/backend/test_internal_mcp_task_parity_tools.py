@@ -212,6 +212,66 @@ def test_task_import_jira_issues_gateway_accepts_issue_objects_from_discovery(mo
     _assert_schema_conformance(gateway, "task_import_jira_issues", payload)
 
 
+def test_task_import_jira_issues_gateway_reuses_seeded_issue_documents(monkeypatch):
+    gateway = _build_gateway()
+    fetched_issue_keys: list[str] = []
+
+    class _FakeProxy:
+        async def get_issue(self, *, issue_key: str, fields=None):  # noqa: ARG002
+            fetched_issue_keys.append(issue_key)
+            return {
+                "key": issue_key,
+                "fields": {
+                    "summary": "Fetched issue",
+                    "status": {"name": "To Do"},
+                    "priority": {"name": "Medium"},
+                    "project": {"key": "JVNAUTOSCI", "name": "JVNAUTOSCI Project"},
+                    "issuelinks": [],
+                },
+            }
+
+    async def _fake_get_jira_proxy():
+        return _FakeProxy()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.jira_proxy_mcp.get_jira_proxy",
+        _fake_get_jira_proxy,
+    )
+
+    payload = gateway.invoke(
+        "task_import_jira_issues",
+        {
+            "issue_keys": [
+                {
+                    "key": "JVNAUTOSCI-3004",
+                    "fields": {
+                        "summary": "Seeded issue",
+                        "description": {
+                            "type": "doc",
+                            "version": 1,
+                            "content": [
+                                {
+                                    "type": "paragraph",
+                                    "content": [{"type": "text", "text": "Desc"}],
+                                }
+                            ],
+                        },
+                        "status": {"name": "To Do"},
+                        "priority": {"name": "Medium"},
+                        "project": {"key": "JVNAUTOSCI", "name": "JVNAUTOSCI Project"},
+                        "issuelinks": [],
+                    },
+                }
+            ],
+            "dry_run": True,
+        },
+    ).payload
+    assert payload.get("success") is True
+    assert payload.get("summary", {}).get("total_issues") == 1
+    assert fetched_issue_keys == []
+    _assert_schema_conformance(gateway, "task_import_jira_issues", payload)
+
+
 def test_task_import_jira_issues_gateway_syncs_migrated_label_on_write(monkeypatch):
     gateway = _build_gateway()
     _patch_task_import_write_path(monkeypatch)

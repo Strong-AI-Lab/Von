@@ -16480,13 +16480,40 @@ def _task_search(**kwargs):
         return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
 
 
-def _normalise_issue_keys_input(raw_issue_keys: Any) -> list[str]:
+def _clone_seeded_jira_issue_doc(
+    raw_issue: Mapping[str, Any],
+    *,
+    issue_key: str,
+) -> dict[str, Any] | None:
+    fields = raw_issue.get("fields")
+    if not isinstance(fields, Mapping):
+        return None
+
+    seeded_issue = dict(raw_issue)
+    seeded_issue["key"] = issue_key
+    seeded_issue["fields"] = dict(fields)
+
+    for optional_key in ("watchers", "watcher", "watches", "changelog"):
+        optional_value = raw_issue.get(optional_key)
+        if isinstance(optional_value, Mapping):
+            seeded_issue[optional_key] = dict(optional_value)
+        elif isinstance(optional_value, list):
+            seeded_issue[optional_key] = list(optional_value)
+
+    return seeded_issue
+
+
+def _normalise_issue_keys_input(
+    raw_issue_keys: Any,
+) -> tuple[list[str], dict[str, dict[str, Any]]]:
     if not isinstance(raw_issue_keys, list):
-        return []
+        return [], {}
     seen: set[str] = set()
     result: list[str] = []
+    seeded_issue_docs: dict[str, dict[str, Any]] = {}
     for raw in raw_issue_keys:
         cleaned: str | None = None
+        seeded_issue_doc: dict[str, Any] | None = None
         if isinstance(raw, str):
             cleaned = raw.strip().upper()
         elif isinstance(raw, Mapping):
@@ -16495,13 +16522,20 @@ def _normalise_issue_keys_input(raw_issue_keys: Any) -> list[str]:
                 if isinstance(value, str) and value.strip():
                     cleaned = value.strip().upper()
                     break
+            if isinstance(cleaned, str) and cleaned:
+                seeded_issue_doc = _clone_seeded_jira_issue_doc(
+                    raw,
+                    issue_key=cleaned,
+                )
         if not isinstance(cleaned, str):
             continue
         if not cleaned or cleaned in seen:
             continue
         seen.add(cleaned)
         result.append(cleaned)
-    return result
+        if isinstance(seeded_issue_doc, dict):
+            seeded_issue_docs[cleaned] = seeded_issue_doc
+    return result, seeded_issue_docs
 
 
 def _coerce_bool_input(value: Any, *, default: bool) -> bool:
@@ -16558,7 +16592,7 @@ def _task_import_jira_issues(**kwargs):
         resolve_event_actor_context,
     )
 
-    issue_keys = _normalise_issue_keys_input(kwargs.get("issue_keys"))
+    issue_keys, seeded_issue_docs = _normalise_issue_keys_input(kwargs.get("issue_keys"))
     jql = kwargs.get("jql")
     backfill_existing_imports = _coerce_bool_input(
         kwargs.get("backfill_existing_imports"),
@@ -16702,16 +16736,27 @@ def _task_import_jira_issues(**kwargs):
 
         issue_docs: list[dict[str, Any]] = []
         for issue_key in discovered_keys:
-            try:
-                issue_doc = await proxy.get_issue(issue_key=issue_key)
-            except Exception as exc:
-                fetch_errors.append(
-                    {
-                        "issue_key": issue_key,
-                        "error": f"{type(exc).__name__}: {exc}",
-                    }
-                )
-                continue
+            seeded_issue_doc = seeded_issue_docs.get(issue_key)
+            issue_doc: dict[str, Any] | None = None
+            if isinstance(seeded_issue_doc, Mapping):
+                issue_doc = dict(seeded_issue_doc)
+                issue_doc["key"] = issue_key
+                raw_fields = issue_doc.get("fields")
+                if isinstance(raw_fields, Mapping):
+                    issue_doc["fields"] = dict(raw_fields)
+            else:
+                try:
+                    fetched_issue_doc = await proxy.get_issue(issue_key=issue_key)
+                except Exception as exc:
+                    fetch_errors.append(
+                        {
+                            "issue_key": issue_key,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
+                    continue
+                if isinstance(fetched_issue_doc, dict):
+                    issue_doc = fetched_issue_doc
 
             if not isinstance(issue_doc, dict):
                 fetch_errors.append(

@@ -11,6 +11,12 @@ This slice adds workflow-first execution coverage for Jira->Von task migration b
 
 The runtime path is MCP-first and uses existing tooling (`jira_search`, `task_import_jira_issues`) rather than bespoke orchestration code.
 
+## Execution Surface
+
+For live project-scale execution, use `scripts/run_jira_task_migration.py`. It pages Jira discovery with `jira_search`, reuses the returned issue documents when calling `task_import_jira_issues`, and can optionally import missing JVNAUTOSCI referenced targets before a final repair pass.
+
+This keeps the migration on the canonical Jira/Von MCP path while avoiding the earlier per-issue refetch bottleneck that made a single large project run operationally unreliable.
+
 ## Project-Level Parity Findings
 
 `task_import_jira_issues` now emits `project_parity` in the migration report. The report is deterministic and grouped by Jira project key.

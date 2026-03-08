@@ -202,6 +202,16 @@ class ConceptsRepository:
         cursor = coll.aggregate(pipeline_with_access)
         return _AccessControlledCursor(cursor)
 
+    @staticmethod
+    def distinct(field: str, filter: Optional[Dict[str, Any]] = None) -> List[Any]:
+        """Return distinct values for a field while preserving concept access control."""
+
+        coll = ConceptsRepository.collection()
+        if coll is None:
+            return []
+        query = apply_concept_query_filter(filter or {})
+        return list(coll.distinct(field, query))
+
     # Relationship helpers
     @staticmethod
     def _ensure_relationship_array(concept_id: str, rel_kind: str) -> bool:

@@ -925,7 +925,12 @@ def list_imported_jira_issue_keys(
     organisation_concept_id: str | None = None,
     limit: int = 2000,
 ) -> list[str]:
-    """Return Jira issue keys already linked via task external_references."""
+    """Return Jira issue keys already linked via task external_references.
+
+    This intentionally uses a distinct-value query rather than a sorted scan of
+    task documents. Full-document scans were operationally unreliable for
+    project-scale migration checkpoints and incremental sync runs.
+    """
 
     try:
         bounded_limit = max(1, min(int(limit), 2000))
@@ -947,50 +952,20 @@ def list_imported_jira_issue_keys(
             {f"metadata.{TASK_METADATA_KEY_ORGANISATION}": None},
         ]
 
-    keys: list[str] = []
-    seen: set[str] = set()
-    skip = 0
-    batch_size = min(max(200, bounded_limit), 1000)
-    projection = {
-        f"metadata.{TASK_METADATA_KEY_EXTERNAL_REFERENCES}.{_JIRA_SOURCE_SYSTEM}": 1,
-    }
+    raw_values = ConceptsRepository.distinct(
+        f"metadata.{TASK_METADATA_KEY_EXTERNAL_REFERENCES}.{_JIRA_SOURCE_SYSTEM}.external_id",
+        query,
+    )
 
-    while len(keys) < bounded_limit:
-        docs = list(
-            ConceptsRepository.find(
-                query,
-                projection=projection,
-                sort=[("updated_at", -1), ("concept_id", 1)],
-                skip=skip,
-                limit=min(batch_size, max(1, bounded_limit - len(keys))),
-            )
-        )
-        if not docs:
-            break
-        skip += len(docs)
-        for doc in docs:
-            if not isinstance(doc, Mapping):
-                continue
-            metadata = doc.get("metadata")
-            if not isinstance(metadata, Mapping):
-                continue
-            external_references = metadata.get(TASK_METADATA_KEY_EXTERNAL_REFERENCES)
-            if not isinstance(external_references, Mapping):
-                continue
-            jira_reference = external_references.get(_JIRA_SOURCE_SYSTEM)
-            if not isinstance(jira_reference, Mapping):
-                continue
-            raw_issue_key = jira_reference.get("external_id") or jira_reference.get(
-                "issue_key"
-            )
-            issue_key = _normalise_issue_key(raw_issue_key)
-            if not issue_key or issue_key in seen:
-                continue
-            seen.add(issue_key)
-            keys.append(issue_key)
-            if len(keys) >= bounded_limit:
-                break
-    return keys
+    unique_keys = sorted(
+        {
+            issue_key
+            for raw_value in raw_values
+            for issue_key in [_normalise_issue_key(raw_value)]
+            if isinstance(issue_key, str) and issue_key
+        }
+    )
+    return unique_keys[:bounded_limit]
 
 
 _PARITY_CLASS_MUST_FIX = "must_fix"
