@@ -119,7 +119,12 @@ def _build_gateway(monkeypatch) -> InternalMCPGateway:
     return gateway
 
 
-def _make_app(monkeypatch, *, llm: _LLMSequence) -> Flask:
+def _make_app(
+    monkeypatch,
+    *,
+    llm: _LLMSequence,
+    selector_enabled: bool = True,
+) -> Flask:
     from src.backend.server.routes.von_routes import von_bp
 
     monkeypatch.setenv("VON_WORKFLOW_DISCOVERY_ENABLE", "0")
@@ -170,7 +175,7 @@ def _make_app(monkeypatch, *, llm: _LLMSequence) -> Flask:
     orchestrator = build_db_independent_orchestrator(
         monkeypatch,
         gateway=gateway,
-        selector_enabled=True,
+        selector_enabled=selector_enabled,
         max_tool_invocations=1,
     )
 
@@ -242,12 +247,12 @@ def test_generate_bare_arxiv_url_auto_represents_paper(monkeypatch):
     assert completion_gate.get("safe_to_claim_completion") is True
 
 
-def test_generate_fallback_route_keeps_route_selection_separate_from_tool_execution(
+def test_generate_invalid_selector_verdict_still_routes_bare_arxiv_to_tool_pipeline(
     monkeypatch,
 ):
     llm = _LLMSequence(
         [
-            "fallback",
+            "I would route this as plain_response.",
             '{"action":"call_tool","tool":"download_paper","payload":{"arxiv_id":"2510.06248"}}',
             "Downloaded and represented the paper.",
         ]
@@ -263,8 +268,9 @@ def test_generate_fallback_route_keeps_route_selection_separate_from_tool_execut
     llm_debug = body.get("llm_debug") or {}
 
     workflow_routing = llm_debug.get("workflow_routing") or {}
-    assert workflow_routing.get("workflow_id") == CHAT_ASSISTANT_WORKFLOW_ID
-    assert workflow_routing.get("verdict") == "fallback"
+    assert workflow_routing.get("workflow_id") == TOOL_CALLING_WORKFLOW_ID
+    assert workflow_routing.get("verdict") == "tool_seeking"
+    assert workflow_routing.get("source") == "selector_override"
 
     diagnostics = llm_debug.get("turn_execution_diagnostics") or {}
     assert diagnostics.get("tool_call_count") == 1
@@ -277,7 +283,7 @@ def test_generate_fallback_route_keeps_route_selection_separate_from_tool_execut
     assert all(entry.get("tool") for entry in tool_history)
 
     workflow_stage_path = diagnostics.get("workflow_stage_path") or {}
-    assert workflow_stage_path.get("workflow_id") != CHAT_ASSISTANT_WORKFLOW_ID
+    assert workflow_stage_path.get("workflow_id") == TOOL_CALLING_WORKFLOW_ID
     assert TOOL_CALLING_WORKFLOW_ID in list(
         workflow_stage_path.get("observed_workflow_ids") or []
     )
@@ -299,6 +305,36 @@ def test_generate_fallback_route_keeps_route_selection_separate_from_tool_execut
     assert tool_stage.get("tool_success_count") == 1
     assert tool_stage.get("tool_failure_count") == 0
     assert tool_stage.get("tool_pending_count") == 0
+
+
+def test_generate_bare_arxiv_url_without_selector_still_forces_tool_pipeline_routing(
+    monkeypatch,
+):
+    llm = _LLMSequence(
+        [
+            '{"action":"call_tool","tool":"download_paper","payload":{"arxiv_id":"2510.06248"}}',
+            "Downloaded and represented the paper.",
+        ]
+    )
+    app = _make_app(monkeypatch, llm=llm, selector_enabled=False)
+
+    client = app.test_client()
+    response = client.post("/von/generate", json={"prompt": "https://arxiv.org/abs/2510.06248"})
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    llm_debug = body.get("llm_debug") or {}
+
+    workflow_routing = llm_debug.get("workflow_routing") or {}
+    assert workflow_routing.get("workflow_id") == TOOL_CALLING_WORKFLOW_ID
+    assert workflow_routing.get("verdict") == "tool_seeking"
+    assert workflow_routing.get("source") == "selector_override"
+
+    diagnostics = llm_debug.get("turn_execution_diagnostics") or {}
+    assert diagnostics.get("tool_call_count") == 1
+    assert diagnostics.get("tool_success_count") == 1
+    assert diagnostics.get("tool_pending_count") == 0
 
 
 def test_generate_bare_arxiv_url_with_explicit_denial_stays_non_mutating(monkeypatch):

@@ -203,6 +203,33 @@ class _OntologyPreflightResult:
 
 
 @dataclass(frozen=True)
+class _PromptRequirementEvaluation:
+    """Canonical prompt-requirement snapshot shared across routing/execution."""
+
+    required_tools: tuple[str, ...] = ()
+    required_fetch_concept_ids: tuple[str, ...] = ()
+    required_read_file_copy_ids: tuple[str, ...] = ()
+    required_scholarly_representation_file_copy_ids: tuple[str, ...] = ()
+    required_create_type_name: str | None = None
+    unavailable_required_tools: tuple[str, ...] = ()
+    scholarly_representation_intent: bool = False
+    missing_tools: tuple[str, ...] = ()
+    missing_fetch_concept_ids: tuple[str, ...] = ()
+    missing_read_file_copy_ids: tuple[str, ...] = ()
+    missing_scholarly_representation_file_copy_ids: tuple[str, ...] = ()
+    missing_retry_reason: str | None = None
+
+    @property
+    def has_missing_requirements(self) -> bool:
+        return bool(
+            self.missing_tools
+            or self.missing_fetch_concept_ids
+            or self.missing_read_file_copy_ids
+            or self.missing_scholarly_representation_file_copy_ids
+        )
+
+
+@dataclass(frozen=True)
 class _WorkflowModelPolicyState:
     enabled: bool
     policy: Mapping[str, Any] | None
@@ -3652,58 +3679,30 @@ class InternalMCPChatOrchestrator:
         if not isinstance(prompt_for_requirements, str) or not prompt_for_requirements.strip():
             prompt_for_requirements = prompt
 
-        prompt_requirement_state = self._derive_prompt_tool_requirements(
-            prompt_for_requirements,
+        prompt_requirements = self._evaluate_prompt_requirements(
+            prompt_text=prompt_for_requirements,
             method_catalogue=(
                 method_catalogue_for_requirements
                 if isinstance(method_catalogue_for_requirements, Mapping)
                 else None
             ),
             context_messages=augmented_context,
+            tool_invocations=(),
         )
-        required_prompt_tools = list(
-            cast(list[str], prompt_requirement_state.get("required_tools") or [])
-        )
+        required_prompt_tools = list(prompt_requirements.required_tools)
         required_prompt_fetch_concept_ids = list(
-            cast(
-                list[str],
-                prompt_requirement_state.get("required_fetch_concept_ids") or [],
-            )
+            prompt_requirements.required_fetch_concept_ids
         )
         required_prompt_read_file_copy_ids = list(
-            cast(
-                list[str],
-                prompt_requirement_state.get("required_read_file_copy_ids") or [],
-            )
+            prompt_requirements.required_read_file_copy_ids
         )
         required_prompt_scholarly_representation_file_copy_ids = list(
-            cast(
-                list[str],
-                prompt_requirement_state.get(
-                    "required_scholarly_representation_for_file_copy_ids"
-                )
-                or [],
-            )
-        )
-        required_prompt_create_type_name_raw = prompt_requirement_state.get(
-            "required_create_type_name"
+            prompt_requirements.required_scholarly_representation_file_copy_ids
         )
         required_prompt_create_type_name = (
-            str(required_prompt_create_type_name_raw).strip()
-            if isinstance(required_prompt_create_type_name_raw, str)
-            else None
+            prompt_requirements.required_create_type_name
         )
-        data["required_prompt_tools"] = list(required_prompt_tools)
-        data["required_prompt_fetch_concept_ids"] = list(
-            required_prompt_fetch_concept_ids
-        )
-        data["required_prompt_read_file_copy_ids"] = list(
-            required_prompt_read_file_copy_ids
-        )
-        data["required_prompt_scholarly_representation_for_file_copy_ids"] = list(
-            required_prompt_scholarly_representation_file_copy_ids
-        )
-        data["required_prompt_create_type_name"] = required_prompt_create_type_name
+        self._store_prompt_requirement_evaluation(data, prompt_requirements)
 
         # Emit planning phase.
         if callable(emit_phase_transition):
@@ -3813,40 +3812,16 @@ class InternalMCPChatOrchestrator:
 
         # Missing-tool-call recovery.
         if not has_valid_tool_call:
-            (
-                missing_prompt_tools,
-                missing_prompt_fetch_concept_ids,
-                missing_prompt_read_file_copy_ids,
-                missing_prompt_scholarly_representation_file_copy_ids,
-            ) = (
-                self._derive_missing_prompt_requirements(
-                    required_tools=required_prompt_tools,
-                    required_fetch_concept_ids=required_prompt_fetch_concept_ids,
-                    required_read_file_copy_ids=required_prompt_read_file_copy_ids,
-                    required_scholarly_representation_for_file_copy_ids=required_prompt_scholarly_representation_file_copy_ids,
-                    tool_invocations=(),
-                )
+            missing_prompt_tools = list(prompt_requirements.missing_tools)
+            missing_prompt_fetch_concept_ids = list(
+                prompt_requirements.missing_fetch_concept_ids
             )
-            data["missing_prompt_fetch_concept_ids"] = list(
-                missing_prompt_fetch_concept_ids
+            missing_prompt_read_file_copy_ids = list(
+                prompt_requirements.missing_read_file_copy_ids
             )
-            data["missing_prompt_read_file_copy_ids"] = list(
-                missing_prompt_read_file_copy_ids
+            missing_prompt_scholarly_representation_file_copy_ids = list(
+                prompt_requirements.missing_scholarly_representation_file_copy_ids
             )
-            data["missing_prompt_scholarly_representation_for_file_copy_ids"] = list(
-                missing_prompt_scholarly_representation_file_copy_ids
-            )
-            missing_retry_reason = self._build_missing_prompt_retry_reason(
-                missing_tools=missing_prompt_tools,
-                missing_fetch_concept_ids=missing_prompt_fetch_concept_ids,
-                missing_read_file_copy_ids=missing_prompt_read_file_copy_ids,
-                missing_scholarly_representation_file_copy_ids=missing_prompt_scholarly_representation_file_copy_ids,
-            )
-            data["missing_prompt_tools"] = list(missing_prompt_tools)
-            if missing_retry_reason:
-                data["missing_tool_call_retry_reason_override"] = missing_retry_reason
-            else:
-                data.pop("missing_tool_call_retry_reason_override", None)
 
             recovery_data = self._run_missing_tool_call_recovery_workflow(
                 request=request,
@@ -4692,96 +4667,43 @@ class InternalMCPChatOrchestrator:
             if not isinstance(prompt_for_requirements, str) or not prompt_for_requirements.strip():
                 prompt_for_requirements = data.get("prompt")
 
-            prompt_requirement_state = self._derive_prompt_tool_requirements(
-                prompt_for_requirements,
+            invocations_for_requirements = cast(
+                Sequence[Mapping[str, Any]], data.get("invocations") or []
+            )
+            prompt_requirements = self._evaluate_prompt_requirements(
+                prompt_text=prompt_for_requirements,
                 method_catalogue=(
                     method_catalogue_for_requirements
                     if isinstance(method_catalogue_for_requirements, Mapping)
                     else None
                 ),
                 context_messages=augmented_context,
+                tool_invocations=invocations_for_requirements,
             )
-            required_prompt_tools = list(
-                cast(list[str], prompt_requirement_state.get("required_tools") or [])
-            )
+            required_prompt_tools = list(prompt_requirements.required_tools)
             required_prompt_fetch_concept_ids = list(
-                cast(
-                    list[str],
-                    prompt_requirement_state.get("required_fetch_concept_ids") or [],
-                )
+                prompt_requirements.required_fetch_concept_ids
             )
             required_prompt_read_file_copy_ids = list(
-                cast(
-                    list[str],
-                    prompt_requirement_state.get("required_read_file_copy_ids") or [],
-                )
+                prompt_requirements.required_read_file_copy_ids
             )
             required_prompt_scholarly_representation_file_copy_ids = list(
-                cast(
-                    list[str],
-                    prompt_requirement_state.get(
-                        "required_scholarly_representation_for_file_copy_ids"
-                    )
-                    or [],
-                )
-            )
-            required_prompt_create_type_name_raw = prompt_requirement_state.get(
-                "required_create_type_name"
+                prompt_requirements.required_scholarly_representation_file_copy_ids
             )
             required_prompt_create_type_name = (
-                str(required_prompt_create_type_name_raw).strip()
-                if isinstance(required_prompt_create_type_name_raw, str)
-                else None
+                prompt_requirements.required_create_type_name
             )
-            data["required_prompt_tools"] = list(required_prompt_tools)
-            data["required_prompt_fetch_concept_ids"] = list(
-                required_prompt_fetch_concept_ids
+            missing_prompt_tools = list(prompt_requirements.missing_tools)
+            missing_prompt_fetch_concept_ids = list(
+                prompt_requirements.missing_fetch_concept_ids
             )
-            data["required_prompt_read_file_copy_ids"] = list(
-                required_prompt_read_file_copy_ids
+            missing_prompt_read_file_copy_ids = list(
+                prompt_requirements.missing_read_file_copy_ids
             )
-            data["required_prompt_scholarly_representation_for_file_copy_ids"] = list(
-                required_prompt_scholarly_representation_file_copy_ids
+            missing_prompt_scholarly_representation_file_copy_ids = list(
+                prompt_requirements.missing_scholarly_representation_file_copy_ids
             )
-            data["required_prompt_create_type_name"] = required_prompt_create_type_name
-
-            invocations_for_requirements = cast(
-                Sequence[Mapping[str, Any]], data.get("invocations") or []
-            )
-            (
-                missing_prompt_tools,
-                missing_prompt_fetch_concept_ids,
-                missing_prompt_read_file_copy_ids,
-                missing_prompt_scholarly_representation_file_copy_ids,
-            ) = (
-                self._derive_missing_prompt_requirements(
-                    required_tools=required_prompt_tools,
-                    required_fetch_concept_ids=required_prompt_fetch_concept_ids,
-                    required_read_file_copy_ids=required_prompt_read_file_copy_ids,
-                    required_scholarly_representation_for_file_copy_ids=required_prompt_scholarly_representation_file_copy_ids,
-                    tool_invocations=invocations_for_requirements,
-                )
-            )
-            data["missing_prompt_tools"] = list(missing_prompt_tools)
-            data["missing_prompt_fetch_concept_ids"] = list(
-                missing_prompt_fetch_concept_ids
-            )
-            data["missing_prompt_read_file_copy_ids"] = list(
-                missing_prompt_read_file_copy_ids
-            )
-            data["missing_prompt_scholarly_representation_for_file_copy_ids"] = list(
-                missing_prompt_scholarly_representation_file_copy_ids
-            )
-            missing_retry_reason = self._build_missing_prompt_retry_reason(
-                missing_tools=missing_prompt_tools,
-                missing_fetch_concept_ids=missing_prompt_fetch_concept_ids,
-                missing_read_file_copy_ids=missing_prompt_read_file_copy_ids,
-                missing_scholarly_representation_file_copy_ids=missing_prompt_scholarly_representation_file_copy_ids,
-            )
-            if missing_retry_reason:
-                data["missing_tool_call_retry_reason_override"] = missing_retry_reason
-            else:
-                data.pop("missing_tool_call_retry_reason_override", None)
+            self._store_prompt_requirement_evaluation(data, prompt_requirements)
 
             if isinstance(aux_llm_calls, list) and required_prompt_tools:
                 try:
@@ -7614,6 +7536,140 @@ class InternalMCPChatOrchestrator:
         if not details:
             return None
         return "prompt requested tool(s) not yet invoked: " + "; ".join(details)
+
+    @classmethod
+    def _evaluate_prompt_requirements(
+        cls,
+        *,
+        prompt_text: str,
+        method_catalogue: Mapping[str, Any] | None = None,
+        context_messages: Sequence[Mapping[str, Any]] | None = None,
+        tool_invocations: Sequence[Mapping[str, Any]] = (),
+    ) -> _PromptRequirementEvaluation:
+        """Compute prompt-required tools and the still-missing subset once."""
+
+        prompt_requirement_state = cls._derive_prompt_tool_requirements(
+            prompt_text,
+            method_catalogue=method_catalogue,
+            context_messages=context_messages,
+        )
+        required_tools = tuple(
+            str(item).strip()
+            for item in (prompt_requirement_state.get("required_tools") or [])
+            if isinstance(item, str) and str(item).strip()
+        )
+        required_fetch_concept_ids = tuple(
+            str(item).strip()
+            for item in (
+                prompt_requirement_state.get("required_fetch_concept_ids") or []
+            )
+            if isinstance(item, str) and str(item).strip()
+        )
+        required_read_file_copy_ids = tuple(
+            str(item).strip()
+            for item in (
+                prompt_requirement_state.get("required_read_file_copy_ids") or []
+            )
+            if isinstance(item, str) and str(item).strip()
+        )
+        required_scholarly_representation_file_copy_ids = tuple(
+            str(item).strip()
+            for item in (
+                prompt_requirement_state.get(
+                    "required_scholarly_representation_for_file_copy_ids"
+                )
+                or []
+            )
+            if isinstance(item, str) and str(item).strip()
+        )
+        required_create_type_name_raw = prompt_requirement_state.get(
+            "required_create_type_name"
+        )
+        required_create_type_name = (
+            str(required_create_type_name_raw).strip()
+            if isinstance(required_create_type_name_raw, str)
+            and str(required_create_type_name_raw).strip()
+            else None
+        )
+        unavailable_required_tools = tuple(
+            str(item).strip()
+            for item in (
+                prompt_requirement_state.get("unavailable_required_tools") or []
+            )
+            if isinstance(item, str) and str(item).strip()
+        )
+        (
+            missing_tools,
+            missing_fetch_concept_ids,
+            missing_read_file_copy_ids,
+            missing_scholarly_representation_file_copy_ids,
+        ) = cls._derive_missing_prompt_requirements(
+            required_tools=required_tools,
+            required_fetch_concept_ids=required_fetch_concept_ids,
+            required_read_file_copy_ids=required_read_file_copy_ids,
+            required_scholarly_representation_for_file_copy_ids=required_scholarly_representation_file_copy_ids,
+            tool_invocations=tool_invocations,
+        )
+        missing_retry_reason = cls._build_missing_prompt_retry_reason(
+            missing_tools=missing_tools,
+            missing_fetch_concept_ids=missing_fetch_concept_ids,
+            missing_read_file_copy_ids=missing_read_file_copy_ids,
+            missing_scholarly_representation_file_copy_ids=missing_scholarly_representation_file_copy_ids,
+        )
+
+        return _PromptRequirementEvaluation(
+            required_tools=required_tools,
+            required_fetch_concept_ids=required_fetch_concept_ids,
+            required_read_file_copy_ids=required_read_file_copy_ids,
+            required_scholarly_representation_file_copy_ids=required_scholarly_representation_file_copy_ids,
+            required_create_type_name=required_create_type_name,
+            unavailable_required_tools=unavailable_required_tools,
+            scholarly_representation_intent=bool(
+                prompt_requirement_state.get("scholarly_representation_intent")
+            ),
+            missing_tools=tuple(missing_tools),
+            missing_fetch_concept_ids=tuple(missing_fetch_concept_ids),
+            missing_read_file_copy_ids=tuple(missing_read_file_copy_ids),
+            missing_scholarly_representation_file_copy_ids=tuple(
+                missing_scholarly_representation_file_copy_ids
+            ),
+            missing_retry_reason=missing_retry_reason,
+        )
+
+    @staticmethod
+    def _store_prompt_requirement_evaluation(
+        data: MutableMapping[str, Any],
+        evaluation: _PromptRequirementEvaluation,
+    ) -> None:
+        """Persist shared prompt-requirement state into workflow data."""
+
+        data["required_prompt_tools"] = list(evaluation.required_tools)
+        data["required_prompt_fetch_concept_ids"] = list(
+            evaluation.required_fetch_concept_ids
+        )
+        data["required_prompt_read_file_copy_ids"] = list(
+            evaluation.required_read_file_copy_ids
+        )
+        data["required_prompt_scholarly_representation_for_file_copy_ids"] = list(
+            evaluation.required_scholarly_representation_file_copy_ids
+        )
+        data["required_prompt_create_type_name"] = evaluation.required_create_type_name
+        data["missing_prompt_tools"] = list(evaluation.missing_tools)
+        data["missing_prompt_fetch_concept_ids"] = list(
+            evaluation.missing_fetch_concept_ids
+        )
+        data["missing_prompt_read_file_copy_ids"] = list(
+            evaluation.missing_read_file_copy_ids
+        )
+        data["missing_prompt_scholarly_representation_for_file_copy_ids"] = list(
+            evaluation.missing_scholarly_representation_file_copy_ids
+        )
+        if evaluation.missing_retry_reason:
+            data["missing_tool_call_retry_reason_override"] = (
+                evaluation.missing_retry_reason
+            )
+        else:
+            data.pop("missing_tool_call_retry_reason_override", None)
 
     @classmethod
     def _validate_completion_claims(
@@ -23395,7 +23451,33 @@ class InternalMCPChatOrchestrator:
         #   2. custom_workflow — execute selected discovered workflow
         #   3. tool_pipeline   — execute registry workflow matching tool contract
         # ----------------------------------------------------------------
-        if selector_verdict == "plain_response" and mutative_intent_requires_tool_routing:
+        routing_prompt_requirements = self._evaluate_prompt_requirements(
+            prompt_text=effective_prompt_for_routing,
+            method_catalogue=method_catalogue_for_routing,
+            context_messages=augmented_context,
+            tool_invocations=(),
+        )
+        selected_uses_tool_pipeline_contract = _workflow_matches_action_contract(
+            selected_workflow_id_text,
+            required_action_ids=_TOOL_PIPELINE_ACTION_IDS,
+        )
+
+        def _force_tool_pipeline_routing(
+            *,
+            reason: str,
+            excluded_selector_verdicts: Sequence[str],
+            extra_payload: Mapping[str, Any] | None = None,
+        ) -> None:
+            nonlocal selected_workflow_id
+            nonlocal selected_workflow_id_text
+            nonlocal selector_verdict
+            nonlocal selector_requests_narration
+            nonlocal selector_requests_custom_workflow
+            nonlocal routing_info
+            nonlocal selected_uses_tool_pipeline_contract
+
+            prior_selected_workflow_id = selected_workflow_id_text
+            prior_selector_verdict = selector_verdict or None
             excluded_workflow_ids = sorted(
                 {
                     CHAT_ASSISTANT_WORKFLOW_ID,
@@ -23407,142 +23489,99 @@ class InternalMCPChatOrchestrator:
             selector_verdict = "tool_seeking"
             selector_requests_narration = False
             selector_requests_custom_workflow = False
+            selected_uses_tool_pipeline_contract = True
+
+            prompt_id = None
+            discovered_workflow_ids: tuple[str, ...] = ()
+            routing_duration_ms = None
             if isinstance(routing_info, WorkflowRoutingInfo):
-                routing_info = WorkflowRoutingInfo(
-                    workflow_id=TOOL_CALLING_WORKFLOW_ID,
-                    verdict="tool_seeking",
-                    prompt_id=routing_info.prompt_id,
-                    discovered_workflow_ids=routing_info.discovered_workflow_ids,
-                    routing_duration_ms=routing_info.routing_duration_ms,
-                    source="selector_override",
-                )
+                prompt_id = routing_info.prompt_id
+                discovered_workflow_ids = routing_info.discovered_workflow_ids
+                routing_duration_ms = routing_info.routing_duration_ms
+            routing_info = WorkflowRoutingInfo(
+                workflow_id=TOOL_CALLING_WORKFLOW_ID,
+                verdict="tool_seeking",
+                prompt_id=prompt_id,
+                discovered_workflow_ids=discovered_workflow_ids,
+                routing_duration_ms=routing_duration_ms,
+                source="selector_override",
+            )
+
             override_payload: dict[str, Any] = {
                 "type": "workflow_selector_override",
-                "reason": "mutative_intent_requires_tool_pipeline",
+                "reason": reason,
                 "selected_workflow_id": TOOL_CALLING_WORKFLOW_ID,
                 "excluded_workflow_ids": excluded_workflow_ids,
-                "excluded_selector_verdicts": ["plain_response"],
-                "write_policy_reason": write_routing_policy_reason,
-                "write_tool_candidate_count": len(write_tool_candidates_for_routing),
-                "write_tool_candidates": write_tool_candidates_for_routing[:12],
+                "excluded_selector_verdicts": list(excluded_selector_verdicts),
+                "prior_selected_workflow_id": prior_selected_workflow_id,
+                "prior_selector_verdict": prior_selector_verdict,
             }
+            if extra_payload:
+                override_payload.update(dict(extra_payload))
             aux_llm_calls.append(override_payload)
             if trace_enabled and trace is not None:
                 trace.metadata["workflow_selector_override"] = dict(override_payload)
 
-        if selector_verdict == "plain_response":
-            plain_requirement_state = self._derive_prompt_tool_requirements(
-                effective_prompt_for_routing,
-                method_catalogue=method_catalogue_for_routing,
-                context_messages=augmented_context,
-            )
-            required_prompt_tools = list(
-                cast(list[str], plain_requirement_state.get("required_tools") or [])
-            )
-            required_prompt_fetch_concept_ids = list(
-                cast(
-                    list[str],
-                    plain_requirement_state.get("required_fetch_concept_ids") or [],
-                )
-            )
-            required_prompt_read_file_copy_ids = list(
-                cast(
-                    list[str],
-                    plain_requirement_state.get("required_read_file_copy_ids") or [],
-                )
-            )
-            required_prompt_scholarly_representation_file_copy_ids = list(
-                cast(
-                    list[str],
-                    plain_requirement_state.get(
-                        "required_scholarly_representation_for_file_copy_ids"
-                    )
-                    or [],
-                )
-            )
-            unavailable_required_tools = list(
-                cast(
-                    list[str],
-                    plain_requirement_state.get("unavailable_required_tools") or [],
-                )
-            )
-            (
-                missing_prompt_tools,
-                missing_prompt_fetch_concept_ids,
-                missing_prompt_read_file_copy_ids,
-                missing_prompt_scholarly_representation_file_copy_ids,
-            ) = self._derive_missing_prompt_requirements(
-                required_tools=required_prompt_tools,
-                required_fetch_concept_ids=required_prompt_fetch_concept_ids,
-                required_read_file_copy_ids=required_prompt_read_file_copy_ids,
-                required_scholarly_representation_for_file_copy_ids=required_prompt_scholarly_representation_file_copy_ids,
-                tool_invocations=(),
-            )
-            missing_retry_reason = self._build_missing_prompt_retry_reason(
-                missing_tools=missing_prompt_tools,
-                missing_fetch_concept_ids=missing_prompt_fetch_concept_ids,
-                missing_read_file_copy_ids=missing_prompt_read_file_copy_ids,
-                missing_scholarly_representation_file_copy_ids=missing_prompt_scholarly_representation_file_copy_ids,
+        if (
+            selector_verdict == "plain_response"
+            and mutative_intent_requires_tool_routing
+            and not selected_uses_tool_pipeline_contract
+        ):
+            _force_tool_pipeline_routing(
+                reason="mutative_intent_requires_tool_pipeline",
+                excluded_selector_verdicts=["plain_response"],
+                extra_payload={
+                    "write_policy_reason": write_routing_policy_reason,
+                    "write_tool_candidate_count": len(
+                        write_tool_candidates_for_routing
+                    ),
+                    "write_tool_candidates": write_tool_candidates_for_routing[:12],
+                },
             )
 
-            if (
-                missing_prompt_tools
-                or missing_prompt_fetch_concept_ids
-                or missing_prompt_read_file_copy_ids
-                or missing_prompt_scholarly_representation_file_copy_ids
-            ):
-                excluded_workflow_ids = sorted(
-                    {
-                        CHAT_ASSISTANT_WORKFLOW_ID,
-                        selected_workflow_id_text or CHAT_ASSISTANT_WORKFLOW_ID,
-                    }
-                )
-                selected_workflow_id = TOOL_CALLING_WORKFLOW_ID
-                selected_workflow_id_text = TOOL_CALLING_WORKFLOW_ID
-                selector_verdict = "tool_seeking"
-                selector_requests_narration = False
-                selector_requests_custom_workflow = False
-                if isinstance(routing_info, WorkflowRoutingInfo):
-                    routing_info = WorkflowRoutingInfo(
-                        workflow_id=TOOL_CALLING_WORKFLOW_ID,
-                        verdict="tool_seeking",
-                        prompt_id=routing_info.prompt_id,
-                        discovered_workflow_ids=routing_info.discovered_workflow_ids,
-                        routing_duration_ms=routing_info.routing_duration_ms,
-                        source="selector_override",
-                    )
-                override_payload = {
-                    "type": "workflow_selector_override",
-                    "reason": "required_prompt_tools_missing",
-                    "selected_workflow_id": TOOL_CALLING_WORKFLOW_ID,
-                    "excluded_workflow_ids": excluded_workflow_ids,
-                    "excluded_selector_verdicts": ["plain_response"],
-                    "required_prompt_tools": list(required_prompt_tools),
-                    "missing_prompt_tools": list(missing_prompt_tools),
+        if (
+            routing_prompt_requirements.has_missing_requirements
+            and not selected_uses_tool_pipeline_contract
+        ):
+            excluded_selector_verdicts: list[str] = []
+            if selector_verdict:
+                excluded_selector_verdicts.append(selector_verdict)
+            elif routing_info is None:
+                excluded_selector_verdicts.append("no_selector_verdict")
+            _force_tool_pipeline_routing(
+                reason="required_prompt_tools_missing",
+                excluded_selector_verdicts=excluded_selector_verdicts,
+                extra_payload={
+                    "required_prompt_tools": list(
+                        routing_prompt_requirements.required_tools
+                    ),
+                    "missing_prompt_tools": list(
+                        routing_prompt_requirements.missing_tools
+                    ),
                     "required_prompt_fetch_concept_ids": list(
-                        required_prompt_fetch_concept_ids
+                        routing_prompt_requirements.required_fetch_concept_ids
                     ),
                     "missing_prompt_fetch_concept_ids": list(
-                        missing_prompt_fetch_concept_ids
+                        routing_prompt_requirements.missing_fetch_concept_ids
                     ),
                     "required_prompt_read_file_copy_ids": list(
-                        required_prompt_read_file_copy_ids
+                        routing_prompt_requirements.required_read_file_copy_ids
                     ),
                     "missing_prompt_read_file_copy_ids": list(
-                        missing_prompt_read_file_copy_ids
+                        routing_prompt_requirements.missing_read_file_copy_ids
                     ),
                     "required_prompt_scholarly_representation_for_file_copy_ids": list(
-                        required_prompt_scholarly_representation_file_copy_ids
+                        routing_prompt_requirements.required_scholarly_representation_file_copy_ids
                     ),
                     "missing_prompt_scholarly_representation_for_file_copy_ids": list(
-                        missing_prompt_scholarly_representation_file_copy_ids
+                        routing_prompt_requirements.missing_scholarly_representation_file_copy_ids
                     ),
-                    "unavailable_required_tools": list(unavailable_required_tools),
-                    "retry_reason": missing_retry_reason,
-                }
-                aux_llm_calls.append(override_payload)
-                if trace_enabled and trace is not None:
-                    trace.metadata["workflow_selector_override"] = dict(override_payload)
+                    "unavailable_required_tools": list(
+                        routing_prompt_requirements.unavailable_required_tools
+                    ),
+                    "retry_reason": routing_prompt_requirements.missing_retry_reason,
+                },
+            )
 
         selected_workflow_name = _resolve_selected_workflow_name(
             selected_workflow_id_text
@@ -23701,11 +23740,6 @@ class InternalMCPChatOrchestrator:
                 workflow_routing=base_result.workflow_routing,
                 render_plan=base_result.render_plan,
             )
-
-        selected_uses_tool_pipeline_contract = _workflow_matches_action_contract(
-            selected_workflow_id_text,
-            required_action_ids=_TOOL_PIPELINE_ACTION_IDS,
-        )
 
         # Tier 1: Plain response — skip tool-calling overhead entirely.
         # When the classifier says "plain_response", there is no need

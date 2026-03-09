@@ -12,7 +12,9 @@ user's intent matches.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Sequence
 
@@ -22,9 +24,13 @@ from .workflow_registry import WorkflowRegistry
 
 
 _DEFAULT_CLASSIFIER_PROMPT = (
-    "You are a router that selects a workflow for the next assistant turn.\n"
-    "Pick ONE of: plain_response, tool_seeking, summarisation, narration.\n"
-    "Reply with only the label. Treat tool-seeking as any case where tools or MCP calls are expected.\n"
+    "You are a workflow router for the next assistant turn.\n"
+    "Return exactly one routing label and nothing else.\n"
+    "Allowed labels: plain_response, tool_seeking, summarisation, narration.\n"
+    "Do not return prose, JSON, punctuation, explanations, code fences, or more than one label.\n"
+    "Choose tool_seeking whenever satisfying the request likely requires tools, MCP calls, retrieval, downloads, reads, searches, file access, or additive knowledge-base mutations.\n"
+    "Canonical artefact identifiers and URLs usually imply tool_seeking when acting on the artefact is needed, including bare arXiv URLs or arXiv IDs.\n"
+    "Choose plain_response only for direct conversational replies that do not need tools.\n"
     "User+assistant turn so far:\n"
     "{turn_text}\n"
 )
@@ -80,6 +86,22 @@ class WorkflowSelector:
         self._verdict_mapping = dict(verdict_mapping)
         self._classifier_prompt_ids = tuple(classifier_prompt_ids)
         self._fallback_prompt = fallback_prompt
+
+    _STATIC_SELECTOR_VERDICTS = (
+        "plain_response",
+        "tool_seeking",
+        "summarisation",
+        "narration",
+    )
+    _JSON_SELECTION_KEYS = (
+        "workflow_id",
+        "workflow",
+        "verdict",
+        "label",
+        "route",
+        "selection",
+    )
+    _CANDIDATE_BOUNDARY_STRIP = " \t\r\n`'\".,;:!?()[]{}<>"
 
     def enabled(self) -> bool:
         """Check whether the workflow selector is enabled.
@@ -178,26 +200,31 @@ class WorkflowSelector:
         discovered_workflow_ids: Sequence[str] = (),
     ) -> WorkflowSelection:
         """Resolve a raw classifier response into a workflow selection."""
-        verdict = str(raw_response or "").strip().lower()
+        verdict = self._extract_candidate_label(
+            raw_response=raw_response,
+            discovered_workflow_ids=discovered_workflow_ids,
+        )
+        verdict_lookup = verdict.lower()
+        resolved_verdict = verdict
         discovered_ids = tuple(
             item for item in discovered_workflow_ids if isinstance(item, str) and item
         )
+        discovered_lookup = {item.lower(): item for item in discovered_ids}
 
         # Resolve verdict → workflow_id.
         # 1. Check static verdict mapping.
-        workflow_id = self._verdict_mapping.get(verdict)
+        workflow_id = self._verdict_mapping.get(verdict_lookup)
 
         # 2. Check if the verdict is a discovered workflow concept_id.
-        if not workflow_id and verdict in {d.lower() for d in discovered_ids}:
-            # Normalise to the original casing from the discovered list.
-            for d in discovered_ids:
-                if d.lower() == verdict:
-                    workflow_id = d
-                    break
+        discovered_match = discovered_lookup.get(verdict_lookup)
+        if not workflow_id and discovered_match:
+            workflow_id = discovered_match
+            resolved_verdict = discovered_match
 
         # 3. Fallback to plain_response mapping.
         if not workflow_id:
             workflow_id = self._verdict_mapping.get("plain_response")
+            resolved_verdict = "plain_response"
 
         if not isinstance(workflow_id, str):
             workflow_id = ""
@@ -211,12 +238,91 @@ class WorkflowSelector:
                 workflow_id = (
                     fallback_id if isinstance(fallback_id, str) else workflow_id
                 )
+                resolved_verdict = "plain_response"
 
         return WorkflowSelection(
             workflow_id=workflow_id or "",
-            verdict=verdict or "",
+            verdict=resolved_verdict or "",
             prompt_id=prompt_id,
             prompt_used=prompt_used,
             raw_response=str(raw_response or ""),
             discovered_workflow_ids=tuple(discovered_ids),
         )
+
+    @classmethod
+    def _extract_candidate_label(
+        cls,
+        *,
+        raw_response: Any,
+        discovered_workflow_ids: Sequence[str] = (),
+    ) -> str:
+        raw_text = str(raw_response or "")
+        discovered_ids = tuple(
+            item for item in discovered_workflow_ids if isinstance(item, str) and item
+        )
+        discovered_lookup = {item.lower(): item for item in discovered_ids}
+
+        snippets: list[str] = []
+        stripped = raw_text.strip()
+        if stripped:
+            snippets.append(stripped)
+            snippets.extend(
+                line.strip() for line in stripped.splitlines() if isinstance(line, str)
+            )
+
+        json_candidate = cls._extract_json_candidate(raw_text)
+        if json_candidate:
+            snippets.insert(0, json_candidate)
+
+        for snippet in snippets:
+            normalised = cls._normalise_candidate(snippet)
+            if normalised in cls._STATIC_SELECTOR_VERDICTS:
+                return normalised
+            discovered_match = discovered_lookup.get(normalised)
+            if discovered_match:
+                return discovered_match
+
+        lowered = raw_text.lower()
+        for workflow_id in discovered_ids:
+            if workflow_id.lower() in lowered:
+                return workflow_id
+
+        static_match = cls._extract_static_verdict_from_text(lowered)
+        if static_match:
+            return static_match
+
+        return cls._normalise_candidate(raw_text)
+
+    @classmethod
+    def _extract_json_candidate(cls, raw_text: str) -> str | None:
+        stripped = raw_text.strip()
+        if not stripped:
+            return None
+        try:
+            parsed = json.loads(stripped)
+        except Exception:
+            return None
+        if isinstance(parsed, str):
+            return parsed
+        if isinstance(parsed, Mapping):
+            for key in cls._JSON_SELECTION_KEYS:
+                value = parsed.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value
+        return None
+
+    @classmethod
+    def _extract_static_verdict_from_text(cls, lowered_text: str) -> str | None:
+        best_match: tuple[int, str] | None = None
+        for verdict in cls._STATIC_SELECTOR_VERDICTS:
+            match = re.search(rf"\b{re.escape(verdict)}\b", lowered_text)
+            if not match:
+                continue
+            position = match.start()
+            if best_match is None or position < best_match[0]:
+                best_match = (position, verdict)
+        return best_match[1] if best_match is not None else None
+
+    @classmethod
+    def _normalise_candidate(cls, value: str) -> str:
+        return str(value or "").strip().strip(cls._CANDIDATE_BOUNDARY_STRIP).lower()
