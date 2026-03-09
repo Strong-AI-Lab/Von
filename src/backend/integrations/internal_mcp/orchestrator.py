@@ -18861,7 +18861,31 @@ class InternalMCPChatOrchestrator:
                 # Place immediately after the main instruction message.
                 augmented_context.insert(1, {"role": "system", "content": hint.strip()})
 
-        selected_workflow_id = CHAT_ASSISTANT_WORKFLOW_ID
+        method_catalogue_for_routing: Mapping[str, Any] = {}
+        describe_methods_for_routing = getattr(self._gateway, "describe_methods", None)
+        if callable(describe_methods_for_routing):
+            try:
+                described_methods = describe_methods_for_routing()
+                if isinstance(described_methods, Mapping):
+                    method_catalogue_for_routing = described_methods
+            except Exception:
+                method_catalogue_for_routing = {}
+
+        routing_prompt_requirements = self._evaluate_prompt_requirements(
+            prompt_text=effective_prompt_for_routing,
+            method_catalogue=method_catalogue_for_routing,
+            context_messages=augmented_context,
+            tool_invocations=(),
+        )
+        prompt_requirements_force_tool_pipeline = (
+            routing_prompt_requirements.has_missing_requirements
+        )
+
+        selected_workflow_id = (
+            TOOL_CALLING_WORKFLOW_ID
+            if prompt_requirements_force_tool_pipeline
+            else CHAT_ASSISTANT_WORKFLOW_ID
+        )
         presenter_mode_requested = False
         if context:
             for msg in context:
@@ -18897,6 +18921,50 @@ class InternalMCPChatOrchestrator:
             )
 
         routing_info: WorkflowRoutingInfo | None = None
+        if prompt_requirements_force_tool_pipeline:
+            routing_info = WorkflowRoutingInfo(
+                workflow_id=TOOL_CALLING_WORKFLOW_ID,
+                verdict="tool_seeking",
+                prompt_id=None,
+                discovered_workflow_ids=(),
+                source="selector_override",
+            )
+            override_payload = {
+                "type": "workflow_selector_override",
+                "reason": "required_prompt_tools_missing_preselector",
+                "selected_workflow_id": TOOL_CALLING_WORKFLOW_ID,
+                "excluded_workflow_ids": [CHAT_ASSISTANT_WORKFLOW_ID],
+                "excluded_selector_verdicts": ["selector_skipped"],
+                "prior_selected_workflow_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                "prior_selector_verdict": None,
+                "required_prompt_tools": list(routing_prompt_requirements.required_tools),
+                "missing_prompt_tools": list(routing_prompt_requirements.missing_tools),
+                "required_prompt_fetch_concept_ids": list(
+                    routing_prompt_requirements.required_fetch_concept_ids
+                ),
+                "missing_prompt_fetch_concept_ids": list(
+                    routing_prompt_requirements.missing_fetch_concept_ids
+                ),
+                "required_prompt_read_file_copy_ids": list(
+                    routing_prompt_requirements.required_read_file_copy_ids
+                ),
+                "missing_prompt_read_file_copy_ids": list(
+                    routing_prompt_requirements.missing_read_file_copy_ids
+                ),
+                "required_prompt_scholarly_representation_for_file_copy_ids": list(
+                    routing_prompt_requirements.required_scholarly_representation_file_copy_ids
+                ),
+                "missing_prompt_scholarly_representation_for_file_copy_ids": list(
+                    routing_prompt_requirements.missing_scholarly_representation_file_copy_ids
+                ),
+                "unavailable_required_tools": list(
+                    routing_prompt_requirements.unavailable_required_tools
+                ),
+                "retry_reason": routing_prompt_requirements.missing_retry_reason,
+            }
+            aux_llm_calls.append(override_payload)
+            if trace_enabled and trace is not None:
+                trace.metadata["workflow_selector_override"] = dict(override_payload)
 
         def _resolve_selected_workflow_name(workflow_id: str | None) -> str | None:
             clean_workflow_id = (
@@ -18929,7 +18997,11 @@ class InternalMCPChatOrchestrator:
                 else clean_workflow_id
             )
 
-        if user_namespace and self._workflow_selector.enabled():
+        if (
+            not prompt_requirements_force_tool_pipeline
+            and user_namespace
+            and self._workflow_selector.enabled()
+        ):
             _emit_progress_local(
                 {
                     "status": "phase_transition",
@@ -19144,15 +19216,6 @@ class InternalMCPChatOrchestrator:
             and selected_workflow_id_text
             and selected_workflow_id_text.lower() == selector_verdict
         )
-        method_catalogue_for_routing: Mapping[str, Any] = {}
-        describe_methods_for_routing = getattr(self._gateway, "describe_methods", None)
-        if callable(describe_methods_for_routing):
-            try:
-                described_methods = describe_methods_for_routing()
-                if isinstance(described_methods, Mapping):
-                    method_catalogue_for_routing = described_methods
-            except Exception:
-                method_catalogue_for_routing = {}
         write_tool_candidates_for_routing = sorted(
             {
                 str(tool_name).strip()
@@ -23451,12 +23514,9 @@ class InternalMCPChatOrchestrator:
         #   2. custom_workflow — execute selected discovered workflow
         #   3. tool_pipeline   — execute registry workflow matching tool contract
         # ----------------------------------------------------------------
-        routing_prompt_requirements = self._evaluate_prompt_requirements(
-            prompt_text=effective_prompt_for_routing,
-            method_catalogue=method_catalogue_for_routing,
-            context_messages=augmented_context,
-            tool_invocations=(),
-        )
+        # This was already evaluated before workflow selection so prompt-required
+        # tools can dominate routing deterministically, even when selector output
+        # is noisy or unavailable.
         selected_uses_tool_pipeline_contract = _workflow_matches_action_contract(
             selected_workflow_id_text,
             required_action_ids=_TOOL_PIPELINE_ACTION_IDS,
@@ -23746,7 +23806,7 @@ class InternalMCPChatOrchestrator:
         # to build tool context, inject write-policy, or run the
         # plan→validate→execute→backfill pipeline.  This saves an LLM
         # round-trip worth of system prompt tokens and reduces latency.
-        if selector_verdict == "plain_response":
+        if selector_verdict == "plain_response" and not selected_uses_tool_pipeline_contract:
             _emit_phase_transition_local(
                 self.PHASE_PLAIN_RESPONSE,
                 extra=workflow_dispatch_progress,

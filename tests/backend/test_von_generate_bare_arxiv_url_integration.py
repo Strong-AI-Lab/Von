@@ -192,7 +192,6 @@ def _make_app(
 def test_generate_bare_arxiv_url_auto_represents_paper(monkeypatch):
     llm = _LLMSequence(
         [
-            "plain_response",
             '{"action":"call_tool","tool":"download_paper","payload":{"arxiv_id":"2510.06248"}}',
             "Downloaded and represented the paper.",
         ]
@@ -210,6 +209,7 @@ def test_generate_bare_arxiv_url_auto_represents_paper(monkeypatch):
     workflow_routing = llm_debug.get("workflow_routing") or {}
     assert workflow_routing.get("workflow_id") == "#V#tool_calling_workflow"
     assert workflow_routing.get("verdict") == "tool_seeking"
+    assert workflow_routing.get("source") == "selector_override"
 
     tool_invocations = llm_debug.get("tool_invocations") or []
     download_records = [
@@ -245,9 +245,10 @@ def test_generate_bare_arxiv_url_auto_represents_paper(monkeypatch):
     completion_gate = turn_record.get("completion_gate") or {}
     assert completion_gate.get("decision") == "completed"
     assert completion_gate.get("safe_to_claim_completion") is True
+    assert len(llm.calls) == 2
 
 
-def test_generate_invalid_selector_verdict_still_routes_bare_arxiv_to_tool_pipeline(
+def test_generate_bare_arxiv_url_recovers_from_noisy_initial_tool_plan_output(
     monkeypatch,
 ):
     llm = _LLMSequence(
@@ -273,13 +274,16 @@ def test_generate_invalid_selector_verdict_still_routes_bare_arxiv_to_tool_pipel
     assert workflow_routing.get("source") == "selector_override"
 
     diagnostics = llm_debug.get("turn_execution_diagnostics") or {}
-    assert diagnostics.get("tool_call_count") == 1
-    assert diagnostics.get("tool_success_count") == 1
+    assert diagnostics.get("tool_call_count") == 2
+    assert diagnostics.get("tool_success_count") == 2
     assert diagnostics.get("tool_failure_count") == 0
     assert diagnostics.get("tool_pending_count") == 0
 
     tool_history = diagnostics.get("tool_history") or []
-    assert [entry.get("tool") for entry in tool_history] == ["download_paper"]
+    assert [entry.get("tool") for entry in tool_history] == [
+        "download_paper",
+        "download_paper",
+    ]
     assert all(entry.get("tool") for entry in tool_history)
 
     workflow_stage_path = diagnostics.get("workflow_stage_path") or {}
@@ -301,10 +305,11 @@ def test_generate_invalid_selector_verdict_still_routes_bare_arxiv_to_tool_pipel
         for entry in stage_diagnostics
         if isinstance(entry, dict) and entry.get("stage_id") == "tool_execute"
     )
-    assert tool_stage.get("tool_call_count") == 1
-    assert tool_stage.get("tool_success_count") == 1
+    assert tool_stage.get("tool_call_count") == 2
+    assert tool_stage.get("tool_success_count") == 2
     assert tool_stage.get("tool_failure_count") == 0
     assert tool_stage.get("tool_pending_count") == 0
+    assert len(llm.calls) == 3
 
 
 def test_generate_bare_arxiv_url_without_selector_still_forces_tool_pipeline_routing(

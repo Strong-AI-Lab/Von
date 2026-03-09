@@ -3280,7 +3280,7 @@ def test_plain_response_overridden_when_prompt_requires_tool_verification(monkey
             for entry in result.aux_llm_calls
             if isinstance(entry, dict)
             and entry.get("type") == "workflow_selector_override"
-            and entry.get("reason") == "required_prompt_tools_missing"
+            and entry.get("reason") == "required_prompt_tools_missing_preselector"
         ),
         None,
     )
@@ -3497,7 +3497,9 @@ def test_write_intent_memory_rehydrates_for_low_risk_confirm_structure_prompt(
     assert gate_entry.get("continuation_context_reused") is True
 
 
-def test_selector_receives_authoritative_workflow_continuation_context(monkeypatch):
+def test_preselected_tool_planner_receives_authoritative_workflow_continuation_context(
+    monkeypatch,
+):
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
 
     monkeypatch.setattr(
@@ -3548,17 +3550,18 @@ def test_selector_receives_authoritative_workflow_continuation_context(monkeypat
 
     assert result.workflow_routing is not None
     assert result.workflow_routing.verdict == "tool_seeking"
+    assert result.workflow_routing.source == "selector_override"
 
-    selector_context = llm.calls[0]["context"] or []
-    selector_prompt = "\n".join(
+    planner_context = llm.calls[0]["context"] or []
+    planner_prompt_context = "\n".join(
         str(message.get("content") or "")
-        for message in selector_context
+        for message in planner_context
         if isinstance(message, dict)
     )
-    assert "ACTIVE WORKFLOW CONTINUATION CONTEXT" in selector_prompt
-    assert "#V#scholarly_paper_representation_workflow" in selector_prompt
-    assert "#V#uploaded_file_copy_abc123" in selector_prompt
-    assert "Please proceed." in selector_prompt
+    assert llm.calls[0]["prompt"] == "Please proceed."
+    assert "ACTIVE WORKFLOW CONTINUATION CONTEXT" in planner_prompt_context
+    assert "#V#scholarly_paper_representation_workflow" in planner_prompt_context
+    assert "#V#uploaded_file_copy_abc123" in planner_prompt_context
 
     continuation_entry = next(
         (

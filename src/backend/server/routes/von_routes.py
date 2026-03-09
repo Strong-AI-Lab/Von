@@ -69,6 +69,11 @@ from ...services.turn_execution_diagnostic_event_service import (
 from ...services.runtime_code_version_service import (
     get_runtime_code_version_info,
 )
+from ...services.tool_progress_store_service import (
+    delete_tool_progress_state,
+    fetch_tool_progress_state,
+    store_tool_progress_state,
+)
 from ...services.turn_execution_record_service import build_turn_execution_record
 from ...workflows import (
     CHAT_BUTTONIFY_WORKFLOW_ID,
@@ -2063,10 +2068,20 @@ def _prune_tool_progress() -> None:
             _TOOL_PROGRESS.pop(key, None)
 
 
+def _cache_tool_progress_state(
+    scope_key: str, request_id: str, payload: Mapping[str, Any]
+) -> dict[str, Any]:
+    cached = dict(payload)
+    with _TOOL_PROGRESS_LOCK:
+        _TOOL_PROGRESS[(scope_key, request_id)] = cached
+    return cached
+
+
 def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) -> None:
     _prune_tool_progress()
     now_epoch = time.time()
     now_utc = _now_utc_iso()
+    merged: dict[str, Any]
     with _TOOL_PROGRESS_LOCK:
         key = (scope_key, request_id)
         existing = _TOOL_PROGRESS.get(key)
@@ -2325,9 +2340,25 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
         merged["updated_at_epoch"] = now_epoch
         _TOOL_PROGRESS[key] = merged
 
+    try:
+        store_tool_progress_state(
+            scope_key=scope_key,
+            request_id=request_id,
+            payload=merged,
+            ttl_seconds=_TOOL_PROGRESS_TTL_SEC,
+        )
+    except Exception:
+        pass
+
 
 def _get_tool_progress(scope_key: str, request_id: str) -> dict[str, Any] | None:
     _prune_tool_progress()
+    try:
+        persisted = fetch_tool_progress_state(scope_key=scope_key, request_id=request_id)
+    except Exception:
+        persisted = None
+    if isinstance(persisted, dict):
+        return dict(_cache_tool_progress_state(scope_key, request_id, persisted))
     with _TOOL_PROGRESS_LOCK:
         value = _TOOL_PROGRESS.get((scope_key, request_id))
         return dict(value) if isinstance(value, dict) else None
@@ -2350,6 +2381,10 @@ def _snapshot_tool_progress_for_request(
 def _clear_tool_progress(scope_key: str, request_id: str) -> None:
     with _TOOL_PROGRESS_LOCK:
         _TOOL_PROGRESS.pop((scope_key, request_id), None)
+    try:
+        delete_tool_progress_state(scope_key=scope_key, request_id=request_id)
+    except Exception:
+        pass
 
 
 @von_bp.route("/progress/<request_id>", methods=["GET"])

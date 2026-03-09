@@ -1,6 +1,17 @@
 """Tests for generate() tool-progress liveness telemetry (JVNAUTOSCI-1103)."""
 
+import os
+
+from flask import Flask
+
 import src.backend.server.routes.von_routes as von_routes
+from src.backend.services.tool_progress_store_service import (
+    clear_tool_progress_documents_for_tests,
+)
+
+
+_ORIGINAL_USE_MOCK_DB = os.environ.get("VON_USE_MOCK_DB")
+_ORIGINAL_DB_NAME = os.environ.get("VON_DB_NAME")
 
 
 def _set_clock(monkeypatch, start: float = 1000.0):
@@ -12,14 +23,25 @@ def _set_clock(monkeypatch, start: float = 1000.0):
 def _clear_progress_state() -> None:
     with von_routes._TOOL_PROGRESS_LOCK:
         von_routes._TOOL_PROGRESS.clear()
+    clear_tool_progress_documents_for_tests()
 
 
 def setup_function() -> None:
+    os.environ["VON_USE_MOCK_DB"] = "1"
+    os.environ["VON_DB_NAME"] = "test_von_db"
     _clear_progress_state()
 
 
 def teardown_function() -> None:
     _clear_progress_state()
+    if _ORIGINAL_USE_MOCK_DB is None:
+        os.environ.pop("VON_USE_MOCK_DB", None)
+    else:
+        os.environ["VON_USE_MOCK_DB"] = _ORIGINAL_USE_MOCK_DB
+    if _ORIGINAL_DB_NAME is None:
+        os.environ.pop("VON_DB_NAME", None)
+    else:
+        os.environ["VON_DB_NAME"] = _ORIGINAL_DB_NAME
 
 
 def test_heartbeat_updates_sequence_and_keeps_stage(monkeypatch) -> None:
@@ -57,6 +79,50 @@ def test_heartbeat_updates_sequence_and_keeps_stage(monkeypatch) -> None:
     assert heartbeat["idle_ms"] >= int(
         von_routes._TOOL_PROGRESS_HEARTBEAT_INTERVAL_SEC * 1000
     )
+
+
+def test_progress_endpoint_reads_persisted_state_after_local_cache_miss(
+    monkeypatch,
+) -> None:
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.register_blueprint(von_routes.von_bp, url_prefix="/von")
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#test_user",
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_show_tool_use_during_thinking",
+        lambda: True,
+    )
+
+    scope_key = "user:#V#test_user"
+    von_routes._set_tool_progress(
+        scope_key,
+        "req-persisted",
+        {
+            "status": "thinking",
+            "phase": "workflow_dispatch",
+            "phase_label": "Selecting workflow",
+            "request_id": "req-persisted",
+            "goal_label": "https://arxiv.org/abs/2602.20478",
+        },
+    )
+
+    with von_routes._TOOL_PROGRESS_LOCK:
+        von_routes._TOOL_PROGRESS.clear()
+
+    client = app.test_client()
+    response = client.get("/von/progress/req-persisted")
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    assert body.get("request_id") == "req-persisted"
+    assert body.get("stage") == "workflow_dispatch"
+    assert body.get("phase_label") == "Selecting workflow"
+    assert body.get("goal_label") == "https://arxiv.org/abs/2602.20478"
 
 
 def test_missing_heartbeat_marks_request_stalled(monkeypatch) -> None:
