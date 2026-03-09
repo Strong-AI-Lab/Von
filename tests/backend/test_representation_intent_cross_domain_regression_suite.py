@@ -25,6 +25,7 @@ class TurnExecutionScenario:
     effect_type: str
     prompt_text: str
     required_tool: str
+    artefact_target_id: str
     unresolved_payload: dict[str, Any]
     verified_payload: dict[str, Any]
     unresolved_failure_code: str
@@ -40,6 +41,7 @@ TURN_EXECUTION_SCENARIOS: tuple[TurnExecutionScenario, ...] = (
             "https://arxiv.org/abs/2502.14996"
         ),
         required_tool="download_paper",
+        artefact_target_id="#V#uploaded_file_copy_2502_14996",
         unresolved_payload={"success": False, "error": "arxiv_proxy_timeout"},
         verified_payload={
             "success": True,
@@ -65,6 +67,7 @@ TURN_EXECUTION_SCENARIOS: tuple[TurnExecutionScenario, ...] = (
             "#V#uploaded_file_copy_person_1."
         ),
         required_tool="interpret_file_copy",
+        artefact_target_id="#V#uploaded_file_copy_person_1",
         unresolved_payload={
             "success": False,
             "error": "person_identity_unresolved",
@@ -92,6 +95,7 @@ TURN_EXECUTION_SCENARIOS: tuple[TurnExecutionScenario, ...] = (
             "#V#uploaded_file_copy_company_1."
         ),
         required_tool="interpret_file_copy",
+        artefact_target_id="#V#uploaded_file_copy_company_1",
         unresolved_payload={
             "success": False,
             "error": "company_identity_unresolved",
@@ -119,6 +123,7 @@ TURN_EXECUTION_SCENARIOS: tuple[TurnExecutionScenario, ...] = (
             "#V#uploaded_file_copy_meeting_1."
         ),
         required_tool="interpret_file_copy",
+        artefact_target_id="#V#uploaded_file_copy_meeting_1",
         unresolved_payload={
             "success": False,
             "error": "meeting_identity_unresolved",
@@ -149,6 +154,20 @@ def _build_gateway() -> InternalMCPGateway:
     )
 
 
+def _payload_for_required_target(
+    scenario: TurnExecutionScenario,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    resolved_payload = dict(payload)
+    if scenario.required_tool != "interpret_file_copy":
+        return resolved_payload
+    # interpret_file_copy success only satisfies the effect if it identifies the
+    # same artefact target the contract derived from the prompt/context.
+    resolved_payload.setdefault("concept_id", scenario.artefact_target_id)
+    resolved_payload.setdefault("file_copy_concept_id", scenario.artefact_target_id)
+    return resolved_payload
+
+
 @pytest.mark.parametrize(
     "scenario",
     TURN_EXECUTION_SCENARIOS,
@@ -165,7 +184,10 @@ def test_cross_domain_unresolved_required_effects_block_completion(
         tool_invocations=[
             {
                 "tool": scenario.required_tool,
-                "payload": dict(scenario.unresolved_payload),
+                "payload": _payload_for_required_target(
+                    scenario,
+                    scenario.unresolved_payload,
+                ),
             }
         ],
     )
@@ -218,7 +240,10 @@ def test_cross_domain_verified_required_effects_allow_completion(
             [
                 {
                     "tool": scenario.required_tool,
-                    "payload": dict(scenario.verified_payload),
+                    "payload": _payload_for_required_target(
+                        scenario,
+                        scenario.verified_payload,
+                    ),
                 }
             ]
             + list(scenario.verified_follow_up_invocations)
@@ -256,7 +281,10 @@ def test_cross_domain_contract_policy_and_idempotence(
             [
                 {
                     "tool": scenario.required_tool,
-                    "payload": dict(scenario.verified_payload),
+                    "payload": _payload_for_required_target(
+                        scenario,
+                        scenario.verified_payload,
+                    ),
                 }
             ]
             + list(scenario.verified_follow_up_invocations)
@@ -270,7 +298,10 @@ def test_cross_domain_contract_policy_and_idempotence(
             [
                 {
                     "tool": scenario.required_tool,
-                    "payload": dict(scenario.verified_payload),
+                    "payload": _payload_for_required_target(
+                        scenario,
+                        scenario.verified_payload,
+                    ),
                 }
             ]
             + list(scenario.verified_follow_up_invocations)
@@ -286,6 +317,46 @@ def test_cross_domain_contract_policy_and_idempotence(
     assert contract_a.get("contract_id") == contract_b.get("contract_id")
     assert record_a.get("required_effects") == record_b.get("required_effects")
     assert record_a.get("completion_gate") == record_b.get("completion_gate")
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    tuple(
+        scenario
+        for scenario in TURN_EXECUTION_SCENARIOS
+        if scenario.required_tool == "interpret_file_copy"
+    ),
+    ids=[
+        scenario.domain_id
+        for scenario in TURN_EXECUTION_SCENARIOS
+        if scenario.required_tool == "interpret_file_copy"
+    ],
+)
+def test_cross_domain_verified_effect_requires_matching_target(
+    monkeypatch, scenario: TurnExecutionScenario
+) -> None:
+    patch_representation_profile_loader(monkeypatch)
+
+    record = build_turn_record(
+        prompt_text=scenario.prompt_text,
+        response_text="Progress note.",
+        tool_invocations=[
+            {
+                "tool": scenario.required_tool,
+                "payload": dict(scenario.verified_payload),
+            }
+        ],
+    )
+
+    required_effects = record.get("required_effects") or []
+    assert required_effects
+    effect = required_effects[0]
+    assert effect.get("status") == "not_executed"
+    assert effect.get("failure_code") == f"{scenario.domain_id}_representation_wrong_target"
+
+    completion_gate = record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "escalation_required"
+    assert completion_gate.get("safe_to_claim_completion") is False
 
 
 @dataclass(frozen=True)
