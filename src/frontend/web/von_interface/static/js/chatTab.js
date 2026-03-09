@@ -1359,6 +1359,9 @@ function buildThinkingProgressPresentation(progress, request = null) {
         ? progress.goal_label.trim()
         : null;
     const tool = (typeof progress.tool === 'string' && progress.tool.trim()) ? progress.tool.trim() : null;
+    const resultSummary = (typeof progress.result_summary === 'string' && progress.result_summary.trim())
+        ? progress.result_summary.trim()
+        : null;
     let subtask = (typeof progress.subtask === 'string' && progress.subtask.trim())
         ? progress.subtask.trim()
         : ((typeof progress.workflow_task === 'string' && progress.workflow_task.trim()) ? progress.workflow_task.trim() : null);
@@ -1398,7 +1401,7 @@ function buildThinkingProgressPresentation(progress, request = null) {
     }
 
     let stageText = phaseLabel || stageLabel || (stage ? toTitleCaseWords(stage) : DEFAULT_THINKING_TEXT);
-    const detail = tool || subtask;
+    const detail = tool || subtask || resultSummary;
     if (detail && !stageText.toLowerCase().includes(detail.toLowerCase())) {
         stageText = `${stageText}: ${detail}`;
     }
@@ -2801,6 +2804,17 @@ function buildWorkflowStageDetailPresentation(stageId, request) {
         }
     }
 
+    const latestStageId = normaliseThinkingActivityString(latestProgress?.stage || latestProgress?.phase);
+    if (cleanStageId && latestStageId === cleanStageId) {
+        const resultSummary = normaliseThinkingActivityString(latestProgress?.result_summary);
+        if (resultSummary) {
+            return {
+                text: resultSummary,
+                html: escapeHtml(resultSummary)
+            };
+        }
+    }
+
     return {
         text: '',
         html: ''
@@ -2965,8 +2979,79 @@ function renderThinkingCardBodyHTML(request) {
     const workflowHtml = request?.workflowDiscovery?.matches
         ? renderWorkflowDiscoveryHTML(request.workflowDiscovery.matches)
         : '';
+    const fallbackProgressHtml = renderThinkingLatestProgressSummaryHTML(request);
 
-    return toolHistoryHtml + workflowHtml;
+    return toolHistoryHtml + workflowHtml + fallbackProgressHtml;
+}
+
+function renderThinkingLatestProgressSummaryHTML(request) {
+    const latestProgress = (request?.latestProgress && typeof request.latestProgress === 'object')
+        ? request.latestProgress
+        : null;
+    if (!latestProgress) {
+        return '';
+    }
+
+    const label = normaliseThinkingActivityString(latestProgress.phase_label)
+        || normaliseThinkingActivityString(latestProgress.stage_label)
+        || formatThinkingActivityFallbackLabel(
+            normaliseThinkingActivityString(latestProgress.phase)
+                || normaliseThinkingActivityString(latestProgress.stage)
+        )
+        || 'Current status';
+    const detail = normaliseThinkingActivityString(latestProgress.result_summary)
+        || normaliseThinkingActivityString(latestProgress.subtask)
+        || normaliseThinkingActivityString(latestProgress.pending_reason);
+    if (!label && !detail) {
+        return '';
+    }
+
+    return renderThinkingDiagnosticRowHTML({
+        label,
+        detail,
+        state: isTerminalThinkingProgress(latestProgress) ? 'success' : 'pending'
+    }, 'thinking-card-tool thinking-card-activity');
+}
+
+function buildPendingThinkingProgressFallback(statusCode, requestId, payload = null) {
+    const fallback = (payload && typeof payload === 'object') ? { ...payload } : {};
+    if (!normaliseThinkingActivityString(fallback.status)) {
+        fallback.status = 'pending';
+    }
+    if (!normaliseThinkingActivityString(fallback.phase)) {
+        fallback.phase = 'context_build';
+    }
+    if (!normaliseThinkingActivityString(fallback.stage)) {
+        fallback.stage = fallback.phase;
+    }
+    if (!normaliseThinkingActivityString(fallback.phase_label)) {
+        fallback.phase_label = statusCode === 404
+            ? 'Request status unavailable'
+            : 'Awaiting visible progress';
+    }
+    if (!normaliseThinkingActivityString(fallback.stage_label)) {
+        fallback.stage_label = 'Build context';
+    }
+    if (!normaliseThinkingActivityString(fallback.liveness_state)) {
+        fallback.liveness_state = THINKING_STATUS_WAITING;
+    }
+    if (!normaliseThinkingActivityString(fallback.request_id) && requestId) {
+        fallback.request_id = requestId;
+    }
+    if (!normaliseThinkingActivityString(fallback.pending_reason)) {
+        fallback.pending_reason = statusCode === 404
+            ? 'request_progress_not_found'
+            : 'no_visible_progress_state';
+    }
+    if (!normaliseThinkingActivityString(fallback.subtask)) {
+        fallback.subtask = 'progress visibility';
+    }
+    if (!normaliseThinkingActivityString(fallback.result_summary)) {
+        fallback.result_summary = statusCode === 404
+            ? 'No visible progress record was found for this request in the current session.'
+            : 'No live progress state is visible yet. The request may still be initialising, or progress visibility may not have caught up yet.';
+    }
+    return fallback;
 }
 
 /**
@@ -3103,17 +3188,23 @@ function startToolUseProgressPolling(request) {
 
             if (resp.status === 404) {
                 poll.consecutiveNotFound += 1;
-                request.latestProgress = {
-                    status: 'pending',
-                    phase: 'context_build',
-                    phase_label: 'Waiting for status',
-                    liveness_state: THINKING_STATUS_WAITING
-                };
+                let progressPayload = null;
+                try {
+                    progressPayload = await resp.json();
+                } catch (_) {
+                    progressPayload = null;
+                }
+                request.latestProgress = buildPendingThinkingProgressFallback(
+                    404,
+                    requestId,
+                    progressPayload
+                );
                 applyThinkingCardDisplayStateUpdate(request, {
                     type: 'progress_update',
                     progress: request.latestProgress
                 });
                 setLoadingIndicatorText(formatToolUseProgressText(request.latestProgress, request));
+                setLoadingIndicatorDetailHtml(renderThinkingCardBodyHTML(request));
                 updateThinkingCardMeta(request, request.latestProgress);
                 poll.nextDelayMs = Math.min(10_000, poll.nextDelayMs * 1.7);
                 scheduleNextPoll(poll.nextDelayMs);
@@ -3122,17 +3213,23 @@ function startToolUseProgressPolling(request) {
 
             if (resp.status === 202) {
                 poll.consecutiveNotFound = 0;
-                request.latestProgress = {
-                    status: 'pending',
-                    phase: 'context_build',
-                    phase_label: 'Waiting for status',
-                    liveness_state: THINKING_STATUS_WAITING
-                };
+                let progressPayload = null;
+                try {
+                    progressPayload = await resp.json();
+                } catch (_) {
+                    progressPayload = null;
+                }
+                request.latestProgress = buildPendingThinkingProgressFallback(
+                    202,
+                    requestId,
+                    progressPayload
+                );
                 applyThinkingCardDisplayStateUpdate(request, {
                     type: 'progress_update',
                     progress: request.latestProgress
                 });
                 setLoadingIndicatorText(formatToolUseProgressText(request.latestProgress, request));
+                setLoadingIndicatorDetailHtml(renderThinkingCardBodyHTML(request));
                 updateThinkingCardMeta(request, request.latestProgress);
                 poll.nextDelayMs = Math.min(5000, poll.nextDelayMs * 1.4);
                 scheduleNextPoll(poll.nextDelayMs);

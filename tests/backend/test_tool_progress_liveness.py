@@ -125,6 +125,52 @@ def test_progress_endpoint_reads_persisted_state_after_local_cache_miss(
     assert body.get("goal_label") == "https://arxiv.org/abs/2602.20478"
 
 
+def test_progress_endpoint_pending_response_includes_explanatory_payload(
+    monkeypatch,
+) -> None:
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.register_blueprint(von_routes.von_bp, url_prefix="/von")
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_show_tool_use_during_thinking",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: None,
+    )
+
+    client = app.test_client()
+    response = client.get("/von/progress/req-pending")
+    assert response.status_code == 202
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    assert body.get("status") == "pending"
+    assert body.get("phase") == "context_build"
+    assert body.get("phase_label") == "Awaiting visible progress"
+    assert body.get("pending_reason") == "no_visible_progress_state"
+    assert "No live progress state is visible yet" in str(body.get("result_summary"))
+
+
+def test_response_finalising_payload_includes_useful_detail() -> None:
+    payload = von_routes._build_response_finalising_tool_progress_payload(
+        request_id="req-finalise",
+        eta_ms=1800,
+        response_text="Final answer",
+        tool_message_count=2,
+        persist_history=True,
+    )
+
+    assert payload["phase"] == "response_finalising"
+    assert payload["phase_label"] == "Finalising response"
+    assert payload["subtask"] == "response assembly"
+    assert "assembling the final response payload" in payload["result_summary"]
+    assert "summarising 2 tool results" in payload["result_summary"]
+    assert "persisting chat history" in payload["result_summary"]
+
+
 def test_missing_heartbeat_marks_request_stalled(monkeypatch) -> None:
     clock = _set_clock(monkeypatch, start=2000.0)
 
@@ -774,6 +820,9 @@ def test_response_finalising_payload_is_non_terminal_with_eta() -> None:
     payload = von_routes._build_response_finalising_tool_progress_payload(
         request_id="req-finalise",
         eta_ms=1750,
+        response_text="Final response",
+        tool_message_count=0,
+        persist_history=False,
     )
     assert payload["request_id"] == "req-finalise"
     assert payload["status"] == "phase_transition"
@@ -781,6 +830,8 @@ def test_response_finalising_payload_is_non_terminal_with_eta() -> None:
     assert payload["phase"] == "response_finalising"
     assert payload["phase_label"] == "Finalising response"
     assert payload["workflow_task"] == "response_finalising"
+    assert payload["subtask"] == "response assembly"
+    assert "assembling the final response payload" in payload["result_summary"]
     assert payload["eta_ms"] == 1750
 
 

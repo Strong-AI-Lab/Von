@@ -1509,6 +1509,78 @@ describe('thinking card toggle accessibility', () => {
         await expect(sendPromise).resolves.toBeUndefined();
     });
 
+    test('renders structured pending progress payloads instead of generic waiting placeholder', async () => {
+        const { getUserContext } = require('../apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        document.getElementById('promptInput').value = 'https://arxiv.org/abs/2602.20478';
+
+        let generateSignal = null;
+        global.fetch = jest.fn((url, options = {}) => {
+            if (typeof url === 'string' && url.startsWith('/api/settings/')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ show_tool_use_during_thinking: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/progress/')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 202,
+                    json: async () => ({
+                        status: 'pending',
+                        phase: 'context_build',
+                        phase_label: 'Initialising request',
+                        liveness_state: 'waiting',
+                        result_summary: 'Resolving session scope, namespace, and chat-history context before workflow/tool selection.',
+                        subtask: 'request setup'
+                    })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                generateSignal = options.signal;
+                return new Promise((resolve, reject) => {
+                    if (generateSignal) {
+                        generateSignal.addEventListener('abort', () => {
+                            const err = new Error('aborted');
+                            err.name = 'AbortError';
+                            reject(err);
+                        });
+                    }
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        const sendPromise = sendMessage();
+        await new Promise((r) => setTimeout(r, 0));
+        await new Promise((r) => setTimeout(r, 0));
+
+        const indicatorText = document.querySelector('.loading-indicator-text');
+        expect(indicatorText.textContent).toContain('Initialising request');
+        expect(indicatorText.textContent).toContain('request setup');
+        expect(document.getElementById('loadingIndicatorDetail').innerHTML).toContain('Resolving session scope, namespace, and chat-history context');
+
+        document.getElementById('abortButton').click();
+        await new Promise((r) => setTimeout(r, 0));
+        await expect(sendPromise).resolves.toBeUndefined();
+    });
+
     test('allows unfurl after terminal progress even while request is still active', async () => {
         const { getUserContext } = require('../apiService.js');
         getUserContext.mockReturnValue({
