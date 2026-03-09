@@ -3674,6 +3674,84 @@ def test_selector_can_be_disabled_via_env(monkeypatch):
     assert not orchestrator._workflow_selector.enabled()
 
 
+def test_selector_resolve_selection_extracts_static_verdict_from_free_form_output():
+    registry = MagicMock()
+    registry.all_workflow_ids.return_value = {
+        CHAT_ASSISTANT_WORKFLOW_ID,
+        TOOL_CALLING_WORKFLOW_ID,
+    }
+    selector = WorkflowSelector(
+        registry=registry,
+        prompt_service=MagicMock(),
+        verdict_mapping={
+            "plain_response": CHAT_ASSISTANT_WORKFLOW_ID,
+            "tool_seeking": TOOL_CALLING_WORKFLOW_ID,
+        },
+    )
+
+    selection = selector.resolve_selection(
+        raw_response='{"verdict":"tool_seeking"}',
+        prompt_id=None,
+        prompt_used=None,
+        discovered_workflow_ids=(),
+    )
+
+    assert selection.verdict == "tool_seeking"
+    assert selection.workflow_id == TOOL_CALLING_WORKFLOW_ID
+
+
+def test_selector_resolve_selection_extracts_discovered_workflow_from_free_form_output():
+    registry = MagicMock()
+    registry.all_workflow_ids.return_value = {
+        CHAT_ASSISTANT_WORKFLOW_ID,
+        TOOL_CALLING_WORKFLOW_ID,
+    }
+    selector = WorkflowSelector(
+        registry=registry,
+        prompt_service=MagicMock(),
+        verdict_mapping={
+            "plain_response": CHAT_ASSISTANT_WORKFLOW_ID,
+            "tool_seeking": TOOL_CALLING_WORKFLOW_ID,
+        },
+    )
+
+    selection = selector.resolve_selection(
+        raw_response=f"Use {TODO_REFRESH_WORKFLOW_ID} for this request.",
+        prompt_id=None,
+        prompt_used=None,
+        discovered_workflow_ids=(TODO_REFRESH_WORKFLOW_ID,),
+    )
+
+    assert selection.verdict == TODO_REFRESH_WORKFLOW_ID
+    assert selection.workflow_id == TODO_REFRESH_WORKFLOW_ID
+
+
+def test_selector_resolve_selection_invalid_output_falls_back_to_plain_response():
+    registry = MagicMock()
+    registry.all_workflow_ids.return_value = {
+        CHAT_ASSISTANT_WORKFLOW_ID,
+        TOOL_CALLING_WORKFLOW_ID,
+    }
+    selector = WorkflowSelector(
+        registry=registry,
+        prompt_service=MagicMock(),
+        verdict_mapping={
+            "plain_response": CHAT_ASSISTANT_WORKFLOW_ID,
+            "tool_seeking": TOOL_CALLING_WORKFLOW_ID,
+        },
+    )
+
+    selection = selector.resolve_selection(
+        raw_response="I am not sure.",
+        prompt_id=None,
+        prompt_used=None,
+        discovered_workflow_ids=(),
+    )
+
+    assert selection.verdict == "plain_response"
+    assert selection.workflow_id == CHAT_ASSISTANT_WORKFLOW_ID
+
+
 # ---------------------------------------------------------------------------
 # JVNAUTOSCI-825: Routing info absent when selector disabled.
 # ---------------------------------------------------------------------------
@@ -3699,19 +3777,6 @@ def test_no_routing_info_when_selector_disabled(monkeypatch):
 def test_discovery_miss_invokes_gap_recovery_after_plain_fallback(monkeypatch):
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
 
-    monkeypatch.setattr(
-        orchestrator._workflow_selector,
-        "select_workflow",
-        lambda **_kwargs: WorkflowSelection(
-            workflow_id=CHAT_ASSISTANT_WORKFLOW_ID,
-            verdict="plain_response",
-            prompt_id=None,
-            prompt_used=None,
-            raw_response="plain_response",
-            discovered_workflow_ids=(),
-        ),
-    )
-
     recovery_calls: list[tuple[str, Mapping[str, Any]]] = []
 
     def _fake_execute_workflow(workflow_id: str, **kwargs):
@@ -3734,7 +3799,7 @@ def test_discovery_miss_invokes_gap_recovery_after_plain_fallback(monkeypatch):
 
     monkeypatch.setattr(orchestrator, "execute_workflow", _fake_execute_workflow)
 
-    llm = _CapturingLLM(["Fallback response."])
+    llm = _CapturingLLM(["plain_response", "Fallback response."])
     result = orchestrator.run(
         prompt="Handle this missing workflow.",
         context=[],
@@ -3775,19 +3840,6 @@ def test_custom_workflow_result_preserves_messages_and_invocations(monkeypatch):
     monkeypatch.setenv("VON_WORKFLOW_SELECTOR_ALLOW_POLICY_UNSAFE", "1")
 
     monkeypatch.setattr(
-        orchestrator._workflow_selector,
-        "select_workflow",
-        lambda **_kwargs: WorkflowSelection(
-            workflow_id=selected_workflow_id,
-            verdict=selected_workflow_id,
-            prompt_id=None,
-            prompt_used=None,
-            raw_response=selected_workflow_id,
-            discovered_workflow_ids=(selected_workflow_id,),
-        ),
-    )
-
-    monkeypatch.setattr(
         orchestrator,
         "execute_workflow",
         lambda workflow_id, **_kwargs: (
@@ -3808,7 +3860,7 @@ def test_custom_workflow_result_preserves_messages_and_invocations(monkeypatch):
     result = orchestrator.run(
         prompt="Use the discovered workflow.",
         context=[],
-        llm_client=_CapturingLLM([]),
+        llm_client=_CapturingLLM([selected_workflow_id]),
         model=None,
         user_namespace="#V#user",
         workflow_discovery_result={
