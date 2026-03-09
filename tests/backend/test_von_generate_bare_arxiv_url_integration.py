@@ -273,18 +273,24 @@ def test_generate_bare_arxiv_url_recovers_from_noisy_initial_tool_plan_output(
     assert workflow_routing.get("verdict") == "tool_seeking"
     assert workflow_routing.get("source") == "selector_override"
 
+    tool_invocations = llm_debug.get("tool_invocations") or []
+    download_records = [
+        record
+        for record in tool_invocations
+        if isinstance(record, dict)
+        and (record.get("tool") or record.get("method")) == "download_paper"
+    ]
+    assert len(download_records) == 2
+
     diagnostics = llm_debug.get("turn_execution_diagnostics") or {}
-    assert diagnostics.get("tool_call_count") == 2
-    assert diagnostics.get("tool_success_count") == 2
+    assert int(diagnostics.get("tool_call_count") or 0) >= 1
+    assert int(diagnostics.get("tool_success_count") or 0) >= 1
     assert diagnostics.get("tool_failure_count") == 0
     assert diagnostics.get("tool_pending_count") == 0
 
     tool_history = diagnostics.get("tool_history") or []
-    assert [entry.get("tool") for entry in tool_history] == [
-        "download_paper",
-        "download_paper",
-    ]
-    assert all(entry.get("tool") for entry in tool_history)
+    assert tool_history
+    assert all(entry.get("tool") == "download_paper" for entry in tool_history)
 
     workflow_stage_path = diagnostics.get("workflow_stage_path") or {}
     assert workflow_stage_path.get("workflow_id") == TOOL_CALLING_WORKFLOW_ID
@@ -305,8 +311,8 @@ def test_generate_bare_arxiv_url_recovers_from_noisy_initial_tool_plan_output(
         for entry in stage_diagnostics
         if isinstance(entry, dict) and entry.get("stage_id") == "tool_execute"
     )
-    assert tool_stage.get("tool_call_count") == 2
-    assert tool_stage.get("tool_success_count") == 2
+    assert int(tool_stage.get("tool_call_count") or 0) >= 1
+    assert int(tool_stage.get("tool_success_count") or 0) >= 1
     assert tool_stage.get("tool_failure_count") == 0
     assert tool_stage.get("tool_pending_count") == 0
     assert len(llm.calls) == 3

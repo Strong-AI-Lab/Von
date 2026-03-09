@@ -1209,6 +1209,57 @@ describe('thinking activity history normalisation', () => {
         expect(html).toContain('Plan tool calls');
     });
 
+    test('renders preserved earlier stage summaries even when latest progress is only finalising', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            workflowStagePath: {
+                path: [
+                    { stage_id: 'context_build', stage_label: 'Build context' },
+                    { stage_id: 'workflow_discovery', stage_label: 'Workflow discovery' },
+                    { stage_id: 'response_finalising', stage_label: 'Finalising response' }
+                ]
+            },
+            workflowDiscovery: {
+                match_count: 0,
+                matches: []
+            },
+            stageDiagnostics: [
+                {
+                    stage_id: 'context_build',
+                    stage_label: 'Build context',
+                    event_count: 1,
+                    latest_status: 'thinking',
+                    latest_result_summary: 'Resolving session scope and chat history.'
+                },
+                {
+                    stage_id: 'workflow_discovery',
+                    stage_label: 'Workflow discovery',
+                    event_count: 1,
+                    latest_status: 'thinking',
+                    latest_result_summary: 'Searching applicable workflows for the turn.'
+                },
+                {
+                    stage_id: 'response_finalising',
+                    stage_label: 'Finalising response',
+                    event_count: 52,
+                    latest_status: 'heartbeat',
+                    latest_result_summary: 'Assembling the final response payload.'
+                }
+            ],
+            latestProgress: {
+                phase: 'response_finalising',
+                status: 'heartbeat',
+                result_summary: 'Assembling the final response payload.'
+            }
+        });
+
+        expect(html).toContain('Build context');
+        expect(html).toContain('Resolving session scope and chat history.');
+        expect(html).toContain('Workflow discovery');
+        expect(html).toContain('No direct workflow match found');
+        expect(html).toContain('Finalising response');
+        expect(html).toContain('Assembling the final response payload.');
+    });
+
     test('dispatches concept selection from thinking card workflow links', () => {
         document.body.innerHTML = '<div id="thinkingCardDetailTest"></div>';
         const onSelect = jest.fn();
