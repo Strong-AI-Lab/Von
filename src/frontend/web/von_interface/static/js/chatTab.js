@@ -2411,12 +2411,44 @@ function getThinkingDiagnosticEventsForStage(request, stageId) {
     ));
 }
 
+function getThinkingStageDiagnosticEntry(request, stageId) {
+    const cleanStageId = canonicaliseThinkingDiagnosticStageId(stageId);
+    if (!cleanStageId) {
+        return null;
+    }
+
+    const stageDiagnostics = Array.isArray(request?.stageDiagnostics)
+        ? request.stageDiagnostics
+        : [];
+    for (const entry of stageDiagnostics) {
+        if (!entry || typeof entry !== 'object') {
+            continue;
+        }
+        const directStageId = canonicaliseThinkingDiagnosticStageId(entry.stage_id || entry.stageId);
+        if (directStageId === cleanStageId) {
+            return entry;
+        }
+        const nestedDiagnostics = entry.diagnostics;
+        if (nestedDiagnostics && typeof nestedDiagnostics === 'object') {
+            const nestedStageId = canonicaliseThinkingDiagnosticStageId(
+                nestedDiagnostics.stage_id || nestedDiagnostics.stageId
+            );
+            if (nestedStageId === cleanStageId) {
+                return nestedDiagnostics;
+            }
+        }
+    }
+
+    return null;
+}
+
 function buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request) {
     const cleanStageId = canonicaliseThinkingDiagnosticStageId(stageId);
     if (!cleanStageId) {
         return null;
     }
 
+    const stageDiagnostic = getThinkingStageDiagnosticEntry(request, cleanStageId);
     const stageEvents = getThinkingDiagnosticEventsForStage(request, cleanStageId);
     const latestStageEvent = stageEvents.length > 0 ? stageEvents[stageEvents.length - 1] : null;
     const workflowDiscovery = (request?.workflowDiscovery && typeof request.workflowDiscovery === 'object')
@@ -2430,11 +2462,21 @@ function buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request) 
     const data = {
         stage_id: cleanStageId,
         stage_label: normaliseThinkingActivityString(stageLabel) || formatThinkingActivityFallbackLabel(cleanStageId) || 'Workflow step',
-        stage_event_count: stageEvents.length,
-        latest_status: normaliseThinkingActivityString(latestStageEvent?.status) || null,
-        latest_at_utc: normaliseThinkingActivityString(latestStageEvent?.at_utc) || null,
-        latest_result_summary: normaliseThinkingActivityString(latestStageEvent?.result_summary) || null,
-        latest_error: normaliseThinkingActivityString(latestStageEvent?.error) || null
+        stage_event_count: Number.isFinite(stageDiagnostic?.event_count)
+            ? Number(stageDiagnostic.event_count)
+            : stageEvents.length,
+        latest_status: normaliseThinkingActivityString(stageDiagnostic?.latest_status)
+            || normaliseThinkingActivityString(latestStageEvent?.status)
+            || null,
+        latest_at_utc: normaliseThinkingActivityString(stageDiagnostic?.latest_at_utc)
+            || normaliseThinkingActivityString(latestStageEvent?.at_utc)
+            || null,
+        latest_result_summary: normaliseThinkingActivityString(stageDiagnostic?.latest_result_summary)
+            || normaliseThinkingActivityString(latestStageEvent?.result_summary)
+            || null,
+        latest_error: normaliseThinkingActivityString(stageDiagnostic?.latest_error)
+            || normaliseThinkingActivityString(latestStageEvent?.error)
+            || null
     };
 
     if (cleanStageId === 'workflow_discovery' && workflowDiscovery) {
@@ -2669,6 +2711,7 @@ function buildWorkflowStageDetailPresentation(stageId, request) {
         ? request.latestProgress
         : null;
     const cleanStageId = normaliseThinkingActivityString(stageId);
+    const stageDiagnostic = getThinkingStageDiagnosticEntry(request, cleanStageId);
 
     if (cleanStageId === 'workflow_discovery') {
         const errors = Array.isArray(workflowDiscovery?.errors)
@@ -2813,6 +2856,14 @@ function buildWorkflowStageDetailPresentation(stageId, request) {
                 html: escapeHtml(resultSummary)
             };
         }
+    }
+
+    const stageResultSummary = normaliseThinkingActivityString(stageDiagnostic?.latest_result_summary);
+    if (stageResultSummary) {
+        return {
+            text: stageResultSummary,
+            html: escapeHtml(stageResultSummary)
+        };
     }
 
     return {
@@ -3281,6 +3332,9 @@ function startToolUseProgressPolling(request) {
             // including explicit no-match payloads.
             if (progress.workflow_discovery && typeof progress.workflow_discovery === 'object') {
                 request.workflowDiscovery = progress.workflow_discovery;
+            }
+            if (Array.isArray(progress.stage_diagnostics)) {
+                request.stageDiagnostics = progress.stage_diagnostics;
             }
 
             setLoadingIndicatorDetailHtml(renderThinkingCardBodyHTML(request));

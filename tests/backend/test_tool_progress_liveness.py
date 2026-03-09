@@ -708,7 +708,7 @@ def test_canonical_tool_summary_survives_long_heartbeat_tail(monkeypatch) -> Non
         **stage_diagnostics[0],
         "stage_id": "tool_execute",
         "stage_label": "Execute tool calls",
-        "event_count": von_routes._TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT,
+        "event_count": von_routes._TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT + 8,
         "latest_status": "heartbeat",
         "latest_at_utc": snapshot.get("updated_at"),
         "latest_result_summary": "Downloaded: 2510.06018",
@@ -722,6 +722,115 @@ def test_canonical_tool_summary_survives_long_heartbeat_tail(monkeypatch) -> Non
         "tool_history": tool_history,
     }
 
+
+def test_live_stage_path_and_stage_diagnostics_survive_long_finalising_heartbeat_tail(
+    monkeypatch,
+) -> None:
+    clock = _set_clock(monkeypatch, start=5250.0)
+
+    von_routes._set_tool_progress(
+        "scope-stage-tail",
+        "req-stage-tail",
+        {
+            "status": "thinking",
+            "phase": "context_build",
+            "phase_label": "Building context",
+            "result_summary": "Resolving session scope and chat history.",
+            "request_id": "req-stage-tail",
+        },
+    )
+    clock["now"] += 0.1
+    von_routes._set_tool_progress(
+        "scope-stage-tail",
+        "req-stage-tail",
+        {
+            "status": "thinking",
+            "phase": "workflow_discovery",
+            "phase_label": "Searching for workflows",
+            "result_summary": "Searching applicable workflows for the turn.",
+            "request_id": "req-stage-tail",
+        },
+    )
+    clock["now"] += 0.1
+    von_routes._set_tool_progress(
+        "scope-stage-tail",
+        "req-stage-tail",
+        {
+            "status": "phase_transition",
+            "phase": "response_finalising",
+            "phase_label": "Finalising response",
+            "result_summary": "Assembling the final response payload.",
+            "request_id": "req-stage-tail",
+        },
+    )
+
+    for _ in range(von_routes._TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT + 10):
+        clock["now"] += float(von_routes._TOOL_PROGRESS_HEARTBEAT_INTERVAL_SEC)
+        von_routes._set_tool_progress(
+            "scope-stage-tail",
+            "req-stage-tail",
+            {
+                "status": "heartbeat",
+                "request_id": "req-stage-tail",
+            },
+        )
+
+    snapshot = von_routes._snapshot_tool_progress_for_request(
+        "scope-stage-tail",
+        "req-stage-tail",
+    )
+    assert snapshot is not None
+
+    workflow_stage_path = snapshot.get("workflow_stage_path")
+    assert isinstance(workflow_stage_path, dict)
+    path = workflow_stage_path.get("path")
+    assert isinstance(path, list)
+    assert [entry.get("stage_id") for entry in path] == [
+        "context_build",
+        "workflow_discovery",
+        "response_finalising",
+    ]
+
+    stage_diagnostics = snapshot.get("stage_diagnostics")
+    assert isinstance(stage_diagnostics, list)
+    assert [entry.get("stage_id") for entry in stage_diagnostics] == [
+        "context_build",
+        "workflow_discovery",
+        "response_finalising",
+    ]
+    assert stage_diagnostics[0].get("event_count") == 1
+    assert stage_diagnostics[0].get("latest_result_summary") == (
+        "Resolving session scope and chat history."
+    )
+    assert stage_diagnostics[1].get("event_count") == 1
+    assert stage_diagnostics[1].get("latest_result_summary") == (
+        "Searching applicable workflows for the turn."
+    )
+    assert stage_diagnostics[2].get("event_count") == (
+        von_routes._TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT + 11
+    )
+
+    diagnostics = von_routes._build_turn_execution_diagnostics(
+        request_id="req-stage-tail",
+        prompt_text="https://arxiv.org/abs/2602.20478",
+        tool_progress_state=snapshot,
+    )
+    diagnostics_stage_path = diagnostics.get("workflow_stage_path")
+    assert isinstance(diagnostics_stage_path, dict)
+    diagnostics_path = diagnostics_stage_path.get("path")
+    assert isinstance(diagnostics_path, list)
+    assert [entry.get("stage_id") for entry in diagnostics_path] == [
+        "context_build",
+        "workflow_discovery",
+        "response_finalising",
+    ]
+    diagnostics_stage_diagnostics = diagnostics.get("stage_diagnostics")
+    assert isinstance(diagnostics_stage_diagnostics, list)
+    assert [entry.get("stage_id") for entry in diagnostics_stage_diagnostics] == [
+        "context_build",
+        "workflow_discovery",
+        "response_finalising",
+    ]
 
 def test_turn_execution_diagnostics_stage_path_fallback_for_unknown_phase(
     monkeypatch,

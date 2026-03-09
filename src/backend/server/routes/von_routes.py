@@ -480,12 +480,39 @@ def _serialise_tool_progress_state(
             events[-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT :]
         )
 
-    payload["workflow_stage_path"] = _build_live_workflow_stage_path(payload)
+    workflow_stage_path = _extract_workflow_stage_path_from_progress(payload)
+    if workflow_stage_path is None:
+        workflow_stage_path = _build_live_workflow_stage_path(payload)
+    payload["workflow_stage_path"] = workflow_stage_path
     workflow_discovery = payload.get("workflow_discovery")
     if isinstance(workflow_discovery, Mapping):
         payload["workflow_discovery"] = _normalise_workflow_discovery_progress_payload(
             workflow_discovery
         )
+    payload["stage_diagnostics"] = _build_turn_execution_stage_diagnostics(
+        diagnostic_events=[
+            cast(dict[str, Any], entry)
+            for entry in payload.get("diagnostic_events", [])
+            if isinstance(entry, dict)
+        ],
+        workflow_stage_path=workflow_stage_path,
+        tool_history=_derive_tool_history_from_diagnostic_events(
+            [
+                cast(dict[str, Any], entry)
+                for entry in payload.get("diagnostic_events", [])
+                if isinstance(entry, dict)
+            ]
+        ),
+        tool_observation_summary=_extract_tool_observation_summary_from_progress(payload),
+        workflow_discovery=(
+            cast(dict[str, Any], payload["workflow_discovery"])
+            if isinstance(payload.get("workflow_discovery"), Mapping)
+            else None
+        ),
+        latest_progress=payload,
+    )
+    payload.pop("_workflow_runtime_stages", None)
+    payload.pop("_stage_summaries", None)
 
     return payload
 
@@ -613,37 +640,27 @@ def _normalise_workflow_discovery_progress_payload(
     return payload
 
 
-def _build_live_workflow_stage_path(
-    state: Mapping[str, Any] | None,
-) -> dict[str, Any]:
-    if not isinstance(state, Mapping):
-        return build_conversation_turn_stage_path(runtime_stages=(), workflow_id=None)
+def _canonicalise_live_runtime_stage(stage: Any) -> str | None:
+    clean_stage = _progress_str(stage)
+    if not clean_stage:
+        return None
+    if clean_stage == "workflow_discovery_complete":
+        return "workflow_discovery"
+    if clean_stage == "orchestrator_start":
+        return "workflow_dispatch"
+    if clean_stage == "orchestrator_end":
+        return None
+    return clean_stage
 
-    def _canonicalise_live_runtime_stage(stage: str | None) -> str | None:
-        if not isinstance(stage, str):
-            return None
-        clean_stage = stage.strip()
-        if not clean_stage:
-            return None
-        if clean_stage == "workflow_discovery_complete":
-            return "workflow_discovery"
-        if clean_stage == "orchestrator_start":
-            return "workflow_dispatch"
-        if clean_stage == "orchestrator_end":
-            return None
-        return clean_stage
 
-    diagnostic_events_raw = state.get("diagnostic_events")
-    diagnostic_events = (
-        [cast(dict[str, Any], entry) for entry in diagnostic_events_raw if isinstance(entry, dict)]
-        if isinstance(diagnostic_events_raw, list)
-        else []
-    )
+def _normalise_live_runtime_stage_sequence(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+
     runtime_stages: list[str] = []
     last_stage_normalised: str | None = None
-    for entry in diagnostic_events:
-        raw_stage = _progress_str(entry.get("phase")) or _progress_str(entry.get("stage"))
-        canonical_stage = _canonicalise_live_runtime_stage(raw_stage)
+    for item in value:
+        canonical_stage = _canonicalise_live_runtime_stage(item)
         if not canonical_stage:
             continue
         canonical_stage_normalised = canonical_stage.strip().lower()
@@ -651,18 +668,86 @@ def _build_live_workflow_stage_path(
             continue
         runtime_stages.append(canonical_stage)
         last_stage_normalised = canonical_stage_normalised
+    return runtime_stages
+
+
+def _append_live_runtime_stage(
+    runtime_stages: list[str], stage: Any
+) -> list[str]:
+    canonical_stage = _canonicalise_live_runtime_stage(stage)
+    if not canonical_stage:
+        return list(runtime_stages)
+
+    normalised_candidate = canonical_stage.strip().lower()
+    if runtime_stages:
+        last_stage = _progress_str(runtime_stages[-1])
+        if last_stage and last_stage.strip().lower() == normalised_candidate:
+            return list(runtime_stages)
+
+    return [*runtime_stages, canonical_stage]
+
+
+def _normalise_live_stage_summary_map(
+    value: Any,
+) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, Mapping):
+        return {}
+
+    summary_map: dict[str, dict[str, Any]] = {}
+    for raw_stage_id, raw_summary in value.items():
+        stage_id = _canonicalise_live_runtime_stage(raw_stage_id)
+        if not stage_id or not isinstance(raw_summary, Mapping):
+            continue
+        summary_map[stage_id] = {
+            key: item
+            for key, item in raw_summary.items()
+            if isinstance(key, str)
+        }
+    return summary_map
+
+
+def _build_live_workflow_stage_path_from_runtime_stages(
+    runtime_stages: list[str], workflow_id: str | None
+) -> dict[str, Any]:
+    return build_conversation_turn_stage_path(
+        runtime_stages=runtime_stages,
+        workflow_id=workflow_id,
+    )
+
+
+def _build_live_workflow_stage_path(
+    state: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(state, Mapping):
+        return build_conversation_turn_stage_path(runtime_stages=(), workflow_id=None)
+
+    runtime_stages = _normalise_live_runtime_stage_sequence(
+        state.get("_workflow_runtime_stages")
+    )
+
+    if not runtime_stages:
+        diagnostic_events_raw = state.get("diagnostic_events")
+        diagnostic_events = (
+            [cast(dict[str, Any], entry) for entry in diagnostic_events_raw if isinstance(entry, dict)]
+            if isinstance(diagnostic_events_raw, list)
+            else []
+        )
+        runtime_stages = []
+        for entry in diagnostic_events:
+            runtime_stages = _append_live_runtime_stage(
+                runtime_stages,
+                _progress_str(entry.get("phase")) or _progress_str(entry.get("stage")),
+            )
 
     current_stage = _canonicalise_live_runtime_stage(
         _progress_str(state.get("phase")) or _progress_str(state.get("stage"))
     )
     if current_stage:
-        current_stage_normalised = current_stage.strip().lower()
-        if current_stage_normalised != last_stage_normalised:
-            runtime_stages.append(current_stage)
+        runtime_stages = _append_live_runtime_stage(runtime_stages, current_stage)
     selected_workflow_id = _progress_str(state.get("selected_workflow_id"))
-    return build_conversation_turn_stage_path(
-        runtime_stages=runtime_stages,
-        workflow_id=selected_workflow_id,
+    return _build_live_workflow_stage_path_from_runtime_stages(
+        runtime_stages,
+        selected_workflow_id,
     )
 
 
@@ -779,6 +864,45 @@ def _extract_tool_observation_summary_from_progress(
         None,
         limit=_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT,
     )
+
+
+def _extract_live_stage_diagnostic_map(
+    progress_state: Mapping[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    if not isinstance(progress_state, Mapping):
+        return {}
+
+    raw_stage_diagnostics = progress_state.get("stage_diagnostics")
+    if isinstance(raw_stage_diagnostics, list):
+        stage_map: dict[str, dict[str, Any]] = {}
+        for entry in raw_stage_diagnostics:
+            if not isinstance(entry, Mapping):
+                continue
+            stage_id = _canonicalise_live_runtime_stage(entry.get("stage_id"))
+            if not stage_id:
+                continue
+            stage_map[stage_id] = {
+                key: value
+                for key, value in entry.items()
+                if isinstance(key, str)
+            }
+        if stage_map:
+            return stage_map
+
+    summary_map = _normalise_live_stage_summary_map(progress_state.get("_stage_summaries"))
+    return {
+        stage_id: {
+            "stage_id": stage_id,
+            "stage_label": _progress_str(summary.get("stage_label"))
+            or _default_stage_label(stage_id),
+            "event_count": int(_progress_number(summary.get("event_count")) or 0),
+            "latest_status": _progress_str(summary.get("latest_status")),
+            "latest_at_utc": _progress_str(summary.get("latest_at_utc")),
+            "latest_result_summary": _progress_str(summary.get("latest_result_summary")),
+            "latest_error": _progress_str(summary.get("latest_error")),
+        }
+        for stage_id, summary in summary_map.items()
+    }
 
 
 def _extract_workflow_stage_path_from_progress(
@@ -1032,6 +1156,7 @@ def _build_turn_execution_stage_diagnostics(
     latest_progress_payload = (
         latest_progress if isinstance(latest_progress, Mapping) else {}
     )
+    live_stage_diagnostic_map = _extract_live_stage_diagnostic_map(latest_progress_payload)
     stage_diagnostics: list[dict[str, Any]] = []
 
     for stage_entry in path_entries:
@@ -1050,27 +1175,38 @@ def _build_turn_execution_stage_diagnostics(
             == stage_id
         ]
         latest_stage_event = stage_events[-1] if stage_events else None
+        live_stage_payload = dict(live_stage_diagnostic_map.get(stage_id) or {})
         stage_payload: dict[str, Any] = {
             "stage_id": stage_id,
             "stage_label": _progress_str(stage_entry.get("stage_label"))
+            or _progress_str(live_stage_payload.get("stage_label"))
             or stage_id.replace("_", " ").strip().title(),
-            "event_count": len(stage_events),
-            "latest_status": (
+            "event_count": int(
+                _progress_number(live_stage_payload.get("event_count"))
+                or len(stage_events)
+            ),
+            "latest_status": _progress_str(live_stage_payload.get("latest_status"))
+            or (
                 _progress_str(latest_stage_event.get("status"))
                 if isinstance(latest_stage_event, Mapping)
                 else None
             ),
-            "latest_at_utc": (
+            "latest_at_utc": _progress_str(live_stage_payload.get("latest_at_utc"))
+            or (
                 _progress_str(latest_stage_event.get("at_utc"))
                 if isinstance(latest_stage_event, Mapping)
                 else None
             ),
-            "latest_result_summary": (
+            "latest_result_summary": _progress_str(
+                live_stage_payload.get("latest_result_summary")
+            )
+            or (
                 _progress_str(latest_stage_event.get("result_summary"))
                 if isinstance(latest_stage_event, Mapping)
                 else None
             ),
-            "latest_error": (
+            "latest_error": _progress_str(live_stage_payload.get("latest_error"))
+            or (
                 _progress_str(latest_stage_event.get("error"))
                 if isinstance(latest_stage_event, Mapping)
                 else None
@@ -2229,6 +2365,19 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
         }
         liveness = _derive_progress_liveness(merged, now_epoch=now_epoch)
 
+        runtime_stages = _normalise_live_runtime_stage_sequence(
+            existing.get("_workflow_runtime_stages")
+        )
+        runtime_stages = _append_live_runtime_stage(
+            runtime_stages,
+            _progress_str(merged.get("phase")) or _progress_str(merged.get("stage")),
+        )
+        merged["_workflow_runtime_stages"] = runtime_stages
+        merged["workflow_stage_path"] = _build_live_workflow_stage_path_from_runtime_stages(
+            runtime_stages,
+            _progress_str(merged.get("selected_workflow_id")),
+        )
+
         existing_events = merged.get("diagnostic_events")
         if not isinstance(existing_events, list):
             existing_events = []
@@ -2316,6 +2465,37 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
             event_entry,
         ]
         merged["diagnostic_events"] = trimmed_events
+
+        stage_summaries = _normalise_live_stage_summary_map(
+            existing.get("_stage_summaries")
+        )
+        live_stage_id = _canonicalise_live_runtime_stage(
+            _progress_str(merged.get("phase")) or _progress_str(merged.get("stage"))
+        )
+        if live_stage_id:
+            existing_summary = dict(stage_summaries.get(live_stage_id) or {})
+            latest_result_summary = _progress_str(event_entry.get("result_summary"))
+            existing_summary.update(
+                {
+                    "stage_id": live_stage_id,
+                    "stage_label": _default_stage_label(live_stage_id),
+                    "event_count": int(
+                        _progress_number(existing_summary.get("event_count")) or 0
+                    )
+                    + 1,
+                    "latest_status": _progress_str(event_entry.get("status")),
+                    "latest_at_utc": _progress_str(event_entry.get("at_utc")),
+                    "latest_result_summary": latest_result_summary
+                    if latest_result_summary
+                    else _progress_str(
+                        existing_summary.get("latest_result_summary")
+                    ),
+                    "latest_error": _progress_str(event_entry.get("error")),
+                }
+            )
+            stage_summaries[live_stage_id] = existing_summary
+        merged["_stage_summaries"] = stage_summaries
+
         merged.update(
             update_tool_observation_summary(
                 merged,
