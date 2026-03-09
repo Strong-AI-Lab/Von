@@ -2409,7 +2409,15 @@ def get_generation_progress(request_id: str):
         if not show_tool_use_progress:
             return jsonify({"status": "disabled"}), 200
 
-        return jsonify({"status": "pending"}), 202
+        return (
+            jsonify(
+                _build_pending_tool_progress_placeholder_payload(
+                    request_id=request_id.strip(),
+                    status_code=202,
+                )
+            ),
+            202,
+        )
 
     return jsonify(_serialise_tool_progress_state(state)), 200
 
@@ -3025,6 +3033,68 @@ def _build_terminal_tool_progress_payload(
     return payload
 
 
+def _build_request_initialising_tool_progress_payload(
+    *,
+    request_id: str,
+    goal_label: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "status": "thinking",
+        "stage": "context_build",
+        "phase": "context_build",
+        "phase_label": "Initialising request",
+        "request_id": request_id,
+        "workflow_task": "context_build",
+        "subtask": "request setup",
+        "result_summary": (
+            "Resolving session scope, namespace, and chat-history context before "
+            "workflow/tool selection."
+        ),
+    }
+    clean_goal_label = _progress_str(goal_label)
+    if clean_goal_label:
+        payload["goal_label"] = clean_goal_label
+    return payload
+
+
+def _build_pending_tool_progress_placeholder_payload(
+    *,
+    request_id: str,
+    status_code: int,
+) -> dict[str, Any]:
+    request_known = int(status_code) != 404
+    phase_label = (
+        "Awaiting visible progress"
+        if request_known
+        else "Request status unavailable"
+    )
+    result_summary = (
+        "No live progress state is visible yet. The request may still be in early "
+        "turn setup, or progress visibility for this session has not caught up yet."
+        if request_known
+        else "No visible progress record was found for this request in the current "
+        "session."
+    )
+    pending_reason = (
+        "no_visible_progress_state"
+        if request_known
+        else "request_progress_not_found"
+    )
+    return {
+        "status": "pending",
+        "stage": "context_build",
+        "phase": "context_build",
+        "phase_label": phase_label,
+        "stage_label": "Build context",
+        "request_id": request_id,
+        "liveness_state": "waiting",
+        "liveness_reason": pending_reason,
+        "pending_reason": pending_reason,
+        "subtask": "progress visibility",
+        "result_summary": result_summary,
+    }
+
+
 def _estimate_response_finalising_eta_ms(
     *,
     response_text: str | None,
@@ -3045,7 +3115,20 @@ def _build_response_finalising_tool_progress_payload(
     *,
     request_id: str,
     eta_ms: int,
+    response_text: str | None,
+    tool_message_count: int,
+    persist_history: bool,
 ) -> dict[str, Any]:
+    detail_bits: list[str] = ["assembling the final response payload"]
+    if tool_message_count > 0:
+        detail_bits.append(
+            f"summarising {int(tool_message_count)} tool result"
+            f"{'' if int(tool_message_count) == 1 else 's'}"
+        )
+    if persist_history:
+        detail_bits.append("persisting chat history")
+    result_summary = "; ".join(detail_bits).strip()
+    response_chars = len(response_text.strip()) if isinstance(response_text, str) else 0
     return {
         "status": "phase_transition",
         "stage": "response_finalising",
@@ -3053,7 +3136,12 @@ def _build_response_finalising_tool_progress_payload(
         "phase_label": "Finalising response",
         "request_id": request_id,
         "workflow_task": "response_finalising",
+        "subtask": "response assembly",
+        "result_summary": result_summary,
         "eta_ms": max(0, int(eta_ms)),
+        "tool_message_count": max(0, int(tool_message_count)),
+        "persist_history": bool(persist_history),
+        "response_chars": max(0, response_chars),
     }
 
 
@@ -5307,6 +5395,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
     else:
         request_id = str(uuid.uuid4())
 
+    if not prompt_text:
+        return jsonify({"error": "No prompt provided."}), 400
+
     # JVNAUTOSCI-1038: Background execution mode
     background_mode = bool(data.get("background", False))
 
@@ -5319,6 +5410,24 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
     interaction_timestamp_utc = (
         datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     )
+
+    progress_scope_key = _get_tool_progress_scope_key()
+    show_tool_use_progress = False
+    try:
+        show_tool_use_progress = bool(get_show_tool_use_during_thinking())
+    except Exception:
+        show_tool_use_progress = False
+
+    progress_goal_label = _build_progress_goal_label(prompt_text=prompt_text)
+    if show_tool_use_progress:
+        _set_tool_progress(
+            progress_scope_key,
+            request_id,
+            _build_request_initialising_tool_progress_payload(
+                request_id=request_id,
+                goal_label=progress_goal_label,
+            ),
+        )
 
     # Get user/org context from request body (sent by frontend from localStorage)
     request_user_id = data.get("user_id")
@@ -5475,6 +5584,20 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         )
 
     if history_user_id:
+        if show_tool_use_progress:
+            _set_tool_progress(
+                progress_scope_key,
+                request_id,
+                {
+                    "status": "thinking",
+                    "phase": "context_build",
+                    "phase_label": "Building context",
+                    "goal_label": progress_goal_label,
+                    "request_id": request_id,
+                    "subtask": "chat-history lookup",
+                    "result_summary": "Loading chat history for the active session.",
+                },
+            )
         if (
             shared_invite
             and history_owner_user_id
@@ -5493,13 +5616,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         else:
             context = chat_history_service.get_chat_history(history_user_id, session_id)
 
-    progress_scope_key = _get_tool_progress_scope_key()
-    show_tool_use_progress = False
-    try:
-        show_tool_use_progress = bool(get_show_tool_use_during_thinking())
-    except Exception:
-        show_tool_use_progress = False
-
     if show_tool_use_progress:
         try:
             max_calls = int(get_internal_mcp_max_tool_invocations())
@@ -5509,7 +5625,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             batch_cap = int(get_internal_mcp_tool_batch_cap())
         except Exception:
             batch_cap = 4
-        progress_goal_label = _build_progress_goal_label(prompt_text=prompt_text)
         _set_tool_progress(
             progress_scope_key,
             request_id,
@@ -5521,6 +5636,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 "request_id": request_id,
                 "tool": None,
                 "batch_size": None,
+                "subtask": "context assembly",
+                "result_summary": (
+                    "Preparing prompt context and workflow inputs for the turn."
+                ),
                 "tool_calls_done": 0,
                 "tool_calls_cap": max_calls,
                 "tool_calls_remaining": max(0, max_calls),
@@ -5536,10 +5655,22 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         )
         model_name = get_active_model_name()
     except Exception as e:
+        if show_tool_use_progress:
+            _set_tool_progress(
+                progress_scope_key,
+                request_id,
+                {
+                    "status": "error",
+                    "phase": "context_build",
+                    "phase_label": "Error",
+                    "request_id": request_id,
+                    "error": f"Could not get LLM client: {e}",
+                    "result_summary": (
+                        "Could not initialise the configured LLM client for this turn."
+                    ),
+                },
+            )
         return jsonify({"error": f"Could not get LLM client: {e}"}), 500
-
-    if not prompt_text:
-        return jsonify({"error": "No prompt provided."}), 400
 
     if show_tool_use_progress and not background_mode:
         progress_heartbeat_stop_event, progress_heartbeat_thread = (
@@ -8491,6 +8622,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     tool_message_count=len(tool_messages),
                     persist_history=bool(history_user_id),
                 ),
+                response_text=response_text,
+                tool_message_count=len(tool_messages),
+                persist_history=bool(history_user_id),
             )
             _set_tool_progress(
                 progress_scope_key,
