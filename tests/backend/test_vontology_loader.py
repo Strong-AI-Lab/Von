@@ -678,6 +678,81 @@ class TestWorkflowGraphPredicateCompatibility:
             "#V#workflow_context_key_validated_type_id"
         ]
 
+    def test_build_graph_reads_explicit_step_conditions_from_concept_data(self):
+        workflow_doc = {
+            "concept_id": "#V#workflow_with_conditions",
+            "relationships": {
+                "hasInitialStep": "#V#step_a",
+                "hasStep": ["#V#step_a", "#V#step_b", "#V#step_c"],
+            },
+        }
+        step_docs = {
+            "#V#step_a": {
+                "concept_id": "#V#step_a",
+                "name": "Step A",
+                "relationships": {
+                    "invokesAction": "route.action",
+                    "nextStep": "#V#step_c",
+                },
+                "concept_data": {
+                    "workflow_step_control_flow": {
+                        "schema_version": 1,
+                        "conditions": [
+                            {
+                                "to": "#V#step_b",
+                                "reason": "preferred_route",
+                                "condition": {
+                                    "kind": "context_value_equals",
+                                    "key": "route",
+                                    "value": "preferred",
+                                },
+                            }
+                        ],
+                    }
+                },
+            },
+            "#V#step_b": {
+                "concept_id": "#V#step_b",
+                "name": "Step B",
+                "relationships": {},
+            },
+            "#V#step_c": {
+                "concept_id": "#V#step_c",
+                "name": "Step C",
+                "relationships": {},
+            },
+        }
+
+        with patch(
+            "src.backend.workflows.vontology_loader.ConceptsRepository.find_one",
+            return_value=workflow_doc,
+        ):
+            with patch(
+                "src.backend.workflows.vontology_loader._fetch_concepts_by_id",
+                return_value=step_docs,
+            ):
+                graph, warnings = build_workflow_process_graph(
+                    "#V#workflow_with_conditions"
+                )
+
+        assert graph is not None
+        assert warnings == [
+            "legacy_workflow_predicates_used:hasInitialStep,hasStep,invokesAction,nextStep"
+        ]
+        step = graph["steps"][0]
+        assert step["control_flow"]["next"] == "#V#step_c"
+        assert step["control_flow"]["conditions"] == [
+            {
+                "to": "#V#step_b",
+                "reason": "preferred_route",
+                "condition": {
+                    "kind": "context_value_equals",
+                    "key": "route",
+                    "value": "preferred",
+                },
+            }
+        ]
+
     def test_build_graph_reads_workflow_step_invokes_tool_predicate(self):
         workflow_doc = {
             "concept_id": "#V#workflow_invokes_tool_predicate",

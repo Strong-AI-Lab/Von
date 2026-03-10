@@ -120,6 +120,12 @@ A VWL program is a workflow concept graph:
   - `on_failure`, `on_unknown`.
   - `on_approval_required`.
   - `on_break`, `on_continue`.
+- Optional per-step declarative branch payload in
+  `concept_data.workflow_step_control_flow.conditions`, where each item is an
+  object with:
+  - `to` (or `to_state`/`next`) target step concept ID
+  - `reason` stable branch label
+  - `condition` transition-condition spec
 - Optional metadata and mapping contracts.
 
 ## 5. Condition Language (Transition Expressions)
@@ -180,6 +186,8 @@ Compilation flow:
 Important deterministic ordering:
 
 - Generated branch precedence for implicit branch links is:
+  Explicit declarative `conditions` listed on the step are evaluated first, in
+  stored order.
   - `on_failure`
   - `on_unknown`
   - `on_approval_required`

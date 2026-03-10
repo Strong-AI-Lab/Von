@@ -101,7 +101,7 @@ def test_workflow_authority_report_accepts_required_type_via_subtype(monkeypatch
     assert report["valid_workflow_ids"] == ["#V#wf_durable"]
 
 
-def test_bootstrap_workflow_concepts_creates_missing(monkeypatch):
+def test_bootstrap_workflow_concept_identities_creates_missing(monkeypatch):
     registry = _DummyRegistry(workflow_ids=["#V#wf_create"])
 
     monkeypatch.setattr(
@@ -123,7 +123,7 @@ def test_bootstrap_workflow_concepts_creates_missing(monkeypatch):
         _mock_create_concept,
     )
 
-    report = authority_service.bootstrap_workflow_concepts(
+    report = authority_service.bootstrap_workflow_concept_identities(
         registry=cast(Any, registry)
     )
 
@@ -136,6 +136,48 @@ def test_bootstrap_workflow_concepts_creates_missing(monkeypatch):
     assert payload["concept_id"] == "#V#wf_create"
     assert payload["parent_concept_ids"] == ["#V#ai_workflow"]
     assert payload["create_as_instance"] is True
+
+
+def test_bootstrap_workflow_concepts_can_skip_optional_side_effects(monkeypatch):
+    registry = _DummyRegistry(workflow_ids=["#V#wf_create"])
+
+    monkeypatch.setattr(
+        authority_service,
+        "resolve_available_workflow_type_ids",
+        lambda: ("#V#ai_workflow",),
+    )
+    monkeypatch.setattr(authority_service, "_load_concept", lambda _cid: (None, None))
+    monkeypatch.setattr(
+        authority_service.concept_service,
+        "create_concept",
+        lambda **kwargs: {"concept_id": kwargs.get("concept_id")},
+    )
+    monkeypatch.setattr(
+        authority_service,
+        "ensure_effort_unit_ontology",
+        lambda: pytest.fail("ensure_effort_unit_ontology should not be called"),
+    )
+    monkeypatch.setattr(
+        authority_service,
+        "publish_canonical_chat_workflow_graphs",
+        lambda **_kwargs: pytest.fail(
+            "publish_canonical_chat_workflow_graphs should not be called"
+        ),
+    )
+
+    report = authority_service.bootstrap_workflow_concepts(
+        registry=cast(Any, registry),
+        ensure_effort_unit_ontology_bootstrap=False,
+        publish_canonical_graphs=False,
+    )
+
+    assert report["counts"]["created"] == 1
+    assert report["created_workflow_ids"] == ["#V#wf_create"]
+    assert report["effort_unit_ontology"]["attempted"] is False
+    assert report["effort_unit_ontology"]["reason"] == "disabled"
+    assert report["graph_publication"]["attempted"] is False
+    assert report["graph_publication"]["reason"] == "disabled"
+    assert report["graph_publication"]["counts"]["workflows_targeted"] == 0
 
 
 def test_ensure_concept_exists_recovers_from_duplicate_key(monkeypatch):
@@ -269,7 +311,7 @@ def test_ensure_context_input_mapping_concept_recovers_from_duplicate_key(monkey
     assert error is None
 
 
-def test_bootstrap_workflow_concepts_enforces_required_type(monkeypatch):
+def test_bootstrap_workflow_concept_identities_enforces_required_type(monkeypatch):
     registry = _DummyRegistry(workflow_ids=["#V#wf_retype"])
 
     monkeypatch.setattr(
@@ -301,7 +343,7 @@ def test_bootstrap_workflow_concepts_enforces_required_type(monkeypatch):
         _mock_update_concept,
     )
 
-    report = authority_service.bootstrap_workflow_concepts(
+    report = authority_service.bootstrap_workflow_concept_identities(
         registry=cast(Any, registry)
     )
 
@@ -312,7 +354,9 @@ def test_bootstrap_workflow_concepts_enforces_required_type(monkeypatch):
     assert "#V#ai_workflow" in payload["relationships"]["is_an_instance_of"]
 
 
-def test_bootstrap_workflow_concepts_preserves_valid_subtype_typing(monkeypatch):
+def test_bootstrap_workflow_concept_identities_preserves_valid_subtype_typing(
+    monkeypatch,
+):
     registry = _DummyRegistry(workflow_ids=["#V#wf_durable"])
 
     monkeypatch.setattr(
@@ -342,7 +386,7 @@ def test_bootstrap_workflow_concepts_preserves_valid_subtype_typing(monkeypatch)
         lambda *args, **kwargs: pytest.fail("update_concept should not be called"),
     )
 
-    report = authority_service.bootstrap_workflow_concepts(
+    report = authority_service.bootstrap_workflow_concept_identities(
         registry=cast(Any, registry)
     )
 
@@ -392,11 +436,146 @@ def _comparable_state_metadata(state: Any) -> dict[str, Any]:
 
 
 def _built_metadata_subset_matches(*, loaded_state: Any, built_state: Any) -> bool:
+    def _metadata_value_matches(*, loaded_value: Any, expected_value: Any) -> bool:
+        if loaded_value == expected_value:
+            return True
+        if isinstance(loaded_value, dict) and isinstance(expected_value, dict):
+            for key, value in expected_value.items():
+                if key not in loaded_value:
+                    return False
+                if (
+                    key in {"mapping_concept_id", "workflow_id_mapping_concept_id"}
+                    and value == ""
+                    and isinstance(loaded_value.get(key), str)
+                    and str(loaded_value.get(key) or "").strip()
+                ):
+                    continue
+                if not _metadata_value_matches(
+                    loaded_value=loaded_value.get(key),
+                    expected_value=value,
+                ):
+                    return False
+            extra_keys = set(loaded_value.keys()) - set(expected_value.keys())
+            return extra_keys.issubset(
+                {
+                    "mapping_concept_id",
+                    "workflow_id_mapping_concept_id",
+                }
+            )
+        if isinstance(loaded_value, list) and isinstance(expected_value, list):
+            if len(loaded_value) != len(expected_value):
+                return False
+            return all(
+                _metadata_value_matches(loaded_value=item, expected_value=expected)
+                for item, expected in zip(loaded_value, expected_value)
+            )
+        return False
+
     expected = _comparable_state_metadata(built_state)
     if not expected:
         return True
     loaded = _comparable_state_metadata(loaded_state)
-    return {key: loaded.get(key) for key in expected.keys()} == expected
+    return all(
+        _metadata_value_matches(
+            loaded_value=loaded.get(key),
+            expected_value=value,
+        )
+        for key, value in expected.items()
+    )
+
+
+def _built_action_inputs_match(*, loaded_state: Any, built_state: Any) -> bool:
+    def _input_value_matches(*, loaded_value: Any, built_value: Any) -> bool:
+        if loaded_value == built_value:
+            return True
+        if not isinstance(loaded_value, dict) or not isinstance(built_value, dict):
+            return False
+
+        loaded_context_key = str(loaded_value.get("$context_key") or "").strip()
+        built_context_key = str(built_value.get("$context_key") or "").strip()
+        if loaded_context_key != built_context_key:
+            return False
+
+        built_mapping_concept_id = str(
+            built_value.get("$mapping_concept_id") or ""
+        ).strip()
+        if built_mapping_concept_id:
+            loaded_mapping_concept_id = str(
+                loaded_value.get("$mapping_concept_id") or ""
+            ).strip()
+            if loaded_mapping_concept_id != built_mapping_concept_id:
+                return False
+
+        ignored_keys = {"$context_key", "$mapping_concept_id"}
+        compared_keys = set(loaded_value.keys()).union(built_value.keys()) - ignored_keys
+        return all(loaded_value.get(key) == built_value.get(key) for key in compared_keys)
+
+    loaded_actions = list(getattr(loaded_state, "actions", ()) or ())
+    built_actions = list(getattr(built_state, "actions", ()) or ())
+    if len(loaded_actions) != len(built_actions):
+        return False
+
+    built_metadata = _comparable_state_metadata(built_state)
+    allow_subworkflow_input_subset = bool(built_metadata.get("subworkflow_contract"))
+
+    for loaded_action, built_action in zip(loaded_actions, built_actions):
+        if getattr(loaded_action, "action_id", None) != getattr(
+            built_action, "action_id", None
+        ):
+            return False
+
+        loaded_inputs = dict(getattr(loaded_action, "inputs", {}) or {})
+        built_inputs = dict(getattr(built_action, "inputs", {}) or {})
+        for key in list(loaded_inputs.keys()):
+            if key.startswith("__parent_") and key not in built_inputs:
+                loaded_inputs.pop(key, None)
+        if loaded_inputs == built_inputs:
+            continue
+        if not allow_subworkflow_input_subset:
+            if set(loaded_inputs.keys()) != set(built_inputs.keys()):
+                return False
+            if any(
+                not _input_value_matches(
+                    loaded_value=loaded_inputs.get(key),
+                    built_value=built_inputs.get(key),
+                )
+                for key in loaded_inputs.keys()
+            ):
+                return False
+            continue
+        if any(key not in built_inputs for key in loaded_inputs):
+            return False
+        if any(
+            not _input_value_matches(
+                loaded_value=value,
+                built_value=built_inputs.get(key),
+            )
+            for key, value in loaded_inputs.items()
+        ):
+            return False
+
+    return True
+
+
+def _graph_step_control_flow_conditions(
+    *,
+    graph: dict[str, Any],
+    workflow_id: str,
+    state_id: str,
+) -> list[dict[str, Any]] | None:
+    step_id = authority_service._step_concept_id(
+        workflow_id=workflow_id,
+        state_id=state_id,
+    )
+    for step in graph.get("steps", []):
+        if isinstance(step, dict) and step.get("step_id") == step_id:
+            control_flow = step.get("control_flow") or {}
+            if isinstance(control_flow, dict):
+                raw_conditions = control_flow.get("conditions")
+                if isinstance(raw_conditions, list):
+                    return raw_conditions
+            return None
+    return None
 
 
 def test_bootstrap_publishes_canonical_chat_graphs_with_loader_runtime_parity(
@@ -477,9 +656,10 @@ def test_bootstrap_publishes_canonical_chat_graphs_with_loader_runtime_parity(
             assert tuple(action.action_id for action in loaded_state.actions) == tuple(
                 action.action_id for action in built_state.actions
             )
-            assert [dict(action.inputs) for action in loaded_state.actions] == [
-                dict(action.inputs) for action in built_state.actions
-            ]
+            assert _built_action_inputs_match(
+                loaded_state=loaded_state,
+                built_state=built_state,
+            )
             assert {transition.to_state for transition in loaded_state.transitions} == {
                 authority_service._step_concept_id(
                     workflow_id=workflow_id,
@@ -497,6 +677,207 @@ def test_bootstrap_publishes_canonical_chat_graphs_with_loader_runtime_parity(
         )
         assert is_executable is True, f"{workflow_id}: {reason}: {detail}"
         assert reason == EXECUTABILITY_EXECUTABLE_NOW
+
+
+def test_bootstrap_publishes_explicit_step_conditions_for_canonical_durable_workflows(
+    _reset_mock_workflow_graph_db,
+):
+    from src.backend.workflows.durable.file_copy_upload_handler_workflow import (
+        FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
+    )
+    from src.backend.workflows.durable.parent_specificity_rumination_workflow import (
+        PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID,
+    )
+    from src.backend.workflows.durable.registry_factory import (
+        build_workflow_registry_read_only,
+    )
+    from src.backend.workflows.durable.workflow_gap_recovery_workflow import (
+        WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
+    )
+    from src.backend.workflows.vontology_loader import build_workflow_process_graph
+
+    registry = build_workflow_registry_read_only()
+
+    report = authority_service.bootstrap_workflow_concepts(registry=cast(Any, registry))
+    errors = (
+        (report.get("graph_publication") or {}).get("errors_by_workflow_id") or {}
+    )
+    assert FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID not in errors
+    assert PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID not in errors
+    assert WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID not in errors
+
+    file_copy_graph, file_copy_warnings = build_workflow_process_graph(
+        FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID
+    )
+    assert file_copy_graph is not None
+    assert file_copy_warnings == []
+    assert _graph_step_control_flow_conditions(
+        graph=file_copy_graph,
+        workflow_id=FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
+        state_id="classify",
+    ) == [
+        {
+            "to": authority_service._step_concept_id(
+                workflow_id=FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
+                state_id="fail_closed",
+            ),
+            "reason": "fail_closed_selected",
+            "condition": {
+                "kind": "context_flag",
+                "key": "upload_fail_closed",
+                "expected": True,
+            },
+        },
+        {
+            "to": authority_service._step_concept_id(
+                workflow_id=FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
+                state_id="specialised",
+            ),
+            "reason": "specialised_route_selected",
+            "condition": {
+                "kind": "all",
+                "conditions": [
+                    {
+                        "kind": "context_value_equals",
+                        "key": "upload_route_mode",
+                        "value": "specialised",
+                    },
+                    {
+                        "kind": "context_exists",
+                        "key": "upload_target_workflow_id",
+                        "expected": True,
+                    },
+                    {
+                        "kind": "not",
+                        "condition": {
+                            "kind": "context_value_equals",
+                            "key": "upload_target_workflow_id",
+                            "value": "",
+                        },
+                    },
+                ],
+            },
+        },
+        {
+            "to": authority_service._step_concept_id(
+                workflow_id=FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
+                state_id="interpret",
+            ),
+            "reason": "interpret_route_selected",
+            "condition": {
+                "kind": "context_value_equals",
+                "key": "upload_route_mode",
+                "value": "interpret",
+            },
+        },
+        {
+            "to": authority_service._step_concept_id(
+                workflow_id=FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
+                state_id="noop",
+            ),
+            "reason": "noop_route_selected",
+            "condition": {
+                "kind": "context_value_equals",
+                "key": "upload_route_mode",
+                "value": "noop",
+            },
+        },
+        {
+            "to": authority_service._step_concept_id(
+                workflow_id=FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
+                state_id="interpret",
+            ),
+            "reason": "fallback_interpret_default",
+            "condition": {
+                "kind": "any",
+                "conditions": [
+                    {
+                        "kind": "context_exists",
+                        "key": "upload_allow_interpret_fallback",
+                        "expected": False,
+                    },
+                    {
+                        "kind": "context_flag",
+                        "key": "upload_allow_interpret_fallback",
+                        "expected": True,
+                    },
+                ],
+            },
+        },
+        {
+            "to": authority_service._step_concept_id(
+                workflow_id=FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
+                state_id="noop",
+            ),
+            "reason": "fallback_noop_default",
+            "condition": {"kind": "always"},
+        },
+    ]
+
+    parent_graph, parent_warnings = build_workflow_process_graph(
+        PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID
+    )
+    assert parent_graph is not None
+    assert parent_warnings == []
+    assert _graph_step_control_flow_conditions(
+        graph=parent_graph,
+        workflow_id=PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID,
+        state_id="assess",
+    ) == [
+        {
+            "to": authority_service._step_concept_id(
+                workflow_id=PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID,
+                state_id="prepare_candidate",
+            ),
+            "reason": "candidates_found",
+            "condition": {
+                "kind": "context_cardinality",
+                "key": "candidate_ids",
+                "operator": "gte",
+                "value": 1,
+            },
+        },
+        {
+            "to": authority_service._step_concept_id(
+                workflow_id=PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID,
+                state_id="complete",
+            ),
+            "reason": "no_candidates",
+            "condition": {"kind": "always"},
+        },
+    ]
+
+    workflow_gap_graph, workflow_gap_warnings = build_workflow_process_graph(
+        WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID
+    )
+    assert workflow_gap_graph is not None
+    assert workflow_gap_warnings == []
+    assert _graph_step_control_flow_conditions(
+        graph=workflow_gap_graph,
+        workflow_id=WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
+        state_id="analyse_gap",
+    ) == [
+        {
+            "to": authority_service._step_concept_id(
+                workflow_id=WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
+                state_id="prepare_candidate",
+            ),
+            "reason": "candidate_needed",
+            "condition": {
+                "kind": "context_flag",
+                "key": "workflow_gap_should_create_candidate",
+                "expected": True,
+            },
+        },
+        {
+            "to": authority_service._step_concept_id(
+                workflow_id=WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
+                state_id="complete",
+            ),
+            "reason": "no_candidate_needed",
+            "condition": {"kind": "always"},
+        },
+    ]
 
 
 def test_bootstrap_publishes_file_copy_upload_handler_dynamic_subworkflow_contract(

@@ -39,6 +39,8 @@ from .engine import (
 
 logger = logging.getLogger(__name__)
 
+WORKFLOW_STEP_CONTROL_FLOW_CONCEPT_DATA_KEY = "workflow_step_control_flow"
+
 # Canonical workflow graph predicates with legacy-compatible aliases.
 # The first entry in each tuple is the preferred canonical concept predicate.
 WORKFLOW_GRAPH_PREDICATE_ALIASES: Dict[str, Tuple[str, ...]] = {
@@ -1458,6 +1460,28 @@ def _fetch_concepts_by_id(concept_ids: List[str]) -> Dict[str, Dict[str, Any]]:
     return mapping
 
 
+def _resolve_step_control_flow_metadata(
+    step_doc: Mapping[str, Any],
+) -> dict[str, Any]:
+    concept_data = step_doc.get("concept_data")
+    if not isinstance(concept_data, Mapping):
+        return {}
+
+    raw_control_flow = concept_data.get(WORKFLOW_STEP_CONTROL_FLOW_CONCEPT_DATA_KEY)
+    if not isinstance(raw_control_flow, Mapping):
+        return {}
+
+    explicit_branches = raw_control_flow.get("conditions")
+    if explicit_branches is None:
+        explicit_branches = raw_control_flow.get("declarative_conditions")
+    if explicit_branches is None:
+        return {}
+
+    return {
+        "conditions": explicit_branches,
+    }
+
+
 def build_workflow_process_graph(
     workflow_id: str,
 ) -> Tuple[Optional[Dict[str, Any]], List[str]]:
@@ -1801,6 +1825,18 @@ def build_workflow_process_graph(
         )
         warnings.extend(policy_warnings)
 
+        control_flow = {
+            "next": next_step,
+            "on_true": on_true,
+            "on_false": on_false,
+            "on_failure": on_failure,
+            "on_unknown": on_unknown,
+            "on_approval_required": on_approval_required,
+            "on_break": on_break,
+            "on_continue": on_continue,
+        }
+        control_flow.update(_resolve_step_control_flow_metadata(doc))
+
         step_items.append(
             {
                 "step_id": step_id,
@@ -1817,16 +1853,7 @@ def build_workflow_process_graph(
                 "prompt_contract": prompt_contract,
                 "prompt_resolution_diagnostics": prompt_resolution_diagnostics,
                 **runtime_policies,
-                "control_flow": {
-                    "next": next_step,
-                    "on_true": on_true,
-                    "on_false": on_false,
-                    "on_failure": on_failure,
-                    "on_unknown": on_unknown,
-                    "on_approval_required": on_approval_required,
-                    "on_break": on_break,
-                    "on_continue": on_continue,
-                },
+                "control_flow": control_flow,
             }
         )
 

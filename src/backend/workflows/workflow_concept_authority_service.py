@@ -12,7 +12,7 @@ import logging
 import re
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..services import concept_service
@@ -63,6 +63,7 @@ from .workflow_gap_workflow_contracts import (
 )
 from .vontology_loader import (
     WORKFLOW_GRAPH_PREDICATE_ALIASES,
+    WORKFLOW_STEP_CONTROL_FLOW_CONCEPT_DATA_KEY,
     build_workflow_process_graph,
     load_workflow_definition_from_vontology,
 )
@@ -71,6 +72,7 @@ from .engine import (
     WorkflowDefinition,
     WorkflowStateSpec,
     WorkflowTransitionSpec,
+    build_transition_condition,
 )
 from .workflow_definition_identity_service import (
     collect_workflow_action_ids,
@@ -205,6 +207,9 @@ _STEP_RELATIONSHIP_ALIAS_KEYS: tuple[str, ...] = tuple(
             *WORKFLOW_GRAPH_PREDICATE_ALIASES["onFalseNextStep"],
             *WORKFLOW_GRAPH_PREDICATE_ALIASES["onFailureNextStep"],
             *WORKFLOW_GRAPH_PREDICATE_ALIASES["onUnknownNextStep"],
+            *WORKFLOW_GRAPH_PREDICATE_ALIASES["onApprovalRequiredNextStep"],
+            *WORKFLOW_GRAPH_PREDICATE_ALIASES["onBreakNextStep"],
+            *WORKFLOW_GRAPH_PREDICATE_ALIASES["onContinueNextStep"],
             *WORKFLOW_GRAPH_PREDICATE_ALIASES["hasEffect"],
         )
     )
@@ -225,6 +230,13 @@ class _CanonicalToolOutputMappingSpec:
     concept_id: str
     tool_output_field: str
     context_key: str
+
+
+@dataclass(frozen=True)
+class _CanonicalConditionalTransitionPublicationSpec:
+    to_state: str
+    condition_spec: Mapping[str, Any]
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -249,6 +261,13 @@ class _CanonicalStepPublicationSpec:
     on_false_state: str | None = None
     on_failure_state: str | None = None
     on_unknown_state: str | None = None
+    on_approval_required_state: str | None = None
+    on_break_state: str | None = None
+    on_continue_state: str | None = None
+    conditional_transitions: tuple[
+        _CanonicalConditionalTransitionPublicationSpec,
+        ...,
+    ] = ()
     effects: tuple[str, ...] = ()
 
 
@@ -364,8 +383,10 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
             _CanonicalStepPublicationSpec(
                 state_id="decide",
                 action_id="write_policy.decide",
+                on_approval_required_state="approval_required",
                 next_state="completed",
             ),
+            _CanonicalStepPublicationSpec(state_id="approval_required"),
             _CanonicalStepPublicationSpec(state_id="completed"),
         ),
     ),
@@ -445,14 +466,24 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
             _CanonicalStepPublicationSpec(
                 state_id="infer",
                 action_id="file_copy_typing.infer",
-                context_input_mappings=_FILE_COPY_WORKFLOW_CONTEXT_INPUT_MAPPINGS,
-                next_state="persist",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="persist",
+                        reason="typing_inferred",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="persist",
                 action_id="file_copy_typing.persist",
-                context_input_mappings=_FILE_COPY_WORKFLOW_CONTEXT_INPUT_MAPPINGS,
-                next_state="complete",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="complete",
+                        reason="typing_persisted",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(state_id="complete"),
             _CanonicalStepPublicationSpec(state_id="failed"),
@@ -464,12 +495,24 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
             _CanonicalStepPublicationSpec(
                 state_id="classify",
                 action_id="file_copy_upload.classify",
-                next_state="persist_decision",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="persist_decision",
+                        reason="classification_completed",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="persist_decision",
                 action_id="file_copy_upload.persist_decision",
-                next_state="complete",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="complete",
+                        reason="decision_persisted",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(state_id="complete"),
             _CanonicalStepPublicationSpec(state_id="failed"),
@@ -482,48 +525,193 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
                 state_id="typing",
                 action_id="workflow_invoke_subworkflow",
                 invoked_workflow_id=FILE_COPY_TYPING_WORKFLOW_ID,
-                context_input_mappings=_FILE_COPY_WORKFLOW_CONTEXT_INPUT_MAPPINGS,
-                next_state="classify",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="classify",
+                        reason="typing_completed",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="classify",
                 action_id="workflow_invoke_subworkflow",
                 invoked_workflow_id=FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID,
-                on_true_state="specialised",
-                on_false_state="interpret",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="fail_closed",
+                        reason="fail_closed_selected",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "upload_fail_closed",
+                            "expected": True,
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="specialised",
+                        reason="specialised_route_selected",
+                        condition_spec={
+                            "kind": "all",
+                            "conditions": [
+                                {
+                                    "kind": "context_value_equals",
+                                    "key": "upload_route_mode",
+                                    "value": "specialised",
+                                },
+                                {
+                                    "kind": "context_exists",
+                                    "key": "upload_target_workflow_id",
+                                    "expected": True,
+                                },
+                                {
+                                    "kind": "not",
+                                    "condition": {
+                                        "kind": "context_value_equals",
+                                        "key": "upload_target_workflow_id",
+                                        "value": "",
+                                    },
+                                },
+                            ],
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="interpret",
+                        reason="interpret_route_selected",
+                        condition_spec={
+                            "kind": "context_value_equals",
+                            "key": "upload_route_mode",
+                            "value": "interpret",
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="noop",
+                        reason="noop_route_selected",
+                        condition_spec={
+                            "kind": "context_value_equals",
+                            "key": "upload_route_mode",
+                            "value": "noop",
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="interpret",
+                        reason="fallback_interpret_default",
+                        condition_spec={
+                            "kind": "any",
+                            "conditions": [
+                                {
+                                    "kind": "context_exists",
+                                    "key": "upload_allow_interpret_fallback",
+                                    "expected": False,
+                                },
+                                {
+                                    "kind": "context_flag",
+                                    "key": "upload_allow_interpret_fallback",
+                                    "expected": True,
+                                },
+                            ],
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="noop",
+                        reason="fallback_noop_default",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="specialised",
                 action_id="workflow_invoke_subworkflow",
-                on_true_state="record_outcome",
-                on_false_state="specialised_failed",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="specialised_failed",
+                        reason="specialised_child_failed",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "upload_specialised_child_failed",
+                            "expected": True,
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="record_outcome",
+                        reason="specialised_completed",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="specialised_failed",
                 action_id="file_copy_upload.mark_specialised_failure",
-                on_true_state="interpret",
-                on_false_state="record_outcome",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="interpret",
+                        reason="fallback_to_interpret",
+                        condition_spec={
+                            "kind": "any",
+                            "conditions": [
+                                {
+                                    "kind": "context_exists",
+                                    "key": "upload_allow_interpret_fallback",
+                                    "expected": False,
+                                },
+                                {
+                                    "kind": "context_flag",
+                                    "key": "upload_allow_interpret_fallback",
+                                    "expected": True,
+                                },
+                            ],
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="record_outcome",
+                        reason="no_fallback_after_specialised_failure",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="interpret",
                 action_id="workflow_invoke_subworkflow",
                 invoked_workflow_id=FILE_COPY_INTERPRETATION_WORKFLOW_ID,
-                next_state="record_outcome",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="record_outcome",
+                        reason="interpret_completed",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="noop",
                 action_id="file_copy_upload.mark_noop",
-                next_state="record_outcome",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="record_outcome",
+                        reason="noop_recorded",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="fail_closed",
                 action_id="file_copy_upload.mark_fail_closed",
-                next_state="record_outcome",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="record_outcome",
+                        reason="fail_closed_recorded",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="record_outcome",
                 action_id="file_copy_upload.persist_route_outcome",
-                next_state="complete",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="complete",
+                        reason="outcome_persisted",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(state_id="complete"),
             _CanonicalStepPublicationSpec(state_id="failed"),
@@ -536,14 +724,44 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
                 state_id="interpret",
                 action_id="interpret_file_copy",
                 context_input_mappings=_FILE_COPY_WORKFLOW_CONTEXT_INPUT_MAPPINGS,
-                on_true_state="index",
-                on_false_state="complete",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="index",
+                        reason="index_enabled",
+                        condition_spec={
+                            "kind": "any",
+                            "conditions": [
+                                {
+                                    "kind": "context_exists",
+                                    "key": "index_in_rag",
+                                    "expected": False,
+                                },
+                                {
+                                    "kind": "context_flag",
+                                    "key": "index_in_rag",
+                                    "expected": True,
+                                },
+                            ],
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="complete",
+                        reason="index_skipped",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="index",
                 action_id="index_file_copy",
                 context_input_mappings=_FILE_COPY_WORKFLOW_CONTEXT_INPUT_MAPPINGS,
-                next_state="complete",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="complete",
+                        reason="index_finished",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(state_id="complete"),
             _CanonicalStepPublicationSpec(state_id="failed"),
@@ -561,7 +779,13 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
                     "concept_dossier_languages",
                     "concept_dossier_relation_count",
                 ),
-                next_state="complete",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="complete",
+                        reason="dossier_collected",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(state_id="complete"),
             _CanonicalStepPublicationSpec(state_id="failed"),
@@ -573,14 +797,64 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
             _CanonicalStepPublicationSpec(
                 state_id="assess",
                 action_id="parent_specificity.assess_candidates",
-                on_true_state="prepare_candidate",
-                on_false_state="complete",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="prepare_candidate",
+                        reason="candidates_found",
+                        condition_spec={
+                            "kind": "context_cardinality",
+                            "key": "candidate_ids",
+                            "operator": "gte",
+                            "value": 1,
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="complete",
+                        reason="no_candidates",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="prepare_candidate",
                 action_id="parent_specificity.prepare_candidate",
-                on_true_state="gather_dossier",
-                on_false_state="complete",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="gather_dossier",
+                        reason="candidate_selected",
+                        condition_spec={
+                            "kind": "all",
+                            "conditions": [
+                                {
+                                    "kind": "context_exists",
+                                    "key": "current_candidate_id",
+                                    "expected": True,
+                                },
+                                {
+                                    "kind": "not",
+                                    "condition": {
+                                        "kind": "context_is_null",
+                                        "key": "current_candidate_id",
+                                        "expected": True,
+                                    },
+                                },
+                                {
+                                    "kind": "not",
+                                    "condition": {
+                                        "kind": "context_value_equals",
+                                        "key": "current_candidate_id",
+                                        "value": "",
+                                    },
+                                },
+                            ],
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="complete",
+                        reason="no_remaining_candidates",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="gather_dossier",
@@ -594,18 +868,44 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
                 ),
                 tool_output_mapping_specs=PARENT_SPECIFICITY_DOSSIER_TOOL_OUTPUT_MAPPINGS,
                 writes_context_keys=PARENT_SPECIFICITY_DOSSIER_WRITES_CONTEXT_KEYS,
-                next_state="analyse_candidate",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="analyse_candidate",
+                        reason="dossier_ready_or_failed_closed",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="analyse_candidate",
                 action_id="parent_specificity.analyse_candidate",
-                next_state="apply_candidate",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="apply_candidate",
+                        reason="analysis_complete",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="apply_candidate",
                 action_id="parent_specificity.apply_candidate",
-                on_true_state="prepare_candidate",
-                on_false_state="complete",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="prepare_candidate",
+                        reason="more_candidates",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "has_remaining_candidates",
+                            "expected": True,
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="complete",
+                        reason="review_budget_exhausted",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="complete",
@@ -620,18 +920,44 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
             _CanonicalStepPublicationSpec(
                 state_id="collect_context",
                 action_id=WORKFLOW_GAP_COLLECT_CONTEXT_ACTION_ID,
-                next_state="analyse_gap",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="analyse_gap",
+                        reason="context_collected",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="analyse_gap",
                 action_id="workflow_gap.analyse_recovery",
-                on_true_state="prepare_candidate",
-                on_false_state="complete",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="prepare_candidate",
+                        reason="candidate_needed",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "workflow_gap_should_create_candidate",
+                            "expected": True,
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="complete",
+                        reason="no_candidate_needed",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="prepare_candidate",
                 action_id=WORKFLOW_GAP_PREPARE_CANDIDATE_ACTION_ID,
-                next_state="create_candidate",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="create_candidate",
+                        reason="candidate_prepared",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="create_candidate",
@@ -647,13 +973,33 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
                 ),
                 tool_output_mapping_specs=WORKFLOW_GAP_CREATE_TOOL_OUTPUT_MAPPINGS,
                 writes_context_keys=WORKFLOW_GAP_CREATE_WRITES_CONTEXT_KEYS,
-                next_state="decide_test",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="decide_test",
+                        reason="candidate_created_or_failed_closed",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="decide_test",
                 action_id=WORKFLOW_GAP_DECIDE_TEST_ACTION_ID,
-                on_true_state="test_candidate",
-                on_false_state="complete",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="test_candidate",
+                        reason="test_candidate_now",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "workflow_gap_should_test_candidate_now",
+                            "expected": True,
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="complete",
+                        reason="skip_test",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="test_candidate",
@@ -676,7 +1022,13 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
                 ),
                 tool_output_mapping_specs=WORKFLOW_GAP_TEST_TOOL_OUTPUT_MAPPINGS,
                 writes_context_keys=WORKFLOW_GAP_TEST_WRITES_CONTEXT_KEYS,
-                next_state="complete",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="complete",
+                        reason="candidate_test_finished",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="complete",
@@ -691,7 +1043,13 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
             _CanonicalStepPublicationSpec(
                 state_id="run_test",
                 action_id=WORKFLOW_GAP_RUN_CANDIDATE_TEST_ACTION_ID,
-                next_state="complete",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="complete",
+                        reason="test_evaluated",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(state_id="complete"),
             _CanonicalStepPublicationSpec(state_id="failed"),
@@ -774,6 +1132,50 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
 }
 
 
+def _build_publication_transition(
+    *,
+    to_state: str,
+    reason: str,
+    condition_spec: Mapping[str, Any],
+) -> WorkflowTransitionSpec:
+    normalised_spec, compiled_condition = build_transition_condition(condition_spec)
+    return WorkflowTransitionSpec(
+        to_state=to_state,
+        condition=compiled_condition,
+        condition_spec=normalised_spec,
+        reason=reason,
+    )
+
+
+def _serialise_conditional_transition_publication_payloads(
+    *,
+    step: _CanonicalStepPublicationSpec,
+    resolve_to_state: Callable[[str], str],
+) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    for index, branch in enumerate(step.conditional_transitions):
+        raw_target = str(branch.to_state or "").strip()
+        if not raw_target:
+            raise ValueError(
+                f"workflow_publication_branch_target_missing:{step.state_id}:{index}"
+            )
+        to_state = resolve_to_state(raw_target)
+        reason = str(branch.reason or f"condition_{index + 1}").strip()
+        if not reason:
+            reason = f"condition_{index + 1}"
+        normalised_spec, _compiled_condition = build_transition_condition(
+            branch.condition_spec
+        )
+        payloads.append(
+            {
+                "to": to_state,
+                "reason": reason,
+                "condition": normalised_spec,
+            }
+        )
+    return payloads
+
+
 def _build_definition_from_publication_spec(
     *,
     workflow_id: str,
@@ -807,44 +1209,106 @@ def _build_definition_from_publication_spec(
             else ()
         )
         transitions: list[WorkflowTransitionSpec] = []
-        if isinstance(step.next_state, str) and step.next_state.strip():
+        for index, branch in enumerate(step.conditional_transitions):
+            reason = str(branch.reason or f"condition_{index + 1}").strip()
+            if not reason:
+                reason = f"condition_{index + 1}"
             transitions.append(
-                WorkflowTransitionSpec(
-                    to_state=step.next_state,
-                    condition=lambda _ctx: True,
-                    reason="next",
-                )
-            )
-        if isinstance(step.on_true_state, str) and step.on_true_state.strip():
-            transitions.append(
-                WorkflowTransitionSpec(
-                    to_state=step.on_true_state,
-                    condition=lambda ctx: bool(ctx.get("last_action_succeeded")),
-                    reason="on_true",
-                )
-            )
-        if isinstance(step.on_false_state, str) and step.on_false_state.strip():
-            transitions.append(
-                WorkflowTransitionSpec(
-                    to_state=step.on_false_state,
-                    condition=lambda ctx: bool(ctx.get("last_action_failed")),
-                    reason="on_false",
+                _build_publication_transition(
+                    to_state=branch.to_state,
+                    reason=reason,
+                    condition_spec=branch.condition_spec,
                 )
             )
         if isinstance(step.on_failure_state, str) and step.on_failure_state.strip():
             transitions.append(
-                WorkflowTransitionSpec(
+                _build_publication_transition(
                     to_state=step.on_failure_state,
-                    condition=lambda ctx: bool(ctx.get("last_action_failed")),
                     reason="on_failure",
+                    condition_spec={
+                        "kind": "context_flag",
+                        "key": "last_action_failed",
+                        "expected": True,
+                    },
                 )
             )
         if isinstance(step.on_unknown_state, str) and step.on_unknown_state.strip():
             transitions.append(
-                WorkflowTransitionSpec(
+                _build_publication_transition(
                     to_state=step.on_unknown_state,
-                    condition=lambda ctx: bool(ctx.get("last_action_unknown")),
                     reason="on_unknown",
+                    condition_spec={
+                        "kind": "context_flag",
+                        "key": "last_action_unknown",
+                        "expected": True,
+                    },
+                )
+            )
+        if (
+            isinstance(step.on_approval_required_state, str)
+            and step.on_approval_required_state.strip()
+        ):
+            transitions.append(
+                _build_publication_transition(
+                    to_state=step.on_approval_required_state,
+                    reason="on_approval_required",
+                    condition_spec={
+                        "kind": "context_flag",
+                        "key": "approval_required",
+                        "expected": True,
+                    },
+                )
+            )
+        if isinstance(step.on_break_state, str) and step.on_break_state.strip():
+            transitions.append(
+                _build_publication_transition(
+                    to_state=step.on_break_state,
+                    reason="on_break",
+                    condition_spec={
+                        "kind": "control_signal",
+                        "signal": "break",
+                    },
+                )
+            )
+        if isinstance(step.on_continue_state, str) and step.on_continue_state.strip():
+            transitions.append(
+                _build_publication_transition(
+                    to_state=step.on_continue_state,
+                    reason="on_continue",
+                    condition_spec={
+                        "kind": "control_signal",
+                        "signal": "continue",
+                    },
+                )
+            )
+        if isinstance(step.on_true_state, str) and step.on_true_state.strip():
+            transitions.append(
+                _build_publication_transition(
+                    to_state=step.on_true_state,
+                    reason="on_true",
+                    condition_spec={
+                        "kind": "transition_result_truth",
+                        "expected": True,
+                    },
+                )
+            )
+        if isinstance(step.on_false_state, str) and step.on_false_state.strip():
+            transitions.append(
+                _build_publication_transition(
+                    to_state=step.on_false_state,
+                    reason="on_false",
+                    condition_spec={
+                        "kind": "transition_result_truth",
+                        "expected": False,
+                    },
+                )
+            )
+        if isinstance(step.next_state, str) and step.next_state.strip():
+            transitions.append(
+                _build_publication_transition(
+                    to_state=step.next_state,
+                    reason="next_step",
+                    condition_spec={"kind": "always"},
                 )
             )
         is_terminal = not transitions
@@ -1693,6 +2157,24 @@ def publish_canonical_chat_workflow_graphs(
                 step_relationships[_CANONICAL_GRAPH_PREDICATES["onUnknownNextStep"]] = [
                     step_id_by_state[step.on_unknown_state]
                 ]
+            if (
+                isinstance(step.on_approval_required_state, str)
+                and step.on_approval_required_state.strip()
+            ):
+                step_relationships[
+                    _CANONICAL_GRAPH_PREDICATES["onApprovalRequiredNextStep"]
+                ] = [step_id_by_state[step.on_approval_required_state]]
+            if isinstance(step.on_break_state, str) and step.on_break_state.strip():
+                step_relationships[_CANONICAL_GRAPH_PREDICATES["onBreakNextStep"]] = [
+                    step_id_by_state[step.on_break_state]
+                ]
+            if (
+                isinstance(step.on_continue_state, str)
+                and step.on_continue_state.strip()
+            ):
+                step_relationships[
+                    _CANONICAL_GRAPH_PREDICATES["onContinueNextStep"]
+                ] = [step_id_by_state[step.on_continue_state]]
 
             effects = list(step.effects)
             if (not step.action_id) and not effects:
@@ -1705,10 +2187,24 @@ def publish_canonical_chat_workflow_graphs(
             if effects:
                 step_relationships[_CANONICAL_GRAPH_PREDICATES["hasEffect"]] = effects
 
+            step_control_flow_payload = {
+                "schema_version": 1,
+                "conditions": _serialise_conditional_transition_publication_payloads(
+                    step=step,
+                    resolve_to_state=lambda state_id: step_id_by_state[state_id],
+                ),
+            }
+
             try:
                 concept_service.update_concept(
                     step_concept_id,
-                    {"relationships": step_relationships},
+                    {
+                        "relationships": step_relationships,
+                        (
+                            "concept_data."
+                            f"{WORKFLOW_STEP_CONTROL_FLOW_CONCEPT_DATA_KEY}"
+                        ): step_control_flow_payload,
+                    },
                 )
             except Exception as exc:  # pragma: no cover - defensive
                 errors_by_workflow_id[workflow_id] = (
@@ -1940,44 +2436,60 @@ def clear_workflow_type_resolution_cache() -> None:
     resolve_available_workflow_type_ids.cache_clear()
 
 
-def bootstrap_workflow_concepts(
+def _build_workflow_identity_bootstrap_report(
     *,
-    registry: WorkflowRegistry,
-    create_missing: bool = True,
-    enforce_required_type: bool = True,
-    publish_canonical_graphs: bool = True,
+    workflow_ids: Sequence[str],
+    required_type_ids: Sequence[str],
+    preferred_type_id: str | None,
+    created: Sequence[str],
+    updated: Sequence[str],
+    unchanged: Sequence[str],
+    errors: Mapping[str, str],
+) -> Dict[str, Any]:
+    return {
+        "counts": {
+            "registry_workflows": len(workflow_ids),
+            "created": len(created),
+            "updated": len(updated),
+            "unchanged": len(unchanged),
+            "errors": len(errors),
+        },
+        "required_type_ids": list(required_type_ids),
+        "preferred_type_id": preferred_type_id,
+        "created_workflow_ids": list(created),
+        "updated_workflow_ids": list(updated),
+        "unchanged_workflow_ids": list(unchanged),
+        "errors_by_workflow_id": dict(errors),
+    }
+
+
+def _build_empty_graph_publication_report(
+    *,
+    reason: str,
     target_workflow_ids: Sequence[str] | None = None,
 ) -> Dict[str, Any]:
-    """Ensure registered workflows have concept identities, typing, and graphs."""
-    effort_unit_ontology_report: dict[str, Any] = {
-        "success": False,
-        "reason": "not_run",
-    }
-    try:
-        effort_unit_ontology_report = ensure_effort_unit_ontology()
-    except Exception as exc:  # pragma: no cover - defensive
-        effort_unit_ontology_report = {
-            "success": False,
-            "reason": "bootstrap_failed",
-            "error": str(exc),
-        }
-
-    workflow_ids = sorted(set(registry.all_workflow_ids()))
-    required_type_ids = list(resolve_available_workflow_type_ids())
-    preferred_type_id = required_type_ids[0] if required_type_ids else None
-
-    created: list[str] = []
-    updated: list[str] = []
-    unchanged: list[str] = []
-    errors: dict[str, str] = {}
-    graph_publication_report: dict[str, Any] = {
+    target_count = (
+        len(
+            [
+                str(item).strip()
+                for item in (target_workflow_ids or ())
+                if isinstance(item, str) and str(item).strip()
+            ]
+        )
+        if target_workflow_ids is not None
+        else 0
+    )
+    return {
+        "attempted": False,
+        "reason": reason,
         "counts": {
-            "workflows_targeted": 0,
+            "workflows_targeted": target_count,
             "workflows_published": 0,
             "workflows_skipped_missing_registration": 0,
             "workflows_skipped_missing_concept": 0,
             "step_concepts_created": 0,
             "action_concepts_created": 0,
+            "mapping_concepts_created": 0,
             "validation_failures": 0,
             "errors": 0,
         },
@@ -1986,9 +2498,46 @@ def bootstrap_workflow_concepts(
         "skipped_missing_concept_workflow_ids": [],
         "created_step_concept_ids": [],
         "created_action_concept_ids": [],
+        "created_mapping_concept_ids": [],
         "validation_failures_by_workflow_id": {},
         "errors_by_workflow_id": {},
     }
+
+
+def _build_empty_effort_unit_ontology_report(*, reason: str) -> Dict[str, Any]:
+    return {
+        "attempted": False,
+        "reason": reason,
+        "cached": False,
+        "success": True,
+        "created_concept_ids": [],
+        "updated_concept_ids": [],
+        "alignment": {
+            "success": True,
+            "updated_type_ids": [],
+            "unchanged_type_ids": [],
+            "skipped_missing_type_ids": [],
+            "errors": [],
+        },
+        "errors": [],
+    }
+
+
+def bootstrap_workflow_concept_identities(
+    *,
+    registry: WorkflowRegistry,
+    create_missing: bool = True,
+    enforce_required_type: bool = True,
+) -> Dict[str, Any]:
+    """Ensure registered workflows have concept identities and required typing."""
+    workflow_ids = sorted(set(registry.all_workflow_ids()))
+    required_type_ids = list(resolve_available_workflow_type_ids())
+    preferred_type_id = required_type_ids[0] if required_type_ids else None
+
+    created: list[str] = []
+    updated: list[str] = []
+    unchanged: list[str] = []
+    errors: dict[str, str] = {}
 
     for workflow_id in workflow_ids:
         registration = registry.get_registration(workflow_id)
@@ -2048,6 +2597,73 @@ def bootstrap_workflow_concepts(
         except Exception as exc:  # pragma: no cover - defensive
             errors[workflow_id] = f"type_enforcement_failed:{exc}"
 
+    return _build_workflow_identity_bootstrap_report(
+        workflow_ids=workflow_ids,
+        required_type_ids=required_type_ids,
+        preferred_type_id=preferred_type_id,
+        created=created,
+        updated=updated,
+        unchanged=unchanged,
+        errors=errors,
+    )
+
+
+def bootstrap_workflow_concepts(
+    *,
+    registry: WorkflowRegistry,
+    create_missing: bool = True,
+    enforce_required_type: bool = True,
+    ensure_effort_unit_ontology_bootstrap: bool = True,
+    publish_canonical_graphs: bool = True,
+    target_workflow_ids: Sequence[str] | None = None,
+) -> Dict[str, Any]:
+    """Ensure registered workflows have concept identities, typing, and graphs."""
+    identity_report = bootstrap_workflow_concept_identities(
+        registry=registry,
+        create_missing=create_missing,
+        enforce_required_type=enforce_required_type,
+    )
+
+    effort_unit_ontology_report: dict[str, Any]
+    if ensure_effort_unit_ontology_bootstrap:
+        try:
+            effort_unit_ontology_report = dict(ensure_effort_unit_ontology())
+            effort_unit_ontology_report["attempted"] = True
+            effort_unit_ontology_report.setdefault(
+                "reason",
+                (
+                    "completed"
+                    if bool(effort_unit_ontology_report.get("success"))
+                    else "reported_failure"
+                ),
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            effort_unit_ontology_report = {
+                "attempted": True,
+                "cached": False,
+                "success": False,
+                "reason": "bootstrap_failed",
+                "created_concept_ids": [],
+                "updated_concept_ids": [],
+                "alignment": {
+                    "success": False,
+                    "updated_type_ids": [],
+                    "unchanged_type_ids": [],
+                    "skipped_missing_type_ids": [],
+                    "errors": [],
+                },
+                "errors": [str(exc)],
+                "error": str(exc),
+            }
+    else:
+        effort_unit_ontology_report = _build_empty_effort_unit_ontology_report(
+            reason="disabled"
+        )
+
+    graph_publication_report = _build_empty_graph_publication_report(
+        reason="disabled",
+        target_workflow_ids=target_workflow_ids,
+    )
     if publish_canonical_graphs:
         try:
             graph_publication_report = publish_canonical_chat_workflow_graphs(
@@ -2055,52 +2671,28 @@ def bootstrap_workflow_concepts(
                 create_missing=create_missing,
                 target_workflow_ids=target_workflow_ids,
             )
-        except Exception as exc:  # pragma: no cover - defensive
-            publication_target_count = (
-                len(
-                    [
-                        str(item).strip()
-                        for item in (target_workflow_ids or ())
-                        if isinstance(item, str) and str(item).strip()
-                    ]
-                )
-                if target_workflow_ids is not None
-                else len(CANONICAL_CHAT_WORKFLOW_IDS)
+            graph_publication_report["attempted"] = True
+            graph_publication_report.setdefault(
+                "reason",
+                (
+                    "completed"
+                    if not (graph_publication_report.get("errors_by_workflow_id") or {})
+                    else "completed_with_errors"
+                ),
             )
-            graph_publication_report = {
-                "counts": {
-                    "workflows_targeted": publication_target_count,
-                    "workflows_published": 0,
-                    "workflows_skipped_missing_registration": 0,
-                    "workflows_skipped_missing_concept": 0,
-                    "step_concepts_created": 0,
-                    "action_concepts_created": 0,
-                    "validation_failures": 0,
-                    "errors": 1,
-                },
-                "published_workflow_ids": [],
-                "skipped_missing_registration_workflow_ids": [],
-                "skipped_missing_concept_workflow_ids": [],
-                "created_step_concept_ids": [],
-                "created_action_concept_ids": [],
-                "validation_failures_by_workflow_id": {},
-                "errors_by_workflow_id": {"__publication__": str(exc)},
+        except Exception as exc:  # pragma: no cover - defensive
+            graph_publication_report = _build_empty_graph_publication_report(
+                reason="publication_exception",
+                target_workflow_ids=target_workflow_ids,
+            )
+            graph_publication_report["attempted"] = True
+            graph_publication_report["counts"]["errors"] = 1
+            graph_publication_report["errors_by_workflow_id"] = {
+                "__publication__": str(exc)
             }
 
     return {
-        "counts": {
-            "registry_workflows": len(workflow_ids),
-            "created": len(created),
-            "updated": len(updated),
-            "unchanged": len(unchanged),
-            "errors": len(errors),
-        },
-        "required_type_ids": required_type_ids,
-        "preferred_type_id": preferred_type_id,
-        "created_workflow_ids": created,
-        "updated_workflow_ids": updated,
-        "unchanged_workflow_ids": unchanged,
-        "errors_by_workflow_id": errors,
+        **identity_report,
         "graph_publication": graph_publication_report,
         "effort_unit_ontology": effort_unit_ontology_report,
     }
