@@ -1,7 +1,7 @@
 # Von Workflow Language (VWL) Manual
 
 Status: Draft (current implementation-aligned)
-Last updated: 2026-03-08 (Pacific/Auckland)
+Last updated: 2026-03-10 (Pacific/Auckland)
 Audience: Human engineers and AI agents
 
 ## 1. Purpose and Scope
@@ -492,6 +492,12 @@ Event-launch semantics:
 - Default event bindings are bootstrapped idempotently; conflicting bindings are not overwritten.
 - Operators should resolve obsolete `file_copy.uploaded` routes through workflow binding governance (`workflow_list_event_bindings`, `workflow_set_event_binding_enabled`, `workflow_delete_event_binding`) rather than by adding Python-side routing switches.
 
+Current implementation caveat (JVNAUTOSCI-1415):
+
+- the upload-classification scholarly default still points at `#V#integration_scholarly_paper_representation_workflow` in code (`src/backend/workflows/durable/file_copy_upload_classification_workflow.py`);
+- that ID is not currently a Vontology concept, while `#V#scholarly_paper_representation_workflow` does exist as a Vontology workflow concept;
+- until `JVNAUTOSCI-1415` aligns these identities, treat the upload scholarly target as an implementation split rather than a clean single-source workflow authority.
+
 ### 10.5 PDF Diagram-Aware Organisation Extraction (JVNAUTOSCI-1017)
 
 When `#V#file_copy_interpretation_workflow` runs `interpret_file_copy` for PDF documents:
@@ -539,6 +545,12 @@ Operational expectations for arXiv tool handlers:
 Turn-execution gate expectation:
 
 - Tool invocations whose payload explicitly reports `success=false` MUST be treated as failed execution for required-effect evaluation and completion gating.
+
+Current implementation caveat (JVNAUTOSCI-1415):
+
+- `#V#scholarly_paper_representation_workflow` currently exists as a loadable Vontology workflow concept, but its present graph is legacy/incomplete: most steps invoke `workflow_creation.emit_marker`, with only author resolution represented as a domain-specific action;
+- the current arXiv and upload pathways therefore still depend primarily on tool-handler materialisation (`download_paper`, `finalise_cached_paper`, `interpret_file_copy`) plus representation-contract and completion-gate semantics, not yet on a fully expressive domain workflow family;
+- `JVNAUTOSCI-1415` is the task that repairs/replaces this workflow family with a proper general-paper workflow plus an explicit arXiv wrapper workflow.
 
 ### 10.7 Person Representation Contract (JVNAUTOSCI-1369 / JVNAUTOSCI-1373)
 

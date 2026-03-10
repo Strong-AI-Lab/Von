@@ -384,6 +384,28 @@ class TestMCPToolInvoke:
         # 'result' should be set so that on_true/on_false conditions work.
         assert result.outputs["result"] == {"success": True}
 
+    def test_error_payload_with_success_false_returns_failed(self):
+        orch, _ = _build_mock_orchestrator(
+            invoke_payload={
+                "success": False,
+                "error": "paper_not_found",
+                "suggestions": ["Check the arXiv identifier"],
+            }
+        )
+
+        request = WorkflowActionRequest(
+            action_id="download_paper",
+            inputs={"arxiv_id": "9999.99999"},
+            environment=WorkflowEnvironment(llm_client=None),
+            data={},
+        )
+        result = orch._action_mcp_tool_invoke(request)
+
+        assert result.ok is False
+        assert result.status == "failed"
+        assert result.error == "paper_not_found"
+        assert result.outputs["result"]["success"] is False
+
     def test_empty_inputs_sends_empty_payload(self):
         orch, gw = _build_mock_orchestrator()
 

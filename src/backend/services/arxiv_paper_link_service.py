@@ -340,6 +340,53 @@ def _extract_metadata_summary(metadata: Mapping[str, Any] | None) -> str | None:
     return None
 
 
+def extract_scholarly_author_names(
+    metadata: Mapping[str, Any] | None,
+) -> list[str]:
+    """Return stable author-name candidates from scholarly metadata."""
+
+    return _extract_author_names(metadata)
+
+
+def extract_scholarly_topic_labels(
+    metadata: Mapping[str, Any] | None,
+) -> list[str]:
+    """Return stable topic/category labels from scholarly metadata."""
+
+    return _extract_topic_labels(metadata)
+
+
+def extract_scholarly_metadata_title(
+    metadata: Mapping[str, Any] | None,
+) -> str | None:
+    """Return the preferred title field from scholarly metadata."""
+
+    return _extract_metadata_title(metadata)
+
+
+def extract_scholarly_metadata_summary(
+    metadata: Mapping[str, Any] | None,
+) -> str | None:
+    """Return the preferred summary/abstract field from scholarly metadata."""
+
+    return _extract_metadata_summary(metadata)
+
+
+def resolve_or_create_scholarly_author_concept_id(
+    *,
+    user_concept_id: str,
+    author_name: str,
+    logger: Any | None = None,
+) -> str:
+    """Resolve or create a person concept for a scholarly author name."""
+
+    return _resolve_or_create_person_concept_id(
+        user_concept_id=user_concept_id,
+        person_name=author_name,
+        logger=logger,
+    )
+
+
 def _relation_contains_target(
     concept_id: str,
     predicate: str,
@@ -861,7 +908,12 @@ __all__ = [
     "ensure_arxiv_paper_instance",
     "ensure_paper_on_arxiv_type_exists",
     "extract_arxiv_id_candidates",
+    "extract_scholarly_author_names",
+    "extract_scholarly_metadata_summary",
+    "extract_scholarly_metadata_title",
+    "extract_scholarly_topic_labels",
     "link_file_copy_to_arxiv_paper",
     "materialise_scholarly_representation_for_file_copy",
     "materialise_scholarly_representation_for_arxiv_file_copy",
+    "resolve_or_create_scholarly_author_concept_id",
 ]

@@ -20,6 +20,7 @@ from typing import Any, Dict, List
 
 from .. import WorkflowRegistry, register_default_workflows
 from ..action_registry import ActionRegistry, WorkflowActionResult
+from ..mcp_tool_bridge import workflow_action_result_from_mcp_payload
 from .rag_sync_workflow import (
     get_rag_sync_workflow_registration,
     register_rag_sync_actions,
@@ -72,6 +73,7 @@ from .parent_specificity_rumination_workflow import (
     get_parent_specificity_rumination_workflow_registration,
     register_parent_specificity_rumination_actions,
 )
+from .paper_representation_workflow import register_paper_representation_actions
 from .workflow_gap_recovery_workflow import (
     get_workflow_discovery_gap_recovery_workflow_registration,
     get_workflow_gap_test_workflow_registration,
@@ -89,6 +91,9 @@ from ..vontology_loader import (
 from ..workflow_concept_authority_service import (
     bootstrap_workflow_concepts,
     build_workflow_concept_authority_report,
+)
+from ...services.paper_representation_workflow_vontology_service import (
+    bootstrap_canonical_paper_representation_workflows,
 )
 
 logger = logging.getLogger(__name__)
@@ -196,14 +201,9 @@ def _durable_mcp_fallback_action(request: Any) -> WorkflowActionResult:
             record_generic_fallback_mcp_invocation(success=True)
         except Exception:
             pass
-        return WorkflowActionResult(
-            status="success",
-            outputs={
-                "mcp_result": result.payload,
-                "mcp_tool": tool_name,
-                "mcp_duration_ms": result.duration_ms,
-                "result": result.payload,
-            },
+        return workflow_action_result_from_mcp_payload(
+            tool_name=tool_name,
+            payload=result.payload,
             duration_ms=result.duration_ms,
         )
     except Exception as exc:
@@ -434,6 +434,13 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
             read-only for diagnostics/introspection surfaces.
     """
     registry = WorkflowRegistry()
+    bootstrap_enabled = os.getenv("VON_WORKFLOW_CONCEPT_BOOTSTRAP_ENABLE", "1")
+    bootstrap_enabled = bootstrap_enabled.strip().lower() in {"1", "true", "yes", "on"}
+    bootstrap_allowed = bool(allow_bootstrap and bootstrap_enabled)
+    paper_representation_bootstrap_report: Dict[str, Any] = {
+        "enabled": bootstrap_allowed,
+        "workflow_ids": [],
+    }
 
     # 1. Built-in conversation-turn workflows
     register_default_workflows(registry)
@@ -454,6 +461,27 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
     registry.register(get_parent_specificity_rumination_workflow_registration())
     registry.register(get_workflow_discovery_gap_recovery_workflow_registration())
     registry.register(get_workflow_gap_test_workflow_registration())
+
+    if bootstrap_allowed:
+        try:
+            paper_representation_bootstrap_report = (
+                bootstrap_canonical_paper_representation_workflows()
+            )
+            paper_representation_bootstrap_report["enabled"] = True
+            _resolve_subworkflow_definition.cache_clear()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "paper_representation_workflow_bootstrap_failed: %s",
+                exc,
+            )
+            paper_representation_bootstrap_report = {
+                "enabled": True,
+                "workflow_ids": [
+                    "#V#scholarly_paper_representation_workflow",
+                    "#V#arxiv_paper_representation_workflow",
+                ],
+                "error": str(exc),
+            }
 
     # 3. Vontology-discovered workflows
     discovered_workflow_ids: List[str] = []
@@ -518,9 +546,6 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
         "unchanged_workflow_ids": [],
         "errors_by_workflow_id": {},
     }
-    bootstrap_enabled = os.getenv("VON_WORKFLOW_CONCEPT_BOOTSTRAP_ENABLE", "1")
-    bootstrap_enabled = bootstrap_enabled.strip().lower() in {"1", "true", "yes", "on"}
-    bootstrap_allowed = bool(allow_bootstrap and bootstrap_enabled)
     if bootstrap_allowed:
         try:
             bootstrap_report = bootstrap_workflow_concepts(registry=registry)
@@ -535,6 +560,9 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
 
     authority_report = build_workflow_concept_authority_report(registry=registry)
     authority_report["bootstrap"] = bootstrap_report
+    authority_report["paper_representation_bootstrap"] = (
+        paper_representation_bootstrap_report
+    )
 
     inventory_snapshot = _build_workflow_parity_inventory(
         registry=registry,
@@ -594,6 +622,7 @@ def build_durable_action_registry() -> ActionRegistry:
     register_jira_task_incremental_import_actions(registry)
     register_parent_specificity_concept_dossier_actions(registry)
     register_parent_specificity_rumination_actions(registry)
+    register_paper_representation_actions(registry)
     register_workflow_gap_recovery_actions(registry)
     register_control_flow_actions(registry, definition_loader=_resolve_subworkflow_definition)
     register_subworkflow_actions(registry, definition_loader=_resolve_subworkflow_definition)

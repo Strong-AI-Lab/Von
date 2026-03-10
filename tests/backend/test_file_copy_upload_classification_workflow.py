@@ -104,7 +104,7 @@ def test_classification_marks_unsupported_specialised_route_when_unavailable(
 ) -> None:
     monkeypatch.setattr(
         "src.backend.workflows.durable.file_copy_upload_classification_workflow._resolve_available_workflow_ids",
-        lambda _payload: ("#V#integration_scholarly_paper_representation_workflow",),
+        lambda _payload: ("#V#scholarly_paper_representation_workflow",),
     )
     registry = ActionRegistry()
     register_file_copy_upload_classification_actions(registry)

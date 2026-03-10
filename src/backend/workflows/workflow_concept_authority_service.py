@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from ..db.repositories.concepts_repository import ConceptsRepository
 from ..services import concept_service
 from ..services.concept_service import ConceptNotFoundError
 from ..services.effort_unit_ontology_service import ensure_effort_unit_ontology
@@ -1840,12 +1841,33 @@ def _extract_type_parents(concept_doc: Dict[str, Any]) -> List[str]:
 
 
 def _load_concept(concept_id: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    concept_id_clean = str(concept_id or "").strip()
+    if not concept_id_clean:
+        return None, None
     try:
-        return concept_service.get_concept_by_concept_id(concept_id), None
+        return ConceptsRepository.find_one({"concept_id": concept_id_clean}), None
     except ConceptNotFoundError:
         return None, None
     except Exception as exc:  # pragma: no cover - defensive
         return None, str(exc)
+
+
+def _concept_exists_fast(concept_id: str) -> bool:
+    """Return whether a concept exists without triggering alias/name fallback work."""
+
+    concept_id_clean = str(concept_id or "").strip()
+    if not concept_id_clean:
+        return False
+    try:
+        return (
+            ConceptsRepository.find_one(
+                {"concept_id": concept_id_clean},
+                {"_id": 1},
+            )
+            is not None
+        )
+    except Exception:
+        return False
 
 
 def _instance_of_satisfies_required_types(
@@ -1899,18 +1921,11 @@ def _instance_of_satisfies_required_types(
 @lru_cache(maxsize=1)
 def resolve_available_workflow_type_ids() -> tuple[str, ...]:
     """Return existing workflow type concepts in canonical preference order."""
-    available: list[str] = []
-    for type_id in WORKFLOW_INSTANCE_TYPE_ID_CANDIDATES:
-        concept_doc, error = _load_concept(type_id)
-        if error:
-            logger.warning(
-                "workflow_authority: failed to inspect type %s: %s",
-                type_id,
-                error,
-            )
-            continue
-        if concept_doc is not None:
-            available.append(type_id)
+    available = [
+        type_id
+        for type_id in WORKFLOW_INSTANCE_TYPE_ID_CANDIDATES
+        if _concept_exists_fast(type_id)
+    ]
 
     if available:
         return tuple(available)

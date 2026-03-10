@@ -43,7 +43,7 @@ FILE_COPY_UPLOAD_ROUTE_DECISION_PREDICATE = (
 )
 FILE_COPY_UPLOAD_CLASSIFICATION_VERSION = "file_copy_upload_classification.v1"
 
-DEFAULT_SCHOLARLY_WORKFLOW_ID = "#V#integration_scholarly_paper_representation_workflow"
+DEFAULT_SCHOLARLY_WORKFLOW_ID = "#V#scholarly_paper_representation_workflow"
 DEFAULT_CV_WORKFLOW_ID = "#V#file_copy_cv_representation_workflow"
 DEFAULT_BUSINESS_CARD_WORKFLOW_ID = "#V#file_copy_business_card_representation_workflow"
 

@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .file_copy_reference_service import extract_file_copy_concept_ids_from_text
 from .file_copy_typing_service import build_file_copy_typing_context
+from .arxiv_paper_link_service import extract_arxiv_id_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -442,6 +443,27 @@ def _build_keyword_fallback_queries(
         for type_name in context.get("type_display_names") or []:
             if isinstance(type_name, str) and type_name.strip():
                 candidates.append(type_name.strip())
+
+    arxiv_ids = extract_arxiv_id_candidates(
+        query,
+        *[
+            context.get("original_filename")
+            for context in contexts
+            if isinstance(context, Mapping)
+        ],
+    )
+    if arxiv_ids:
+        primary_arxiv_id = arxiv_ids[0]
+        candidates.extend(
+            [
+                "arxiv workflow",
+                "arxiv paper workflow",
+                "arxiv paper representation workflow",
+                "scholarly paper workflow",
+                "scholarly paper representation workflow",
+                f"arxiv {primary_arxiv_id}",
+            ]
+        )
 
     deduped: list[str] = []
     seen: set[str] = set()

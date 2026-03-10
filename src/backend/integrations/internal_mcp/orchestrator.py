@@ -43,6 +43,7 @@ from ...workflows.action_registry import (
     WorkflowActionResult,
     WorkflowEnvironment,
 )
+from ...workflows.mcp_tool_bridge import workflow_action_result_from_mcp_payload
 from ...workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
     CHAT_BUTTONIFY_WORKFLOW_ID,
@@ -1427,14 +1428,9 @@ class InternalMCPChatOrchestrator:
                 record_generic_fallback_mcp_invocation(success=True)
             except Exception:
                 pass
-            return WorkflowActionResult(
-                status="success",
-                outputs={
-                    "mcp_result": result.payload,
-                    "mcp_tool": tool_name,
-                    "mcp_duration_ms": result.duration_ms,
-                    "result": result.payload,
-                },
+            return workflow_action_result_from_mcp_payload(
+                tool_name=tool_name,
+                payload=result.payload,
                 duration_ms=result.duration_ms,
             )
         except Exception as exc:

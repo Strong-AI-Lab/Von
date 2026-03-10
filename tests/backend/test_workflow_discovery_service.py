@@ -26,6 +26,7 @@ from src.backend.services.workflow_discovery_service import (
     WORKFLOW_TYPE_IDS,
     WorkflowDiscoveryResult,
     WorkflowMatch,
+    _build_keyword_fallback_queries,
     _classify_workflow_concept_executability,
     _deduplicate_and_rank,
     _get_workflow_description,
@@ -243,6 +244,21 @@ class TestDeduplicateAndRank:
         assert result[0].concept_id == "#V#wf2"  # Highest score first
         assert result[1].concept_id == "#V#wf3"
         assert result[2].concept_id == "#V#wf1"
+
+
+class TestKeywordFallbackQueries:
+    """Unit tests for keyword fallback query generation."""
+
+    def test_adds_arxiv_specific_queries_for_bare_arxiv_url(self) -> None:
+        queries = _build_keyword_fallback_queries(
+            "https://arxiv.org/abs/2602.20478",
+            [],
+        )
+
+        assert "arxiv paper representation workflow" in queries
+        assert "scholarly paper representation workflow" in queries
+        assert "arxiv workflow" in queries
+        assert "arxiv 2602.20478" in queries
 
 
 class TestDiscoverWorkflows:

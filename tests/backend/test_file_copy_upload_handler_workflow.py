@@ -124,7 +124,7 @@ def test_persist_route_outcome_writes_singleton_text_relation(monkeypatch) -> No
         "upload_fail_closed": True,
         "upload_route_reasons": ["mutation_route_confidence_below_threshold"],
         "upload_route_decision_persisted": True,
-        "upload_target_workflow_id": "#V#integration_scholarly_paper_representation_workflow",
+        "upload_target_workflow_id": "#V#scholarly_paper_representation_workflow",
         "upload_target_workflow_available": True,
         "upload_effective_route_mode": "fail_closed",
     }
