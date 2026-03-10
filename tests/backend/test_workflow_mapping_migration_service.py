@@ -140,6 +140,78 @@ def test_migrate_workflow_mapping_specs_recovers_from_invalid_structured_spec(mo
     assert migrated_detail["parse_source"] == "legacy_recovery"
 
 
+def test_migrate_workflow_mapping_specs_recovers_invalid_structured_output_spec(
+    monkeypatch,
+):
+    mapping_id = "#V#workflow_mapping_tool_field_concept_id_to_validated_type_id"
+    graph = _workflow_graph_for_step(
+        step_id="#V#step_identify",
+        action_id="fetch_concept",
+        output_mapping_ids=[mapping_id],
+    )
+    mapping_doc = {
+        "concept_id": mapping_id,
+        "concept_data": {
+            "workflow_mapping_spec": {
+                "schema_version": 1,
+                "mapping_type": "tool_output_field_to_context_key",
+                "workflow_step_id": "#V#step_identify",
+                "tool_id": "wrong_tool",
+                "tool_output_field_name": "concept_id",
+                "target_context_key_concept_id": (
+                    "#V#workflow_context_key_validated_type_id"
+                ),
+            }
+        },
+        "relationships": {},
+    }
+
+    monkeypatch.setattr(
+        migration_service,
+        "discover_workflow_ids",
+        lambda: ["#V#test_workflow"],
+    )
+    monkeypatch.setattr(
+        migration_service,
+        "build_workflow_process_graph",
+        lambda _workflow_id: (graph, []),
+    )
+    monkeypatch.setattr(
+        migration_service,
+        "_fetch_concepts_by_id",
+        lambda _mapping_ids: {mapping_id: mapping_doc},
+    )
+    monkeypatch.setattr(
+        migration_service,
+        "_mapping_description_text",
+        lambda *_args, **_kwargs: (
+            "Map tool output field 'concept_id' to context key "
+            "'#V#workflow_context_key_validated_type_id'."
+        ),
+    )
+
+    writes: list[Dict[str, Any]] = []
+
+    def _fake_update_concept(*, concept_id: str, update_data: Dict[str, Any]):
+        writes.append({"concept_id": concept_id, "update_data": update_data})
+        return {"concept_id": concept_id}
+
+    monkeypatch.setattr(migration_service, "update_concept", _fake_update_concept)
+
+    report = migration_service.migrate_workflow_mapping_specs(dry_run=False)
+
+    assert report["success"] is True
+    assert report["stats"]["migrated"] == 1
+    assert report["stats"]["updated"] == 1
+    assert len(writes) == 1
+    migrated_spec = writes[0]["update_data"]["concept_data.workflow_mapping_spec"]
+    assert migrated_spec["tool_id"] == "fetch_concept"
+    migrated_detail = next(
+        item for item in report["details"] if item["status"] == "migrated"
+    )
+    assert migrated_detail["parse_source"] == "legacy_recovery"
+
+
 def test_migrate_workflow_mapping_specs_skips_already_structured(monkeypatch):
     mapping_id = "#V#workflow_mapping_target_type_id_to_concept_id_param"
     graph = _workflow_graph_for_step(

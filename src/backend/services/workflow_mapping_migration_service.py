@@ -18,12 +18,17 @@ from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
 from .concept_service import update_concept
 from ..workflows.vontology_loader import (
+    _WORKFLOW_INPUT_MAPPING_TYPES,
+    _WORKFLOW_OUTPUT_MAPPING_TYPES,
     _extract_mapping_pair,
-    _mapping_description_text,
     _extract_structured_mapping_spec,
     _extract_tool_output_mapping,
     _fetch_concepts_by_id,
+    _mapping_description_text,
+    _normalise_context_key_symbol,
     _normalise_invoked_action_target,
+    _normalise_mapping_type,
+    _validate_mapping_spec_common,
     build_workflow_process_graph,
     discover_workflow_ids,
 )
@@ -79,6 +84,50 @@ def _description_only_doc(
     return {"description": description.strip()}
 
 
+def _structured_mapping_requires_legacy_recovery(
+    *,
+    mapping_kind: str,
+    structured_spec: Mapping[str, Any] | None,
+    structured_error: str | None,
+    step_id: str,
+    action_id: str,
+) -> bool:
+    if isinstance(structured_error, str) and structured_error.strip():
+        return True
+    if not isinstance(structured_spec, Mapping):
+        return False
+
+    mapping_type = _normalise_mapping_type(structured_spec.get("mapping_type"))
+    allowed_types = (
+        _WORKFLOW_INPUT_MAPPING_TYPES
+        if mapping_kind == "input"
+        else _WORKFLOW_OUTPUT_MAPPING_TYPES
+    )
+    if mapping_type not in allowed_types:
+        return True
+
+    validation_error = _validate_mapping_spec_common(
+        spec=dict(structured_spec),
+        step_id=step_id,
+        action_id=action_id,
+    )
+    if validation_error:
+        return True
+
+    if mapping_kind == "input":
+        context_key = _normalise_context_key_symbol(
+            str(structured_spec.get("context_key_concept_id") or "")
+        )
+        tool_param = str(structured_spec.get("tool_param_name") or "").strip()
+        return not (context_key and tool_param)
+
+    tool_output_field = str(structured_spec.get("tool_output_field_name") or "").strip()
+    context_key = _normalise_context_key_symbol(
+        str(structured_spec.get("target_context_key_concept_id") or "")
+    )
+    return not (tool_output_field and context_key)
+
+
 def _parse_input_mapping(
     *,
     mapping_concept_id: str,
@@ -86,6 +135,17 @@ def _parse_input_mapping(
     step_id: str,
     action_id: str,
 ) -> tuple[str | None, str | None, str | None, str]:
+    structured_spec, structured_error = _extract_structured_mapping_spec(
+        dict(mapping_doc) if isinstance(mapping_doc, Mapping) else None
+    )
+    recovery_required = _structured_mapping_requires_legacy_recovery(
+        mapping_kind="input",
+        structured_spec=structured_spec,
+        structured_error=structured_error,
+        step_id=step_id,
+        action_id=action_id,
+    )
+
     context_key, tool_param, reason = _extract_mapping_pair(
         mapping_concept_id=mapping_concept_id,
         mapping_doc=dict(mapping_doc) if isinstance(mapping_doc, Mapping) else None,
@@ -93,12 +153,14 @@ def _parse_input_mapping(
         action_id=action_id,
     )
     if context_key and tool_param and not reason:
-        return context_key, tool_param, None, "primary"
+        return (
+            context_key,
+            tool_param,
+            None,
+            "legacy_recovery" if recovery_required else "primary",
+        )
 
-    structured_spec, _ = _extract_structured_mapping_spec(
-        dict(mapping_doc) if isinstance(mapping_doc, Mapping) else None
-    )
-    if structured_spec:
+    if recovery_required:
         fallback_doc = _description_only_doc(mapping_concept_id, mapping_doc)
         context_key, tool_param, fallback_reason = _extract_mapping_pair(
             mapping_concept_id=mapping_concept_id,
@@ -119,6 +181,17 @@ def _parse_output_mapping(
     step_id: str,
     action_id: str,
 ) -> tuple[str | None, str | None, str | None, str]:
+    structured_spec, structured_error = _extract_structured_mapping_spec(
+        dict(mapping_doc) if isinstance(mapping_doc, Mapping) else None
+    )
+    recovery_required = _structured_mapping_requires_legacy_recovery(
+        mapping_kind="output",
+        structured_spec=structured_spec,
+        structured_error=structured_error,
+        step_id=step_id,
+        action_id=action_id,
+    )
+
     output_field, context_key, reason = _extract_tool_output_mapping(
         mapping_concept_id=mapping_concept_id,
         mapping_doc=dict(mapping_doc) if isinstance(mapping_doc, Mapping) else None,
@@ -126,12 +199,14 @@ def _parse_output_mapping(
         action_id=action_id,
     )
     if output_field and context_key and not reason:
-        return output_field, context_key, None, "primary"
+        return (
+            output_field,
+            context_key,
+            None,
+            "legacy_recovery" if recovery_required else "primary",
+        )
 
-    structured_spec, _ = _extract_structured_mapping_spec(
-        dict(mapping_doc) if isinstance(mapping_doc, Mapping) else None
-    )
-    if structured_spec:
+    if recovery_required:
         fallback_doc = _description_only_doc(mapping_concept_id, mapping_doc)
         output_field, context_key, fallback_reason = _extract_tool_output_mapping(
             mapping_concept_id=mapping_concept_id,
