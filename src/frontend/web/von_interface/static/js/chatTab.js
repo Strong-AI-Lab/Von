@@ -617,6 +617,8 @@ const THINKING_CARD_TOGGLE_ARIA_LABEL_EXPANDED = 'Collapse thinking details';
 const THINKING_CARD_TOGGLE_ARIA_LABEL_COLLAPSED = 'Expand thinking details';
 const THINKING_ACTIVITY_LOW_LEVEL_EVENT_KINDS = new Set(['llm_call_chunk', 'heartbeat']);
 const THINKING_DIAGNOSTIC_DETAILS_SELECTOR = 'details[data-thinking-diagnostic-key]';
+const THINKING_DIAGNOSTICS_EXPORT_EVENT_LIMIT = 40;
+const THINKING_DIAGNOSTICS_EXPORT_PHASE_HISTORY_LIMIT = 80;
 const THINKING_TERMINAL_PROGRESS_STATUSES = new Set([
     'completed',
     'complete',
@@ -972,6 +974,15 @@ function cloneThinkingToolHistory(history) {
         .map((entry) => ({ ...entry }));
 }
 
+function cloneThinkingStructuredHistory(history) {
+    if (!Array.isArray(history)) {
+        return [];
+    }
+    return history
+        .filter((entry) => entry && typeof entry === 'object')
+        .map((entry) => ({ ...entry }));
+}
+
 function getCanonicalThinkingToolHistory(request) {
     if (!request || typeof request !== 'object') {
         return [];
@@ -999,6 +1010,36 @@ function syncThinkingToolHistoryFromProgress(request, progress) {
     return true;
 }
 
+function syncThinkingCanonicalHistoriesFromProgress(request, progress) {
+    if (!request || typeof request !== 'object' || !progress || typeof progress !== 'object') {
+        return false;
+    }
+
+    let updated = false;
+
+    if (Array.isArray(progress.phase_history)) {
+        request.phaseHistory = cloneThinkingStructuredHistory(progress.phase_history);
+        updated = true;
+    }
+
+    if (Array.isArray(progress.progress_events)) {
+        request.progressEvents = cloneThinkingStructuredHistory(progress.progress_events);
+        updated = true;
+    }
+
+    if (Array.isArray(progress.activity_history)) {
+        request.activityHistory = cloneThinkingStructuredHistory(progress.activity_history);
+        updated = true;
+    }
+
+    if (Array.isArray(progress.stage_diagnostics)) {
+        request.stageDiagnostics = cloneThinkingStructuredHistory(progress.stage_diagnostics);
+        updated = true;
+    }
+
+    return updated;
+}
+
 function createThinkingCardHistorySnapshot(request) {
     if (!request || typeof request !== 'object') {
         return null;
@@ -1009,6 +1050,12 @@ function createThinkingCardHistorySnapshot(request) {
         : null;
     const activityHistory = Array.isArray(request.activityHistory)
         ? request.activityHistory.map((entry) => ({ ...entry }))
+        : [];
+    const progressEvents = Array.isArray(request.progressEvents)
+        ? request.progressEvents.map((entry) => ({ ...entry }))
+        : [];
+    const phaseHistory = Array.isArray(request.phaseHistory)
+        ? request.phaseHistory.map((entry) => ({ ...entry }))
         : [];
     const toolHistory = getCanonicalThinkingToolHistory(request);
     const workflowDiscovery = (request.workflowDiscovery && typeof request.workflowDiscovery === 'object')
@@ -1039,6 +1086,9 @@ function createThinkingCardHistorySnapshot(request) {
                 : []
         }
         : null;
+    const stageDiagnostics = Array.isArray(request.stageDiagnostics)
+        ? request.stageDiagnostics.map((entry) => ({ ...entry }))
+        : [];
 
     const effectiveProgressForTerminal = latestProgress || { status: 'completed' };
     const completedDisplayState = reduceThinkingCardDisplayState(
@@ -1048,9 +1098,12 @@ function createThinkingCardHistorySnapshot(request) {
 
     return {
         activityHistory,
+        progressEvents,
+        phaseHistory,
         toolUseProgressHistory: toolHistory,
         workflowDiscovery,
         workflowStagePath,
+        stageDiagnostics,
         latestProgress,
         expandedThinkingDiagnosticKeys: request.expandedThinkingDiagnosticKeys instanceof Set
             ? Array.from(request.expandedThinkingDiagnosticKeys)
@@ -1464,6 +1517,10 @@ export function __testOnly_updateThinkingCardMeta(request, progress) {
     updateThinkingCardMeta(request, progress);
 }
 
+export function __testOnly_syncThinkingCanonicalHistoriesFromProgress(request, progress) {
+    return syncThinkingCanonicalHistoriesFromProgress(request, progress);
+}
+
 function updateThinkingCardStatusBadge(progress) {
     const badgeEl = document.getElementById('thinkingCardStatusBadge');
     if (!badgeEl) {
@@ -1573,8 +1630,10 @@ function recordToolUseHistory(request, progress) {
         request.phaseHistory = [];
     }
 
+    const hasCanonicalPhaseHistory = Array.isArray(progress.phase_history);
+
     // Record phase transitions (JVNAUTOSCI-984).
-    if (phase && status === 'phase_transition') {
+    if (!hasCanonicalPhaseHistory && phase && status === 'phase_transition') {
         const lastPhase = request.phaseHistory.length
             ? request.phaseHistory[request.phaseHistory.length - 1]
             : null;
@@ -2692,7 +2751,7 @@ function buildToolHistoryDiagnosticsHTML(entry) {
 }
 
 function buildThinkingStageDiagnosticsSnapshot(request) {
-    return buildThinkingWorkflowStageRows(request)
+    const workflowRows = buildThinkingWorkflowStageRows(request)
         .map((entry) => ({
             stage_id: entry.stageId || null,
             label: entry.label || null,
@@ -2701,6 +2760,65 @@ function buildThinkingStageDiagnosticsSnapshot(request) {
             diagnostics: entry.diagnosticData || null
         }))
         .filter((entry) => entry.stage_id || entry.label);
+
+    const preservedEntries = Array.isArray(request?.stageDiagnostics)
+        ? request.stageDiagnostics
+            .map((entry) => normaliseThinkingStageDiagnosticSnapshotEntry(entry))
+            .filter((entry) => entry && (entry.stage_id || entry.label))
+        : [];
+
+    if (workflowRows.length === 0) {
+        return preservedEntries;
+    }
+    if (preservedEntries.length === 0) {
+        return workflowRows;
+    }
+
+    const mergedRows = workflowRows.map((entry) => ({ ...entry }));
+    const seenStageKeys = new Set(
+        mergedRows
+            .map((entry) => normaliseThinkingActivityString(entry.stage_id || entry.label))
+            .filter(Boolean)
+    );
+
+    for (const entry of preservedEntries) {
+        const stageKey = normaliseThinkingActivityString(entry.stage_id || entry.label);
+        if (!stageKey || seenStageKeys.has(stageKey)) {
+            continue;
+        }
+        mergedRows.push({ ...entry });
+        seenStageKeys.add(stageKey);
+    }
+
+    return mergedRows;
+}
+
+function normaliseThinkingStageDiagnosticSnapshotEntry(entry) {
+    if (!entry || typeof entry !== 'object') {
+        return null;
+    }
+
+    const stageId = normaliseThinkingActivityString(entry.stage_id || entry.stageId);
+    const label = normaliseThinkingActivityString(entry.label || entry.stage_label || entry.stageLabel)
+        || formatThinkingActivityFallbackLabel(stageId)
+        || null;
+    const detail = normaliseThinkingActivityString(entry.detail) || null;
+    const state = normaliseThinkingActivityString(entry.state) || null;
+    const diagnostics = (entry.diagnostics && typeof entry.diagnostics === 'object')
+        ? { ...entry.diagnostics }
+        : null;
+
+    if (!stageId && !label) {
+        return null;
+    }
+
+    return {
+        stage_id: stageId,
+        label,
+        detail,
+        state,
+        diagnostics
+    };
 }
 
 function buildWorkflowStageDetailPresentation(stageId, request) {
@@ -2887,11 +3005,28 @@ function buildThinkingWorkflowStageRows(request) {
     const path = Array.isArray(workflowStagePath?.path)
         ? workflowStagePath.path.filter((entry) => entry && typeof entry === 'object')
         : [];
+    const preservedRows = Array.isArray(request?.stageDiagnostics)
+        ? request.stageDiagnostics
+            .map((entry) => normaliseThinkingStageDiagnosticSnapshotEntry(entry))
+            .filter((entry) => entry && (entry.stage_id || entry.label))
+            .map((entry) => ({
+                stageId: entry.stage_id,
+                label: entry.label || formatThinkingActivityFallbackLabel(entry.stage_id) || 'Workflow step',
+                detail: entry.detail || '',
+                detailHtml: '',
+                state: entry.state || null,
+                diagnosticKey: buildThinkingDiagnosticKey('stage', entry.stage_id || entry.label),
+                diagnosticData: entry.diagnostics || null
+            }))
+        : [];
 
     const workflowDiscovery = (request.workflowDiscovery && typeof request.workflowDiscovery === 'object')
         ? request.workflowDiscovery
         : null;
     if (path.length === 0) {
+        if (preservedRows.length > 0) {
+            return preservedRows;
+        }
         if (workflowDiscovery) {
             const diagnosticData = buildThinkingWorkflowStageDiagnosticData(
                 'workflow_discovery',
@@ -2923,7 +3058,7 @@ function buildThinkingWorkflowStageRows(request) {
     const latestIsTerminal = isTerminalThinkingProgress(latestProgress);
     const latestIsFailure = latestStatus === 'error' || latestStatus === 'failed';
 
-    return path.map((entry, index) => {
+    const stageRows = path.map((entry, index) => {
         const stageId = normaliseThinkingActivityString(entry.stage_id || entry.runtime_stage_normalised);
         const stageLabel = normaliseThinkingActivityString(entry.stage_label)
             || formatThinkingActivityFallbackLabel(stageId)
@@ -2960,6 +3095,28 @@ function buildThinkingWorkflowStageRows(request) {
             diagnosticData
         };
     });
+
+    if (preservedRows.length === 0) {
+        return stageRows;
+    }
+
+    const mergedRows = stageRows.map((entry) => ({ ...entry }));
+    const seenStageKeys = new Set(
+        mergedRows
+            .map((entry) => normaliseThinkingActivityString(entry.stageId || entry.label))
+            .filter(Boolean)
+    );
+
+    for (const entry of preservedRows) {
+        const stageKey = normaliseThinkingActivityString(entry.stageId || entry.label);
+        if (!stageKey || seenStageKeys.has(stageKey)) {
+            continue;
+        }
+        mergedRows.push({ ...entry });
+        seenStageKeys.add(stageKey);
+    }
+
+    return mergedRows;
 }
 
 function renderThinkingWorkflowStageHistoryHTML(request) {
@@ -3298,20 +3455,23 @@ function startToolUseProgressPolling(request) {
                 type: 'progress_update',
                 progress
             });
-            if (!Array.isArray(request.progressEvents)) {
-                request.progressEvents = [];
-            }
-            request.progressEvents.push({
-                at_utc: new Date().toISOString(),
-                status: progress?.status || null,
-                stage: progress?.stage || progress?.phase || null,
-                sequence_no: progress?.sequence_no || null,
-                liveness_state: progress?.liveness_state || null,
-                idle_ms: progress?.activity_idle_ms ?? progress?.idle_ms ?? null,
-                subtask: progress?.subtask || progress?.tool || progress?.workflow_task || null
-            });
-            if (request.progressEvents.length > 60) {
-                request.progressEvents = request.progressEvents.slice(-60);
+            syncThinkingCanonicalHistoriesFromProgress(request, progress);
+            if (!Array.isArray(progress?.progress_events)) {
+                if (!Array.isArray(request.progressEvents)) {
+                    request.progressEvents = [];
+                }
+                request.progressEvents.push({
+                    at_utc: new Date().toISOString(),
+                    status: progress?.status || null,
+                    stage: progress?.stage || progress?.phase || null,
+                    sequence_no: progress?.sequence_no || null,
+                    liveness_state: progress?.liveness_state || null,
+                    idle_ms: progress?.activity_idle_ms ?? progress?.idle_ms ?? null,
+                    subtask: progress?.subtask || progress?.tool || progress?.workflow_task || null
+                });
+                if (request.progressEvents.length > 60) {
+                    request.progressEvents = request.progressEvents.slice(-60);
+                }
             }
 
             poll.consecutiveNotFound = 0;
@@ -3319,9 +3479,11 @@ function startToolUseProgressPolling(request) {
             setLoadingIndicatorText(formatToolUseProgressText(progress, request));
             updateThinkingCardMeta(request, progress);
             recordToolUseHistory(request, progress);
-            request.activityHistory = normaliseThinkingActivityHistory(progress?.diagnostic_events);
-            if (request.activityHistory.length > 80) {
-                request.activityHistory = request.activityHistory.slice(-80);
+            if (!Array.isArray(progress?.activity_history)) {
+                request.activityHistory = normaliseThinkingActivityHistory(progress?.diagnostic_events);
+                if (request.activityHistory.length > 80) {
+                    request.activityHistory = request.activityHistory.slice(-80);
+                }
             }
 
             if (progress.workflow_stage_path && typeof progress.workflow_stage_path === 'object') {
@@ -3332,9 +3494,6 @@ function startToolUseProgressPolling(request) {
             // including explicit no-match payloads.
             if (progress.workflow_discovery && typeof progress.workflow_discovery === 'object') {
                 request.workflowDiscovery = progress.workflow_discovery;
-            }
-            if (Array.isArray(progress.stage_diagnostics)) {
-                request.stageDiagnostics = progress.stage_diagnostics;
             }
 
             setLoadingIndicatorDetailHtml(renderThinkingCardBodyHTML(request));
@@ -18533,10 +18692,16 @@ function buildThinkingDiagnosticsPayload(request) {
         elapsed_ms: elapsedMs,
         prompt_preview: typeof request.promptRaw === 'string' ? request.promptRaw.slice(0, 1000) : null,
         latest_progress: request.latestProgress || null,
-        activity_history: Array.isArray(request.activityHistory) ? request.activityHistory.slice(-40) : [],
-        progress_events: Array.isArray(request.progressEvents) ? request.progressEvents.slice(-40) : [],
-        phase_history: Array.isArray(request.phaseHistory) ? request.phaseHistory.slice(-40) : [],
-        tool_history: getCanonicalThinkingToolHistory(request).slice(-40),
+        activity_history: Array.isArray(request.activityHistory)
+            ? request.activityHistory.slice(-THINKING_DIAGNOSTICS_EXPORT_EVENT_LIMIT)
+            : [],
+        progress_events: Array.isArray(request.progressEvents)
+            ? request.progressEvents.slice(-THINKING_DIAGNOSTICS_EXPORT_EVENT_LIMIT)
+            : [],
+        phase_history: Array.isArray(request.phaseHistory)
+            ? request.phaseHistory.slice(-THINKING_DIAGNOSTICS_EXPORT_PHASE_HISTORY_LIMIT)
+            : [],
+        tool_history: getCanonicalThinkingToolHistory(request).slice(-THINKING_DIAGNOSTICS_EXPORT_EVENT_LIMIT),
         workflow_discovery: request.workflowDiscovery || null,
         workflow_stage_path: request.workflowStagePath || null,
         stage_diagnostics: buildThinkingStageDiagnosticsSnapshot(request)
@@ -19077,6 +19242,8 @@ async function handleSendPrompt(options = {}) {
         workflowStagePath: null,
         latestProgress: null,
         progressEvents: [],
+        phaseHistory: [],
+        stageDiagnostics: [],
         thinkingCardDisplayState: reduceThinkingCardDisplayState(null, { type: 'reset_for_active' })
     };
     activeChatRequest = request;
