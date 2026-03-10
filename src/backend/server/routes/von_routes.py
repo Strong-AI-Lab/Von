@@ -199,6 +199,10 @@ if _TOOL_PROGRESS_WAITING_THRESHOLD_SEC >= _TOOL_PROGRESS_STALL_THRESHOLD_SEC:
         _TOOL_PROGRESS_WAITING_THRESHOLD_SEC + _TOOL_PROGRESS_HEARTBEAT_INTERVAL_SEC
     )
 
+_TOOL_PROGRESS_WINDOW_SCOPE_PREFIX = "anon:window:"
+_TOOL_PROGRESS_SESSION_SCOPE_PREFIX = "anon:session:"
+_WINDOW_SESSION_HEADER_NAME = "X-Von-Window-Session"
+
 
 def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -1795,11 +1799,23 @@ def _slugify_concept_id_for_key(concept_id: str) -> str:
     return cleaned or "unknown"
 
 
+def _normalise_tool_progress_window_session_id(value: Any) -> str | None:
+    clean_value = _progress_str(value)
+    if not clean_value:
+        return None
+    if len(clean_value) > 200:
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9._:-]+", clean_value):
+        return None
+    return clean_value
+
+
 def _get_tool_progress_scope_key() -> str:
     """Return a stable scope key for tool-progress lookup.
 
     - Authenticated: scope is user concept id
-    - Unauthenticated: scope is a session-scoped random token
+    - Unauthenticated: scope is the stable window-session header when present,
+      otherwise a legacy Flask-session random token
     """
 
     user_concept_id = None
@@ -1813,10 +1829,16 @@ def _get_tool_progress_scope_key() -> str:
     if isinstance(user_concept_id, str) and user_concept_id.strip():
         return f"user:{user_concept_id.strip()}"
 
+    window_session_id = _normalise_tool_progress_window_session_id(
+        request.headers.get(_WINDOW_SESSION_HEADER_NAME)
+    )
+    if window_session_id:
+        return f"{_TOOL_PROGRESS_WINDOW_SCOPE_PREFIX}{window_session_id}"
+
     if "tool_progress_scope" not in session:
         session["tool_progress_scope"] = secrets.token_urlsafe(16)
 
-    return f"anon:{session.get('tool_progress_scope')}"
+    return f"{_TOOL_PROGRESS_SESSION_SCOPE_PREFIX}{session.get('tool_progress_scope')}"
 
 
 @von_bp.route("/api/files/upload", methods=["POST"])
