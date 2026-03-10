@@ -34,6 +34,7 @@ import {
     __testOnly_renderThinkingCardBodyHTML,
     __testOnly_bindConceptSelectionClicks,
     __testOnly_updateThinkingCardMeta,
+    __testOnly_syncThinkingCanonicalHistoriesFromProgress,
     __testOnly_resetChatConceptMetaCaches,
     formatChatTimestamp,
     sendMessage
@@ -1171,6 +1172,97 @@ describe('thinking activity history normalisation', () => {
                 })
             })
         ]);
+    });
+
+    test('syncs canonical preserved histories from progress payloads', () => {
+        const phaseHistory = Array.from({ length: 45 }, (_, index) => ({
+            phase: `phase_${index}`,
+            phaseLabel: `Phase ${index}`,
+            timestamp: index + 1
+        }));
+        const request = {
+            activityHistory: [{ label: 'Stale row' }],
+            progressEvents: [{ stage: 'stale_stage' }],
+            phaseHistory: [{ phase: 'stale_phase' }],
+            stageDiagnostics: [{ stage_id: 'stale_stage' }]
+        };
+        const progress = {
+            phase_history: phaseHistory,
+            progress_events: [
+                { stage: 'context_build', status: 'phase_transition' },
+                { stage: 'response_finalising', status: 'heartbeat' }
+            ],
+            activity_history: [
+                { stage: 'context_build', label: 'Build context', state: 'success' },
+                { stage: 'response_finalising', label: 'Finalising response', state: 'pending' }
+            ],
+            stage_diagnostics: [
+                { stage_id: 'context_build', stage_label: 'Build context' },
+                { stage_id: 'response_finalising', stage_label: 'Finalising response' }
+            ]
+        };
+
+        expect(__testOnly_syncThinkingCanonicalHistoriesFromProgress(request, progress)).toBe(true);
+        expect(request.phaseHistory).toEqual(progress.phase_history);
+        expect(request.progressEvents).toEqual(progress.progress_events);
+        expect(request.activityHistory).toEqual(progress.activity_history);
+        expect(request.stageDiagnostics).toEqual(progress.stage_diagnostics);
+
+        const diagnosticsPayload = __testOnly_buildThinkingDiagnosticsPayload({
+            ...request,
+            latestProgress: progress,
+            clientRequestId: 'req-canonical',
+            promptRaw: 'https://arxiv.org/abs/2602.20478'
+        });
+        expect(diagnosticsPayload.phase_history).toEqual(progress.phase_history);
+        expect(diagnosticsPayload.progress_events).toEqual(progress.progress_events);
+        expect(diagnosticsPayload.activity_history).toEqual(progress.activity_history);
+        expect(diagnosticsPayload.stage_diagnostics).toEqual([
+            expect.objectContaining({ stage_id: 'context_build' }),
+            expect.objectContaining({ stage_id: 'response_finalising' })
+        ]);
+        expect(diagnosticsPayload.phase_history).toHaveLength(45);
+        expect(diagnosticsPayload.phase_history[0]).toEqual(expect.objectContaining({ phase: 'phase_0' }));
+    });
+
+    test('renders preserved stage diagnostics when workflow stage path is absent', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            latestProgress: {
+                status: 'heartbeat',
+                stage: 'response_finalising'
+            },
+            stageDiagnostics: [
+                {
+                    stage_id: 'context_build',
+                    label: 'Build context',
+                    detail: 'Initialising request context',
+                    state: 'success',
+                    diagnostics: {
+                        stage_id: 'context_build',
+                        stage_label: 'Build context',
+                        stage_event_count: 2,
+                        latest_status: 'thinking'
+                    }
+                },
+                {
+                    stage_id: 'response_finalising',
+                    label: 'Finalising response',
+                    detail: 'Persisting conversation history',
+                    state: 'pending',
+                    diagnostics: {
+                        stage_id: 'response_finalising',
+                        stage_label: 'Finalising response',
+                        stage_event_count: 1,
+                        latest_status: 'heartbeat'
+                    }
+                }
+            ]
+        });
+
+        expect(html).toContain('Build context');
+        expect(html).toContain('Initialising request context');
+        expect(html).toContain('Finalising response');
+        expect(html).toContain('Persisting conversation history');
     });
 
     test('renders canonical workflow stages with selected workflow details', () => {

@@ -809,6 +809,28 @@ def test_live_stage_path_and_stage_diagnostics_survive_long_finalising_heartbeat
     assert stage_diagnostics[2].get("event_count") == (
         von_routes._TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT + 11
     )
+    phase_history = snapshot.get("phase_history")
+    assert isinstance(phase_history, list)
+    assert [entry.get("phase") for entry in phase_history] == [
+        "context_build",
+        "workflow_discovery",
+        "response_finalising",
+    ]
+    progress_events = snapshot.get("progress_events")
+    assert isinstance(progress_events, list)
+    assert [entry.get("stage") for entry in progress_events] == [
+        "context_build",
+        "workflow_discovery",
+        "response_finalising",
+    ]
+    activity_history = snapshot.get("activity_history")
+    assert isinstance(activity_history, list)
+    assert [entry.get("stage") for entry in activity_history] == [
+        "context_build",
+        "workflow_discovery",
+        "response_finalising",
+    ]
+    assert activity_history[-1].get("state") == "pending"
 
     diagnostics = von_routes._build_turn_execution_diagnostics(
         request_id="req-stage-tail",
@@ -827,6 +849,41 @@ def test_live_stage_path_and_stage_diagnostics_survive_long_finalising_heartbeat
     diagnostics_stage_diagnostics = diagnostics.get("stage_diagnostics")
     assert isinstance(diagnostics_stage_diagnostics, list)
     assert [entry.get("stage_id") for entry in diagnostics_stage_diagnostics] == [
+        "context_build",
+        "workflow_discovery",
+        "response_finalising",
+    ]
+    diagnostics_phase_history = diagnostics.get("phase_history")
+    assert isinstance(diagnostics_phase_history, list)
+    assert [entry.get("phase") for entry in diagnostics_phase_history] == [
+        "context_build",
+        "workflow_discovery",
+        "response_finalising",
+    ]
+    diagnostics_progress_events = diagnostics.get("progress_events")
+    assert isinstance(diagnostics_progress_events, list)
+    assert [entry.get("stage") for entry in diagnostics_progress_events] == [
+        "context_build",
+        "workflow_discovery",
+        "response_finalising",
+    ]
+    diagnostics_activity_history = diagnostics.get("activity_history")
+    assert isinstance(diagnostics_activity_history, list)
+    assert [entry.get("stage") for entry in diagnostics_activity_history] == [
+        "context_build",
+        "workflow_discovery",
+        "response_finalising",
+    ]
+    diagnostics_timing = diagnostics.get("timing_breakdown")
+    assert isinstance(diagnostics_timing, dict)
+    diagnostics_stage_rows = diagnostics_timing.get("stages")
+    assert isinstance(diagnostics_stage_rows, list)
+    diagnostics_stage_names = [
+        entry.get("stage")
+        for entry in diagnostics_stage_rows
+        if isinstance(entry, dict)
+    ]
+    assert diagnostics_stage_names[:3] == [
         "context_build",
         "workflow_discovery",
         "response_finalising",

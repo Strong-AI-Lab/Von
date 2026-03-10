@@ -113,6 +113,7 @@ _TOOL_PROGRESS_TERMINAL_PHASES = {
     "terminated",
 }
 _TOOL_PROGRESS_DIAGNOSTIC_EVENT_LIMIT = 80
+_TOOL_PROGRESS_PHASE_HISTORY_LIMIT = 80
 
 _ONBOARDING_WORKFLOW_IDS_ENV = "VON_NEW_MEMBER_ONBOARDING_WORKFLOW_IDS"
 _ONBOARDING_WORKFLOW_KEYWORDS = ("onboard", "onboarding")
@@ -484,25 +485,25 @@ def _serialise_tool_progress_state(
     if workflow_stage_path is None:
         workflow_stage_path = _build_live_workflow_stage_path(payload)
     payload["workflow_stage_path"] = workflow_stage_path
+    diagnostic_events = [
+        cast(dict[str, Any], entry)
+        for entry in payload.get("diagnostic_events", [])
+        if isinstance(entry, dict)
+    ]
+    phase_history = _extract_phase_history_from_progress_state(
+        payload,
+        diagnostic_events=diagnostic_events,
+    )
     workflow_discovery = payload.get("workflow_discovery")
     if isinstance(workflow_discovery, Mapping):
         payload["workflow_discovery"] = _normalise_workflow_discovery_progress_payload(
             workflow_discovery
         )
-    payload["stage_diagnostics"] = _build_turn_execution_stage_diagnostics(
-        diagnostic_events=[
-            cast(dict[str, Any], entry)
-            for entry in payload.get("diagnostic_events", [])
-            if isinstance(entry, dict)
-        ],
+    tool_history = _derive_tool_history_from_diagnostic_events(diagnostic_events)
+    stage_diagnostics = _build_turn_execution_stage_diagnostics(
+        diagnostic_events=diagnostic_events,
         workflow_stage_path=workflow_stage_path,
-        tool_history=_derive_tool_history_from_diagnostic_events(
-            [
-                cast(dict[str, Any], entry)
-                for entry in payload.get("diagnostic_events", [])
-                if isinstance(entry, dict)
-            ]
-        ),
+        tool_history=tool_history,
         tool_observation_summary=_extract_tool_observation_summary_from_progress(payload),
         workflow_discovery=(
             cast(dict[str, Any], payload["workflow_discovery"])
@@ -511,7 +512,19 @@ def _serialise_tool_progress_state(
         ),
         latest_progress=payload,
     )
+    payload["phase_history"] = phase_history
+    payload["progress_events"] = _build_progress_events_from_phase_history(
+        phase_history,
+        latest_progress=payload,
+    )
+    payload["stage_diagnostics"] = stage_diagnostics
+    payload["activity_history"] = _build_activity_history_from_phase_history(
+        phase_history,
+        stage_diagnostics=stage_diagnostics,
+        latest_progress=payload,
+    )
     payload.pop("_workflow_runtime_stages", None)
+    payload.pop("_phase_history", None)
     payload.pop("_stage_summaries", None)
 
     return payload
@@ -821,6 +834,230 @@ def _derive_phase_history_from_diagnostic_events(
         last_phase = phase
 
     return phase_history[-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT :]
+
+
+def _normalise_phase_history_entries(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    normalised: list[dict[str, Any]] = []
+    for raw_entry in value:
+        if not isinstance(raw_entry, Mapping):
+            continue
+
+        phase = _progress_str(raw_entry.get("phase")) or _progress_str(raw_entry.get("stage"))
+        if not phase:
+            continue
+
+        timestamp = _progress_number(raw_entry.get("timestamp"))
+        at_utc = _progress_str(raw_entry.get("at_utc"))
+        if timestamp is None and at_utc:
+            timestamp = _iso_utc_to_epoch_ms(at_utc)
+        if timestamp is None:
+            continue
+
+        stage_id = _canonicalise_live_runtime_stage(phase) or phase
+        phase_label = (
+            _progress_str(raw_entry.get("phaseLabel"))
+            or _progress_str(raw_entry.get("phase_label"))
+            or _progress_str(raw_entry.get("stage_label"))
+            or _default_stage_label(stage_id)
+        )
+        normalised.append(
+            {
+                "phase": phase,
+                "phaseLabel": phase_label,
+                "timestamp": int(max(0.0, timestamp)),
+                "at_utc": at_utc,
+                "sequence_no": int(max(0.0, _progress_number(raw_entry.get("sequence_no")) or 0))
+                or None,
+            }
+        )
+
+    return normalised[-_TOOL_PROGRESS_PHASE_HISTORY_LIMIT :]
+
+
+def _append_preserved_phase_history_entry(
+    entries: list[dict[str, Any]],
+    *,
+    phase: str | None,
+    phase_label: str | None,
+    timestamp_ms: int,
+    at_utc: str | None,
+    sequence_no: int | None,
+) -> list[dict[str, Any]]:
+    clean_phase = _progress_str(phase)
+    if not clean_phase:
+        return entries
+
+    updated = [dict(entry) for entry in entries if isinstance(entry, Mapping)]
+    clean_stage_id = _canonicalise_live_runtime_stage(clean_phase) or clean_phase
+    clean_phase_label = _progress_str(phase_label) or _default_stage_label(clean_stage_id)
+    clean_timestamp = int(max(0, timestamp_ms))
+    clean_sequence_no = int(max(0, sequence_no)) if isinstance(sequence_no, int) else None
+
+    if updated:
+        last_entry = updated[-1]
+        last_phase = _progress_str(last_entry.get("phase"))
+        if last_phase == clean_phase:
+            if not _progress_str(last_entry.get("phaseLabel")):
+                last_entry["phaseLabel"] = clean_phase_label
+            if not _progress_str(last_entry.get("at_utc")) and at_utc:
+                last_entry["at_utc"] = at_utc
+            if _progress_number(last_entry.get("timestamp")) is None:
+                last_entry["timestamp"] = clean_timestamp
+            if clean_sequence_no is not None and _progress_number(
+                last_entry.get("sequence_no")
+            ) is None:
+                last_entry["sequence_no"] = clean_sequence_no
+            return updated[-_TOOL_PROGRESS_PHASE_HISTORY_LIMIT :]
+
+    updated.append(
+        {
+            "phase": clean_phase,
+            "phaseLabel": clean_phase_label,
+            "timestamp": clean_timestamp,
+            "at_utc": at_utc,
+            "sequence_no": clean_sequence_no,
+        }
+    )
+    return updated[-_TOOL_PROGRESS_PHASE_HISTORY_LIMIT :]
+
+
+def _extract_phase_history_from_progress_state(
+    progress_state: Mapping[str, Any] | None,
+    *,
+    diagnostic_events: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    if isinstance(progress_state, Mapping):
+        preserved_entries = _normalise_phase_history_entries(progress_state.get("_phase_history"))
+        if preserved_entries:
+            return preserved_entries
+
+        payload_entries = _normalise_phase_history_entries(progress_state.get("phase_history"))
+        if payload_entries:
+            return payload_entries
+
+    return _derive_phase_history_from_diagnostic_events(diagnostic_events or [])
+
+
+def _build_progress_events_from_phase_history(
+    phase_history: list[dict[str, Any]],
+    *,
+    latest_progress: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if not phase_history:
+        return []
+
+    latest_payload = latest_progress if isinstance(latest_progress, Mapping) else {}
+    latest_stage = _canonicalise_live_runtime_stage(
+        _progress_str(latest_payload.get("phase")) or _progress_str(latest_payload.get("stage"))
+    )
+    latest_status = _progress_str(latest_payload.get("status"))
+    latest_liveness_state = _progress_str(latest_payload.get("liveness_state"))
+    latest_idle_ms = _progress_number(latest_payload.get("idle_ms"))
+    latest_subtask = _progress_str(latest_payload.get("subtask")) or _progress_str(
+        latest_payload.get("tool")
+    ) or _progress_str(latest_payload.get("workflow_task"))
+    goal_label = _normalise_progress_goal_label(latest_payload.get("goal_label"))
+
+    progress_events: list[dict[str, Any]] = []
+    for index, entry in enumerate(phase_history):
+        phase = _progress_str(entry.get("phase"))
+        if not phase:
+            continue
+        stage_id = _canonicalise_live_runtime_stage(phase) or phase
+        is_latest = index == len(phase_history) - 1
+        progress_events.append(
+            {
+                "at_utc": _progress_str(entry.get("at_utc")),
+                "status": latest_status if is_latest and latest_status else "phase_transition",
+                "stage": stage_id,
+                "sequence_no": _progress_number(entry.get("sequence_no")),
+                "liveness_state": latest_liveness_state
+                if is_latest and latest_liveness_state
+                else "active",
+                "idle_ms": int(max(0.0, latest_idle_ms))
+                if is_latest and latest_idle_ms is not None
+                else 0,
+                "subtask": latest_subtask if is_latest and latest_subtask else None,
+                "goal_label": goal_label,
+            }
+        )
+
+    if latest_stage and progress_events:
+        progress_events[-1]["stage"] = latest_stage
+
+    return progress_events[-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT :]
+
+
+def _build_activity_history_from_phase_history(
+    phase_history: list[dict[str, Any]],
+    *,
+    stage_diagnostics: list[dict[str, Any]],
+    latest_progress: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if not phase_history:
+        return []
+
+    latest_payload = latest_progress if isinstance(latest_progress, Mapping) else {}
+    latest_stage = _canonicalise_live_runtime_stage(
+        _progress_str(latest_payload.get("phase")) or _progress_str(latest_payload.get("stage"))
+    )
+    latest_status = (_progress_str(latest_payload.get("status")) or "").lower()
+    stage_diagnostic_map = {
+        _canonicalise_live_runtime_stage(entry.get("stage_id")) or _progress_str(entry.get("stage_id")): entry
+        for entry in stage_diagnostics
+        if isinstance(entry, Mapping)
+    }
+
+    activity_history: list[dict[str, Any]] = []
+    for index, entry in enumerate(phase_history):
+        phase = _progress_str(entry.get("phase"))
+        if not phase:
+            continue
+        stage_id = _canonicalise_live_runtime_stage(phase) or phase
+        stage_diagnostic = stage_diagnostic_map.get(stage_id) or {}
+        is_latest = index == len(phase_history) - 1
+        state = "success"
+        if is_latest:
+            if latest_status in {"error", "failed", "cancelled"}:
+                state = "failure"
+            else:
+                state = "pending"
+
+        activity_history.append(
+            {
+                "sequenceNo": _progress_number(entry.get("sequence_no")),
+                "atUtc": _progress_str(entry.get("at_utc")),
+                "stage": stage_id,
+                "status": _progress_str(stage_diagnostic.get("latest_status"))
+                or ("heartbeat" if is_latest and latest_status == "heartbeat" else "phase_transition"),
+                "eventKind": "phase_transition",
+                "label": _progress_str(entry.get("phaseLabel"))
+                or _progress_str(stage_diagnostic.get("stage_label"))
+                or _default_stage_label(stage_id),
+                "detail": _progress_str(stage_diagnostic.get("latest_result_summary"))
+                or _progress_str(stage_diagnostic.get("latest_error")),
+                "detailHtml": "",
+                "state": state,
+                "isLowLevel": False,
+                "groupCount": 1,
+                "subtask": (
+                    _progress_str(latest_payload.get("subtask"))
+                    or _progress_str(latest_payload.get("tool"))
+                    or _progress_str(latest_payload.get("workflow_task"))
+                )
+                if is_latest
+                else None,
+                "model": _progress_str(latest_payload.get("model")) if is_latest else None,
+            }
+        )
+
+    if latest_stage and activity_history:
+        activity_history[-1]["stage"] = latest_stage
+
+    return activity_history[-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT :]
 
 
 def _derive_tool_history_from_diagnostic_events(
@@ -1303,7 +1540,10 @@ def _build_turn_execution_diagnostics(
     if effective_request_id is None and isinstance(latest_progress, dict):
         effective_request_id = _progress_str(latest_progress.get("request_id"))
 
-    phase_history = _derive_phase_history_from_diagnostic_events(diagnostic_events)
+    phase_history = _extract_phase_history_from_progress_state(
+        latest_progress,
+        diagnostic_events=diagnostic_events,
+    )
     runtime_stages = [entry.get("phase") for entry in phase_history]
     selected_workflow_id = (
         _progress_str(latest_progress.get("selected_workflow_id"))
@@ -1349,6 +1589,15 @@ def _build_turn_execution_diagnostics(
         workflow_discovery=workflow_payload,
         latest_progress=latest_progress,
     )
+    progress_events = _build_progress_events_from_phase_history(
+        phase_history,
+        latest_progress=latest_progress,
+    )
+    activity_history = _build_activity_history_from_phase_history(
+        phase_history,
+        stage_diagnostics=stage_diagnostics,
+        latest_progress=latest_progress,
+    )
 
     return {
         "generated_at_utc": _progress_str(generated_at_utc) or _now_utc_iso(),
@@ -1358,9 +1607,8 @@ def _build_turn_execution_diagnostics(
         "elapsed_ms": elapsed_ms_value,
         "prompt_preview": prompt_preview,
         "latest_progress": latest_progress,
-        "progress_events": _normalise_progress_events_from_diagnostic_events(
-            diagnostic_events
-        ),
+        "progress_events": progress_events,
+        "activity_history": activity_history,
         "phase_history": phase_history,
         "tool_history": tool_history,
         "tool_call_count": int(_progress_number(tool_observation_summary.get("tool_call_count")) or 0),
@@ -2373,6 +2621,17 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
             _progress_str(merged.get("phase")) or _progress_str(merged.get("stage")),
         )
         merged["_workflow_runtime_stages"] = runtime_stages
+        phase_history = _normalise_phase_history_entries(existing.get("_phase_history"))
+        phase_history = _append_preserved_phase_history_entry(
+            phase_history,
+            phase=_progress_str(merged.get("phase")) or _progress_str(merged.get("stage")),
+            phase_label=_progress_str(merged.get("phase_label"))
+            or _progress_str(merged.get("stage_label")),
+            timestamp_ms=int(now_epoch * 1000.0),
+            at_utc=now_utc,
+            sequence_no=sequence_no,
+        )
+        merged["_phase_history"] = phase_history
         merged["workflow_stage_path"] = _build_live_workflow_stage_path_from_runtime_stages(
             runtime_stages,
             _progress_str(merged.get("selected_workflow_id")),
