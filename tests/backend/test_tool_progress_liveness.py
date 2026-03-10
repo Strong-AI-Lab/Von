@@ -154,6 +154,116 @@ def test_progress_endpoint_pending_response_includes_explanatory_payload(
     assert "No live progress state is visible yet" in str(body.get("result_summary"))
 
 
+def test_progress_endpoint_uses_window_session_scope_for_anonymous_requests(
+    monkeypatch,
+) -> None:
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.register_blueprint(von_routes.von_bp, url_prefix="/von")
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_show_tool_use_during_thinking",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: None,
+    )
+
+    window_session_id = "ws_progress_visibility_race"
+    with app.test_request_context(
+        "/von/generate",
+        headers={"X-Von-Window-Session": window_session_id},
+    ):
+        scope_key = von_routes._get_tool_progress_scope_key()
+
+    assert scope_key == f"anon:window:{window_session_id}"
+
+    von_routes._set_tool_progress(
+        scope_key,
+        "req-window-scope",
+        {
+            "status": "thinking",
+            "phase": "workflow_discovery",
+            "phase_label": "Searching for workflows",
+            "request_id": "req-window-scope",
+            "goal_label": "https://arxiv.org/abs/2602.20478",
+        },
+    )
+
+    with von_routes._TOOL_PROGRESS_LOCK:
+        von_routes._TOOL_PROGRESS.clear()
+
+    client = app.test_client()
+    with client.session_transaction() as flask_session:
+        flask_session["tool_progress_scope"] = "legacy_cookie_scope"
+
+    response = client.get(
+        "/von/progress/req-window-scope",
+        headers={"X-Von-Window-Session": window_session_id},
+    )
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    assert body.get("request_id") == "req-window-scope"
+    assert body.get("stage") == "workflow_discovery"
+    assert body.get("phase_label") == "Searching for workflows"
+    assert body.get("goal_label") == "https://arxiv.org/abs/2602.20478"
+
+
+def test_progress_endpoint_retains_legacy_session_scope_without_window_header(
+    monkeypatch,
+) -> None:
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.register_blueprint(von_routes.von_bp, url_prefix="/von")
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_show_tool_use_during_thinking",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: None,
+    )
+
+    client = app.test_client()
+    with client.session_transaction() as flask_session:
+        flask_session["tool_progress_scope"] = "legacy_cookie_scope"
+
+    with app.test_request_context("/von/generate"):
+        from flask import session as request_session
+
+        request_session["tool_progress_scope"] = "legacy_cookie_scope"
+        scope_key = von_routes._get_tool_progress_scope_key()
+
+    assert scope_key == "anon:session:legacy_cookie_scope"
+
+    von_routes._set_tool_progress(
+        scope_key,
+        "req-legacy-scope",
+        {
+            "status": "thinking",
+            "phase": "context_build",
+            "phase_label": "Building context",
+            "request_id": "req-legacy-scope",
+        },
+    )
+
+    with von_routes._TOOL_PROGRESS_LOCK:
+        von_routes._TOOL_PROGRESS.clear()
+
+    response = client.get("/von/progress/req-legacy-scope")
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    assert body.get("request_id") == "req-legacy-scope"
+    assert body.get("stage") == "context_build"
+    assert body.get("phase_label") == "Building context"
+
+
 def test_response_finalising_payload_includes_useful_detail() -> None:
     payload = von_routes._build_response_finalising_tool_progress_payload(
         request_id="req-finalise",
