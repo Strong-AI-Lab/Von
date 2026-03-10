@@ -369,6 +369,34 @@ def test_upload_returns_error_when_blob_store_fails(app, monkeypatch):
     assert workflow_calls == []
 
 
+def test_upload_returns_error_when_blob_store_initialisation_fails(app, monkeypatch):
+    client = app.test_client()
+
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#user"
+        sess["session_id"] = "test-session"
+
+    def boom():
+        raise ValueError(
+            "OpenStack cloud was not found for OS_CLOUD='catalystcloud'. Available clouds: ['envvars']."
+        )
+
+    monkeypatch.setattr("src.backend.services.blob_store.get_blob_store_from_env", boom)
+
+    resp = client.post(
+        "/von/api/files/upload",
+        data={"file": (io.BytesIO(b"hello"), "hello.txt")},
+        content_type="multipart/form-data",
+    )
+
+    assert resp.status_code == 502
+    body = resp.get_json()
+    assert body["success"] is False
+    assert body["error"] == "blob_store_upload_failed"
+    assert "Blob store initialisation failed" in body["message"]
+    assert "OS_CLOUD" in body["message"]
+
+
 def test_file_copy_delete_removes_blob_and_concept(app):
     client = app.test_client()
 

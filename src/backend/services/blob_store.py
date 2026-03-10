@@ -173,6 +173,33 @@ class SwiftBlobStore:
 
         self._conn = self._create_connection()
 
+    def _create_connection_from_envvars(self, connection_mod):
+        def _require(name: str) -> str:
+            value = os.environ.get(name)
+            if not value:
+                raise ValueError(
+                    f"Missing required environment variable for Swift auth: {name}"
+                )
+            return value
+
+        auth_url = _require("OS_AUTH_URL")
+        username = _require("OS_USERNAME")
+        password = _require("OS_PASSWORD")
+        project_name = _require("OS_PROJECT_NAME")
+        user_domain_name = os.environ.get("OS_USER_DOMAIN_NAME", "Default")
+        project_domain_name = os.environ.get("OS_PROJECT_DOMAIN_NAME", "Default")
+        region_name = os.environ.get("OS_REGION_NAME")
+
+        return connection_mod.Connection(
+            auth_url=auth_url,
+            username=username,
+            password=password,
+            project_name=project_name,
+            user_domain_name=user_domain_name,
+            project_domain_name=project_domain_name,
+            region_name=region_name,
+        )
+
     def _create_connection(self):
         # Import lazily via importlib so type-checking doesn't require
         # openstacksdk unless Swift support is actually used.
@@ -208,6 +235,25 @@ class SwiftBlobStore:
                     except Exception:
                         available = []
 
+                    # If explicit cloud profile lookup fails but envvars profile is
+                    # present, fall back to environment-variable auth. This keeps
+                    # uploads resilient when OS_CLOUD is stale/mistyped.
+                    if "envvars" in {str(name).strip().lower() for name in available}:
+                        try:
+                            return self._create_connection_from_envvars(connection_mod)
+                        except Exception as env_exc:
+                            msg = (
+                                "OpenStack cloud was not found for OS_CLOUD="
+                                f"{self._cloud!r}, and fallback to env-var auth failed: "
+                                f"{env_exc}. "
+                                "Set OS_CLOUD to a configured cloud name in clouds.yaml "
+                                "(or set OS_CLIENT_CONFIG_FILE to point at clouds.yaml), "
+                                "or configure OS_AUTH_URL/OS_USERNAME/etc instead."
+                            )
+                            if available:
+                                msg += f" Available clouds: {available!r}."
+                            raise ValueError(msg) from env_exc
+
                     msg = (
                         "OpenStack cloud was not found for OS_CLOUD="
                         f"{self._cloud!r}. "
@@ -220,31 +266,7 @@ class SwiftBlobStore:
                     raise ValueError(msg) from exc
                 raise
 
-        def _require(name: str) -> str:
-            value = os.environ.get(name)
-            if not value:
-                raise ValueError(
-                    f"Missing required environment variable for Swift auth: {name}"
-                )
-            return value
-
-        auth_url = _require("OS_AUTH_URL")
-        username = _require("OS_USERNAME")
-        password = _require("OS_PASSWORD")
-        project_name = _require("OS_PROJECT_NAME")
-        user_domain_name = os.environ.get("OS_USER_DOMAIN_NAME", "Default")
-        project_domain_name = os.environ.get("OS_PROJECT_DOMAIN_NAME", "Default")
-        region_name = os.environ.get("OS_REGION_NAME")
-
-        return connection_mod.Connection(
-            auth_url=auth_url,
-            username=username,
-            password=password,
-            project_name=project_name,
-            user_domain_name=user_domain_name,
-            project_domain_name=project_domain_name,
-            region_name=region_name,
-        )
+        return self._create_connection_from_envvars(connection_mod)
 
     def _full_key(self, key: str) -> str:
         safe_key = _normalise_key(key)

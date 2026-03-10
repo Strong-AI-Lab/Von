@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -138,3 +139,56 @@ def test_swift_blob_store_delete_uses_delete_object_obj_signature():
     assert store._conn.object_store.calls == [
         ("demo/thing.txt", "demo-container", True)
     ]
+
+
+def test_swift_blob_store_cloud_not_found_falls_back_to_envvars(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import importlib as _importlib
+
+    class ConfigException(Exception):
+        pass
+
+    class _DummyConnection:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class _DummyCloud:
+        def __init__(self, name: str):
+            self.name = name
+
+    class _DummyOpenStackConfig:
+        def get_all_clouds(self):
+            return [_DummyCloud("envvars")]
+
+    def _fake_connect(*, cloud):
+        raise ConfigException(f"Cloud {cloud} was not found.")
+
+    openstack_mod = SimpleNamespace(connect=_fake_connect)
+    connection_mod = SimpleNamespace(Connection=_DummyConnection)
+    config_mod = SimpleNamespace(OpenStackConfig=_DummyOpenStackConfig)
+
+    real_import_module = _importlib.import_module
+
+    def _fake_import_module(name: str, package: str | None = None):
+        if name == "openstack":
+            return openstack_mod
+        if name == "openstack.connection":
+            return connection_mod
+        if name == "openstack.config":
+            return config_mod
+        return real_import_module(name, package)
+
+    monkeypatch.setattr(_importlib, "import_module", _fake_import_module)
+    monkeypatch.setenv("OS_AUTH_URL", "https://identity.example/v3")
+    monkeypatch.setenv("OS_USERNAME", "demo-user")
+    monkeypatch.setenv("OS_PASSWORD", "demo-pass")
+    monkeypatch.setenv("OS_PROJECT_NAME", "demo-project")
+    monkeypatch.setenv("OS_USER_DOMAIN_NAME", "Default")
+    monkeypatch.setenv("OS_PROJECT_DOMAIN_NAME", "Default")
+
+    store = SwiftBlobStore(container="demo-container", cloud="catalystcloud")
+    assert isinstance(store._conn, _DummyConnection)
+    assert store._conn.kwargs["auth_url"] == "https://identity.example/v3"
+    assert store._conn.kwargs["username"] == "demo-user"
+    assert store._conn.kwargs["project_name"] == "demo-project"

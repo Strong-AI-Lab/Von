@@ -50,7 +50,10 @@ def put_bytes_durable(
     # Import at call-time so tests can monkeypatch blob_store.get_blob_store_from_env.
     from .blob_store import get_blob_store_from_env
 
-    store = get_blob_store_from_env()
+    try:
+        store = get_blob_store_from_env()
+    except Exception as exc:
+        raise BlobUploadError(f"Blob store initialisation failed: {exc}") from exc
 
     try:
         ref = store.put_bytes(key, data_bytes, content_type=content_type, metadata=meta)
