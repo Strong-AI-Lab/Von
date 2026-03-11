@@ -47,6 +47,7 @@ def test_create_chat_session_sets_name_and_namespace(monkeypatch):
     doc = stored[("#V#user", "s-1")]
     assert doc["session_name"] == "My chat"
     assert doc["namespace"] == "#V#user@org"
+    assert doc["history"] == []
 
 
 def test_rename_chat_session_updates_name(monkeypatch):

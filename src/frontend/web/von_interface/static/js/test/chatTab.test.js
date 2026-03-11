@@ -2,11 +2,17 @@ import {
     __testOnly_buildThinkingProgressPresentation,
     __testOnly_buildThinkingDiagnosticsPayload,
     __testOnly_buildWorkflowMonitorExportPayload,
+    __testOnly_loadChatHistory,
     __testOnly_refreshAvailableWorkflowDefinitions,
+    __testOnly_refreshWorkflowStatusSnapshot,
+    __testOnly_resetHistoryUiState,
     __testOnly_resetWorkflowDefinitionsState,
+    __testOnly_resetWorkflowStatusState,
     __testOnly_formatAbsoluteTimestamp,
     __testOnly_formatThinkingEtaText,
     __testOnly_renderWorkflowDefinitionsBody,
+    __testOnly_setActiveChatSession,
+    __testOnly_setDisplayedHistorySession,
     __testOnly_setUnambiguousTimestampTooltip,
     __testOnly_setWorkflowShowDesigns,
     __testOnly_buildWorkflowStatusQuery,
@@ -775,6 +781,199 @@ describe('workflow monitor definitions refresh contention handling', () => {
             'workflow_definitions_fetch_failed'
         );
         expect(exportPayload.definitions_snapshot.payload.status).toBe(500);
+    });
+});
+
+describe('workflow monitor active snapshot degradation handling', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <div id="workflowStatusPanel"></div>
+            <div id="workflowStatusBody"></div>
+            <button id="workflowStatusRefresh"></button>
+            <button id="workflowStatusToggleAvailable"></button>
+            <input id="workflowStatusShowDesigns" type="checkbox" />
+        `;
+        __testOnly_resetWorkflowDefinitionsState();
+        __testOnly_resetWorkflowStatusState();
+    });
+
+    afterEach(() => {
+        delete global.fetch;
+        __testOnly_resetWorkflowDefinitionsState();
+        __testOnly_resetWorkflowStatusState();
+    });
+
+    test('shows retryable snapshot degradation without blanking last loaded active workflows', async () => {
+        global.fetch = jest.fn(() => Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                items: [
+                    {
+                        instance_id: 'wf-1',
+                        workflow_id: '#V#demo_retry_workflow',
+                        status: 'running',
+                        current_state: 'waiting_for_input',
+                        progress: { current: 1, total: 2 }
+                    }
+                ]
+            })
+        }));
+
+        await __testOnly_refreshWorkflowStatusSnapshot();
+        expect(document.getElementById('workflowStatusBody').textContent).toContain(
+            'demo retry workflow'
+        );
+
+        global.fetch = jest.fn(() => Promise.resolve({
+            ok: false,
+            status: 503,
+            json: async () => ({
+                items: [],
+                count: 0,
+                degraded: true,
+                retryable: true,
+                error: 'Workflow monitor temporarily unavailable; please retry.',
+                detail: 'server selection timeout while reading workflow_instances'
+            })
+        }));
+
+        await __testOnly_refreshWorkflowStatusSnapshot();
+
+        const bodyText = document.getElementById('workflowStatusBody').textContent;
+        expect(bodyText).toContain('Workflow monitor temporarily unavailable');
+        expect(bodyText).toContain('demo retry workflow');
+        const payload = __testOnly_buildWorkflowMonitorExportPayload();
+        expect(payload.monitor_state.active_notice).toContain(
+            'Workflow monitor temporarily unavailable'
+        );
+        expect(payload.active_instances_snapshot.payload.retryable).toBe(true);
+    });
+});
+
+describe('loadChatHistory degraded handling', () => {
+    beforeEach(() => {
+        const { getUserContext, postJson } = require('../apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: '#V#user',
+            org_id: '#V#org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+        postJson.mockResolvedValue({ status: 'updated' });
+        document.body.innerHTML = `
+            <div id="scrollableField"><div class="message-container">Kept content</div></div>
+            <div id="historyBanner" class="history-banner hidden">
+                <span id="historyBannerText"></span>
+                <button id="loadOlderHistoryBtn" type="button"></button>
+            </div>
+            <div id="chat-history-length"></div>
+        `;
+        __testOnly_resetHistoryUiState();
+        __testOnly_setActiveChatSession('session-1', 'Session 1');
+    });
+
+    afterEach(() => {
+        delete global.fetch;
+        __testOnly_resetHistoryUiState();
+        __testOnly_setActiveChatSession(null, null);
+    });
+
+    test('preserves rendered history and surfaces a banner when the backend reports degraded history', async () => {
+        __testOnly_setDisplayedHistorySession('session-1');
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/session/context')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        user_id: '#V#user',
+                        organisation_id: '#V#org',
+                        namespace: '#V#user@org'
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history?')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        history: [],
+                        segments_returned: 0,
+                        total_segments: 0,
+                        has_more_history: false,
+                        degraded: true,
+                        retryable: true,
+                        error: 'Chat history temporarily unavailable; please retry.',
+                        detail: 'read circuit open'
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        history_length: 4,
+                        session_count: 1,
+                        authenticated: true
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        const loaded = await __testOnly_loadChatHistory({ segments: 1 });
+
+        expect(loaded).toBe(false);
+        expect(document.getElementById('scrollableField').textContent).toContain('Kept content');
+        expect(document.getElementById('historyBanner').classList.contains('hidden')).toBe(false);
+        expect(document.getElementById('historyBannerText').textContent).toContain(
+            'temporarily unavailable'
+        );
+    });
+
+    test('treats genuinely empty history as a successful empty load', async () => {
+        __testOnly_setDisplayedHistorySession('session-1');
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/session/context')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        user_id: '#V#user',
+                        organisation_id: '#V#org',
+                        namespace: '#V#user@org'
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history?')) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        history: [],
+                        segments_returned: 0,
+                        total_segments: 0,
+                        has_more_history: false
+                    })
+                });
+            }
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        history_length: 0,
+                        session_count: 1,
+                        authenticated: true
+                    })
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        const loaded = await __testOnly_loadChatHistory({ segments: 1 });
+
+        expect(loaded).toBe(true);
+        expect(document.getElementById('scrollableField').textContent).not.toContain('Kept content');
+        expect(document.getElementById('historyBanner').classList.contains('hidden')).toBe(true);
     });
 });
 
