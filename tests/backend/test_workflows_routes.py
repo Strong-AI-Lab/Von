@@ -6,6 +6,7 @@ import time
 import types
 
 import pytest
+from pymongo.errors import PyMongoError
 
 
 @pytest.fixture()
@@ -686,6 +687,29 @@ def test_trigger_workflow_schedule_route_rejects_unrunnable_workflow(
     assert "workflow_definition_not_registered" in payload["verification"]["preflight"][
         "errors"
     ]
+
+
+def test_list_workflow_instances_returns_retryable_degraded_payload_for_mongo_timeout(
+    monkeypatch, app_client
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    manager = types.SimpleNamespace(
+        list_instances=lambda **kwargs: (_ for _ in ()).throw(
+            PyMongoError("server selection timeout while reading workflow_instances")
+        )
+    )
+    monkeypatch.setattr(workflows_routes, "_get_instance_manager", lambda: manager)
+
+    response = app_client.get("/api/workflows/instances")
+
+    assert response.status_code == 503
+    payload = response.get_json()
+    assert payload["degraded"] is True
+    assert payload["retryable"] is True
+    assert payload["items"] == []
+    assert payload["count"] == 0
+    assert payload["error"] == "Workflow monitor temporarily unavailable; please retry."
 
 
 def test_workflow_definitions_list_uses_short_ttl_cache(monkeypatch, app_client):

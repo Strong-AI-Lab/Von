@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
-from typing import Any, Mapping, cast
+from typing import Any, Dict, Mapping, cast
 from ...workflows.durable.registry_factory import build_workflow_registry_read_only
 from ...workflows.durable.startup import get_instance_manager
 from ...workflows.durable.workflow_instance_submission_service import (
@@ -9570,19 +9570,37 @@ def history():
                 exc_info=True,
             )
             return jsonify(
-                {
-                    "history": [],
-                    "segments_returned": 0,
-                    "total_segments": 0,
-                    "has_more_history": False,
-                    "degraded": True,
-                    "retryable": True,
-                    "error": "Chat history temporarily unavailable; please retry.",
-                    "detail": str(e)[:300],
-                }
+                _build_transient_chat_history_payload(
+                    error_message="Chat history temporarily unavailable; please retry.",
+                    exc=e,
+                    fallback_payload={
+                        "history": [],
+                        "segments_returned": 0,
+                        "total_segments": 0,
+                        "has_more_history": False,
+                    },
+                )
             )
         print(f"Error retrieving history: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+def _build_transient_chat_history_payload(
+    *,
+    error_message: str,
+    exc: Exception,
+    fallback_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    payload = dict(fallback_payload)
+    payload.update(
+        {
+            "degraded": True,
+            "retryable": True,
+            "error": error_message,
+            "detail": str(exc)[:300],
+        }
+    )
+    return payload
 
 
 @von_bp.route("/history/debug", methods=["GET"])
@@ -10108,15 +10126,15 @@ def history_length():
                 exc_info=True,
             )
             return jsonify(
-                {
-                    "history_length": 0,
-                    "session_count": 0,
-                    "authenticated": True,
-                    "degraded": True,
-                    "retryable": True,
-                    "error": "Chat history metrics temporarily unavailable; showing fallback values.",
-                    "detail": str(e)[:300],
-                }
+                _build_transient_chat_history_payload(
+                    error_message="Chat history metrics temporarily unavailable; showing fallback values.",
+                    exc=e,
+                    fallback_payload={
+                        "history_length": 0,
+                        "session_count": 0,
+                        "authenticated": True,
+                    },
+                )
             )
         print(f"Error retrieving history length: {e}")
         return jsonify({"error": str(e)}), 500
@@ -10401,6 +10419,24 @@ def history_sessions():
 
         return jsonify(response_payload)
     except Exception as e:
+        if chat_history_service.is_transient_chat_history_error(e):
+            current_app.logger.warning(
+                "history_sessions degraded due to transient chat history error: %s",
+                e,
+                exc_info=True,
+            )
+            return jsonify(
+                _build_transient_chat_history_payload(
+                    error_message="Conversation list temporarily unavailable; showing fallback state.",
+                    exc=e,
+                    fallback_payload={
+                        "authenticated": True,
+                        "sessions": [],
+                        "active_session_id": session.get("session_id"),
+                        "warnings": ["chat_history_temporarily_unavailable"],
+                    },
+                )
+            )
         current_app.logger.exception("Error retrieving history sessions")
         return jsonify({"error": str(e)}), 500
 

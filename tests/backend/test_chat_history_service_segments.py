@@ -14,6 +14,18 @@ class _FakeCollection:
     def __init__(self, docs):
         self._docs = docs
 
+    def _evaluate_expression(self, doc, expr):
+        if isinstance(expr, str) and expr.startswith("$"):
+            return doc.get(expr[1:])
+        if isinstance(expr, dict) and "$ifNull" in expr:
+            args = expr["$ifNull"]
+            if isinstance(args, list) and len(args) == 2:
+                value = self._evaluate_expression(doc, args[0])
+                if value is not None:
+                    return value
+                return self._evaluate_expression(doc, args[1])
+        return expr
+
     def _matches_query(self, doc, query):
         for key, value in query.items():
             if key == "$or":
@@ -76,8 +88,9 @@ class _FakeCollection:
                             if isinstance(slice_spec, list):
                                 if len(slice_spec) == 2:
                                     source, count = slice_spec
-                                    if isinstance(source, str) and source.startswith("$"):
-                                        history = list(doc.get(source[1:]) or [])
+                                    source_value = self._evaluate_expression(doc, source)
+                                    if isinstance(source_value, list):
+                                        history = list(source_value)
                                         if isinstance(count, int):
                                             history = history[count:] if count < 0 else history[:count]
                                         else:
@@ -89,8 +102,9 @@ class _FakeCollection:
                                         history = history[start : start + count]
                                 elif len(slice_spec) == 3:
                                     source, start, count = slice_spec
-                                    if isinstance(source, str) and source.startswith("$"):
-                                        history = list(doc.get(source[1:]) or [])
+                                    source_value = self._evaluate_expression(doc, source)
+                                    if isinstance(source_value, list):
+                                        history = list(source_value)
                                     if isinstance(start, int) and start < 0:
                                         start = len(history) + start
                                     history = history[start : start + count]
@@ -99,13 +113,8 @@ class _FakeCollection:
                             out[key] = history
                             continue
                         if isinstance(spec, dict) and "$size" in spec:
-                            field = spec["$size"]
-                            if isinstance(field, str) and field.startswith("$"):
-                                field_name = field[1:]
-                                target = doc.get(field_name)
-                                out[key] = len(target) if isinstance(target, list) else 0
-                            else:
-                                out[key] = 0
+                            target = self._evaluate_expression(doc, spec["$size"])
+                            out[key] = len(target) if isinstance(target, list) else 0
                             continue
                         if spec in (1, True):
                             out[key] = doc.get(key)
@@ -311,6 +320,35 @@ def test_get_chat_history_segments_reports_truncation(monkeypatch):
 
     assert isinstance(segments, list)
     assert meta["history_truncated"] is True
+
+
+def test_get_chat_history_segments_handles_missing_history_field_with_tail_limit(
+    monkeypatch,
+):
+    from src.backend.services import chat_history_service
+
+    docs = [
+        {
+            "_id": "1",
+            "user_id": "#V#u",
+            "session_id": "s1",
+        }
+    ]
+
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda **kwargs: _FakeCollection(docs),
+    )
+
+    result = chat_history_service.get_chat_history_segments(
+        "#V#u",
+        "s1",
+        history_tail_limit=25,
+        return_meta=True,
+    )
+
+    assert result == ([], {"history_truncated": False})
 
 
 def test_get_chat_history_segments_offsets_locations_with_tail_limit(monkeypatch):

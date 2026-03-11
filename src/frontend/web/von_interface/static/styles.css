@@ -7026,6 +7026,18 @@ footer {
     font-size: 0.9rem;
 }
 
+.history-banner.is-warning {
+    border-color: #f5d48b;
+    background-color: #fff8e8;
+    color: #92400e;
+}
+
+.history-banner.is-error {
+    border-color: #f2b8b5;
+    background-color: #fff1f2;
+    color: #991b1b;
+}
+
 .history-banner.hidden {
     display: none;
 }

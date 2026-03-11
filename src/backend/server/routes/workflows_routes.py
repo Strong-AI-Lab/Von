@@ -9,6 +9,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from flask import Blueprint, jsonify, request
+from pymongo.errors import (
+    AutoReconnect,
+    ConnectionFailure,
+    NetworkTimeout,
+    PyMongoError,
+    ServerSelectionTimeoutError,
+)
 
 from ...db.repositories.concepts_repository import ConceptsRepository
 from ...services.text_value_service import get_texts_for_concept
@@ -57,6 +64,31 @@ _WORKFLOW_DEFINITIONS_REFRESH_LOCKS: Dict[
 _WORKFLOW_DEFINITIONS_CACHE_MAX_ENTRIES = 32
 _WORKFLOW_DEFINITIONS_CACHE_TTL_SECONDS_DEFAULT = 8.0
 _WORKFLOW_DEFINITIONS_REFRESH_RETRY_AFTER_SECONDS_DEFAULT = 1.0
+
+
+def _is_transient_workflow_instances_error(exc: Exception) -> bool:
+    if isinstance(
+        exc,
+        (
+            NetworkTimeout,
+            ServerSelectionTimeoutError,
+            AutoReconnect,
+            ConnectionFailure,
+            PyMongoError,
+        ),
+    ):
+        return True
+    message = str(exc).lower()
+    transient_markers = (
+        "timed out",
+        "no primary",
+        "replicasetnoprimary",
+        "connection pool paused",
+        "server selection timeout",
+        "networktimeout",
+        "temporarily unavailable",
+    )
+    return any(marker in message for marker in transient_markers)
 
 
 def _read_workflow_definitions_cache_ttl_seconds() -> float:
@@ -759,16 +791,40 @@ def api_list_workflow_instances():
             return jsonify({"error": f"Invalid status: {status_str}"}), 400
 
     manager = _get_instance_manager()
-    instances = manager.list_instances(
-        user_id=user_id,
-        org_id=org_id,
-        namespace=namespace,
-        status=status,
-        workflow_id=workflow_id,
-        source_event_type=source_event_type,
-        source_event_id=source_event_id,
-        limit=limit,
-    )
+    try:
+        instances = manager.list_instances(
+            user_id=user_id,
+            org_id=org_id,
+            namespace=namespace,
+            status=status,
+            workflow_id=workflow_id,
+            source_event_type=source_event_type,
+            source_event_id=source_event_id,
+            limit=limit,
+        )
+    except Exception as exc:
+        if _is_transient_workflow_instances_error(exc):
+            logger.warning(
+                "Workflow instances snapshot degraded due to transient store error: %s",
+                exc,
+                exc_info=True,
+            )
+            response = jsonify(
+                {
+                    "items": [],
+                    "count": 0,
+                    "degraded": True,
+                    "retryable": True,
+                    "retry_after_seconds": 2,
+                    "error": "Workflow monitor temporarily unavailable; please retry.",
+                    "detail": str(exc)[:300],
+                }
+            )
+            response.status_code = 503
+            response.headers["Retry-After"] = "2"
+            return response
+        logger.exception("Failed to list workflow instances")
+        return jsonify({"error": str(exc)}), 500
 
     return jsonify(
         {

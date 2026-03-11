@@ -182,3 +182,49 @@ def test_history_sessions_skips_bad_shared_invite_rows(monkeypatch, app_client):
     assert payload["authenticated"] is True
     assert [s["session_id"] for s in payload["sessions"]] == ["shared-ok"]
     assert "shared_invite_resolution_errors:1" in (payload.get("warnings") or [])
+
+
+def test_history_sessions_returns_degraded_payload_for_transient_history_errors(
+    monkeypatch, app_client
+):
+    _, client = app_client
+    import src.backend.services.chat_history_service as chat_history_service
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#u",
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "get_effective_context",
+        lambda *args, **kwargs: {
+            "user_id": "#V#u",
+            "organisation_id": "#V#org",
+            "role": None,
+            "namespace": "#V#u@org",
+            "chat_session_id": None,
+            "source": "test",
+        },
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "get_chat_history_session_summaries",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            chat_history_service.ChatHistoryServiceError(
+                "read circuit open for 3.0s"
+            )
+        ),
+    )
+
+    response = client.get(
+        "/von/history/sessions?limit=50&summary=light",
+        headers={"X-Von-Window-Session": "ws_test"},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["authenticated"] is True
+    assert payload["degraded"] is True
+    assert payload["retryable"] is True
+    assert payload["sessions"] == []
+    assert "chat_history_temporarily_unavailable" in (payload.get("warnings") or [])

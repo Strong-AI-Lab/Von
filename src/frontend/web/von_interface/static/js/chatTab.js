@@ -74,6 +74,21 @@ let activeChatSessionId = null;
 let activeChatSessionName = null;
 let activeChatSessionOwnerId = null;
 let sessionTabsCache = [];
+let displayedHistorySessionId = null;
+const historyLoadState = {
+    degraded: false,
+    message: '',
+    retryable: false,
+    detail: '',
+    sessionId: null
+};
+const historyMetricsState = {
+    degraded: false,
+    message: '',
+    retryable: false,
+    detail: '',
+    lastHealthy: null
+};
 const sessionHistoryCache = new Map();
 let loadingChatSessionId = null;
 const SESSION_TABS_REFRESH_COOLDOWN_MS = 15_000;
@@ -147,7 +162,10 @@ const workflowStatusStreamState = {
     reconnectAttempts: 0,
     reconnectTimeoutId: null,
     items: new Map(),
-    lastSnapshotAt: 0
+    lastSnapshotAt: 0,
+    snapshotError: '',
+    snapshotNotice: '',
+    lastSnapshotPayload: null
 };
 const workflowDefinitionsState = {
     visible: false,
@@ -1212,6 +1230,64 @@ function rehydrateFromCache(scrollableField, cached) {
     });
     updateHistoryBanner();
     return true;
+}
+
+function normaliseHistorySessionId(sessionId) {
+    return (typeof sessionId === 'string' && sessionId.trim())
+        ? sessionId.trim()
+        : null;
+}
+
+function clearHistoryLoadState({ sessionId = null } = {}) {
+    const normalisedSessionId = normaliseHistorySessionId(sessionId);
+    if (
+        normalisedSessionId
+        && historyLoadState.sessionId
+        && historyLoadState.sessionId !== normalisedSessionId
+    ) {
+        return;
+    }
+    historyLoadState.degraded = false;
+    historyLoadState.message = '';
+    historyLoadState.retryable = false;
+    historyLoadState.detail = '';
+    historyLoadState.sessionId = null;
+}
+
+function setHistoryLoadState({
+    sessionId = null,
+    message = '',
+    retryable = false,
+    detail = ''
+} = {}) {
+    historyLoadState.degraded = true;
+    historyLoadState.message = (typeof message === 'string' && message.trim())
+        ? message.trim()
+        : 'Conversation history temporarily unavailable; please retry.';
+    historyLoadState.retryable = Boolean(retryable);
+    historyLoadState.detail = (typeof detail === 'string' && detail.trim())
+        ? detail.trim()
+        : '';
+    historyLoadState.sessionId = normaliseHistorySessionId(sessionId);
+}
+
+function isHistoryLoadStateActiveForSession(sessionId = null) {
+    if (!historyLoadState.degraded) {
+        return false;
+    }
+    const normalisedSessionId = normaliseHistorySessionId(sessionId);
+    if (!normalisedSessionId || !historyLoadState.sessionId) {
+        return historyLoadState.degraded;
+    }
+    return historyLoadState.sessionId === normalisedSessionId;
+}
+
+function shouldPreserveRenderedHistoryForSession(scrollableField, sessionId) {
+    const normalisedSessionId = normaliseHistorySessionId(sessionId);
+    if (!scrollableField || !normalisedSessionId || displayedHistorySessionId !== normalisedSessionId) {
+        return false;
+    }
+    return Boolean(scrollableField.querySelector('.message-container'));
 }
 
 async function refreshToolUseDuringThinkingSetting(force = false) {
@@ -12152,6 +12228,16 @@ function updateHistoryBanner() {
         return;
     }
 
+    const activeHistoryIssue = isHistoryLoadStateActiveForSession(activeChatSessionId);
+    banner.classList.remove('is-warning', 'is-error');
+    if (activeHistoryIssue) {
+        bannerText.textContent = historyLoadState.message;
+        banner.classList.remove('hidden');
+        banner.classList.add(historyLoadState.retryable ? 'is-warning' : 'is-error');
+        loadButton.disabled = true;
+        return;
+    }
+
     const remainingSegments = Math.max(totalHistorySegments - historySegmentsShown, 0);
 
     if (remainingSegments > 0) {
@@ -13729,6 +13815,22 @@ async function refreshChatSessionTabs() {
             return;
         }
 
+        if (data?.degraded === true) {
+            console.warn('[chatTab] Chat session refresh degraded; keeping existing tabs where possible', {
+                status: response.status,
+                data
+            });
+            if (hasCachedTabs) {
+                renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
+                container.hidden = false;
+            } else {
+                _stopChatTabsLoadingTicker();
+                renderChatSessionTabsPlaceholder('error');
+            }
+            setTimeout(() => scheduleChatSessionTabsRefresh(true), 2000);
+            return;
+        }
+
         if (!response.ok) {
             console.warn('[chatTab] Failed to refresh chat sessions (keeping existing tabs)', {
                 status: response.status,
@@ -14594,6 +14696,8 @@ async function switchToChatSession(sessionId) {
     }
 
     scrollableField.innerHTML = '<div class="chat-session-loading">Switching chat…</div>';
+    displayedHistorySessionId = null;
+    clearHistoryLoadState();
     historySegmentsShown = 0;
     totalHistorySegments = 0;
     updateHistoryBanner();
@@ -14679,6 +14783,10 @@ async function switchToChatSession(sessionId) {
             });
             if (!reused) {
                 scrollableField.innerHTML = '';
+                displayedHistorySessionId = null;
+            } else {
+                displayedHistorySessionId = sid;
+                clearHistoryLoadState({ sessionId: sid });
             }
             setChatSessionTabLoading(sid, false);
         } else {
@@ -14695,7 +14803,7 @@ async function switchToChatSession(sessionId) {
                 duration_ms: recentMs,
                 session_id: sid
             });
-            if (!loaded) {
+            if (!loaded && !isHistoryLoadStateActiveForSession(sid)) {
                 scrollableField.innerHTML = '';
             }
 
@@ -14888,17 +14996,55 @@ async function updateHistoryLength() {
         const response = await fetch('/von/history/length', {
             headers: buildChatFetchHeaders()
         });
-        const data = await response.json();
+        const data = await response.json().catch(() => ({}));
 
         if (response.ok) {
-            const historyLength = data.history_length || 0;
+            const historyLength = Number.isFinite(Number(data?.history_length))
+                ? Number(data.history_length)
+                : 0;
             const sessionCount = (typeof data.session_count === 'number') ? data.session_count : null;
             const authenticated = data.authenticated !== undefined ? data.authenticated : true;
             const historyLengthElement = document.getElementById('chat-history-length');
             if (historyLengthElement) {
                 if (!authenticated) {
+                    historyMetricsState.degraded = false;
+                    historyMetricsState.lastHealthy = null;
                     historyLengthElement.textContent = 'History: unauthenticated';
+                    historyLengthElement.title = 'Conversation history unavailable until you log in.';
+                } else if (data?.degraded === true) {
+                    historyMetricsState.degraded = true;
+                    historyMetricsState.message = (typeof data?.error === 'string' && data.error.trim())
+                        ? data.error.trim()
+                        : 'Conversation history metrics temporarily unavailable.';
+                    historyMetricsState.retryable = Boolean(data?.retryable);
+                    historyMetricsState.detail = (typeof data?.detail === 'string' && data.detail.trim())
+                        ? data.detail.trim()
+                        : '';
+                    const contextCount = transcriptTurns.length;
+                    const cached = (
+                        historyMetricsState.lastHealthy
+                        && typeof historyMetricsState.lastHealthy === 'object'
+                    ) ? historyMetricsState.lastHealthy : null;
+                    if (cached) {
+                        const conversationsText = cached.sessionCount === null
+                            ? '- conversations'
+                            : `${cached.sessionCount} conversations`;
+                        historyLengthElement.textContent = `History: ${conversationsText} | this ${contextCount} (stale)`;
+                        historyLengthElement.title = `${historyMetricsState.message} Showing last loaded totals: ${cached.sessionCount ?? '—'} conversations • ${cached.historyLength ?? '—'} messages.`;
+                    } else {
+                        historyLengthElement.textContent = `History: temporarily unavailable | this ${contextCount}`;
+                        historyLengthElement.title = historyMetricsState.message;
+                    }
                 } else {
+                    historyMetricsState.degraded = false;
+                    historyMetricsState.message = '';
+                    historyMetricsState.retryable = false;
+                    historyMetricsState.detail = '';
+                    historyMetricsState.lastHealthy = {
+                        historyLength,
+                        sessionCount,
+                        authenticated: true
+                    };
                     const contextCount = transcriptTurns.length;
                     const conversationsText = (sessionCount === null) ? '- conversations' : `${sessionCount} conversations`;
                     historyLengthElement.textContent = `History: ${conversationsText} | this ${contextCount}`;
@@ -15115,7 +15261,9 @@ async function loadChatHistory(options = {}) {
 
     await _ensureInviteSessionContext();
 
-    const requestedSessionId = activeChatSessionId;
+    const requestedSessionId = normaliseHistorySessionId(activeChatSessionId);
+    clearHistoryLoadState({ sessionId: requestedSessionId });
+    updateHistoryBanner();
     abortActiveHistoryRequest();
     const requestId = ++historyRequestCounter;
     const abortController = new AbortController();
@@ -15157,7 +15305,7 @@ async function loadChatHistory(options = {}) {
             signal: abortController.signal,
             headers: buildChatFetchHeaders()
         });
-        const data = await response.json();
+        const data = await response.json().catch(() => ({}));
 
         if (!activeHistoryRequest || activeHistoryRequest.id !== requestId) {
             return false;
@@ -15166,9 +15314,42 @@ async function loadChatHistory(options = {}) {
             return false;
         }
 
+        const targetSessionId = normaliseHistorySessionId(requestedSessionId || activeChatSessionId);
+        const canPreserveRenderedHistory = shouldPreserveRenderedHistoryForSession(
+            scrollableField,
+            targetSessionId
+        );
+
         console.log(`[chatTab] loadChatHistory response: ok=${response.ok}, segments=${data.segments_returned}, total=${data.total_segments}, history_len=${data.history ? data.history.length : 'undefined'}`);
 
-        if (response.ok && data.history && Array.isArray(data.history)) {
+        if (data?.degraded === true) {
+            const degradedMessage = (typeof data?.error === 'string' && data.error.trim())
+                ? data.error.trim()
+                : 'Conversation history temporarily unavailable; please retry.';
+            setHistoryLoadState({
+                sessionId: targetSessionId,
+                message: degradedMessage,
+                retryable: Boolean(data?.retryable),
+                detail: typeof data?.detail === 'string' ? data.detail : ''
+            });
+            if (!canPreserveRenderedHistory) {
+                scrollableField.innerHTML = `<div class="chat-session-loading">${escapeHtml(degradedMessage)}</div>`;
+                displayedHistorySessionId = null;
+            }
+            console.warn('[chatTab] loadChatHistory degraded', {
+                session_id: targetSessionId,
+                status: response.status,
+                retryable: Boolean(data?.retryable),
+                detail: data?.detail || null
+            });
+            updateHistoryBanner();
+            if (activeHistoryRequest && activeHistoryRequest.id === requestId) {
+                activeHistoryRequest = null;
+            }
+            return false;
+        }
+
+        if (response.ok && Array.isArray(data?.history)) {
             const historyMessages = filterRecentPair
                 ? selectRecentChatPair(data.history)
                 : data.history;
@@ -15188,6 +15369,8 @@ async function loadChatHistory(options = {}) {
                 forceScrollToBottom
             });
 
+            displayedHistorySessionId = targetSessionId;
+            clearHistoryLoadState({ sessionId: targetSessionId });
             updateHistoryBanner();
             const sessionMeta = sessionTabsCache.find(
                 session => String(session?.session_id || '') === String(requestedSessionId || '')
@@ -15205,6 +15388,27 @@ async function loadChatHistory(options = {}) {
             return true;
         }
 
+        if (!response.ok) {
+            const fallbackMessage = (typeof data?.error === 'string' && data.error.trim())
+                ? data.error.trim()
+                : 'Conversation history request failed; please retry.';
+            setHistoryLoadState({
+                sessionId: targetSessionId,
+                message: fallbackMessage,
+                retryable: Boolean(data?.retryable) || response.status >= 500,
+                detail: typeof data?.detail === 'string' ? data.detail : ''
+            });
+            if (!canPreserveRenderedHistory) {
+                scrollableField.innerHTML = `<div class="chat-session-loading">${escapeHtml(fallbackMessage)}</div>`;
+                displayedHistorySessionId = null;
+            }
+            updateHistoryBanner();
+            if (activeHistoryRequest && activeHistoryRequest.id === requestId) {
+                activeHistoryRequest = null;
+            }
+            return false;
+        }
+
         const hasMoreHistory = data?.has_more_history === true;
         const segmentsReturned = Math.max(data?.segments_returned || 0, 0);
         let totalSegments = Math.max(data?.total_segments || segmentsReturned, segmentsReturned);
@@ -15213,6 +15417,8 @@ async function loadChatHistory(options = {}) {
         }
         historySegmentsShown = segmentsReturned;
         totalHistorySegments = totalSegments;
+        displayedHistorySessionId = targetSessionId;
+        clearHistoryLoadState({ sessionId: targetSessionId });
         updateHistoryBanner();
         console.log('No Conversation history to load or empty history');
         if (activeHistoryRequest && activeHistoryRequest.id === requestId) {
@@ -15222,6 +15428,18 @@ async function loadChatHistory(options = {}) {
     } catch (error) {
         if (error?.name === 'AbortError') {
             return false;
+        }
+        const targetSessionId = normaliseHistorySessionId(requestedSessionId || activeChatSessionId);
+        const fallbackMessage = 'Conversation history request failed; please retry.';
+        setHistoryLoadState({
+            sessionId: targetSessionId,
+            message: fallbackMessage,
+            retryable: true,
+            detail: error instanceof Error ? error.message : String(error || '')
+        });
+        if (!shouldPreserveRenderedHistoryForSession(scrollableField, targetSessionId)) {
+            scrollableField.innerHTML = `<div class="chat-session-loading">${escapeHtml(fallbackMessage)}</div>`;
+            displayedHistorySessionId = null;
         }
         console.error('Error loading Conversation history:', error);
         updateHistoryBanner();
@@ -17250,6 +17468,11 @@ function buildWorkflowMonitorExportPayload() {
             show_available: Boolean(workflowDefinitionsState.visible),
             show_designs: Boolean(workflowDefinitionsState.showDesigns),
             loading_available: Boolean(workflowDefinitionsState.loading),
+            active_error: workflowStatusStreamState.snapshotError || null,
+            active_notice: workflowStatusStreamState.snapshotNotice || null,
+            active_last_snapshot_at: workflowStatusStreamState.lastSnapshotAt
+                ? new Date(workflowStatusStreamState.lastSnapshotAt).toISOString()
+                : null,
             available_error: workflowDefinitionsState.error || null,
             available_notice: workflowDefinitionsState.notice || null,
             available_last_fetched_at: workflowDefinitionsState.lastFetchedAt
@@ -17267,7 +17490,8 @@ function buildWorkflowMonitorExportPayload() {
         },
         active_instances_snapshot: {
             count: activeItems.length,
-            items: activeItems
+            items: activeItems,
+            payload: workflowStatusStreamState.lastSnapshotPayload
         },
         diagnostics: {
             parity_counts: parityInventory?.counts || null,
@@ -17308,8 +17532,16 @@ function renderWorkflowStatusList(items) {
     const { body } = getWorkflowStatusElements();
     if (!body) return;
 
+    const bannerParts = [];
+    if (workflowStatusStreamState.snapshotError) {
+        bannerParts.push(`<div class="workflow-status-empty workflow-status-error">${escapeHtml(workflowStatusStreamState.snapshotError)}</div>`);
+    } else if (workflowStatusStreamState.snapshotNotice) {
+        bannerParts.push(`<div class="workflow-status-empty workflow-status-info">${escapeHtml(workflowStatusStreamState.snapshotNotice)}</div>`);
+    }
+    const bannerHtml = bannerParts.join('');
+
     if (!items.length) {
-        body.innerHTML = '<div class="workflow-status-empty">No active workflows</div>';
+        body.innerHTML = bannerHtml || '<div class="workflow-status-empty">No active workflows</div>';
         return;
     }
 
@@ -17383,7 +17615,7 @@ function renderWorkflowStatusList(items) {
         `;
     }).join('');
 
-    body.innerHTML = html;
+    body.innerHTML = `${bannerHtml}${html}`;
 }
 
 function renderWorkflowDefinitionsList(items) {
@@ -17563,13 +17795,40 @@ async function refreshWorkflowStatusSnapshot({ silent = false } = {}) {
     try {
         const resp = await fetch(`/api/workflows/instances?${params.toString()}`,
             { method: 'GET', headers: buildChatFetchHeaders() });
-        if (!resp.ok) {
+        const data = await resp.json().catch(() => null);
+        const payload = (data && typeof data === 'object') ? data : {};
+        if (!resp.ok || payload?.degraded === true) {
+            const hasItems = workflowStatusStreamState.items.size > 0;
+            const detail = (typeof payload?.detail === 'string' && payload.detail.trim())
+                ? payload.detail.trim()
+                : '';
+            const retryable = Boolean(payload?.retryable) || resp.status === 503;
+            workflowStatusStreamState.lastSnapshotPayload = {
+                ...payload,
+                status: resp.status,
+                retryable,
+                degraded: true
+            };
+            if (retryable) {
+                workflowStatusStreamState.snapshotError = '';
+                workflowStatusStreamState.snapshotNotice = hasItems
+                    ? 'Workflow monitor temporarily unavailable; showing last loaded active workflows.'
+                    : 'Workflow monitor temporarily unavailable; please retry.';
+            } else {
+                workflowStatusStreamState.snapshotNotice = '';
+                workflowStatusStreamState.snapshotError = detail
+                    ? `Could not load workflow monitor: ${detail}`
+                    : 'Could not load workflow monitor';
+            }
+            renderWorkflowStatusBody();
             if (!silent) {
-                console.warn('[workflowStatus] Snapshot fetch failed', resp.status);
+                console.warn('[workflowStatus] Snapshot fetch failed', {
+                    status: resp.status,
+                    payload: workflowStatusStreamState.lastSnapshotPayload
+                });
             }
             return;
         }
-        const data = await resp.json();
         const items = Array.isArray(data?.items) ? data.items : [];
         workflowStatusStreamState.items.clear();
         items.forEach((item) => {
@@ -17578,8 +17837,23 @@ async function refreshWorkflowStatusSnapshot({ silent = false } = {}) {
             }
         });
         workflowStatusStreamState.lastSnapshotAt = Date.now();
+        workflowStatusStreamState.snapshotError = '';
+        workflowStatusStreamState.snapshotNotice = '';
+        workflowStatusStreamState.lastSnapshotPayload = payload;
         renderWorkflowStatusBody();
     } catch (err) {
+        const hasItems = workflowStatusStreamState.items.size > 0;
+        workflowStatusStreamState.snapshotError = '';
+        workflowStatusStreamState.snapshotNotice = hasItems
+            ? 'Workflow monitor temporarily unavailable; showing last loaded active workflows.'
+            : 'Workflow monitor temporarily unavailable; please retry.';
+        workflowStatusStreamState.lastSnapshotPayload = {
+            error: 'workflow_status_snapshot_failed',
+            detail: err instanceof Error ? err.message : String(err || 'unknown_error'),
+            retryable: true,
+            degraded: true
+        };
+        renderWorkflowStatusBody();
         if (!silent) {
             console.warn('[workflowStatus] Snapshot fetch failed', err);
         }
@@ -18101,6 +18375,8 @@ async function handleOrgSwitchForChatTab(_detail) {
     activeChatSessionId = null;
     activeChatSessionName = null;
     activeChatSessionOwnerId = null;
+    displayedHistorySessionId = null;
+    clearHistoryLoadState();
 
     // Clear the chat display and show loading state
     const scrollableField = document.getElementById('scrollableField');
@@ -18111,6 +18387,9 @@ async function handleOrgSwitchForChatTab(_detail) {
     closeSharedConversationStream();
     stopWorkflowStatusStream('workflow_stream_stopped_org_switch');
     workflowStatusStreamState.items.clear();
+    workflowStatusStreamState.snapshotError = '';
+    workflowStatusStreamState.snapshotNotice = '';
+    workflowStatusStreamState.lastSnapshotPayload = null;
     renderWorkflowStatusBody();
 
     if (container) {
@@ -21030,6 +21309,16 @@ export function __testOnly_buildWorkflowStatusQuery(opts = {}) {
 export function __testOnly_buildWorkflowStatusStreamQuery() {
     return buildWorkflowStatusStreamQuery().toString();
 }
+export async function __testOnly_refreshWorkflowStatusSnapshot(options = {}) {
+    return refreshWorkflowStatusSnapshot(options);
+}
+export function __testOnly_resetWorkflowStatusState() {
+    workflowStatusStreamState.items.clear();
+    workflowStatusStreamState.lastSnapshotAt = 0;
+    workflowStatusStreamState.snapshotError = '';
+    workflowStatusStreamState.snapshotNotice = '';
+    workflowStatusStreamState.lastSnapshotPayload = null;
+}
 export function __testOnly_renderWorkflowDefinitionsBody(items = []) {
     workflowDefinitionsState.visible = true;
     workflowDefinitionsState.loading = false;
@@ -21061,6 +21350,32 @@ export function __testOnly_resetWorkflowDefinitionsState() {
 }
 export function __testOnly_buildWorkflowMonitorExportPayload() {
     return buildWorkflowMonitorExportPayload();
+}
+export async function __testOnly_loadChatHistory(options = {}) {
+    return loadChatHistory(options);
+}
+export async function __testOnly_refreshChatSessionTabs() {
+    return refreshChatSessionTabs();
+}
+export function __testOnly_setActiveChatSession(sessionId, sessionName = null) {
+    setActiveChatSession(sessionId, sessionName);
+}
+export function __testOnly_setDisplayedHistorySession(sessionId) {
+    displayedHistorySessionId = normaliseHistorySessionId(sessionId);
+}
+export function __testOnly_resetHistoryUiState() {
+    displayedHistorySessionId = null;
+    clearHistoryLoadState();
+    historyMetricsState.degraded = false;
+    historyMetricsState.message = '';
+    historyMetricsState.retryable = false;
+    historyMetricsState.detail = '';
+    historyMetricsState.lastHealthy = null;
+}
+export function __testOnly_setSessionTabsCache(sessions = []) {
+    sessionTabsCache = normaliseConversationSessionViewModels(
+        Array.isArray(sessions) ? sessions : []
+    );
 }
 export function __testOnly_shouldMaintainSharedConversationStreamForInputs(inputs = {}) {
     return shouldMaintainSharedConversationStreamForInputs(inputs);

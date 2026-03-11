@@ -213,6 +213,10 @@ def _read_aggregate(chat_history_coll, pipeline: List[Dict[str, Any]]):
         return chat_history_coll.aggregate(pipeline)
 
 
+def _history_array_expr(field_name: str = "history") -> Dict[str, Any]:
+    return {"$ifNull": [f"${field_name}", []]}
+
+
 def _ensure_chat_history_indexes(collection) -> None:
     global _CHAT_HISTORY_INDEXES_READY
     if _CHAT_HISTORY_INDEXES_READY:
@@ -879,8 +883,13 @@ def get_chat_history_segments(
                     {"$match": query},
                     {
                         "$project": {
-                            "history": {"$slice": ["$history", -history_tail_limit]},
-                            "history_length": {"$size": "$history"},
+                            "history": {
+                                "$slice": [
+                                    _history_array_expr(),
+                                    -history_tail_limit,
+                                ]
+                            },
+                            "history_length": {"$size": _history_array_expr()},
                         }
                     },
                 ]
@@ -1710,7 +1719,7 @@ def get_chat_history_length(
                     "message_count": {
                         "$size": {
                             "$filter": {
-                                "input": {"$ifNull": ["$history", []]},
+                                "input": _history_array_expr(),
                                 "as": "msg",
                                 "cond": {
                                     "$not": {
@@ -1771,7 +1780,7 @@ def get_chat_history_session_count(
                     "message_count": {
                         "$size": {
                             "$filter": {
-                                "input": {"$ifNull": ["$history", []]},
+                                "input": _history_array_expr(),
                                 "as": "msg",
                                 "cond": {
                                     "$not": {
@@ -2291,6 +2300,7 @@ def create_chat_session(
         "created_at": now,
         "updated_at": now,
         "session_name": name,
+        "history": [],
     }
     if isinstance(ns, str) and ns.strip():
         set_on_insert["namespace"] = ns.strip()
