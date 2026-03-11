@@ -4428,8 +4428,14 @@ class InternalMCPChatOrchestrator:
                                 isinstance(result.payload, Mapping)
                                 and result.payload.get("success")
                             )
+                logical_error, logical_error_code = (
+                    self._extract_logical_tool_error_details(result.payload)
+                )
                 tool_payload = self._format_tool_result(
-                    tool_name, result.payload, result.duration_ms, "ok"
+                    tool_name,
+                    result.payload,
+                    result.duration_ms,
+                    "ok",
                 )
                 result_summary = self._extract_result_summary(tool_name, result.payload)
 
@@ -4437,8 +4443,12 @@ class InternalMCPChatOrchestrator:
                     "tool": tool_name,
                     "payload": payload_before_invoke,
                 }
+                if isinstance(result.payload, Mapping):
+                    invocation_record["effective_payload"] = dict(result.payload)
                 if payload != payload_before_invoke:
-                    invocation_record["effective_payload"] = dict(payload)
+                    invocation_record["effective_arguments"] = dict(payload)
+                elif payload_before_invoke:
+                    invocation_record["effective_arguments"] = dict(payload_before_invoke)
                 if auto_retry_details:
                     invocation_record["auto_retry"] = auto_retry_details
                 if write_interaction_metadata:
@@ -4450,10 +4460,19 @@ class InternalMCPChatOrchestrator:
                     )
                 if call_id:
                     invocation_record["call_id"] = call_id
+                if logical_error:
+                    invocation_record["status"] = "error"
+                    invocation_record["error"] = logical_error
+                    if logical_error_code:
+                        invocation_record["error_code"] = logical_error_code
+                else:
+                    invocation_record["status"] = "ok"
+                if result_summary:
+                    invocation_record["result_summary"] = result_summary
                 invocations.append(invocation_record)
 
                 progress_info: dict[str, Any] = {
-                    "status": "tool_invoked",
+                    "status": "tool_failed" if logical_error else "tool_invoked",
                     "tool": tool_name,
                     "batch_size": current_batch_size,
                     "tool_calls_done": iteration_count,
@@ -4465,13 +4484,18 @@ class InternalMCPChatOrchestrator:
                 }
                 if result_summary:
                     progress_info["result_summary"] = result_summary
+                if logical_error:
+                    progress_info["error"] = logical_error
+                    if logical_error_code:
+                        progress_info["error_code"] = logical_error_code
                 if callable(emit_progress):
                     emit_progress(progress_info)
 
                 self._logger.info(
-                    "[mcp_orchestrator] Tool invocation #%d: tool=%s",
+                    "[mcp_orchestrator] Tool invocation #%d: tool=%s status=%s",
                     iteration_count,
                     tool_name,
+                    "error" if logical_error else "ok",
                 )
             except Exception as exc:
                 tool_payload = self._format_tool_result(
@@ -12022,6 +12046,45 @@ class InternalMCPChatOrchestrator:
             return msg[: max_length - 3] + "..."
 
         return None
+
+    @staticmethod
+    def _extract_logical_tool_error_details(
+        payload: Any,
+    ) -> tuple[str | None, str | None]:
+        """Return logical tool-failure details for MCP error payloads.
+
+        Handlers often return structured MCP error responses with ``success=False``
+        instead of raising. Treat those payloads as failed executions in
+        diagnostics/turn-execution recording while preserving their details for
+        later model/tool inspection.
+        """
+
+        if not isinstance(payload, Mapping):
+            return None, None
+
+        def _clean_text(value: Any) -> str | None:
+            if not isinstance(value, str):
+                return None
+            cleaned = value.strip()
+            return cleaned or None
+
+        payload_status = (_clean_text(payload.get("status")) or "").lower()
+        raw_success = payload.get("success")
+        has_error_status = payload_status in {"error", "failed", "failure"}
+        if raw_success is not False and not has_error_status:
+            return None, None
+
+        error_code = _clean_text(payload.get("error_code"))
+        error_text = _clean_text(payload.get("error"))
+        message_text = _clean_text(payload.get("message"))
+
+        if error_text:
+            return error_text, error_code
+        if message_text:
+            return message_text, error_code
+        if error_code:
+            return error_code, error_code
+        return "Tool returned an error payload.", None
 
     @staticmethod
     def _apply_vontology_template(

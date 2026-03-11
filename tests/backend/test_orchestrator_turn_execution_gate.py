@@ -533,7 +533,7 @@ def test_turn_execution_critic_flags_missing_scholarly_representation(monkeypatc
     assert completion_gate.get("decision") == "escalation_required"
     assert (
         completion_gate.get("decision_reason")
-        == "Required scholarly paper representation was not executed."
+        == "No required representation tool execution was observed."
     )
     assert completion_gate.get("safe_to_claim_completion") is False
 
@@ -550,7 +550,13 @@ def test_turn_execution_critic_marks_scholarly_representation_satisfied(monkeypa
                 {
                     "tool": "interpret_file_copy",
                     "payload": {
-                        "concept_id": "#V#uploaded_file_copy_76c1c13fed0140f496133d008b4cfad7"
+                        "success": True,
+                        "concept_id": "#V#uploaded_file_copy_76c1c13fed0140f496133d008b4cfad7",
+                        "scholarly_representation": {
+                            "attempted": True,
+                            "verified": True,
+                            "paper_concept_id": "#V#paper_on_arxiv_76c1c13f",
+                        },
                     },
                 }
             ],

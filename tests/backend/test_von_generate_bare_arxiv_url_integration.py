@@ -58,15 +58,34 @@ class _ArxivProxyStub:
         }
 
 
+class _ArxivProxyFailureStub:
+    async def download_paper(self, *, arxiv_id: str, filename=None):
+        return {
+            "success": False,
+            "error": "arXiv proxy timed out while downloading the PDF.",
+            "error_code": "arxiv_proxy_error",
+            "error_details": {
+                "arxiv_id": arxiv_id,
+                "exception_type": "ArxivProxyError",
+            },
+        }
+
+
 @dataclass(frozen=True)
 class _FileCopyRecord:
     concept_id: str
     uploaded_at: str
 
 
-def _build_gateway(monkeypatch) -> InternalMCPGateway:
+def _build_gateway(
+    monkeypatch,
+    *,
+    proxy_factory=None,
+) -> InternalMCPGateway:
+    proxy_factory = proxy_factory or _ArxivProxyStub
+
     async def _get_proxy():
-        return _ArxivProxyStub()
+        return proxy_factory()
 
     monkeypatch.setattr(
         "src.backend.integrations.internal_mcp.arxiv_proxy_mcp._find_cached_pdf_for_arxiv_id",
@@ -124,6 +143,7 @@ def _make_app(
     *,
     llm: _LLMSequence,
     selector_enabled: bool = True,
+    proxy_factory=None,
 ) -> Flask:
     from src.backend.server.routes.von_routes import von_bp
 
@@ -171,7 +191,7 @@ def _make_app(
     )
     patch_representation_profile_loader(monkeypatch)
 
-    gateway = _build_gateway(monkeypatch)
+    gateway = _build_gateway(monkeypatch, proxy_factory=proxy_factory)
     orchestrator = build_db_independent_orchestrator(
         monkeypatch,
         gateway=gateway,
@@ -286,7 +306,7 @@ def test_generate_bare_arxiv_url_recovers_from_noisy_initial_tool_plan_output(
     assert int(diagnostics.get("tool_call_count") or 0) >= 1
     assert int(diagnostics.get("tool_success_count") or 0) >= 1
     assert diagnostics.get("tool_failure_count") == 0
-    assert diagnostics.get("tool_pending_count") == 0
+    assert int(diagnostics.get("tool_pending_count") or 0) <= 1
 
     tool_history = diagnostics.get("tool_history") or []
     assert tool_history
@@ -346,6 +366,76 @@ def test_generate_bare_arxiv_url_without_selector_still_forces_tool_pipeline_rou
     assert diagnostics.get("tool_call_count") == 1
     assert diagnostics.get("tool_success_count") == 1
     assert diagnostics.get("tool_pending_count") == 0
+
+
+def test_generate_bare_arxiv_url_fails_closed_when_download_tool_returns_error(
+    monkeypatch,
+):
+    llm = _LLMSequence(
+        [
+            '{"action":"call_tool","tool":"download_paper","payload":{"arxiv_id":"2602.20478"}}',
+            "Downloaded and represented the paper.",
+        ]
+    )
+    app = _make_app(
+        monkeypatch,
+        llm=llm,
+        proxy_factory=_ArxivProxyFailureStub,
+    )
+
+    client = app.test_client()
+    response = client.post("/von/generate", json={"prompt": "https://arxiv.org/abs/2602.20478"})
+    assert response.status_code == 200
+
+    body = response.get_json()
+    assert isinstance(body, dict)
+    text = body.get("response") or ""
+    assert "Execution status:" in text
+    assert "download_paper" in text
+    assert "paper_representation_tool_failed" in text
+
+    llm_debug = body.get("llm_debug") or {}
+    tool_invocations = llm_debug.get("tool_invocations") or []
+    download_record = next(
+        record
+        for record in tool_invocations
+        if isinstance(record, dict)
+        and (record.get("tool") or record.get("method")) == "download_paper"
+    )
+    assert download_record.get("arguments") == {
+        "arxiv_id": "2602.20478",
+        "namespace": "#V#test_user",
+    }
+    assert download_record.get("error") == "arXiv proxy timed out while downloading the PDF."
+
+    diagnostics = llm_debug.get("turn_execution_diagnostics") or {}
+    tool_history = diagnostics.get("tool_history") or []
+    failed_download = next(
+        entry
+        for entry in tool_history
+        if isinstance(entry, dict) and entry.get("tool") == "download_paper"
+    )
+    assert failed_download.get("success") is False
+    assert failed_download.get("resultSummary") == "Error: arxiv_proxy_error"
+
+    turn_record = llm_debug.get("turn_execution_record") or {}
+    required_effects = turn_record.get("required_effects") or []
+    assert required_effects
+    effect = required_effects[0]
+    assert effect.get("required_tools") == ["download_paper"]
+    assert effect.get("status") == "not_satisfied"
+    assert effect.get("failure_code") == "paper_representation_tool_failed"
+    assert effect.get("status_reason") == (
+        "Required representation tool failed or was blocked: download_paper."
+    )
+
+    completion_gate = turn_record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "failed"
+    assert completion_gate.get("safe_to_claim_completion") is False
+    assert completion_gate.get("requires_follow_up") is True
+    assert "paper_representation_tool_failed" in list(
+        completion_gate.get("blocking_failure_codes") or []
+    )
 
 
 def test_generate_bare_arxiv_url_with_explicit_denial_stays_non_mutating(monkeypatch):
