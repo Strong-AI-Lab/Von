@@ -694,6 +694,7 @@ def save_all_settings():
         return jsonify({"status": "error", "message": "Invalid JSON payload"}), 400
 
     try:
+        resolved_llm = None
         if "disable_write_tool_conservatism" in data:
             if not _is_admin_or_owner_session():
                 return (
@@ -750,14 +751,47 @@ def save_all_settings():
                     if scope == "user"
                     else set_org_llm_setting(concept_id, provider, model)
                 )
-                if ok:
-                    current_app.logger.info(
-                        f"Scoped LLM set scope={scope} concept={concept_id} provider={provider} model={model}"
+                if not ok:
+                    return (
+                        jsonify(
+                            {
+                                "status": "error",
+                                "message": "Failed to persist the selected model setting.",
+                            }
+                        ),
+                        500,
                     )
+                resolved_llm = resolve_llm_setting(
+                    user_concept_id=concept_id if scope == "user" else None,
+                    org_concept_id=concept_id if scope == "organisation" else None,
+                )
+                if not resolved_llm:
+                    return (
+                        jsonify(
+                            {
+                                "status": "error",
+                                "message": "The selected model did not resolve after persistence.",
+                            }
+                        ),
+                        500,
+                    )
+                current_app.logger.info(
+                    f"Scoped LLM set scope={scope} concept={concept_id} provider={provider} model={model}"
+                )
             elif provider and model:
-                # No global setting allowed - require user context
                 current_app.logger.warning(
-                    f"LLM setting rejected: no user/org scope provided. provider={provider} model={model}"
+                    "LLM setting rejected: no user/org scope provided. provider=%s model=%s",
+                    provider,
+                    model,
+                )
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": "Model changes require a current user or organisation context.",
+                        }
+                    ),
+                    400,
                 )
 
         if "openai_api_key_env_var" in data and data["openai_api_key_env_var"]:
@@ -834,7 +868,13 @@ def save_all_settings():
         # user/org/language fields intentionally ignored (browser-local)
 
         return (
-            jsonify({"status": "success", "message": "Settings updated successfully."}),
+            jsonify(
+                {
+                    "status": "success",
+                    "message": "Settings updated successfully.",
+                    "resolved_llm": resolved_llm,
+                }
+            ),
             200,
         )
     except Exception as e:

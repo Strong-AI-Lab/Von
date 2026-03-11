@@ -281,20 +281,6 @@ async function fetchJsonWithTimeout(url, options = {}) {
   }
 }
 
-async function withTimeout(promiseFactory, timeoutMs, fallback = null) {
-  let timeoutId = null;
-  try {
-    const timeoutPromise = new Promise((resolve) => {
-      timeoutId = setTimeout(() => resolve(fallback), timeoutMs);
-    });
-    return await Promise.race([promiseFactory(), timeoutPromise]);
-  } catch (_) {
-    return fallback;
-  } finally {
-    if (timeoutId) clearTimeout(timeoutId);
-  }
-}
-
 async function getSettings() {
   try {
     // Pass user context to get properly resolved LLM setting (user > org precedence, no global)
@@ -663,7 +649,7 @@ function attachFooterDbBadge(footer, dbInfo) {
       const nextPingOk = (payload && typeof payload.ping_ok === 'boolean') ? payload.ping_ok : lastPingOk;
       const state = applyBadgeState(!!nextPingOk, nextClassification, !!nextFallback, true);
       applyLatencyState(state, elapsed);
-    } catch (e) {
+    } catch (_) {
       recordFooterDbProbeFailure();
       const inferredServerReachable = normaliseFooterServerReachability(footerServerReachability);
       const state = applyBadgeState(
@@ -781,79 +767,10 @@ export async function setModelInfoFooterText() {
     if (orgInfo.conceptId) llmParams.set('organisation_concept_id', orgInfo.conceptId);
     const llmUrl = '/api/settings/llm/info' + (llmParams.toString() ? '?' + llmParams.toString() : '');
     llmInfo = await fetchJsonWithTimeout(llmUrl, { timeoutMs: 6000 });
-  } catch (e) { }
+  } catch (_) { }
   if (!llmInfo) {
     readinessIssues.add('llm');
   }
-
-  let modelText = 'Model: Not Set';
-  if (activeLlm?.provider && activeLlm?.model) {
-    modelText = `Model: ${activeLlm.provider}: ${activeLlm.model}`;
-  }
-
-  // Attempt to resolve the active model to an individual concept that is (directly or indirectly) an instance of #V#large_language_model
-  async function resolveLlmConcept(activeLlm) {
-    const LLM_TYPE_ID = '#V#large_language_model';
-    if (!activeLlm || !activeLlm.model) return null;
-    const queries = [];
-    const model = activeLlm.model.trim();
-    const provider = (activeLlm.provider || '').trim();
-    if (model) queries.push(model);
-    if (provider && model) queries.push(`${provider} ${model}`);
-    // Helper: verify candidate individual is (directly or via parent) under LLM type
-    async function isLlmInstance(conceptId) {
-      try {
-        const data = await fetchJsonWithTimeout(
-          `/vontology/api/vontology/node_content?identifier=${encodeURIComponent(conceptId)}`,
-          { timeoutMs: 4000 }
-        );
-        if (!data) return false;
-        const instOf = data?.is_an_instance_of || data?.is_a || [];
-        const directIds = [];
-        if (Array.isArray(instOf)) {
-          for (const c of instOf) {
-            if (!c) continue;
-            if (typeof c === 'string') directIds.push(c);
-            else if (c.concept_id) directIds.push(c.concept_id);
-            else if (c.id) directIds.push(c.id);
-            else if (c['@id']) directIds.push(c['@id']);
-          }
-        }
-        if (directIds.includes(LLM_TYPE_ID)) return true;
-        // Indirect: fetch parents of first type and see if chain contains LLM_TYPE_ID
-        for (const typeId of directIds.slice(0, 3)) { // limit breadth
-          try {
-            const pdata = await fetchJsonWithTimeout(
-              `/vontology/api/vontology/parents?identifier=${encodeURIComponent(typeId)}`,
-              { timeoutMs: 4000 }
-            );
-            const parentList = pdata?.parents || [];
-            if (parentList.some(p => (p.concept_id || p.id) === LLM_TYPE_ID)) return true;
-          } catch (_) { }
-        }
-      } catch (_) { }
-      return false;
-    }
-    for (const q of queries) {
-      try {
-        const data = await fetchJsonWithTimeout(
-          `/vontology/api/vontology/search?q=${encodeURIComponent(q)}&limit=6&include_individuals=true`,
-          { timeoutMs: 4000 }
-        );
-        if (!data) continue;
-        const results = Array.isArray(data?.results) ? data.results : [];
-        for (const r of results) {
-          if (r?.kind === 'individual' && r.id) {
-            if (await isLlmInstance(r.id)) {
-              return { conceptId: r.id, name: r.name || r.id };
-            }
-          }
-        }
-      } catch (_) { }
-    }
-    return null;
-  }
-  const resolvedModelConcept = await withTimeout(() => resolveLlmConcept(activeLlm), 5000, null);
 
   // Determine LLM status styles
   const status = llmInfo?.status || 'unknown';
@@ -875,29 +792,6 @@ export async function setModelInfoFooterText() {
 
   // Build dynamic segments (User / Org as concept buttons)
   const segments = [];
-  if (resolvedModelConcept) {
-    // Create a concept button for the model individual (label prefix 'Model')
-    const seg = makeConceptButton('Model', activeLlm?.model || resolvedModelConcept.name, resolvedModelConcept.conceptId, resolvedModelConcept.name);
-    if (llmClass) seg.classList.add('llm-status-badge', llmClass);
-    if (llmTooltipSuffix) {
-      const btn = seg.querySelector('button');
-      if (btn) btn.title = (btn.title || '') + llmTooltipSuffix;
-    }
-    segments.push(seg);
-  } else {
-    const span = document.createElement('span');
-    span.className = 'footer-segment';
-    if (llmClass) span.classList.add('llm-status-badge', llmClass);
-    const label = document.createElement('span');
-    label.className = 'footer-label-inline';
-    label.textContent = 'Model: ';
-    span.appendChild(label);
-    const val = document.createElement('span');
-    val.textContent = activeLlm?.model || 'Not Set';
-    span.appendChild(val);
-    if (llmTooltipSuffix) span.title = llmTooltipSuffix.trim();
-    segments.push(span);
-  }
 
   function makeConceptButton(labelPrefix, displayName, conceptId, conceptName) {
     const span = document.createElement('span');
@@ -960,7 +854,7 @@ export async function setModelInfoFooterText() {
                   }
                 }
               }
-            } catch (e) { /* non-fatal */ }
+            } catch (_) { /* non-fatal */ }
           } else if (name) {
             // Fall back to name-based selection (may create individual tab heuristically)
             document.dispatchEvent(new CustomEvent('von:selectConceptByName', { detail: { name, createConceptTab: true } }));
@@ -995,7 +889,6 @@ export async function setModelInfoFooterText() {
     return span;
   }
 
-  // LLM settings link button: keep it parallel to footer concept controls.
   {
     const titleParts = ['Open language model settings'];
     titleParts.push(`Status: ${status}`);
@@ -1003,17 +896,23 @@ export async function setModelInfoFooterText() {
     if (activeLlm?.model) titleParts.push(`Model: ${activeLlm.model}`);
     if (llmHost) titleParts.push(`Host: ${llmHost}`);
     if (errorMsg) titleParts.push(`Error: ${errorMsg}`);
-    const llmSettingsSegment = makeActionButton(
-      'LLM',
-      llmHost ? 'Server' : 'Settings',
+    const modelSettingsSegment = makeActionButton(
+      'Model',
+      activeLlm?.model || 'Not Set',
       () => { openSettingsForModelControls(); },
       {
         ariaLabel: 'Open language model settings',
         title: titleParts.join('\n')
       }
     );
-    if (llmClass) llmSettingsSegment.classList.add('llm-status-badge', llmClass);
-    segments.push(llmSettingsSegment);
+    if (llmClass) modelSettingsSegment.classList.add('llm-status-badge', llmClass);
+    if (llmTooltipSuffix) {
+      const btn = modelSettingsSegment.querySelector('.concept-footer-button');
+      if (btn) {
+        btn.title = titleParts.join('\n') + llmTooltipSuffix;
+      }
+    }
+    segments.push(modelSettingsSegment);
   }
 
   // User segment
@@ -1120,7 +1019,7 @@ export async function setModelInfoFooterText() {
 
   // Jest fallback: if running under tests and highlight missing, force-create it to avoid timing/env flakiness.
   try {
-    const inJest = typeof process !== 'undefined' && process.env && process.env.JEST_WORKER_ID;
+    const inJest = typeof globalThis.process !== 'undefined' && globalThis.process?.env?.JEST_WORKER_ID;
     if (inJest && !footer.querySelector('.concept-footer-button.user-auth-active')) {
       const userSeg = [...footer.querySelectorAll('.footer-segment')]
         .find(seg => seg.querySelector('.footer-label-inline')?.textContent?.trim().startsWith('User:'));
@@ -1191,7 +1090,7 @@ export async function setModelInfoFooterText() {
     }
     recordFooterDbProbeFailure();
 
-    const inJest = typeof process !== 'undefined' && process.env && process.env.JEST_WORKER_ID;
+    const inJest = typeof globalThis.process !== 'undefined' && globalThis.process?.env?.JEST_WORKER_ID;
     if (inJest) return;
 
     const delayMs = computeFooterDbRetryDelayMs(attempt);
@@ -1242,7 +1141,7 @@ export function renderSpanSuggestions(turnId, suggestions) {
   container.className = 'annotation-suggestions';
   container.style.marginTop = '6px';
   container.style.fontSize = '0.9em';
-  suggestions.forEach((s, idx) => {
+  suggestions.forEach((s) => {
     const spanWrap = document.createElement('div');
     spanWrap.style.marginBottom = '4px';
     const preview = document.createElement('span');

@@ -2,7 +2,7 @@
 
 const domUtilsPath = '../../src/frontend/web/von_interface/static/js/domUtils.js';
 
-describe('footer LLM settings link button', () => {
+describe('footer model settings button', () => {
     beforeEach(() => {
         jest.resetModules();
         document.body.innerHTML = `
@@ -20,7 +20,7 @@ describe('footer LLM settings link button', () => {
         sessionStorage.clear();
     });
 
-    test('renders LLM footer button and opens model settings focus target', async () => {
+    test('renders model footer button, omits redundant LLM segment, and opens model settings focus target', async () => {
         const settingsTabButton = document.querySelector('.tab-button[data-tab="settingsTab"]');
         const settingsFrame = document.getElementById('settingsFrame');
         const frameWindow = settingsFrame.contentWindow;
@@ -35,7 +35,7 @@ describe('footer LLM settings link button', () => {
                 return {
                     ok: true,
                     json: async () => ({
-                        active_llm: { provider: 'ollama', model: 'llama3.1:8b' }
+                        resolved_llm: { provider: 'ollama', model: 'llama3.1:8b' }
                     })
                 };
             }
@@ -62,15 +62,19 @@ describe('footer LLM settings link button', () => {
         const { setModelInfoFooterText } = require(domUtilsPath);
         await setModelInfoFooterText();
 
+        const modelSegment = Array.from(document.querySelectorAll('.footer-segment'))
+            .find((seg) => seg.querySelector('.footer-label-inline')?.textContent?.trim() === 'Model:');
+        expect(modelSegment).toBeTruthy();
+        const modelButton = modelSegment.querySelector('.concept-footer-button');
+        expect(modelButton).toBeTruthy();
+        expect(modelButton.textContent.trim()).toBe('llama3.1:8b');
+        expect(modelButton.getAttribute('aria-label')).toBe('Open language model settings');
+
         const llmSegment = Array.from(document.querySelectorAll('.footer-segment'))
             .find((seg) => seg.querySelector('.footer-label-inline')?.textContent?.trim() === 'LLM:');
-        expect(llmSegment).toBeTruthy();
-        const llmButton = llmSegment.querySelector('.concept-footer-button');
-        expect(llmButton).toBeTruthy();
-        expect(llmButton.textContent.trim()).toBe('Server');
-        expect(llmButton.getAttribute('aria-label')).toBe('Open language model settings');
+        expect(llmSegment).toBeFalsy();
 
-        llmButton.click();
+        modelButton.click();
         expect(settingsClickSpy).toHaveBeenCalledTimes(1);
         expect(postMessageMock).toHaveBeenCalledWith({ type: 'von:focus-model-settings' }, window.location.origin);
     });

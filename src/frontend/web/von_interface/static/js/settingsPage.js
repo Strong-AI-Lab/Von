@@ -12,6 +12,7 @@ import {
   loadOllamaHosts,
   populateModelDropdown,
   populateOpenAIModelDropdown,
+  renderOpenAIModelOptions,
   populateOrganisationsDropdown,
   populatePeopleDropdown,
   saveOllamaHosts,
@@ -144,6 +145,20 @@ function _setWriteConservatismOverrideBadgeEnabled(enabled) {
       void window.parent.updateModelInfoFooterDisplay();
     }
   } catch { }
+}
+
+function resolveActiveLlmScopeContext() {
+  const storedUser = getStoredJson(LS_USER_KEY);
+  if (storedUser?.concept_id) {
+    return { scope: 'user', conceptId: storedUser.concept_id };
+  }
+
+  const storedOrg = getStoredJson(LS_ORG_KEY);
+  if (storedOrg?.concept_id) {
+    return { scope: 'organisation', conceptId: storedOrg.concept_id };
+  }
+
+  return { scope: null, conceptId: null };
 }
 
 async function _fetchSessionContextForRole() {
@@ -444,7 +459,7 @@ async function refreshGmailProfileStatusList() {
             return { profileId, status: `authorised as ${email}${expiry}` };
           }
           return { profileId, status: 'not authorised' };
-        } catch (error) {
+        } catch (_) {
           return { profileId, status: 'error (failed to fetch)' };
         }
       })
@@ -478,6 +493,12 @@ function updateGmailOauthLastRefreshed() {
 }
 
 window.updateGmailOauthLastRefreshed = updateGmailOauthLastRefreshed;
+
+function updateGmailProfileStatus() {
+  void refreshGmailProfileStatusList();
+}
+
+window.updateGmailProfileStatus = updateGmailProfileStatus;
 
 function clampNumber(value, minValue, maxValue, fallbackValue) {
   const num = Number(value);
@@ -2211,10 +2232,7 @@ async function loadAndDisplayDbInfo() {
 async function saveAllSettings(changedProvider = null) {
   const ollamaModelSelect = document.getElementById('globalModelSelect');
   const openaiModelSelect = document.getElementById('openaiModelSelect');
-
-  // Get current user concept ID for user-scoped LLM setting
-  const storedUser = getStoredJson(LS_USER_KEY);
-  const userConceptId = storedUser?.concept_id || null;
+  const { scope: llmScope, conceptId: llmConceptId } = resolveActiveLlmScopeContext();
 
   let activeLlm = null;
 
@@ -2245,10 +2263,18 @@ async function saveAllSettings(changedProvider = null) {
     }
   }
 
-  // Add user scope to activeLlm if a user is selected (for per-user model persistence)
-  if (activeLlm && userConceptId) {
-    activeLlm.scope = 'user';
-    activeLlm.concept_id = userConceptId;
+  if (activeLlm && (!llmScope || !llmConceptId)) {
+    showStatusMessage(
+      'settingsStatusMessage',
+      'Select a current user or organisation before changing the model.',
+      true,
+    );
+    return;
+  }
+
+  if (activeLlm) {
+    activeLlm.scope = llmScope;
+    activeLlm.concept_id = llmConceptId;
   }
 
   // We now persist user/org/language only in localStorage; do not send to backend
@@ -2283,8 +2309,30 @@ async function saveAllSettings(changedProvider = null) {
   }
 
   try {
-    const response = await postJson('/api/settings/', settings);
-    showStatusMessage('settingsStatusMessage', response.message || 'Settings saved successfully!');
+    const response = await fetch('/api/settings/', {
+      method: 'POST',
+      headers: buildSettingsFetchHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(settings),
+    });
+    const payload = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      const message = payload?.message || `Failed to save settings (${response.status})`;
+      throw new Error(message);
+    }
+
+    if (
+      activeLlm
+      && (
+        !payload?.resolved_llm
+        || payload.resolved_llm.provider !== activeLlm.provider
+        || payload.resolved_llm.model !== activeLlm.model
+      )
+    ) {
+      throw new Error('Model change did not take effect for the current context.');
+    }
+
+    showStatusMessage('settingsStatusMessage', payload.message || 'Settings saved successfully!');
 
     // Update parent window footer
     if (window.parent?.updateModelInfoFooterDisplay) {
@@ -2297,7 +2345,11 @@ async function saveAllSettings(changedProvider = null) {
     }
   } catch (error) {
     console.error('Error saving settings:', error);
-    showStatusMessage('settingsStatusMessage', 'Failed to save settings.', true);
+    showStatusMessage(
+      'settingsStatusMessage',
+      error?.message || 'Failed to save settings.',
+      true,
+    );
   }
 }
 
@@ -2402,7 +2454,6 @@ async function verifyOpenAiApiKey(savedModel = null) {
   const apiKeyEnvVar = document.getElementById('openaiApiKeyEnvVar').value;
   const statusMessage = document.getElementById('openaiStatusMessage');
   const modelsContainer = document.getElementById('openaiModelsContainer');
-  const modelSelect = document.getElementById('openaiModelSelect');
 
   statusMessage.style.display = 'block';
   statusMessage.textContent = 'Verifying API key...';
@@ -2417,18 +2468,7 @@ async function verifyOpenAiApiKey(savedModel = null) {
       modelsContainer.style.display = 'block';
       modelsContainer.classList.remove('hidden');
 
-      modelSelect.innerHTML = '<option value="">Select an OpenAI Model</option>';
-      response.models.forEach(model => {
-        const option = document.createElement('option');
-        option.value = model;
-        option.textContent = model;
-        modelSelect.appendChild(option);
-      });
-
-      // Select the saved model after populating the dropdown
-      if (savedModel) {
-        modelSelect.value = savedModel;
-      }
+      renderOpenAIModelOptions('openaiModelSelect', response.models || [], savedModel);
     } else {
       throw new Error(response.error || 'Failed to verify API key.');
     }
@@ -2440,7 +2480,7 @@ async function verifyOpenAiApiKey(savedModel = null) {
       statusMessage.classList.add('success');
       modelsContainer.style.display = 'block';
       modelsContainer.classList.remove('hidden');
-    } catch (fallbackError) {
+    } catch (_) {
       statusMessage.textContent = `Error: ${error.message}`;
       statusMessage.classList.add('error');
       modelsContainer.style.display = 'none';
@@ -2569,7 +2609,7 @@ async function addOllamaHost() {
   // Validate URL format
   try {
     new URL(hostUrl);
-  } catch (e) {
+  } catch (_) {
     showStatusMessage('settingsStatusMessage', 'Invalid URL format', true);
     return;
   }

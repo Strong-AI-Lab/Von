@@ -194,6 +194,95 @@ def test_settings_endpoint_updates_auto_proceed_minimal_imposition(monkeypatch):
         assert captured["enabled"] is False
 
 
+def test_settings_endpoint_rejects_active_llm_without_scope(monkeypatch):
+    app = _make_settings_app()
+
+    user_called = {"hit": False}
+    org_called = {"hit": False}
+
+    def _set_user_llm_setting(*_args, **_kwargs) -> bool:
+        user_called["hit"] = True
+        return True
+
+    def _set_org_llm_setting(*_args, **_kwargs) -> bool:
+        org_called["hit"] = True
+        return True
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.set_user_llm_setting",
+        _set_user_llm_setting,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.set_org_llm_setting",
+        _set_org_llm_setting,
+    )
+
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/settings/",
+            json={"active_llm": {"provider": "openai", "model": "gpt-5-mini"}},
+        )
+
+    assert resp.status_code == 400
+    payload = resp.get_json() or {}
+    assert payload.get("message") == (
+        "Model changes require a current user or organisation context."
+    )
+    assert user_called["hit"] is False
+    assert org_called["hit"] is False
+
+
+def test_settings_endpoint_returns_resolved_llm_after_scoped_save(monkeypatch):
+    app = _make_settings_app()
+
+    captured: dict[str, Any] = {}
+
+    def _set_user_llm_setting(concept_id: str, provider: str, model: str) -> bool:
+        captured["concept_id"] = concept_id
+        captured["provider"] = provider
+        captured["model"] = model
+        return True
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.set_user_llm_setting",
+        _set_user_llm_setting,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.resolve_llm_setting",
+        lambda user_concept_id=None, org_concept_id=None: {
+            "provider": "openai",
+            "model": "gpt-5-mini",
+            "scope": "user",
+            "user_concept_id": user_concept_id,
+            "organisation_concept_id": org_concept_id,
+        },
+    )
+
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/settings/",
+            json={
+                "active_llm": {
+                    "provider": "openai",
+                    "model": "gpt-5-mini",
+                    "scope": "user",
+                    "concept_id": "#V#michael_witbrock",
+                }
+            },
+        )
+
+    assert resp.status_code == 200
+    payload = resp.get_json() or {}
+    assert payload.get("message") == "Settings updated successfully."
+    assert payload.get("resolved_llm", {}).get("model") == "gpt-5-mini"
+    assert payload.get("resolved_llm", {}).get("scope") == "user"
+    assert captured == {
+        "concept_id": "#V#michael_witbrock",
+        "provider": "openai",
+        "model": "gpt-5-mini",
+    }
+
+
 @pytest.mark.parametrize(
     "raw, expected",
     [

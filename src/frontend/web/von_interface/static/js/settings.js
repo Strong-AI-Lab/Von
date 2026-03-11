@@ -61,6 +61,41 @@ export async function loadAvailableOpenAIModels() {
   }
 }
 
+function renderOpenAiModelSelect(select, models = [], selectedModel = null) {
+  if (!select) return;
+
+  select.innerHTML = '<option value="">Select an OpenAI Model</option>';
+
+  if (Array.isArray(models) && models.length > 0) {
+    models.forEach(modelName => {
+      const option = document.createElement('option');
+      option.value = modelName;
+      option.textContent = modelName;
+      select.appendChild(option);
+    });
+  } else {
+    select.innerHTML = '<option value="">No OpenAI models available</option>';
+  }
+
+  if (selectedModel) {
+    select.value = selectedModel;
+    if (select.value !== selectedModel) {
+      const currentOption = document.createElement('option');
+      currentOption.value = selectedModel;
+      currentOption.textContent = `${selectedModel} (current effective model; unavailable in loaded list)`;
+      currentOption.dataset.currentEffective = 'true';
+      select.appendChild(currentOption);
+      select.value = selectedModel;
+    }
+  }
+}
+
+export function renderOpenAIModelOptions(selectElementId, models = [], selectedModel = null) {
+  const select = document.getElementById(selectElementId);
+  if (!select) return;
+  renderOpenAiModelSelect(select, models, selectedModel);
+}
+
 export async function loadAvailablePeople() {
   try {
     return await getJson('/api/settings/people');
@@ -148,22 +183,7 @@ export async function populateOpenAIModelDropdown(selectElementId, selectedModel
 
   try {
     const models = await loadAvailableOpenAIModels();
-    select.innerHTML = '<option value="">Select an OpenAI Model</option>';
-
-    if (models?.length > 0) {
-      models.forEach(modelName => {
-        const option = document.createElement('option');
-        option.value = modelName;
-        option.textContent = modelName;
-        select.appendChild(option);
-      });
-    } else {
-      select.innerHTML = '<option value="">No OpenAI models available</option>';
-    }
-
-    if (selectedModel) {
-      select.value = selectedModel;
-    }
+    renderOpenAiModelSelect(select, models, selectedModel);
   } catch (err) {
     console.error('Error populating OpenAI model dropdown:', err);
     select.innerHTML = '<option value="">Error loading OpenAI models</option>';
