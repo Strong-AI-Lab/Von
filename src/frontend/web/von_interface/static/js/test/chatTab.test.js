@@ -871,6 +871,48 @@ describe('thinking liveness presentation', () => {
         );
     });
 
+    test('explains selector routing when dispatch follows a no-match discovery result', () => {
+        const presentation = __testOnly_buildThinkingProgressPresentation({
+            stage: 'workflow_dispatch',
+            phase_label: 'Selecting workflow',
+            workflow_discovery: {
+                match_count: 0,
+                candidate_count: 0
+            },
+            selected_workflow_id: '#V#tool_calling_workflow',
+            selected_workflow_name: 'Tool calling workflow',
+            workflow_selector_verdict: 'tool_seeking',
+            workflow_selector_source: 'selector'
+        });
+
+        expect(presentation.stageText).toContain('Selecting workflow');
+        expect(presentation.stageText).toContain(
+            'No direct workflow match found; routed via selector to Tool calling workflow (#V#tool_calling_workflow)'
+        );
+        expect(presentation.stageText).toContain('Tool seeking');
+    });
+
+    test('preserves selected workflow context in terminal thinking text', () => {
+        const presentation = __testOnly_buildThinkingProgressPresentation({
+            status: 'completed',
+            stage: 'completed',
+            workflow_discovery: {
+                match_count: 0,
+                candidate_count: 0
+            },
+            selected_workflow_id: '#V#tool_calling_workflow',
+            selected_workflow_name: 'Tool calling workflow',
+            workflow_selector_verdict: 'tool_seeking',
+            workflow_selector_source: 'selector'
+        });
+
+        expect(presentation.livenessLabel).toBe('Complete');
+        expect(presentation.stageText).toContain('Complete:');
+        expect(presentation.stageText).toContain(
+            'No direct workflow match found; routed via selector to Tool calling workflow (#V#tool_calling_workflow)'
+        );
+    });
+
     test('prefixes the current goal when teleological progress is available', () => {
         const presentation = __testOnly_buildThinkingProgressPresentation({
             stage: 'workflow_discovery',
@@ -1077,6 +1119,43 @@ describe('thinking activity history normalisation', () => {
         expect(rows[0].label).toBe('Workflow discovery');
         expect(rows[0].detail).toContain('Relevant workflow candidate found');
         expect(rows[0].state).toBe('success');
+    });
+
+    test('links no-match discovery and dispatch activity to the selected workflow', () => {
+        const rows = __testOnly_normaliseThinkingActivityHistory([
+            {
+                sequence_no: 1,
+                status: 'workflow_discovery_complete',
+                stage: 'workflow_discovery_complete',
+                workflow_match_count: 0,
+                workflow_candidate_count: 0,
+                selected_workflow_id: '#V#tool_calling_workflow',
+                selected_workflow_name: 'Tool calling workflow',
+                workflow_selector_verdict: 'tool_seeking',
+                workflow_selector_source: 'selector'
+            },
+            {
+                sequence_no: 2,
+                status: 'orchestrator_start',
+                stage: 'workflow_dispatch',
+                workflow_match_count: 0,
+                workflow_candidate_count: 0,
+                selected_workflow_id: '#V#tool_calling_workflow',
+                selected_workflow_name: 'Tool calling workflow',
+                workflow_selector_verdict: 'tool_seeking',
+                workflow_selector_source: 'selector'
+            }
+        ]);
+
+        expect(rows).toHaveLength(2);
+        expect(rows[0].detail).toContain(
+            'No direct workflow match found; routed via selector to Tool calling workflow (#V#tool_calling_workflow)'
+        );
+        expect(rows[0].detail).toContain('Tool seeking');
+        expect(rows[1].detail).toContain(
+            'No direct workflow match found; routed via selector to Tool calling workflow (#V#tool_calling_workflow)'
+        );
+        expect(rows[1].detail).toContain('Tool seeking');
     });
 
     test('uses teleological selector labels for workflow-dispatch LLM calls', () => {
@@ -1287,7 +1366,8 @@ describe('thinking activity history normalisation', () => {
                 phase: 'workflow_dispatch',
                 selected_workflow_id: '#V#tool_calling_workflow',
                 selected_workflow_name: 'Tool calling workflow',
-                workflow_selector_verdict: 'tool_seeking'
+                workflow_selector_verdict: 'tool_seeking',
+                workflow_selector_source: 'selector'
             }
         });
 
@@ -1296,9 +1376,41 @@ describe('thinking activity history normalisation', () => {
         expect(html).toContain('Tool calling workflow (#V#tool_calling_workflow)');
         expect(html).toContain('Workflow dispatch');
         expect(html).toContain('Selected <button');
+        expect(html).toContain('Source: Selector');
         expect(html).toContain('thinking-card-concept-link');
         expect(html).toContain('data-concept-id="#V#tool_calling_workflow"');
         expect(html).toContain('Plan tool calls');
+    });
+
+    test('explains discovery-to-dispatch routing when selector chooses a workflow after no direct match', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            workflowStagePath: {
+                path: [
+                    { stage_id: 'workflow_discovery', stage_label: 'Workflow discovery' },
+                    { stage_id: 'workflow_dispatch', stage_label: 'Workflow dispatch' },
+                    { stage_id: 'tool_execute', stage_label: 'Execute tool calls' }
+                ]
+            },
+            workflowDiscovery: {
+                match_count: 0,
+                candidate_count: 0,
+                matches: []
+            },
+            latestProgress: {
+                phase: 'workflow_dispatch',
+                selected_workflow_id: '#V#tool_calling_workflow',
+                selected_workflow_name: 'Tool calling workflow',
+                workflow_selector_verdict: 'tool_seeking',
+                workflow_selector_source: 'selector'
+            }
+        });
+
+        expect(html).toContain('No direct workflow match found; routed via selector to <button');
+        expect(html).toContain('Tool calling workflow (#V#tool_calling_workflow)');
+        expect(html).toContain('Routing rationale');
+        expect(html).toContain('Dispatch outcome');
+        expect(html).toContain('Tool seeking');
+        expect(html).not.toContain('thinking-card-tool-status failure');
     });
 
     test('renders preserved earlier stage summaries even when latest progress is only finalising', () => {
@@ -1503,6 +1615,26 @@ describe('thinking activity history normalisation', () => {
         expect(html).toContain('data-thinking-diagnostic-key="activity::7::tool_failed::tool_execute"');
         expect(html).toContain('Sequence');
         expect(html).toContain('Timeout while fetching');
+    });
+
+    test('renders fallback latest-progress summary with selected workflow context', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            latestProgress: {
+                status: 'completed',
+                stage: 'completed',
+                stage_label: 'Complete',
+                workflow_match_count: 0,
+                workflow_candidate_count: 0,
+                selected_workflow_id: '#V#tool_calling_workflow',
+                selected_workflow_name: 'Tool calling workflow',
+                workflow_selector_verdict: 'tool_seeking',
+                workflow_selector_source: 'selector'
+            }
+        });
+
+        expect(html).toContain('Complete');
+        expect(html).toContain('No direct workflow match found; routed via selector to <button');
+        expect(html).toContain('Tool calling workflow (#V#tool_calling_workflow)');
     });
 });
 
