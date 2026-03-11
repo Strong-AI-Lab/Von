@@ -1421,17 +1421,18 @@ function buildThinkingProgressPresentation(progress, request = null) {
     const workflowDiscovery = (progress.workflow_discovery && typeof progress.workflow_discovery === 'object')
         ? progress.workflow_discovery
         : ((request?.workflowDiscovery && typeof request.workflowDiscovery === 'object') ? request.workflowDiscovery : null);
+    const routingNarrative = buildWorkflowRoutingNarrative(progress, workflowDiscovery, {
+        includeNoMatchTransition: true,
+    });
 
     if ((stage === 'workflow_dispatch' || stage === 'plain_response') && !subtask) {
-        subtask = formatWorkflowDisplayText(
-            progress.selected_workflow_id,
-            progress.selected_workflow_name,
-            workflowDiscovery
-        ) || subtask;
+        subtask = routingNarrative.text || subtask;
     } else if (stage === 'workflow_discovery_complete') {
         const matchCount = getWorkflowDiscoveryMatchCount(workflowDiscovery);
         const candidateCount = getWorkflowDiscoveryCandidateCount(workflowDiscovery);
-        if (matchCount === 0 && candidateCount > 0) {
+        if (matchCount === 0 && routingNarrative.context.hasSelection) {
+            subtask = routingNarrative.text;
+        } else if (matchCount === 0 && candidateCount > 0) {
             const primaryCandidate = normaliseWorkflowDiscoveryCandidates(workflowDiscovery)[0] || null;
             const primaryCandidateLabel = formatWorkflowDisplayText(
                 primaryCandidate?.concept_id,
@@ -1463,7 +1464,9 @@ function buildThinkingProgressPresentation(progress, request = null) {
     }
 
     if (terminalStatus) {
-        stageText = livenessLabel;
+        stageText = routingNarrative.text
+            ? `${livenessLabel}: ${routingNarrative.text}`
+            : livenessLabel;
     } else if (livenessState === THINKING_STATUS_STALLED) {
         stageText = stageText ? `Stalled: ${stageText}` : 'Stalled';
     } else if (livenessState === THINKING_STATUS_WAITING) {
@@ -1783,8 +1786,6 @@ function buildThinkingActivityLabelAndDetail(entry) {
     const provider = normaliseThinkingActivityString(entry.provider);
     const resultSummary = normaliseThinkingActivityString(entry.result_summary);
     const error = normaliseThinkingActivityString(entry.error);
-    const selectedWorkflowId = normaliseThinkingActivityString(entry.selected_workflow_id);
-    const selectedWorkflowName = normaliseThinkingActivityString(entry.selected_workflow_name);
     const workflowMatchCount = Number.isFinite(entry.workflow_match_count)
         ? Math.max(0, Number(entry.workflow_match_count))
         : null;
@@ -1792,34 +1793,48 @@ function buildThinkingActivityLabelAndDetail(entry) {
         ? Math.max(0, Number(entry.workflow_candidate_count))
         : null;
     const batchSize = Number.isFinite(entry.batch_size) ? Number(entry.batch_size) : null;
+    const routingNarrative = buildWorkflowRoutingNarrative(entry, null, {
+        includeNoMatchTransition: true,
+    });
 
     const stageText = stageLabel || formatThinkingActivityFallbackLabel(stage);
     const toolName = tool || workflowTask || subtask;
     const modelText = [model, provider].filter(Boolean).join(' · ');
     const detailParts = [];
-    let detailHtml = '';
+    const detailHtmlParts = [];
     let label = '';
+    const pushDetail = (text, html = null) => {
+        const cleanText = normaliseThinkingActivityString(text);
+        const cleanHtml = normaliseThinkingActivityString(html);
+        if (!cleanText) {
+            return;
+        }
+        detailParts.push(cleanText);
+        detailHtmlParts.push(cleanHtml || escapeHtml(cleanText));
+    };
 
     if (status === 'phase_transition') {
         label = stageText || 'Phase transition';
         if (stage && stageText.toLowerCase() !== stage.toLowerCase()) {
-            detailParts.push(formatThinkingActivityFallbackLabel(stage));
+            pushDetail(formatThinkingActivityFallbackLabel(stage));
         }
     } else if (status === 'workflow_discovery') {
         label = 'Workflow discovery';
-        detailParts.push('Searching applicable workflows');
+        pushDetail('Searching applicable workflows');
     } else if (status === 'workflow_discovery_complete') {
         label = 'Workflow discovery';
-        if (workflowMatchCount === 0 && workflowCandidateCount && workflowCandidateCount > 0) {
-            detailParts.push(
+        if (workflowMatchCount === 0 && routingNarrative.context.hasSelection) {
+            pushDetail(routingNarrative.text, routingNarrative.html);
+        } else if (workflowMatchCount === 0 && workflowCandidateCount && workflowCandidateCount > 0) {
+            pushDetail(
                 workflowCandidateCount > 1
                     ? `${workflowCandidateCount} workflow candidates found`
                     : 'Relevant workflow candidate found'
             );
         } else if (workflowMatchCount === 0) {
-            detailParts.push('No direct workflow match found');
+            pushDetail('No direct workflow match found');
         } else if (workflowMatchCount && workflowMatchCount > 0) {
-            detailParts.push(
+            pushDetail(
                 workflowMatchCount > 1
                     ? `${workflowMatchCount} workflows found`
                     : '1 workflow found'
@@ -1827,17 +1842,7 @@ function buildThinkingActivityLabelAndDetail(entry) {
         }
     } else if (status === 'orchestrator_start') {
         label = 'Workflow dispatch';
-        const workflowLabel = formatWorkflowDisplayText(
-            selectedWorkflowId,
-            selectedWorkflowName
-        );
-        if (workflowLabel) {
-            detailParts.push(`Selected ${workflowLabel}`);
-            const workflowLabelHtml = renderWorkflowDisplayHtml(selectedWorkflowId, selectedWorkflowName);
-            if (workflowLabelHtml) {
-                detailHtml = `Selected ${workflowLabelHtml}`;
-            }
-        }
+        pushDetail(routingNarrative.text, routingNarrative.html);
     } else if (status === 'orchestrator_end') {
         label = 'Finished orchestrator';
     } else if (status === 'llm_call_start') {
@@ -1845,19 +1850,19 @@ function buildThinkingActivityLabelAndDetail(entry) {
             ? stageText
             : 'Starting LLM call';
         if (modelText) {
-            detailParts.push(modelText);
+            pushDetail(modelText);
         }
     } else if (status === 'llm_call_chunk') {
         label = 'Streaming LLM output';
         if (modelText) {
-            detailParts.push(modelText);
+            pushDetail(modelText);
         }
     } else if (status === 'llm_call_end') {
         label = stage === 'workflow_dispatch' && stageText
             ? stageText
             : 'Completed LLM call';
         if (modelText) {
-            detailParts.push(modelText);
+            pushDetail(modelText);
         }
     } else if (status === 'tool_call_start') {
         label = toolName ? `Tool call: ${toolName}` : 'Starting tool call';
@@ -1870,17 +1875,17 @@ function buildThinkingActivityLabelAndDetail(entry) {
     } else if (status === 'retry_start') {
         label = 'Retrying step';
         if (subtask) {
-            detailParts.push(subtask);
+            pushDetail(subtask);
         }
     } else if (status === 'retry_end') {
         label = 'Retry completed';
         if (subtask) {
-            detailParts.push(subtask);
+            pushDetail(subtask);
         }
     } else if (status === 'heartbeat') {
         label = 'Waiting for updates';
         if (stageText) {
-            detailParts.push(stageText);
+            pushDetail(stageText);
         }
     } else if (status === 'completed' || status === 'done') {
         label = 'Turn completed';
@@ -1901,18 +1906,18 @@ function buildThinkingActivityLabelAndDetail(entry) {
     }
 
     if (batchSize !== null) {
-        detailParts.push(`batch ${batchSize}`);
+        pushDetail(`batch ${batchSize}`);
     }
     if (resultSummary) {
-        detailParts.push(resultSummary);
+        pushDetail(resultSummary);
     } else if (error) {
-        detailParts.push(error);
+        pushDetail(error);
     }
 
     return {
         label,
         detail: detailParts.join(' · '),
-        detailHtml
+        detailHtml: detailHtmlParts.join(' · ')
     };
 }
 
@@ -2177,6 +2182,116 @@ function renderWorkflowDisplayHtml(workflowId, workflowName, workflowDiscovery =
 
 function formatWorkflowDisplayText(workflowId, workflowName, workflowDiscovery = null) {
     return resolveWorkflowDisplayDescriptor(workflowId, workflowName, workflowDiscovery).label;
+}
+
+function buildWorkflowRoutingContext(progressLike, workflowDiscovery = null) {
+    if (!progressLike || typeof progressLike !== 'object') {
+        const workflowMatchCount = getWorkflowDiscoveryMatchCount(workflowDiscovery);
+        return {
+            selectedWorkflowId: null,
+            selectedWorkflowName: null,
+            selectedWorkflowText: null,
+            selectedWorkflowHtml: '',
+            selectorVerdict: null,
+            selectorVerdictLabel: null,
+            selectorSource: null,
+            selectorSourceLabel: null,
+            workflowMatchCount,
+            workflowCandidateCount: getWorkflowDiscoveryCandidateCount(workflowDiscovery),
+            hasSelection: false,
+            hasDirectMatch: Number.isFinite(workflowMatchCount) && Number(workflowMatchCount) > 0,
+            noDirectMatch: workflowMatchCount !== null && Number(workflowMatchCount) <= 0,
+        };
+    }
+
+    const selectedWorkflowId = normaliseThinkingActivityString(progressLike.selected_workflow_id) || null;
+    const selectedWorkflowName = normaliseThinkingActivityString(progressLike.selected_workflow_name) || null;
+    const selectedWorkflowText = formatWorkflowDisplayText(
+        selectedWorkflowId,
+        selectedWorkflowName,
+        workflowDiscovery
+    ) || null;
+    const selectedWorkflowHtml = renderWorkflowDisplayHtml(
+        selectedWorkflowId,
+        selectedWorkflowName,
+        workflowDiscovery
+    ) || (selectedWorkflowText ? escapeHtml(selectedWorkflowText) : '');
+    const selectorVerdict = normaliseThinkingActivityString(progressLike.workflow_selector_verdict) || null;
+    const selectorSource = normaliseThinkingActivityString(progressLike.workflow_selector_source) || null;
+    const workflowMatchCount = Number.isFinite(progressLike.workflow_match_count)
+        ? Math.max(0, Number(progressLike.workflow_match_count))
+        : getWorkflowDiscoveryMatchCount(workflowDiscovery);
+
+    return {
+        selectedWorkflowId,
+        selectedWorkflowName,
+        selectedWorkflowText,
+        selectedWorkflowHtml,
+        selectorVerdict,
+        selectorVerdictLabel: selectorVerdict
+            ? formatThinkingActivityFallbackLabel(selectorVerdict)
+            : null,
+        selectorSource,
+        selectorSourceLabel: selectorSource
+            ? formatThinkingActivityFallbackLabel(selectorSource)
+            : null,
+        workflowMatchCount,
+        workflowCandidateCount: Number.isFinite(progressLike.workflow_candidate_count)
+            ? Math.max(0, Number(progressLike.workflow_candidate_count))
+            : getWorkflowDiscoveryCandidateCount(workflowDiscovery),
+        hasSelection: Boolean(selectedWorkflowText),
+        hasDirectMatch: Number.isFinite(workflowMatchCount) && Number(workflowMatchCount) > 0,
+        noDirectMatch: workflowMatchCount !== null && Number(workflowMatchCount) <= 0,
+    };
+}
+
+function buildWorkflowRoutingNarrative(
+    progressLike,
+    workflowDiscovery = null,
+    {
+        includeNoMatchTransition = false,
+        includeSource = true,
+        includeVerdict = true,
+        preferRouteVerb = false,
+    } = {}
+) {
+    const context = buildWorkflowRoutingContext(progressLike, workflowDiscovery);
+    const textParts = [];
+    const htmlParts = [];
+    const useNoMatchTransition = includeNoMatchTransition && context.noDirectMatch && context.hasSelection;
+
+    if (context.hasSelection) {
+        if (useNoMatchTransition) {
+            const prefix = context.selectorSourceLabel
+                ? `No direct workflow match found; routed via ${context.selectorSourceLabel.toLowerCase()} to `
+                : 'No direct workflow match found; routed to ';
+            textParts.push(`${prefix}${context.selectedWorkflowText}`);
+            htmlParts.push(`${escapeHtml(prefix)}${context.selectedWorkflowHtml}`);
+        } else if (preferRouteVerb && context.selectorSourceLabel) {
+            const prefix = `Routed via ${context.selectorSourceLabel.toLowerCase()} to `;
+            textParts.push(`${prefix}${context.selectedWorkflowText}`);
+            htmlParts.push(`${escapeHtml(prefix)}${context.selectedWorkflowHtml}`);
+        } else {
+            textParts.push(`Selected ${context.selectedWorkflowText}`);
+            htmlParts.push(`Selected ${context.selectedWorkflowHtml}`);
+        }
+    }
+
+    if (includeSource && context.selectorSourceLabel && !useNoMatchTransition && !preferRouteVerb) {
+        textParts.push(`Source: ${context.selectorSourceLabel}`);
+        htmlParts.push(`Source: ${escapeHtml(context.selectorSourceLabel)}`);
+    }
+
+    if (includeVerdict && context.selectorVerdictLabel) {
+        textParts.push(context.selectorVerdictLabel);
+        htmlParts.push(escapeHtml(context.selectorVerdictLabel));
+    }
+
+    return {
+        text: textParts.join(' · '),
+        html: htmlParts.join(' · '),
+        context,
+    };
 }
 
 function buildThinkingDiagnosticKey(...parts) {
@@ -2517,6 +2632,9 @@ function buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request) 
         ? request.latestProgress
         : null;
     const toolHistory = getCanonicalThinkingToolHistory(request);
+    const routingNarrative = buildWorkflowRoutingNarrative(latestProgress, workflowDiscovery, {
+        includeNoMatchTransition: true,
+    });
 
     const data = {
         stage_id: cleanStageId,
@@ -2563,19 +2681,23 @@ function buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request) 
                 .filter(Boolean)
             : [];
         data.candidates = normaliseWorkflowDiscoveryCandidates(workflowDiscovery).map((candidate) => ({ ...candidate }));
+        data.selected_workflow_id = routingNarrative.context.selectedWorkflowId;
+        data.selected_workflow_name = routingNarrative.context.selectedWorkflowName;
+        data.workflow_selector_verdict = routingNarrative.context.selectorVerdict;
+        data.workflow_selector_source = routingNarrative.context.selectorSource;
+        data.workflow_selection_narrative = routingNarrative.text || null;
+        data.workflow_selection_narrative_html = routingNarrative.html || null;
     }
 
     if (cleanStageId === 'workflow_dispatch' || cleanStageId === 'plain_response') {
-        data.selected_workflow_id = normaliseThinkingActivityString(latestProgress?.selected_workflow_id) || null;
-        data.selected_workflow_name = normaliseThinkingActivityString(latestProgress?.selected_workflow_name) || null;
-        data.workflow_selector_verdict = normaliseThinkingActivityString(latestProgress?.workflow_selector_verdict) || null;
-        data.workflow_selector_source = normaliseThinkingActivityString(latestProgress?.workflow_selector_source) || null;
-        data.workflow_match_count = Number.isFinite(latestProgress?.workflow_match_count)
-            ? Number(latestProgress.workflow_match_count)
-            : getWorkflowDiscoveryMatchCount(workflowDiscovery);
-        data.workflow_candidate_count = Number.isFinite(latestProgress?.workflow_candidate_count)
-            ? Number(latestProgress.workflow_candidate_count)
-            : getWorkflowDiscoveryCandidateCount(workflowDiscovery);
+        data.selected_workflow_id = routingNarrative.context.selectedWorkflowId;
+        data.selected_workflow_name = routingNarrative.context.selectedWorkflowName;
+        data.workflow_selector_verdict = routingNarrative.context.selectorVerdict;
+        data.workflow_selector_source = routingNarrative.context.selectorSource;
+        data.workflow_match_count = routingNarrative.context.workflowMatchCount;
+        data.workflow_candidate_count = routingNarrative.context.workflowCandidateCount;
+        data.workflow_selection_narrative = routingNarrative.text || null;
+        data.workflow_selection_narrative_html = routingNarrative.html || null;
     }
 
     if (cleanStageId === 'tool_execute') {
@@ -2627,7 +2749,12 @@ function renderThinkingWorkflowStageDiagnosticDataHTML(data, workflowDiscovery =
             { label: 'Search time', value: Number.isFinite(data.search_time_ms) ? `${data.search_time_ms} ms` : '' },
             { label: 'Routing matches', value: data.match_count },
             { label: 'Candidates considered', value: data.candidate_count },
-            { label: 'Allow non-executable', value: data.allow_non_executable }
+            { label: 'Allow non-executable', value: data.allow_non_executable },
+            {
+                label: 'Dispatch outcome',
+                value: data.workflow_selection_narrative,
+                html: data.workflow_selection_narrative_html
+            }
         );
         sections.push(buildThinkingDiagnosticListHTML('Fallback queries', data.keyword_fallback_queries, { code: true }));
         sections.push(buildThinkingDiagnosticListHTML('Errors', data.errors));
@@ -2659,6 +2786,11 @@ function renderThinkingWorkflowStageDiagnosticDataHTML(data, workflowDiscovery =
                 value: data.workflow_selector_source
                     ? formatThinkingActivityFallbackLabel(data.workflow_selector_source)
                     : ''
+            },
+            {
+                label: 'Routing rationale',
+                value: data.workflow_selection_narrative,
+                html: data.workflow_selection_narrative_html
             },
             { label: 'Routing matches', value: data.workflow_match_count },
             { label: 'Candidates considered', value: data.workflow_candidate_count }
@@ -2830,6 +2962,9 @@ function buildWorkflowStageDetailPresentation(stageId, request) {
         : null;
     const cleanStageId = normaliseThinkingActivityString(stageId);
     const stageDiagnostic = getThinkingStageDiagnosticEntry(request, cleanStageId);
+    const routingNarrative = buildWorkflowRoutingNarrative(latestProgress, workflowDiscovery, {
+        includeNoMatchTransition: true,
+    });
 
     if (cleanStageId === 'workflow_discovery') {
         const errors = Array.isArray(workflowDiscovery?.errors)
@@ -2848,6 +2983,12 @@ function buildWorkflowStageDetailPresentation(stageId, request) {
             return {
                 text: 'Searching applicable workflows',
                 html: 'Searching applicable workflows'
+            };
+        }
+        if (matchCount <= 0 && routingNarrative.context.hasSelection) {
+            return {
+                text: routingNarrative.text,
+                html: routingNarrative.html
             };
         }
         if (matchCount <= 0 && candidateCount > 0) {
@@ -2920,31 +3061,9 @@ function buildWorkflowStageDetailPresentation(stageId, request) {
     }
 
     if (cleanStageId === 'workflow_dispatch' || cleanStageId === 'plain_response') {
-        const workflowLabel = formatWorkflowDisplayText(
-            latestProgress?.selected_workflow_id,
-            latestProgress?.selected_workflow_name,
-            workflowDiscovery
-        );
-        const workflowLabelHtml = renderWorkflowDisplayHtml(
-            latestProgress?.selected_workflow_id,
-            latestProgress?.selected_workflow_name,
-            workflowDiscovery
-        );
-        const verdict = normaliseThinkingActivityString(latestProgress?.workflow_selector_verdict);
-        const detailParts = [];
-        const detailHtmlParts = [];
-        if (workflowLabel) {
-            detailParts.push(`Selected ${workflowLabel}`);
-            detailHtmlParts.push(`Selected ${workflowLabelHtml || escapeHtml(workflowLabel)}`);
-        }
-        if (verdict) {
-            const verdictLabel = formatThinkingActivityFallbackLabel(verdict);
-            detailParts.push(verdictLabel);
-            detailHtmlParts.push(escapeHtml(verdictLabel));
-        }
         return {
-            text: detailParts.join(' · '),
-            html: detailHtmlParts.join(' · ')
+            text: routingNarrative.text,
+            html: routingNarrative.html
         };
     }
 
@@ -3034,12 +3153,15 @@ function buildThinkingWorkflowStageRows(request) {
                 request
             );
             const detailPresentation = buildWorkflowStageDetailPresentation('workflow_discovery', request);
+            const routingContext = buildWorkflowRoutingContext(request?.latestProgress, workflowDiscovery);
             return [{
                 stageId: 'workflow_discovery',
                 label: 'Workflow discovery',
                 detail: detailPresentation.text,
                 detailHtml: detailPresentation.html,
-                state: getWorkflowDiscoveryMatchCount(workflowDiscovery) > 0 ? 'success' : 'failure',
+                state: routingContext.noDirectMatch && routingContext.hasSelection
+                    ? 'success'
+                    : (getWorkflowDiscoveryMatchCount(workflowDiscovery) > 0 ? 'success' : 'failure'),
                 diagnosticKey: buildThinkingDiagnosticKey('stage', 'workflow_discovery'),
                 diagnosticData
             }];
@@ -3050,6 +3172,7 @@ function buildThinkingWorkflowStageRows(request) {
     const latestProgress = (request.latestProgress && typeof request.latestProgress === 'object')
         ? request.latestProgress
         : null;
+    const routingContext = buildWorkflowRoutingContext(latestProgress, workflowDiscovery);
     const latestStageId = (() => {
         const lastStage = path[path.length - 1];
         return normaliseThinkingActivityString(lastStage?.stage_id || lastStage?.runtime_stage_normalised);
@@ -3074,7 +3197,9 @@ function buildThinkingWorkflowStageRows(request) {
             const discoveryErrors = Array.isArray(workflowDiscovery?.errors)
                 ? workflowDiscovery.errors.filter((item) => typeof item === 'string' && item.trim())
                 : [];
-            if (discoveryErrors.length > 0 || matchCount === 0) {
+            if (routingContext.noDirectMatch && routingContext.hasSelection) {
+                state = 'success';
+            } else if (discoveryErrors.length > 0 || matchCount === 0) {
                 state = candidateCount > 0 ? 'success' : 'failure';
             } else if (matchCount === null) {
                 state = 'pending';
@@ -3199,6 +3324,12 @@ function renderThinkingLatestProgressSummaryHTML(request) {
     if (!latestProgress) {
         return '';
     }
+    const workflowDiscovery = (request?.workflowDiscovery && typeof request.workflowDiscovery === 'object')
+        ? request.workflowDiscovery
+        : null;
+    const routingNarrative = buildWorkflowRoutingNarrative(latestProgress, workflowDiscovery, {
+        includeNoMatchTransition: true,
+    });
 
     const label = normaliseThinkingActivityString(latestProgress.phase_label)
         || normaliseThinkingActivityString(latestProgress.stage_label)
@@ -3209,6 +3340,7 @@ function renderThinkingLatestProgressSummaryHTML(request) {
         || 'Current status';
     const detail = normaliseThinkingActivityString(latestProgress.result_summary)
         || normaliseThinkingActivityString(latestProgress.subtask)
+        || routingNarrative.text
         || normaliseThinkingActivityString(latestProgress.pending_reason);
     if (!label && !detail) {
         return '';
@@ -3217,6 +3349,7 @@ function renderThinkingLatestProgressSummaryHTML(request) {
     return renderThinkingDiagnosticRowHTML({
         label,
         detail,
+        detailHtml: routingNarrative.text === detail ? routingNarrative.html : '',
         state: isTerminalThinkingProgress(latestProgress) ? 'success' : 'pending'
     }, 'thinking-card-tool thinking-card-activity');
 }
