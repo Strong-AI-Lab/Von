@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import logging
 from typing import Any, Mapping, Optional, Sequence, cast
 
 from src.backend.integrations.internal_mcp.orchestrator import (
@@ -9,19 +9,9 @@ from src.backend.integrations.internal_mcp.orchestrator import (
 )
 
 
-@dataclass(frozen=True)
-class _TransportResult:
-    payload: Any
-    duration_ms: float
-
-
 class _Gateway:
-    enabled = True
-
-    def __init__(self) -> None:
-        self.invocations: list[dict[str, Any]] = []
-
-    def describe_methods(self) -> dict[str, Any]:
+    @staticmethod
+    def describe_methods() -> dict[str, Any]:
         return {
             "download_paper": {
                 "category": "write",
@@ -36,10 +26,6 @@ class _Gateway:
                 "description": "List cached papers",
             },
         }
-
-    def invoke(self, tool_name: str, payload: Mapping[str, Any]) -> _TransportResult:
-        self.invocations.append({"tool": tool_name, "payload": dict(payload)})
-        return _TransportResult(payload={"success": True}, duration_ms=1.0)
 
 
 class _CapturingLLM:
@@ -61,72 +47,105 @@ class _CapturingLLM:
         return self._responses.pop(0)
 
 
-def test_missing_tool_call_retry_forces_download_paper_over_list_papers():
-    gateway = _Gateway()
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=cast(Any, gateway),
-        max_tool_invocations=1,
-    )
-
+def _build_orchestrator_stub() -> InternalMCPChatOrchestrator:
+    orchestrator = object.__new__(InternalMCPChatOrchestrator)
+    orchestrator._logger = logging.getLogger(__name__)
+    orchestrator._gateway = cast(Any, _Gateway())
     orchestrator._missing_tool_call_detector_loaded = True
     orchestrator._missing_tool_call_detector = _MissingToolCallDetectorSpec(
         action_id="fallback_missing_tool_call_detector",
         prompt_id=None,
-        prompt_text=orchestrator._FALLBACK_MISSING_TOOL_CALL_PROMPT,
+        prompt_text=InternalMCPChatOrchestrator._FALLBACK_MISSING_TOOL_CALL_PROMPT,
         model=None,
     )
+    return orchestrator
+
+
+def _uses_missing_tool_call_classifier_prompt(
+    calls: Sequence[Mapping[str, Any]],
+    classifier_prompt: str,
+) -> bool:
+    classifier_prefix = classifier_prompt.split("{response}", 1)[0].strip()
+    for call in calls:
+        prompt = call.get("prompt")
+        if not isinstance(prompt, str):
+            continue
+        if classifier_prefix and classifier_prefix in prompt:
+            return True
+    return False
+
+
+def test_missing_tool_call_assessment_skips_classifier_when_fallback_detector_matches():
+    orchestrator = _build_orchestrator_stub()
 
     llm = _CapturingLLM(
         [
             "Here is the actual tool call.",
-            "Done.",
         ]
     )
 
-    orchestrator.run(
-        prompt="Download arXiv:2506.16596 and store it as an artefact.",
-        context=[],
+    response_text = "Here is the actual tool call."
+    assessment = orchestrator._assess_missing_tool_call(
+        response_text=response_text,
+        use_structured=False,
+        interpretation=orchestrator._interpret_model_turn(response_text),
         llm_client=llm,
         model=None,
-        user_namespace="#V#user",
+        classifier_model=None,
+        aux_log=[],
+        tool_call_parse_error=None,
+        allow_semantic_retry=True,
     )
 
-    assert any(call["tool"] == "download_paper" for call in gateway.invocations)
-    assert not any(call["tool"] == "list_papers" for call in gateway.invocations)
+    assert assessment.retry_reason == "heuristic missing tool call"
+    assert assessment.classifier_invoked is False
+    assert not _uses_missing_tool_call_classifier_prompt(
+        llm.calls, orchestrator._FALLBACK_MISSING_TOOL_CALL_PROMPT
+    )
+    assert llm.calls == []
 
-    # The forced retry path should avoid an extra LLM call.
-    assert len(llm.calls) == 2
+
+def test_missing_tool_call_retry_forces_download_paper_over_list_papers():
+    orchestrator = _build_orchestrator_stub()
+
+    prompt = "Download arXiv:2506.16596 and store it as an artefact."
+    requirements = orchestrator._derive_prompt_tool_requirements(
+        prompt,
+        method_catalogue=_Gateway.describe_methods(),
+        context_messages=[],
+    )
+    assert "download_paper" in requirements["required_tools"]
+    assert "finalise_cached_paper" not in requirements["required_tools"]
+    assert "list_papers" not in requirements["required_tools"]
+
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt=prompt,
+        missing_required_tools=requirements["required_tools"],
+    )
+    assert forced is not None
+    assert any(call["tool"] == "download_paper" for call in forced)
+    assert not any(call["tool"] == "list_papers" for call in forced)
 
 
 def test_missing_tool_call_retry_forces_finalise_cached_paper_when_requested():
-    gateway = _Gateway()
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=cast(Any, gateway),
-        max_tool_invocations=1,
-    )
+    orchestrator = _build_orchestrator_stub()
 
-    orchestrator._missing_tool_call_detector_loaded = True
-    orchestrator._missing_tool_call_detector = _MissingToolCallDetectorSpec(
-        action_id="fallback_missing_tool_call_detector",
-        prompt_id=None,
-        prompt_text=orchestrator._FALLBACK_MISSING_TOOL_CALL_PROMPT,
-        model=None,
+    prompt = "Finalise cached arXiv:2506.16596v2 and store it as an artefact."
+    requirements = orchestrator._derive_prompt_tool_requirements(
+        prompt,
+        method_catalogue=_Gateway.describe_methods(),
+        context_messages=[],
     )
+    assert "finalise_cached_paper" in requirements["required_tools"]
+    assert "download_paper" not in requirements["required_tools"]
+    assert "list_papers" not in requirements["required_tools"]
 
-    llm = _CapturingLLM(
-        [
-            "Here is the actual tool call.",
-            "Done.",
-        ]
+    forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
+        [],
+        user_prompt=prompt,
+        missing_required_tools=requirements["required_tools"],
     )
-
-    orchestrator.run(
-        prompt="Finalise cached arXiv:2506.16596v2 and store it as an artefact.",
-        context=[],
-        llm_client=llm,
-        model=None,
-        user_namespace="#V#user",
-    )
-
-    assert any(call["tool"] == "finalise_cached_paper" for call in gateway.invocations)
-    assert not any(call["tool"] == "list_papers" for call in gateway.invocations)
+    assert forced is not None
+    assert any(call["tool"] == "finalise_cached_paper" for call in forced)
+    assert not any(call["tool"] == "list_papers" for call in forced)

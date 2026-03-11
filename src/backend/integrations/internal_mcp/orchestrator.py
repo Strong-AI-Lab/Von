@@ -7163,6 +7163,34 @@ class InternalMCPChatOrchestrator:
 
         return required_tools
 
+    @classmethod
+    def _infer_arxiv_acquisition_tool_from_prompt(
+        cls,
+        prompt_text: str,
+        *,
+        allow_default_download: bool,
+    ) -> str | None:
+        """Infer the deterministic arXiv acquisition tool implied by a prompt."""
+
+        if not isinstance(prompt_text, str) or not prompt_text.strip():
+            return None
+
+        if not cls._extract_arxiv_id_from_text(prompt_text):
+            return None
+
+        lowered = prompt_text.lower()
+        if any(token in lowered for token in ("finalise", "finalize", "cached")):
+            return "finalise_cached_paper"
+
+        explicit_artefact_intent = any(
+            token in lowered
+            for token in ("download", "ingest", "upload", "store", "save")
+        )
+        if explicit_artefact_intent or allow_default_download:
+            return "download_paper"
+
+        return None
+
     @staticmethod
     def _missing_prompt_tool_requirements(
         *,
@@ -7343,8 +7371,7 @@ class InternalMCPChatOrchestrator:
         if not _tool_available("create_concepts"):
             required_create_type_name = None
         prompt_text = user_prompt if isinstance(user_prompt, str) else ""
-        prompt_arxiv_id = cls._extract_arxiv_id_from_text(prompt_text)
-        allow_default_arxiv_download = bool(prompt_arxiv_id) and not (
+        allow_default_arxiv_download = bool(cls._extract_arxiv_id_from_text(prompt_text)) and not (
             prompt_explicitly_denies_write(prompt_text)
         )
         has_prompt_url = (
@@ -7357,10 +7384,25 @@ class InternalMCPChatOrchestrator:
             for tool_name in required_tools
             if isinstance(tool_name, str) and tool_name.strip()
         }
-        if allow_default_arxiv_download and _tool_available("download_paper"):
-            if "download_paper" not in seen_required:
-                required_tools.append("download_paper")
-                seen_required.add("download_paper")
+        preferred_arxiv_tool = cls._infer_arxiv_acquisition_tool_from_prompt(
+            prompt_text,
+            allow_default_download=allow_default_arxiv_download,
+        )
+        if preferred_arxiv_tool == "finalise_cached_paper" and not _tool_available(
+            "finalise_cached_paper"
+        ):
+            preferred_arxiv_tool = (
+                "download_paper"
+                if allow_default_arxiv_download and _tool_available("download_paper")
+                else None
+            )
+        elif preferred_arxiv_tool and not _tool_available(preferred_arxiv_tool):
+            preferred_arxiv_tool = None
+
+        if preferred_arxiv_tool:
+            if preferred_arxiv_tool not in seen_required:
+                required_tools.append(preferred_arxiv_tool)
+                seen_required.add(preferred_arxiv_tool)
         elif has_prompt_url:
             url_tool_name: str | None = None
             if _tool_available("resilient_extract_url"):
@@ -16576,27 +16618,12 @@ class InternalMCPChatOrchestrator:
         if not arxiv_id:
             return None
 
-        lowered = last_user_text.lower()
-        explicit_artefact_intent = any(
-            token in lowered
-            for token in (
-                "download",
-                "ingest",
-                "upload",
-                "store",
-                "save",
-                "finalise",
-                "finalize",
-            )
+        tool_name = self._infer_arxiv_acquisition_tool_from_prompt(
+            last_user_text,
+            allow_default_download=False,
         )
-        if not explicit_artefact_intent:
+        if tool_name is None:
             return None
-
-        tool_name = (
-            "finalise_cached_paper"
-            if ("finalise" in lowered or "finalize" in lowered or "cached" in lowered)
-            else "download_paper"
-        )
 
         return [
             {
