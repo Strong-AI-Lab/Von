@@ -2462,3 +2462,110 @@ class TestDiscoverWorkflowIds:
             workflow_ids = discover_workflow_ids()
 
         assert workflow_ids == ["#V#wf_alpha", "#V#wf_zeta"]
+
+
+# ---------------------------------------------------------------------------
+# Variable declarations — JVNAUTOSCI-1440
+# ---------------------------------------------------------------------------
+
+
+class TestVariableDeclarations:
+    """Tests for workflow-level variable declaration reading and propagation."""
+
+    def test_build_graph_reads_hasWorkflowVariable_relationships(self):
+        workflow_doc = {
+            "concept_id": "#V#var_workflow",
+            "relationships": {
+                "#V#hasInitialStep": ["#V#step_a"],
+                "#V#hasStep": ["#V#step_a"],
+                "#V#hasWorkflowVariable": ["#V#var_counter", "#V#var_flag"],
+            },
+        }
+        step_docs = {
+            "#V#step_a": {
+                "concept_id": "#V#step_a",
+                "name": "Step A",
+                "relationships": {"#V#invokesAction": ["some.action"]},
+            },
+        }
+        variable_docs = {
+            "#V#var_counter": {
+                "concept_id": "#V#var_counter",
+                "name": "counter",
+                "concept_data": {"variable_name": "counter", "default_value": 0},
+            },
+            "#V#var_flag": {
+                "concept_id": "#V#var_flag",
+                "name": "flag",
+                "concept_data": {"key": "active_flag", "default_value": False},
+            },
+        }
+        all_docs = {**step_docs, **variable_docs}
+
+        def _fake_find_one(query, projection=None):
+            cid = query.get("concept_id") if isinstance(query, dict) else None
+            if not isinstance(cid, str):
+                return None
+            return {"#V#var_workflow": workflow_doc}.get(cid)
+
+        with patch(
+            "src.backend.workflows.vontology_loader.ConceptsRepository.find_one",
+            side_effect=_fake_find_one,
+        ), patch(
+            "src.backend.workflows.vontology_loader._fetch_concepts_by_id",
+            side_effect=lambda ids: {k: all_docs[k] for k in ids if k in all_docs},
+        ):
+            graph, warnings = build_workflow_process_graph("#V#var_workflow")
+
+        assert graph is not None
+        var_decls = graph["variable_declarations"]
+        assert len(var_decls) == 2
+        assert var_decls[0]["name"] == "counter"
+        assert var_decls[0]["default_value"] == 0
+        assert var_decls[1]["name"] == "active_flag"
+        assert var_decls[1]["default_value"] is False
+
+    def test_load_definition_propagates_variable_declarations_to_metadata(self):
+        var_decls = [
+            {"concept_id": "#V#var_x", "name": "x", "default_value": 10},
+        ]
+        graph = {
+            **_make_graph(
+                initial_step="#V#step_a",
+                steps=[_make_step("#V#step_a", invokes_action="test.action")],
+            ),
+            "variable_declarations": var_decls,
+        }
+
+        with _stub_fetch_concepts({}), _stub_narrative():
+            with patch(
+                "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+                return_value=(graph, []),
+            ):
+                definition = load_workflow_definition_from_vontology(
+                    "#V#test_workflow"
+                )
+
+        assert definition is not None
+        assert definition.metadata is not None
+        assert definition.metadata["variable_declarations"] == var_decls
+
+    def test_load_definition_omits_variable_declarations_when_empty(self):
+        graph = _make_graph(
+            initial_step="#V#step_a",
+            steps=[_make_step("#V#step_a", invokes_action="test.action")],
+        )
+        # _make_graph does not include variable_declarations by default
+        assert "variable_declarations" not in graph
+
+        with _stub_fetch_concepts({}), _stub_narrative():
+            with patch(
+                "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+                return_value=(graph, []),
+            ):
+                definition = load_workflow_definition_from_vontology(
+                    "#V#test_workflow"
+                )
+
+        assert definition is not None
+        assert "variable_declarations" not in (definition.metadata or {})

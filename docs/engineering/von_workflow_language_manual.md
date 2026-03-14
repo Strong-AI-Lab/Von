@@ -1,7 +1,7 @@
 # Von Workflow Language (VWL) Manual
 
 Status: Draft (current implementation-aligned)
-Last updated: 2026-03-10 (Pacific/Auckland)
+Last updated: 2026-03-15 (Pacific/Auckland)
 Audience: Human engineers and AI agents
 
 ## 1. Purpose and Scope
@@ -101,6 +101,7 @@ Canonical graph families include:
 - `workflowStepMapsContextKeyToToolParam`
 - `workflowStepWritesContextKey`
 - `workflowStepMapsToolOutputFieldToContextKey`
+- `hasWorkflowVariable`
 
 ## 4. VWL Program Model
 
@@ -204,6 +205,7 @@ Important deterministic ordering:
 
 Runtime execution model (`WorkflowExecutor`):
 
+0. Initialise declared workflow variables from `definition.metadata["variable_declarations"]` — only for keys not already present in the caller-supplied context.
 1. Enter current state.
 2. Run pre-action metadata validation (unless validation mode disables enforcement).
 3. Execute actions in state order.
@@ -307,6 +309,7 @@ Per-state metadata keys currently used:
 - `loop_scope_id`
 - `fork_id`
 - `join_fork_id`
+- `variable_declarations`
 
 ### 8.1 Runtime Policy Metadata
 
@@ -390,6 +393,7 @@ Control-flow action IDs:
 - `workflow_control.fork`
 - `workflow_control.join`
 - `workflow_control.for_each`
+- `workflow_control.context_set`
 
 ### 10.1 Break/Continue
 
@@ -472,6 +476,70 @@ Runtime semantics:
 - aggregate counts are returned in `for_each_success_count`, `for_each_error_count`, and `for_each_partial_success`;
 - `all_must_succeed` returns failure when any child execution fails;
 - `allow_partial` returns success while preserving structured failure details.
+
+### 10.3a Context Set (JVNAUTOSCI-1440)
+
+`workflow_control.context_set` is the canonical declarative context-mutation primitive for VWL.
+
+Required inputs:
+
+- `assignments` (list of dicts): each assignment MUST contain:
+  - `key` (string, required): the target context key to write.
+  - `value` (any, optional): literal value to assign.
+  - `value_from_context` (string, optional): context path to copy from (resolved via `resolve_context_path`). If the source path is absent, the target key receives `None`.
+  - Exactly one of `value` or `value_from_context` SHOULD be present. If both are supplied, `value_from_context` takes precedence.
+
+Outputs:
+
+- One output key per assignment (using the declared `key` as the output key), merged into context by the standard action-output merge.
+- `_context_set_applied_keys` (list of strings): ordered list of keys that were written.
+
+Error semantics:
+
+- Missing or non-list `assignments` → `context_set:assignments_missing_or_invalid`.
+- Non-mapping assignment entry → `context_set:assignment_{index}_not_mapping`.
+- Missing or empty `key` → `context_set:assignment_{index}_missing_key`.
+
+Usage pattern:
+
+```json
+{
+  "invokesAction": "workflow_control.context_set",
+  "hasInputMap": [
+    "assignments=[{\"key\":\"my_flag\",\"value\":true},{\"key\":\"derived\",\"value_from_context\":\"source_key\"}]"
+  ]
+}
+```
+
+### 10.3b Variable Declarations (JVNAUTOSCI-1440)
+
+Workflow-level variable declarations provide deterministic default initialisation for workflow context keys before execution begins.
+
+Ontology representation:
+
+- The workflow concept is linked to variable concepts via the `hasWorkflowVariable` predicate (canonical: `#V#hasWorkflowVariable`).
+- Each variable concept SHOULD contain `concept_data` with:
+  - `variable_name` (preferred) or `key` (fallback): the context key name. The resolution chain is `variable_name` → `key` → concept `name` → concept ID.
+  - `default_value` (optional): default value assigned during initialisation. May be any JSON-serialisable value, including `null`.
+
+Compilation:
+
+- `build_workflow_process_graph()` reads `hasWorkflowVariable` relationships from the workflow concept.
+- Each resolved variable concept is compiled into a declaration dict:
+  ```json
+  {"concept_id": "<id>", "name": "<resolved_name>", "default_value": <value>}
+  ```
+- The list is stored in the graph output as `variable_declarations`.
+- `load_workflow_definition_from_vontology()` propagates `variable_declarations` into `workflow_metadata`.
+
+Runtime initialisation:
+
+- `WorkflowExecutor.run()` reads `variable_declarations` from `definition.metadata` before entering the state-machine loop.
+- For each declaration, if the variable `name` is **not already present** in the context, the engine sets `context[name] = default_value`.
+- Caller-supplied context data takes precedence over declared defaults.
+- Malformed declarations (non-mapping entries, empty names) are silently skipped.
+
+This enables workflow authors to declare expected context variables and their defaults in the ontology, ensuring consistent initial state without requiring callers to supply every expected key.
 
 ### 10.4 File-Copy Upload Routing Workflows (JVNAUTOSCI-1309)
 

@@ -9,6 +9,7 @@ from src.backend.workflows.action_registry import (
 from src.backend.workflows.durable.control_flow_actions import register_control_flow_actions
 from src.backend.workflows.execution_contracts import (
     WORKFLOW_CONTROL_ACTION_BREAK_ID,
+    WORKFLOW_CONTROL_ACTION_CONTEXT_SET_ID,
     WORKFLOW_CONTROL_ACTION_FOR_EACH_ID,
     WORKFLOW_CONTROL_ACTION_FORK_ID,
     WORKFLOW_CONTROL_ACTION_JOIN_ID,
@@ -200,3 +201,107 @@ def test_for_each_action_respects_partial_success_policy() -> None:
     assert result.outputs.get("for_each_success_count") == 1
     assert result.outputs.get("for_each_error_count") == 1
     assert result.outputs.get("for_each_partial_success") is True
+
+
+# ---------------------------------------------------------------------------
+# context.set action tests (JVNAUTOSCI-1440)
+# ---------------------------------------------------------------------------
+
+
+def _build_context_set_registry() -> ActionRegistry:
+    registry = ActionRegistry()
+    register_control_flow_actions(registry, definition_loader=lambda _wid: None)
+    return registry
+
+
+def test_context_set_literal_values() -> None:
+    registry = _build_context_set_registry()
+    result = registry.execute(
+        WORKFLOW_CONTROL_ACTION_CONTEXT_SET_ID,
+        inputs={
+            "assignments": [
+                {"key": "flag_a", "value": True},
+                {"key": "counter", "value": 42},
+            ]
+        },
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["flag_a"] is True
+    assert result.outputs["counter"] == 42
+    assert result.outputs["_context_set_applied_keys"] == ["flag_a", "counter"]
+
+
+def test_context_set_value_from_context() -> None:
+    registry = _build_context_set_registry()
+    result = registry.execute(
+        WORKFLOW_CONTROL_ACTION_CONTEXT_SET_ID,
+        inputs={
+            "assignments": [
+                {"key": "copied_val", "value_from_context": "source_key"},
+            ]
+        },
+        context={"source_key": "hello"},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["copied_val"] == "hello"
+
+
+def test_context_set_value_from_context_missing_source() -> None:
+    registry = _build_context_set_registry()
+    result = registry.execute(
+        WORKFLOW_CONTROL_ACTION_CONTEXT_SET_ID,
+        inputs={
+            "assignments": [
+                {"key": "dest", "value_from_context": "nonexistent"},
+            ]
+        },
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["dest"] is None
+
+
+def test_context_set_fails_when_assignments_missing() -> None:
+    registry = _build_context_set_registry()
+    result = registry.execute(
+        WORKFLOW_CONTROL_ACTION_CONTEXT_SET_ID,
+        inputs={},
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "failed"
+    assert "assignments_missing" in (result.error or "")
+
+
+def test_context_set_fails_on_missing_key() -> None:
+    registry = _build_context_set_registry()
+    result = registry.execute(
+        WORKFLOW_CONTROL_ACTION_CONTEXT_SET_ID,
+        inputs={"assignments": [{"value": "no_key"}]},
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "failed"
+    assert "missing_key" in (result.error or "")
+
+
+def test_context_set_fails_on_non_mapping_assignment() -> None:
+    registry = _build_context_set_registry()
+    result = registry.execute(
+        WORKFLOW_CONTROL_ACTION_CONTEXT_SET_ID,
+        inputs={"assignments": ["not_a_dict"]},
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "failed"
+    assert "not_mapping" in (result.error or "")

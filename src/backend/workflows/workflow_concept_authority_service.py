@@ -19,12 +19,16 @@ from ..services import concept_service
 from ..services.concept_service import ConceptNotFoundError
 from ..services.effort_unit_ontology_service import ensure_effort_unit_ontology
 from .definitions import (
+    CHAT_ASSISTANT_WORKFLOW_ID,
+    CHAT_BUTTONIFY_WORKFLOW_ID,
     CHAT_NARRATION_WORKFLOW_ID,
     CONCEPT_SUGGESTION_PREFLIGHT_WORKFLOW_ID,
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+    KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
     MISSING_TOOL_CALL_WORKFLOW_ID,
     TODO_REFRESH_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
+    TURN_COMPLETION_GATE_WORKFLOW_ID,
     WRITE_TOOL_POLICY_WORKFLOW_ID,
 )
 from .parent_specificity_workflow_contracts import (
@@ -151,10 +155,14 @@ WORKFLOW_INSTANCE_TYPE_ID_CANDIDATES: tuple[str, ...] = (
 CANONICAL_CHAT_WORKFLOW_IDS: tuple[str, ...] = (
     MISSING_TOOL_CALL_WORKFLOW_ID,
     CHAT_NARRATION_WORKFLOW_ID,
+    CHAT_BUTTONIFY_WORKFLOW_ID,
+    CHAT_ASSISTANT_WORKFLOW_ID,
     TODO_REFRESH_WORKFLOW_ID,
     WRITE_TOOL_POLICY_WORKFLOW_ID,
     CONCEPT_SUGGESTION_PREFLIGHT_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
+    KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
+    TURN_COMPLETION_GATE_WORKFLOW_ID,
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
 )
 
@@ -303,14 +311,40 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
             _CanonicalStepPublicationSpec(
                 state_id="observed",
                 action_id="missing_tool_call.assess",
-                on_true_state="needs_retry",
-                on_false_state="completed",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="needs_retry",
+                        reason="retry_needed",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "missing_tool_call_retry_needed",
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="completed",
+                        reason="no_retry_required",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="needs_retry",
                 action_id="missing_tool_call.retry",
-                on_true_state="completed",
-                on_false_state="failed",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="completed",
+                        reason="retry_succeeded",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "missing_tool_call_retry_success",
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="failed",
+                        reason="retry_failed",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(state_id="completed"),
             _CanonicalStepPublicationSpec(state_id="failed"),
@@ -322,27 +356,118 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
             _CanonicalStepPublicationSpec(
                 state_id="classify_need",
                 action_id="narration.classify",
-                on_true_state="select_prompt_fragments",
-                on_false_state="completed",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="select_prompt_fragments",
+                        reason="narration_required",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "narration_required",
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="completed",
+                        reason="narration_not_required",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="select_prompt_fragments",
                 action_id="narration.select_prompts",
-                next_state="render_narration",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="render_narration",
+                        reason="prompt_selected",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="render_narration",
                 action_id="narration.render",
-                on_true_state="emit_audio",
-                on_false_state="failed",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="emit_audio",
+                        reason="rendered",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "narration_rendered",
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="failed",
+                        reason="render_failed",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="emit_audio",
                 action_id="narration.emit_audio",
-                next_state="completed",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="completed",
+                        reason="emitted",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(state_id="completed"),
             _CanonicalStepPublicationSpec(state_id="failed"),
+        ),
+    ),
+    CHAT_BUTTONIFY_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state="assess_input",
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id="assess_input",
+                action_id="buttonify.assess_input",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="select_prompt",
+                        reason="eligible",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "buttonify_should_run",
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="completed",
+                        reason="skipped",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="select_prompt",
+                action_id="buttonify.select_prompt",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="extract_options",
+                        reason="prompt_selected",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="extract_options",
+                action_id="buttonify.extract_options",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="completed",
+                        reason="transformation_completed",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
+            ),
+            _CanonicalStepPublicationSpec(state_id="completed"),
+        ),
+    ),
+    CHAT_ASSISTANT_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state="completed",
+        steps=(
+            _CanonicalStepPublicationSpec(state_id="completed"),
         ),
     ),
     TODO_REFRESH_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
@@ -351,28 +476,65 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
             _CanonicalStepPublicationSpec(
                 state_id="check_cache_freshness",
                 action_id="todo_refresh.check_cache",
-                on_true_state="maybe_fetch_gmail",
-                on_false_state="completed",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="maybe_fetch_gmail",
+                        reason="refresh_needed",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "todo_refresh_needed",
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="completed",
+                        reason="cache_fresh",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="maybe_fetch_gmail",
                 action_id="todo_refresh.fetch_gmail",
-                next_state="extract_tasks",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="extract_tasks",
+                        reason="gmail_checked",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="extract_tasks",
                 action_id="todo_refresh.extract_tasks",
-                next_state="prioritise",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="prioritise",
+                        reason="tasks_extracted",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="prioritise",
                 action_id="todo_refresh.prioritise",
-                next_state="summarise",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="summarise",
+                        reason="prioritised",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="summarise",
                 action_id="todo_refresh.summarise",
-                next_state="completed",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="completed",
+                        reason="summarised",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(state_id="completed"),
         ),
@@ -383,8 +545,21 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
             _CanonicalStepPublicationSpec(
                 state_id="decide",
                 action_id="write_policy.decide",
-                on_approval_required_state="approval_required",
-                next_state="completed",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="approval_required",
+                        reason="on_approval_required",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "approval_required",
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="completed",
+                        reason="decided",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(state_id="approval_required"),
             _CanonicalStepPublicationSpec(state_id="completed"),
@@ -396,7 +571,13 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
             _CanonicalStepPublicationSpec(
                 state_id="suggest",
                 action_id="preflight.specialised_suggest",
-                next_state="completed",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="completed",
+                        reason="evaluated",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(state_id="completed"),
         ),
@@ -407,41 +588,145 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
             _CanonicalStepPublicationSpec(
                 state_id="plan",
                 action_id="tool_calling.plan",
-                on_true_state="validate",
-                on_false_state="postcondition_critic",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="validate",
+                        reason="tool_calls_found",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "tool_calls_present",
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="postcondition_critic",
+                        reason="direct_response",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="validate",
                 action_id="tool_calling.validate",
-                on_true_state="execute",
-                on_false_state="postcondition_critic",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="execute",
+                        reason="validation_passed",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "tool_calls_validated",
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="postcondition_critic",
+                        reason="validation_error",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="execute",
                 action_id="tool_calling.execute",
-                next_state="backfill",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="backfill",
+                        reason="batch_executed",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="backfill",
                 action_id="tool_calling.backfill",
-                on_true_state="validate",
-                on_false_state="postcondition_critic",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="validate",
+                        reason="chained_tool_calls",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "more_tool_calls",
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="postcondition_critic",
+                        reason="backfill_done",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="postcondition_critic",
                 action_id="turn_execution.critic",
-                next_state="completion_gate",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="completion_gate",
+                        reason="critic_completed",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="completion_gate",
                 action_id="turn_execution.completion_gate",
-                # Built-in workflow allows completion-gate retries by
-                # transitioning back to plan when repeat_iteration is set.
-                on_true_state="plan",
-                on_false_state="completed",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="plan",
+                        reason="completion_gate_repeat_iteration",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "completion_gate_repeat_iteration",
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="completed",
+                        reason="follow_up_required",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "completion_gate_requires_follow_up",
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="completed",
+                        reason="completion_gate_passed",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(state_id="completed"),
             _CanonicalStepPublicationSpec(state_id="failed"),
+        ),
+    ),
+    KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state="evaluate",
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id="evaluate",
+                action_id="turn_execution.critic",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="completed",
+                        reason="evaluated",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
+            ),
+            _CanonicalStepPublicationSpec(state_id="completed"),
+        ),
+    ),
+    TURN_COMPLETION_GATE_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state="decide",
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id="decide",
+                action_id="turn_execution.completion_gate",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="completed",
+                        reason="decided",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
+            ),
+            _CanonicalStepPublicationSpec(state_id="completed"),
         ),
     ),
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
@@ -450,12 +735,24 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
             _CanonicalStepPublicationSpec(
                 state_id="critic",
                 action_id="turn_execution.critic",
-                next_state="completion_gate",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="completion_gate",
+                        reason="critic_completed",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(
                 state_id="completion_gate",
                 action_id="turn_execution.completion_gate",
-                next_state="completed",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="completed",
+                        reason="completion_gate_decided",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
             ),
             _CanonicalStepPublicationSpec(state_id="completed"),
         ),

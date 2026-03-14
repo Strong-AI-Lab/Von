@@ -29,6 +29,7 @@ WORKFLOW_CONTROL_ACTION_CONTINUE_ID = "workflow_control.continue"
 WORKFLOW_CONTROL_ACTION_FORK_ID = "workflow_control.fork"
 WORKFLOW_CONTROL_ACTION_JOIN_ID = "workflow_control.join"
 WORKFLOW_CONTROL_ACTION_FOR_EACH_ID = "workflow_control.for_each"
+WORKFLOW_CONTROL_ACTION_CONTEXT_SET_ID = "workflow_control.context_set"
 
 WORKFLOW_CONTROL_BREAK_ACTION_IDS: tuple[str, ...] = (
     WORKFLOW_CONTROL_ACTION_BREAK_ID,
