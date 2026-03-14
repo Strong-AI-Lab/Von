@@ -606,7 +606,13 @@ class InternalMCPChatOrchestrator:
         flags=re.IGNORECASE,
     )
     _PROMPT_EXPLICIT_TOOL_CALL_PATTERN = re.compile(
-        r"\bcall\s+`?([a-z_][a-z0-9_]*)`?\b",
+        r"\b(?:call|use|run|invoke|execute)\s+`?([a-z_][a-z0-9_]*(?:_[a-z0-9_]+)+)`?\b",
+        flags=re.IGNORECASE,
+    )
+    # Matches natural-language MCP tool-family references such as
+    # "GitHub MCP read tools" or "Jira MCP tools".
+    _PROMPT_MCP_TOOL_FAMILY_PATTERN = re.compile(
+        r"\b([a-z][a-z0-9_]*)\s+MCP\s+(?:([a-z]+)\s+)?tools?\b",
         flags=re.IGNORECASE,
     )
     _PROMPT_CONCEPT_VERIFICATION_HINT_PATTERN = re.compile(
@@ -7105,7 +7111,13 @@ class InternalMCPChatOrchestrator:
         *,
         method_catalogue: Mapping[str, Any] | None = None,
     ) -> list[str]:
-        """Return tool names explicitly requested via "call <tool>" phrases."""
+        """Return tool names explicitly requested via prompt phrases.
+
+        Detects both direct tool-name references ("call fetch_concept",
+        "use search_concepts") and natural-language MCP tool-family
+        references ("GitHub MCP read tools") resolved against the
+        catalogue.
+        """
 
         if not isinstance(user_prompt, str) or not user_prompt.strip():
             return []
@@ -7119,6 +7131,14 @@ class InternalMCPChatOrchestrator:
 
         required_tools: list[str] = []
         seen: set[str] = set()
+
+        def _add_tool(name: str) -> None:
+            key = name.lower()
+            if key in seen:
+                return
+            seen.add(key)
+            required_tools.append(name)
+
         for match in cls._PROMPT_EXPLICIT_TOOL_CALL_PATTERN.finditer(user_prompt):
             candidate = str(match.group(1) or "").strip()
             if not candidate:
@@ -7127,11 +7147,21 @@ class InternalMCPChatOrchestrator:
             if catalogue_lookup and lowered not in catalogue_lookup:
                 continue
             resolved = catalogue_lookup.get(lowered, candidate)
-            key = resolved.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            required_tools.append(resolved)
+            _add_tool(resolved)
+
+        # MCP tool-family references (e.g. "GitHub MCP read tools").
+        if catalogue_lookup:
+            for match in cls._PROMPT_MCP_TOOL_FAMILY_PATTERN.finditer(user_prompt):
+                provider = str(match.group(1) or "").strip().lower()
+                qualifier = str(match.group(2) or "").strip().lower()
+                if not provider:
+                    continue
+                for cat_key, canonical in catalogue_lookup.items():
+                    if provider not in cat_key:
+                        continue
+                    if qualifier and qualifier not in cat_key:
+                        continue
+                    _add_tool(canonical)
 
         return required_tools
 
