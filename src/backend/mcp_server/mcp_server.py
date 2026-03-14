@@ -576,7 +576,17 @@ async def list_tools() -> List[types.Tool]:
                     "issue_key": {
                         "type": "string",
                         "description": "Issue key, e.g. JVNAUTOSCI-371",
-                    }
+                    },
+                    "fields": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional Jira fields to include (e.g. ['summary','status']).",
+                    },
+                    "expand": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional Jira expand tokens (e.g. ['changelog']).",
+                    },
                 },
                 "required": ["issue_key"],
             },
@@ -790,6 +800,11 @@ async def call_tool(
         fields = arguments.get("fields")
         if isinstance(fields, list) and fields:
             issue_params = {"fields": ",".join(str(f) for f in fields)}
+        expand = arguments.get("expand")
+        if isinstance(expand, list) and expand:
+            if issue_params is None:
+                issue_params = {}
+            issue_params["expand"] = ",".join(str(item) for item in expand)
         result = jira_get(f"issue/{issue_key}", params=issue_params)
         text = json.dumps(result, indent=2)
         return [types.TextContent(type="text", text=text)]

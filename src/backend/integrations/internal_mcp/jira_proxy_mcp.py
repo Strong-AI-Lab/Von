@@ -75,11 +75,17 @@ class JiraMCPProxy:
         return await self._call("jira_search", arguments)
 
     async def get_issue(
-        self, *, issue_key: str, fields: Optional[list[str]] = None
+        self,
+        *,
+        issue_key: str,
+        fields: Optional[list[str]] = None,
+        expand: Optional[list[str]] = None,
     ) -> Dict[str, Any]:
         arguments: Dict[str, Any] = {"issue_key": issue_key}
         if fields:
             arguments["fields"] = fields
+        if expand:
+            arguments["expand"] = expand
         return await self._call("jira_get_issue", arguments)
 
     async def get_watchers(self, *, issue_key: str) -> Dict[str, Any]:

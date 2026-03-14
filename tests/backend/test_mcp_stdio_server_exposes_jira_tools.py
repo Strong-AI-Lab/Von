@@ -38,3 +38,11 @@ def test_vontology_mcp_manifest_includes_jira_tools():
     names = {t.get("name") for t in tools if isinstance(t, dict)}
     missing = JIRA_TOOL_NAMES - names
     assert not missing, f"Manifest missing Jira tools: {sorted(missing)}"
+
+    jira_get_issue = next(
+        tool
+        for tool in tools
+        if isinstance(tool, dict) and tool.get("name") == "jira_get_issue"
+    )
+    properties = jira_get_issue.get("inputSchema", {}).get("properties", {})
+    assert "expand" in properties

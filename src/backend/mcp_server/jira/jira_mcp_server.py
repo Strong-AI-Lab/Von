@@ -128,7 +128,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         elif name == "jira_get_issue":
             issue_key = arguments.get("issue_key", "")
-            result = jira_get(f"issue/{issue_key}")
+            issue_params: Dict[str, Any] | None = None
+            fields = arguments.get("fields")
+            if isinstance(fields, list) and fields:
+                issue_params = {"fields": ",".join(str(f) for f in fields)}
+            expand = arguments.get("expand")
+            if isinstance(expand, list) and expand:
+                if issue_params is None:
+                    issue_params = {}
+                issue_params["expand"] = ",".join(str(item) for item in expand)
+            result = jira_get(f"issue/{issue_key}", params=issue_params)
             return [
                 TextContent(
                     type="text",

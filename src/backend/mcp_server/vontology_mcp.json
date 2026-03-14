@@ -1103,7 +1103,7 @@
         },
         {
             "name": "jira_get_issue",
-            "description": "Fetch full details for a Jira issue by key (e.g., JVNAUTOSCI-123). Use when you need issue fields, summary, status, or metadata.",
+            "description": "Fetch full details for a Jira issue by key (e.g., JVNAUTOSCI-123). Use when you need issue fields, summary, status, metadata, or expanded sections such as changelog.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1113,13 +1113,17 @@
                     "fields": {
                         "type": "array",
                         "items": {}
+                    },
+                    "expand": {
+                        "type": "array",
+                        "items": {}
                     }
                 },
                 "required": [
                     "issue_key"
                 ],
                 "additionalProperties": true,
-                "description": "jira_get_issue input: issue_key (str, required), optional fields (list of field names)"
+                "description": "jira_get_issue input: issue_key (str, required), optional fields (list of field names), and optional expand (list of Jira expand tokens such as ['changelog'])."
             }
         },
         {

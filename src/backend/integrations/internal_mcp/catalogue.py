@@ -11171,9 +11171,13 @@ def _jira_search_input_schema() -> Schema:
 def _jira_get_issue_input_schema() -> Schema:
     return Schema(
         required={"issue_key": str},
-        optional={"fields": (list,)},
+        optional={"fields": (list,), "expand": (list,)},
         allow_unknown=True,
-        description="jira_get_issue input: issue_key (str, required), optional fields (list of field names)",
+        description=(
+            "jira_get_issue input: issue_key (str, required), optional fields "
+            "(list of field names), and optional expand (list of Jira expand "
+            "tokens such as ['changelog'])."
+        ),
     )
 
 
@@ -14603,7 +14607,11 @@ def _jira_get_issue(**kwargs):
 
     async def _async_get_issue():
         proxy = await get_jira_proxy()
-        return await proxy.get_issue(issue_key=issue_key, fields=kwargs.get("fields"))
+        return await proxy.get_issue(
+            issue_key=issue_key,
+            fields=kwargs.get("fields"),
+            expand=kwargs.get("expand"),
+        )
 
     try:
         return _run_async_compat(_async_get_issue)
@@ -19663,7 +19671,11 @@ def build_default_catalogue() -> MethodCatalogue:
             output_schema=jira_get_issue_output_schema,
             category="read",
             timeout_sec=15.0,
-            description="Fetch full details for a Jira issue by key (e.g., JVNAUTOSCI-123). Use when you need issue fields, summary, status, or metadata.",
+            description=(
+                "Fetch full details for a Jira issue by key (e.g., JVNAUTOSCI-123). "
+                "Use when you need issue fields, summary, status, metadata, or "
+                "expanded sections such as changelog."
+            ),
         ),
         MethodDefinition(
             name="jira_get_transitions",
