@@ -101,7 +101,14 @@ MongoDB will be automatically installed during the setup process (via `setup_py.
      MONGO_PROJECT=Your Project Name
      ```
 
-you should see `[Von Database] Connecting to LOCAL MongoDB at localhost:27017` or connection to your Atlas cluster in log file under `./logs` folder once running the system.
+     For hosted/cloud development, also set `MONGO_ALLOW_LOCAL_FALLBACK=0` so
+     Atlas failures do not silently fall back to localhost. Once connectivity is
+     stable, prefer `VON_MONGO_STRICT_STARTUP=1` and
+     `VON_MONGO_STARTUP_PROBE=1`.
+
+Von decides local versus remote MongoDB from the effective `MONGO_URI` host and
+logs either `[Von Database] Connecting to LOCAL MongoDB ...` or
+`[Von Database] Connecting to REMOTE MongoDB ...` in `./logs`.
 
 **Starting with Knowledge:**
 
@@ -162,8 +169,11 @@ Visit `http://localhost:5000` and explore the pre-loaded concepts in the interfa
 
 **Google Gemini:**
 1. Get your own API key from https://ai.google.dev
-2. Set `GOOGLE_API_KEY` in `.env`
+2. Set `GEMINI_API_KEY` in `.env`
 3. Select Gemini model in Von's Settings panel
+
+Von still accepts the legacy `GOOGLE_API_KEY` name for compatibility, but new
+setups should use `GEMINI_API_KEY`.
 
 ### 5. **UI Feature Flags**
 
@@ -187,6 +197,46 @@ Visit `http://localhost:5000` and explore the pre-loaded concepts in the interfa
 
 # Open browser to http://localhost:5000
 ```
+
+### 6A. **Environment Profiles**
+
+**Explicit local minimum:**
+
+```powershell
+$env:MONGO_URI = 'mongodb://localhost:27017/'
+$env:VON_DB_NAME = 'von_db'
+```
+
+**Backend test shell:**
+
+```powershell
+$env:VON_DB_NAME = 'test_von_db'
+```
+
+Use `VON_USE_MOCK_DB=1` only for mock/in-memory test flows. Do not start the
+real server with `VON_DB_NAME=test_von_db`; `run.ps1` blocks that path.
+
+**Minimum sane cloud runtime:**
+
+```powershell
+$env:MONGO_URI = '<YOUR-ATLAS-URI>'
+$env:VON_DB_NAME = 'von_db'
+$env:MONGO_ALLOW_LOCAL_FALLBACK = '0'
+$env:VON_SKIP_BROWSER_LAUNCH = '1'
+$env:FLASK_SECRET_KEY = '<32+ chars>'
+```
+
+If cloud browser testing needs Google login, add:
+
+```powershell
+$env:GOOGLE_OAUTH_CLIENT_ID = '<YOUR-CLIENT-ID>'
+$env:GOOGLE_OAUTH_CLIENT_SECRET = '<YOUR-CLIENT-SECRET>'
+$env:GOOGLE_OAUTH_REDIRECT_URI = 'https://<your-domain>/von/api/auth/google/callback'
+$env:GOOGLE_OAUTH_STRICT_STARTUP = '1'
+```
+
+For the full minimum-env matrix, cloud-development path, and browser-testing
+notes, see [docs/engineering/environment_minimums.md](docs/engineering/environment_minimums.md).
 
 ### 7. **Stop:**
 

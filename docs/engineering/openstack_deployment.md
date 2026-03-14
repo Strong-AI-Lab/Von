@@ -5,6 +5,7 @@ This manual is a practical, step-by-step guide for deploying and testing Von on 
 Use this as your primary checklist. For deeper operations detail, see:
 - `docs/engineering/catalyst_cloud_terraform_iac.md`
 - `docs/engineering/openstack_operations_runbooks.md`
+- `docs/engineering/environment_minimums.md`
 
 ## 1) What you need before starting
 

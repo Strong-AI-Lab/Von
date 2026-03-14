@@ -15958,6 +15958,7 @@ def _chat_introspect(
     sensitive_env_keys = {
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
         "GOOGLE_API_KEY",
         "MISTRAL_API_KEY",
         "GROQ_API_KEY",

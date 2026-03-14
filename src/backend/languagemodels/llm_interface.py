@@ -39,6 +39,7 @@ if genai is not None:
     # Cast to Any so Pyright doesn't complain about dynamic attrs
     genai = cast(Any, genai)
 from ..services.settings_service import resolve_llm_setting, get_openai_env_var
+from ..services.llm_api_key_resolution import get_gemini_api_key
 import time
 from collections import defaultdict
 
@@ -1235,10 +1236,11 @@ class GeminiClient(LLMInterface):
             raise ImportError(
                 "google-genai package is required for GeminiClient. Install with: pdm add google-genai"
             )
-        self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
+        self.api_key = api_key or get_gemini_api_key()
         if not self.api_key:
             raise ValueError(
-                "Gemini API key not provided or found in environment variables (GEMINI_API_KEY)."
+                "Gemini API key not provided or found in environment variables "
+                "(GEMINI_API_KEY or legacy GOOGLE_API_KEY)."
             )
         try:
             genai.configure(api_key=self.api_key)  # type: ignore[attr-defined]

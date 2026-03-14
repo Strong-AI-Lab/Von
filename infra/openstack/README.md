@@ -5,6 +5,7 @@ This directory provides reusable Terraform infrastructure for deploying Von on O
 If you want a plain-language, researcher-focused walkthrough, start with:
 
 - `docs/engineering/openstack_deployment.md`
+- `docs/engineering/environment_minimums.md`
 
 ## Scope
 

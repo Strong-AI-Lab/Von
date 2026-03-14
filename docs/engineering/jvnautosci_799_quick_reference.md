@@ -169,7 +169,8 @@ except ToolCallError as e:
 - ✅ Native function calling
 - ✅ Schema mapping
 - Limited token usage tracking
-- Requires: GOOGLE_API_KEY env var
+- Requires: GEMINI_API_KEY env var
+- Legacy compatibility: GOOGLE_API_KEY is still accepted during transition
 
 ### Ollama (llama2, mistral, etc.)
 - ✅ Works offline (local models)
@@ -383,7 +384,8 @@ def test_tool_calling():
 
 ```
 OPENAI_API_KEY              # OpenAI API key (if not in config)
-GOOGLE_API_KEY              # Google API key (if not in config)
+GEMINI_API_KEY              # Gemini API key (preferred)
+GOOGLE_API_KEY              # Legacy Gemini API key alias
 VON_INTERNAL_MCP_STRUCTURED_TOOL_CALLING   # Enable/disable (default: 1)
 VON_LEGACY_JSON_TEXT_PARSING                # Force legacy (default: 0)
 ```

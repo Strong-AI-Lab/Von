@@ -15,6 +15,8 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
+from .llm_api_key_resolution import get_gemini_api_key
+
 logger = logging.getLogger(__name__)
 
 _DOCX_MIME_TYPES: frozenset[str] = frozenset(
@@ -921,7 +923,7 @@ def _describe_image_with_gemini(
             "model": model,
         }
 
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = get_gemini_api_key()
     if not api_key:
         return {
             "description": None,
