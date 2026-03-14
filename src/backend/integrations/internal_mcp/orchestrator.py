@@ -108,6 +108,9 @@ class WorkflowRoutingInfo:
     JVNAUTOSCI-825: Provides traceable reasoning for the routing decision:
     which workflow was selected, what the classifier verdict was, which
     discovered workflows were candidates, and how long routing took.
+
+    JVNAUTOSCI-1424 Phase 3: Enriched with confidence_score and reasoning
+    from the model-based selection.
     """
 
     workflow_id: str
@@ -116,6 +119,8 @@ class WorkflowRoutingInfo:
     discovered_workflow_ids: tuple[str, ...]
     routing_duration_ms: float | None = None
     source: str = "selector"  # "selector" | "selector_override" | "default" | "presenter_mode"
+    confidence_score: float = 0.0
+    reasoning: str = ""
 
 
 @dataclass(frozen=True)
@@ -19192,6 +19197,8 @@ class InternalMCPChatOrchestrator:
                     discovered_workflow_ids=selector_selection.discovered_workflow_ids,
                     routing_duration_ms=routing_duration_ms,
                     source="selector",
+                    confidence_score=selector_selection.confidence_score,
+                    reasoning=selector_selection.reasoning,
                 )
                 _emit_progress_local(
                     {
@@ -19227,6 +19234,8 @@ class InternalMCPChatOrchestrator:
                         + len(excluded_discovered_matches),
                         "discovery_excluded_count": len(excluded_discovered_matches),
                         "routing_duration_ms": routing_duration_ms,
+                        "confidence_score": selector_selection.confidence_score,
+                        "reasoning": selector_selection.reasoning,
                     }
                 )
                 if trace_enabled and trace is not None:
@@ -19251,7 +19260,29 @@ class InternalMCPChatOrchestrator:
                             if isinstance(item.get("concept_id"), str)
                         ],
                         "routing_duration_ms": routing_duration_ms,
+                        "confidence_score": selector_selection.confidence_score,
+                        "reasoning": selector_selection.reasoning,
                     }
+                # Phase 3: record selection experience tuple.
+                try:
+                    from ...services.workflow_selection_experience import (
+                        record_selection_experience,
+                    )
+                    record_selection_experience(
+                        turn_id=str(turn_id or ""),
+                        query=effective_prompt_for_routing[:500],
+                        candidate_workflow_ids=list(
+                            selector_selection.discovered_workflow_ids
+                        ),
+                        selected_workflow_id=selector_selection.workflow_id,
+                        verdict=selector_selection.verdict,
+                        confidence_score=selector_selection.confidence_score,
+                        reasoning=selector_selection.reasoning,
+                        model_name=str(classifier_model or ""),
+                        routing_duration_ms=routing_duration_ms,
+                    )
+                except Exception:
+                    pass  # Best-effort; never block routing.
             except Exception as exc:
                 selected_workflow_id = CHAT_ASSISTANT_WORKFLOW_ID
                 routing_info = WorkflowRoutingInfo(
