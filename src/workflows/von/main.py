@@ -49,6 +49,11 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.DEBUG)  # Set the root logger to the lowest level
 
+# Suppress noisy third-party DEBUG loggers that flood the log file (pymongo alone
+# can produce tens of MB per minute at DEBUG, slowing startup and I/O).
+for _noisy_logger_name in ("pymongo", "urllib3", "httpcore", "httpx"):
+    logging.getLogger(_noisy_logger_name).setLevel(logging.WARNING)
+
 # File Handler - for detailed logging to a file
 # Use 'w' mode to overwrite the log file each time the script runs for ease of debugging.
 # We'll use 'a' mode once we are in production to append logs.
