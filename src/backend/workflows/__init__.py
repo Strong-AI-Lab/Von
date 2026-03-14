@@ -39,7 +39,7 @@ from .engine import (
     WorkflowStateSpec,
     WorkflowTransitionSpec,
 )
-from .workflow_registry import WorkflowRegistration, WorkflowRegistry
+from .workflow_registry import LazyWorkflowRegistration, WorkflowRegistration, WorkflowRegistry
 from .workflow_selector import WorkflowSelection, WorkflowSelector
 
 __all__ = [
@@ -60,6 +60,7 @@ __all__ = [
     "list_recent_workflow_execution_traces",
     "WorkflowRegistry",
     "WorkflowRegistration",
+    "LazyWorkflowRegistration",
     "WorkflowSelector",
     "WorkflowSelection",
     "register_default_workflows",

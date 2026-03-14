@@ -14,11 +14,13 @@ import copy
 from functools import lru_cache
 import logging
 import os
+import threading
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, Dict, List
 
 from .. import WorkflowRegistry, register_default_workflows
+from ..workflow_registry import LazyWorkflowRegistration
 from ..action_registry import ActionRegistry, WorkflowActionResult
 from ..mcp_tool_bridge import workflow_action_result_from_mcp_payload
 from .rag_sync_workflow import (
@@ -433,7 +435,9 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
             When False, skip concept bootstrap writes and keep this call path
             read-only for diagnostics/introspection surfaces.
     """
-    registry = WorkflowRegistry()
+    registry = WorkflowRegistry(
+        definition_loader=load_workflow_definition_from_vontology,
+    )
     bootstrap_enabled = os.getenv("VON_WORKFLOW_CONCEPT_BOOTSTRAP_ENABLE", "1")
     bootstrap_enabled = bootstrap_enabled.strip().lower() in {"1", "true", "yes", "on"}
     bootstrap_allowed = bool(allow_bootstrap and bootstrap_enabled)
@@ -483,99 +487,164 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
                 "error": str(exc),
             }
 
-    # 3. Vontology-discovered workflows
+    # 3. Vontology-discovered workflows — lazy registration
+    #    (JVNAUTOSCI-1424 Phase 1: defer expensive per-workflow DB loads)
     discovered_workflow_ids: List[str] = []
+    lazy_count = 0
+    eager_override_count = 0
     try:
         discovered_workflow_ids = discover_workflow_ids()
 
         for wf_id in discovered_workflow_ids:
             try:
                 existing_registration = registry.get_registration(wf_id)
-                existing_source = ""
                 if existing_registration is not None:
                     existing_source = str(
                         getattr(existing_registration, "source", "") or ""
                     ).strip()
-                replace_existing = bool(existing_registration) and (
-                    existing_source.lower() != "vontology"
-                )
-
-                registered, error_code = register_workflow_from_vontology(
-                    registry=registry,
-                    workflow_id=wf_id,
-                    replace_existing=replace_existing,
-                )
-                if registered:
-                    if replace_existing:
+                    if existing_source.lower() == "vontology":
+                        # Already Vontology-authoritative — skip.
+                        continue
+                    # Non-Vontology source — eagerly load the Vontology
+                    # override (rare: typically <5 workflows).
+                    registered, error_code = register_workflow_from_vontology(
+                        registry=registry,
+                        workflow_id=wf_id,
+                        replace_existing=True,
+                    )
+                    if registered:
+                        eager_override_count += 1
                         logger.info(
                             "Registered Vontology workflow override: %s (replaced source=%s)",
                             wf_id,
                             existing_source or "unknown",
                         )
-                    elif existing_registration is None:
-                        logger.info("Registered Vontology workflow: %s", wf_id)
-                    else:
+                    elif error_code:
                         logger.debug(
-                            "Vontology workflow %s already authoritative.",
+                            "Skipping Vontology workflow override %s (%s)",
                             wf_id,
+                            error_code,
                         )
-                elif error_code:
-                    logger.debug(
-                        "Skipping Vontology workflow %s (%s)",
-                        wf_id,
-                        error_code,
-                    )
+                    continue
+
+                # Not yet registered — register lazily.
+                lazy_reg = LazyWorkflowRegistration(
+                    workflow_id=wf_id,
+                    source="vontology",
+                )
+                if registry.register_lazy(lazy_reg):
+                    lazy_count += 1
+
             except Exception as e:
-                logger.warning("Failed to load Vontology workflow %s: %s", wf_id, e)
+                logger.warning("Failed to register Vontology workflow %s: %s", wf_id, e)
 
     except Exception as e:
         logger.error("Failed to discover Vontology workflows: %s", e)
 
-    bootstrap_report: Dict[str, Any] = {
-        "counts": {
-            "registry_workflows": len(list(registry.all_workflow_ids())),
-            "created": 0,
-            "updated": 0,
-            "unchanged": 0,
-            "errors": 0,
-        },
-        "required_type_ids": [],
-        "preferred_type_id": None,
-        "created_workflow_ids": [],
-        "updated_workflow_ids": [],
-        "unchanged_workflow_ids": [],
-        "errors_by_workflow_id": {},
-    }
-    if bootstrap_allowed:
-        try:
-            bootstrap_report = bootstrap_workflow_concepts(registry=registry)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(
-                "workflow_concept_bootstrap_failed: %s",
-                exc,
-            )
-            bootstrap_report["errors_by_workflow_id"] = {"__bootstrap__": str(exc)}
-            bootstrap_report["counts"]["errors"] = 1
-    bootstrap_report["enabled"] = bootstrap_allowed
-
-    authority_report = build_workflow_concept_authority_report(registry=registry)
-    authority_report["bootstrap"] = bootstrap_report
-    authority_report["paper_representation_bootstrap"] = (
-        paper_representation_bootstrap_report
+    logger.info(
+        "Workflow registry built: %d eager, %d lazy (%d Vontology overrides). "
+        "Discovered %d Vontology workflow IDs.",
+        len(list(registry.eager_workflow_ids())),
+        lazy_count,
+        eager_override_count,
+        len(discovered_workflow_ids),
     )
 
-    inventory_snapshot = _build_workflow_parity_inventory(
+    # 4. Deferred work — bootstrap + parity inventory in a daemon thread.
+    #    These operations trigger lazy-loading of definitions so they must
+    #    NOT block the registry return path (JVNAUTOSCI-1424).
+    _launch_deferred_registry_work(
         registry=registry,
         discovered_workflow_ids=discovered_workflow_ids,
-        authority_report=authority_report,
+        paper_representation_bootstrap_report=paper_representation_bootstrap_report,
+        bootstrap_allowed=bootstrap_allowed,
     )
-    with _inventory_lock:
-        global _last_inventory_snapshot
-        _last_inventory_snapshot = inventory_snapshot
-
-    _apply_workflow_parity_policy(inventory_snapshot)
 
     return registry
+
+
+def _launch_deferred_registry_work(
+    *,
+    registry: WorkflowRegistry,
+    discovered_workflow_ids: List[str],
+    paper_representation_bootstrap_report: Dict[str, Any],
+    bootstrap_allowed: bool,
+) -> None:
+    """Launch background thread for bootstrap and parity inventory.
+
+    This work is important for data consistency and diagnostics but must
+    not block Flask startup.  The daemon flag ensures the thread does not
+    prevent process exit.
+    """
+
+    def _deferred_work() -> None:
+        try:
+            bootstrap_report: Dict[str, Any] = {
+                "counts": {
+                    "registry_workflows": len(list(registry.all_workflow_ids())),
+                    "created": 0,
+                    "updated": 0,
+                    "unchanged": 0,
+                    "errors": 0,
+                },
+                "required_type_ids": [],
+                "preferred_type_id": None,
+                "created_workflow_ids": [],
+                "updated_workflow_ids": [],
+                "unchanged_workflow_ids": [],
+                "errors_by_workflow_id": {},
+            }
+            if bootstrap_allowed:
+                try:
+                    bootstrap_report = bootstrap_workflow_concepts(registry=registry)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning(
+                        "workflow_concept_bootstrap_failed: %s",
+                        exc,
+                    )
+                    bootstrap_report["errors_by_workflow_id"] = {
+                        "__bootstrap__": str(exc),
+                    }
+                    bootstrap_report["counts"]["errors"] = 1
+            bootstrap_report["enabled"] = bootstrap_allowed
+
+            authority_report = build_workflow_concept_authority_report(
+                registry=registry,
+            )
+            authority_report["bootstrap"] = bootstrap_report
+            authority_report["paper_representation_bootstrap"] = (
+                paper_representation_bootstrap_report
+            )
+
+            inventory_snapshot = _build_workflow_parity_inventory(
+                registry=registry,
+                discovered_workflow_ids=discovered_workflow_ids,
+                authority_report=authority_report,
+            )
+            with _inventory_lock:
+                global _last_inventory_snapshot
+                _last_inventory_snapshot = inventory_snapshot
+
+            _apply_workflow_parity_policy(inventory_snapshot)
+
+            logger.info(
+                "Deferred workflow registry work completed: "
+                "%d eager workflows after background loading.",
+                len(list(registry.eager_workflow_ids())),
+            )
+        except Exception as exc:
+            logger.error(
+                "Deferred workflow registry work failed: %s",
+                exc,
+                exc_info=True,
+            )
+
+    thread = threading.Thread(
+        target=_deferred_work,
+        name="workflow-registry-deferred",
+        daemon=True,
+    )
+    thread.start()
 
 
 def build_workflow_registry() -> WorkflowRegistry:
