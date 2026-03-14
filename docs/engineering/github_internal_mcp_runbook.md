@@ -8,7 +8,7 @@ This runbook documents the GitHub MCP proxy used by Von internal MCP tools.
 - Preserve deterministic diagnostics for operator troubleshooting.
 
 ## Environment setup
-- `GITHUB_PERSONAL_ACCESS_TOKEN` or `GITHUB_TOKEN` or `GH_TOKEN`: GitHub token (required).
+- `GITHUB_PERSONAL_ACCESS_TOKEN` or `GITHUB_VON_TOKEN` or `GITHUB_TOKEN` or `GH_TOKEN`: GitHub token (required).
 - `VON_GITHUB_MCP_COMMAND`: command for GitHub MCP server process (default `npx`).
 - `VON_GITHUB_MCP_ARGS`: args for GitHub MCP server process (default `-y @modelcontextprotocol/server-github`).
 - `VON_GITHUB_REPO_ALLOW_LIST`: comma-separated owner/repo allow-list (default `Strong-AI-Lab/Von`).

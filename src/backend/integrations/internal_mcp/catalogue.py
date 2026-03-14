@@ -13860,7 +13860,7 @@ def _github_get_auth_config(**kwargs):
 
     token_key = None
     token: str | None = None
-    for candidate_key in ("GITHUB_PERSONAL_ACCESS_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"):
+    for candidate_key in ("GITHUB_PERSONAL_ACCESS_TOKEN", "GITHUB_VON_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"):
         candidate_value = _clean(env.get(candidate_key))
         if candidate_value:
             token_key = candidate_key

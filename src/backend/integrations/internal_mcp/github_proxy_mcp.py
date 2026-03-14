@@ -78,13 +78,14 @@ def _build_github_env() -> Dict[str, str]:
 
     token = _clean(
         env.get("GITHUB_PERSONAL_ACCESS_TOKEN")
+        or env.get("GITHUB_VON_TOKEN")
         or env.get("GITHUB_TOKEN")
         or env.get("GH_TOKEN")
     )
     if not token:
         raise GitHubProxyError(
             "Missing GitHub token. Set one of: GITHUB_PERSONAL_ACCESS_TOKEN, "
-            "GITHUB_TOKEN, or GH_TOKEN."
+            "GITHUB_VON_TOKEN, GITHUB_TOKEN, or GH_TOKEN."
         )
 
     # Populate common token keys used by GitHub MCP server variants.
