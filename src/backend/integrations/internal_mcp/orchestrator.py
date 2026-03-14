@@ -9449,6 +9449,9 @@ class InternalMCPChatOrchestrator:
                 )
                 continue
 
+            _progress_cb: Callable[[Mapping[str, Any]], None] | None = (
+                emit_progress if emit_progress is not None else None
+            )
             llm_start = time.perf_counter()
             try:
                 response = self._invoke_with_llm_heartbeat(
@@ -9459,7 +9462,7 @@ class InternalMCPChatOrchestrator:
                     ),
                     stage_name=stage,
                     model_name=model_name,
-                    emit_progress=emit_progress,
+                    emit_progress=_progress_cb,
                     attempt_meta=attempt_meta,
                 )
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
