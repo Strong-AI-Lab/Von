@@ -76,17 +76,34 @@ def _build_github_env() -> Dict[str, str]:
             cleaned = cleaned[1:-1].strip()
         return cleaned or None
 
-    token = _clean(
-        env.get("GITHUB_PERSONAL_ACCESS_TOKEN")
-        or env.get("GITHUB_VON_TOKEN")
-        or env.get("GITHUB_TOKEN")
-        or env.get("GH_TOKEN")
-    )
+    # Resolve token from env vars in priority order and log which key was used.
+    resolved_key: str | None = None
+    token: str | None = None
+    for candidate_key in (
+        "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "GITHUB_VON_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+    ):
+        candidate_value = _clean(env.get(candidate_key))
+        if candidate_value:
+            resolved_key = candidate_key
+            token = candidate_value
+            break
+
     if not token:
         raise GitHubProxyError(
             "Missing GitHub token. Set one of: GITHUB_PERSONAL_ACCESS_TOKEN, "
             "GITHUB_VON_TOKEN, GITHUB_TOKEN, or GH_TOKEN."
         )
+
+    logger.info(
+        "%s Token resolved from %s (length=%d, prefix=%s...)",
+        _LOG_TAG,
+        resolved_key,
+        len(token),
+        token[:12] if len(token) > 12 else "***",
+    )
 
     # Populate common token keys used by GitHub MCP server variants.
     env["GITHUB_PERSONAL_ACCESS_TOKEN"] = token

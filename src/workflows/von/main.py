@@ -156,6 +156,11 @@ _apply_dotenv_overrides(
         "VON_DETERMINISTIC_INTROSPECTION",
         "VON_AGENT_GMAIL_OAUTH_REDIRECT_URI",
         "VON_EXPERT_TABS_ENABLED",
+        # GitHub proxy tokens — override early so _build_github_env() always
+        # resolves from .env rather than relying on inherited shell env
+        # (VS Code may set GITHUB_TOKEN to its own Copilot auth token).
+        "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "GITHUB_VON_TOKEN",
     }
 )
 

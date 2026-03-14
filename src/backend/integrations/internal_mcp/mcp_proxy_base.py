@@ -291,20 +291,29 @@ class MCPStdIOClient:
             self._error_count += 1
             self._total_duration_ms += duration_ms
 
+            # Unpack ExceptionGroup to surface the real root cause.
+            root_cause = exc
+            if isinstance(exc, BaseExceptionGroup):
+                flattened = list(exc.exceptions)
+                if flattened:
+                    root_cause = flattened[0]
+
             telemetry.duration_ms = duration_ms
-            telemetry.error_type = type(exc).__name__
-            telemetry.error_message = str(exc)[:500]  # Truncate long errors
+            telemetry.error_type = type(root_cause).__name__
+            telemetry.error_message = str(root_cause)[:500]
             self._record_telemetry(telemetry)
 
             logger.error(
-                "%s Tool %s failed after %.1fms: [%s] %s",
+                "%s Tool %s failed after %.1fms: [%s] %s (root: [%s] %s)",
                 self._config.log_tag,
                 tool_name,
                 duration_ms,
                 type(exc).__name__,
                 exc,
+                type(root_cause).__name__,
+                root_cause,
             )
-            raise MCPToolClientError(str(exc)) from exc
+            raise MCPToolClientError(str(root_cause)) from exc
 
     async def list_tools(self) -> list[Dict[str, Any]]:
         """List tools exposed by the MCP server."""
@@ -350,8 +359,20 @@ class MCPStdIOClient:
                     raise exc
         except Exception as exc:  # pragma: no cover - environment dependent
             self._error_count += 1
-            logger.error("%s Tool list failed: %s", self._config.log_tag, exc)
-            raise MCPToolClientError(str(exc)) from exc
+            root_cause = exc
+            if isinstance(exc, BaseExceptionGroup):
+                flattened = list(exc.exceptions)
+                if flattened:
+                    root_cause = flattened[0]
+            logger.error(
+                "%s Tool list failed: [%s] %s (root: [%s] %s)",
+                self._config.log_tag,
+                type(exc).__name__,
+                exc,
+                type(root_cause).__name__,
+                root_cause,
+            )
+            raise MCPToolClientError(str(root_cause)) from exc
 
     def _parse_result(
         self,
