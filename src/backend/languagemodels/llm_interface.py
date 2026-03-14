@@ -4,10 +4,28 @@ import sys
 import warnings
 import requests
 
-try:  # Optional dependency (local model runtime)
-    import ollama  # type: ignore
-except ImportError:  # pragma: no cover - environment without ollama
+try:  # Optional dependency (local model runtime) — imported lazily to avoid
+    # the module-level Client() creation in ollama/__init__.py which calls
+    # platform.machine() → WMI on Windows and can stall or fail when resources
+    # are constrained.  We just probe availability here.
+    import importlib.util as _ilu
+
+    _ollama_available = _ilu.find_spec("ollama") is not None
+    del _ilu
+    ollama = None  # loaded on first use via _import_ollama()
+except Exception:  # pragma: no cover
+    _ollama_available = False
     ollama = None  # type: ignore
+
+
+def _import_ollama():
+    """Lazily import the ollama package on first use."""
+    global ollama
+    if ollama is None and _ollama_available:
+        import ollama as _ollama  # type: ignore
+
+        ollama = _ollama
+    return ollama
 import openai
 from abc import ABC, abstractmethod
 
@@ -156,6 +174,12 @@ def to_gemini_history(conv: Sequence[LLMMessage]) -> List[Dict[str, Any]]:
 _OPENAI_MODEL_PREFIXES = (
     "gpt-",
     "o1-",
+    "o1",
+    "o3-",
+    "o3",
+    "o4-",
+    "o4",
+    "chatgpt-",
     "text-",
     "davinci",
     "curie",
@@ -396,15 +420,7 @@ def initialize_clients(force: bool = False):
                         try:
                             safe_model = current_model or ""
                             if isinstance(safe_model, str) and safe_model.startswith(
-                                (
-                                    "gpt-",
-                                    "o1-",
-                                    "text-",
-                                    "davinci",
-                                    "curie",
-                                    "babbage",
-                                    "ada",
-                                )
+                                _OPENAI_MODEL_PREFIXES
                             ):
                                 # Skip this noisy warning
                                 continue
@@ -428,14 +444,24 @@ def initialize_clients(force: bool = False):
             _openai_client = None
             logger.warning(f"Could not initialize OpenAI client: {e}")
 
-    # Always ensure Ollama client is available as a potential option
-    if _ollama_client is None or force:
+    # Ollama client is created lazily by _ensure_ollama_client() when first
+    # needed (i.e. when get_llm_client selects the Ollama provider).  This
+    # avoids a 30 s+ hang at startup if Ollama is not running locally.
+    if force and _ollama_client is not None:
+        _ollama_client = None  # force re-creation on next access
+
+
+def _ensure_ollama_client() -> Optional["OllamaClient"]:
+    """Lazily create the global OllamaClient on first access."""
+    global _ollama_client
+    if _ollama_client is None:
         try:
             _ollama_client = OllamaClient()
-            logger.info("Ollama client initialized successfully.")
+            logger.info("Ollama client initialized successfully (lazy).")
         except Exception as e:
             logger.error(f"Failed to initialize Ollama client: {e}")
             _ollama_client = None
+    return _ollama_client
 
 
 class LLMInterface(ABC):
@@ -540,7 +566,8 @@ class OllamaClient(LLMInterface):
     def __init__(
         self, host: Optional[str] = None, default_model: str = "granite3.3:2b"
     ):
-        if ollama is None:
+        _ollama_mod = _import_ollama()
+        if _ollama_mod is None:
             raise RuntimeError(
                 "The 'ollama' package is not installed. Install with 'pip install ollama' or disable Ollama usage in settings."
             )
@@ -569,7 +596,7 @@ class OllamaClient(LLMInterface):
         # the OLLAMA_HOST environment variable if set, or its own internal default
         # if no host is provided. We now explicitly pass the resolved host.
         try:
-            self.client = ollama.Client(host=self.host)
+            self.client = _ollama_mod.Client(host=self.host)
             logger.info(f"OllamaClient initialized for host: {self.host}")
         except TypeError as e:
             logger.error(
@@ -713,9 +740,10 @@ class OllamaClient(LLMInterface):
                 return content
             except Exception as e:
                 # Handle known Ollama ResponseError distinctly if library present
+                _ollama_mod = _import_ollama()
                 ollama_resp_err_cls = (
-                    getattr(ollama, "ResponseError", None)
-                    if ollama is not None
+                    getattr(_ollama_mod, "ResponseError", None)
+                    if _ollama_mod is not None
                     else None
                 )
                 if ollama_resp_err_cls and isinstance(e, ollama_resp_err_cls):
@@ -1497,9 +1525,10 @@ def get_llm_client(
                 "OpenAI provider was selected, but the client is not available. Check API key."
             )
             # Fallback to Ollama if available
-            if _ollama_client:
+            ollama_fallback = _ensure_ollama_client()
+            if ollama_fallback:
                 logger.warning("Falling back to Ollama client.")
-                return _ollama_client
+                return ollama_fallback
             else:
                 raise RuntimeError("No LLM clients available")
 
@@ -1548,9 +1577,11 @@ def get_llm_client(
 
         try:
             # Prefer already-initialized global client to avoid duplicate inits unless a specific host is requested
-            if effective_host is None and _ollama_client is not None:
-                logger.info("Using existing Ollama client instance.")
-                return _ollama_client
+            if effective_host is None:
+                existing = _ensure_ollama_client()
+                if existing is not None:
+                    logger.info("Using existing Ollama client instance.")
+                    return existing
             logger.info(
                 f"Creating Ollama client for host: {effective_host or 'default'}"
             )
@@ -1560,9 +1591,10 @@ def get_llm_client(
                 f"Failed to initialize Ollama client for host '{effective_host}': {e}"
             )
             # Fallback to the globally initialized client if it exists
-            if _ollama_client:
+            ollama_fb = _ensure_ollama_client()
+            if ollama_fb:
                 logger.warning("Falling back to default Ollama client.")
-                return _ollama_client
+                return ollama_fb
             else:
                 raise RuntimeError("No LLM clients available") from e
 
@@ -1571,9 +1603,10 @@ def get_llm_client(
             return GeminiClient(**kwargs)
         except Exception as e:
             logger.error(f"Failed to initialize Gemini client: {e}")
-            if _ollama_client:
+            gemini_fb = _ensure_ollama_client()
+            if gemini_fb:
                 logger.warning("Falling back to Ollama client.")
-                return _ollama_client
+                return gemini_fb
             else:
                 raise RuntimeError("No LLM clients available")
 
@@ -1583,8 +1616,9 @@ def get_llm_client(
             raise ValueError(f"Unknown provider '{provider}'")
         else:
             logger.warning(f"Unknown provider '{provider}'. Defaulting to Ollama.")
-            if _ollama_client:
-                return _ollama_client
+            default_fb = _ensure_ollama_client()
+            if default_fb:
+                return default_fb
             else:
                 raise RuntimeError("No LLM clients available")
 
@@ -1612,9 +1646,7 @@ def validate_openai_config(
     # Check model configuration
     if not model or not model.strip():
         messages.append("OpenAI model not configured")
-    elif not model.startswith(
-        ("gpt-", "o1-", "text-", "davinci", "curie", "babbage", "ada")
-    ):
+    elif not model.startswith(_OPENAI_MODEL_PREFIXES):
         messages.append("Unusual OpenAI model name format")
 
     # Check API key
