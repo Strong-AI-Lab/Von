@@ -1,13 +1,18 @@
 """Workflow selector that routes chat turns to workflow definitions.
 
-JVNAUTOSCI-922 Phase 1.3: The selector routes conversation turns to
-workflow definitions.  It supports both static verdicts (plain_response,
-tool_seeking, summarisation, narration) and dynamically discovered
-Vontology workflows surfaced by ``discover_workflows_for_turn()``.
+JVNAUTOSCI-1424 Phase 2: RAG-first workflow routing.  The selector
+receives candidate workflows from the capability index (including
+built-in workflows like chat_assistant and tool_calling on equal footing
+with Vontology-authored workflows) and asks an LLM ranker to choose the
+best candidate for the user's request.
 
-The classifier prompt is augmented with discovered workflow descriptions
-so the LLM can choose a discovered workflow by its concept_id when the
-user's intent matches.
+The static verdict taxonomy (plain_response, tool_seeking, summarisation,
+narration) is retired.  All workflows — built-in and Vontology — compete
+as RAG-retrieved candidates.
+
+Legacy compatibility: if ``verdict_mapping`` is provided at construction,
+the old static-verdict path is used so existing code can transition
+incrementally.
 """
 
 from __future__ import annotations
@@ -23,7 +28,34 @@ from src.backend.services.prompt_template_service import PromptTemplateService
 from .workflow_registry import WorkflowRegistry
 
 
-_DEFAULT_CLASSIFIER_PROMPT = (
+# -----------------------------------------------------------------------
+# RAG-first ranker prompt (Phase 2 default)
+# -----------------------------------------------------------------------
+
+_DEFAULT_RANKER_PROMPT = (
+    "You are a workflow router.  Given the user's request and a set of "
+    "candidate workflows, return the concept_id of the single best "
+    "workflow to handle this request.\n\n"
+    "Rules:\n"
+    "- Return ONLY the concept_id (e.g. #V#tool_calling_workflow). "
+    "No prose, no JSON, no explanation.\n"
+    "- Choose the workflow whose capabilities best match the user's intent.\n"
+    "- If the request requires tools, data retrieval, file operations, API "
+    "calls, or knowledge-base mutations, prefer a tool-calling or "
+    "specialised workflow.\n"
+    "- If the request is a simple greeting, question, or acknowledgement "
+    "that needs no external data, choose the chat assistant workflow.\n"
+    "- Canonical artefact identifiers and URLs (arXiv IDs, DOIs, file "
+    "references) usually require a tool-calling or specialised workflow.\n\n"
+    "User request:\n{turn_text}\n\n"
+    "Candidate workflows:\n{candidate_list}\n"
+)
+
+# -----------------------------------------------------------------------
+# Legacy static-verdict prompt (deprecated, kept for transitional use)
+# -----------------------------------------------------------------------
+
+_LEGACY_CLASSIFIER_PROMPT = (
     "You are a workflow router for the next assistant turn.\n"
     "Return exactly one routing label and nothing else.\n"
     "Allowed labels: plain_response, tool_seeking, summarisation, narration.\n"
@@ -35,8 +67,7 @@ _DEFAULT_CLASSIFIER_PROMPT = (
     "{turn_text}\n"
 )
 
-# Appended when discovered workflows are available.
-_DISCOVERY_SUFFIX = (
+_LEGACY_DISCOVERY_SUFFIX = (
     "\n\n"
     "In addition to the standard verdicts, these specialised workflows are available.\n"
     "If the user's request clearly matches one, respond with its concept_id instead "
@@ -64,12 +95,13 @@ class WorkflowSelectionPrompt:
 
 
 class WorkflowSelector:
-    """Select a workflow for a chat turn based on an LLM classifier.
+    """Select a workflow for a chat turn.
 
-    The selector can be augmented with ``discovered_workflows`` from
-    ``discover_workflows_for_turn()``.  When present, the discovered
-    workflow concept_ids are valid responses from the classifier alongside
-    the static verdicts.  See JVNAUTOSCI-922 Phase 1.3.
+    JVNAUTOSCI-1424 Phase 2: RAG-first routing.  When ``verdict_mapping``
+    is None (the default), the selector operates in RAG-first mode —
+    all candidate workflows (built-in + Vontology) are presented to the
+    LLM ranker on equal footing.  When ``verdict_mapping`` is provided,
+    the legacy static-verdict path is used for backward compatibility.
     """
 
     def __init__(
@@ -77,17 +109,23 @@ class WorkflowSelector:
         *,
         registry: WorkflowRegistry,
         prompt_service: PromptTemplateService,
-        verdict_mapping: Mapping[str, str],
+        verdict_mapping: Mapping[str, str] | None = None,
+        default_workflow_id: str = "#V#chat_assistant_workflow",
         classifier_prompt_ids: Sequence[str] = ("#V#chat_turn_classifier_prompt",),
-        fallback_prompt: str = _DEFAULT_CLASSIFIER_PROMPT,
+        fallback_prompt: str | None = None,
     ) -> None:
         self._registry = registry
         self._prompt_service = prompt_service
-        self._verdict_mapping = dict(verdict_mapping)
+        self._verdict_mapping = dict(verdict_mapping) if verdict_mapping else None
+        self._default_workflow_id = default_workflow_id
         self._classifier_prompt_ids = tuple(classifier_prompt_ids)
-        self._fallback_prompt = fallback_prompt
+        self._fallback_prompt = fallback_prompt or (
+            _LEGACY_CLASSIFIER_PROMPT if self._verdict_mapping else _DEFAULT_RANKER_PROMPT
+        )
+        self._rag_first = self._verdict_mapping is None
 
-    _STATIC_SELECTOR_VERDICTS = (
+    # Legacy verdicts kept for backward-compat extraction.
+    _LEGACY_VERDICTS = (
         "plain_response",
         "tool_seeking",
         "summarisation",
@@ -103,17 +141,25 @@ class WorkflowSelector:
     )
     _CANDIDATE_BOUNDARY_STRIP = " \t\r\n`'\".,;:!?()[]{}<>"
 
+    @property
+    def rag_first(self) -> bool:
+        """True when operating in RAG-first mode (no static verdict taxonomy)."""
+        return self._rag_first
+
     def enabled(self) -> bool:
         """Check whether the workflow selector is enabled.
 
         JVNAUTOSCI-825: Defaults to ON.  The selector is the primary
-        routing mechanism for chat turns — it decides whether to run
-        tool-calling, narration, a discovered workflow, or a plain
-        response.  Disable with VON_CHAT_WORKFLOW_SELECTOR_ENABLED=0
-        to fall back to the legacy always-tool-calling path.
+        routing mechanism for chat turns.  Disable with
+        VON_CHAT_WORKFLOW_SELECTOR_ENABLED=0 to fall back to the legacy
+        always-tool-calling path.
         """
         value = os.getenv("VON_CHAT_WORKFLOW_SELECTOR_ENABLED", "1").strip().lower()
         return value not in {"0", "false", "off"}
+
+    # ------------------------------------------------------------------
+    # High-level API
+    # ------------------------------------------------------------------
 
     def select_workflow(
         self,
@@ -123,16 +169,7 @@ class WorkflowSelector:
         turn_text: str,
         discovered_workflows: Sequence[Mapping[str, Any]] | None = None,
     ) -> WorkflowSelection:
-        """Select a workflow for the current turn.
-
-        Args:
-            llm_client: LLM client for the classifier call.
-            model: Model to use for classification.
-            turn_text: Combined user+assistant conversation text.
-            discovered_workflows: Optional list of workflow matches from
-                ``discover_workflows_for_turn()``.  Each entry should have
-                ``concept_id``, ``name``, and optionally ``description``.
-        """
+        """Select a workflow for the current turn."""
         selection_prompt = self.prepare_selection_prompt(
             turn_text=turn_text,
             discovered_workflows=discovered_workflows,
@@ -149,13 +186,112 @@ class WorkflowSelector:
             discovered_workflow_ids=selection_prompt.discovered_workflow_ids,
         )
 
+    # ------------------------------------------------------------------
+    # Prompt construction
+    # ------------------------------------------------------------------
+
     def prepare_selection_prompt(
         self,
         *,
         turn_text: str,
         discovered_workflows: Sequence[Mapping[str, Any]] | None = None,
     ) -> WorkflowSelectionPrompt:
-        """Build the classifier prompt and discovered-workflow context."""
+        """Build the selection prompt.
+
+        In RAG-first mode, *discovered_workflows* contains ALL candidates
+        (including built-in workflows) from the capability index.  The
+        prompt lists every candidate so the LLM ranker can choose the
+        best one.
+
+        In legacy mode, the prompt uses the static-verdict classifier
+        with discovered workflows as an optional addendum.
+        """
+        if self._rag_first:
+            return self._prepare_rag_first_prompt(
+                turn_text=turn_text,
+                candidate_workflows=discovered_workflows,
+            )
+        return self._prepare_legacy_prompt(
+            turn_text=turn_text,
+            discovered_workflows=discovered_workflows,
+        )
+
+    # ------------------------------------------------------------------
+    # RAG-first prompt (Phase 2)
+    # ------------------------------------------------------------------
+
+    def _prepare_rag_first_prompt(
+        self,
+        *,
+        turn_text: str,
+        candidate_workflows: Sequence[Mapping[str, Any]] | None = None,
+    ) -> WorkflowSelectionPrompt:
+        """Build the RAG-first ranker prompt from candidate workflows."""
+        candidate_ids: list[str] = []
+        candidate_lines: list[str] = []
+
+        if candidate_workflows:
+            for wf in candidate_workflows:
+                cid = str(wf.get("concept_id") or "").strip()
+                if not cid:
+                    continue
+                candidate_ids.append(cid)
+                name = wf.get("name", cid)
+                desc = wf.get("description", "")
+                entry = f"- {cid}: {name}"
+                if desc:
+                    entry += f" — {desc}"
+                candidate_lines.append(entry)
+
+        # If no candidates were provided (e.g. empty capability index),
+        # inject the default workflow as the sole candidate.
+        if not candidate_ids:
+            candidate_ids.append(self._default_workflow_id)
+            candidate_lines.append(
+                f"- {self._default_workflow_id}: Default workflow"
+            )
+
+        candidate_list = "\n".join(candidate_lines)
+
+        # Try Vontology prompt template first, then fall back.
+        prompt = self._prompt_service.render_prompt(
+            self._classifier_prompt_ids,
+            variables={"turn_text": turn_text, "candidate_list": candidate_list},
+            fallback=self._fallback_prompt,
+            max_chars=6000,
+        )
+        prompt_id = prompt.prompt_id if prompt else None
+        prompt_text = prompt.text if prompt else self._fallback_prompt
+
+        # If the rendered prompt doesn't contain the candidate list
+        # (e.g. because the Vontology template doesn't have the
+        # {candidate_list} variable), append it.
+        if "{candidate_list}" in prompt_text:
+            prompt_text = prompt_text.replace("{candidate_list}", candidate_list)
+        elif candidate_list and candidate_list not in prompt_text:
+            prompt_text = _DEFAULT_RANKER_PROMPT.format(
+                turn_text=turn_text,
+                candidate_list=candidate_list,
+            )
+            prompt_id = None  # Using fallback ranker prompt.
+
+        return WorkflowSelectionPrompt(
+            prompt_id=prompt_id,
+            prompt_text=prompt_text,
+            discovered_workflow_ids=tuple(candidate_ids),
+        )
+
+    # ------------------------------------------------------------------
+    # Legacy prompt (backward compatibility)
+    # ------------------------------------------------------------------
+
+    def _prepare_legacy_prompt(
+        self,
+        *,
+        turn_text: str,
+        discovered_workflows: Sequence[Mapping[str, Any]] | None = None,
+    ) -> WorkflowSelectionPrompt:
+        """Build the legacy static-verdict classifier prompt."""
         prompt = self._prompt_service.render_prompt(
             self._classifier_prompt_ids,
             variables={"turn_text": turn_text},
@@ -165,7 +301,6 @@ class WorkflowSelector:
         prompt_id = prompt.prompt_id if prompt else None
         prompt_text = prompt.text if prompt else self._fallback_prompt
 
-        # Build set of discovered workflow concept_ids for verdict resolution.
         discovered_ids: list[str] = []
         if discovered_workflows:
             lines: list[str] = []
@@ -181,7 +316,7 @@ class WorkflowSelector:
                     entry += f" — {desc}"
                 lines.append(entry)
             if lines:
-                prompt_text += _DISCOVERY_SUFFIX.format(
+                prompt_text += _LEGACY_DISCOVERY_SUFFIX.format(
                     discovered_workflows="\n".join(lines)
                 )
 
@@ -191,6 +326,10 @@ class WorkflowSelector:
             discovered_workflow_ids=tuple(discovered_ids),
         )
 
+    # ------------------------------------------------------------------
+    # Selection resolution
+    # ------------------------------------------------------------------
+
     def resolve_selection(
         self,
         *,
@@ -199,7 +338,94 @@ class WorkflowSelector:
         prompt_used: str | None,
         discovered_workflow_ids: Sequence[str] = (),
     ) -> WorkflowSelection:
-        """Resolve a raw classifier response into a workflow selection."""
+        """Resolve a raw LLM response into a workflow selection.
+
+        In RAG-first mode, *discovered_workflow_ids* contains ALL
+        candidate workflow_ids.  The response is matched against them.
+
+        In legacy mode, the response is matched against static verdicts
+        first, then discovered workflow IDs.
+        """
+        if self._rag_first:
+            return self._resolve_rag_first(
+                raw_response=raw_response,
+                prompt_id=prompt_id,
+                prompt_used=prompt_used,
+                candidate_workflow_ids=discovered_workflow_ids,
+            )
+        return self._resolve_legacy(
+            raw_response=raw_response,
+            prompt_id=prompt_id,
+            prompt_used=prompt_used,
+            discovered_workflow_ids=discovered_workflow_ids,
+        )
+
+    # ------------------------------------------------------------------
+    # RAG-first resolution (Phase 2)
+    # ------------------------------------------------------------------
+
+    def _resolve_rag_first(
+        self,
+        *,
+        raw_response: Any,
+        prompt_id: Optional[str],
+        prompt_used: str | None,
+        candidate_workflow_ids: Sequence[str] = (),
+    ) -> WorkflowSelection:
+        """Resolve selection from RAG candidate list."""
+        candidate_ids = tuple(
+            item for item in candidate_workflow_ids
+            if isinstance(item, str) and item
+        )
+        candidate_lookup = {item.lower(): item for item in candidate_ids}
+
+        label = self._extract_candidate_label(
+            raw_response=raw_response,
+            discovered_workflow_ids=candidate_ids,
+        )
+
+        # Match against candidate workflow IDs.
+        label_lower = label.lower()
+        matched_id = candidate_lookup.get(label_lower)
+
+        if matched_id:
+            workflow_id = matched_id
+            verdict = "rag_selected"
+        else:
+            # Fallback: try to find a candidate in the raw text.
+            raw_text = str(raw_response or "").lower()
+            for cid in candidate_ids:
+                if cid.lower() in raw_text:
+                    workflow_id = cid
+                    verdict = "rag_selected"
+                    break
+            else:
+                # Ultimate fallback to default workflow.
+                workflow_id = self._default_workflow_id
+                verdict = "rag_default"
+
+        return WorkflowSelection(
+            workflow_id=workflow_id,
+            verdict=verdict,
+            prompt_id=prompt_id,
+            prompt_used=prompt_used,
+            raw_response=str(raw_response or ""),
+            discovered_workflow_ids=candidate_ids,
+        )
+
+    # ------------------------------------------------------------------
+    # Legacy resolution (backward compatibility)
+    # ------------------------------------------------------------------
+
+    def _resolve_legacy(
+        self,
+        *,
+        raw_response: Any,
+        prompt_id: Optional[str],
+        prompt_used: str | None,
+        discovered_workflow_ids: Sequence[str] = (),
+    ) -> WorkflowSelection:
+        """Resolve selection using static verdict mapping (legacy path)."""
         verdict = self._extract_candidate_label(
             raw_response=raw_response,
             discovered_workflow_ids=discovered_workflow_ids,
@@ -207,13 +433,15 @@ class WorkflowSelector:
         verdict_lookup = verdict.lower()
         resolved_verdict = verdict
         discovered_ids = tuple(
-            item for item in discovered_workflow_ids if isinstance(item, str) and item
+            item for item in discovered_workflow_ids
+            if isinstance(item, str) and item
         )
         discovered_lookup = {item.lower(): item for item in discovered_ids}
 
-        # Resolve verdict → workflow_id.
+        mapping = self._verdict_mapping or {}
+
         # 1. Check static verdict mapping.
-        workflow_id = self._verdict_mapping.get(verdict_lookup)
+        workflow_id = mapping.get(verdict_lookup)
 
         # 2. Check if the verdict is a discovered workflow concept_id.
         discovered_match = discovered_lookup.get(verdict_lookup)
@@ -223,18 +451,16 @@ class WorkflowSelector:
 
         # 3. Fallback to plain_response mapping.
         if not workflow_id:
-            workflow_id = self._verdict_mapping.get("plain_response")
+            workflow_id = mapping.get("plain_response") or self._default_workflow_id
             resolved_verdict = "plain_response"
 
         if not isinstance(workflow_id, str):
             workflow_id = ""
 
-        # Validate workflow_id is in the registry (static or Vontology-loaded).
+        # Validate workflow_id is in the registry.
         if workflow_id and workflow_id not in self._registry.all_workflow_ids():
-            # If it's a discovered workflow, it may not be in the registry yet
-            # but is still valid — the orchestrator can attempt to load it.
             if workflow_id not in discovered_ids:
-                fallback_id = self._verdict_mapping.get("plain_response")
+                fallback_id = mapping.get("plain_response") or self._default_workflow_id
                 workflow_id = (
                     fallback_id if isinstance(fallback_id, str) else workflow_id
                 )
@@ -249,6 +475,10 @@ class WorkflowSelector:
             discovered_workflow_ids=tuple(discovered_ids),
         )
 
+    # ------------------------------------------------------------------
+    # Label extraction (shared by both modes)
+    # ------------------------------------------------------------------
+
     @classmethod
     def _extract_candidate_label(
         cls,
@@ -258,7 +488,8 @@ class WorkflowSelector:
     ) -> str:
         raw_text = str(raw_response or "")
         discovered_ids = tuple(
-            item for item in discovered_workflow_ids if isinstance(item, str) and item
+            item for item in discovered_workflow_ids
+            if isinstance(item, str) and item
         )
         discovered_lookup = {item.lower(): item for item in discovered_ids}
 
@@ -267,7 +498,9 @@ class WorkflowSelector:
         if stripped:
             snippets.append(stripped)
             snippets.extend(
-                line.strip() for line in stripped.splitlines() if isinstance(line, str)
+                line.strip()
+                for line in stripped.splitlines()
+                if isinstance(line, str)
             )
 
         json_candidate = cls._extract_json_candidate(raw_text)
@@ -276,7 +509,8 @@ class WorkflowSelector:
 
         for snippet in snippets:
             normalised = cls._normalise_candidate(snippet)
-            if normalised in cls._STATIC_SELECTOR_VERDICTS:
+            # Check legacy verdicts (for backward-compat extraction).
+            if normalised in cls._LEGACY_VERDICTS:
                 return normalised
             discovered_match = discovered_lookup.get(normalised)
             if discovered_match:
@@ -313,8 +547,9 @@ class WorkflowSelector:
 
     @classmethod
     def _extract_static_verdict_from_text(cls, lowered_text: str) -> str | None:
+        """Extract a legacy static verdict from text.  Kept for compatibility."""
         best_match: tuple[int, str] | None = None
-        for verdict in cls._STATIC_SELECTOR_VERDICTS:
+        for verdict in cls._LEGACY_VERDICTS:
             match = re.search(rf"\b{re.escape(verdict)}\b", lowered_text)
             if not match:
                 continue

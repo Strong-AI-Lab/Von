@@ -118,6 +118,9 @@ def build_db_independent_orchestrator(
 
     env_val = "1" if selector_enabled else "0"
     monkeypatch.setenv("VON_CHAT_WORKFLOW_SELECTOR_ENABLED", env_val)
+    # Default to legacy selector mode in the harness — RAG-first routing
+    # is tested separately in test_workflow_selector_rag_first.py.
+    monkeypatch.setenv("VON_WORKFLOW_RAG_FIRST_ROUTING", "0")
 
     from src.backend.workflows import WorkflowRegistry, register_default_workflows
     from src.backend.workflows.action_registry import ActionRegistry

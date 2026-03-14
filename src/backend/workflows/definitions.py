@@ -720,7 +720,11 @@ def register_default_workflows(registry: WorkflowRegistry) -> None:
         WorkflowRegistration(
             workflow_id=CHAT_NARRATION_WORKFLOW_ID,
             definition=build_chat_narration_workflow(),
-            purpose="Narration generation pipeline.",
+            purpose=(
+                "Narrative generation and storytelling pipeline. "
+                "Use for generating prose, narrating content, summarising documents, "
+                "composing extended text, and long-form text generation."
+            ),
             source="built_in",
         ),
         WorkflowRegistration(
@@ -738,9 +742,17 @@ def register_default_workflows(registry: WorkflowRegistry) -> None:
                     "completed": WorkflowStateSpec(state_id="completed", terminal=True)
                 },
                 termination_states=("completed",),
-                purpose="Default chat assistant no-op workflow placeholder.",
+                purpose=(
+                    "Direct conversational response without tools. "
+                    "For greetings, simple questions, general chat, and exchanges "
+                    "that do not require external data or tool invocations."
+                ),
             ),
-            purpose="Base chat assistant workflow.",
+            purpose=(
+                "Direct conversational response without tools. "
+                "For greetings, simple questions, general chat, and exchanges "
+                "that do not require external data or tool invocations."
+            ),
             source="built_in",
         ),
         WorkflowRegistration(
@@ -782,7 +794,11 @@ def register_default_workflows(registry: WorkflowRegistry) -> None:
         WorkflowRegistration(
             workflow_id=TOOL_CALLING_WORKFLOW_ID,
             definition=build_tool_calling_workflow(),
-            purpose="Standard tool-calling pipeline.",
+            purpose=(
+                "General-purpose tool-calling pipeline for tasks requiring external actions. "
+                "Use for MCP tool invocations, knowledge-base queries, web searches, "
+                "file operations, downloads, data mutations, and API calls."
+            ),
             source="built_in",
         ),
     ):
