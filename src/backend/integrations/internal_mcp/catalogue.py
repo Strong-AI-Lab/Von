@@ -13729,11 +13729,16 @@ def _github_invoke_proxy_tool(tool_name: str, arguments: Mapping[str, Any]) -> d
     try:
         raw_result, proxy_stats = _run_async_compat(_async_call)
     except GitHubProxyError as exc:
+        error_message = str(exc)
         return make_error_response(
             "github_proxy_error",
-            str(exc),
-            details={"exception_type": "GitHubProxyError", "tool": tool_name},
-            suggestions=["Check GitHub MCP connectivity, command args, and token configuration"],
+            error_message,
+            details={"exception_type": "GitHubProxyError", "tool": tool_name, "message": error_message},
+            suggestions=[
+                "Check GitHub MCP connectivity, command args, and token configuration",
+                "If using VS Code, ensure GITHUB_PERSONAL_ACCESS_TOKEN is set in .env "
+                "(VS Code may override GITHUB_TOKEN with its own Copilot auth token)",
+            ],
         )
     except Exception as exc:  # pragma: no cover - defensive
         return make_error_response(

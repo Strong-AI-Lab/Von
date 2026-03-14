@@ -161,6 +161,8 @@ _apply_dotenv_overrides(
         # (VS Code may set GITHUB_TOKEN to its own Copilot auth token).
         "GITHUB_PERSONAL_ACCESS_TOKEN",
         "GITHUB_VON_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
     }
 )
 

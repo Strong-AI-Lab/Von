@@ -7196,6 +7196,12 @@ class InternalMCPChatOrchestrator:
         if not cls._extract_arxiv_id_from_text(prompt_text):
             return None
 
+        # Explicit denial overrides all artefact-intent tokens — the denial
+        # phrase itself contains words like "download"/"store" that would
+        # otherwise register as positive intent.
+        if prompt_explicitly_denies_write(prompt_text):
+            return None
+
         lowered = prompt_text.lower()
         if any(token in lowered for token in ("finalise", "finalize", "cached")):
             return "finalise_cached_paper"
@@ -11702,6 +11708,9 @@ class InternalMCPChatOrchestrator:
             error_msg = payload.get("error", "")
             error_code = payload.get("error_code")
             if error_code:
+                if isinstance(error_msg, str) and error_msg:
+                    short_msg = error_msg[:50] + "..." if len(error_msg) > 50 else error_msg
+                    return f"Error: {error_code} \u2014 {short_msg}"
                 return f"Error: {error_code}"
             if isinstance(error_msg, str) and error_msg:
                 short = error_msg[:50] + "..." if len(error_msg) > 50 else error_msg
