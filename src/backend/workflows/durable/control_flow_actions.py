@@ -23,6 +23,7 @@ from ..execution_contracts import (
     LAST_WORKFLOW_STEP_RESULT_ENVELOPE_KEY,
     WORKFLOW_CONTROL_ACTION_BREAK_ID,
     WORKFLOW_CONTROL_ACTION_CONTINUE_ID,
+    WORKFLOW_CONTROL_ACTION_CONTEXT_SET_ID,
     WORKFLOW_CONTROL_ACTION_FOR_EACH_ID,
     WORKFLOW_CONTROL_ACTION_FORK_ID,
     WORKFLOW_CONTROL_ACTION_JOIN_ID,
@@ -614,6 +615,60 @@ def _build_join_handler() -> Callable[[WorkflowActionRequest], WorkflowActionRes
     return _handle
 
 
+def _handle_context_set(request: WorkflowActionRequest) -> WorkflowActionResult:
+    """Set key-value pairs in workflow context.
+
+    Input schema::
+
+        {
+          "assignments": [
+            {"key": "my_flag", "value": true},
+            {"key": "other_key", "value_from_context": "source_key"}
+          ]
+        }
+
+    Each assignment writes exactly one context key.  ``value`` sets a literal;
+    ``value_from_context`` copies from an existing context key.
+    """
+    inputs = request.inputs if isinstance(request.inputs, Mapping) else {}
+    assignments = inputs.get("assignments")
+    if not isinstance(assignments, (list, tuple)):
+        return WorkflowActionResult(
+            status="failed",
+            error="context_set:assignments_missing_or_invalid",
+        )
+
+    outputs: dict[str, Any] = {}
+    applied: list[str] = []
+    for index, entry in enumerate(assignments):
+        if not isinstance(entry, Mapping):
+            return WorkflowActionResult(
+                status="failed",
+                error=f"context_set:assignment_{index}_not_mapping",
+            )
+        key = str(entry.get("key") or "").strip()
+        if not key:
+            return WorkflowActionResult(
+                status="failed",
+                error=f"context_set:assignment_{index}_missing_key",
+            )
+
+        if "value_from_context" in entry:
+            source_key = str(entry["value_from_context"]).strip()
+            found, resolved = resolve_context_path(
+                context=request.data, path=source_key
+            )
+            value = resolved if found else None
+        else:
+            value = entry.get("value")
+
+        outputs[key] = value
+        applied.append(key)
+
+    outputs["_context_set_applied_keys"] = applied
+    return WorkflowActionResult(status="success", outputs=outputs)
+
+
 def register_control_flow_actions(
     registry: ActionRegistry,
     *,
@@ -622,6 +677,18 @@ def register_control_flow_actions(
     """Register reusable control-flow primitives in the action registry."""
 
     loader = definition_loader or load_workflow_definition_from_vontology
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=WORKFLOW_CONTROL_ACTION_CONTEXT_SET_ID,
+            handler=_handle_context_set,
+            description=(
+                "Declaratively set key-value pairs in workflow context.  "
+                "Accepts an ``assignments`` list of dicts, each with ``key`` "
+                "and one of ``value`` (literal) or ``value_from_context`` "
+                "(copy from another context key)."
+            ),
+        )
+    )
     registry.register_if_absent(
         ActionSpec(
             action_id=WORKFLOW_CONTROL_ACTION_BREAK_ID,

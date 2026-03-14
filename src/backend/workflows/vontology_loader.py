@@ -160,6 +160,12 @@ WORKFLOW_GRAPH_PREDICATE_ALIASES: Dict[str, Tuple[str, ...]] = {
         "#V#workflowStepMapsToolOutputFieldToContextKey",
         "workflowStepMapsToolOutputFieldToContextKey",
     ),
+    "hasWorkflowVariable": (
+        "#V#hasWorkflowVariable",
+        "hasWorkflowVariable",
+        "#V#has_workflow_variable",
+        "has_workflow_variable",
+    ),
 }
 
 # Preferred roots for workflow type discovery.
@@ -1534,6 +1540,43 @@ def build_workflow_process_graph(
         matched_predicates=step_predicates,
     )
 
+    # Read workflow-level variable declarations.
+    variable_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES["hasWorkflowVariable"]
+    variable_ids, variable_predicates = _all_relationship_targets_with_predicates(
+        relationships,
+        variable_candidates,
+    )
+    _record_legacy_alias_use(
+        legacy_aliases=legacy_aliases,
+        canonical_predicate=variable_candidates[0],
+        matched_predicates=variable_predicates,
+    )
+    variable_declarations: List[Dict[str, Any]] = []
+    if variable_ids:
+        var_docs = _fetch_concepts_by_id(variable_ids)
+        for var_id in variable_ids:
+            var_doc = var_docs.get(var_id)
+            if not isinstance(var_doc, dict):
+                warnings.append(f"workflow_variable_concept_missing:{var_id}")
+                continue
+            var_data = var_doc.get("concept_data") or {}
+            if not isinstance(var_data, dict):
+                var_data = {}
+            var_name = str(
+                var_data.get("variable_name")
+                or var_data.get("key")
+                or var_doc.get("name")
+                or var_id
+            ).strip()
+            var_default = var_data.get("default_value")
+            variable_declarations.append(
+                {
+                    "concept_id": var_id,
+                    "name": var_name,
+                    "default_value": var_default,
+                }
+            )
+
     if initial_step and initial_step not in step_ids:
         step_ids.insert(0, initial_step)
     if not initial_step and step_ids:
@@ -1876,6 +1919,7 @@ def build_workflow_process_graph(
         "workflow_id": workflow_id,
         "initial_step": initial_step,
         "workflow_metadata": workflow_runtime_policies,
+        "variable_declarations": variable_declarations,
         "steps": step_items,
         "edges": edges,
         "warnings": warnings,
@@ -2372,6 +2416,9 @@ def load_workflow_definition_from_vontology(
         workflow_metadata["background_launch_policy_source"] = (
             background_launch_policy_source
         )
+    graph_variable_declarations = graph.get("variable_declarations")
+    if isinstance(graph_variable_declarations, list) and graph_variable_declarations:
+        workflow_metadata["variable_declarations"] = graph_variable_declarations
 
     return WorkflowDefinition(
         workflow_id=workflow_id,

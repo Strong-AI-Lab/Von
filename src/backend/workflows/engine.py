@@ -1113,6 +1113,20 @@ class WorkflowExecutor:
     ) -> WorkflowResult:
         context: Dict[str, Any] = data or {}
         clear_control_signal_context(context)
+
+        # Initialise declared workflow variables (defaults only, not overriding
+        # values already present from caller-supplied data).
+        variable_declarations = (definition.metadata or {}).get(
+            "variable_declarations"
+        )
+        if isinstance(variable_declarations, (list, tuple)):
+            for var_decl in variable_declarations:
+                if not isinstance(var_decl, Mapping):
+                    continue
+                var_name = str(var_decl.get("name") or "").strip()
+                if var_name and var_name not in context:
+                    context[var_name] = var_decl.get("default_value")
+
         current_state = definition.initial_state
         transitions = 0
         termination_states = set(definition.termination_states) | {
