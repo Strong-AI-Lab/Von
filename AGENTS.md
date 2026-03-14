@@ -42,6 +42,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 31C. **Destructive actions require workflow confirmation**: deletes, removals, and other destructive mutations should branch to explicit workflow confirmation/escalation rather than being executed immediately.
 31D. **Human in the loop is not the default doctrine**: outside genuinely safety-critical cases, do not interrupt users or route to human approval without evidence that it is necessary.
 32. When the user asks whether something is "finished" or "complete", do not treat Jira status alone as the answer. Verify effective implementation state in both code and Vontology, then report whether it is unimplemented, partly implemented, or fully implemented (with concise evidence).
+33. **`.env` is authoritative for credentials and service config**: any code that reads credential or service-critical environment variables (API tokens, secrets, proxy config) **must** register those keys in `_apply_dotenv_overrides()` (`src/workflows/von/main.py`). Never rely on inheriting credential env vars from the parent shell — VS Code, CI runners, and other host processes routinely override well-known keys (e.g. `GITHUB_TOKEN`) with their own values. When adding or modifying code that resolves an env var for auth or external service access: (a) add the key to the override set, (b) verify `.env` contains a value for it, and (c) add a diagnostic log at resolution time showing which key was used.
 
 ## Core AI-Focused Documents
 - `docs/AINotes.md`: short-term memory and tactical log.
