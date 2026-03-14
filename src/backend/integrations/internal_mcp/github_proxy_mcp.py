@@ -105,6 +105,18 @@ def _build_github_env() -> Dict[str, str]:
         token[:12] if len(token) > 12 else "***",
     )
 
+    # GITHUB_TOKEN / GH_TOKEN are low-priority fallbacks that VS Code may
+    # have set to its own Copilot auth token (insufficient scopes for the
+    # GitHub MCP server).  Warn so operators can add a proper PAT to .env.
+    if resolved_key in ("GITHUB_TOKEN", "GH_TOKEN"):
+        logger.warning(
+            "%s Token resolved from %s — this may be a VS Code Copilot token "
+            "with insufficient scopes. Set GITHUB_PERSONAL_ACCESS_TOKEN in "
+            ".env for reliable GitHub API access.",
+            _LOG_TAG,
+            resolved_key,
+        )
+
     # Populate common token keys used by GitHub MCP server variants.
     env["GITHUB_PERSONAL_ACCESS_TOKEN"] = token
     env["GITHUB_TOKEN"] = token
