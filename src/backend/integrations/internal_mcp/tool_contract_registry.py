@@ -20,7 +20,7 @@ from typing import Any, Iterable, Mapping
 
 from .catalogue import build_default_catalogue
 from .gateway import MethodDefinition
-from .schemas import Schema
+from .schemas import Schema, schema_to_json_schema
 
 SURFACE_INTERNAL_CATALOGUE = "internal_catalogue"
 SURFACE_VONTOLOGY_STDIO = "vontology_stdio"
@@ -200,66 +200,6 @@ class CanonicalMCPToolContract:
             "description": self.description,
             "inputSchema": self.input_schema,
         }
-
-
-def _python_type_to_json_schema_type(python_type: Any) -> str:
-    if python_type is type(None):
-        return "null"
-    mapping = {
-        str: "string",
-        int: "integer",
-        float: "number",
-        bool: "boolean",
-        list: "array",
-        dict: "object",
-    }
-    return mapping.get(python_type, "string")
-
-
-def _expected_to_json_type(expected: Any) -> str | list[str]:
-    if isinstance(expected, tuple):
-        candidates = expected
-    else:
-        candidates = (expected,)
-
-    json_types: list[str] = []
-    for candidate in candidates:
-        if candidate is None:
-            candidate = type(None)
-        json_type = _python_type_to_json_schema_type(candidate)
-        if json_type not in json_types:
-            json_types.append(json_type)
-
-    if not json_types:
-        return "string"
-    if len(json_types) == 1:
-        return json_types[0]
-    return json_types
-
-
-def schema_to_json_schema(schema: Schema) -> dict[str, Any]:
-    properties: dict[str, Any] = {}
-    required_names: list[str] = []
-
-    for field_name, expected in schema.required.items():
-        properties[field_name] = {"type": _expected_to_json_type(expected)}
-        required_names.append(field_name)
-
-    for field_name, expected in schema.optional.items():
-        if field_name not in properties:
-            properties[field_name] = {"type": _expected_to_json_type(expected)}
-
-    payload: dict[str, Any] = {
-        "type": "object",
-        "properties": properties,
-        "required": required_names,
-    }
-    if schema.allow_unknown:
-        payload["additionalProperties"] = True
-    if isinstance(schema.description, str) and schema.description.strip():
-        payload["description"] = schema.description.strip()
-    return payload
-
 
 def _infer_tool_family(tool_name: str) -> str:
     if tool_name.startswith("jira_"):

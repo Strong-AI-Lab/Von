@@ -28,7 +28,12 @@ from typing import (
 )
 
 from .gateway import InternalMCPGateway, MethodDefinition
-from .schemas import Schema as McpSchema, coerce_payload_types, validate_payload
+from .schemas import (
+    Schema as McpSchema,
+    coerce_payload_types,
+    expected_to_json_schema,
+    validate_payload,
+)
 
 # Structured tool calling support (JVNAUTOSCI-799 Phase 3)
 from ...languagemodels.structured_tool_calling import (
@@ -6169,9 +6174,7 @@ class InternalMCPChatOrchestrator:
         # Process required fields (accept dict or list)
         if isinstance(required_fields, dict):
             for field_name, field_type in required_fields.items():
-                properties[field_name] = {
-                    "type": self._python_type_to_json_schema_type(field_type)
-                }
+                properties[field_name] = expected_to_json_schema(field_type)
                 required_list.append(field_name)
         elif isinstance(required_fields, list):
             for field_name in required_fields:
@@ -6183,9 +6186,7 @@ class InternalMCPChatOrchestrator:
         # Process optional fields (accept dict or list)
         if isinstance(optional_fields, dict):
             for field_name, field_type in optional_fields.items():
-                properties[field_name] = {
-                    "type": self._python_type_to_json_schema_type(field_type)
-                }
+                properties[field_name] = expected_to_json_schema(field_type)
         elif isinstance(optional_fields, list):
             for field_name in optional_fields:
                 if not isinstance(field_name, str):
@@ -6205,35 +6206,6 @@ class InternalMCPChatOrchestrator:
             json_schema["required"] = required_list
 
         return json_schema
-
-    @staticmethod
-    def _python_type_to_json_schema_type(python_type: Any) -> str:
-        """Convert Python type annotations to JSON Schema type strings."""
-        # Handle tuples of types (union types)
-        if isinstance(python_type, tuple):
-            # For unions, just take the first non-None type
-            for t in python_type:
-                if t is not type(None):
-                    return InternalMCPChatOrchestrator._python_type_to_json_schema_type(
-                        t
-                    )
-            return "string"  # Fallback
-
-        # Handle None type
-        if python_type is type(None):
-            return "null"
-
-        # Map Python types to JSON Schema types
-        type_map = {
-            str: "string",
-            int: "integer",
-            float: "number",
-            bool: "boolean",
-            list: "array",
-            dict: "object",
-        }
-
-        return type_map.get(python_type, "string")  # Default to string
 
     def _limit_context_for_llm(
         self, messages: List[Mapping[str, Any]]

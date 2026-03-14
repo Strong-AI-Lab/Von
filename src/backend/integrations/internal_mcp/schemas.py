@@ -174,6 +174,64 @@ def _matches(value: Any, expected: JsonCompatibleType) -> bool:
     return any(isinstance(value, typ) for typ in allowed)
 
 
+def python_type_to_json_schema_type(python_type: Any) -> str:
+    if python_type is type(None):
+        return "null"
+    mapping = {
+        str: "string",
+        int: "integer",
+        float: "number",
+        bool: "boolean",
+        list: "array",
+        dict: "object",
+    }
+    return mapping.get(python_type, "string")
+
+
+def expected_to_json_schema(expected: JsonCompatibleType) -> Dict[str, Any]:
+    json_types: list[str] = []
+    for candidate in _normalise_expected(expected):
+        json_type = python_type_to_json_schema_type(candidate)
+        if json_type not in json_types:
+            json_types.append(json_type)
+
+    payload: Dict[str, Any] = {
+        "type": json_types[0] if len(json_types) == 1 else json_types or "string"
+    }
+
+    # Some MCP clients reject array schemas without an explicit items schema.
+    if "array" in json_types:
+        payload["items"] = {}
+    if "object" in json_types:
+        payload["additionalProperties"] = True
+
+    return payload
+
+
+def schema_to_json_schema(schema: "Schema") -> Dict[str, Any]:
+    properties: Dict[str, Any] = {}
+    required_names: list[str] = []
+
+    for field_name, expected in schema.required.items():
+        properties[field_name] = expected_to_json_schema(expected)
+        required_names.append(field_name)
+
+    for field_name, expected in schema.optional.items():
+        if field_name not in properties:
+            properties[field_name] = expected_to_json_schema(expected)
+
+    payload: Dict[str, Any] = {
+        "type": "object",
+        "properties": properties,
+        "required": required_names,
+    }
+    if schema.allow_unknown:
+        payload["additionalProperties"] = True
+    if isinstance(schema.description, str) and schema.description.strip():
+        payload["description"] = schema.description.strip()
+    return payload
+
+
 def validate_payload(
     schema: Schema, payload: Mapping[str, Any]
 ) -> Tuple[bool, list[str]]:

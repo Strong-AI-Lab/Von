@@ -361,7 +361,7 @@ def test_namespace_injection_preserved(orchestrator):
 def test_mcp_schema_to_json_schema_conversion(orchestrator):
     """Test Schema to JSON Schema conversion."""
     mcp_schema = {
-        "required": {"query": str, "limit": int},
+        "required": {"query": str, "limit": int, "names": list},
         "optional": {"offset": int},
         "allow_unknown": False,
         "description": "Search parameters",
@@ -376,10 +376,13 @@ def test_mcp_schema_to_json_schema_conversion(orchestrator):
     assert "offset" in json_schema["properties"]
     assert json_schema["properties"]["query"]["type"] == "string"
     assert json_schema["properties"]["limit"]["type"] == "integer"
+    assert json_schema["properties"]["names"]["type"] == "array"
+    assert json_schema["properties"]["names"]["items"] == {}
     assert json_schema["properties"]["offset"]["type"] == "integer"
     assert "required" in json_schema
     assert "query" in json_schema["required"]
     assert "limit" in json_schema["required"]
+    assert "names" in json_schema["required"]
     assert "offset" not in json_schema["required"]
 
 

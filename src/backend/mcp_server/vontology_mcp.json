@@ -11,7 +11,8 @@
                         "type": "string"
                     },
                     "names": {
-                        "type": "array"
+                        "type": "array",
+                        "items": {}
                     }
                 },
                 "required": [
@@ -151,7 +152,8 @@
                         "type": "string"
                     },
                     "concepts": {
-                        "type": "array"
+                        "type": "array",
+                        "items": {}
                     },
                     "allow_duplicate_instances": {
                         "type": "boolean"
@@ -408,7 +410,8 @@
                         ]
                     },
                     "predicate_filter": {
-                        "type": "array"
+                        "type": "array",
+                        "items": {}
                     },
                     "limit": {
                         "type": "integer"
@@ -435,7 +438,8 @@
                         "type": [
                             "array",
                             "null"
-                        ]
+                        ],
+                        "items": {}
                     }
                 },
                 "required": [
@@ -539,7 +543,8 @@
                         "type": [
                             "array",
                             "null"
-                        ]
+                        ],
+                        "items": {}
                     },
                     "relation_kind": {
                         "type": [
@@ -599,7 +604,8 @@
                         "type": [
                             "array",
                             "null"
-                        ]
+                        ],
+                        "items": {}
                     },
                     "namespace": {
                         "type": [
@@ -737,13 +743,15 @@
                         "type": [
                             "array",
                             "null"
-                        ]
+                        ],
+                        "items": {}
                     },
                     "languages": {
                         "type": [
                             "array",
                             "null"
-                        ]
+                        ],
+                        "items": {}
                     },
                     "max_relation_ids_per_group": {
                         "type": [
@@ -850,7 +858,8 @@
                         "type": "string"
                     },
                     "label_ids": {
-                        "type": "array"
+                        "type": "array",
+                        "items": {}
                     },
                     "max_results": {
                         "type": [
@@ -887,10 +896,12 @@
                         "type": "boolean"
                     },
                     "add_labels": {
-                        "type": "array"
+                        "type": "array",
+                        "items": {}
                     },
                     "remove_labels": {
-                        "type": "array"
+                        "type": "array",
+                        "items": {}
                     }
                 },
                 "required": [
@@ -1000,13 +1011,15 @@
                         "type": [
                             "array",
                             "null"
-                        ]
+                        ],
+                        "items": {}
                     },
                     "components": {
                         "type": [
                             "array",
                             "null"
-                        ]
+                        ],
+                        "items": {}
                     },
                     "dry_run": {
                         "type": "boolean"
@@ -1098,7 +1111,8 @@
                         "type": "string"
                     },
                     "fields": {
-                        "type": "array"
+                        "type": "array",
+                        "items": {}
                     }
                 },
                 "required": [
@@ -1217,7 +1231,8 @@
                         "type": "string"
                     },
                     "fields": {
-                        "type": "array"
+                        "type": "array",
+                        "items": {}
                     }
                 },
                 "required": [
@@ -1258,7 +1273,8 @@
                         "type": "string"
                     },
                     "update_fields": {
-                        "type": "object"
+                        "type": "object",
+                        "additionalProperties": true
                     },
                     "dry_run": {
                         "type": "boolean"
@@ -1339,7 +1355,8 @@
                         "type": [
                             "array",
                             "null"
-                        ]
+                        ],
+                        "items": {}
                     },
                     "match_clipboard": {
                         "type": [
@@ -1554,19 +1571,22 @@
                         "type": [
                             "array",
                             "null"
-                        ]
+                        ],
+                        "items": {}
                     },
                     "relations": {
                         "type": [
                             "array",
                             "null"
-                        ]
+                        ],
+                        "items": {}
                     },
                     "filter": {
                         "type": [
                             "object",
                             "null"
-                        ]
+                        ],
+                        "additionalProperties": true
                     },
                     "mode": {
                         "type": [
@@ -1629,13 +1649,16 @@
                 "type": "object",
                 "properties": {
                     "request_payload": {
-                        "type": "object"
+                        "type": "object",
+                        "additionalProperties": true
                     },
                     "renderer_definitions": {
-                        "type": "array"
+                        "type": "array",
+                        "items": {}
                     },
                     "renderer_definition_concept_ids": {
-                        "type": "array"
+                        "type": "array",
+                        "items": {}
                     },
                     "allow_multimodal": {
                         "type": "boolean"
@@ -1667,13 +1690,15 @@
                         "type": [
                             "array",
                             "null"
-                        ]
+                        ],
+                        "items": {}
                     },
                     "allowed_languages": {
                         "type": [
                             "array",
                             "null"
-                        ]
+                        ],
+                        "items": {}
                     },
                     "instance_of": {
                         "type": [
@@ -1744,7 +1769,8 @@
                         "type": [
                             "array",
                             "null"
-                        ]
+                        ],
+                        "items": {}
                     },
                     "scope_root": {
                         "type": [
@@ -1818,7 +1844,8 @@
                         "type": "string"
                     },
                     "predicates": {
-                        "type": "array"
+                        "type": "array",
+                        "items": {}
                     },
                     "org_id": {
                         "type": "string"
@@ -1850,13 +1877,15 @@
                         "type": [
                             "array",
                             "null"
-                        ]
+                        ],
+                        "items": {}
                     },
                     "exclude_domains": {
                         "type": [
                             "array",
                             "null"
-                        ]
+                        ],
+                        "items": {}
                     },
                     "include_answer": {
                         "type": "boolean"
@@ -1926,7 +1955,8 @@
                         ]
                     },
                     "decisions": {
-                        "type": "array"
+                        "type": "array",
+                        "items": {}
                     },
                     "workflow_id": {
                         "type": [
@@ -2052,7 +2082,8 @@
                         ]
                     },
                     "decisions": {
-                        "type": "array"
+                        "type": "array",
+                        "items": {}
                     },
                     "workflow_id": {
                         "type": [
@@ -2139,7 +2170,8 @@
                         ]
                     },
                     "decisions": {
-                        "type": "array"
+                        "type": "array",
+                        "items": {}
                     },
                     "workflow_id": {
                         "type": [
@@ -2216,7 +2248,8 @@
                         "type": "string"
                     },
                     "update_data": {
-                        "type": "object"
+                        "type": "object",
+                        "additionalProperties": true
                     }
                 },
                 "required": [
@@ -2296,7 +2329,8 @@
                         "type": "string"
                     },
                     "renderer_profile": {
-                        "type": "object"
+                        "type": "object",
+                        "additionalProperties": true
                     },
                     "predicate": {
                         "type": "string"
@@ -2317,13 +2351,15 @@
                         "type": [
                             "object",
                             "null"
-                        ]
+                        ],
+                        "additionalProperties": true
                     },
                     "context": {
                         "type": [
                             "object",
                             "null"
-                        ]
+                        ],
+                        "additionalProperties": true
                     },
                     "namespace": {
                         "type": [
@@ -2371,13 +2407,15 @@
                         "type": [
                             "object",
                             "null"
-                        ]
+                        ],
+                        "additionalProperties": true
                     },
                     "context": {
                         "type": [
                             "object",
                             "null"
-                        ]
+                        ],
+                        "additionalProperties": true
                     }
                 },
                 "required": [
@@ -2417,7 +2455,8 @@
                         "type": [
                             "object",
                             "null"
-                        ]
+                        ],
+                        "additionalProperties": true
                     }
                 },
                 "required": [
@@ -2534,7 +2573,8 @@
                         "type": [
                             "array",
                             "null"
-                        ]
+                        ],
+                        "items": {}
                     },
                     "scope_root": {
                         "type": [
@@ -2596,7 +2636,8 @@
                         "type": [
                             "object",
                             "null"
-                        ]
+                        ],
+                        "additionalProperties": true
                     },
                     "enabled": {
                         "type": "boolean"
@@ -2661,7 +2702,8 @@
                         "type": [
                             "object",
                             "null"
-                        ]
+                        ],
+                        "additionalProperties": true
                     },
                     "max_retries": {
                         "type": "integer"
@@ -2711,7 +2753,8 @@
                         "type": [
                             "object",
                             "null"
-                        ]
+                        ],
+                        "additionalProperties": true
                     },
                     "description": {
                         "type": [

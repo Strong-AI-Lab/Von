@@ -9,8 +9,25 @@ from src.backend.integrations.internal_mcp.tool_contract_registry import (
     get_canonical_tool_registry,
     get_surface_tool_payloads,
 )
+from src.backend.integrations.internal_mcp.schemas import Schema, schema_to_json_schema
 from src.backend.mcp_server import mcp_stdio_server
 from src.backend.mcp_server import rag_mcp_stdio_server
+
+
+def _assert_array_schemas_define_items(node: Any, *, path: str) -> None:
+    if isinstance(node, dict):
+        node_type = node.get("type")
+        if node_type == "array" or (
+            isinstance(node_type, list) and "array" in node_type
+        ):
+            assert "items" in node, f"Array schema at {path} is missing items"
+        for key, value in node.items():
+            _assert_array_schemas_define_items(value, path=f"{path}.{key}")
+        return
+
+    if isinstance(node, list):
+        for index, value in enumerate(node):
+            _assert_array_schemas_define_items(value, path=f"{path}[{index}]")
 
 
 def test_all_vontology_stdio_handlers_are_canonically_registered() -> None:
@@ -100,3 +117,26 @@ def test_turn_execution_tools_are_exposed_on_vontology_stdio_surface() -> None:
     assert expected.issubset(names)
     for tool_name in expected:
         assert tool_name in mcp_stdio_server._TOOL_HANDLERS
+
+
+def test_schema_to_json_schema_includes_items_for_arrays() -> None:
+    payload = schema_to_json_schema(
+        Schema(
+            required={"names": list},
+            optional={"aliases": (list, type(None))},
+        )
+    )
+
+    assert payload["properties"]["names"]["type"] == "array"
+    assert payload["properties"]["names"]["items"] == {}
+    assert payload["properties"]["aliases"]["type"] == ["array", "null"]
+    assert payload["properties"]["aliases"]["items"] == {}
+
+
+def test_vontology_stdio_payload_array_schemas_define_items() -> None:
+    payloads = get_surface_tool_payloads(SURFACE_VONTOLOGY_STDIO)
+
+    for payload in payloads:
+        _assert_array_schemas_define_items(
+            payload.get("inputSchema"), path=f"{payload['name']}.inputSchema"
+        )
