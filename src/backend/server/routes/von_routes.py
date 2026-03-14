@@ -6091,6 +6091,37 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     request_id,
                 )
 
+    # ------------------------------------------------------------------
+    # JVNAUTOSCI-1423: Persist user message to chat history immediately,
+    # BEFORE orchestrator/LLM work begins.  This guarantees the user's
+    # message is recorded even if the downstream turn crashes or stalls.
+    # Downstream paths must NOT re-persist the user message.
+    # ------------------------------------------------------------------
+    _user_message_persisted_early = False
+    if history_user_id:
+        try:
+            _add_chat_history_message(
+                user_id=history_user_id,
+                session_id=session_id,
+                message={
+                    "role": "user",
+                    "content": prompt_text,
+                    "author_user_id": user_concept_id,
+                },
+                namespace=user_namespace,
+                organisation_concept_id=org_concept_id,
+                role_in_org=role_in_org,
+            )
+            _user_message_persisted_early = True
+        except Exception as early_persist_exc:
+            current_app.logger.warning(
+                "[EARLY_PERSIST] Failed to persist user message early "
+                "for session_id=%s request_id=%s: %s",
+                session_id,
+                request_id,
+                early_persist_exc,
+            )
+
     if show_tool_use_progress:
         try:
             max_calls = int(get_internal_mcp_max_tool_invocations())
@@ -6859,7 +6890,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 tool_messages = []
 
             # Persist messages in history/context.
-            if user_id_for_history:
+            # NOTE: User message already persisted early (JVNAUTOSCI-1423).
+            # Fallback: persist here if early persist failed.
+            if not _user_message_persisted_early and user_id_for_history:
                 _add_chat_history_message(
                     user_id=user_id_for_history,
                     session_id=session_id,
@@ -7041,19 +7074,22 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             ]
 
                     # Skip LLM generation for direct tool calls
+                    # NOTE: User message already persisted early (JVNAUTOSCI-1423).
                     if history_user_id:
-                        _add_chat_history_message(
-                            user_id=history_user_id,
-                            session_id=session_id,
-                            message={
-                                "role": "user",
-                                "content": prompt_text,
-                                "author_user_id": user_concept_id,
-                            },
-                            namespace=user_namespace,
-                            organisation_concept_id=org_concept_id,
-                            role_in_org=role_in_org,
-                        )
+                        # Fallback: persist here if early persist failed.
+                        if not _user_message_persisted_early:
+                            _add_chat_history_message(
+                                user_id=history_user_id,
+                                session_id=session_id,
+                                message={
+                                    "role": "user",
+                                    "content": prompt_text,
+                                    "author_user_id": user_concept_id,
+                                },
+                                namespace=user_namespace,
+                                organisation_concept_id=org_concept_id,
+                                role_in_org=role_in_org,
+                            )
                         for tool_msg in _truncate_large_tool_results(
                             tool_messages, max_tool_content_chars=5000
                         ):
@@ -7499,22 +7535,24 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             )
 
                             # Phase 4: Persist to chat history
+                            # NOTE: User message already persisted early (JVNAUTOSCI-1423).
                             if bg_history_user_id:
                                 try:
-                                    # Store user message
-                                    _add_chat_history_message(
-                                        user_id=bg_history_user_id,
-                                        session_id=bg_session_id,
-                                        message={
-                                            "role": "user",
-                                            "content": prompt_text,
-                                            "author_user_id": bg_user_concept_id,
-                                            "background_task_id": request_id,
-                                        },
-                                        namespace=bg_user_namespace,
-                                        organisation_concept_id=bg_org_concept_id,
-                                        role_in_org=bg_role_in_org,
-                                    )
+                                    # Fallback: persist user message here if early persist failed.
+                                    if not _user_message_persisted_early:
+                                        _add_chat_history_message(
+                                            user_id=bg_history_user_id,
+                                            session_id=bg_session_id,
+                                            message={
+                                                "role": "user",
+                                                "content": prompt_text,
+                                                "author_user_id": bg_user_concept_id,
+                                                "background_task_id": request_id,
+                                            },
+                                            namespace=bg_user_namespace,
+                                            organisation_concept_id=bg_org_concept_id,
+                                            role_in_org=bg_role_in_org,
+                                        )
                                     # Store tool messages
                                     tool_messages = [
                                         dict(msg) for msg in result.extra_messages
@@ -7544,7 +7582,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                         role_in_org=bg_role_in_org,
                                     )
                                 except Exception as hist_exc:
-                                    _logger.warning(
+                                    current_app.logger.warning(
                                         "[background] Failed to persist history: %s",
                                         hist_exc,
                                     )
@@ -9237,18 +9275,21 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         )
 
         if history_user_id:
-            _add_chat_history_message(
-                user_id=history_user_id,
-                session_id=session_id,
-                message={
-                    "role": "user",
-                    "content": prompt_text,
-                    "author_user_id": user_concept_id,
-                },
-                namespace=user_namespace,
-                organisation_concept_id=org_concept_id,
-                role_in_org=role_in_org,
-            )
+            # NOTE: User message already persisted early (JVNAUTOSCI-1423).
+            # Fallback: persist here if early persist failed.
+            if not _user_message_persisted_early:
+                _add_chat_history_message(
+                    user_id=history_user_id,
+                    session_id=session_id,
+                    message={
+                        "role": "user",
+                        "content": prompt_text,
+                        "author_user_id": user_concept_id,
+                    },
+                    namespace=user_namespace,
+                    organisation_concept_id=org_concept_id,
+                    role_in_org=role_in_org,
+                )
             for tool_msg in truncated_tool_messages:
                 _add_chat_history_message(
                     user_id=history_user_id,
