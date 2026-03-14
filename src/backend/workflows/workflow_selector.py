@@ -6,6 +6,13 @@ built-in workflows like chat_assistant and tool_calling on equal footing
 with Vontology-authored workflows) and asks an LLM ranker to choose the
 best candidate for the user's request.
 
+JVNAUTOSCI-1424 Phase 3: Model-based selection.  The selector now
+requests structured JSON output from the LLM ranker, extracting a
+confidence score (0.0–1.0) and reasoning trace alongside the workflow
+selection.  This decouples precision (model-based selection) from recall
+(RAG candidate retrieval) and lays the groundwork for Phase 4 RL
+optimisation by recording experience tuples.
+
 The static verdict taxonomy (plain_response, tool_seeking, summarisation,
 narration) is retired.  All workflows — built-in and Vontology — compete
 as RAG-retrieved candidates.
@@ -34,11 +41,15 @@ from .workflow_registry import WorkflowRegistry
 
 _DEFAULT_RANKER_PROMPT = (
     "You are a workflow router.  Given the user's request and a set of "
-    "candidate workflows, return the concept_id of the single best "
-    "workflow to handle this request.\n\n"
+    "candidate workflows, select the single best workflow.\n\n"
+    "Return a JSON object with exactly these fields:\n"
+    '- "workflow_id": the concept_id of the best workflow '
+    "(e.g. #V#tool_calling_workflow)\n"
+    '- "confidence": a float between 0.0 and 1.0 indicating selection '
+    "confidence\n"
+    '- "reasoning": a brief explanation (1-2 sentences) of why this '
+    "workflow fits\n\n"
     "Rules:\n"
-    "- Return ONLY the concept_id (e.g. #V#tool_calling_workflow). "
-    "No prose, no JSON, no explanation.\n"
     "- Choose the workflow whose capabilities best match the user's intent.\n"
     "- If the request requires tools, data retrieval, file operations, API "
     "calls, or knowledge-base mutations, prefer a tool-calling or "
@@ -46,7 +57,9 @@ _DEFAULT_RANKER_PROMPT = (
     "- If the request is a simple greeting, question, or acknowledgement "
     "that needs no external data, choose the chat assistant workflow.\n"
     "- Canonical artefact identifiers and URLs (arXiv IDs, DOIs, file "
-    "references) usually require a tool-calling or specialised workflow.\n\n"
+    "references) usually require a tool-calling or specialised workflow.\n"
+    "- Set confidence to 1.0 when the match is unambiguous, lower when "
+    "multiple workflows could apply.\n\n"
     "User request:\n{turn_text}\n\n"
     "Candidate workflows:\n{candidate_list}\n"
 )
@@ -85,6 +98,8 @@ class WorkflowSelection:
     prompt_used: str | None
     raw_response: str
     discovered_workflow_ids: tuple[str, ...] = ()
+    confidence_score: float = 0.0
+    reasoning: str = ""
 
 
 @dataclass(frozen=True)
@@ -139,6 +154,8 @@ class WorkflowSelector:
         "route",
         "selection",
     )
+    _JSON_CONFIDENCE_KEYS = ("confidence", "confidence_score", "score")
+    _JSON_REASONING_KEYS = ("reasoning", "reason", "explanation", "rationale")
     _CANDIDATE_BOUNDARY_STRIP = " \t\r\n`'\".,;:!?()[]{}<>"
 
     @property
@@ -361,7 +378,7 @@ class WorkflowSelector:
         )
 
     # ------------------------------------------------------------------
-    # RAG-first resolution (Phase 2)
+    # RAG-first resolution (Phase 2 + Phase 3 structured output)
     # ------------------------------------------------------------------
 
     def _resolve_rag_first(
@@ -372,12 +389,24 @@ class WorkflowSelector:
         prompt_used: str | None,
         candidate_workflow_ids: Sequence[str] = (),
     ) -> WorkflowSelection:
-        """Resolve selection from RAG candidate list."""
+        """Resolve selection from RAG candidate list.
+
+        Phase 3: extracts confidence score and reasoning trace from
+        structured JSON responses.  Falls back gracefully when the LLM
+        returns a plain concept_id or unstructured text.
+        """
         candidate_ids = tuple(
             item for item in candidate_workflow_ids
             if isinstance(item, str) and item
         )
         candidate_lookup = {item.lower(): item for item in candidate_ids}
+
+        # Phase 3: attempt structured extraction first.
+        structured = self._parse_structured_selection(
+            raw_response=raw_response,
+        )
+        confidence_score = structured.get("confidence", 0.0)
+        reasoning = structured.get("reasoning", "")
 
         label = self._extract_candidate_label(
             raw_response=raw_response,
@@ -403,6 +432,9 @@ class WorkflowSelector:
                 # Ultimate fallback to default workflow.
                 workflow_id = self._default_workflow_id
                 verdict = "rag_default"
+                # Lower confidence for fallback selections.
+                if confidence_score > 0.0:
+                    confidence_score = min(confidence_score, 0.3)
 
         return WorkflowSelection(
             workflow_id=workflow_id,
@@ -411,6 +443,8 @@ class WorkflowSelector:
             prompt_used=prompt_used,
             raw_response=str(raw_response or ""),
             discovered_workflow_ids=candidate_ids,
+            confidence_score=confidence_score,
+            reasoning=reasoning,
         )
 
     # ------------------------------------------------------------------
@@ -474,6 +508,53 @@ class WorkflowSelector:
             raw_response=str(raw_response or ""),
             discovered_workflow_ids=tuple(discovered_ids),
         )
+
+    # ------------------------------------------------------------------
+    # Structured selection parsing (Phase 3)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _parse_structured_selection(
+        cls,
+        *,
+        raw_response: Any,
+    ) -> dict[str, Any]:
+        """Extract confidence and reasoning from a structured JSON response.
+
+        Returns a dict with keys ``confidence`` (float 0.0–1.0) and
+        ``reasoning`` (str).  Falls back to empty defaults when the
+        response is not valid JSON or lacks the expected fields.
+        """
+        raw_text = str(raw_response or "").strip()
+        if not raw_text:
+            return {"confidence": 0.0, "reasoning": ""}
+
+        try:
+            parsed = json.loads(raw_text)
+        except Exception:
+            return {"confidence": 0.0, "reasoning": ""}
+
+        if not isinstance(parsed, Mapping):
+            return {"confidence": 0.0, "reasoning": ""}
+
+        confidence = 0.0
+        for key in cls._JSON_CONFIDENCE_KEYS:
+            raw_conf = parsed.get(key)
+            if raw_conf is not None:
+                try:
+                    confidence = max(0.0, min(1.0, float(raw_conf)))
+                except (TypeError, ValueError):
+                    pass
+                break
+
+        reasoning = ""
+        for key in cls._JSON_REASONING_KEYS:
+            raw_reason = parsed.get(key)
+            if isinstance(raw_reason, str) and raw_reason.strip():
+                reasoning = raw_reason.strip()
+                break
+
+        return {"confidence": confidence, "reasoning": reasoning}
 
     # ------------------------------------------------------------------
     # Label extraction (shared by both modes)
