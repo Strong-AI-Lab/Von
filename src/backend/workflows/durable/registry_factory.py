@@ -89,6 +89,7 @@ from ..vontology_loader import (
     build_workflow_process_graph,
     discover_workflow_ids,
     load_workflow_definition_from_vontology,
+    batch_fetch_workflow_purposes,
 )
 from ..workflow_concept_authority_service import (
     bootstrap_workflow_concepts,
@@ -626,6 +627,37 @@ def _launch_deferred_registry_work(
                 _last_inventory_snapshot = inventory_snapshot
 
             _apply_workflow_parity_policy(inventory_snapshot)
+
+            # JVNAUTOSCI-1424 Phase 2: Build the workflow capability index
+            # for RAG-first routing.  This is deferred to avoid blocking
+            # startup — the index is populated from the registry after
+            # bootstrap and parity work completes.
+            try:
+                # Batch-fetch descriptions for lazy workflows so the
+                # capability index has searchable text.
+                lazy_ids = list(registry.lazy_workflow_ids())
+                if lazy_ids:
+                    purposes = batch_fetch_workflow_purposes(lazy_ids)
+                    for wf_id, purpose_text in purposes.items():
+                        lazy_reg = registry._lazy.get(wf_id)  # type: ignore[attr-defined]
+                        if lazy_reg and not lazy_reg.purpose:
+                            lazy_reg.purpose = purpose_text
+
+                from ...services.workflow_capability_service import (
+                    get_workflow_capability_index,
+                )
+
+                cap_index = get_workflow_capability_index()
+                cap_count = cap_index.index_from_registry(registry)
+                logger.info(
+                    "[workflow_capability_index] Built with %d entries.",
+                    cap_count,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "workflow_capability_index_build_failed: %s",
+                    exc,
+                )
 
             logger.info(
                 "Deferred workflow registry work completed: "

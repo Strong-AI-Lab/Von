@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .file_copy_reference_service import extract_file_copy_concept_ids_from_text
 from .file_copy_typing_service import build_file_copy_typing_context
 from .arxiv_paper_link_service import extract_arxiv_id_candidates
+from .workflow_capability_service import get_workflow_capability_index
 
 logger = logging.getLogger(__name__)
 
@@ -838,6 +839,41 @@ def _seed_workflow_creation_candidate(query: str) -> list[WorkflowMatch]:
     ]
 
 
+def _search_workflow_capabilities(
+    query: str,
+    *,
+    limit: int = DEFAULT_MAX_RESULTS * 3,
+) -> List[WorkflowMatch]:
+    """Search the dedicated workflow capability index (primary search path).
+
+    JVNAUTOSCI-1424 Phase 2: The capability index covers ALL registered
+    workflows (built-in + Vontology) with rich capability descriptions.
+    This is the first search strategy tried, before semantic/vontology/name
+    fallback paths.
+    """
+    try:
+        index = get_workflow_capability_index()
+        if index.size == 0:
+            return []
+
+        cap_matches = index.search(query, max_results=limit, min_score=0.01)
+        results: list[WorkflowMatch] = []
+        for cap in cap_matches:
+            results.append(
+                WorkflowMatch(
+                    concept_id=cap.workflow_id,
+                    name=cap.name,
+                    description=cap.description,
+                    relevance_score=cap.relevance_score,
+                    match_source="capability_index",
+                )
+            )
+        return results
+    except Exception as exc:
+        logger.warning("Workflow capability index search failed: %s", exc)
+        return []
+
+
 def discover_workflows(
     query: str,
     *,
@@ -891,7 +927,21 @@ def discover_workflows(
     search_query = _augment_query_with_file_copy_context(query, file_copy_contexts)
     keyword_fallback_queries = _build_keyword_fallback_queries(query, file_copy_contexts)
 
-    # Search both sources
+    # JVNAUTOSCI-1424 Phase 2: Search the dedicated capability index FIRST.
+    # This covers all registered workflows (built-in + Vontology) with rich
+    # capability descriptions.  Built-in workflows like chat_assistant and
+    # tool_calling are discoverable on equal footing with Vontology workflows.
+    try:
+        search_sources.append("capability_index")
+        capability_matches = _search_workflow_capabilities(
+            search_query, limit=max_results * 3
+        )
+        all_matches.extend(capability_matches)
+    except Exception as e:
+        errors.append(f"capability_index_error: {e}")
+        logger.warning("Workflow capability index search failed: %s", e)
+
+    # Secondary: existing search sources fill gaps the capability index misses.
     try:
         search_sources.append("semantic")
         semantic_matches = _search_workflows_semantic(

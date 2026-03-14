@@ -2501,3 +2501,29 @@ def discover_workflow_ids() -> List[str]:
             logger.warning(f"Error querying workflows by type: {e}")
 
     return sorted(candidates)
+
+
+def batch_fetch_workflow_purposes(
+    workflow_ids: Iterable[str],
+) -> Dict[str, str]:
+    """Batch-fetch short descriptions for workflow concept IDs.
+
+    Returns {workflow_id: purpose_text} for IDs where a description is
+    available.  Uses ``resolve_workflow_narrative_text`` but caps the
+    result to the first 300 characters to keep the registry lightweight.
+
+    JVNAUTOSCI-1424 Phase 2: Provides purpose metadata for lazy
+    registrations so the workflow capability index has searchable text
+    for Vontology-authored workflows without resolving full definitions.
+    """
+    purposes: Dict[str, str] = {}
+    for wf_id in workflow_ids:
+        if not isinstance(wf_id, str) or not wf_id.strip():
+            continue
+        try:
+            text, _source = resolve_workflow_narrative_text(wf_id.strip())
+            if text:
+                purposes[wf_id.strip()] = text[:300]
+        except Exception:
+            continue
+    return purposes

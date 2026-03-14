@@ -1000,17 +1000,28 @@ class InternalMCPChatOrchestrator:
         self._workflow_executor = WorkflowExecutor(
             registry=self._action_registry, max_transitions=50
         )
-        self._workflow_selector = WorkflowSelector(
-            registry=self._workflow_registry,
-            prompt_service=self._prompt_templates,
-            verdict_mapping={
+        # JVNAUTOSCI-1424 Phase 2: RAG-first routing support.
+        # The selector uses RAG-first candidate matching by default.
+        # Set VON_WORKFLOW_RAG_FIRST_ROUTING=0 to fall back to the legacy
+        # static verdict taxonomy during rollback.
+        rag_first = os.getenv("VON_WORKFLOW_RAG_FIRST_ROUTING", "1").strip().lower() not in {
+            "0", "false", "off",
+        }
+        selector_kwargs: dict[str, Any] = {
+            "registry": self._workflow_registry,
+            "prompt_service": self._prompt_templates,
+            "classifier_prompt_ids": self._TURN_SELECTOR_PROMPTS,
+        }
+        if rag_first:
+            selector_kwargs["default_workflow_id"] = CHAT_ASSISTANT_WORKFLOW_ID
+        else:
+            selector_kwargs["verdict_mapping"] = {
                 "plain_response": CHAT_ASSISTANT_WORKFLOW_ID,
                 "tool_seeking": TOOL_CALLING_WORKFLOW_ID,
                 "summarisation": TOOL_CALLING_WORKFLOW_ID,
                 "narration": CHAT_NARRATION_WORKFLOW_ID,
-            },
-            classifier_prompt_ids=self._TURN_SELECTOR_PROMPTS,
-        )
+            }
+        self._workflow_selector = WorkflowSelector(**selector_kwargs)
         self._last_base_system_prompt_telemetry: dict[str, Any] | None = None
 
     def configure_execution_caps(
