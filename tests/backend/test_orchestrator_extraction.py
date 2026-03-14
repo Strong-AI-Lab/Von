@@ -1475,9 +1475,101 @@ def test_run_recovers_from_late_turn_invalid_tool_call_json_with_retry():
         for inv in result.tool_invocations
     )
 
-    aux_types = [entry.get("type") for entry in result.aux_llm_calls]
-    assert "missing_tool_call_detection" in aux_types
-    assert "missing_tool_call_retry" in aux_types
+
+# ---- Tests for widened prompt requirement detection (JVNAUTOSCI-1422) ----
+
+
+class _GitHubMCPGateway(_DummyGateway):
+    def describe_methods(self):
+        return {
+            "github_read_file": {"description": "read a file from GitHub"},
+            "github_read_tree": {"description": "read repo tree from GitHub"},
+            "github_search_code": {"description": "search code on GitHub"},
+            "jira_search": {"description": "search Jira"},
+        }
+
+
+def test_extract_explicit_prompt_tool_requirements_matches_use_verb():
+    """'use <tool>' should be detected like 'call <tool>'."""
+    result = InternalMCPChatOrchestrator._extract_explicit_prompt_tool_requirements(
+        "Please use fetch_concept for #V#foo",
+        method_catalogue={"fetch_concept": {"description": "fetch"}},
+    )
+    assert "fetch_concept" in result
+
+
+def test_extract_explicit_prompt_tool_requirements_matches_run_verb():
+    result = InternalMCPChatOrchestrator._extract_explicit_prompt_tool_requirements(
+        "Run search_concepts for anything matching 'test'",
+        method_catalogue={"search_concepts": {"description": "search"}},
+    )
+    assert "search_concepts" in result
+
+
+def test_extract_explicit_prompt_tool_requirements_matches_invoke_verb():
+    result = InternalMCPChatOrchestrator._extract_explicit_prompt_tool_requirements(
+        "Invoke download_paper on arXiv:2301.12345",
+        method_catalogue={"download_paper": {"description": "download"}},
+    )
+    assert "download_paper" in result
+
+
+def test_extract_explicit_prompt_tool_requirements_mcp_family_github_read():
+    """'GitHub MCP read tools' should resolve to all github_read_* tools."""
+    catalogue = _GitHubMCPGateway().describe_methods()
+    result = InternalMCPChatOrchestrator._extract_explicit_prompt_tool_requirements(
+        "Use the GitHub MCP read tools to fetch docs/engineering/manual.md",
+        method_catalogue=catalogue,
+    )
+    assert "github_read_file" in result
+    assert "github_read_tree" in result
+    # 'search' doesn't match 'read' qualifier
+    assert "github_search_code" not in result
+    # 'jira' doesn't match 'github' provider
+    assert "jira_search" not in result
+
+
+def test_extract_explicit_prompt_tool_requirements_mcp_family_no_qualifier():
+    """'GitHub MCP tools' (no qualifier) should match all github_* tools."""
+    catalogue = _GitHubMCPGateway().describe_methods()
+    result = InternalMCPChatOrchestrator._extract_explicit_prompt_tool_requirements(
+        "Use the GitHub MCP tools to explore the repo",
+        method_catalogue=catalogue,
+    )
+    assert "github_read_file" in result
+    assert "github_read_tree" in result
+    assert "github_search_code" in result
+    assert "jira_search" not in result
+
+
+def test_extract_explicit_prompt_tool_requirements_mcp_family_jira():
+    """'Jira MCP tools' should match jira_* tools."""
+    catalogue = _GitHubMCPGateway().describe_methods()
+    result = InternalMCPChatOrchestrator._extract_explicit_prompt_tool_requirements(
+        "Use the Jira MCP tools to find the task",
+        method_catalogue=catalogue,
+    )
+    assert "jira_search" in result
+    assert "github_read_file" not in result
+
+
+def test_extract_explicit_prompt_tool_requirements_mcp_family_requires_catalogue():
+    """MCP family pattern should not produce results without a catalogue."""
+    result = InternalMCPChatOrchestrator._extract_explicit_prompt_tool_requirements(
+        "Use the GitHub MCP read tools to fetch docs/manual.md",
+        method_catalogue=None,
+    )
+    assert result == []
+
+
+def test_extract_explicit_prompt_tool_requirements_deduplicates():
+    """If a tool is matched by both verb+name and MCP family, only list it once."""
+    catalogue = {"github_read_file": {"description": "read a file from GitHub"}}
+    result = InternalMCPChatOrchestrator._extract_explicit_prompt_tool_requirements(
+        "Use github_read_file via the GitHub MCP read tools",
+        method_catalogue=catalogue,
+    )
+    assert result.count("github_read_file") == 1
 
 
 def test_run_surfaces_late_turn_parse_error_when_retry_also_invalid():

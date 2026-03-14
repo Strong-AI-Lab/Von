@@ -6059,23 +6059,37 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     "result_summary": "Loading chat history for the active session.",
                 },
             )
-        if (
-            shared_invite
-            and history_owner_user_id
-            and user_concept_id
-            and history_owner_user_id != user_concept_id
-        ):
-            owner_history = chat_history_service.get_chat_history(
-                history_owner_user_id, session_id
-            )
-            invitee_history = chat_history_service.get_chat_history(
-                user_concept_id, session_id
-            )
-            owner_history = _apply_default_author(owner_history, history_owner_user_id)
-            invitee_history = _apply_default_author(invitee_history, user_concept_id)
-            context = _merge_shared_histories(owner_history, invitee_history)
-        else:
-            context = chat_history_service.get_chat_history(history_user_id, session_id)
+        _chat_history_start_perf = time.perf_counter()
+        try:
+            if (
+                shared_invite
+                and history_owner_user_id
+                and user_concept_id
+                and history_owner_user_id != user_concept_id
+            ):
+                owner_history = chat_history_service.get_chat_history(
+                    history_owner_user_id, session_id
+                )
+                invitee_history = chat_history_service.get_chat_history(
+                    user_concept_id, session_id
+                )
+                owner_history = _apply_default_author(owner_history, history_owner_user_id)
+                invitee_history = _apply_default_author(invitee_history, user_concept_id)
+                context = _merge_shared_histories(owner_history, invitee_history)
+            else:
+                context = chat_history_service.get_chat_history(history_user_id, session_id)
+        finally:
+            _chat_history_elapsed_ms = (
+                time.perf_counter() - _chat_history_start_perf
+            ) * 1000.0
+            if _chat_history_elapsed_ms > 5000:
+                current_app.logger.warning(
+                    "[CHAT_HISTORY_SLOW] Chat-history lookup took %.0fms "
+                    "for session_id=%s request_id=%s",
+                    _chat_history_elapsed_ms,
+                    session_id,
+                    request_id,
+                )
 
     if show_tool_use_progress:
         try:
@@ -7224,6 +7238,24 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             _set_tool_progress(progress_scope_key, request_id, payload)
 
         if orchestrator is None:
+            orchestrator_status = current_app.config.get(
+                "INTERNAL_MCP_ORCHESTRATOR_STATUS"
+            ) or {}
+            orch_state = orchestrator_status.get("state", "unknown")
+            current_app.logger.warning(
+                "[ORCHESTRATOR_FALLBACK] orchestrator is None "
+                "(state=%s); falling back to direct LLM generate for request_id=%s",
+                orch_state,
+                request_id,
+            )
+            auxiliary_llm_calls.append(
+                {
+                    "type": "orchestrator_unavailable_fallback",
+                    "orchestrator_state": orch_state,
+                    "orchestrator_status_error": orchestrator_status.get("error"),
+                }
+            )
+
             method_catalogue_for_fallback: Mapping[str, Any] | None = None
             if gateway is not None and callable(getattr(gateway, "describe_methods", None)):
                 try:
@@ -7385,6 +7417,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         "duration_ms": llm_interaction["duration_ms"],
                         "usage": None,
                         "workflow": "von_generate",
+                        "stage": "fallback_direct_llm",
                     }
                 ]
         else:
