@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, List, Mapping, MutableMapping, Optional, Sequence
 
 from .action_registry import (
     ActionRegistry,
@@ -80,6 +80,25 @@ WORKFLOW_IDEMPOTENCY_RECORDS_KEY = "workflow_idempotency_records"
 WORKFLOW_RETRY_POLICY_SCHEMA_VERSION = "workflow_step_retry_policy.v1"
 WORKFLOW_APPROVAL_GATE_SCHEMA_VERSION = "workflow_step_approval_gate.v1"
 WORKFLOW_IDEMPOTENCY_POLICY_SCHEMA_VERSION = "workflow_step_idempotency_policy.v1"
+WORKFLOW_STEP_EXECUTION_MODE_LLM = "llm"
+WORKFLOW_STEP_EXECUTION_MODE_DETERMINISTIC = "deterministic"
+WORKFLOW_STEP_EXECUTION_MODE_SUBWORKFLOW = "subworkflow"
+WORKFLOW_STEP_EXECUTION_MODE_CONTROL = "control"
+WORKFLOW_STEP_EXECUTION_MODES = frozenset(
+    {
+        WORKFLOW_STEP_EXECUTION_MODE_LLM,
+        WORKFLOW_STEP_EXECUTION_MODE_DETERMINISTIC,
+        WORKFLOW_STEP_EXECUTION_MODE_SUBWORKFLOW,
+        WORKFLOW_STEP_EXECUTION_MODE_CONTROL,
+    }
+)
+
+
+def normalise_workflow_step_execution_mode(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in WORKFLOW_STEP_EXECUTION_MODES:
+        return raw
+    return WORKFLOW_STEP_EXECUTION_MODE_DETERMINISTIC
 
 
 def _extract_context_binding_symbol(value: Any) -> str | None:
@@ -422,6 +441,55 @@ def _apply_action_result_context(
         return_payload=return_payload,
     )
     return action_outcome
+
+
+def execute_workflow_step_invocation(
+    *,
+    registry: ActionRegistry,
+    action: WorkflowActionInvocation,
+    resolved_inputs: MutableMapping[str, Any],
+    context: Dict[str, Any],
+    env: WorkflowEnvironment,
+    trace: WorkflowExecutionTrace | None = None,
+) -> WorkflowActionResult:
+    if action.execution_mode == WORKFLOW_STEP_EXECUTION_MODE_LLM:
+        from .llm_step_executor import execute_llm_step
+        from .action_registry import WorkflowActionRequest
+
+        request = WorkflowActionRequest(
+            action_id=action.target_id,
+            inputs=resolved_inputs,
+            environment=env,
+            data=context,
+            trace=trace,
+            action_target_id=action.target_id,
+            contract_concept_id=action.contract_concept_id,
+            execution_mode=action.execution_mode,
+            prompt_contract=(
+                dict(action.prompt_contract)
+                if isinstance(action.prompt_contract, Mapping)
+                else None
+            ),
+            llm_policy=(
+                dict(action.llm_policy)
+                if isinstance(action.llm_policy, Mapping)
+                else None
+            ),
+            validation_policy=(
+                dict(action.validation_policy)
+                if isinstance(action.validation_policy, Mapping)
+                else None
+            ),
+        )
+        return execute_llm_step(request)
+
+    return registry.execute(
+        action.target_id,
+        inputs=resolved_inputs,
+        context=context,
+        env=env,
+        trace=trace,
+    )
 
 
 def _resolve_condition_path_key(condition_spec: Mapping[str, Any]) -> str:
@@ -846,10 +914,61 @@ def build_transition_condition(
 
 @dataclass(frozen=True)
 class WorkflowActionInvocation:
-    action_id: str
+    action_id: str | None = None
     inputs: Mapping[str, Any] = field(default_factory=dict)
     description: str | None = None
     contract_concept_id: str | None = None
+    execution_mode: str = WORKFLOW_STEP_EXECUTION_MODE_DETERMINISTIC
+    prompt_contract: Mapping[str, Any] | None = None
+    llm_policy: Mapping[str, Any] | None = None
+    validation_policy: Mapping[str, Any] | None = None
+    subworkflow_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "execution_mode",
+            normalise_workflow_step_execution_mode(self.execution_mode),
+        )
+
+    @property
+    def is_llm_step(self) -> bool:
+        return self.execution_mode == WORKFLOW_STEP_EXECUTION_MODE_LLM
+
+    @property
+    def is_subworkflow_step(self) -> bool:
+        return self.execution_mode == WORKFLOW_STEP_EXECUTION_MODE_SUBWORKFLOW
+
+    @property
+    def target_id(self) -> str:
+        action_id = str(self.action_id or "").strip()
+        if action_id:
+            return action_id
+        subworkflow_id = str(self.subworkflow_id or "").strip()
+        if subworkflow_id:
+            return subworkflow_id
+        prompt_contract = (
+            self.prompt_contract
+            if isinstance(self.prompt_contract, Mapping)
+            else {}
+        )
+        resolved_prompt_id = str(
+            prompt_contract.get("resolved_prompt_concept_id") or ""
+        ).strip()
+        if resolved_prompt_id:
+            return f"llm_prompt:{resolved_prompt_id}"
+        requested_prompt_ids = prompt_contract.get("requested_prompt_concept_ids") or []
+        if isinstance(requested_prompt_ids, Sequence) and not isinstance(
+            requested_prompt_ids, str
+        ):
+            for prompt_id in requested_prompt_ids:
+                candidate = str(prompt_id or "").strip()
+                if candidate:
+                    return f"llm_prompt:{candidate}"
+        return f"workflow_step.{self.execution_mode}"
+
+
+WorkflowStepExecutionSpec = WorkflowActionInvocation
 
 
 @dataclass(frozen=True)
@@ -1325,6 +1444,7 @@ class WorkflowExecutor:
                 retry_requested = False
                 for action in state_spec.actions:
                     context_before_action = dict(context)
+                    action_target_id = action.target_id
                     resolved_inputs = resolve_action_inputs_from_context(
                         action_inputs=action.inputs,
                         context=context,
@@ -1340,7 +1460,7 @@ class WorkflowExecutor:
                             idempotency_key = _build_idempotency_key(
                                 workflow_id=definition.workflow_id,
                                 state_id=current_state,
-                                action_id=action.action_id,
+                                action_id=action_target_id,
                                 context=context,
                                 idempotency_policy=idempotency_policy,
                             )
@@ -1378,12 +1498,12 @@ class WorkflowExecutor:
                         )
                         action_outcome = _apply_action_result_context(
                             context=context,
-                            action_id=action.action_id,
+                            action_id=action_target_id,
                             result=result,
                         )
                         if trace is not None:
                             trace.record_action(
-                                action_id=action.action_id,
+                                action_id=action_target_id,
                                 inputs=resolved_inputs,
                                 outputs=result.outputs,
                                 status=result.status,
@@ -1398,13 +1518,13 @@ class WorkflowExecutor:
                                 metadata=state_spec.metadata,
                                 action_outputs=cached_outputs,
                                 state_id=current_state,
-                                action_id=action.action_id,
+                                action_id=action_target_id,
                             )
                         idempotency_event = {
                             "status": "idempotent_reuse",
                             "workflow_id": definition.workflow_id,
                             "state_id": current_state,
-                            "action_id": action.action_id,
+                            "action_id": action_target_id,
                             "idempotency_key": idempotency_key,
                         }
                         _append_context_event(
@@ -1439,7 +1559,7 @@ class WorkflowExecutor:
                                 "status": "approval_gate_checked",
                                 "workflow_id": definition.workflow_id,
                                 "state_id": current_state,
-                                "action_id": action.action_id,
+                                "action_id": action_target_id,
                                 "approval_context_key": approval_gate.get(
                                     "approval_context_key"
                                 ),
@@ -1473,16 +1593,17 @@ class WorkflowExecutor:
                             context["approval_required"] = False
                             context["approval_state"] = "approved"
 
-                        result = self._registry.execute(
-                            action.action_id,
-                            inputs=resolved_inputs,
+                        result = execute_workflow_step_invocation(
+                            registry=self._registry,
+                            action=action,
+                            resolved_inputs=resolved_inputs,
                             context=context,
                             env=environment,
                             trace=trace,
                         )
                         if trace is not None:
                             trace.record_action(
-                                action_id=action.action_id,
+                                action_id=action_target_id,
                                 inputs=resolved_inputs,
                                 outputs=result.outputs,
                                 status=result.status,
@@ -1501,7 +1622,7 @@ class WorkflowExecutor:
                                 metadata=state_spec.metadata,
                                 action_outputs=result.outputs,
                                 state_id=current_state,
-                                action_id=action.action_id,
+                                action_id=action_target_id,
                             )
                             if (
                                 idempotency_policy is not None
@@ -1518,7 +1639,7 @@ class WorkflowExecutor:
                                     "status": "idempotent_recorded",
                                     "workflow_id": definition.workflow_id,
                                     "state_id": current_state,
-                                    "action_id": action.action_id,
+                                    "action_id": action_target_id,
                                     "idempotency_key": idempotency_key,
                                 }
                                 _append_context_event(
@@ -1535,7 +1656,7 @@ class WorkflowExecutor:
                     step_envelope = build_step_result_envelope(
                         workflow_id=definition.workflow_id,
                         state_id=current_state,
-                        action_id=action.action_id,
+                        action_id=action_target_id,
                         action_status=result.status,
                         action_outcome=action_outcome,
                         action_error=result.error,
@@ -1555,7 +1676,7 @@ class WorkflowExecutor:
                             "status": "control_signal",
                             "workflow_id": definition.workflow_id,
                             "state_id": current_state,
-                            "action_id": action.action_id,
+                            "action_id": action_target_id,
                             "control_signal": step_envelope["control_signal"],
                             "control_signal_scope": step_envelope.get(
                                 "control_signal_scope"
@@ -1582,7 +1703,7 @@ class WorkflowExecutor:
                             "status": "retry_scheduled",
                             "workflow_id": definition.workflow_id,
                             "state_id": current_state,
-                            "action_id": action.action_id,
+                            "action_id": action_target_id,
                             "attempt_number": state_attempt,
                             "next_attempt_number": state_attempt + 1,
                             "delay_ms": delay_ms,

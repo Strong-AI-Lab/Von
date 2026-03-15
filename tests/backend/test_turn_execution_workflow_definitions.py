@@ -9,29 +9,25 @@ from src.backend.workflows.definitions import (
     build_tool_calling_workflow,
     register_default_workflows,
 )
+from src.backend.workflows.engine import WORKFLOW_STEP_EXECUTION_MODE_LLM
 from src.backend.workflows.workflow_registry import WorkflowRegistry
 
 
 def test_tool_calling_workflow_includes_turn_execution_critic_and_gate() -> None:
     workflow = build_tool_calling_workflow()
 
+    assert workflow.initial_state == "respond"
+    assert "respond" in workflow.states
     assert "postcondition_critic" in workflow.states
     assert "completion_gate" in workflow.states
 
-    plan = workflow.states["plan"]
+    respond = workflow.states["respond"]
+    assert respond.actions[0].action_id == "tool_calling.respond"
+    assert respond.actions[0].execution_mode == WORKFLOW_STEP_EXECUTION_MODE_LLM
     assert any(
-        t.to_state == "postcondition_critic" and t.reason == "direct_response"
-        for t in plan.transitions
+        t.to_state == "postcondition_critic" and t.reason == "response_ready"
+        for t in respond.transitions
     )
-
-    validate = workflow.states["validate"]
-    assert any(
-        t.to_state == "postcondition_critic" and t.reason == "validation_error"
-        for t in validate.transitions
-    )
-
-    backfill = workflow.states["backfill"]
-    assert any(t.to_state == "postcondition_critic" for t in backfill.transitions)
 
     postcondition_critic = workflow.states["postcondition_critic"]
     assert postcondition_critic.actions[0].action_id == "turn_execution.critic"
@@ -40,7 +36,7 @@ def test_tool_calling_workflow_includes_turn_execution_critic_and_gate() -> None
     completion_gate = workflow.states["completion_gate"]
     assert completion_gate.actions[0].action_id == "turn_execution.completion_gate"
     assert any(
-        t.to_state == "plan" and t.reason == "completion_gate_repeat_iteration"
+        t.to_state == "respond" and t.reason == "completion_gate_repeat_iteration"
         for t in completion_gate.transitions
     )
     assert any(t.to_state == "completed" for t in completion_gate.transitions)

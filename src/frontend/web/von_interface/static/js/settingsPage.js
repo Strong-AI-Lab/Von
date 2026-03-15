@@ -71,6 +71,7 @@ let runtimeAbortController = null;
 let runtimeStatusInFlight = false;
 let backgroundTaskUnsubscribe = null;
 let gmailProfileStatusInFlight = false;
+let currentResolvedLlm = null;
 
 let __vonIsAdminOrOwner = false;
 let availableGmailProfiles = [];
@@ -159,6 +160,47 @@ function resolveActiveLlmScopeContext() {
   }
 
   return { scope: null, conceptId: null };
+}
+
+function buildEnabledLlmSelections() {
+  const selections = [];
+  const openaiModelSelect = document.getElementById('openaiModelSelect');
+  const ollamaModelSelect = document.getElementById('globalModelSelect');
+
+  const openaiModel = openaiModelSelect?.value;
+  if (openaiModel) {
+    selections.push({ provider: 'openai', model: openaiModel });
+  }
+
+  const ollamaOption = ollamaModelSelect?.selectedOptions?.[0];
+  const ollamaModel = ollamaOption ? (ollamaOption.dataset.modelName || ollamaModelSelect?.value) : ollamaModelSelect?.value;
+  if (ollamaModel) {
+    const selection = { provider: 'ollama', model: ollamaModel };
+    const hostUrl = ollamaOption?.dataset?.hostUrl || null;
+    if (hostUrl) selection.host = hostUrl;
+    selections.push(selection);
+  }
+
+  return selections;
+}
+
+function resolveActiveLlmFromSelections(enabledLlms, preferredProvider = null) {
+  if (!Array.isArray(enabledLlms) || !enabledLlms.length) return null;
+
+  const matchesCurrent = enabledLlms.find((entry) =>
+    currentResolvedLlm
+    && entry?.provider === currentResolvedLlm.provider
+    && entry?.model === currentResolvedLlm.model
+    && (entry?.host || null) === (currentResolvedLlm.host || null)
+  );
+  if (matchesCurrent) return { ...matchesCurrent };
+
+  if (preferredProvider) {
+    const preferred = enabledLlms.find((entry) => entry?.provider === preferredProvider);
+    if (preferred) return { ...preferred };
+  }
+
+  return { ...enabledLlms[0] };
 }
 
 async function _fetchSessionContextForRole() {
@@ -1781,13 +1823,24 @@ async function loadAndDisplaySettings() {
     // Extract current model information from resolved_llm (respects user > org > global precedence)
     // Falls back to active_llm for backwards compatibility
     const effectiveLlm = settings.resolved_llm || settings.active_llm;
+    currentResolvedLlm = effectiveLlm || null;
+    const enabledLlms = Array.isArray(settings.enabled_llms) ? settings.enabled_llms : [];
     let currentOllamaModel = null;
     let currentOpenAIModel = null;
 
+    for (const entry of enabledLlms) {
+      if (!entry || typeof entry !== 'object') continue;
+      if (entry.provider === 'ollama' && entry.model) {
+        currentOllamaModel = entry.model;
+      } else if (entry.provider === 'openai' && entry.model) {
+        currentOpenAIModel = entry.model;
+      }
+    }
+
     if (effectiveLlm) {
-      if (effectiveLlm.provider === 'ollama') {
+      if (!currentOllamaModel && effectiveLlm.provider === 'ollama') {
         currentOllamaModel = effectiveLlm.model;
-      } else if (effectiveLlm.provider === 'openai') {
+      } else if (!currentOpenAIModel && effectiveLlm.provider === 'openai') {
         currentOpenAIModel = effectiveLlm.model;
       }
     }
@@ -2233,37 +2286,10 @@ async function saveAllSettings(changedProvider = null) {
   const ollamaModelSelect = document.getElementById('globalModelSelect');
   const openaiModelSelect = document.getElementById('openaiModelSelect');
   const { scope: llmScope, conceptId: llmConceptId } = resolveActiveLlmScopeContext();
+  const enabledLlms = buildEnabledLlmSelections();
+  let activeLlm = resolveActiveLlmFromSelections(enabledLlms, changedProvider);
 
-  let activeLlm = null;
-
-  if (changedProvider === 'openai') {
-    activeLlm = { provider: 'openai', model: openaiModelSelect.value };
-    // Clear the other dropdown to avoid confusion
-    ollamaModelSelect.value = '';
-  } else if (changedProvider === 'ollama') {
-    // Extract both the model name and host URL from the selected option
-    const selectedOption = ollamaModelSelect.selectedOptions[0];
-    const modelName = selectedOption ? selectedOption.dataset.modelName : ollamaModelSelect.value;
-    const hostUrl = selectedOption ? selectedOption.dataset.hostUrl : null;
-    activeLlm = { provider: 'ollama', model: modelName, host: hostUrl };
-    // Clear the other dropdown
-    openaiModelSelect.value = '';
-  } else {
-    // If no specific provider changed (e.g., user change), determine the active one
-    const openaiModel = openaiModelSelect?.value;
-    const ollamaModel = ollamaModelSelect?.value;
-    if (openaiModel) {
-      activeLlm = { provider: 'openai', model: openaiModel };
-    } else if (ollamaModel) {
-      // Extract both the model name and host URL from the selected option
-      const selectedOption = ollamaModelSelect.selectedOptions[0];
-      const modelName = selectedOption ? selectedOption.dataset.modelName : ollamaModel;
-      const hostUrl = selectedOption ? selectedOption.dataset.hostUrl : null;
-      activeLlm = { provider: 'ollama', model: modelName, host: hostUrl };
-    }
-  }
-
-  if (activeLlm && (!llmScope || !llmConceptId)) {
+  if (enabledLlms.length && (!llmScope || !llmConceptId)) {
     showStatusMessage(
       'settingsStatusMessage',
       'Select a current user or organisation before changing the model.',
@@ -2280,6 +2306,7 @@ async function saveAllSettings(changedProvider = null) {
   // We now persist user/org/language only in localStorage; do not send to backend
   const settings = {
     active_llm: activeLlm,
+    enabled_llms: enabledLlms,
     openai_api_key_env_var: document.getElementById('openaiApiKeyEnvVar')?.value,
     preload_vontology_tree: !!document.getElementById('preloadVontologyTreeToggle')?.checked,
     fetch_counts_on_load: !!document.getElementById('fetchCountsOnLoadToggle')?.checked,
@@ -2330,6 +2357,10 @@ async function saveAllSettings(changedProvider = null) {
       )
     ) {
       throw new Error('Model change did not take effect for the current context.');
+    }
+
+    if (payload?.resolved_llm) {
+      currentResolvedLlm = payload.resolved_llm;
     }
 
     showStatusMessage('settingsStatusMessage', payload.message || 'Settings saved successfully!');

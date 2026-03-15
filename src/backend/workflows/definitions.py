@@ -9,6 +9,7 @@ from .engine import (
     WorkflowDefinition,
     WorkflowStateSpec,
     WorkflowTransitionSpec,
+    WORKFLOW_STEP_EXECUTION_MODE_LLM,
 )
 from .workflow_registry import WorkflowRegistration, WorkflowRegistry
 
@@ -134,7 +135,33 @@ def build_chat_narration_workflow() -> WorkflowDefinition:
 
     render = WorkflowStateSpec(
         state_id="render_narration",
-        actions=(WorkflowActionInvocation(action_id="narration.render"),),
+        actions=(
+            WorkflowActionInvocation(
+                action_id="narration.render",
+                execution_mode=WORKFLOW_STEP_EXECUTION_MODE_LLM,
+                llm_policy={
+                    "tool_mode": "none",
+                    "policy_stage": "narration",
+                    "prompt_text_context_key": "narration_prompt_text",
+                    "response_contract_text": (
+                        "Return ONLY one block: <spoken>...</spoken>. "
+                        "Do not include <screen>. Do not include code blocks. "
+                        "Use New Zealand English spelling."
+                    ),
+                    "context_fields": [
+                        {"label": "User message", "context_key": "user_prompt"},
+                        {
+                            "label": (
+                                "On-screen content (do not read verbatim if long; "
+                                "summarise)"
+                            ),
+                            "context_key": "screen_text",
+                        },
+                    ],
+                },
+                validation_policy={"output_format": "narration_spoken_xml"},
+            ),
+        ),
         transitions=(
             _transition_if_flag_set(
                 "narration_rendered",
@@ -218,7 +245,25 @@ def build_chat_buttonify_workflow() -> WorkflowDefinition:
 
     extract = WorkflowStateSpec(
         state_id="extract_options",
-        actions=(WorkflowActionInvocation(action_id="buttonify.extract_options"),),
+        actions=(
+            WorkflowActionInvocation(
+                action_id="buttonify.extract_options",
+                execution_mode=WORKFLOW_STEP_EXECUTION_MODE_LLM,
+                llm_policy={
+                    "tool_mode": "none",
+                    "policy_stage": "buttonify",
+                    "prompt_text_context_key": "buttonify_prompt_text",
+                    "context_fields": [
+                        {"label": "User message", "context_key": "user_prompt"},
+                        {
+                            "label": "Assistant response",
+                            "context_key": "screen_text",
+                        },
+                    ],
+                },
+                validation_policy={"output_format": "buttonify_options_json"},
+            ),
+        ),
         transitions=(
             WorkflowTransitionSpec(
                 to_state="completed",
@@ -413,114 +458,40 @@ def build_concept_suggestion_preflight_workflow() -> WorkflowDefinition:
 
 
 def build_tool_calling_workflow() -> WorkflowDefinition:
-    """Workflow wrapping the standard tool-calling pipeline.
+    """Workflow wrapping the standard prompt-driven tool-calling pipeline.
 
     Flow::
 
-        plan  ──[tool_calls_present]──▸  validate
-          │                                  │
-          └──[direct_response]──▸ completed   ├──[tool_calls_present]──▸ execute ──▸ backfill
-                                              │                                       │
-                                              └──[no tools]──▸ completed               ├──[more_tool_calls]──▸ validate  (loop)
-                                                                                       └──[done]──▸ completed
+        respond ──▸ postcondition_critic ──▸ completion_gate
+             ▲                                      │
+             └──────[completion_gate_repeat_iteration]──────┘
 
-    This expresses the same logic currently inline in ``orchestrator.run()``
-    (LLM call → missing-tool-call recovery → preflight → tool execution →
-    screen backfill) as a declarative workflow so that it can participate in
-    workflow selection alongside narration, todo refresh, etc.
-
-    The execute handler processes **one batch** of tool calls (respecting
-    ``tool_batch_cap``).  Overflow batches and chained tool calls from the
-    backfill LLM response re-enter via ``validate``.
-
-    See JVNAUTOSCI-922 Phase 2.
+    The bounded tool-use loop now lives inside the generic LLM step executor,
+    so the workflow itself only models the ordinary reasoning step plus the
+    postcondition and completion policy stages.
     """
-    plan = WorkflowStateSpec(
-        state_id="plan",
+    respond = WorkflowStateSpec(
+        state_id="respond",
         actions=(
             WorkflowActionInvocation(
-                action_id="tool_calling.plan",
-                description="Generate tool calls via LLM (structured or legacy).",
+                action_id="tool_calling.respond",
+                description=(
+                    "Run bounded prompt-driven response generation with optional "
+                    "tool use via the generic LLM step executor."
+                ),
+                execution_mode=WORKFLOW_STEP_EXECUTION_MODE_LLM,
+                llm_policy={
+                    "tool_mode": "allowed",
+                    "policy_stage": "tool_call",
+                    "prompt_text_context_key": "prompt",
+                },
             ),
         ),
         transitions=(
-            _transition_if_flag_set(
-                "tool_calls_present",
-                to_state="validate",
-                reason="tool_calls_found",
-            ),
-            # No tool calls found (or error with pre-built result) still flows
-            # through turn-execution critic + completion gate.
             WorkflowTransitionSpec(
                 to_state="postcondition_critic",
                 condition=lambda ctx: True,
-                reason="direct_response",
-            ),
-        ),
-    )
-
-    validate = WorkflowStateSpec(
-        state_id="validate",
-        actions=(
-            WorkflowActionInvocation(
-                action_id="tool_calling.validate",
-                description="Preflight validation, coercion, and repair of tool calls.",
-            ),
-        ),
-        transitions=(
-            _transition_if_flag_set(
-                "tool_calls_validated",
-                to_state="execute",
-                reason="validation_passed",
-            ),
-            # Validation errors must still pass through critic + completion gate
-            # so unresolved required effects cannot be marked as safely complete.
-            WorkflowTransitionSpec(
-                to_state="postcondition_critic",
-                condition=lambda ctx: True,
-                reason="validation_error",
-            ),
-        ),
-    )
-
-    execute = WorkflowStateSpec(
-        state_id="execute",
-        actions=(
-            WorkflowActionInvocation(
-                action_id="tool_calling.execute",
-                description="Execute tool-call batch against MCP gateway.",
-            ),
-        ),
-        transitions=(
-            # Execute always transitions to backfill (even on errors, the
-            # backfill summariser can explain what went wrong).
-            WorkflowTransitionSpec(
-                to_state="backfill",
-                condition=lambda ctx: True,
-                reason="batch_executed",
-            ),
-        ),
-    )
-
-    backfill = WorkflowStateSpec(
-        state_id="backfill",
-        actions=(
-            WorkflowActionInvocation(
-                action_id="tool_calling.backfill",
-                description="Summariser LLM call; detect chained tool calls.",
-            ),
-        ),
-        transitions=(
-            # Chained tool calls from the summariser response
-            _transition_if_flag_set(
-                "more_tool_calls",
-                to_state="validate",
-                reason="chained_tool_calls",
-            ),
-            WorkflowTransitionSpec(
-                to_state="postcondition_critic",
-                condition=lambda ctx: True,
-                reason="backfill_done",
+                reason="response_ready",
             ),
         ),
     )
@@ -553,7 +524,7 @@ def build_tool_calling_workflow() -> WorkflowDefinition:
         transitions=(
             _transition_if_flag_set(
                 "completion_gate_repeat_iteration",
-                to_state="plan",
+                to_state="respond",
                 reason="completion_gate_repeat_iteration",
             ),
             _transition_if_flag_set(
@@ -574,12 +545,9 @@ def build_tool_calling_workflow() -> WorkflowDefinition:
 
     return WorkflowDefinition(
         workflow_id=TOOL_CALLING_WORKFLOW_ID,
-        initial_state="plan",
+        initial_state="respond",
         states={
-            "plan": plan,
-            "validate": validate,
-            "execute": execute,
-            "backfill": backfill,
+            "respond": respond,
             "postcondition_critic": postcondition_critic,
             "completion_gate": completion_gate,
             "completed": completed,
@@ -587,8 +555,9 @@ def build_tool_calling_workflow() -> WorkflowDefinition:
         },
         termination_states=("completed", "failed"),
         purpose=(
-            "Standard tool-calling pipeline: plan → validate → execute → backfill "
-            "→ postcondition critic → completion gate."
+            "Standard tool-calling pipeline implemented as a generic prompt-driven "
+            "LLM step with bounded tool use, followed by postcondition critic and "
+            "completion gate."
         ),
     )
 

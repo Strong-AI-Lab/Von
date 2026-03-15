@@ -1,7 +1,7 @@
 import logging
 import json
 import os
-from typing import Any, Optional, Dict, List
+from typing import Any, Optional, Dict, List, Mapping, Sequence
 from pymongo.results import UpdateResult
 from pymongo.errors import OperationFailure
 from datetime import datetime, timezone
@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 # --- Setting Names ---
 # REFACTORING_NOTE: Consolidating to a single setting for the active LLM.
 ACTIVE_LLM_SETTING_NAME = "active_llm"
+ENABLED_LLMS_SETTING_NAME = "enabled_llms"
 OPENAI_ENV_VAR_SETTING_NAME = "openai_api_key_env_var"
 # Setting has been removed as it's a flawed concept for multi-user applications.
 # The user's identity is managed via the session.
@@ -65,6 +66,58 @@ REQUIRE_HUMAN_REVIEW_FOR_HIGH_IMPACT_KB_WRITES_SETTING_NAME = (
 # Prefixes for contextual (scoped) LLM settings (Phase 2 scaffold)
 _ACTIVE_LLM_USER_PREFIX = f"{ACTIVE_LLM_SETTING_NAME}:user:"
 _ACTIVE_LLM_ORG_PREFIX = f"{ACTIVE_LLM_SETTING_NAME}:org:"
+_ENABLED_LLMS_USER_PREFIX = f"{ENABLED_LLMS_SETTING_NAME}:user:"
+_ENABLED_LLMS_ORG_PREFIX = f"{ENABLED_LLMS_SETTING_NAME}:org:"
+
+
+def _normalise_llm_setting_entry(raw: Any) -> dict[str, str] | None:
+    if not isinstance(raw, dict):
+        return None
+    provider = str(raw.get("provider") or "").strip().lower()
+    model = str(raw.get("model") or "").strip()
+    if not provider or not model:
+        return None
+    normalised: dict[str, str] = {
+        "provider": provider,
+        "model": model,
+    }
+    host = str(raw.get("host") or "").strip()
+    if host:
+        normalised["host"] = host
+    return normalised
+
+
+def _dedupe_llm_setting_entries(
+    entries: Sequence[Mapping[str, Any]],
+) -> list[dict[str, str]]:
+    deduped: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for entry in entries:
+        provider = str(entry.get("provider") or "").strip().lower()
+        model = str(entry.get("model") or "").strip()
+        host = str(entry.get("host") or "").strip()
+        if not provider or not model:
+            continue
+        key = (provider, model, host)
+        if key in seen:
+            continue
+        seen.add(key)
+        payload = {"provider": provider, "model": model}
+        if host:
+            payload["host"] = host
+        deduped.append(payload)
+    return deduped
+
+
+def _normalise_llm_setting_list(raw: Any) -> list[dict[str, str]]:
+    if not isinstance(raw, list):
+        return []
+    entries: list[dict[str, str]] = []
+    for item in raw:
+        entry = _normalise_llm_setting_entry(item)
+        if entry is not None:
+            entries.append(entry)
+    return _dedupe_llm_setting_entries(entries)
 
 
 def get_setting(setting_name: str) -> Any:
@@ -356,16 +409,80 @@ def _build_org_llm_setting_name(org_concept_id: str) -> str:
     return f"{_ACTIVE_LLM_ORG_PREFIX}{org_concept_id}"
 
 
+def _build_user_enabled_llm_setting_name(user_concept_id: str) -> str:
+    return f"{_ENABLED_LLMS_USER_PREFIX}{user_concept_id}"
+
+
+def _build_org_enabled_llm_setting_name(org_concept_id: str) -> str:
+    return f"{_ENABLED_LLMS_ORG_PREFIX}{org_concept_id}"
+
+
+def _merge_primary_into_enabled_llms(
+    *,
+    primary: Mapping[str, Any] | None,
+    enabled: Sequence[Mapping[str, Any]] | None,
+) -> list[dict[str, str]]:
+    merged = list(enabled or [])
+    primary_entry = _normalise_llm_setting_entry(primary)
+    if primary_entry is None:
+        return _dedupe_llm_setting_entries(merged)
+    return _dedupe_llm_setting_entries([primary_entry, *merged])
+
+
+def set_user_enabled_llm_settings(
+    user_concept_id: str,
+    entries: Sequence[Mapping[str, Any]],
+) -> bool:
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        logger.error("set_user_enabled_llm_settings requires a non-empty user_concept_id")
+        return False
+    normalised = _normalise_llm_setting_list(list(entries))
+    return update_setting(_build_user_enabled_llm_setting_name(user_concept_id), normalised)
+
+
+def get_user_enabled_llm_settings(user_concept_id: str) -> list[dict[str, str]]:
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        return []
+    raw = get_setting(_build_user_enabled_llm_setting_name(user_concept_id))
+    return _normalise_llm_setting_list(raw)
+
+
+def set_org_enabled_llm_settings(
+    org_concept_id: str,
+    entries: Sequence[Mapping[str, Any]],
+) -> bool:
+    if not isinstance(org_concept_id, str) or not org_concept_id.strip():
+        logger.error("set_org_enabled_llm_settings requires a non-empty org_concept_id")
+        return False
+    normalised = _normalise_llm_setting_list(list(entries))
+    return update_setting(_build_org_enabled_llm_setting_name(org_concept_id), normalised)
+
+
+def get_org_enabled_llm_settings(org_concept_id: str) -> list[dict[str, str]]:
+    if not isinstance(org_concept_id, str) or not org_concept_id.strip():
+        return []
+    raw = get_setting(_build_org_enabled_llm_setting_name(org_concept_id))
+    return _normalise_llm_setting_list(raw)
+
+
 def set_user_llm_setting(user_concept_id: str, provider: str, model_name: str) -> bool:
     if not all(
         isinstance(x, str) and x for x in (user_concept_id, provider, model_name)
     ):
         logger.error("set_user_llm_setting requires non-empty string arguments")
         return False
-    return update_setting(
+    ok = update_setting(
         _build_user_llm_setting_name(user_concept_id),
         {"provider": provider, "model": model_name},
     )
+    if not ok:
+        return False
+    merged_enabled = _merge_primary_into_enabled_llms(
+        primary={"provider": provider, "model": model_name},
+        enabled=get_user_enabled_llm_settings(user_concept_id),
+    )
+    set_user_enabled_llm_settings(user_concept_id, merged_enabled)
+    return True
 
 
 def get_user_llm_setting(user_concept_id: str):
@@ -384,10 +501,18 @@ def set_org_llm_setting(org_concept_id: str, provider: str, model_name: str) -> 
     ):
         logger.error("set_org_llm_setting requires non-empty string arguments")
         return False
-    return update_setting(
+    ok = update_setting(
         _build_org_llm_setting_name(org_concept_id),
         {"provider": provider, "model": model_name},
     )
+    if not ok:
+        return False
+    merged_enabled = _merge_primary_into_enabled_llms(
+        primary={"provider": provider, "model": model_name},
+        enabled=get_org_enabled_llm_settings(org_concept_id),
+    )
+    set_org_enabled_llm_settings(org_concept_id, merged_enabled)
+    return True
 
 
 def get_org_llm_setting(org_concept_id: str):
@@ -421,6 +546,51 @@ def resolve_llm_setting(
                 "organisation_concept_id": org_concept_id,
             }
     return None
+
+
+def resolve_enabled_llm_settings(
+    user_concept_id: str | None = None,
+    org_concept_id: str | None = None,
+) -> list[dict[str, str]]:
+    """Resolve ordered enabled LLM candidates with precedence user > organisation.
+
+    The first item is always the effective primary selection for backwards
+    compatibility. Additional items represent scope-local enabled alternatives.
+    """
+
+    if user_concept_id:
+        user_primary = get_user_llm_setting(user_concept_id)
+        user_enabled = _merge_primary_into_enabled_llms(
+            primary=user_primary,
+            enabled=get_user_enabled_llm_settings(user_concept_id),
+        )
+        if user_enabled:
+            return [
+                {
+                    **entry,
+                    "scope": "user",
+                    "user_concept_id": user_concept_id,
+                }
+                for entry in user_enabled
+            ]
+
+    if org_concept_id:
+        org_primary = get_org_llm_setting(org_concept_id)
+        org_enabled = _merge_primary_into_enabled_llms(
+            primary=org_primary,
+            enabled=get_org_enabled_llm_settings(org_concept_id),
+        )
+        if org_enabled:
+            return [
+                {
+                    **entry,
+                    "scope": "organisation",
+                    "organisation_concept_id": org_concept_id,
+                }
+                for entry in org_enabled
+            ]
+
+    return []
 
 
 # --- Deprecated compatibility layer (tests still reference these) ---

@@ -175,33 +175,12 @@ _FORMAL_STAGE_PROFILE_BY_ACTION_ID: dict[str, _DerivedFormalStageProfile] = {
         boundary_type="policy",
         runtime_aliases=("write_policy",),
     ),
-    "tool_calling.plan": _DerivedFormalStageProfile(
-        stage_id="tool_plan",
-        stage_label="Plan tool calls",
-        order=50,
-        boundary_type="execution",
-        runtime_aliases=("tool_plan", "plan"),
-    ),
-    "tool_calling.validate": _DerivedFormalStageProfile(
-        stage_id="tool_validate",
-        stage_label="Validate tool calls",
-        order=60,
-        boundary_type="execution",
-        runtime_aliases=("validate",),
-    ),
-    "tool_calling.execute": _DerivedFormalStageProfile(
+    "tool_calling.respond": _DerivedFormalStageProfile(
         stage_id="tool_execute",
-        stage_label="Execute tool calls",
+        stage_label="Prompt-driven tool execution",
         order=70,
         boundary_type="execution",
-        runtime_aliases=("tool_execute", "execute"),
-    ),
-    "tool_calling.backfill": _DerivedFormalStageProfile(
-        stage_id="screen_backfill",
-        stage_label="Summarise/backfill response",
-        order=80,
-        boundary_type="execution",
-        runtime_aliases=("screen_backfill", "backfill"),
+        runtime_aliases=("tool_execute", "respond"),
     ),
     "turn_execution.critic": _DerivedFormalStageProfile(
         stage_id="postcondition_critic",

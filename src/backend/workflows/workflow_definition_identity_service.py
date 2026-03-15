@@ -231,7 +231,11 @@ def collect_workflow_action_ids(definition: Any) -> tuple[str, ...]:
         actions_raw = getattr(state_spec, "actions", ())
         actions = actions_raw if _is_sequence_like(actions_raw) else ()
         for action in actions:
-            action_id = str(getattr(action, "action_id", "") or "").strip()
+            action_id = str(
+                getattr(action, "action_id", None)
+                or getattr(action, "target_id", "")
+                or ""
+            ).strip()
             if action_id:
                 action_ids.add(action_id)
     return tuple(sorted(action_ids))
@@ -719,19 +723,44 @@ def validate_workflow_definition_contract(
         metadata = dict(metadata_raw) if isinstance(metadata_raw, Mapping) else {}
         actions_raw = getattr(state_spec, "actions", ())
         action_objects = actions_raw if _is_sequence_like(actions_raw) else ()
-        action_specs: list[tuple[str, Mapping[str, Any]]] = []
+        action_specs: list[dict[str, Any]] = []
         for action in action_objects:
             action_id = str(getattr(action, "action_id", "") or "").strip()
-            if not action_id:
-                continue
+            target_id = str(getattr(action, "target_id", "") or "").strip()
+            execution_mode = str(getattr(action, "execution_mode", "") or "").strip()
             action_inputs_raw = getattr(action, "inputs", {})
             action_inputs = (
                 dict(action_inputs_raw)
                 if isinstance(action_inputs_raw, Mapping)
                 else {}
             )
-            action_specs.append((action_id, action_inputs))
-        actions = [action_id for action_id, _ in action_specs]
+            prompt_contract_raw = getattr(action, "prompt_contract", None)
+            action_specs.append(
+                {
+                    "action_id": action_id,
+                    "target_id": target_id,
+                    "execution_mode": execution_mode,
+                    "inputs": action_inputs,
+                    "prompt_contract": (
+                        dict(prompt_contract_raw)
+                        if isinstance(prompt_contract_raw, Mapping)
+                        else {}
+                    ),
+                }
+            )
+        executable_actions = [
+            spec for spec in action_specs if str(spec.get("target_id") or "").strip()
+        ]
+        actions = [
+            str(spec.get("action_id") or spec.get("target_id") or "").strip()
+            for spec in executable_actions
+            if str(spec.get("action_id") or spec.get("target_id") or "").strip()
+        ]
+        llm_actions = [
+            spec
+            for spec in executable_actions
+            if str(spec.get("execution_mode") or "").strip().lower() == "llm"
+        ]
         is_terminal_state = bool(getattr(state_spec, "terminal", False)) or (
             state_id in termination_states
         )
@@ -821,11 +850,19 @@ def validate_workflow_definition_contract(
         resolved_prompt_concept_id = str(
             prompt_contract.get("resolved_prompt_concept_id") or ""
         ).strip()
-        if prompt_contract and not actions:
+        if prompt_contract and not executable_actions:
             prompt_contract_issues.append(
                 {
                     "state_id": state_id,
                     "reason_code": "prompt_contract_without_action",
+                    "severity": "error",
+                }
+            )
+        if prompt_contract and executable_actions and not llm_actions:
+            prompt_contract_issues.append(
+                {
+                    "state_id": state_id,
+                    "reason_code": "prompt_contract_not_compiled_as_llm_step",
                     "severity": "error",
                 }
             )
@@ -838,10 +875,27 @@ def validate_workflow_definition_contract(
                     "requested_prompt_concept_ids": requested_prompt_concept_ids,
                 }
             )
-        for action_id, action_inputs in action_specs:
+        for action_spec in action_specs:
+            action_id = str(
+                action_spec.get("action_id") or action_spec.get("target_id") or ""
+            ).strip()
+            raw_action_inputs = action_spec.get("inputs")
+            action_inputs: dict[str, Any] = (
+                {
+                    str(key): value
+                    for key, value in raw_action_inputs.items()
+                    if isinstance(key, str)
+                }
+                if isinstance(raw_action_inputs, Mapping)
+                else {}
+            )
             raw_prompt_diagnostics = action_inputs.get("__prompt_resolution_diagnostics")
-            prompt_diagnostics: Mapping[str, Any] = (
-                raw_prompt_diagnostics
+            prompt_diagnostics: dict[str, Any] = (
+                {
+                    str(key): value
+                    for key, value in raw_prompt_diagnostics.items()
+                    if isinstance(key, str)
+                }
                 if isinstance(raw_prompt_diagnostics, Mapping)
                 else {}
             )

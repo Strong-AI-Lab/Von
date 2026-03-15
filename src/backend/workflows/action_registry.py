@@ -67,6 +67,10 @@ class WorkflowActionRequest:
     trace: Any | None = None
     action_target_id: str | None = None
     contract_concept_id: str | None = None
+    execution_mode: str | None = None
+    prompt_contract: Mapping[str, Any] | None = None
+    llm_policy: Mapping[str, Any] | None = None
+    validation_policy: Mapping[str, Any] | None = None
 
 
 @dataclass

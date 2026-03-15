@@ -254,6 +254,9 @@ class _CanonicalStepPublicationSpec:
     concept_id: str | None = None
     action_id: str | None = None
     action_concept_id: str | None = None
+    execution_mode: str | None = None
+    llm_policy: Mapping[str, Any] | None = None
+    validation_policy: Mapping[str, Any] | None = None
     invoked_workflow_id: str | None = None
     static_input_bindings: tuple[tuple[str, str], ...] = ()
     context_input_mappings: tuple[str, ...] = ()
@@ -289,6 +292,9 @@ class _CanonicalWorkflowPublicationSpec:
 
 @dataclass(frozen=True)
 class _RuntimeStepPublicationDetails:
+    execution_mode: str | None = None
+    llm_policy: Mapping[str, Any] | None = None
+    validation_policy: Mapping[str, Any] | None = None
     invoked_workflow_id: str | None = None
     static_input_bindings: tuple[tuple[str, str], ...] = ()
     context_input_mapping_specs: tuple[_CanonicalContextInputMappingSpec, ...] = ()
@@ -388,6 +394,28 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
             _CanonicalStepPublicationSpec(
                 state_id="render_narration",
                 action_id="narration.render",
+                execution_mode="llm",
+                llm_policy={
+                    "tool_mode": "none",
+                    "policy_stage": "narration",
+                    "prompt_text_context_key": "narration_prompt_text",
+                    "response_contract_text": (
+                        "Return ONLY one block: <spoken>...</spoken>. "
+                        "Do not include <screen>. Do not include code blocks. "
+                        "Use New Zealand English spelling."
+                    ),
+                    "context_fields": [
+                        {"label": "User message", "context_key": "user_prompt"},
+                        {
+                            "label": (
+                                "On-screen content (do not read verbatim if long; "
+                                "summarise)"
+                            ),
+                            "context_key": "screen_text",
+                        },
+                    ],
+                },
+                validation_policy={"output_format": "narration_spoken_xml"},
                 conditional_transitions=(
                     _CanonicalConditionalTransitionPublicationSpec(
                         to_state="emit_audio",
@@ -455,6 +483,20 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
             _CanonicalStepPublicationSpec(
                 state_id="extract_options",
                 action_id="buttonify.extract_options",
+                execution_mode="llm",
+                llm_policy={
+                    "tool_mode": "none",
+                    "policy_stage": "buttonify",
+                    "prompt_text_context_key": "buttonify_prompt_text",
+                    "context_fields": [
+                        {"label": "User message", "context_key": "user_prompt"},
+                        {
+                            "label": "Assistant response",
+                            "context_key": "screen_text",
+                        },
+                    ],
+                },
+                validation_policy={"output_format": "buttonify_options_json"},
                 conditional_transitions=(
                     _CanonicalConditionalTransitionPublicationSpec(
                         to_state="completed",
@@ -585,72 +627,21 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
         ),
     ),
     TOOL_CALLING_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="plan",
+        initial_state="respond",
         steps=(
             _CanonicalStepPublicationSpec(
-                state_id="plan",
-                action_id="tool_calling.plan",
+                state_id="respond",
+                action_id="tool_calling.respond",
+                execution_mode="llm",
+                llm_policy={
+                    "tool_mode": "allowed",
+                    "policy_stage": "tool_call",
+                    "prompt_text_context_key": "prompt",
+                },
                 conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="validate",
-                        reason="tool_calls_found",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "tool_calls_present",
-                        },
-                    ),
                     _CanonicalConditionalTransitionPublicationSpec(
                         to_state="postcondition_critic",
-                        reason="direct_response",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="validate",
-                action_id="tool_calling.validate",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="execute",
-                        reason="validation_passed",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "tool_calls_validated",
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="postcondition_critic",
-                        reason="validation_error",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="execute",
-                action_id="tool_calling.execute",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="backfill",
-                        reason="batch_executed",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="backfill",
-                action_id="tool_calling.backfill",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="validate",
-                        reason="chained_tool_calls",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "more_tool_calls",
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="postcondition_critic",
-                        reason="backfill_done",
+                        reason="response_ready",
                         condition_spec={"kind": "always"},
                     ),
                 ),
@@ -671,7 +662,7 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
                 action_id="turn_execution.completion_gate",
                 conditional_transitions=(
                     _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="plan",
+                        to_state="respond",
                         reason="completion_gate_repeat_iteration",
                         condition_spec={
                             "kind": "context_flag",
@@ -1515,6 +1506,17 @@ def _build_definition_from_publication_spec(
                         and step.action_concept_id.strip()
                         else None
                     ),
+                    execution_mode=step.execution_mode or "deterministic",
+                    llm_policy=(
+                        dict(step.llm_policy)
+                        if isinstance(step.llm_policy, Mapping)
+                        else None
+                    ),
+                    validation_policy=(
+                        dict(step.validation_policy)
+                        if isinstance(step.validation_policy, Mapping)
+                        else None
+                    ),
                 ),
             )
             if isinstance(step.action_id, str) and step.action_id.strip()
@@ -1788,8 +1790,21 @@ def _extract_runtime_step_publication_details(
     )
     static_input_bindings: list[tuple[str, str]] = []
     context_input_mapping_specs: list[_CanonicalContextInputMappingSpec] = []
+    execution_mode: str | None = None
+    llm_policy: Mapping[str, Any] | None = None
+    validation_policy: Mapping[str, Any] | None = None
 
     for action in actions:
+        execution_mode = str(getattr(action, "execution_mode", "") or "").strip() or execution_mode
+        action_llm_policy = getattr(action, "llm_policy", None)
+        if isinstance(action_llm_policy, Mapping) and not isinstance(llm_policy, Mapping):
+            llm_policy = dict(action_llm_policy)
+        action_validation_policy = getattr(action, "validation_policy", None)
+        if isinstance(action_validation_policy, Mapping) and not isinstance(
+            validation_policy,
+            Mapping,
+        ):
+            validation_policy = dict(action_validation_policy)
         inputs = getattr(action, "inputs", None)
         if not isinstance(inputs, Mapping):
             continue
@@ -1865,6 +1880,13 @@ def _extract_runtime_step_publication_details(
             ]
 
     return _RuntimeStepPublicationDetails(
+        execution_mode=execution_mode or None,
+        llm_policy=dict(llm_policy) if isinstance(llm_policy, Mapping) else None,
+        validation_policy=(
+            dict(validation_policy)
+            if isinstance(validation_policy, Mapping)
+            else None
+        ),
         invoked_workflow_id=invoked_workflow_id or None,
         static_input_bindings=tuple(dict.fromkeys(static_input_bindings)),
         context_input_mapping_specs=tuple(
@@ -2429,6 +2451,29 @@ def publish_canonical_chat_workflow_graphs(
                 and step.invoked_workflow_id.strip()
                 else runtime_details.invoked_workflow_id
             )
+            execution_mode = (
+                step.execution_mode.strip()
+                if isinstance(step.execution_mode, str) and step.execution_mode.strip()
+                else runtime_details.execution_mode
+            )
+            llm_policy = (
+                dict(step.llm_policy)
+                if isinstance(step.llm_policy, Mapping)
+                else (
+                    dict(runtime_details.llm_policy)
+                    if isinstance(runtime_details.llm_policy, Mapping)
+                    else None
+                )
+            )
+            validation_policy = (
+                dict(step.validation_policy)
+                if isinstance(step.validation_policy, Mapping)
+                else (
+                    dict(runtime_details.validation_policy)
+                    if isinstance(runtime_details.validation_policy, Mapping)
+                    else None
+                )
+            )
             static_input_bindings = (
                 step.static_input_bindings
                 if step.static_input_bindings
@@ -2524,6 +2569,32 @@ def publish_canonical_chat_workflow_graphs(
                     and isinstance(value, str)
                     and value.strip()
                 ]
+            runtime_input_maps = list(
+                step_relationships.get(_CANONICAL_GRAPH_PREDICATES["hasInputMap"]) or []
+            )
+            if isinstance(execution_mode, str) and execution_mode.strip():
+                runtime_input_maps.append(
+                    "workflow_step_execution_mode="
+                    f"{execution_mode.strip()}"
+                )
+            if isinstance(llm_policy, Mapping) and llm_policy:
+                runtime_input_maps.append(
+                    "workflow_step_llm_policy="
+                    + json.dumps(dict(llm_policy), ensure_ascii=True, sort_keys=True)
+                )
+            if isinstance(validation_policy, Mapping) and validation_policy:
+                runtime_input_maps.append(
+                    "workflow_step_validation_policy="
+                    + json.dumps(
+                        dict(validation_policy),
+                        ensure_ascii=True,
+                        sort_keys=True,
+                    )
+                )
+            if runtime_input_maps:
+                step_relationships[_CANONICAL_GRAPH_PREDICATES["hasInputMap"]] = (
+                    list(dict.fromkeys(item for item in runtime_input_maps if item))
+                )
             if context_input_mapping_specs:
                 if not isinstance(mapping_target_id, str) or not mapping_target_id.strip():
                     errors_by_workflow_id[workflow_id] = (

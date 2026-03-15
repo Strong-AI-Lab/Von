@@ -150,6 +150,7 @@ _PROMPT_VARIABLE_RE = re.compile(r"{([A-Za-z0-9_]+)}")
 class WorkflowPromptResolution:
     requested_prompt_concept_ids: tuple[str, ...] = ()
     resolved_prompt_concept_id: str | None = None
+    prompt_text: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
     diagnostics: Mapping[str, Any] = field(default_factory=dict)
 
@@ -645,6 +646,7 @@ def resolve_workflow_prompt_metadata(
     return WorkflowPromptResolution(
         requested_prompt_concept_ids=requested_prompt_ids,
         resolved_prompt_concept_id=selected_prompt_id,
+        prompt_text=prompt_text,
         metadata=merged_metadata,
         diagnostics=diagnostics,
     )
@@ -664,6 +666,8 @@ def build_workflow_prompt_contract(
         )
     if resolution.resolved_prompt_concept_id:
         contract["resolved_prompt_concept_id"] = resolution.resolved_prompt_concept_id
+    if isinstance(resolution.prompt_text, str) and resolution.prompt_text.strip():
+        contract["prompt_text"] = resolution.prompt_text
     if resolution.metadata:
         contract["metadata"] = dict(resolution.metadata)
     return contract

@@ -467,6 +467,7 @@ class InternalMCPChatOrchestrator:
     _BASE_SYSTEM_PROMPT_TYPE_ID = "#V#von_chat_base_system_prompt"
     _CURRENT_BASE_SYSTEM_PROMPT_TYPE_ID = "#V#current_von_base_system_prompt"
     _MISSING_TOOL_CALL_ACTION_ID = "#V#detect_missing_tool_call_action"
+    _MISSING_TOOL_CALL_RETRY_ACTION_ID = "#V#retry_missing_tool_call_action"
     _PREFLIGHT_PREDICATE_TYPE_ID = "#V#conversation_preflight_predicate"
     _PREFLIGHT_TYPE_TYPE_ID = "#V#conversation_preflight_type"
     _PREFLIGHT_CACHE_TTL_SECONDS = 120
@@ -1235,7 +1236,7 @@ class InternalMCPChatOrchestrator:
                 action_id="missing_tool_call.retry",
                 handler=self._action_missing_tool_call_retry,
                 description="Run retry prompt to elicit tool-call JSON.",
-                concept_id=self._MISSING_TOOL_CALL_ACTION_ID,
+                concept_id=self._MISSING_TOOL_CALL_RETRY_ACTION_ID,
             )
         )
         registry.register(
@@ -3698,6 +3699,12 @@ class InternalMCPChatOrchestrator:
         if isinstance(method_catalogue_for_requirements, Mapping):
             data["method_catalogue"] = method_catalogue_for_requirements
 
+        allowed_tool_names = {
+            str(tool_name).strip().lower()
+            for tool_name in (data.get("llm_allowed_tools") or [])
+            if isinstance(tool_name, str) and str(tool_name).strip()
+        }
+
         prompt_for_requirements = data.get("prompt_for_requirements")
         if not isinstance(prompt_for_requirements, str) or not prompt_for_requirements.strip():
             prompt_for_requirements = prompt
@@ -3759,6 +3766,14 @@ class InternalMCPChatOrchestrator:
                         else None
                     )
                 )
+                if allowed_tool_names:
+                    tool_definitions = [
+                        definition
+                        for definition in tool_definitions
+                        if isinstance(getattr(definition, "name", None), str)
+                        and getattr(definition, "name").strip().lower()
+                        in allowed_tool_names
+                    ]
                 llm_response, tool_call_model, _ = self._run_llm_with_tools_fallbacks(
                     stage="tool_call",
                     prompt=prompt,
@@ -4029,6 +4044,11 @@ class InternalMCPChatOrchestrator:
         preflight = self._preflight_tool_calls(
             cast(list, tool_calls),
             method_catalogue,
+            allowed_tool_names=set(
+                str(tool_name).strip().lower()
+                for tool_name in (data.get("llm_allowed_tools") or [])
+                if isinstance(tool_name, str) and str(tool_name).strip()
+            ),
             user_namespace=env.user_namespace,
             selected_gmail_profile=gmail_profile,
             conversation_session_id=conversation_session_id,
@@ -4073,6 +4093,11 @@ class InternalMCPChatOrchestrator:
                 preflight = self._preflight_tool_calls(
                     repaired_calls,
                     method_catalogue,
+                    allowed_tool_names=set(
+                        str(tool_name).strip().lower()
+                        for tool_name in (data.get("llm_allowed_tools") or [])
+                        if isinstance(tool_name, str) and str(tool_name).strip()
+                    ),
                     user_namespace=env.user_namespace,
                     selected_gmail_profile=gmail_profile,
                     conversation_session_id=conversation_session_id,
@@ -4257,6 +4282,11 @@ class InternalMCPChatOrchestrator:
             for item in (data.get("write_policy_requires_confirmation") or [])
             if isinstance(item, str) and str(item).strip()
         }
+        allowed_tool_names = {
+            str(tool_name).strip().lower()
+            for tool_name in (data.get("llm_allowed_tools") or [])
+            if isinstance(tool_name, str) and str(tool_name).strip()
+        }
         turn_id = data.get("turn_id")
 
         for tool_request in tool_calls:
@@ -4267,6 +4297,7 @@ class InternalMCPChatOrchestrator:
 
             if not isinstance(tool_name, str):
                 continue
+            tool_name_key = tool_name.strip().lower()
             if not isinstance(payload, dict):
                 payload = dict(payload) if isinstance(payload, Mapping) else {}
             else:
@@ -4285,9 +4316,46 @@ class InternalMCPChatOrchestrator:
                         "tool_calls_remaining": max(
                             0, max_tool_invocations - iteration_count
                         ),
-                        "call_id": call_id,
-                    }
+                            "call_id": call_id,
+                        }
+                    )
+
+            if allowed_tool_names and tool_name_key not in allowed_tool_names:
+                message = (
+                    f"Tool '{tool_name}' is not allowed for this workflow step."
                 )
+                tool_payload = self._format_tool_result(
+                    tool_name, None, None, "error", message
+                )
+                blocked_record = {
+                    "tool": tool_name,
+                    "payload": dict(payload),
+                    "error": message,
+                    "blocked": True,
+                    "blocked_reason": "tool_not_allowed_for_llm_step",
+                }
+                if call_id:
+                    blocked_record["call_id"] = call_id
+                invocations.append(blocked_record)
+                if callable(emit_progress):
+                    emit_progress(
+                        {
+                            "status": "tool_blocked",
+                            "tool": tool_name,
+                            "batch_size": current_batch_size,
+                            "tool_calls_done": iteration_count,
+                            "tool_calls_cap": int(max_tool_invocations),
+                            "tool_calls_remaining": max(
+                                0, max_tool_invocations - iteration_count
+                            ),
+                            "call_id": call_id,
+                            "error": message,
+                            "blocked_reason": "tool_not_allowed_for_llm_step",
+                        }
+                    )
+                augmented_context.append({"role": "tool", "content": tool_payload})
+                tool_messages.append({"role": "tool", "content": tool_payload})
+                continue
 
             # Write-policy gate.
             tool_category = tool_categories.get(tool_name)
@@ -8363,11 +8431,45 @@ class InternalMCPChatOrchestrator:
         default_model: Optional[str],
         policy_state: _WorkflowModelPolicyState,
         registry_snapshot: Mapping[str, Any] | None = None,
+        user_concept_id: Optional[str] = None,
+        org_concept_id: Optional[str] = None,
     ) -> list[_ModelCandidate]:
         candidates: list[_ModelCandidate] = []
+        enabled_candidates: list[_ModelCandidate] = []
+        try:
+            from src.backend.services.settings_service import (
+                resolve_enabled_llm_settings,
+            )
+
+            enabled_entries = resolve_enabled_llm_settings(
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+            )
+        except Exception:
+            enabled_entries = []
+
+        for entry in enabled_entries:
+            if not isinstance(entry, Mapping):
+                continue
+            provider = str(entry.get("provider") or "").strip().lower() or None
+            model = str(entry.get("model") or "").strip() or None
+            host = str(entry.get("host") or "").strip() or None
+            if not provider or not model:
+                continue
+            raw = f"{provider}:{model}"
+            enabled_candidates.append(
+                _ModelCandidate(
+                    provider=provider,
+                    model=model,
+                    raw=raw,
+                    source="enabled_settings",
+                    host=host,
+                )
+            )
 
         if not policy_state.enabled or not policy_state.policy:
-            return [
+            candidates.extend(enabled_candidates)
+            candidates.append(
                 _ModelCandidate(
                     provider=None,
                     model=default_model,
@@ -8375,65 +8477,61 @@ class InternalMCPChatOrchestrator:
                     source="active_llm",
                     host=None,
                 )
-            ]
-
-        stages = None
-        if policy_state.policy and isinstance(
-            policy_state.policy.get("stages"), Mapping
-        ):
-            stages = policy_state.policy.get("stages")
-
-        stage_config = None
-        if isinstance(stages, Mapping):
-            stage_config = stages.get(stage)
-
-        primary = None
-        fallback = None
-        if isinstance(stage_config, Mapping):
-            primary = stage_config.get("primary")
-            fallback = stage_config.get("fallback")
-
-        primary = self._resolve_registry_model_candidate(primary, registry_snapshot)
-        fallback = (
-            [
-                self._resolve_registry_model_candidate(item, registry_snapshot)
-                for item in fallback
-            ]
-            if isinstance(fallback, list)
-            else fallback
-        )
-
-        primary_candidate = self._parse_policy_model_candidate(primary)
-        if primary_candidate:
-            candidates.append(primary_candidate)
-
-        if isinstance(fallback, list):
-            for item in fallback:
-                fallback_candidate = self._parse_policy_model_candidate(item)
-                if fallback_candidate:
-                    candidates.append(fallback_candidate)
-
-        # Always include active LLM as last resort.
-        candidates.append(
-            _ModelCandidate(
-                provider=None,
-                model=default_model,
-                raw="active_llm",
-                source="active_llm",
-                host=None,
             )
-        )
+        else:
+            stages = None
+            if policy_state.policy and isinstance(
+                policy_state.policy.get("stages"), Mapping
+            ):
+                stages = policy_state.policy.get("stages")
 
-        # De-duplicate by provider+model+host+source
-        seen: set[tuple[str | None, str | None, str | None, str]] = set()
+            stage_config = None
+            if isinstance(stages, Mapping):
+                stage_config = stages.get(stage)
+
+            primary = None
+            fallback = None
+            if isinstance(stage_config, Mapping):
+                primary = stage_config.get("primary")
+                fallback = stage_config.get("fallback")
+
+            primary = self._resolve_registry_model_candidate(primary, registry_snapshot)
+            fallback = (
+                [
+                    self._resolve_registry_model_candidate(item, registry_snapshot)
+                    for item in fallback
+                ]
+                if isinstance(fallback, list)
+                else fallback
+            )
+
+            primary_candidate = self._parse_policy_model_candidate(primary)
+            if primary_candidate:
+                candidates.append(primary_candidate)
+
+            if isinstance(fallback, list):
+                for item in fallback:
+                    fallback_candidate = self._parse_policy_model_candidate(item)
+                    if fallback_candidate:
+                        candidates.append(fallback_candidate)
+
+            candidates.extend(enabled_candidates)
+            candidates.append(
+                _ModelCandidate(
+                    provider=None,
+                    model=default_model,
+                    raw="active_llm",
+                    source="active_llm",
+                    host=None,
+                )
+            )
+
+        # De-duplicate by provider+model+host so the same model does not appear
+        # multiple times merely because it was sourced from settings and active_llm.
+        seen: set[tuple[str | None, str | None, str | None]] = set()
         unique: list[_ModelCandidate] = []
         for candidate in candidates:
-            key = (
-                candidate.provider,
-                candidate.model,
-                candidate.host,
-                candidate.source,
-            )
+            key = (candidate.provider, candidate.model, candidate.host)
             if key in seen:
                 continue
             seen.add(key)
@@ -8970,15 +9068,16 @@ class InternalMCPChatOrchestrator:
         default_model: Optional[str],
         policy_state: _WorkflowModelPolicyState,
         registry_snapshot: Mapping[str, Any] | None = None,
+        user_concept_id: Optional[str] = None,
+        org_concept_id: Optional[str] = None,
     ) -> Optional[str]:
-        if not policy_state.enabled:
-            return default_model
-
         candidates = self._stage_model_candidates(
             stage=stage,
             default_model=default_model,
             policy_state=policy_state,
             registry_snapshot=registry_snapshot,
+            user_concept_id=user_concept_id,
+            org_concept_id=org_concept_id,
         )
 
         for candidate in candidates:
@@ -9342,6 +9441,8 @@ class InternalMCPChatOrchestrator:
             default_model=default_model,
             policy_state=policy_state,
             registry_snapshot=registry_snapshot,
+            user_concept_id=user_concept_id,
+            org_concept_id=org_concept_id,
         )
 
         errors: list[Mapping[str, Any]] = []
@@ -9633,6 +9734,8 @@ class InternalMCPChatOrchestrator:
             default_model=default_model,
             policy_state=policy_state,
             registry_snapshot=registry_snapshot,
+            user_concept_id=user_concept_id,
+            org_concept_id=org_concept_id,
         )
 
         errors: list[Mapping[str, Any]] = []
@@ -10967,6 +11070,7 @@ class InternalMCPChatOrchestrator:
         tool_calls: list[_ToolCallRequest],
         method_catalogue: Mapping[str, Any],
         *,
+        allowed_tool_names: set[str] | None,
         user_namespace: str | None,
         selected_gmail_profile: str | None,
         conversation_session_id: str | None = None,
@@ -10991,10 +11095,15 @@ class InternalMCPChatOrchestrator:
             if not isinstance(tool_name, str):
                 errors.append("Tool name must be a string.")
                 continue
+            tool_name_key = tool_name.strip().lower()
 
             if enforce_availability and tool_name not in available_tools:
                 tool_unavailable.append(tool_name)
                 errors.append(f"Tool '{tool_name}' is not available.")
+                continue
+            if allowed_tool_names and tool_name_key not in allowed_tool_names:
+                tool_unavailable.append(tool_name)
+                errors.append(f"Tool '{tool_name}' is not allowed for this workflow step.")
                 continue
 
             if not isinstance(payload, MutableMapping):
@@ -18642,6 +18751,8 @@ class InternalMCPChatOrchestrator:
                 default_model=model,
                 policy_state=policy_state,
                 registry_snapshot=registry_snapshot,
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
             )
 
         def _summarise_tool_messages_for_critic(

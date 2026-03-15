@@ -110,6 +110,12 @@ Canonical graph families include:
 - a raw executable action ID such as `workflow_control.context_set`, or
 - a concept-backed action contract, typically an instance of `#V#workflow_action_contract`.
 
+Semantic rule:
+
+- `invokesAction` is the deterministic execution target for a step; it is not, by itself, evidence that the step is an ordinary reasoning step.
+- Prompt-bearing reasoning steps MUST compile as `llm` execution-mode steps, even when they also expose an underlying `action_id` for traceability or publication.
+- Genuinely deterministic and reliable steps SHOULD remain explicit deterministic or control executions rather than being wrapped in LLM reasoning.
+
 When a workflow step points at an action-contract concept, the concept SHOULD carry the machine-readable contract in both:
 
 - `concept_data.workflow_action_contract`
@@ -137,10 +143,15 @@ A VWL program is a workflow concept graph:
 - Workflow node (concept ID, usually an instance of `#V#ai_workflow` or `#V#durable_workflow`).
 - Step nodes linked via `hasStep`.
 - One initial step via `hasInitialStep` (or inferred first step if absent).
-- Per-step invocation target:
+- Per-step execution contract:
+  - `llm` for ordinary prompt-driven reasoning,
+  - `deterministic` for explicit reliable tool/action execution,
+  - `control` for workflow control primitives,
+  - `subworkflow` for child workflow invocation.
+- Per-step deterministic/subworkflow target:
   - tool/action (`invokesAction` or `workflow_step_invokes_tool`), or
   - subworkflow (`invokesWorkflow`).
-- Optional per-step prompt contract link:
+- Optional per-step prompt contract link, required for KB-authored prompt-bearing LLM steps:
   - `workflow_step_uses_llm_prompt` (legacy aliases accepted for compatibility).
 - Per-step control flow links:
   - `next`
@@ -155,6 +166,12 @@ A VWL program is a workflow concept graph:
   - `reason` stable branch label
   - `condition` transition-condition spec
 - Optional metadata and mapping contracts.
+
+Compilation rule:
+
+- If a step carries a prompt contract and is intended to perform ordinary reasoning, the loader MUST compile it as execution mode `llm`.
+- A prompt-bearing executable step compiled as `deterministic` is semantically contradictory and MUST fail workflow validation unless it is an explicitly documented deterministic exception.
+- `WorkflowActionInvocation` is now the compiled step execution contract surface. In addition to `action_id`/`inputs`, it carries first-class `execution_mode`, `prompt_contract`, `llm_policy`, `validation_policy`, and `subworkflow_id`.
 
 ### 4.1 Workflow Publication Lifecycle
 
@@ -262,7 +279,7 @@ Runtime execution model (`WorkflowExecutor`):
 0. Initialise declared workflow variables from `definition.metadata["variable_declarations"]` — only for keys not already present in the caller-supplied context.
 1. Enter current state.
 2. Run pre-action metadata validation (unless validation mode disables enforcement).
-3. Execute actions in state order.
+3. Execute actions in state order according to their compiled execution mode.
 4. Merge action outputs into context for non-failure outcomes.
 5. Apply tool-output-to-context mappings.
 6. Emit canonical step-result envelope for each executed action.
@@ -290,6 +307,14 @@ Control-signal keys:
 - `last_control_signal` (`none|break|continue|return|error`)
 - `last_control_signal_scope`
 - boolean convenience flags (`last_control_signal_break`, `last_control_signal_continue`, `last_control_signal_return`, `last_control_signal_error`)
+
+Step execution dispatch:
+
+- `llm` steps execute through the generic LLM step executor. Prompt resolution, bounded tool use, structured validation, and tool-policy enforcement happen inside that runtime path.
+- `deterministic` steps execute via the deterministic action registry and MCP fallback bridge.
+- `control` steps are deterministic executions reserved for workflow control and validation primitives.
+- `subworkflow` steps invoke a child workflow and map its outputs back into the parent context.
+- The current canonical tool-calling workflow no longer models plan/validate/execute/backfill as separate VWL states. Ordinary tool-augmented reasoning happens inside a single prompt-driven `llm` step, with critic/completion policy stages remaining explicit.
 
 ### 7.1 Thinking-Card Progress Terminal Precedence (JVNAUTOSCI-1316)
 
@@ -1022,7 +1047,15 @@ Validation and fail-closed behaviour:
 - unavailable tools or agent profiles follow the declared validation policy (`warn` or `fail`),
 - stable merged prompt state is carried in workflow-state metadata as `prompt_contract`,
 - runtime diagnostics are attached to action inputs as `__prompt_resolution_diagnostics`,
+- the compiled action/step contract carries the prompt contract as a first-class field; prompt-bearing steps MUST NOT depend on hidden `__prompt_contract` input passthrough,
 - fail-policy violations reject workflow loading with deterministic `workflow_prompt_contract_invalid` errors.
+
+LLM policy and model-selection notes:
+
+- compiled `llm` steps MAY carry first-class `llm_policy` fields such as `prompt_candidates`, `selected_prompt_id`, `allowed_tools`, `tool_resolution_priority`, `prompt_text_context_key`, `response_contract_text`, and `selection_policy`;
+- `selection_policy` currently distinguishes declared intent such as `fixed`, `adaptive`, and `bandit`, and the runtime records the chosen policy in the step envelope even when the concrete model candidate set is resolved through stage policy and enabled-model settings;
+- runtime model candidate discovery is sourced from `enabled_llms` settings (global, organisation, or user scope as applicable), with `active_llm` retained as the fallback/default model when no enabled-model list is present;
+- multiple enabled LLMs are therefore part of the canonical VWL execution substrate, not a UI-only convenience.
 
 ### 16.6 External SKILL Interoperability
 
