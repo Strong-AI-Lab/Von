@@ -26,6 +26,7 @@ from src.backend.workflows.durable.workflow_creation_workflow import (
     WORKFLOW_CONTEXT_KEY_VALIDATED_TYPE_NAME,
     WORKFLOW_CREATION_ACTION_CREATE_STEP_CONCEPTS,
     WORKFLOW_CREATION_ACTION_CREATE_WORKFLOW_TYPE,
+    WORKFLOW_CREATION_ACTION_RESOLVE_SCHOLARLY_AUTHORS,
     WORKFLOW_CREATION_ACTION_DESIGN_STRUCTURE,
     WORKFLOW_CREATION_ACTION_EMIT_MARKER,
     WORKFLOW_CREATION_ACTION_ESTABLISH_RELATIONSHIPS,
@@ -39,7 +40,23 @@ from src.backend.workflows.durable.workflow_creation_workflow import (
     WORKFLOW_CREATION_WORKFLOW_ID,
 )
 from src.backend.workflows.engine import WorkflowExecutor
-from src.backend.workflows.vontology_loader import load_workflow_definition_from_vontology
+from src.backend.workflows.vontology_loader import (
+    build_workflow_process_graph,
+    discover_workflow_ids,
+    load_workflow_definition_from_vontology,
+    resolve_workflow_publication_lifecycle,
+)
+from src.backend.workflows.workflow_creation_contracts import (
+    WORKFLOW_CREATION_ACTION_CONCEPT_CREATE_STEP_CONCEPTS,
+    WORKFLOW_CREATION_ACTION_CONCEPT_CREATE_WORKFLOW_TYPE,
+    WORKFLOW_CREATION_ACTION_CONCEPT_DESIGN_STRUCTURE,
+    WORKFLOW_CREATION_ACTION_CONCEPT_EMIT_MARKER,
+    WORKFLOW_CREATION_ACTION_CONCEPT_ESTABLISH_RELATIONSHIPS,
+    WORKFLOW_CREATION_ACTION_CONCEPT_FINALISE,
+    WORKFLOW_CREATION_ACTION_CONCEPT_IDENTIFY_NEED,
+    WORKFLOW_CREATION_ACTION_CONCEPT_RESOLVE_SCHOLARLY_AUTHORS,
+    WORKFLOW_CREATION_ACTION_CONCEPT_VERIFY_DISCOVERABILITY,
+)
 from src.backend.workflows.workflow_definition_identity_service import (
     collect_workflow_action_ids,
 )
@@ -188,6 +205,15 @@ def test_publish_repair_adds_executable_actions_to_workflow_creation_workflow() 
     assert WORKFLOW_CREATION_WORKFLOW_ID in (
         report.get("published_workflow_ids") or []
     )
+    assert set(report.get("created_action_concept_ids") or []) == {
+        WORKFLOW_CREATION_ACTION_CONCEPT_IDENTIFY_NEED,
+        WORKFLOW_CREATION_ACTION_CONCEPT_DESIGN_STRUCTURE,
+        WORKFLOW_CREATION_ACTION_CONCEPT_CREATE_WORKFLOW_TYPE,
+        WORKFLOW_CREATION_ACTION_CONCEPT_CREATE_STEP_CONCEPTS,
+        WORKFLOW_CREATION_ACTION_CONCEPT_ESTABLISH_RELATIONSHIPS,
+        WORKFLOW_CREATION_ACTION_CONCEPT_VERIFY_DISCOVERABILITY,
+        WORKFLOW_CREATION_ACTION_CONCEPT_FINALISE,
+    }
 
     repaired = load_workflow_definition_from_vontology(WORKFLOW_CREATION_WORKFLOW_ID)
     assert repaired is not None
@@ -199,6 +225,43 @@ def test_publish_repair_adds_executable_actions_to_workflow_creation_workflow() 
     assert WORKFLOW_CREATION_ACTION_ESTABLISH_RELATIONSHIPS in action_ids
     assert WORKFLOW_CREATION_ACTION_VERIFY_DISCOVERABILITY in action_ids
     assert WORKFLOW_CREATION_ACTION_FINALISE in action_ids
+
+    graph, warnings = build_workflow_process_graph(WORKFLOW_CREATION_WORKFLOW_ID)
+    assert graph is not None
+    assert warnings == []
+    step_targets = {
+        str(step.get("step_id")): str(step.get("invokes_action_target") or "")
+        for step in (graph.get("steps") or [])
+        if isinstance(step, dict)
+    }
+    assert (
+        step_targets.get("#V#workflow_creation_step_identify_need")
+        == WORKFLOW_CREATION_ACTION_CONCEPT_IDENTIFY_NEED
+    )
+    assert (
+        step_targets.get("#V#workflow_creation_step_design_structure")
+        == WORKFLOW_CREATION_ACTION_CONCEPT_DESIGN_STRUCTURE
+    )
+    assert (
+        step_targets.get("#V#workflow_creation_step_create_workflow_type")
+        == WORKFLOW_CREATION_ACTION_CONCEPT_CREATE_WORKFLOW_TYPE
+    )
+    assert (
+        step_targets.get("#V#workflow_creation_step_create_step_concepts")
+        == WORKFLOW_CREATION_ACTION_CONCEPT_CREATE_STEP_CONCEPTS
+    )
+    assert (
+        step_targets.get("#V#workflow_creation_step_establish_relationships")
+        == WORKFLOW_CREATION_ACTION_CONCEPT_ESTABLISH_RELATIONSHIPS
+    )
+    assert (
+        step_targets.get("#V#workflow_creation_step_verify_discoverability")
+        == WORKFLOW_CREATION_ACTION_CONCEPT_VERIFY_DISCOVERABILITY
+    )
+    assert (
+        step_targets.get("#V#workflow_creation_step_document_in_jira")
+        == WORKFLOW_CREATION_ACTION_CONCEPT_FINALISE
+    )
 
 
 def test_workflow_creation_actions_individual_then_end_to_end() -> None:
@@ -228,16 +291,15 @@ def test_workflow_creation_actions_individual_then_end_to_end() -> None:
         "workflow_spec": _workflow_spec(target_workflow_id, marker_key, marker_value),
     }
 
-    individual_actions = (
+    pre_publication_actions = (
         WORKFLOW_CREATION_ACTION_IDENTIFY_NEED,
         WORKFLOW_CREATION_ACTION_DESIGN_STRUCTURE,
         WORKFLOW_CREATION_ACTION_CREATE_WORKFLOW_TYPE,
         WORKFLOW_CREATION_ACTION_CREATE_STEP_CONCEPTS,
         WORKFLOW_CREATION_ACTION_ESTABLISH_RELATIONSHIPS,
         WORKFLOW_CREATION_ACTION_VERIFY_DISCOVERABILITY,
-        WORKFLOW_CREATION_ACTION_FINALISE,
     )
-    for action_id in individual_actions:
+    for action_id in pre_publication_actions:
         result = action_registry.execute(
             action_id,
             inputs={},
@@ -251,6 +313,30 @@ def test_workflow_creation_actions_individual_then_end_to_end() -> None:
     assert context.get("required_effects_declared") is True
     assert context.get("structural_validation_passed") is True
     assert context.get("postconditions_verified") is True
+    lifecycle_before_publish, lifecycle_source_before_publish = (
+        resolve_workflow_publication_lifecycle(target_workflow_id)
+    )
+    assert lifecycle_before_publish is not None
+    assert lifecycle_before_publish.get("phase") == "validated"
+    assert lifecycle_before_publish.get("published") is False
+    assert lifecycle_source_before_publish in {"concept_data", "text_relation:#V#hasWorkflowLifecycleJson"}
+    assert target_workflow_id not in set(discover_workflow_ids())
+
+    finalise_result = action_registry.execute(
+        WORKFLOW_CREATION_ACTION_FINALISE,
+        inputs={},
+        context=context,
+        env=env,
+    )
+    assert finalise_result.outcome == "success", finalise_result.error
+    context.update(finalise_result.outputs)
+    lifecycle_after_publish, _lifecycle_source_after_publish = (
+        resolve_workflow_publication_lifecycle(target_workflow_id)
+    )
+    assert lifecycle_after_publish is not None
+    assert lifecycle_after_publish.get("phase") == "published"
+    assert lifecycle_after_publish.get("published") is True
+    assert target_workflow_id in set(discover_workflow_ids())
 
     workflow_creation_definition = load_workflow_definition_from_vontology(
         WORKFLOW_CREATION_WORKFLOW_ID
@@ -484,8 +570,27 @@ def test_text_only_scholarly_request_synthesises_non_blocking_workflow() -> None
     assert generated_definition is not None
     action_ids = set(collect_workflow_action_ids(generated_definition))
     assert "request_user_input" not in action_ids
-    assert "workflow_creation.emit_marker" in action_ids
-    assert "workflow_creation.resolve_scholarly_authors" in action_ids
+    assert WORKFLOW_CREATION_ACTION_EMIT_MARKER in action_ids
+    assert WORKFLOW_CREATION_ACTION_RESOLVE_SCHOLARLY_AUTHORS in action_ids
+
+    generated_graph, generated_warnings = build_workflow_process_graph(
+        "#V#integration_scholarly_paper_representation_workflow"
+    )
+    assert generated_graph is not None
+    assert generated_warnings == []
+    generated_step_targets = {
+        str(step.get("invokes_action")): str(step.get("invokes_action_target") or "")
+        for step in (generated_graph.get("steps") or [])
+        if isinstance(step, dict) and isinstance(step.get("invokes_action"), str)
+    }
+    assert (
+        generated_step_targets.get(WORKFLOW_CREATION_ACTION_EMIT_MARKER)
+        == WORKFLOW_CREATION_ACTION_CONCEPT_EMIT_MARKER
+    )
+    assert (
+        generated_step_targets.get(WORKFLOW_CREATION_ACTION_RESOLVE_SCHOLARLY_AUTHORS)
+        == WORKFLOW_CREATION_ACTION_CONCEPT_RESOLVE_SCHOLARLY_AUTHORS
+    )
 
     _ensure_type("#V#scholarly_article", "Scholarly Article")
     _ensure_type("#V#person", "Person")

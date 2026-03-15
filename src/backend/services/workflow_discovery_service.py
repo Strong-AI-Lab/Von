@@ -61,6 +61,7 @@ SEARCH_TIMEOUT_SECONDS = 0.5
 EXECUTABILITY_EXECUTABLE_NOW = "executable_now"
 EXECUTABILITY_GRAPH_INCOMPLETE = "graph_incomplete"
 EXECUTABILITY_NON_EXECUTABLE_DESIGN_ARTIFACT = "non_executable_design_artifact"
+EXECUTABILITY_DRAFT_NOT_PUBLISHED = "draft_not_published"
 EXECUTABILITY_WORKFLOW_STEP_INTEGRITY = "workflow_step_integrity_issue"
 EXECUTABILITY_WORKFLOW_STEP_PARTIALLY_VACUOUS = "workflow_step_partially_vacuous"
 EXECUTABILITY_WORKFLOW_STEP_COMPLETELY_VACUOUS = (
@@ -71,6 +72,7 @@ _EXECUTABILITY_REASON_PRIORITY = {
     EXECUTABILITY_EXECUTABLE_NOW: 2,
     EXECUTABILITY_GRAPH_INCOMPLETE: 1,
     EXECUTABILITY_NON_EXECUTABLE_DESIGN_ARTIFACT: 0,
+    EXECUTABILITY_DRAFT_NOT_PUBLISHED: 1,
     EXECUTABILITY_WORKFLOW_STEP_INTEGRITY: 1,
     EXECUTABILITY_WORKFLOW_STEP_PARTIALLY_VACUOUS: 1,
     EXECUTABILITY_WORKFLOW_STEP_COMPLETELY_VACUOUS: 1,
@@ -636,9 +638,26 @@ def _classify_workflow_concept_executability(
     try:
         from ..workflows.vontology_loader import (
             build_workflow_process_graph,
-            load_workflow_definition_from_vontology,
             detect_vacuous_workflow_steps,
+            load_workflow_definition_from_vontology,
+            resolve_workflow_publication_lifecycle,
         )
+
+        publication_lifecycle, publication_lifecycle_source = (
+            resolve_workflow_publication_lifecycle(concept_id)
+        )
+        if (
+            isinstance(publication_lifecycle, Mapping)
+            and publication_lifecycle.get("published") is False
+        ):
+            phase = str(publication_lifecycle.get("phase") or "draft").strip() or "draft"
+            detail = f"workflow_not_published:phase={phase}"
+            if (
+                isinstance(publication_lifecycle_source, str)
+                and publication_lifecycle_source
+            ):
+                detail = f"{detail}:source={publication_lifecycle_source}"
+            return (False, EXECUTABILITY_DRAFT_NOT_PUBLISHED, detail)
 
         graph, warnings = build_workflow_process_graph(concept_id)
         warning_items = [

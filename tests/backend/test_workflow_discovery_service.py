@@ -17,6 +17,7 @@ import pytest
 from src.backend.services.workflow_discovery_service import (
     DEFAULT_MAX_RESULTS,
     DEFAULT_RELEVANCE_THRESHOLD,
+    EXECUTABILITY_DRAFT_NOT_PUBLISHED,
     EXECUTABILITY_EXECUTABLE_NOW,
     EXECUTABILITY_GRAPH_INCOMPLETE,
     EXECUTABILITY_WORKFLOW_STEP_COMPLETELY_VACUOUS,
@@ -661,6 +662,25 @@ def test_classify_workflow_treats_partial_vacuous_steps_as_non_executable() -> N
     assert "count=1" in str(detail)
     assert "total=2" in str(detail)
     assert "first_step=#V#identify" in str(detail)
+
+
+def test_classify_workflow_treats_unpublished_draft_as_non_executable() -> None:
+    _classify_workflow_concept_executability.cache_clear()
+
+    with patch(
+        "src.backend.workflows.vontology_loader.resolve_workflow_publication_lifecycle",
+        return_value=(
+            {"phase": "validated", "published": False},
+            "concept_data",
+        ),
+    ):
+        is_executable, reason, detail = _classify_workflow_concept_executability(
+            "#V#wf_draft"
+        )
+
+    assert is_executable is False
+    assert reason == EXECUTABILITY_DRAFT_NOT_PUBLISHED
+    assert detail == "workflow_not_published:phase=validated:source=concept_data"
 
 
 def test_classify_workflow_treats_completely_vacuous_steps_as_non_executable() -> None:

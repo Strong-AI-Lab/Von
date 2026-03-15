@@ -26,6 +26,7 @@ from .subworkflow_contracts import (
     WORKFLOW_SUBWORKFLOW_ACTION_ID,
     build_subworkflow_contract,
 )
+from .workflow_action_contracts import resolve_workflow_action_target
 from .engine import (
     WorkflowDefinition,
     WorkflowStateSpec,
@@ -191,6 +192,21 @@ WORKFLOW_DESCRIPTION_SOURCE_DEFINITION = "definition.purpose"
 WORKFLOW_BACKGROUND_LAUNCH_POLICY_SOURCE_NONE = "none"
 WORKFLOW_BACKGROUND_LAUNCH_POLICY_SCHEMA_VERSION = (
     "workflow_background_launch_policy.v1"
+)
+WORKFLOW_PUBLICATION_LIFECYCLE_SOURCE_NONE = "none"
+WORKFLOW_PUBLICATION_LIFECYCLE_SCHEMA_VERSION = (
+    "workflow_publication_lifecycle.v1"
+)
+WORKFLOW_PUBLICATION_LIFECYCLE_CONCEPT_DATA_KEY = "workflow_publication_lifecycle"
+WORKFLOW_PUBLICATION_LIFECYCLE_TEXT_PREDICATE_PRECEDENCE: Tuple[
+    Tuple[str, ...], ...
+] = (
+    (
+        "#V#hasWorkflowLifecycleJson",
+        "hasWorkflowLifecycleJson",
+        "#V#has_workflow_lifecycle_json",
+        "has_workflow_lifecycle_json",
+    ),
 )
 WORKFLOW_STEP_RETRY_POLICY_TEXT_PREDICATE_PRECEDENCE: Tuple[Tuple[str, ...], ...] = (
     (
@@ -931,20 +947,10 @@ def _normalise_invoked_action_target(raw_target: str) -> str | None:
 
     if not isinstance(raw_target, str):
         return None
-    target = raw_target.strip()
-    if not target:
-        return None
-
-    if target.startswith("#V#"):
-        token = target[3:].strip()
-        if token.endswith("_tool"):
-            token = token[: -len("_tool")]
-        elif token.endswith(" tool"):
-            token = token[: -len(" tool")]
-        token = token.strip()
-        return token or None
-
-    return target
+    resolved_action_id, _contract_payload, _contract_source = (
+        resolve_workflow_action_target(raw_target)
+    )
+    return resolved_action_id
 
 
 def _normalise_invoked_workflow_target(raw_target: str) -> str | None:
@@ -1262,6 +1268,98 @@ def _parse_json_object_text_value(text_value: Any) -> dict[str, Any] | None:
     return None
 
 
+def _normalise_workflow_publication_lifecycle(
+    value: Any,
+) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+
+    phase = _normalise_non_empty_text(value.get("phase")) or "published"
+    published_raw = value.get("published")
+    if isinstance(published_raw, bool):
+        published = published_raw
+    else:
+        published = phase not in {
+            "draft",
+            "validated",
+            "validation_failed",
+            "draft_failed_completion_gate",
+        }
+
+    payload: dict[str, Any] = {
+        "schema_version": (
+            _normalise_non_empty_text(value.get("schema_version"))
+            or WORKFLOW_PUBLICATION_LIFECYCLE_SCHEMA_VERSION
+        ),
+        "phase": phase,
+        "published": bool(published),
+    }
+    for key in ("validation_passed", "postconditions_verified"):
+        raw_flag = value.get(key)
+        if isinstance(raw_flag, bool):
+            payload[key] = raw_flag
+    optional_test_instance_id = _normalise_non_empty_text(
+        value.get("optional_test_instance_id")
+    )
+    if optional_test_instance_id:
+        payload["optional_test_instance_id"] = optional_test_instance_id
+    last_error = _normalise_non_empty_text(value.get("last_error"))
+    if last_error:
+        payload["last_error"] = last_error
+    return payload
+
+
+def resolve_workflow_publication_lifecycle(
+    workflow_id: str,
+    workflow_doc: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, str]:
+    """Resolve explicit workflow publication lifecycle metadata.
+
+    Draft workflows must remain loadable so the workflow-creation authoring flow
+    can validate them before publication, but discovery/routing should ignore
+    workflows whose lifecycle explicitly says ``published=false``.
+    """
+
+    workflow_id_text = _normalise_non_empty_text(workflow_id)
+    if not workflow_id_text:
+        return None, WORKFLOW_PUBLICATION_LIFECYCLE_SOURCE_NONE
+
+    concept_doc = workflow_doc if isinstance(workflow_doc, Mapping) else None
+    if concept_doc is None:
+        try:
+            raw_doc = ConceptsRepository.find_one(
+                {"concept_id": workflow_id_text},
+                {"concept_id": 1, "concept_data": 1},
+            )
+        except Exception:
+            raw_doc = None
+        if isinstance(raw_doc, Mapping):
+            concept_doc = raw_doc
+
+    concept_data = (
+        concept_doc.get("concept_data") if isinstance(concept_doc, Mapping) else None
+    )
+    if isinstance(concept_data, Mapping):
+        raw_lifecycle = concept_data.get(
+            WORKFLOW_PUBLICATION_LIFECYCLE_CONCEPT_DATA_KEY
+        )
+        if isinstance(raw_lifecycle, Mapping):
+            normalised = _normalise_workflow_publication_lifecycle(raw_lifecycle)
+            if normalised is not None:
+                return normalised, "concept_data"
+
+    lifecycle, lifecycle_source = _resolve_policy_from_text_relations(
+        concept_id=workflow_id_text,
+        predicate_precedence=WORKFLOW_PUBLICATION_LIFECYCLE_TEXT_PREDICATE_PRECEDENCE,
+        normaliser=_normalise_workflow_publication_lifecycle,
+    )
+    if lifecycle is not None:
+        return lifecycle, lifecycle_source or WORKFLOW_PUBLICATION_LIFECYCLE_SOURCE_NONE
+    if isinstance(lifecycle_source, str) and lifecycle_source:
+        return None, lifecycle_source
+    return None, WORKFLOW_PUBLICATION_LIFECYCLE_SOURCE_NONE
+
+
 def _resolve_policy_from_text_relations(
     *,
     concept_id: str,
@@ -1502,7 +1600,7 @@ def build_workflow_process_graph(
 
     workflow_doc = ConceptsRepository.find_one(
         {"concept_id": workflow_id},
-        {"concept_id": 1, "name": 1, "relationships": 1},
+        {"concept_id": 1, "name": 1, "relationships": 1, "concept_data": 1},
     )
     if not workflow_doc:
         return None, ["workflow_concept_not_found"]
@@ -1515,6 +1613,25 @@ def build_workflow_process_graph(
         resolve_workflow_long_horizon_policies(workflow_id)
     )
     warnings.extend(workflow_policy_warnings)
+    publication_lifecycle, publication_lifecycle_source = (
+        resolve_workflow_publication_lifecycle(workflow_id, workflow_doc)
+    )
+    if publication_lifecycle is not None:
+        workflow_runtime_policies["publication_lifecycle"] = publication_lifecycle
+    if (
+        isinstance(publication_lifecycle_source, str)
+        and publication_lifecycle_source
+        and publication_lifecycle_source != WORKFLOW_PUBLICATION_LIFECYCLE_SOURCE_NONE
+    ):
+        if publication_lifecycle is not None:
+            workflow_runtime_policies["publication_lifecycle_source"] = (
+                publication_lifecycle_source
+            )
+        else:
+            warnings.append(
+                "workflow_publication_lifecycle_invalid:"
+                f"{workflow_id}:{publication_lifecycle_source}"
+            )
 
     legacy_aliases: set[str] = set()
 
@@ -1614,7 +1731,10 @@ def build_workflow_process_graph(
             step_rels,
             invokes_action_candidates,
         )
-        invokes_action = _normalise_invoked_action_target(invokes_action_raw or "")
+        invokes_action_target = _normalise_non_empty_text(invokes_action_raw)
+        invokes_action, action_contract_payload, action_contract_source = (
+            resolve_workflow_action_target(str(invokes_action_raw or ""))
+        )
         _record_legacy_alias_use(
             legacy_aliases=legacy_aliases,
             canonical_predicate=WORKFLOW_GRAPH_PREDICATE_ALIASES["invokesAction"][0],
@@ -1885,6 +2005,7 @@ def build_workflow_process_graph(
                 "step_id": step_id,
                 "name": doc.get("name"),
                 "invokes_action": invokes_action,
+                "invokes_action_target": invokes_action_target,
                 "invokes_workflow": invokes_workflow,
                 "preconditions": preconditions,
                 "effects": effects,
@@ -1899,6 +2020,10 @@ def build_workflow_process_graph(
                 "control_flow": control_flow,
             }
         )
+        if action_contract_payload:
+            step_items[-1]["action_contract"] = action_contract_payload
+        if action_contract_source:
+            step_items[-1]["action_contract_source"] = action_contract_source
 
         _edge(step_id, "nextStep", next_step)
         _edge(step_id, "onTrueNextStep", on_true)
@@ -2032,6 +2157,8 @@ def load_workflow_definition_from_vontology(
         subworkflow_input_mappings: list[Dict[str, str]] = []
         subworkflow_output_mappings: list[Dict[str, str]] = []
         subworkflow_failure_mode = ""
+        action_contract: dict[str, Any] | None = None
+        action_contract_source = ""
         if invocation_action_id:
             # Read input mapping from Vontology (hasInputMap relationships).
             doc = step_docs.get(step_id, {})
@@ -2043,6 +2170,11 @@ def load_workflow_definition_from_vontology(
             prompt_contract = (
                 dict(step.get("prompt_contract"))
                 if isinstance(step.get("prompt_contract"), Mapping)
+                else None
+            )
+            action_contract = (
+                dict(step.get("action_contract"))
+                if isinstance(step.get("action_contract"), Mapping)
                 else None
             )
             prompt_resolution_diagnostics = (
@@ -2106,6 +2238,12 @@ def load_workflow_definition_from_vontology(
                 WorkflowActionInvocation(
                     action_id=invocation_action_id,
                     inputs=input_map if input_map else {},
+                    contract_concept_id=(
+                        str(action_contract.get("concept_id") or "").strip()
+                        if isinstance(action_contract, Mapping)
+                        else None
+                    )
+                    or None,
                 )
             )
 
@@ -2352,6 +2490,11 @@ def load_workflow_definition_from_vontology(
             step_metadata["checkpoint_policy"] = checkpoint_policy
         if prompt_contract:
             step_metadata["prompt_contract"] = prompt_contract
+        if action_contract:
+            step_metadata["action_contract"] = action_contract
+        action_contract_source = step.get("action_contract_source")
+        if isinstance(action_contract_source, str) and action_contract_source.strip():
+            step_metadata["action_contract_source"] = action_contract_source.strip()
         if is_subworkflow_action:
             workflow_target = str(invokes_workflow or "").strip()
             workflow_id_context_key = ""
@@ -2547,7 +2690,33 @@ def discover_workflow_ids() -> List[str]:
         except Exception as e:
             logger.warning(f"Error querying workflows by type: {e}")
 
-    return sorted(candidates)
+    if not candidates:
+        return []
+
+    lifecycle_docs: dict[str, dict[str, Any]] = {}
+    try:
+        lifecycle_cursor = ConceptsRepository.find(
+            {"concept_id": {"$in": sorted(candidates)}},
+            {"concept_id": 1, "concept_data": 1},
+        )
+        for doc in lifecycle_cursor:
+            concept_id = doc.get("concept_id")
+            if isinstance(concept_id, str) and concept_id.strip():
+                lifecycle_docs[concept_id.strip()] = dict(doc)
+    except Exception as e:
+        logger.warning(f"Error querying workflow publication lifecycle: {e}")
+
+    discoverable_candidates: set[str] = set()
+    for concept_id in candidates:
+        lifecycle, _source = resolve_workflow_publication_lifecycle(
+            concept_id,
+            lifecycle_docs.get(concept_id),
+        )
+        if isinstance(lifecycle, Mapping) and lifecycle.get("published") is False:
+            continue
+        discoverable_candidates.add(concept_id)
+
+    return sorted(discoverable_candidates)
 
 
 def batch_fetch_workflow_purposes(

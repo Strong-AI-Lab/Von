@@ -8,6 +8,7 @@ provides one canonical pathway to:
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from ..db.repositories.concepts_repository import ConceptsRepository
 from ..services import concept_service
 from ..services.concept_service import ConceptNotFoundError
 from ..services.effort_unit_ontology_service import ensure_effort_unit_ontology
+from ..services.text_value_service import upsert_text_for_concept
 from .definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
     CHAT_BUTTONIFY_WORKFLOW_ID,
@@ -71,6 +73,38 @@ from .vontology_loader import (
     build_workflow_process_graph,
     load_workflow_definition_from_vontology,
 )
+from .workflow_action_contracts import (
+    WORKFLOW_ACTION_CONTRACT_SPEC_CONCEPT_DATA_KEY,
+    WORKFLOW_ACTION_CONTRACT_TEXT_PREDICATE_PRECEDENCE,
+    WORKFLOW_ACTION_CONTRACT_TYPE_ID,
+    build_workflow_action_contract_payload,
+    invalidate_workflow_action_contract_resolution_cache,
+)
+from .workflow_creation_contracts import (
+    WORKFLOW_CREATION_ACTION_CONCEPT_CREATE_STEP_CONCEPTS,
+    WORKFLOW_CREATION_ACTION_CONCEPT_CREATE_WORKFLOW_TYPE,
+    WORKFLOW_CREATION_ACTION_CONCEPT_DESIGN_STRUCTURE,
+    WORKFLOW_CREATION_ACTION_CONCEPT_ESTABLISH_RELATIONSHIPS,
+    WORKFLOW_CREATION_ACTION_CONCEPT_FINALISE,
+    WORKFLOW_CREATION_ACTION_CONCEPT_IDENTIFY_NEED,
+    WORKFLOW_CREATION_ACTION_CONCEPT_VERIFY_DISCOVERABILITY,
+    WORKFLOW_CREATION_ACTION_CONTRACT_BY_ACTION_ID,
+    WORKFLOW_CREATION_ACTION_CREATE_STEP_CONCEPTS,
+    WORKFLOW_CREATION_ACTION_CREATE_WORKFLOW_TYPE,
+    WORKFLOW_CREATION_ACTION_DESIGN_STRUCTURE,
+    WORKFLOW_CREATION_ACTION_ESTABLISH_RELATIONSHIPS,
+    WORKFLOW_CREATION_ACTION_FINALISE,
+    WORKFLOW_CREATION_ACTION_IDENTIFY_NEED,
+    WORKFLOW_CREATION_ACTION_VERIFY_DISCOVERABILITY,
+    WORKFLOW_CREATION_STEP_CREATE_STEP_CONCEPTS,
+    WORKFLOW_CREATION_STEP_CREATE_WORKFLOW_TYPE,
+    WORKFLOW_CREATION_STEP_DESIGN_STRUCTURE,
+    WORKFLOW_CREATION_STEP_DOCUMENT_IN_JIRA,
+    WORKFLOW_CREATION_STEP_ESTABLISH_RELATIONSHIPS,
+    WORKFLOW_CREATION_STEP_IDENTIFY_NEED,
+    WORKFLOW_CREATION_STEP_VERIFY_DISCOVERABILITY,
+    WORKFLOW_CREATION_WORKFLOW_ID,
+)
 from .engine import (
     WorkflowActionInvocation,
     WorkflowDefinition,
@@ -106,39 +140,6 @@ PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID = (
     "#V#parent_specificity_rumination_workflow"
 )
 RUMINATION_WORKFLOW_ID = "#V#rumination_workflow"
-WORKFLOW_CREATION_WORKFLOW_ID = "#V#von_workflow_creation_workflow"
-
-WORKFLOW_CREATION_STEP_IDENTIFY_NEED = "#V#workflow_creation_step_identify_need"
-WORKFLOW_CREATION_STEP_DESIGN_STRUCTURE = "#V#workflow_creation_step_design_structure"
-WORKFLOW_CREATION_STEP_CREATE_WORKFLOW_TYPE = (
-    "#V#workflow_creation_step_create_workflow_type"
-)
-WORKFLOW_CREATION_STEP_CREATE_STEP_CONCEPTS = (
-    "#V#workflow_creation_step_create_step_concepts"
-)
-WORKFLOW_CREATION_STEP_ESTABLISH_RELATIONSHIPS = (
-    "#V#workflow_creation_step_establish_relationships"
-)
-WORKFLOW_CREATION_STEP_VERIFY_DISCOVERABILITY = (
-    "#V#workflow_creation_step_verify_discoverability"
-)
-WORKFLOW_CREATION_STEP_DOCUMENT_IN_JIRA = "#V#workflow_creation_step_document_in_jira"
-
-WORKFLOW_CREATION_ACTION_IDENTIFY_NEED = "workflow_creation.identify_need"
-WORKFLOW_CREATION_ACTION_DESIGN_STRUCTURE = "workflow_creation.design_structure"
-WORKFLOW_CREATION_ACTION_CREATE_WORKFLOW_TYPE = (
-    "workflow_creation.create_workflow_type"
-)
-WORKFLOW_CREATION_ACTION_CREATE_STEP_CONCEPTS = (
-    "workflow_creation.create_step_concepts"
-)
-WORKFLOW_CREATION_ACTION_ESTABLISH_RELATIONSHIPS = (
-    "workflow_creation.establish_relationships"
-)
-WORKFLOW_CREATION_ACTION_VERIFY_DISCOVERABILITY = (
-    "workflow_creation.verify_discoverability"
-)
-WORKFLOW_CREATION_ACTION_FINALISE = "workflow_creation.finalise"
 
 
 # Ordered from preferred canonical type to legacy fallbacks.
@@ -252,6 +253,7 @@ class _CanonicalStepPublicationSpec:
     state_id: str
     concept_id: str | None = None
     action_id: str | None = None
+    action_concept_id: str | None = None
     invoked_workflow_id: str | None = None
     static_input_bindings: tuple[tuple[str, str], ...] = ()
     context_input_mappings: tuple[str, ...] = ()
@@ -1387,42 +1389,49 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
                 state_id=WORKFLOW_CREATION_STEP_IDENTIFY_NEED,
                 concept_id=WORKFLOW_CREATION_STEP_IDENTIFY_NEED,
                 action_id=WORKFLOW_CREATION_ACTION_IDENTIFY_NEED,
+                action_concept_id=WORKFLOW_CREATION_ACTION_CONCEPT_IDENTIFY_NEED,
                 next_state=WORKFLOW_CREATION_STEP_DESIGN_STRUCTURE,
             ),
             _CanonicalStepPublicationSpec(
                 state_id=WORKFLOW_CREATION_STEP_DESIGN_STRUCTURE,
                 concept_id=WORKFLOW_CREATION_STEP_DESIGN_STRUCTURE,
                 action_id=WORKFLOW_CREATION_ACTION_DESIGN_STRUCTURE,
+                action_concept_id=WORKFLOW_CREATION_ACTION_CONCEPT_DESIGN_STRUCTURE,
                 next_state=WORKFLOW_CREATION_STEP_CREATE_WORKFLOW_TYPE,
             ),
             _CanonicalStepPublicationSpec(
                 state_id=WORKFLOW_CREATION_STEP_CREATE_WORKFLOW_TYPE,
                 concept_id=WORKFLOW_CREATION_STEP_CREATE_WORKFLOW_TYPE,
                 action_id=WORKFLOW_CREATION_ACTION_CREATE_WORKFLOW_TYPE,
+                action_concept_id=WORKFLOW_CREATION_ACTION_CONCEPT_CREATE_WORKFLOW_TYPE,
                 next_state=WORKFLOW_CREATION_STEP_CREATE_STEP_CONCEPTS,
             ),
             _CanonicalStepPublicationSpec(
                 state_id=WORKFLOW_CREATION_STEP_CREATE_STEP_CONCEPTS,
                 concept_id=WORKFLOW_CREATION_STEP_CREATE_STEP_CONCEPTS,
                 action_id=WORKFLOW_CREATION_ACTION_CREATE_STEP_CONCEPTS,
+                action_concept_id=WORKFLOW_CREATION_ACTION_CONCEPT_CREATE_STEP_CONCEPTS,
                 next_state=WORKFLOW_CREATION_STEP_ESTABLISH_RELATIONSHIPS,
             ),
             _CanonicalStepPublicationSpec(
                 state_id=WORKFLOW_CREATION_STEP_ESTABLISH_RELATIONSHIPS,
                 concept_id=WORKFLOW_CREATION_STEP_ESTABLISH_RELATIONSHIPS,
                 action_id=WORKFLOW_CREATION_ACTION_ESTABLISH_RELATIONSHIPS,
+                action_concept_id=WORKFLOW_CREATION_ACTION_CONCEPT_ESTABLISH_RELATIONSHIPS,
                 next_state=WORKFLOW_CREATION_STEP_VERIFY_DISCOVERABILITY,
             ),
             _CanonicalStepPublicationSpec(
                 state_id=WORKFLOW_CREATION_STEP_VERIFY_DISCOVERABILITY,
                 concept_id=WORKFLOW_CREATION_STEP_VERIFY_DISCOVERABILITY,
                 action_id=WORKFLOW_CREATION_ACTION_VERIFY_DISCOVERABILITY,
+                action_concept_id=WORKFLOW_CREATION_ACTION_CONCEPT_VERIFY_DISCOVERABILITY,
                 next_state=WORKFLOW_CREATION_STEP_DOCUMENT_IN_JIRA,
             ),
             _CanonicalStepPublicationSpec(
                 state_id=WORKFLOW_CREATION_STEP_DOCUMENT_IN_JIRA,
                 concept_id=WORKFLOW_CREATION_STEP_DOCUMENT_IN_JIRA,
                 action_id=WORKFLOW_CREATION_ACTION_FINALISE,
+                action_concept_id=WORKFLOW_CREATION_ACTION_CONCEPT_FINALISE,
             ),
         ),
     ),
@@ -1500,6 +1509,12 @@ def _build_definition_from_publication_spec(
                 WorkflowActionInvocation(
                     action_id=step.action_id,
                     inputs=action_inputs,
+                    contract_concept_id=(
+                        step.action_concept_id.strip()
+                        if isinstance(step.action_concept_id, str)
+                        and step.action_concept_id.strip()
+                        else None
+                    ),
                 ),
             )
             if isinstance(step.action_id, str) and step.action_id.strip()
@@ -2077,6 +2092,130 @@ def _ensure_concept_exists(
     return created_doc, True, None
 
 
+def _ensure_type_concept_exists(
+    *,
+    concept_id: str,
+    name: str,
+    description: str | None = None,
+) -> tuple[Dict[str, Any] | None, bool, str | None]:
+    existing_doc, load_error = _load_concept(concept_id)
+    if load_error:
+        return None, False, f"lookup_failed:{load_error}"
+    if existing_doc is not None:
+        return existing_doc, False, None
+
+    try:
+        concept_service.create_concept(
+            name=name,
+            concept_id=concept_id,
+            description=description,
+            create_as_instance=False,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        error_text = str(exc)
+        if "E11000" in error_text or "duplicate key" in error_text.lower():
+            recovered_doc, recovered_error = _load_concept(concept_id)
+            if recovered_error:
+                return None, False, f"lookup_after_duplicate_failed:{recovered_error}"
+            if recovered_doc is not None:
+                return recovered_doc, False, None
+        return None, False, f"create_failed:{exc}"
+
+    created_doc, created_error = _load_concept(concept_id)
+    if created_error:
+        return None, False, f"lookup_after_create_failed:{created_error}"
+    return created_doc, True, None
+
+
+def _ensure_workflow_action_contract_concept(
+    *,
+    action_id: str,
+) -> tuple[str | None, bool, str | None]:
+    definition = WORKFLOW_CREATION_ACTION_CONTRACT_BY_ACTION_ID.get(
+        str(action_id or "").strip()
+    )
+    if definition is None:
+        return None, False, "action_contract_definition_missing"
+
+    _type_doc, _type_created, type_error = _ensure_type_concept_exists(
+        concept_id=WORKFLOW_ACTION_CONTRACT_TYPE_ID,
+        name="Workflow Action Contract",
+        description=(
+            "Canonical action or tool contract concept used by VWL-authored "
+            "workflow steps."
+        ),
+    )
+    if type_error:
+        return None, False, f"action_contract_type_failed:{type_error}"
+
+    concept_doc, created, create_error = _ensure_concept_exists(
+        concept_id=definition.concept_id,
+        name=definition.name,
+        description=definition.description,
+        parent_concept_ids=[WORKFLOW_ACTION_CONTRACT_TYPE_ID],
+    )
+    if create_error:
+        return None, False, create_error
+
+    payload = build_workflow_action_contract_payload(
+        concept_id=definition.concept_id,
+        action_id=definition.action_id,
+        description=definition.description,
+        input_schema=definition.input_schema,
+        output_schema=definition.output_schema,
+        side_effects=definition.side_effects,
+        postconditions=definition.postconditions,
+    )
+    existing_payload = (
+        ((concept_doc or {}).get("concept_data") or {}).get(
+            WORKFLOW_ACTION_CONTRACT_SPEC_CONCEPT_DATA_KEY
+        )
+        if isinstance(concept_doc, Mapping)
+        else None
+    )
+    if existing_payload != payload:
+        try:
+            concept_service.update_concept(
+                definition.concept_id,
+                {
+                    (
+                        "concept_data."
+                        f"{WORKFLOW_ACTION_CONTRACT_SPEC_CONCEPT_DATA_KEY}"
+                    ): payload
+                },
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            return None, created, f"action_contract_update_failed:{exc}"
+
+    predicate = WORKFLOW_ACTION_CONTRACT_TEXT_PREDICATE_PRECEDENCE[0][0]
+    try:
+        upsert_text_for_concept(
+            subject_concept_id=definition.concept_id,
+            predicate=predicate,
+            text=json.dumps(payload, sort_keys=True),
+            lang="en-NZ",
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        return None, created, f"action_contract_text_upsert_failed:{exc}"
+
+    invalidate_workflow_action_contract_resolution_cache()
+    return definition.concept_id, created, None
+
+
+def ensure_workflow_action_contract_concept(
+    *,
+    action_id: str,
+) -> tuple[str | None, bool, str | None]:
+    """Ensure a canonical workflow action-contract concept exists.
+
+    This is the reusable VWL authoring primitive used both by canonical
+    publication repair and by the workflow-creation workflow when it authors
+    new Vontology workflow graphs that bind to concept-backed actions.
+    """
+
+    return _ensure_workflow_action_contract_concept(action_id=action_id)
+
+
 def _invalidate_runnable_verification_for_workflow(
     workflow_id: str,
     *,
@@ -2314,6 +2453,31 @@ def publish_canonical_chat_workflow_graphs(
                 if step.tool_output_mapping_specs
                 else runtime_details.tool_output_mapping_specs
             )
+            action_concept_id = (
+                step.action_concept_id.strip()
+                if isinstance(step.action_concept_id, str)
+                and step.action_concept_id.strip()
+                else None
+            )
+            if (
+                isinstance(step.action_id, str)
+                and step.action_id.strip()
+                and step.action_id.strip() in WORKFLOW_CREATION_ACTION_CONTRACT_BY_ACTION_ID
+            ):
+                resolved_action_concept_id, created_action_concept, action_concept_error = (
+                    _ensure_workflow_action_contract_concept(
+                        action_id=step.action_id.strip()
+                    )
+                )
+                if action_concept_error:
+                    errors_by_workflow_id[workflow_id] = (
+                        f"action_contract_failed:{step.state_id}:{action_concept_error}"
+                    )
+                    step_update_failed = True
+                    break
+                action_concept_id = action_concept_id or resolved_action_concept_id
+                if created_action_concept and resolved_action_concept_id:
+                    created_action_concept_ids.append(resolved_action_concept_id)
             tool_output_context_mapping_ids = (
                 tuple(
                     item.strip()
@@ -2332,7 +2496,9 @@ def publish_canonical_chat_workflow_graphs(
                 else runtime_details.writes_context_keys
             )
             mapping_target_id = (
-                invoked_workflow_id if invoked_workflow_id else step.action_id
+                invoked_workflow_id
+                if invoked_workflow_id
+                else (action_concept_id or step.action_id)
             )
             if (
                 isinstance(step.action_id, str)
@@ -2343,7 +2509,7 @@ def publish_canonical_chat_workflow_graphs(
                 )
             ):
                 step_relationships[_CANONICAL_GRAPH_PREDICATES["invokesAction"]] = [
-                    step.action_id.strip()
+                    action_concept_id or step.action_id.strip()
                 ]
             if invoked_workflow_id:
                 step_relationships[
