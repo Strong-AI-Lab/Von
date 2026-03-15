@@ -1571,10 +1571,11 @@ describe('thinking activity history normalisation', () => {
         });
 
         expect(html).toContain('Workflow discovery');
-        expect(html).toContain('Found <button');
+        // JVNAUTOSCI-1441: collapsible summary now uses plain text, not button HTML
+        expect(html).toContain('Found Tool calling workflow');
         expect(html).toContain('Tool calling workflow (#V#tool_calling_workflow)');
         expect(html).toContain('Workflow dispatch');
-        expect(html).toContain('Selected <button');
+        expect(html).toContain('Selected Tool calling workflow');
         expect(html).toContain('Source: Selector');
         expect(html).toContain('thinking-card-concept-link');
         expect(html).toContain('data-concept-id="#V#tool_calling_workflow"');
@@ -1744,7 +1745,8 @@ describe('thinking activity history normalisation', () => {
             }
         });
 
-        expect(html).toContain('Found candidate <button');
+        // JVNAUTOSCI-1441: collapsible summary now uses plain text, not button HTML
+        expect(html).toContain('Found candidate Scholarly paper representation workflow');
         expect(html).toContain('Scholarly paper representation workflow (#V#scholarly_paper_representation_workflow)');
         expect(html).toContain('thinking-card-tool-status success');
     });
@@ -1834,6 +1836,78 @@ describe('thinking activity history normalisation', () => {
         expect(html).toContain('Complete');
         expect(html).toContain('No direct workflow match found; routed via selector to <button');
         expect(html).toContain('Tool calling workflow (#V#tool_calling_workflow)');
+    });
+
+    // JVNAUTOSCI-1441 regression: collapsible diagnostic rows must not put
+    // interactive <button> elements inside <summary>, as that prevents the
+    // native <details> toggle from working.
+    test('collapsible diagnostic rows use plain text detail in summary instead of button HTML', () => {
+        const html = __testOnly_renderThinkingCardBodyHTML({
+            workflowStagePath: {
+                path: [
+                    { stage_id: 'workflow_discovery', stage_label: 'Workflow discovery' }
+                ]
+            },
+            workflowDiscovery: {
+                requested_query: 'Run scholarly workflow',
+                query: 'Run scholarly workflow',
+                match_count: 1,
+                matches: [
+                    {
+                        concept_id: '#V#scholarly_paper_representation_workflow',
+                        name: 'Scholarly paper representation workflow',
+                        relevance_score: 0.95
+                    }
+                ]
+            },
+            latestProgress: {
+                phase: 'workflow_discovery_complete'
+            }
+        });
+
+        const container = document.createElement('div');
+        container.innerHTML = html;
+
+        const detailsRow = container.querySelector('details[data-thinking-diagnostic-key]');
+        expect(detailsRow).toBeTruthy();
+
+        const summary = detailsRow.querySelector('summary');
+        expect(summary).toBeTruthy();
+
+        // The summary must NOT contain any <button> elements — they block
+        // the native <details> toggle behaviour.
+        const buttonsInSummary = summary.querySelectorAll('button');
+        expect(buttonsInSummary).toHaveLength(0);
+
+        // The plain-text concept label should still appear in the summary.
+        expect(summary.textContent).toContain('Scholarly paper representation workflow');
+    });
+
+    // JVNAUTOSCI-1441 regression: bindConceptSelectionClicks must not call
+    // preventDefault when the click originates inside a <summary>/<details>.
+    test('bindConceptSelectionClicks does not preventDefault for links inside a summary', () => {
+        document.body.innerHTML = '<div id="diagnosticToggleTest"></div>';
+        const container = document.getElementById('diagnosticToggleTest');
+        container.innerHTML = `
+            <details data-thinking-diagnostic-key="test">
+                <summary>
+                    <button type="button" class="concept-selection-link" data-concept-id="#V#test_concept">Test</button>
+                </summary>
+                <div>Diagnostic content</div>
+            </details>`;
+
+        __testOnly_bindConceptSelectionClicks(container, {
+            selector: '.concept-selection-link',
+            datasetKey: 'conceptLinkBound'
+        });
+
+        const button = container.querySelector('.concept-selection-link');
+        const clickEvent = new MouseEvent('click', { bubbles: true, cancelable: true });
+        button.dispatchEvent(clickEvent);
+
+        // preventDefault must NOT have been called because the button lives
+        // inside a <summary> — blocking it would prevent <details> toggle.
+        expect(clickEvent.defaultPrevented).toBe(false);
     });
 });
 
