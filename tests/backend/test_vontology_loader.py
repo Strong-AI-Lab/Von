@@ -22,6 +22,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from src.backend.workflows.engine import (
+    WORKFLOW_STEP_EXECUTION_MODE_LLM,
     WorkflowActionInvocation,
     WorkflowDefinition,
     WorkflowStateSpec,
@@ -589,7 +590,9 @@ class TestWorkflowPromptContracts:
         assert step["prompt_contract"]["metadata"]["prompt_variables"] == ["issue_key"]
         assert step["prompt_resolution_diagnostics"]["status"] == "ok"
 
-    def test_load_workflow_definition_carries_prompt_contract_into_action_inputs(self):
+    def test_load_workflow_definition_carries_prompt_contract_into_llm_step_metadata(
+        self,
+    ):
         steps = [
             {
                 **_make_step(
@@ -637,13 +640,24 @@ class TestWorkflowPromptContracts:
         assert prompt_state.metadata["prompt_contract"]["resolved_prompt_concept_id"] == (
             "#V#issue_prompt"
         )
-        action_inputs = prompt_state.actions[0].inputs
+        action = prompt_state.actions[0]
+        action_inputs = action.inputs
         assert action_inputs["ticket_id"] == "JVNAUTOSCI-1358"
         assert "__prompt_defaults" not in action_inputs
-        assert action_inputs["__prompt_contract"]["metadata"]["prompt_name"] == (
+        assert "__prompt_contract" not in action_inputs
+        assert action_inputs["__prompt_resolution_diagnostics"]["status"] == "warning"
+        assert action.execution_mode == WORKFLOW_STEP_EXECUTION_MODE_LLM
+        assert action.prompt_contract is not None
+        assert action.prompt_contract["metadata"]["prompt_name"] == "Issue fixer"
+        assert action.llm_policy is not None
+        assert action.llm_policy["selected_prompt_id"] == "#V#issue_prompt"
+        assert action.llm_policy["selection_policy"] == "adaptive"
+        assert action.validation_policy == {
+            "prompt_validation_policy": "warn"
+        }
+        assert prompt_state.metadata["prompt_contract"]["metadata"]["prompt_name"] == (
             "Issue fixer"
         )
-        assert action_inputs["__prompt_resolution_diagnostics"]["status"] == "warning"
 
 
 class TestWorkflowBackgroundLaunchPolicyResolution:
@@ -2392,7 +2406,7 @@ class TestMetadataCarrythrough:
         assert meta["writes_variables"] == ["task_id"]
 
     def test_empty_metadata_when_no_annotations(self):
-        """Steps without annotations should have empty metadata."""
+        """Steps without annotations should still expose execution-mode metadata."""
         steps = [_make_step("#V#step", invokes_action="act")]
         graph = _make_graph(initial_step="#V#step", steps=steps)
 
@@ -2404,7 +2418,10 @@ class TestMetadataCarrythrough:
                 defn = load_workflow_definition_from_vontology("#V#test_workflow")
 
         assert defn is not None
-        assert defn.states["#V#step"].metadata == {}
+        assert defn.states["#V#step"].metadata == {
+            "execution_mode": "deterministic",
+            "execution_modes": ["deterministic"],
+        }
 
 
 # ---------------------------------------------------------------------------

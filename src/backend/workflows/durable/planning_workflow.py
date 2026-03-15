@@ -31,6 +31,7 @@ from ..engine import (
     WorkflowDefinition,
     WorkflowStateSpec,
     WorkflowTransitionSpec,
+    WORKFLOW_STEP_EXECUTION_MODE_LLM,
 )
 from ..workflow_registry import WorkflowRegistration
 
@@ -360,6 +361,7 @@ def _handle_assess_context(request: WorkflowActionRequest) -> WorkflowActionResu
             "planning_context": planning_context,
             "planning_inventory": planning_inventory,
             "planning_diagnostics": planning_diagnostics,
+            "planning_prompt_text": _resolve_planning_prompt(context),
             "planning_trace": trace,
         }
     )
@@ -679,6 +681,28 @@ def build_planning_workflow() -> WorkflowDefinition:
             WorkflowActionInvocation(
                 action_id="planning.infer_plan",
                 description="Infer forward actions from context and inventory.",
+                execution_mode=WORKFLOW_STEP_EXECUTION_MODE_LLM,
+                llm_policy={
+                    "tool_mode": "none",
+                    "policy_stage": "planning",
+                    "prompt_text_context_key": "planning_prompt_text",
+                    "response_contract_text": "Return JSON only.",
+                    "context_fields": [
+                        {
+                            "label": "Planning input (JSON)",
+                            "context_key": "planning_context",
+                        },
+                        {
+                            "label": "Available execution inventory (JSON)",
+                            "context_key": "planning_inventory",
+                        },
+                        {
+                            "label": "Context summary",
+                            "context_key": "context_summary",
+                        },
+                    ],
+                },
+                validation_policy={"output_format": "planning_plan_json"},
             ),
         ),
         transitions=(

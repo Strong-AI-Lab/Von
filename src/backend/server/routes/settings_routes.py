@@ -27,8 +27,11 @@ from ...services.settings_service import (
     get_active_ollama_host,
     set_active_ollama_host,
     resolve_llm_setting,
+    resolve_enabled_llm_settings,
     set_user_llm_setting,
     set_org_llm_setting,
+    set_user_enabled_llm_settings,
+    set_org_enabled_llm_settings,
     get_disable_remote_ollama_scan,
     get_show_tool_use_during_thinking,
     set_disable_remote_ollama_scan,
@@ -675,6 +678,10 @@ def get_all_settings():
             user_concept_id=user_concept_id, org_concept_id=org_concept_id
         )
         settings["resolved_llm"] = resolved
+        settings["enabled_llms"] = resolve_enabled_llm_settings(
+            user_concept_id=user_concept_id,
+            org_concept_id=org_concept_id,
+        )
         return jsonify(settings), 200
     except Exception as e:
         current_app.logger.error(f"Error retrieving all settings: {e}", exc_info=True)
@@ -695,6 +702,9 @@ def save_all_settings():
 
     try:
         resolved_llm = None
+        resolved_enabled_llms = None
+        llm_scope = None
+        llm_scope_concept_id = None
         if "disable_write_tool_conservatism" in data:
             if not _is_admin_or_owner_session():
                 return (
@@ -746,6 +756,8 @@ def save_all_settings():
             scope = llm_data.get("scope")  # required: user or organisation
             concept_id = llm_data.get("concept_id")
             if scope in ("user", "organisation") and concept_id and provider and model:
+                llm_scope = scope
+                llm_scope_concept_id = concept_id
                 ok = (
                     set_user_llm_setting(concept_id, provider, model)
                     if scope == "user"
@@ -793,6 +805,53 @@ def save_all_settings():
                     ),
                     400,
                 )
+
+        if "enabled_llms" in data:
+            enabled_entries = data.get("enabled_llms")
+            if not isinstance(enabled_entries, list):
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": "enabled_llms must be a list of provider/model entries.",
+                        }
+                    ),
+                    400,
+                )
+            if not (llm_scope and llm_scope_concept_id):
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": (
+                                "Saving enabled_llms requires active_llm scope and concept_id "
+                                "in the same request."
+                            ),
+                        }
+                    ),
+                    400,
+                )
+            ok = (
+                set_user_enabled_llm_settings(llm_scope_concept_id, enabled_entries)
+                if llm_scope == "user"
+                else set_org_enabled_llm_settings(llm_scope_concept_id, enabled_entries)
+            )
+            if not ok:
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": "Failed to persist enabled_llms.",
+                        }
+                    ),
+                    500,
+                )
+            resolved_enabled_llms = resolve_enabled_llm_settings(
+                user_concept_id=llm_scope_concept_id if llm_scope == "user" else None,
+                org_concept_id=(
+                    llm_scope_concept_id if llm_scope == "organisation" else None
+                ),
+            )
 
         if "openai_api_key_env_var" in data and data["openai_api_key_env_var"]:
             env_var = data["openai_api_key_env_var"]
@@ -873,6 +932,7 @@ def save_all_settings():
                     "status": "success",
                     "message": "Settings updated successfully.",
                     "resolved_llm": resolved_llm,
+                    "enabled_llms": resolved_enabled_llms,
                 }
             ),
             200,

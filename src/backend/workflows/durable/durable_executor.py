@@ -14,6 +14,7 @@ from typing import Any, Mapping
 from ..engine import (
     WorkflowDefinition,
     apply_tool_output_context_mappings,
+    execute_workflow_step_invocation,
     evaluate_transition_condition_spec,
     resolve_action_inputs_from_context,
     state_has_on_break_transition,
@@ -173,6 +174,7 @@ class DurableWorkflowExecutor:
             get_active_model_name,
             get_llm_client,
         )
+        from .registry_factory import _get_or_build_durable_mcp_gateway
 
         llm_client = get_llm_client(
             user_concept_id=instance.user_id,
@@ -180,6 +182,7 @@ class DurableWorkflowExecutor:
         )
         environment = WorkflowEnvironment(
             llm_client=llm_client,
+            gateway=_get_or_build_durable_mcp_gateway(),
             model=get_active_model_name(),
             user_namespace=instance.namespace,
         )
@@ -379,20 +382,22 @@ class DurableWorkflowExecutor:
             context_before_actions = dict(context)
             for action in state_spec.actions:
                 context_before_action = dict(context)
+                action_target_id = action.target_id
                 resolved_inputs = resolve_action_inputs_from_context(
                     action_inputs=action.inputs,
                     context=context,
                 )
-                result = self._registry.execute(
-                    action.action_id,
-                    inputs=resolved_inputs,
+                result = execute_workflow_step_invocation(
+                    registry=self._registry,
+                    action=action,
+                    resolved_inputs=resolved_inputs,
                     context=context,
                     env=environment,
                     trace=trace,
                 )
 
                 trace.record_action(
-                    action_id=action.action_id,
+                    action_id=action_target_id,
                     inputs=resolved_inputs,
                     outputs=result.outputs,
                     status=result.status,
@@ -412,13 +417,13 @@ class DurableWorkflowExecutor:
                         metadata=state_spec.metadata,
                         action_outputs=result.outputs,
                         state_id=current_state,
-                        action_id=action.action_id,
+                        action_id=action_target_id,
                     )
 
                 step_envelope = build_step_result_envelope(
                     workflow_id=definition.workflow_id,
                     state_id=current_state,
-                    action_id=action.action_id,
+                    action_id=action_target_id,
                     action_status=result.status,
                     action_outcome=action_outcome,
                     action_error=result.error,
@@ -435,7 +440,7 @@ class DurableWorkflowExecutor:
                         "status": "control_signal",
                         "workflow_id": definition.workflow_id,
                         "state_id": current_state,
-                        "action_id": action.action_id,
+                        "action_id": action_target_id,
                         "control_signal": step_envelope["control_signal"],
                         "control_signal_scope": step_envelope.get(
                             "control_signal_scope"
@@ -462,7 +467,7 @@ class DurableWorkflowExecutor:
                         final_state=current_state,
                         error=error,
                         checkpoint=True,
-                        error_step=action.action_id,
+                        error_step=action_target_id,
                     )
                 if action_outcome == WORKFLOW_ACTION_OUTCOME_UNKNOWN:
                     if state_has_unknown_route:
@@ -476,7 +481,7 @@ class DurableWorkflowExecutor:
                         final_state=current_state,
                         error=error,
                         checkpoint=True,
-                        error_step=action.action_id,
+                        error_step=action_target_id,
                     )
 
                 control_signal = get_last_control_signal(context)

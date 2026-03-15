@@ -31,11 +31,16 @@ from .engine import (
     WorkflowDefinition,
     WorkflowStateSpec,
     WorkflowActionInvocation,
+    WORKFLOW_STEP_EXECUTION_MODE_CONTROL,
+    WORKFLOW_STEP_EXECUTION_MODE_DETERMINISTIC,
+    WORKFLOW_STEP_EXECUTION_MODE_LLM,
+    WORKFLOW_STEP_EXECUTION_MODE_SUBWORKFLOW,
     WorkflowTransitionSpec,
     _normalise_approval_gate_spec,
     _normalise_idempotency_policy_spec,
     _normalise_retry_policy_spec,
     build_transition_condition,
+    normalise_workflow_step_execution_mode,
 )
 
 logger = logging.getLogger(__name__)
@@ -876,6 +881,119 @@ def _extract_step_prompt_resolution_config(
         normalise_prompt_metadata_defaults(defaults_raw),
         normalise_prompt_validation_policy(policy_raw),
     )
+
+
+_WORKFLOW_STEP_EXECUTION_MODE_INPUT_KEYS: tuple[str, ...] = (
+    "execution_mode",
+    "__execution_mode",
+    "workflow_step_execution_mode",
+    "step_execution_mode",
+)
+_WORKFLOW_STEP_LLM_POLICY_INPUT_KEYS: tuple[str, ...] = (
+    "llm_policy",
+    "__llm_policy",
+    "workflow_step_llm_policy",
+)
+_WORKFLOW_STEP_VALIDATION_POLICY_INPUT_KEYS: tuple[str, ...] = (
+    "validation_policy",
+    "__validation_policy",
+    "workflow_step_validation_policy",
+)
+
+
+def _extract_step_execution_mode(input_map: Dict[str, Any]) -> str | None:
+    for key in _WORKFLOW_STEP_EXECUTION_MODE_INPUT_KEYS:
+        if key not in input_map:
+            continue
+        return normalise_workflow_step_execution_mode(input_map.pop(key))
+    return None
+
+
+def _extract_step_llm_policy(
+    *,
+    input_map: Dict[str, Any],
+    prompt_contract: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    policy: dict[str, Any] = {}
+    raw_policy: Any = None
+    for key in _WORKFLOW_STEP_LLM_POLICY_INPUT_KEYS:
+        if key not in input_map:
+            continue
+        raw_policy = input_map.pop(key)
+        break
+
+    if isinstance(raw_policy, Mapping):
+        policy.update(dict(raw_policy))
+    elif isinstance(raw_policy, str) and raw_policy.strip():
+        try:
+            parsed = json.loads(raw_policy)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, Mapping):
+            policy.update(dict(parsed))
+
+    prompt_contract_map = (
+        prompt_contract if isinstance(prompt_contract, Mapping) else {}
+    )
+    prompt_metadata = prompt_contract_map.get("metadata")
+    prompt_metadata_map = (
+        prompt_metadata if isinstance(prompt_metadata, Mapping) else {}
+    )
+
+    requested_prompt_ids = prompt_contract_map.get("requested_prompt_concept_ids")
+    if isinstance(requested_prompt_ids, list) and requested_prompt_ids:
+        policy.setdefault("prompt_candidates", list(requested_prompt_ids))
+    resolved_prompt_id = str(
+        prompt_contract_map.get("resolved_prompt_concept_id") or ""
+    ).strip()
+    if resolved_prompt_id:
+        policy.setdefault("selected_prompt_id", resolved_prompt_id)
+    prompt_text = str(prompt_contract_map.get("prompt_text") or "").strip()
+    if prompt_text:
+        policy.setdefault("prompt_text", prompt_text)
+
+    allowed_tools = prompt_metadata_map.get("allowed_tools")
+    if isinstance(allowed_tools, list) and allowed_tools:
+        policy.setdefault("allowed_tools", list(allowed_tools))
+    tool_priority = prompt_metadata_map.get("tool_resolution_priority")
+    if isinstance(tool_priority, list) and tool_priority:
+        policy.setdefault("tool_resolution_priority", list(tool_priority))
+    model_preference = prompt_metadata_map.get("model_preference")
+    if isinstance(model_preference, str) and model_preference.strip():
+        policy.setdefault("model_preference", model_preference.strip())
+    agent_profiles = prompt_metadata_map.get("agent_profile_ids")
+    if isinstance(agent_profiles, list) and agent_profiles:
+        policy.setdefault("agent_profile_ids", list(agent_profiles))
+
+    selection_policy = str(policy.get("selection_policy") or "").strip().lower()
+    if selection_policy not in {"fixed", "adaptive", "bandit"}:
+        policy["selection_policy"] = "adaptive"
+
+    return policy
+
+
+def _extract_step_validation_policy(
+    input_map: Dict[str, Any],
+) -> dict[str, Any] | None:
+    raw_policy: Any = None
+    for key in _WORKFLOW_STEP_VALIDATION_POLICY_INPUT_KEYS:
+        if key not in input_map:
+            continue
+        raw_policy = input_map.pop(key)
+        break
+
+    policy: dict[str, Any] = {}
+    if isinstance(raw_policy, Mapping):
+        policy.update(dict(raw_policy))
+    elif isinstance(raw_policy, str) and raw_policy.strip():
+        try:
+            parsed = json.loads(raw_policy)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, Mapping):
+            policy.update(dict(parsed))
+
+    return policy or None
 
 
 def _extract_tool_output_mapping(
@@ -2159,7 +2277,8 @@ def load_workflow_definition_from_vontology(
         subworkflow_failure_mode = ""
         action_contract: dict[str, Any] | None = None
         action_contract_source = ""
-        if invocation_action_id:
+        step_has_prompt_contract = isinstance(step.get("prompt_contract"), Mapping)
+        if invocation_action_id or step_has_prompt_contract:
             # Read input mapping from Vontology (hasInputMap relationships).
             doc = step_docs.get(step_id, {})
             step_rels = doc.get("relationships") or {}
@@ -2167,6 +2286,7 @@ def load_workflow_definition_from_vontology(
                 step_rels = {}
             input_map = _parse_step_input_map(step_rels)
             _extract_step_prompt_resolution_config(input_map)
+            configured_execution_mode = _extract_step_execution_mode(input_map)
             prompt_contract = (
                 dict(step.get("prompt_contract"))
                 if isinstance(step.get("prompt_contract"), Mapping)
@@ -2227,12 +2347,48 @@ def load_workflow_definition_from_vontology(
                 input_map["workflow_id"] = str(invokes_workflow).strip()
                 input_map["__parent_workflow_id"] = str(workflow_id or "").strip()
                 input_map["__parent_state_id"] = str(step_id or "").strip()
-            if prompt_contract:
-                input_map["__prompt_contract"] = prompt_contract
             if prompt_resolution_diagnostics:
                 input_map["__prompt_resolution_diagnostics"] = (
                     prompt_resolution_diagnostics
                 )
+
+            execution_mode = configured_execution_mode
+            if not execution_mode:
+                if has_static_workflow_invocation:
+                    execution_mode = WORKFLOW_STEP_EXECUTION_MODE_SUBWORKFLOW
+                elif prompt_contract:
+                    if str(invocation_action_id or "").strip().startswith(
+                        "workflow_control."
+                    ):
+                        execution_mode = WORKFLOW_STEP_EXECUTION_MODE_CONTROL
+                    else:
+                        execution_mode = WORKFLOW_STEP_EXECUTION_MODE_LLM
+                elif str(invocation_action_id or "").strip().startswith(
+                    "workflow_control."
+                ):
+                    execution_mode = WORKFLOW_STEP_EXECUTION_MODE_CONTROL
+                else:
+                    execution_mode = WORKFLOW_STEP_EXECUTION_MODE_DETERMINISTIC
+
+            llm_policy = (
+                _extract_step_llm_policy(
+                    input_map=input_map,
+                    prompt_contract=prompt_contract,
+                )
+                if execution_mode == WORKFLOW_STEP_EXECUTION_MODE_LLM
+                else None
+            )
+            validation_policy = _extract_step_validation_policy(input_map)
+            if (
+                validation_policy is None
+                and isinstance(prompt_contract, Mapping)
+                and prompt_contract.get("validation_policy")
+            ):
+                validation_policy = {
+                    "prompt_validation_policy": str(
+                        prompt_contract.get("validation_policy") or ""
+                    ).strip()
+                }
 
             actions.append(
                 WorkflowActionInvocation(
@@ -2244,6 +2400,15 @@ def load_workflow_definition_from_vontology(
                         else None
                     )
                     or None,
+                    execution_mode=execution_mode,
+                    prompt_contract=prompt_contract,
+                    llm_policy=llm_policy,
+                    validation_policy=validation_policy,
+                    subworkflow_id=(
+                        str(invokes_workflow or "").strip() or None
+                        if execution_mode == WORKFLOW_STEP_EXECUTION_MODE_SUBWORKFLOW
+                        else None
+                    ),
                 )
             )
 
@@ -2490,6 +2655,31 @@ def load_workflow_definition_from_vontology(
             step_metadata["checkpoint_policy"] = checkpoint_policy
         if prompt_contract:
             step_metadata["prompt_contract"] = prompt_contract
+        action_execution_modes = [
+            str(getattr(action, "execution_mode", "") or "").strip()
+            for action in actions
+            if str(getattr(action, "execution_mode", "") or "").strip()
+        ]
+        if action_execution_modes:
+            step_metadata["execution_modes"] = action_execution_modes
+            if len(action_execution_modes) == 1:
+                step_metadata["execution_mode"] = action_execution_modes[0]
+        llm_policies = []
+        for action in actions:
+            raw_llm_policy = getattr(action, "llm_policy", None)
+            if not isinstance(raw_llm_policy, Mapping):
+                continue
+            llm_policies.append(
+                {
+                    str(key): value
+                    for key, value in raw_llm_policy.items()
+                    if isinstance(key, str)
+                }
+            )
+        if llm_policies:
+            step_metadata["llm_policies"] = llm_policies
+            if len(llm_policies) == 1:
+                step_metadata["llm_policy"] = llm_policies[0]
         if action_contract:
             step_metadata["action_contract"] = action_contract
         action_contract_source = step.get("action_contract_source")

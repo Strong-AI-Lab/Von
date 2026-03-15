@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from src.backend.workflows.engine import (
+    WORKFLOW_STEP_EXECUTION_MODE_LLM,
     WorkflowActionInvocation,
     WorkflowDefinition,
     WorkflowStateSpec,
@@ -410,6 +411,7 @@ def test_validate_contract_keeps_prompt_contract_warnings_non_blocking() -> None
                 actions=(
                     WorkflowActionInvocation(
                         action_id="llm.action",
+                        execution_mode=WORKFLOW_STEP_EXECUTION_MODE_LLM,
                         inputs={
                             "__prompt_resolution_diagnostics": {
                                 "errors": [],

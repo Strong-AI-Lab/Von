@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Any, Mapping, Optional, Sequence
 
-from .settings_service import resolve_llm_setting
+from .settings_service import resolve_enabled_llm_settings, resolve_llm_setting
 
 logger = logging.getLogger(__name__)
 
@@ -406,28 +406,54 @@ def _build_registry_from_settings() -> Mapping[str, Any]:
     except Exception:
         pass
 
-    active = (
-        resolve_llm_setting(
-            user_concept_id=user_concept_id, org_concept_id=org_concept_id
-        )
-        or {}
-    )
-    provider = active.get("provider") if isinstance(active, dict) else None
-    model = active.get("model") if isinstance(active, dict) else None
-    locality = "external"
-    if isinstance(provider, str) and provider.lower() == "ollama":
-        locality = "local"
-
     models = []
-    if isinstance(model, str) and model.strip():
+    enabled = resolve_enabled_llm_settings(
+        user_concept_id=user_concept_id,
+        org_concept_id=org_concept_id,
+    )
+    for entry in enabled:
+        if not isinstance(entry, Mapping):
+            continue
+        provider = entry.get("provider")
+        model = entry.get("model")
+        locality = "external"
+        if isinstance(provider, str) and provider.lower() == "ollama":
+            locality = "local"
+        if not isinstance(model, str) or not model.strip():
+            continue
         models.append(
             {
                 "model_id": model.strip(),
                 "provider": provider or "unknown",
                 "locality": locality,
                 "source": "settings",
+                "scope": entry.get("scope"),
+                "host": entry.get("host"),
             }
         )
+
+    if not models:
+        active = (
+            resolve_llm_setting(
+                user_concept_id=user_concept_id, org_concept_id=org_concept_id
+            )
+            or {}
+        )
+        provider = active.get("provider") if isinstance(active, dict) else None
+        model = active.get("model") if isinstance(active, dict) else None
+        locality = "external"
+        if isinstance(provider, str) and provider.lower() == "ollama":
+            locality = "local"
+        if isinstance(model, str) and model.strip():
+            models.append(
+                {
+                    "model_id": model.strip(),
+                    "provider": provider or "unknown",
+                    "locality": locality,
+                    "source": "settings",
+                    "scope": active.get("scope") if isinstance(active, Mapping) else None,
+                }
+            )
 
     return {
         "source": "settings",

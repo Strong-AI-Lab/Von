@@ -15747,7 +15747,10 @@ def _settings_get_public(
     """
 
     from src.backend.server.routes.settings_routes import get_all_settings_data
-    from src.backend.services.settings_service import resolve_llm_setting
+    from src.backend.services.settings_service import (
+        resolve_enabled_llm_settings,
+        resolve_llm_setting,
+    )
 
     settings = get_all_settings_data() or {}
     try:
@@ -15757,6 +15760,13 @@ def _settings_get_public(
         )
     except Exception:
         settings["resolved_llm"] = None
+    try:
+        settings["enabled_llms"] = resolve_enabled_llm_settings(
+            user_concept_id=user_concept_id,
+            org_concept_id=organisation_concept_id,
+        )
+    except Exception:
+        settings["enabled_llms"] = []
 
     return {"success": True, "settings": settings}
 
@@ -15788,6 +15798,7 @@ def _chat_introspect(
     )
     from src.backend.services.settings_service import (
         get_setting,
+        resolve_enabled_llm_settings,
         resolve_llm_setting,
     )
 
@@ -15951,6 +15962,14 @@ def _chat_introspect(
     except Exception:
         resolved_llm = None
     resolved_llm = _sanitise_for_introspection(resolved_llm)
+    try:
+        enabled_llms = resolve_enabled_llm_settings(
+            user_concept_id=namespace,
+            org_concept_id=organisation_concept_id,
+        )
+    except Exception:
+        enabled_llms = []
+    enabled_llms = _sanitise_for_introspection(enabled_llms)
 
     configured_openai_api_key_env_var = None
     try:
@@ -16143,6 +16162,7 @@ def _chat_introspect(
         "active_model_name": active_model_name,
         "active_llm": resolved_llm,  # Resolved LLM shape with sensitive keys redacted to booleans.
         "resolved_llm": resolved_llm,
+        "enabled_llms": enabled_llms,
         # Backwards-compatible fields.
         "prompt_concept_ids": list(behaviour_prompt_concept_ids),
         "prompt_concepts": prompt_concepts,
@@ -18748,6 +18768,7 @@ def build_default_catalogue() -> MethodCatalogue:
                     "active_model_name": (str, type(None)),
                     "active_llm": (dict, type(None)),
                     "resolved_llm": (dict, type(None)),
+                    "enabled_llms": list,
                     "prompt_concept_ids": list,
                     "prompt_concepts": list,
                     "prompt_count": int,
