@@ -20,10 +20,13 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-import re
 from typing import TYPE_CHECKING, Any, Iterator, Mapping, Sequence
 
 from ..integrations.internal_mcp.jira_proxy_mcp import get_jira_proxy
+from ..utils.jira_issue_key_utils import (
+    extract_jira_issue_number,
+    normalise_jira_issue_key,
+)
 
 if TYPE_CHECKING:
     from ..integrations.internal_mcp.gateway import InternalMCPGateway
@@ -58,8 +61,6 @@ DEFAULT_JIRA_TASK_MIGRATION_FIELDS = [
     "customfield_10014",
     "customfield_10008",
 ]
-
-_ISSUE_KEY_NUMBER_RE = re.compile(r"^[A-Z][A-Z0-9_]*-(\d+)$")
 
 
 @dataclass(frozen=True)
@@ -107,26 +108,6 @@ def build_default_jira_task_migration_jql(
     else:
         order_by = "key ASC"
     return " AND ".join(clauses) + f" ORDER BY {order_by}"
-
-
-def _normalise_issue_key(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    cleaned = value.strip().upper()
-    return cleaned or None
-
-
-def _extract_issue_number(issue_key: Any) -> int | None:
-    cleaned = _normalise_issue_key(issue_key)
-    if not cleaned:
-        return None
-    match = _ISSUE_KEY_NUMBER_RE.match(cleaned)
-    if match is None:
-        return None
-    try:
-        return int(match.group(1))
-    except (TypeError, ValueError):
-        return None
 
 
 def normalise_jira_task_migration_options(
@@ -222,7 +203,7 @@ def _iter_batches(
         yield list(items[start : start + batch_size])
 
 
-async def _discover_issue_docs(
+async def discover_jira_issue_docs(
     *,
     jql: str,
     fields: Sequence[str],
@@ -299,7 +280,9 @@ def _extract_missing_targets(
                     continue
                 if relation_row.get("reason") != "target_issue_not_imported":
                     continue
-                issue_key = _normalise_issue_key(relation_row.get("target_issue_key"))
+                issue_key = normalise_jira_issue_key(
+                    relation_row.get("target_issue_key")
+                )
                 if isinstance(issue_key, str) and issue_key.startswith(project_prefix):
                     missing_targets.add(issue_key)
     return sorted(missing_targets)
@@ -377,7 +360,7 @@ def _filter_issue_docs_by_issue_number(
     selected: list[Mapping[str, Any]] = []
     filtered_out_count = 0
     for issue_doc in issue_docs:
-        issue_number = _extract_issue_number(issue_doc.get("key"))
+        issue_number = extract_jira_issue_number(issue_doc.get("key"))
         if issue_number is None:
             filtered_out_count += 1
             continue
@@ -436,7 +419,7 @@ async def run_jira_task_migration(
     options = normalise_jira_task_migration_options(options)
     gateway = gateway or _build_gateway()
 
-    discovered_issue_docs = await _discover_issue_docs(
+    discovered_issue_docs = await discover_jira_issue_docs(
         jql=str(options.jql),
         fields=DEFAULT_JIRA_TASK_MIGRATION_FIELDS,
         page_size=options.page_size,
@@ -445,7 +428,7 @@ async def run_jira_task_migration(
         issue_key: issue_doc
         for issue_doc in discovered_issue_docs
         if isinstance(issue_doc, Mapping)
-        for issue_key in [_normalise_issue_key(issue_doc.get("key"))]
+        for issue_key in [normalise_jira_issue_key(issue_doc.get("key"))]
         if isinstance(issue_key, str)
     }
     deduplicated_issue_docs = list(discovered_by_key.values())
@@ -463,14 +446,14 @@ async def run_jira_task_migration(
     imported_issue_keys = set(
         list_imported_jira_issue_keys(
             organisation_concept_id=options.organisation_concept_id,
-            limit=2000,
+            limit=None,
         )
     )
     already_imported_selected_issue_count = sum(
         1
         for issue_doc in candidate_issue_docs
         if (
-            issue_key := _normalise_issue_key(issue_doc.get("key"))
+            issue_key := normalise_jira_issue_key(issue_doc.get("key"))
         ) in imported_issue_keys
     )
 
@@ -480,7 +463,7 @@ async def run_jira_task_migration(
             issue_doc
             for issue_doc in candidate_issue_docs
             if (
-                issue_key := _normalise_issue_key(issue_doc.get("key"))
+                issue_key := normalise_jira_issue_key(issue_doc.get("key"))
             ) not in imported_issue_keys
         ]
 
@@ -507,7 +490,7 @@ async def run_jira_task_migration(
             "selected_issue_keys_sample": [
                 issue_key
                 for issue_doc in selected_issue_docs[:20]
-                for issue_key in [_normalise_issue_key(issue_doc.get("key"))]
+                for issue_key in [normalise_jira_issue_key(issue_doc.get("key"))]
                 if isinstance(issue_key, str)
             ],
         },
@@ -572,6 +555,7 @@ __all__ = [
     "DEFAULT_JIRA_TASK_MIGRATION_REPORT_PATH",
     "JiraTaskMigrationOptions",
     "build_default_jira_task_migration_jql",
+    "discover_jira_issue_docs",
     "normalise_jira_task_migration_options",
     "run_jira_task_migration",
     "run_jira_task_migration_sync",

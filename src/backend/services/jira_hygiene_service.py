@@ -12,7 +12,14 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence
 
+from ..utils.jira_issue_key_utils import (
+    normalise_jira_issue_key,
+    normalise_jira_issue_key_set,
+)
+
 _WORD_RE = re.compile(r"[a-z0-9]+")
+_normalise_issue_key = normalise_jira_issue_key
+_normalise_issue_key_set = normalise_jira_issue_key_set
 
 _DEFAULT_PROJECT_KEY = "JVNAUTOSCI"
 _DEFAULT_MAX_ISSUES = 200
@@ -234,26 +241,6 @@ def _coerce_bool(value: Any, *, default: bool = False) -> bool:
         if lowered in {"0", "false", "no", "off"}:
             return False
     return default
-
-
-def _normalise_issue_key(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    cleaned = value.strip().upper()
-    return cleaned or None
-
-
-def _normalise_issue_key_set(value: Any) -> set[str]:
-    if not isinstance(value, list):
-        return set()
-    keys: set[str] = set()
-    for item in value:
-        cleaned = _normalise_issue_key(item)
-        if cleaned:
-            keys.add(cleaned)
-    return keys
-
-
 def _extract_plain_text(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()

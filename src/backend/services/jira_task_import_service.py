@@ -20,6 +20,7 @@ from ..db.repositories.text_value_repository import (
     TextRelationsRepository,
     TextValuesRepository,
 )
+from ..utils.jira_issue_key_utils import normalise_jira_issue_key
 from ..utils.concept_id_utils import canonicalise_vontology_concept_id, ensure_v_concept_prefix
 from .concept_resolution_service import resolve_concept_by_name
 from .concept_service import create_concept, get_concept_by_concept_id
@@ -38,6 +39,7 @@ from .task_management_service import (
     upsert_task_external_reference,
 )
 
+_normalise_issue_key = normalise_jira_issue_key
 
 _JIRA_SOURCE_SYSTEM = "jira"
 _DEFAULT_PRIORITY = "medium"
@@ -82,15 +84,6 @@ _JIRA_PRIORITY_TO_VON_PRIORITY = {
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _normalise_issue_key(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    cleaned = value.strip().upper()
-    return cleaned or None
-
-
 def _extract_plain_text(value: Any) -> str | None:
     if isinstance(value, str):
         cleaned = value.strip()
@@ -923,7 +916,7 @@ def _resolve_existing_task_id(
 def list_imported_jira_issue_keys(
     *,
     organisation_concept_id: str | None = None,
-    limit: int = 2000,
+    limit: int | None = None,
 ) -> list[str]:
     """Return Jira issue keys already linked via task external_references.
 
@@ -932,10 +925,9 @@ def list_imported_jira_issue_keys(
     project-scale migration checkpoints and incremental sync runs.
     """
 
-    try:
-        bounded_limit = max(1, min(int(limit), 2000))
-    except (TypeError, ValueError):
-        bounded_limit = 2000
+    bounded_limit: int | None = None
+    if isinstance(limit, int):
+        bounded_limit = max(1, min(limit, 100000))
 
     query: Dict[str, Any] = {
         "relationships.is_an_instance_of": TASK_SPECIFICATION_TYPE_ID,
@@ -961,10 +953,12 @@ def list_imported_jira_issue_keys(
         {
             issue_key
             for raw_value in raw_values
-            for issue_key in [_normalise_issue_key(raw_value)]
+            for issue_key in [normalise_jira_issue_key(raw_value)]
             if isinstance(issue_key, str) and issue_key
         }
     )
+    if bounded_limit is None:
+        return unique_keys
     return unique_keys[:bounded_limit]
 
 

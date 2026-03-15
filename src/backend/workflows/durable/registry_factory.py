@@ -67,6 +67,9 @@ from .jira_task_incremental_import_workflow import (
     get_jira_task_incremental_import_workflow_registration,
     register_jira_task_incremental_import_actions,
 )
+from .jira_task_full_reconciliation_workflow import (
+    register_jira_task_full_reconciliation_actions,
+)
 from .parent_specificity_concept_dossier_workflow import (
     get_parent_specificity_concept_dossier_workflow_registration,
     register_parent_specificity_concept_dossier_actions,
@@ -721,6 +724,7 @@ def build_durable_action_registry() -> ActionRegistry:
     register_file_copy_interpretation_actions(registry)
     register_entity_identity_resolution_actions(registry)
     register_jira_task_incremental_import_actions(registry)
+    register_jira_task_full_reconciliation_actions(registry)
     register_parent_specificity_concept_dossier_actions(registry)
     register_parent_specificity_rumination_actions(registry)
     register_paper_representation_actions(registry)
