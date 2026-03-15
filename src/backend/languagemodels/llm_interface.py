@@ -36,6 +36,7 @@ from .structured_tool_calling import (
     get_llm_client as get_structured_client,
     LLMClientConfig,
 )
+from .structured_tool_calling.client import resolve_safe_temperature_for_model
 from typing import (
     Optional,
     List,
@@ -995,10 +996,14 @@ class OpenAIClient(LLMInterface):
     def _get_structured_client_config(self, model: Optional[str]) -> LLMClientConfig:
         """Get configuration for structured tool calling client (JVNAUTOSCI-799)."""
         resolved_model = resolve_openai_model_name(model)
+        safe_temperature = resolve_safe_temperature_for_model(
+            resolved_model or self.DEFAULT_MODEL,
+            0.7,
+        )
         return LLMClientConfig(
             model=resolved_model or self.DEFAULT_MODEL,
             api_key=self.api_key,
-            temperature=0.7,
+            temperature=safe_temperature,
         )
 
     def validate_model_response(self, response, model: str) -> str:
@@ -1088,7 +1093,12 @@ class OpenAIClient(LLMInterface):
             openai_params = {}
             if llm_params:
                 if "temperature" in llm_params:
-                    openai_params["temperature"] = llm_params["temperature"]
+                    safe_temperature = resolve_safe_temperature_for_model(
+                        target_model,
+                        llm_params["temperature"],
+                    )
+                    if safe_temperature is not None:
+                        openai_params["temperature"] = safe_temperature
                 # Add other OpenAI specific params like top_p, max_tokens, etc.
 
             response = self.client.chat.completions.create(  # type: ignore[arg-type]

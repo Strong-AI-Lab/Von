@@ -14,12 +14,13 @@ from .types import ToolDefinition, LLMResponse
 logger = logging.getLogger(__name__)
 
 
-# Models that only support default temperature (1.0) - JVNAUTOSCI-1010
+# Models that only support default temperature (1.0) - JVNAUTOSCI-1010 / JVNAUTOSCI-1427
 # See: OpenAI API error "temperature does not support X with this model"
 MODELS_REQUIRING_DEFAULT_TEMPERATURE = frozenset(
     {
         "gpt-5.2-chat-latest",
         "gpt-5.2",
+        "gpt-5-mini",
     }
 )
 
@@ -27,7 +28,8 @@ MODELS_REQUIRING_DEFAULT_TEMPERATURE = frozenset(
 def model_supports_custom_temperature(model: str) -> bool:
     """Check if a model supports custom temperature values.
 
-    Some newer OpenAI models (e.g. gpt-5.2) only accept temperature=1.
+    Some newer OpenAI models (e.g. gpt-5.2, gpt-5-mini) only accept
+    temperature=1 / model default.
     """
     if not model:
         return True
@@ -40,6 +42,23 @@ def model_supports_custom_temperature(model: str) -> bool:
         if model_lower.startswith(restricted):
             return False
     return True
+
+
+def resolve_safe_temperature_for_model(
+    model: str,
+    temperature: Optional[float],
+) -> Optional[float]:
+    """Return a temperature that is safe to send for the given model.
+
+    For models that reject custom temperatures, return ``None`` so callers omit
+    the parameter entirely and let the model use its default behaviour.
+    """
+
+    if temperature is None:
+        return None
+    if model_supports_custom_temperature(model):
+        return temperature
+    return None
 
 
 @dataclass

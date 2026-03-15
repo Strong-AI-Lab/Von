@@ -9,7 +9,11 @@ import asyncio
 import openai
 
 from ..types import ToolCall, ToolDefinition, LLMResponse, ToolCallError
-from ..client import LLMClient, LLMClientConfig, model_supports_custom_temperature
+from ..client import (
+    LLMClient,
+    LLMClientConfig,
+    resolve_safe_temperature_for_model,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -62,11 +66,12 @@ class OpenAIClient(LLMClient):
 
             # Only pass temperature if the model supports it and a value is set
             # Some models (e.g. gpt-5.2) only accept default temperature
-            if (
-                self.config.temperature is not None
-                and model_supports_custom_temperature(self.config.model)
-            ):
-                request_kwargs["temperature"] = self.config.temperature
+            safe_temperature = resolve_safe_temperature_for_model(
+                self.config.model,
+                self.config.temperature,
+            )
+            if safe_temperature is not None:
+                request_kwargs["temperature"] = safe_temperature
 
             response = await self._client.chat.completions.create(
                 model=self.config.model,

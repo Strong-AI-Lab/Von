@@ -1,5 +1,8 @@
 """Tests for LLMClient interface and factory."""
 
+import asyncio
+import types
+
 import pytest
 
 from src.backend.languagemodels.structured_tool_calling import (
@@ -66,15 +69,23 @@ class TestGetLLMClient:
         import types
 
         fake_genai = types.ModuleType("google.genai")
-        fake_genai.Client = lambda **kwargs: types.SimpleNamespace(
-            models=types.SimpleNamespace(generate_content=lambda **kw: None)
+        setattr(
+            fake_genai,
+            "Client",
+            lambda **kwargs: types.SimpleNamespace(
+                models=types.SimpleNamespace(generate_content=lambda **kw: None)
+            ),
         )
-        fake_genai.types = types.SimpleNamespace(
-            GenerateContentConfig=lambda **kw: kw,
-            Tool=lambda **kw: kw,
-            FunctionDeclaration=lambda **kw: kw,
-            Schema=lambda **kw: kw,
-            Type=types.SimpleNamespace(OBJECT="OBJECT"),
+        setattr(
+            fake_genai,
+            "types",
+            types.SimpleNamespace(
+                GenerateContentConfig=lambda **kw: kw,
+                Tool=lambda **kw: kw,
+                FunctionDeclaration=lambda **kw: kw,
+                Schema=lambda **kw: kw,
+                Type=types.SimpleNamespace(OBJECT="OBJECT"),
+            ),
         )
 
         sys.modules["google.genai"] = fake_genai
@@ -95,6 +106,77 @@ class TestGetLLMClient:
         client = get_llm_client(config)
 
         assert isinstance(client, OllamaClient)
+
+
+class TestTemperatureGuards:
+    """Tests for model-specific temperature safeguards."""
+
+    @pytest.mark.parametrize(
+        ("model", "temperature", "expected"),
+        [
+            ("gpt-4", 0.7, 0.7),
+            ("gpt-5-mini", 0.7, None),
+            ("gpt-5-mini-2026-03-01", 0.7, None),
+            ("gpt-5.2-chat-latest", 0.7, None),
+        ],
+    )
+    def test_resolve_safe_temperature_for_model(self, model, temperature, expected):
+        from src.backend.languagemodels.structured_tool_calling.client import (
+            resolve_safe_temperature_for_model,
+        )
+
+        assert resolve_safe_temperature_for_model(model, temperature) == expected
+
+    def test_openai_provider_omits_temperature_for_gpt5_mini(self, monkeypatch):
+        from src.backend.languagemodels.structured_tool_calling.providers import (
+            openai_client as provider_module,
+        )
+        from src.backend.languagemodels.structured_tool_calling.providers import (
+            OpenAIClient,
+        )
+
+        captured_kwargs: dict[str, object] = {}
+
+        async def _create(**kwargs):
+            captured_kwargs.update(kwargs)
+            return types.SimpleNamespace(
+                choices=[
+                    types.SimpleNamespace(
+                        message=types.SimpleNamespace(content="ok", tool_calls=None)
+                    )
+                ],
+                usage=None,
+                model="gpt-5-mini",
+            )
+
+        monkeypatch.setattr(
+            provider_module.openai,
+            "AsyncOpenAI",
+            lambda **_kwargs: types.SimpleNamespace(
+                chat=types.SimpleNamespace(
+                    completions=types.SimpleNamespace(create=_create)
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            provider_module.openai,
+            "OpenAI",
+            lambda **_kwargs: object(),
+        )
+
+        client = OpenAIClient(
+            LLMClientConfig(model="gpt-5-mini", api_key="test-key", temperature=0.7)
+        )
+
+        result = asyncio.run(
+            client.generate_with_tools(
+                prompt="hello",
+                available_tools=[],
+            )
+        )
+
+        assert result.text_response == "ok"
+        assert "temperature" not in captured_kwargs
 
     def test_unknown_model_defaults_to_ollama(self):
         """Test that unknown models default to Ollama."""
