@@ -148,3 +148,90 @@ def test_list_tools_retries_transport_closed_once_then_succeeds(monkeypatch):
     assert state["calls"] == 2
     assert client.error_count == 0
     assert client.call_count == 1
+
+
+def test_call_tool_surfaces_leaf_exception_message_from_exception_group(monkeypatch):
+    class _Session:
+        def __init__(self, _read, _write):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def initialize(self):
+            return None
+
+        async def call_tool(self, _tool_name, _arguments):
+            raise ExceptionGroup(
+                "unhandled errors in a TaskGroup",
+                [RuntimeError("Missing GitHub token from repo-root .env")],
+            )
+
+    monkeypatch.setattr(mcp_proxy_base, "stdio_client", lambda _params: _DummyStdioContext())
+    monkeypatch.setattr(mcp_proxy_base, "ClientSession", _Session)
+
+    client = MCPStdIOClient(
+        MCPServerConfig(
+            command="python",
+            args=["server.py"],
+            transport_retry_attempts=0,
+            transport_retry_backoff_sec=0.0,
+        )
+    )
+
+    with pytest.raises(
+        MCPToolClientError,
+        match="Missing GitHub token from repo-root \\.env",
+    ):
+        asyncio.run(client.call_tool("github_get_file_contents", {"owner": "Strong-AI-Lab"}))
+
+    assert client.error_count == 1
+    assert client.call_count == 0
+    assert client.last_call_telemetry is not None
+    assert client.last_call_telemetry.error_type == "RuntimeError"
+    assert (
+        client.last_call_telemetry.error_message
+        == "Missing GitHub token from repo-root .env"
+    )
+
+
+def test_list_tools_surfaces_leaf_exception_message_from_exception_group(monkeypatch):
+    class _Session:
+        def __init__(self, _read, _write):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def initialize(self):
+            return None
+
+        async def list_tools(self):
+            raise ExceptionGroup(
+                "unhandled errors in a TaskGroup",
+                [ConnectionRefusedError("connection refused")],
+            )
+
+    monkeypatch.setattr(mcp_proxy_base, "stdio_client", lambda _params: _DummyStdioContext())
+    monkeypatch.setattr(mcp_proxy_base, "ClientSession", _Session)
+
+    client = MCPStdIOClient(
+        MCPServerConfig(
+            command="python",
+            args=["server.py"],
+            transport_retry_attempts=0,
+            transport_retry_backoff_sec=0.0,
+        )
+    )
+
+    with pytest.raises(MCPToolClientError, match="connection refused"):
+        asyncio.run(client.list_tools())
+
+    assert client.error_count == 1
+    assert client.call_count == 0

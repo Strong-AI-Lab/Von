@@ -25,6 +25,7 @@ from src.backend.server.routes.vontology_routes import vontology_bp  # type: ign
 from src.backend.server.routes.settings_routes import settings_bp  # type: ignore
 from src.backend.languagemodels.llm_interface import OllamaClient  # type: ignore
 from src.backend.services.feature_flags import get_expert_tabs_enabled
+from src.backend.utils.runtime_env import apply_repo_dotenv_overrides
 
 
 # Add src directory to Python path FIRST, before any backend imports
@@ -81,15 +82,6 @@ logger = logging.getLogger(__name__)
 logger.info("Logging initialized for von. File output to: %s", LOG_FILE_PATH)
 
 
-def _clean_env_value(value: str | None) -> str | None:
-    if value is None:
-        return None
-    cleaned = value.strip()
-    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ('"', "'"):
-        cleaned = cleaned[1:-1].strip()
-    return cleaned or None
-
-
 def _apply_dotenv_overrides(keys: set[str]) -> None:
     """Load repo-root .env and override specific keys in os.environ.
 
@@ -98,31 +90,8 @@ def _apply_dotenv_overrides(keys: set[str]) -> None:
     contain stale values.
     """
 
-    try:
-        from dotenv import dotenv_values  # type: ignore
-    except Exception:
-        return
-
-    env_path = PROJECT_ROOT / ".env"
-    if not env_path.exists():
-        return
-
-    try:
-        values = dotenv_values(env_path)
-    except Exception as exc:  # pragma: no cover
-        logger.warning("Failed to read .env for overrides: %s", exc)
-        return
-
-    applied = 0
-    for key in keys:
-        raw = values.get(key)
-        if raw is None:
-            continue
-        cleaned = _clean_env_value(str(raw))
-        if cleaned is None:
-            continue
-        os.environ[key] = cleaned
-        applied += 1
+    applied_values = apply_repo_dotenv_overrides(keys)
+    applied = len(applied_values)
 
     if applied:
         token_len = len(os.environ.get("ATLASSIAN_API_TOKEN", ""))

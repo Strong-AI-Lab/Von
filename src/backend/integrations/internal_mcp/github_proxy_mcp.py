@@ -11,12 +11,24 @@ import logging
 import os
 import shlex
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 from .mcp_proxy_base import MCPServerConfig, MCPStdIOClient, MCPToolClientError
+from ...utils.runtime_env import apply_repo_dotenv_overrides, clean_env_value
 
 logger = logging.getLogger(__name__)
 _LOG_TAG = "[github_proxy]"
+GITHUB_TOKEN_ENV_KEYS: tuple[str, ...] = (
+    "GITHUB_PERSONAL_ACCESS_TOKEN",
+    "GITHUB_VON_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+)
+GITHUB_PROXY_ENV_OVERRIDE_KEYS: tuple[str, ...] = (
+    *GITHUB_TOKEN_ENV_KEYS,
+    "VON_GITHUB_MCP_COMMAND",
+    "VON_GITHUB_MCP_ARGS",
+)
 
 
 class GitHubProxyError(Exception):
@@ -66,30 +78,18 @@ class GitHubMCPProxy:
 
 
 def _build_github_env() -> Dict[str, str]:
+    applied_overrides = apply_repo_dotenv_overrides(GITHUB_PROXY_ENV_OVERRIDE_KEYS)
+    if applied_overrides:
+        logger.info(
+            "%s Applied repo-root .env overrides for %s GitHub key(s).",
+            _LOG_TAG,
+            len(applied_overrides),
+        )
+
     env = os.environ.copy()
 
-    def _clean(value: str | None) -> str | None:
-        if value is None:
-            return None
-        cleaned = value.strip()
-        if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ('"', "'"):
-            cleaned = cleaned[1:-1].strip()
-        return cleaned or None
-
     # Resolve token from env vars in priority order and log which key was used.
-    resolved_key: str | None = None
-    token: str | None = None
-    for candidate_key in (
-        "GITHUB_PERSONAL_ACCESS_TOKEN",
-        "GITHUB_VON_TOKEN",
-        "GITHUB_TOKEN",
-        "GH_TOKEN",
-    ):
-        candidate_value = _clean(env.get(candidate_key))
-        if candidate_value:
-            resolved_key = candidate_key
-            token = candidate_value
-            break
+    resolved_key, token = resolve_github_token(env)
 
     if not token:
         raise GitHubProxyError(
@@ -122,6 +122,19 @@ def _build_github_env() -> Dict[str, str]:
     env["GITHUB_TOKEN"] = token
     env["GH_TOKEN"] = token
     return env
+
+
+def resolve_github_token(
+    env: Mapping[str, str] | None = None,
+) -> tuple[str | None, str | None]:
+    """Resolve the first configured GitHub token and the key it came from."""
+
+    source_env = os.environ if env is None else env
+    for candidate_key in GITHUB_TOKEN_ENV_KEYS:
+        candidate_value = clean_env_value(source_env.get(candidate_key))
+        if candidate_value:
+            return candidate_key, candidate_value
+    return None, None
 
 
 def _build_github_config() -> GitHubProxyConfig:

@@ -13855,26 +13855,17 @@ def _github_execute_write_tool(
 def _github_get_auth_config(**kwargs):
     import os
     import shlex
-    from .github_proxy_mcp import GitHubProxyError, get_github_proxy
+    from ...utils.runtime_env import apply_repo_dotenv_overrides
+    from .github_proxy_mcp import (
+        GitHubProxyError,
+        GITHUB_PROXY_ENV_OVERRIDE_KEYS,
+        get_github_proxy,
+        resolve_github_token,
+    )
 
+    applied_overrides = apply_repo_dotenv_overrides(GITHUB_PROXY_ENV_OVERRIDE_KEYS)
     env = os.environ.copy()
-
-    def _clean(value: str | None) -> str | None:
-        if value is None:
-            return None
-        cleaned = value.strip()
-        if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ('"', "'"):
-            cleaned = cleaned[1:-1].strip()
-        return cleaned or None
-
-    token_key = None
-    token: str | None = None
-    for candidate_key in ("GITHUB_PERSONAL_ACCESS_TOKEN", "GITHUB_VON_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"):
-        candidate_value = _clean(env.get(candidate_key))
-        if candidate_value:
-            token_key = candidate_key
-            token = candidate_value
-            break
+    token_key, token = resolve_github_token(env)
 
     command = str(os.getenv("VON_GITHUB_MCP_COMMAND") or "npx").strip() or "npx"
     raw_args = os.getenv("VON_GITHUB_MCP_ARGS")
@@ -13894,6 +13885,7 @@ def _github_get_auth_config(**kwargs):
             "allow_list": "VON_GITHUB_REPO_ALLOW_LIST",
             "execute_mode": "VON_INTERNAL_MCP_GITHUB_EXECUTE_MODE",
         },
+        "dotenv_overrides_applied": sorted(applied_overrides.keys()),
         "allow_repositories": _github_repo_allow_list(),
         "execute_mode_enabled": _github_execute_mode_enabled(),
         "command": command,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from src.backend.integrations.internal_mcp.catalogue import (
     _github_create_branch,
     _github_create_pull_request,
@@ -199,3 +201,86 @@ def test_github_create_pull_request_success_through_gateway_invoke(monkeypatch) 
     assert payload.get("success") is True
     assert payload.get("executed") is True
     assert payload.get("action") == "create_pull_request"
+
+
+def test_github_build_env_prefers_repo_dotenv_token(monkeypatch, tmp_path: Path) -> None:
+    import src.backend.integrations.internal_mcp.github_proxy_mcp as github_proxy_mcp
+    import src.backend.utils.runtime_env as runtime_env
+
+    dotenv_token = "ghp_dotenv_token_for_test"
+    (tmp_path / ".env").write_text(
+        f"GITHUB_PERSONAL_ACCESS_TOKEN={dotenv_token}\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(runtime_env, "get_project_root", lambda: tmp_path)
+    monkeypatch.setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "ghp_stale_shell_token")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghu_vscode_injected_token")
+    monkeypatch.delenv("GITHUB_VON_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+
+    env = github_proxy_mcp._build_github_env()
+
+    assert env["GITHUB_PERSONAL_ACCESS_TOKEN"] == dotenv_token
+    assert env["GITHUB_TOKEN"] == dotenv_token
+    assert env["GH_TOKEN"] == dotenv_token
+
+
+def test_github_auth_config_uses_repo_dotenv_token_through_gateway_invoke(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.backend.utils.runtime_env as runtime_env
+    from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
+    from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
+
+    dotenv_token = "ghp_gateway_dotenv_token"
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                f"GITHUB_PERSONAL_ACCESS_TOKEN={dotenv_token}",
+                "VON_GITHUB_MCP_ARGS=-y @modelcontextprotocol/server-github",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(runtime_env, "get_project_root", lambda: tmp_path)
+    monkeypatch.setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "ghp_stale_shell_token")
+    monkeypatch.delenv("GITHUB_VON_TOKEN", raising=False)
+    monkeypatch.setenv("GITHUB_TOKEN", "ghu_vscode_injected_token")
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+
+    class _FakeProxy:
+        async def call_tool(self, tool_name: str, arguments: dict):  # noqa: ARG002
+            raise AssertionError("github_get_auth_config should not call GitHub tools")
+
+        async def list_tools(self):
+            return [{"name": "github_get_file_contents"}]
+
+        def get_stats(self):
+            return {"call_count": 0, "error_count": 0}
+
+    async def _fake_get_github_proxy():
+        return _FakeProxy()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.github_proxy_mcp.get_github_proxy",
+        _fake_get_github_proxy,
+    )
+
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    result = gateway.invoke("github_get_auth_config", {})
+    payload = result.payload
+
+    assert payload.get("success") is True
+    assert payload.get("token_present") is True
+    assert payload.get("token_length") == len(dotenv_token)
+    assert payload.get("env_keys_used", {}).get("token") == "GITHUB_PERSONAL_ACCESS_TOKEN"
+    assert "GITHUB_PERSONAL_ACCESS_TOKEN" in payload.get("dotenv_overrides_applied", [])
+    assert payload.get("proxy_tools_available") is True

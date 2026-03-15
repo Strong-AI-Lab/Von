@@ -121,9 +121,11 @@ class MCPStdIOClient:
             self._telemetry_history.pop(0)
 
     @staticmethod
-    def _collect_exception_text(exc: BaseException) -> str:
-        """Flatten exception and chained causes into a searchable message blob."""
-        segments: list[str] = []
+    def _walk_exception_messages(exc: BaseException) -> tuple[list[str], list[str]]:
+        """Return flattened exception text and leaf-only exception text."""
+
+        messages: list[str] = []
+        leaf_messages: list[str] = []
         seen: set[int] = set()
 
         def _walk(err: BaseException | None) -> None:
@@ -135,24 +137,83 @@ class MCPStdIOClient:
             seen.add(err_id)
 
             message = str(err).strip()
+            nested_errors: list[BaseException] = []
+            nested = getattr(err, "exceptions", None)
+            if isinstance(nested, (list, tuple)):
+                for sub_err in nested:
+                    if isinstance(sub_err, BaseException):
+                        nested_errors.append(sub_err)
+
+            cause = getattr(err, "__cause__", None)
+            if isinstance(cause, BaseException):
+                nested_errors.append(cause)
+            context = getattr(err, "__context__", None)
+            if isinstance(context, BaseException) and context is not cause:
+                nested_errors.append(context)
+
             if message:
-                segments.append(message)
+                messages.append(message)
+
+            if nested_errors:
+                for nested_error in nested_errors:
+                    _walk(nested_error)
+                return
+
+            if message:
+                leaf_messages.append(message)
+
+        _walk(exc)
+        return messages, leaf_messages
+
+    @classmethod
+    def _collect_exception_text(cls, exc: BaseException) -> str:
+        """Flatten exception and chained causes into a searchable message blob."""
+
+        segments, _ = cls._walk_exception_messages(exc)
+        return " | ".join(segments)
+
+    @classmethod
+    def _collect_leaf_exception_text(cls, exc: BaseException) -> str:
+        """Return the leaf-most exception text for user-facing error messages."""
+
+        _, leaf_messages = cls._walk_exception_messages(exc)
+        if leaf_messages:
+            unique_leaf_messages: list[str] = []
+            for message in leaf_messages:
+                if message not in unique_leaf_messages:
+                    unique_leaf_messages.append(message)
+            return " | ".join(unique_leaf_messages)
+        return cls._collect_exception_text(exc)
+
+    @staticmethod
+    def _select_leaf_exception(exc: BaseException) -> BaseException:
+        """Prefer the first leaf exception so error types match the real failure."""
+
+        seen: set[int] = set()
+
+        def _walk(err: BaseException) -> BaseException:
+            err_id = id(err)
+            if err_id in seen:
+                return err
+            seen.add(err_id)
 
             nested = getattr(err, "exceptions", None)
             if isinstance(nested, (list, tuple)):
                 for sub_err in nested:
                     if isinstance(sub_err, BaseException):
-                        _walk(sub_err)
+                        return _walk(sub_err)
 
             cause = getattr(err, "__cause__", None)
             if isinstance(cause, BaseException):
-                _walk(cause)
-            context = getattr(err, "__context__", None)
-            if isinstance(context, BaseException):
-                _walk(context)
+                return _walk(cause)
 
-        _walk(exc)
-        return " | ".join(segments)
+            context = getattr(err, "__context__", None)
+            if isinstance(context, BaseException) and context is not cause:
+                return _walk(context)
+
+            return err
+
+        return _walk(exc)
 
     @classmethod
     def _is_transport_closed_error(cls, exc: BaseException) -> bool:
@@ -291,20 +352,17 @@ class MCPStdIOClient:
             self._error_count += 1
             self._total_duration_ms += duration_ms
 
-            # Unpack ExceptionGroup to surface the real root cause.
-            root_cause = exc
-            if isinstance(exc, BaseExceptionGroup):
-                flattened = list(exc.exceptions)
-                if flattened:
-                    root_cause = flattened[0]
+            root_cause = self._select_leaf_exception(exc)
+            user_message = self._collect_leaf_exception_text(exc)
+            flattened_error = self._collect_exception_text(exc)
 
             telemetry.duration_ms = duration_ms
             telemetry.error_type = type(root_cause).__name__
-            telemetry.error_message = str(root_cause)[:500]
+            telemetry.error_message = user_message[:500]
             self._record_telemetry(telemetry)
 
             logger.error(
-                "%s Tool %s failed after %.1fms: [%s] %s (root: [%s] %s)",
+                "%s Tool %s failed after %.1fms: [%s] %s (root: [%s] %s, flattened=%s)",
                 self._config.log_tag,
                 tool_name,
                 duration_ms,
@@ -312,8 +370,9 @@ class MCPStdIOClient:
                 exc,
                 type(root_cause).__name__,
                 root_cause,
+                flattened_error,
             )
-            raise MCPToolClientError(str(root_cause)) from exc
+            raise MCPToolClientError(user_message or str(root_cause)) from exc
 
     async def list_tools(self) -> list[Dict[str, Any]]:
         """List tools exposed by the MCP server."""
@@ -359,20 +418,19 @@ class MCPStdIOClient:
                     raise exc
         except Exception as exc:  # pragma: no cover - environment dependent
             self._error_count += 1
-            root_cause = exc
-            if isinstance(exc, BaseExceptionGroup):
-                flattened = list(exc.exceptions)
-                if flattened:
-                    root_cause = flattened[0]
+            root_cause = self._select_leaf_exception(exc)
+            user_message = self._collect_leaf_exception_text(exc)
+            flattened_error = self._collect_exception_text(exc)
             logger.error(
-                "%s Tool list failed: [%s] %s (root: [%s] %s)",
+                "%s Tool list failed: [%s] %s (root: [%s] %s, flattened=%s)",
                 self._config.log_tag,
                 type(exc).__name__,
                 exc,
                 type(root_cause).__name__,
                 root_cause,
+                flattened_error,
             )
-            raise MCPToolClientError(str(root_cause)) from exc
+            raise MCPToolClientError(user_message or str(root_cause)) from exc
 
     def _parse_result(
         self,
