@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Mapping, Optional
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 from .execution_contracts import (
     WORKFLOW_CONTROL_SIGNAL_ERROR,
@@ -65,6 +65,8 @@ class WorkflowActionRequest:
     environment: WorkflowEnvironment
     data: Dict[str, Any]
     trace: Any | None = None
+    action_target_id: str | None = None
+    contract_concept_id: str | None = None
 
 
 @dataclass
@@ -91,13 +93,17 @@ class ActionSpec:
     description: str | None = None
     concept_id: str | None = None
     input_schema: Mapping[str, Any] | None = None
+    output_schema: Mapping[str, Any] | None = None
     side_effects: str | None = None
+    postconditions: Sequence[str] = ()
 
 
 def _apply_action_outcome_context(
     *,
     context: Dict[str, Any],
-    action_id: str,
+    action_target_id: str,
+    resolved_action_id: str | None,
+    contract_concept_id: str | None,
     result: WorkflowActionResult,
 ) -> None:
     """Stamp canonical action outcome flags into workflow context.
@@ -107,7 +113,12 @@ def _apply_action_outcome_context(
     and durable) observes identical post-action state.
     """
     outcome = normalise_action_outcome(result.status)
-    context["last_action_id"] = action_id
+    context["last_action_id"] = action_target_id
+    context["last_action_target_id"] = action_target_id
+    context["last_action_registry_action_id"] = (
+        resolved_action_id or action_target_id
+    )
+    context["last_action_contract_concept_id"] = contract_concept_id
     context["last_action_status"] = result.status
     context["last_action_outcome"] = outcome
     context["last_action_succeeded"] = outcome == WORKFLOW_ACTION_OUTCOME_SUCCESS
@@ -144,6 +155,7 @@ class ActionRegistry:
 
     def __init__(self) -> None:
         self._actions: Dict[str, ActionSpec] = {}
+        self._actions_by_concept_id: Dict[str, ActionSpec] = {}
         self._fallback_handler: (
             Callable[[WorkflowActionRequest], WorkflowActionResult] | None
         ) = None
@@ -155,7 +167,17 @@ class ActionRegistry:
             raise TypeError("spec must be an ActionSpec")
         if spec.action_id in self._actions:
             raise ValueError(f"action already registered: {spec.action_id}")
+        concept_id = str(spec.concept_id or "").strip()
+        if concept_id:
+            existing = self._actions_by_concept_id.get(concept_id)
+            if existing is not None and existing.action_id != spec.action_id:
+                raise ValueError(
+                    "action concept already registered: "
+                    f"{concept_id} -> {existing.action_id}"
+                )
         self._actions[spec.action_id] = spec
+        if concept_id:
+            self._actions_by_concept_id[concept_id] = spec
 
     def register_if_absent(self, spec: ActionSpec) -> bool:
         """Register *spec* only if its ``action_id`` is not already present.
@@ -166,7 +188,17 @@ class ActionRegistry:
             raise TypeError("spec must be an ActionSpec")
         if spec.action_id in self._actions:
             return False
+        concept_id = str(spec.concept_id or "").strip()
+        if concept_id:
+            existing = self._actions_by_concept_id.get(concept_id)
+            if existing is not None and existing.action_id != spec.action_id:
+                raise ValueError(
+                    "action concept already registered: "
+                    f"{concept_id} -> {existing.action_id}"
+                )
         self._actions[spec.action_id] = spec
+        if concept_id:
+            self._actions_by_concept_id[concept_id] = spec
         return True
 
     def merge(self, other: "ActionRegistry", *, overwrite: bool = False) -> None:
@@ -181,6 +213,9 @@ class ActionRegistry:
         for action_id, spec in other._actions.items():
             if overwrite or action_id not in self._actions:
                 self._actions[action_id] = spec
+                concept_id = str(spec.concept_id or "").strip()
+                if concept_id:
+                    self._actions_by_concept_id[concept_id] = spec
 
     def set_fallback_handler(
         self,
@@ -204,9 +239,26 @@ class ActionRegistry:
     def get(self, action_id: str) -> ActionSpec | None:
         return self._actions.get(action_id)
 
+    def get_by_concept_id(self, concept_id: str) -> ActionSpec | None:
+        return self._actions_by_concept_id.get(concept_id)
+
+    def resolve_action_spec(self, action_target_id: str) -> ActionSpec | None:
+        target = str(action_target_id or "").strip()
+        if not target:
+            return None
+        spec = self.get(target)
+        if spec is not None:
+            return spec
+        if target.startswith("#V#"):
+            return self.get_by_concept_id(target)
+        return None
+
     def has(self, action_id: str) -> bool:
         """Return True if *action_id* is registered."""
         return action_id in self._actions
+
+    def has_action_target(self, action_target_id: str) -> bool:
+        return self.resolve_action_spec(action_target_id) is not None
 
     def all_action_ids(self) -> list[str]:
         """Return all registered action IDs."""
@@ -221,27 +273,38 @@ class ActionRegistry:
         env: WorkflowEnvironment,
         trace: Any | None = None,
     ) -> WorkflowActionResult:
-        spec = self.get(action_id)
+        action_target_id = str(action_id or "").strip()
+        spec = self.resolve_action_spec(action_target_id)
         handler: Callable[[WorkflowActionRequest], WorkflowActionResult] | None = (
             spec.handler if spec is not None else self._fallback_handler
         )
         if handler is None:
             result = WorkflowActionResult(
-                status="failed", error=f"action_not_registered:{action_id}"
+                status="failed", error=f"action_not_registered:{action_target_id}"
             )
             _apply_action_outcome_context(
                 context=context,
-                action_id=action_id,
+                action_target_id=action_target_id,
+                resolved_action_id=None,
+                contract_concept_id=None,
                 result=result,
             )
             return result
+        resolved_action_id = (
+            str(spec.action_id or "").strip() if spec is not None else action_target_id
+        )
+        contract_concept_id = (
+            str(spec.concept_id or "").strip() if spec is not None else None
+        ) or None
         try:
             request = WorkflowActionRequest(
-                action_id=action_id,
+                action_id=resolved_action_id or action_target_id,
                 inputs=inputs,
                 environment=env,
                 data=context,
                 trace=trace,
+                action_target_id=action_target_id or None,
+                contract_concept_id=contract_concept_id,
             )
             raw_result = handler(request)
             if isinstance(raw_result, WorkflowActionResult):
@@ -251,7 +314,7 @@ class ActionRegistry:
                     status="failed",
                     error=(
                         "invalid_action_result_type:"
-                        f"{action_id}:{type(raw_result).__name__}"
+                        f"{action_target_id}:{type(raw_result).__name__}"
                     ),
                 )
         except Exception as exc:
@@ -259,7 +322,9 @@ class ActionRegistry:
 
         _apply_action_outcome_context(
             context=context,
-            action_id=action_id,
+            action_target_id=action_target_id,
+            resolved_action_id=resolved_action_id or action_target_id,
+            contract_concept_id=contract_concept_id,
             result=result,
         )
         return result

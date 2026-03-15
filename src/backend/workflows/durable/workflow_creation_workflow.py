@@ -23,58 +23,35 @@ from ..action_registry import (
 )
 from ..engine import WorkflowEnvironment, WorkflowExecutor
 from ..vontology_loader import discover_workflow_ids, load_workflow_definition_from_vontology
+from ..workflow_creation_contracts import (
+    WORKFLOW_CREATION_ACTION_ASSERT_PHD_STUDENT_RELATIONSHIPS,
+    WORKFLOW_CREATION_ACTION_CONTRACT_BY_ACTION_ID,
+    WORKFLOW_CREATION_ACTION_CREATE_STEP_CONCEPTS,
+    WORKFLOW_CREATION_ACTION_CREATE_WORKFLOW_TYPE,
+    WORKFLOW_CREATION_ACTION_DESIGN_STRUCTURE,
+    WORKFLOW_CREATION_ACTION_EMIT_MARKER,
+    WORKFLOW_CREATION_ACTION_ESTABLISH_RELATIONSHIPS,
+    WORKFLOW_CREATION_ACTION_FINALISE,
+    WORKFLOW_CREATION_ACTION_GROUND_PHD_STUDENT_TEXT,
+    WORKFLOW_CREATION_ACTION_IDENTIFY_NEED,
+    WORKFLOW_CREATION_ACTION_RESOLVE_PHD_STUDENT_CANDIDATE,
+    WORKFLOW_CREATION_ACTION_RESOLVE_SCHOLARLY_AUTHORS,
+    WORKFLOW_CREATION_ACTION_VERIFY_DISCOVERABILITY,
+    WORKFLOW_CREATION_STEP_CREATE_STEP_CONCEPTS,
+    WORKFLOW_CREATION_STEP_CREATE_WORKFLOW_TYPE,
+    WORKFLOW_CREATION_STEP_DESIGN_STRUCTURE,
+    WORKFLOW_CREATION_STEP_DOCUMENT_IN_JIRA,
+    WORKFLOW_CREATION_STEP_ESTABLISH_RELATIONSHIPS,
+    WORKFLOW_CREATION_STEP_IDENTIFY_NEED,
+    WORKFLOW_CREATION_STEP_VERIFY_DISCOVERABILITY,
+    WORKFLOW_CREATION_WORKFLOW_ID,
+    workflow_creation_action_target,
+)
 from ..workflow_definition_identity_service import (
     collect_workflow_action_ids,
     validate_workflow_definition_contract,
 )
 from .workflow_gap_recovery_workflow import register_workflow_gap_recovery_actions
-
-WORKFLOW_CREATION_WORKFLOW_ID = "#V#von_workflow_creation_workflow"
-
-WORKFLOW_CREATION_STEP_IDENTIFY_NEED = "#V#workflow_creation_step_identify_need"
-WORKFLOW_CREATION_STEP_DESIGN_STRUCTURE = "#V#workflow_creation_step_design_structure"
-WORKFLOW_CREATION_STEP_CREATE_WORKFLOW_TYPE = (
-    "#V#workflow_creation_step_create_workflow_type"
-)
-WORKFLOW_CREATION_STEP_CREATE_STEP_CONCEPTS = (
-    "#V#workflow_creation_step_create_step_concepts"
-)
-WORKFLOW_CREATION_STEP_ESTABLISH_RELATIONSHIPS = (
-    "#V#workflow_creation_step_establish_relationships"
-)
-WORKFLOW_CREATION_STEP_VERIFY_DISCOVERABILITY = (
-    "#V#workflow_creation_step_verify_discoverability"
-)
-WORKFLOW_CREATION_STEP_DOCUMENT_IN_JIRA = "#V#workflow_creation_step_document_in_jira"
-
-WORKFLOW_CREATION_ACTION_IDENTIFY_NEED = "workflow_creation.identify_need"
-WORKFLOW_CREATION_ACTION_DESIGN_STRUCTURE = "workflow_creation.design_structure"
-WORKFLOW_CREATION_ACTION_CREATE_WORKFLOW_TYPE = (
-    "workflow_creation.create_workflow_type"
-)
-WORKFLOW_CREATION_ACTION_CREATE_STEP_CONCEPTS = (
-    "workflow_creation.create_step_concepts"
-)
-WORKFLOW_CREATION_ACTION_ESTABLISH_RELATIONSHIPS = (
-    "workflow_creation.establish_relationships"
-)
-WORKFLOW_CREATION_ACTION_VERIFY_DISCOVERABILITY = (
-    "workflow_creation.verify_discoverability"
-)
-WORKFLOW_CREATION_ACTION_FINALISE = "workflow_creation.finalise"
-WORKFLOW_CREATION_ACTION_EMIT_MARKER = "workflow_creation.emit_marker"
-WORKFLOW_CREATION_ACTION_RESOLVE_SCHOLARLY_AUTHORS = (
-    "workflow_creation.resolve_scholarly_authors"
-)
-WORKFLOW_CREATION_ACTION_RESOLVE_PHD_STUDENT_CANDIDATE = (
-    "workflow_creation.resolve_phd_student_candidate"
-)
-WORKFLOW_CREATION_ACTION_ASSERT_PHD_STUDENT_RELATIONSHIPS = (
-    "workflow_creation.assert_phd_student_relationships"
-)
-WORKFLOW_CREATION_ACTION_GROUND_PHD_STUDENT_TEXT = (
-    "workflow_creation.ground_phd_student_text"
-)
 
 WORKFLOW_CONTEXT_KEY_VALIDATED_TYPE_NAME = "#V#workflow_context_key_validated_type_name"
 DEFAULT_WORKFLOW_PARENT_TYPE_ID = "#V#ai_workflow"
@@ -87,6 +64,15 @@ DEFAULT_PREDICATE_TYPE_ID = "#V#predicate"
 DEFAULT_AUTHORED_BY_PREDICATE_ID = "#V#authored_by"
 DEFAULT_SUPERVISED_BY_PREDICATE_ID = "#V#supervised_by"
 DEFAULT_RESEARCHES_PREDICATE_ID = "#V#researches"
+WORKFLOW_GRAPH_PREDICATE_HAS_INITIAL_STEP = "#V#hasInitialStep"
+WORKFLOW_GRAPH_PREDICATE_HAS_STEP = "#V#hasStep"
+WORKFLOW_GRAPH_PREDICATE_INVOKES_ACTION = "#V#invokesAction"
+WORKFLOW_GRAPH_PREDICATE_HAS_INPUT_MAP = "#V#hasInputMap"
+WORKFLOW_GRAPH_PREDICATE_NEXT_STEP = "#V#nextStep"
+WORKFLOW_GRAPH_PREDICATE_ON_TRUE_NEXT_STEP = "#V#onTrueNextStep"
+WORKFLOW_GRAPH_PREDICATE_ON_FALSE_NEXT_STEP = "#V#onFalseNextStep"
+WORKFLOW_GRAPH_PREDICATE_ON_FAILURE_NEXT_STEP = "#V#onFailureNextStep"
+WORKFLOW_GRAPH_PREDICATE_ON_UNKNOWN_NEXT_STEP = "#V#onUnknownNextStep"
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _WORKFLOW_CREATION_INTENT_RE = re.compile(
     r"\b(create|build|generate)\b[\s\w]{0,80}\bworkflow\b",
@@ -105,6 +91,8 @@ WORKFLOW_CREATION_AUTONOMY_POLICY_VALUE = "only_when_vital_info_missing"
 WORKFLOW_CREATION_SYNTHESIS_POLICY_MISSING_ERROR = (
     "workflow_creation_synthesis_policy_missing"
 )
+WORKFLOW_PUBLICATION_LIFECYCLE_SCHEMA_VERSION = "workflow_publication_lifecycle.v1"
+WORKFLOW_PUBLICATION_LIFECYCLE_TEXT_PREDICATE = "#V#hasWorkflowLifecycleJson"
 
 
 def _clean_text(value: Any) -> str:
@@ -1177,6 +1165,43 @@ def _add_contract_output(
     return payload
 
 
+def _write_workflow_publication_lifecycle(
+    *,
+    workflow_id: str,
+    phase: str,
+    published: bool,
+    validation_passed: bool | None = None,
+    postconditions_verified: bool | None = None,
+    optional_test_instance_id: str | None = None,
+    last_error: str | None = None,
+) -> None:
+    phase_text = _clean_text(phase) or "draft"
+    payload: dict[str, Any] = {
+        "schema_version": WORKFLOW_PUBLICATION_LIFECYCLE_SCHEMA_VERSION,
+        "phase": phase_text,
+        "published": bool(published),
+    }
+    if validation_passed is not None:
+        payload["validation_passed"] = bool(validation_passed)
+    if postconditions_verified is not None:
+        payload["postconditions_verified"] = bool(postconditions_verified)
+    if isinstance(optional_test_instance_id, str) and optional_test_instance_id.strip():
+        payload["optional_test_instance_id"] = optional_test_instance_id.strip()
+    if isinstance(last_error, str) and last_error.strip():
+        payload["last_error"] = last_error.strip()
+
+    concept_service.update_concept(
+        workflow_id,
+        {"concept_data.workflow_publication_lifecycle": payload},
+    )
+    upsert_text_for_concept(
+        subject_concept_id=workflow_id,
+        predicate=WORKFLOW_PUBLICATION_LIFECYCLE_TEXT_PREDICATE,
+        text=json.dumps(payload, sort_keys=True),
+        lang="en-NZ",
+    )
+
+
 def _handle_identify_need(request: WorkflowActionRequest) -> WorkflowActionResult:
     spec = _normalise_workflow_spec(request.data)
     parent_type_id = str(spec.get("parent_type_id") or DEFAULT_WORKFLOW_PARENT_TYPE_ID)
@@ -1218,6 +1243,13 @@ def _handle_create_workflow_type(request: WorkflowActionRequest) -> WorkflowActi
         name=workflow_name,
         parent_type_id=parent_type_id,
         description=workflow_description or None,
+    )
+    _write_workflow_publication_lifecycle(
+        workflow_id=workflow_id,
+        phase="draft",
+        published=False,
+        validation_passed=False,
+        postconditions_verified=False,
     )
 
     outputs = _add_contract_output(
@@ -1265,6 +1297,8 @@ def _handle_create_step_concepts(request: WorkflowActionRequest) -> WorkflowActi
 
 
 def _handle_establish_relationships(request: WorkflowActionRequest) -> WorkflowActionResult:
+    from .. import workflow_concept_authority_service as workflow_authority_service
+
     spec = _normalise_workflow_spec(request.data)
     parent_type_id = str(spec.get("parent_type_id") or DEFAULT_WORKFLOW_PARENT_TYPE_ID)
     workflow_id = str(spec["workflow_id"])
@@ -1289,28 +1323,47 @@ def _handle_establish_relationships(request: WorkflowActionRequest) -> WorkflowA
         )
 
     workflow_relationships = dict(workflow_doc.get("relationships") or {})
+    for key in (
+        WORKFLOW_GRAPH_PREDICATE_HAS_INITIAL_STEP,
+        "hasInitialStep",
+        "has_initial_step",
+        WORKFLOW_GRAPH_PREDICATE_HAS_STEP,
+        "hasStep",
+        "has_step",
+    ):
+        workflow_relationships.pop(key, None)
     ordered_step_ids = [
         state_to_step_id.get(str(row.get("state_key") or ""))
         for row in (spec.get("steps") or [])
         if isinstance(row, Mapping)
     ]
     ordered_step_ids = [item for item in ordered_step_ids if isinstance(item, str)]
-    workflow_relationships["hasInitialStep"] = [initial_step_id]
-    workflow_relationships["hasStep"] = ordered_step_ids
+    workflow_relationships[WORKFLOW_GRAPH_PREDICATE_HAS_INITIAL_STEP] = [
+        initial_step_id
+    ]
+    workflow_relationships[WORKFLOW_GRAPH_PREDICATE_HAS_STEP] = ordered_step_ids
     concept_service.update_concept(workflow_id, {"relationships": workflow_relationships})
 
     graph_keys = {
+        WORKFLOW_GRAPH_PREDICATE_INVOKES_ACTION,
         "invokesAction",
         "workflow_step_invokes_tool",
+        WORKFLOW_GRAPH_PREDICATE_HAS_INPUT_MAP,
         "hasInputMap",
         "has_input_map",
+        WORKFLOW_GRAPH_PREDICATE_NEXT_STEP,
         "nextStep",
         "next_step",
+        WORKFLOW_GRAPH_PREDICATE_ON_TRUE_NEXT_STEP,
         "onTrueNextStep",
+        WORKFLOW_GRAPH_PREDICATE_ON_FALSE_NEXT_STEP,
         "onFalseNextStep",
+        WORKFLOW_GRAPH_PREDICATE_ON_FAILURE_NEXT_STEP,
         "onFailureNextStep",
+        WORKFLOW_GRAPH_PREDICATE_ON_UNKNOWN_NEXT_STEP,
         "onUnknownNextStep",
     }
+    action_contract_concept_ids: list[str] = []
 
     for row in spec.get("steps") or []:
         if not isinstance(row, Mapping):
@@ -1330,11 +1383,33 @@ def _handle_establish_relationships(request: WorkflowActionRequest) -> WorkflowA
 
         action_id = _clean_text(row.get("action_id"))
         if action_id:
-            relationships["invokesAction"] = [action_id]
+            action_target = action_id
+            if action_id in WORKFLOW_CREATION_ACTION_CONTRACT_BY_ACTION_ID:
+                (
+                    resolved_action_concept_id,
+                    _created_action_concept,
+                    action_concept_error,
+                ) = workflow_authority_service.ensure_workflow_action_contract_concept(
+                    action_id=action_id
+                )
+                if action_concept_error:
+                    return WorkflowActionResult(
+                        status="failed",
+                        error=(
+                            "workflow_creation_action_contract_failed:"
+                            f"{step_id}:{action_id}:{action_concept_error}"
+                        ),
+                    )
+                if resolved_action_concept_id:
+                    action_target = resolved_action_concept_id
+                    action_contract_concept_ids.append(resolved_action_concept_id)
+            relationships[WORKFLOW_GRAPH_PREDICATE_INVOKES_ACTION] = [
+                workflow_creation_action_target(action_target) or action_target
+            ]
 
         inputs = row.get("inputs")
         if isinstance(inputs, Mapping) and inputs:
-            relationships["hasInputMap"] = [
+            relationships[WORKFLOW_GRAPH_PREDICATE_HAS_INPUT_MAP] = [
                 f"{key}={value}"
                 for key, value in sorted(inputs.items(), key=lambda item: item[0])
             ]
@@ -1343,31 +1418,39 @@ def _handle_establish_relationships(request: WorkflowActionRequest) -> WorkflowA
         if next_state_key:
             target_step_id = state_to_step_id.get(next_state_key)
             if target_step_id:
-                relationships["nextStep"] = [target_step_id]
+                relationships[WORKFLOW_GRAPH_PREDICATE_NEXT_STEP] = [target_step_id]
 
         on_true_state_key = _clean_text(row.get("on_true_state_key"))
         if on_true_state_key:
             target_step_id = state_to_step_id.get(on_true_state_key)
             if target_step_id:
-                relationships["onTrueNextStep"] = [target_step_id]
+                relationships[WORKFLOW_GRAPH_PREDICATE_ON_TRUE_NEXT_STEP] = [
+                    target_step_id
+                ]
 
         on_false_state_key = _clean_text(row.get("on_false_state_key"))
         if on_false_state_key:
             target_step_id = state_to_step_id.get(on_false_state_key)
             if target_step_id:
-                relationships["onFalseNextStep"] = [target_step_id]
+                relationships[WORKFLOW_GRAPH_PREDICATE_ON_FALSE_NEXT_STEP] = [
+                    target_step_id
+                ]
 
         on_failure_state_key = _clean_text(row.get("on_failure_state_key"))
         if on_failure_state_key:
             target_step_id = state_to_step_id.get(on_failure_state_key)
             if target_step_id:
-                relationships["onFailureNextStep"] = [target_step_id]
+                relationships[WORKFLOW_GRAPH_PREDICATE_ON_FAILURE_NEXT_STEP] = [
+                    target_step_id
+                ]
 
         on_unknown_state_key = _clean_text(row.get("on_unknown_state_key"))
         if on_unknown_state_key:
             target_step_id = state_to_step_id.get(on_unknown_state_key)
             if target_step_id:
-                relationships["onUnknownNextStep"] = [target_step_id]
+                relationships[WORKFLOW_GRAPH_PREDICATE_ON_UNKNOWN_NEXT_STEP] = [
+                    target_step_id
+                ]
 
         concept_service.update_concept(step_id, {"relationships": relationships})
 
@@ -1376,6 +1459,9 @@ def _handle_establish_relationships(request: WorkflowActionRequest) -> WorkflowA
             "workflow_creation_spec": spec,
             "workflow_structure_written": True,
             "workflow_concept_id": workflow_id,
+            "workflow_action_contract_concept_ids": list(
+                dict.fromkeys(action_contract_concept_ids)
+            ),
         },
         validated_type_name=parent_type_id,
     )
@@ -1918,6 +2004,9 @@ def _build_verification_registry(environment: WorkflowEnvironment) -> ActionRegi
             action_id=WORKFLOW_CREATION_ACTION_EMIT_MARKER,
             handler=_handle_emit_marker,
             description="Emit a deterministic marker key/value into workflow context.",
+            **_workflow_creation_action_spec_kwargs(
+                WORKFLOW_CREATION_ACTION_EMIT_MARKER
+            ),
         )
     )
     registry.register_if_absent(
@@ -1927,6 +2016,9 @@ def _build_verification_registry(environment: WorkflowEnvironment) -> ActionRegi
             description=(
                 "Resolve scholarly-work authors against existing person concepts "
                 "and create/link missing people."
+            ),
+            **_workflow_creation_action_spec_kwargs(
+                WORKFLOW_CREATION_ACTION_RESOLVE_SCHOLARLY_AUTHORS
             ),
         )
     )
@@ -1938,6 +2030,9 @@ def _build_verification_registry(environment: WorkflowEnvironment) -> ActionRegi
                 "Resolve a PhD-student candidate concept from text/profile data "
                 "with fail-closed ambiguity diagnostics."
             ),
+            **_workflow_creation_action_spec_kwargs(
+                WORKFLOW_CREATION_ACTION_RESOLVE_PHD_STUDENT_CANDIDATE
+            ),
         )
     )
     registry.register_if_absent(
@@ -1948,6 +2043,9 @@ def _build_verification_registry(environment: WorkflowEnvironment) -> ActionRegi
                 "Assert core person/student/research relationships for the resolved "
                 "PhD student concept."
             ),
+            **_workflow_creation_action_spec_kwargs(
+                WORKFLOW_CREATION_ACTION_ASSERT_PHD_STUDENT_RELATIONSHIPS
+            ),
         )
     )
     registry.register_if_absent(
@@ -1956,6 +2054,9 @@ def _build_verification_registry(environment: WorkflowEnvironment) -> ActionRegi
             handler=_handle_ground_phd_student_text,
             description=(
                 "Ground source text and provenance on the resolved PhD student concept."
+            ),
+            **_workflow_creation_action_spec_kwargs(
+                WORKFLOW_CREATION_ACTION_GROUND_PHD_STUDENT_TEXT
             ),
         )
     )
@@ -2020,7 +2121,7 @@ def _handle_verify_discoverability(request: WorkflowActionRequest) -> WorkflowAc
     parent_type_id = str(spec.get("parent_type_id") or DEFAULT_WORKFLOW_PARENT_TYPE_ID)
     workflow_id = str(spec["workflow_id"])
     discovered = set(discover_workflow_ids())
-    discoverable = workflow_id in discovered
+    discoverable_before_publish = workflow_id in discovered
     definition = load_workflow_definition_from_vontology(workflow_id)
     if definition is None:
         outputs = _add_contract_output(
@@ -2029,9 +2130,17 @@ def _handle_verify_discoverability(request: WorkflowActionRequest) -> WorkflowAc
                 "required_effects_declared": bool(spec.get("required_effects")),
                 "structural_validation_passed": False,
                 "postconditions_verified": False,
-                "workflow_discoverable": discoverable,
+                "workflow_discoverable_before_publish": discoverable_before_publish,
             },
             validated_type_name=parent_type_id,
+        )
+        _write_workflow_publication_lifecycle(
+            workflow_id=workflow_id,
+            phase="validation_failed",
+            published=False,
+            validation_passed=False,
+            postconditions_verified=False,
+            last_error=f"workflow_definition_not_loadable:{workflow_id}",
         )
         return WorkflowActionResult(
             status="failed",
@@ -2051,7 +2160,7 @@ def _handle_verify_discoverability(request: WorkflowActionRequest) -> WorkflowAc
         known_workflow_ids=discovered,
         workflow_definition_loader=load_workflow_definition_from_vontology,
     )
-    structural_validation_passed = bool(contract.get("valid")) and discoverable
+    structural_validation_passed = bool(contract.get("valid"))
 
     postconditions_verified = False
     optional_test_instance_id: str | None = None
@@ -2090,6 +2199,18 @@ def _handle_verify_discoverability(request: WorkflowActionRequest) -> WorkflowAc
         )
 
     required_effects_declared = bool(spec.get("required_effects"))
+    all_verified = (
+        required_effects_declared and structural_validation_passed and postconditions_verified
+    )
+    _write_workflow_publication_lifecycle(
+        workflow_id=workflow_id,
+        phase="validated" if all_verified else "validation_failed",
+        published=False,
+        validation_passed=structural_validation_passed,
+        postconditions_verified=postconditions_verified,
+        optional_test_instance_id=optional_test_instance_id,
+        last_error=None if all_verified else "workflow_creation_verification_failed",
+    )
     outputs = _add_contract_output(
         outputs={
             "workflow_creation_spec": spec,
@@ -2099,15 +2220,13 @@ def _handle_verify_discoverability(request: WorkflowActionRequest) -> WorkflowAc
             "structural_validation_passed": structural_validation_passed,
             "postconditions_verified": postconditions_verified,
             "optional_test_instance_id": optional_test_instance_id,
-            "workflow_discoverable": discoverable,
+            "workflow_discoverable_before_publish": discoverable_before_publish,
             "contract_validation": contract,
         },
         validated_type_name=parent_type_id,
     )
 
-    if not (
-        required_effects_declared and structural_validation_passed and postconditions_verified
-    ):
+    if not all_verified:
         return WorkflowActionResult(
             status="failed",
             error="workflow_creation_verification_failed",
@@ -2119,22 +2238,40 @@ def _handle_verify_discoverability(request: WorkflowActionRequest) -> WorkflowAc
 def _handle_finalise(request: WorkflowActionRequest) -> WorkflowActionResult:
     spec = _normalise_workflow_spec(request.data)
     parent_type_id = str(spec.get("parent_type_id") or DEFAULT_WORKFLOW_PARENT_TYPE_ID)
+    workflow_id = str(
+        request.data.get("workflow_concept_id") or spec.get("workflow_id") or ""
+    ).strip()
     required_effects_declared = bool(request.data.get("required_effects_declared"))
     structural_validation_passed = bool(request.data.get("structural_validation_passed"))
     postconditions_verified = bool(request.data.get("postconditions_verified"))
     all_verified = (
         required_effects_declared and structural_validation_passed and postconditions_verified
     )
+    if workflow_id:
+        _write_workflow_publication_lifecycle(
+            workflow_id=workflow_id,
+            phase="published" if all_verified else "draft_failed_completion_gate",
+            published=all_verified,
+            validation_passed=structural_validation_passed,
+            postconditions_verified=postconditions_verified,
+            optional_test_instance_id=(
+                str(request.data.get("optional_test_instance_id") or "").strip() or None
+            ),
+            last_error=(
+                None if all_verified else "workflow_creation_completion_gate_failed"
+            ),
+        )
+    discoverable = workflow_id in set(discover_workflow_ids()) if workflow_id else False
 
     summary = {
-        "workflow_concept_id": request.data.get("workflow_concept_id")
-        or spec.get("workflow_id"),
+        "workflow_concept_id": workflow_id or spec.get("workflow_id"),
         "parent_concept_id_used": request.data.get("parent_concept_id_used")
         or parent_type_id,
         "required_effects_declared": required_effects_declared,
         "structural_validation_passed": structural_validation_passed,
         "postconditions_verified": postconditions_verified,
         "optional_test_instance_id": request.data.get("optional_test_instance_id"),
+        "workflow_discoverable": discoverable,
     }
     outputs = _add_contract_output(outputs=summary, validated_type_name=parent_type_id)
     outputs["response_text"] = (
@@ -2183,6 +2320,21 @@ def _handle_emit_marker(request: WorkflowActionRequest) -> WorkflowActionResult:
     )
 
 
+def _workflow_creation_action_spec_kwargs(action_id: str) -> dict[str, Any]:
+    definition = WORKFLOW_CREATION_ACTION_CONTRACT_BY_ACTION_ID.get(
+        str(action_id or "").strip()
+    )
+    if definition is None:
+        return {}
+    return {
+        "concept_id": definition.concept_id,
+        "input_schema": definition.input_schema,
+        "output_schema": definition.output_schema,
+        "side_effects": definition.side_effects,
+        "postconditions": definition.postconditions,
+    }
+
+
 def register_workflow_creation_actions(registry: ActionRegistry) -> None:
     """Register action handlers required by ``#V#von_workflow_creation_workflow``."""
 
@@ -2191,41 +2343,65 @@ def register_workflow_creation_actions(registry: ActionRegistry) -> None:
             action_id=WORKFLOW_CREATION_ACTION_IDENTIFY_NEED,
             handler=_handle_identify_need,
             description="Normalise workflow creation request/specification.",
+            **_workflow_creation_action_spec_kwargs(
+                WORKFLOW_CREATION_ACTION_IDENTIFY_NEED
+            ),
         ),
         ActionSpec(
             action_id=WORKFLOW_CREATION_ACTION_DESIGN_STRUCTURE,
             handler=_handle_design_structure,
             description="Design a deterministic workflow structure.",
+            **_workflow_creation_action_spec_kwargs(
+                WORKFLOW_CREATION_ACTION_DESIGN_STRUCTURE
+            ),
         ),
         ActionSpec(
             action_id=WORKFLOW_CREATION_ACTION_CREATE_WORKFLOW_TYPE,
             handler=_handle_create_workflow_type,
             description="Create or update workflow concept and parent typing.",
+            **_workflow_creation_action_spec_kwargs(
+                WORKFLOW_CREATION_ACTION_CREATE_WORKFLOW_TYPE
+            ),
         ),
         ActionSpec(
             action_id=WORKFLOW_CREATION_ACTION_CREATE_STEP_CONCEPTS,
             handler=_handle_create_step_concepts,
             description="Create step concepts for the target workflow graph.",
+            **_workflow_creation_action_spec_kwargs(
+                WORKFLOW_CREATION_ACTION_CREATE_STEP_CONCEPTS
+            ),
         ),
         ActionSpec(
             action_id=WORKFLOW_CREATION_ACTION_ESTABLISH_RELATIONSHIPS,
             handler=_handle_establish_relationships,
             description="Write workflow graph relationships (initial/step/transition/action).",
+            **_workflow_creation_action_spec_kwargs(
+                WORKFLOW_CREATION_ACTION_ESTABLISH_RELATIONSHIPS
+            ),
         ),
         ActionSpec(
             action_id=WORKFLOW_CREATION_ACTION_VERIFY_DISCOVERABILITY,
             handler=_handle_verify_discoverability,
             description="Verify created workflow discoverability, contract validity, and postconditions.",
+            **_workflow_creation_action_spec_kwargs(
+                WORKFLOW_CREATION_ACTION_VERIFY_DISCOVERABILITY
+            ),
         ),
         ActionSpec(
             action_id=WORKFLOW_CREATION_ACTION_FINALISE,
             handler=_handle_finalise,
             description="Apply completion gate for workflow creation.",
+            **_workflow_creation_action_spec_kwargs(
+                WORKFLOW_CREATION_ACTION_FINALISE
+            ),
         ),
         ActionSpec(
             action_id=WORKFLOW_CREATION_ACTION_EMIT_MARKER,
             handler=_handle_emit_marker,
             description="Emit deterministic marker output for created workflow tasks.",
+            **_workflow_creation_action_spec_kwargs(
+                WORKFLOW_CREATION_ACTION_EMIT_MARKER
+            ),
         ),
         ActionSpec(
             action_id=WORKFLOW_CREATION_ACTION_RESOLVE_SCHOLARLY_AUTHORS,
@@ -2233,6 +2409,9 @@ def register_workflow_creation_actions(registry: ActionRegistry) -> None:
             description=(
                 "Resolve scholarly-work authors by reusing verified person concepts "
                 "or creating missing person concepts, then assert authorship links."
+            ),
+            **_workflow_creation_action_spec_kwargs(
+                WORKFLOW_CREATION_ACTION_RESOLVE_SCHOLARLY_AUTHORS
             ),
         ),
         ActionSpec(
@@ -2242,6 +2421,9 @@ def register_workflow_creation_actions(registry: ActionRegistry) -> None:
                 "Resolve a PhD-student candidate concept from text/profile data "
                 "with fail-closed ambiguity diagnostics."
             ),
+            **_workflow_creation_action_spec_kwargs(
+                WORKFLOW_CREATION_ACTION_RESOLVE_PHD_STUDENT_CANDIDATE
+            ),
         ),
         ActionSpec(
             action_id=WORKFLOW_CREATION_ACTION_ASSERT_PHD_STUDENT_RELATIONSHIPS,
@@ -2250,12 +2432,18 @@ def register_workflow_creation_actions(registry: ActionRegistry) -> None:
                 "Assert core person/student/research relationships for the resolved "
                 "PhD student concept."
             ),
+            **_workflow_creation_action_spec_kwargs(
+                WORKFLOW_CREATION_ACTION_ASSERT_PHD_STUDENT_RELATIONSHIPS
+            ),
         ),
         ActionSpec(
             action_id=WORKFLOW_CREATION_ACTION_GROUND_PHD_STUDENT_TEXT,
             handler=_handle_ground_phd_student_text,
             description=(
                 "Ground source text and provenance on the resolved PhD student concept."
+            ),
+            **_workflow_creation_action_spec_kwargs(
+                WORKFLOW_CREATION_ACTION_GROUND_PHD_STUDENT_TEXT
             ),
         ),
     )

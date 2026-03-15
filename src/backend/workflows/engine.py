@@ -849,6 +849,7 @@ class WorkflowActionInvocation:
     action_id: str
     inputs: Mapping[str, Any] = field(default_factory=dict)
     description: str | None = None
+    contract_concept_id: str | None = None
 
 
 @dataclass(frozen=True)

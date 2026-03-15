@@ -15,6 +15,7 @@ including:
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional, Tuple
 from unittest.mock import patch, MagicMock
 
@@ -40,7 +41,16 @@ from src.backend.workflows.vontology_loader import (
     resolve_workflow_description,
     resolve_workflow_long_horizon_policies,
     resolve_workflow_narrative_text,
+    resolve_workflow_publication_lifecycle,
     resolve_workflow_step_runtime_policies,
+)
+from src.backend.workflows.workflow_action_contracts import (
+    build_workflow_action_contract_payload,
+    invalidate_workflow_action_contract_resolution_cache,
+)
+from src.backend.workflows.workflow_creation_contracts import (
+    WORKFLOW_CREATION_ACTION_CONCEPT_EMIT_MARKER,
+    WORKFLOW_CREATION_ACTION_EMIT_MARKER,
 )
 from src.backend.workflows.subworkflow_contracts import (
     WORKFLOW_SUBWORKFLOW_ACTION_ID,
@@ -197,6 +207,117 @@ class TestNormaliseInvokedActionTarget:
             _normalise_invoked_action_target("#V#fetch_concept_tool")
             == "fetch_concept"
         )
+
+    def test_action_contract_concept_resolves_to_registry_action_id(self):
+        payload = build_workflow_action_contract_payload(
+            concept_id=WORKFLOW_CREATION_ACTION_CONCEPT_EMIT_MARKER,
+            action_id=WORKFLOW_CREATION_ACTION_EMIT_MARKER,
+            description="Emit marker contract",
+        )
+
+        with patch(
+            "src.backend.workflows.workflow_action_contracts.get_texts_for_concept",
+            return_value=[
+                {
+                    "predicate": "#V#hasWorkflowActionContractJson",
+                    "text": json.dumps(payload, sort_keys=True),
+                }
+            ],
+        ), patch(
+            "src.backend.workflows.workflow_action_contracts.ConceptsRepository.find_one",
+            return_value=None,
+        ):
+            assert (
+                _normalise_invoked_action_target(
+                    WORKFLOW_CREATION_ACTION_CONCEPT_EMIT_MARKER
+                )
+                == WORKFLOW_CREATION_ACTION_EMIT_MARKER
+            )
+
+
+class TestWorkflowPublicationLifecycleResolution:
+    def test_resolve_publication_lifecycle_prefers_concept_data(self):
+        lifecycle, source = resolve_workflow_publication_lifecycle(
+            "#V#demo_workflow",
+            {
+                "concept_id": "#V#demo_workflow",
+                "concept_data": {
+                    "workflow_publication_lifecycle": {
+                        "phase": "validated",
+                        "published": False,
+                    }
+                },
+            },
+        )
+
+        assert lifecycle is not None
+        assert lifecycle["phase"] == "validated"
+        assert lifecycle["published"] is False
+        assert source == "concept_data"
+
+
+class TestWorkflowActionContractGraphLoading:
+    def test_build_graph_preserves_action_contract_metadata(self):
+        workflow_doc = {
+            "concept_id": "#V#contract_workflow",
+            "relationships": {
+                "#V#hasInitialStep": ["#V#step_a"],
+                "#V#hasStep": ["#V#step_a"],
+            },
+            "concept_data": {},
+        }
+        step_docs = {
+            "#V#step_a": {
+                "concept_id": "#V#step_a",
+                "name": "Step A",
+                "relationships": {
+                    "#V#invokesAction": [WORKFLOW_CREATION_ACTION_CONCEPT_EMIT_MARKER]
+                },
+            }
+        }
+        payload = build_workflow_action_contract_payload(
+            concept_id=WORKFLOW_CREATION_ACTION_CONCEPT_EMIT_MARKER,
+            action_id=WORKFLOW_CREATION_ACTION_EMIT_MARKER,
+            description="Emit marker contract",
+        )
+        invalidate_workflow_action_contract_resolution_cache()
+
+        def _fake_find_one(query, *_args, **_kwargs):
+            if isinstance(query, dict) and query.get("concept_id") == "#V#contract_workflow":
+                return workflow_doc
+            return None
+
+        with patch(
+            "src.backend.workflows.vontology_loader.ConceptsRepository.find_one",
+            side_effect=_fake_find_one,
+        ), patch(
+            "src.backend.workflows.vontology_loader._fetch_concepts_by_id",
+            return_value=step_docs,
+        ), patch(
+            "src.backend.workflows.vontology_loader.resolve_workflow_long_horizon_policies",
+            return_value=({}, []),
+        ), patch(
+            "src.backend.workflows.workflow_action_contracts.get_texts_for_concept",
+            return_value=[
+                {
+                    "predicate": "#V#hasWorkflowActionContractJson",
+                    "text": json.dumps(payload, sort_keys=True),
+                }
+            ],
+        ):
+            graph, warnings = build_workflow_process_graph("#V#contract_workflow")
+
+        assert graph is not None
+        assert warnings == []
+        steps = graph.get("steps") or []
+        assert len(steps) == 1
+        step = steps[0]
+        assert step["invokes_action"] == WORKFLOW_CREATION_ACTION_EMIT_MARKER
+        assert (
+            step["invokes_action_target"]
+            == WORKFLOW_CREATION_ACTION_CONCEPT_EMIT_MARKER
+        )
+        assert step["action_contract"]["action_id"] == WORKFLOW_CREATION_ACTION_EMIT_MARKER
 
 
 class TestFetchConceptProjection:
@@ -2404,6 +2525,13 @@ class TestDiscoverWorkflowIds:
                     for item in query["$or"]
                 ):
                     return [{"concept_id": "#V#wf_canonical"}]
+            if isinstance(query, dict) and isinstance(query.get("concept_id"), dict):
+                return [
+                    {
+                        "concept_id": "#V#wf_canonical",
+                        "concept_data": {},
+                    }
+                ]
             return []
 
         with patch(
@@ -2450,6 +2578,17 @@ class TestDiscoverWorkflowIds:
                             },
                         },
                     ]
+            if isinstance(query, dict) and isinstance(query.get("concept_id"), dict):
+                return [
+                    {
+                        "concept_id": "#V#wf_alpha",
+                        "concept_data": {},
+                    },
+                    {
+                        "concept_id": "#V#wf_zeta",
+                        "concept_data": {},
+                    },
+                ]
             return []
 
         with patch(
@@ -2462,6 +2601,52 @@ class TestDiscoverWorkflowIds:
             workflow_ids = discover_workflow_ids()
 
         assert workflow_ids == ["#V#wf_alpha", "#V#wf_zeta"]
+
+    def test_excludes_explicitly_unpublished_draft_workflows(self):
+        def _fake_find(query, *_args, **_kwargs):
+            if isinstance(query, dict) and isinstance(query.get("$or"), list):
+                if any(
+                    isinstance(item, dict)
+                    and "relationships.#V#hasInitialStep" in item
+                    for item in query["$or"]
+                ):
+                    return [
+                        {"concept_id": "#V#wf_published"},
+                        {"concept_id": "#V#wf_draft"},
+                    ]
+            if isinstance(query, dict) and isinstance(query.get("concept_id"), dict):
+                return [
+                    {
+                        "concept_id": "#V#wf_published",
+                        "concept_data": {
+                            "workflow_publication_lifecycle": {
+                                "phase": "published",
+                                "published": True,
+                            }
+                        },
+                    },
+                    {
+                        "concept_id": "#V#wf_draft",
+                        "concept_data": {
+                            "workflow_publication_lifecycle": {
+                                "phase": "validated",
+                                "published": False,
+                            }
+                        },
+                    },
+                ]
+            return []
+
+        with patch(
+            "src.backend.workflows.vontology_loader.ConceptsRepository.find",
+            side_effect=_fake_find,
+        ), patch(
+            "src.backend.workflows.vontology_loader._discover_workflow_type_family_ids",
+            return_value=set(),
+        ):
+            workflow_ids = discover_workflow_ids()
+
+        assert workflow_ids == ["#V#wf_published"]
 
 
 # ---------------------------------------------------------------------------

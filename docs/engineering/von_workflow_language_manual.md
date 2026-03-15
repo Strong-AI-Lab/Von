@@ -103,6 +103,33 @@ Canonical graph families include:
 - `workflowStepMapsToolOutputFieldToContextKey`
 - `hasWorkflowVariable`
 
+### 3.4 Action-Contract Concepts
+
+`invokesAction` MAY point to either:
+
+- a raw executable action ID such as `workflow_control.context_set`, or
+- a concept-backed action contract, typically an instance of `#V#workflow_action_contract`.
+
+When a workflow step points at an action-contract concept, the concept SHOULD carry the machine-readable contract in both:
+
+- `concept_data.workflow_action_contract`
+- `#V#hasWorkflowActionContractJson` text (primary `en-NZ`)
+
+The canonical payload schema is `workflow_action_contract.v1` and includes:
+
+- `concept_id`
+- `action_id`
+- `description`
+- optional `input_schema`
+- optional `output_schema`
+- optional `side_effects`
+- optional `postconditions`
+
+Runtime rule:
+
+- the loader MUST resolve the concept-backed target to its underlying executable `action_id`;
+- the original concept target MUST remain available as the step's contract concept for introspection, validation, and publication repair.
+
 ## 4. VWL Program Model
 
 A VWL program is a workflow concept graph:
@@ -128,6 +155,31 @@ A VWL program is a workflow concept graph:
   - `reason` stable branch label
   - `condition` transition-condition spec
 - Optional metadata and mapping contracts.
+
+### 4.1 Workflow Publication Lifecycle
+
+Workflow authoring MAY attach explicit publication lifecycle metadata to a workflow concept. This is the current mechanism used by the workflow-creation workflow to keep drafts loadable but non-routable until validation and final publish complete.
+
+Canonical storage:
+
+- `concept_data.workflow_publication_lifecycle`
+- `#V#hasWorkflowLifecycleJson` text (primary `en-NZ`)
+
+Canonical schema: `workflow_publication_lifecycle.v1`
+
+Current phases:
+
+- `draft`
+- `validated`
+- `validation_failed`
+- `draft_failed_completion_gate`
+- `published`
+
+Current routing/discovery rule:
+
+- workflows with explicit lifecycle metadata where `published=false` MUST remain loadable for validation and repair;
+- those workflows MUST NOT be returned by workflow discovery or treated as executable for routing;
+- only workflows with `published=true`, or workflows with no explicit lifecycle metadata, are discoverable.
 
 ## 5. Condition Language (Transition Expressions)
 
@@ -176,6 +228,8 @@ Compilation flow:
 2. Build process graph (`build_workflow_process_graph`):
    - collect steps,
    - resolve invocation target,
+   - resolve optional action-contract metadata,
+   - resolve optional publication lifecycle metadata,
    - resolve control-flow edges,
    - capture metadata and mapping references.
 3. Compile into runtime state machine (`load_workflow_definition_from_vontology`):
