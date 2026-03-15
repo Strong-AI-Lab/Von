@@ -1600,6 +1600,10 @@ export function __testOnly_syncThinkingCanonicalHistoriesFromProgress(request, p
     return syncThinkingCanonicalHistoriesFromProgress(request, progress);
 }
 
+export function __testOnly_setThinkingState(isThinking, request, options) {
+    return setThinkingState(isThinking, request, options);
+}
+
 function updateThinkingCardStatusBadge(progress) {
     const badgeEl = document.getElementById('thinkingCardStatusBadge');
     if (!badgeEl) {
@@ -19020,8 +19024,8 @@ function setThinkingState(isThinking, request = activeChatRequest, options = {})
         retryButton.setAttribute('aria-hidden', isThinking ? 'false' : 'true');
     }
     if (copyDiagnosticsButton) {
-        copyDiagnosticsButton.setAttribute('aria-hidden', isThinking ? 'false' : 'true');
-        if (!isThinking) {
+        copyDiagnosticsButton.setAttribute('aria-hidden', (isThinking || preserveFinishedCard) ? 'false' : 'true');
+        if (!isThinking && !preserveFinishedCard) {
             copyDiagnosticsButton.textContent = 'Copy diagnostics';
             copyDiagnosticsButton.classList.remove('success-feedback', 'error-feedback');
         }

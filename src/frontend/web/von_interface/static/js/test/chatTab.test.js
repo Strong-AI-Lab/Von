@@ -36,6 +36,7 @@ import {
     __testOnly_showNewSharedMessagesIndicator,
     __testOnly_updateScrollToEndButtonVisibility,
     __testOnly_reduceThinkingCardDisplayState,
+    __testOnly_setThinkingState,
     __testOnly_normaliseThinkingActivityHistory,
     __testOnly_renderThinkingCardBodyHTML,
     __testOnly_bindConceptSelectionClicks,
@@ -2293,6 +2294,76 @@ describe('thinking card toggle accessibility', () => {
         expect(toggleButton.getAttribute('aria-label')).toBe('Collapse thinking details');
         expect(toggleButton.getAttribute('title')).toBe('Collapse thinking details');
         expect(detail.getAttribute('aria-hidden')).toBe('false');
+    });
+});
+
+describe('copy diagnostics button visibility on preserved finished card', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <div id="scrollableField"></div>
+            <div class="thinking-card-wrapper" id="thinkingCardWrapper" aria-hidden="true">
+                <div class="thinking-card" role="status" aria-live="polite">
+                    <div class="thinking-card-header" id="loadingIndicator">
+                        <span class="thinking-card-phase loading-indicator-text">Thinking...</span>
+                        <span id="thinkingCardStatusBadge" class="thinking-card-status active" aria-hidden="true">Active</span>
+                        <span class="thinking-card-meta" id="thinkingCardMeta"></span>
+                        <button id="thinkingCardToggleButton" type="button" aria-hidden="true" aria-expanded="true" aria-controls="loadingIndicatorDetail" aria-label="Collapse thinking details" title="Collapse thinking details">
+                            <span class="thinking-card-toggle-icon" aria-hidden="true">⌄</span>
+                            <span class="visually-hidden">Toggle thinking details</span>
+                        </button>
+                        <button id="retryThinkingButton" type="button" aria-hidden="true">Retry</button>
+                        <button id="copyThinkingDiagnosticsButton" type="button" aria-hidden="true">Copy diagnostics</button>
+                        <button id="abortButton" type="button" aria-hidden="true"></button>
+                    </div>
+                    <div class="thinking-card-body" id="loadingIndicatorDetail" aria-live="polite"></div>
+                </div>
+            </div>
+            <button id="sendButton"></button>
+            <textarea id="promptInput"></textarea>
+            <input type="checkbox" id="annotationToggle" />
+        `;
+    });
+
+    afterEach(() => {
+        jest.restoreAllMocks();
+    });
+
+    test('copy diagnostics button remains visible on preserved finished card (JVNAUTOSCI-1431)', () => {
+        const copyBtn = document.getElementById('copyThinkingDiagnosticsButton');
+        const toggleBtn = document.getElementById('thinkingCardToggleButton');
+
+        // While thinking — both visible
+        __testOnly_setThinkingState(true, {});
+        expect(copyBtn.getAttribute('aria-hidden')).toBe('false');
+        expect(toggleBtn.getAttribute('aria-hidden')).toBe('false');
+
+        // Finished with preserveFinishedCard — both should stay visible
+        __testOnly_setThinkingState(false, {}, { preserveFinishedCard: true });
+        expect(copyBtn.getAttribute('aria-hidden')).toBe('false');
+        expect(toggleBtn.getAttribute('aria-hidden')).toBe('false');
+
+        // Finished without preserveFinishedCard — both should hide
+        __testOnly_setThinkingState(false, {});
+        expect(copyBtn.getAttribute('aria-hidden')).toBe('true');
+        expect(toggleBtn.getAttribute('aria-hidden')).toBe('true');
+    });
+
+    test('copy diagnostics button resets text only when fully dismissed', () => {
+        const copyBtn = document.getElementById('copyThinkingDiagnosticsButton');
+
+        // Simulate a successful copy feedback state
+        copyBtn.textContent = 'Copied!';
+        copyBtn.classList.add('success-feedback');
+
+        // Preserved finished card should keep the feedback text
+        __testOnly_setThinkingState(false, {}, { preserveFinishedCard: true });
+        expect(copyBtn.textContent).toBe('Copied!');
+        expect(copyBtn.classList.contains('success-feedback')).toBe(true);
+
+        // Full dismissal should reset
+        __testOnly_setThinkingState(false, {});
+        expect(copyBtn.textContent).toBe('Copy diagnostics');
+        expect(copyBtn.classList.contains('success-feedback')).toBe(false);
     });
 });
 
