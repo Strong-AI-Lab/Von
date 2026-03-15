@@ -1805,7 +1805,13 @@ function bindConceptSelectionClicks(container, options = {}) {
         if (!button) {
             return;
         }
-        event.preventDefault();
+        // JVNAUTOSCI-1441: Do not call preventDefault when the concept link
+        // is inside a <summary> of a <details> element, because that would
+        // block the native toggle behaviour.
+        const insideDetailsSummary = !!button.closest('summary')?.closest('details');
+        if (!insideDetailsSummary) {
+            event.preventDefault();
+        }
         const conceptId = button.dataset.conceptId;
         if (!conceptId) {
             return;
@@ -2607,11 +2613,17 @@ function renderThinkingDiagnosticRowHTML(entry, rowClass = 'thinking-card-tool')
 
     const statusClass = (entry.state === 'success' || entry.state === 'failure') ? entry.state : 'pending';
     const statusIcon = statusClass === 'success' ? '✓' : (statusClass === 'failure' ? '✗' : '');
+    const diagnosticHtml = normaliseThinkingActivityString(entry.diagnosticHtml);
     const detailHtmlParts = [];
     if (Number.isFinite(entry.groupCount) && Number(entry.groupCount) > 1) {
         detailHtmlParts.push(escapeHtml(`${Number(entry.groupCount)} updates`));
     }
-    if (normaliseThinkingActivityString(entry.detailHtml)) {
+    // JVNAUTOSCI-1441: For collapsible rows (<details>), use plain text in
+    // <summary> to avoid interactive <button> elements that prevent the
+    // native <details> toggle.
+    if (diagnosticHtml && normaliseThinkingActivityString(entry.detail)) {
+        detailHtmlParts.push(escapeHtml(normaliseThinkingActivityString(entry.detail)));
+    } else if (normaliseThinkingActivityString(entry.detailHtml)) {
         detailHtmlParts.push(entry.detailHtml);
     } else if (normaliseThinkingActivityString(entry.detail)) {
         detailHtmlParts.push(escapeHtml(normaliseThinkingActivityString(entry.detail)));
@@ -2622,7 +2634,6 @@ function renderThinkingDiagnosticRowHTML(entry, rowClass = 'thinking-card-tool')
 
     const summaryHtml = `<span class="thinking-card-tool-status ${statusClass}">${statusIcon}</span>
         <span class="thinking-card-tool-name">${escapeHtml(label)}</span>${detailLabel}`;
-    const diagnosticHtml = normaliseThinkingActivityString(entry.diagnosticHtml);
     if (!diagnosticHtml) {
         return `<div class="${rowClass}">${summaryHtml}</div>`;
     }
