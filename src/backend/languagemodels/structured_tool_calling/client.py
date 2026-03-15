@@ -8,40 +8,33 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Union
 import logging
 
+from ...services.model_registry_service import (
+    resolve_model_parameter_policy,
+    sanitise_model_parameter_value,
+)
 from .types import ToolDefinition, LLMResponse
 
 
 logger = logging.getLogger(__name__)
 
 
-# Models that only support default temperature (1.0) - JVNAUTOSCI-1010 / JVNAUTOSCI-1427
-# See: OpenAI API error "temperature does not support X with this model"
-MODELS_REQUIRING_DEFAULT_TEMPERATURE = frozenset(
-    {
-        "gpt-5.2-chat-latest",
-        "gpt-5.2",
-        "gpt-5-mini",
-    }
-)
-
-
 def model_supports_custom_temperature(model: str) -> bool:
-    """Check if a model supports custom temperature values.
+    """Return whether the KB allows explicit temperature for this model."""
 
-    Some newer OpenAI models (e.g. gpt-5.2, gpt-5-mini) only accept
-    temperature=1 / model default.
-    """
-    if not model:
+    if not isinstance(model, str) or not model.strip():
         return True
-    model_lower = model.lower()
-    # Check exact match first
-    if model_lower in MODELS_REQUIRING_DEFAULT_TEMPERATURE:
-        return False
-    # Check prefix match for version variants
-    for restricted in MODELS_REQUIRING_DEFAULT_TEMPERATURE:
-        if model_lower.startswith(restricted):
-            return False
-    return True
+
+    policy = resolve_model_parameter_policy(
+        model=model,
+        provider="openai",
+        parameter="temperature",
+        api_surface="chat_completions",
+    )
+    if not isinstance(policy, dict):
+        return True
+
+    action = str(policy.get("action") or "").strip().lower().replace("-", "_")
+    return action not in {"omit", "fixed_value"}
 
 
 def resolve_safe_temperature_for_model(
@@ -50,15 +43,21 @@ def resolve_safe_temperature_for_model(
 ) -> Optional[float]:
     """Return a temperature that is safe to send for the given model.
 
-    For models that reject custom temperatures, return ``None`` so callers omit
-    the parameter entirely and let the model use its default behaviour.
+    Runtime parameter policies are resolved from the model registry in Vontology.
+    When a model/API profile rejects explicit temperature values, return ``None``
+    so callers omit the parameter and allow the provider default to apply.
     """
 
     if temperature is None:
         return None
-    if model_supports_custom_temperature(model):
-        return temperature
-    return None
+    sanitised = sanitise_model_parameter_value(
+        model=model,
+        provider="openai",
+        parameter="temperature",
+        value=temperature,
+        api_surface="chat_completions",
+    )
+    return sanitised if isinstance(sanitised, (int, float)) else None
 
 
 @dataclass

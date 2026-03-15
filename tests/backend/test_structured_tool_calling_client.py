@@ -14,6 +14,64 @@ from src.backend.languagemodels.structured_tool_calling import (
 )
 
 
+def _install_openai_temperature_registry(monkeypatch) -> dict[str, object]:
+    import src.backend.services.model_registry_service as registry_module
+
+    snapshot = {
+        "source": "vontology_graph",
+        "models": [
+            {
+                "model_id": "gpt-5.2",
+                "provider": "openai",
+                "concept_id": "#V#openai_gpt52",
+                "registry_entry_id": "#V#openai_gpt52_registry_entry",
+                "api_profiles": [
+                    {
+                        "profile_concept_id": "#V#openai_gpt52_chat_completions_profile",
+                        "api_surface": "chat_completions",
+                        "parameter_constraints": [
+                            {
+                                "constraint_concept_id": "#V#openai_gpt52_temperature_omit_constraint",
+                                "parameter_concept_id": "#V#temperature_parameter",
+                                "parameter": "temperature",
+                                "action": "omit",
+                                "fixed_value": "1.0",
+                            }
+                        ],
+                    }
+                ],
+            },
+            {
+                "model_id": "gpt-5-mini",
+                "provider": "openai",
+                "concept_id": "#V#openai_gpt_5_mini",
+                "registry_entry_id": "#V#openai_gpt5_mini_registry_entry",
+                "api_profiles": [
+                    {
+                        "profile_concept_id": "#V#openai_gpt5_mini_chat_completions_profile",
+                        "api_surface": "chat_completions",
+                        "parameter_constraints": [
+                            {
+                                "constraint_concept_id": "#V#openai_gpt5_mini_temperature_omit_constraint",
+                                "parameter_concept_id": "#V#temperature_parameter",
+                                "parameter": "temperature",
+                                "action": "omit",
+                                "fixed_value": "1.0",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        registry_module,
+        "get_model_registry_snapshot",
+        lambda *, preferred_language=None: snapshot,
+    )
+    return snapshot
+
+
 class TestLLMClientConfig:
     """Tests for LLMClientConfig."""
 
@@ -120,7 +178,10 @@ class TestTemperatureGuards:
             ("gpt-5.2-chat-latest", 0.7, None),
         ],
     )
-    def test_resolve_safe_temperature_for_model(self, model, temperature, expected):
+    def test_resolve_safe_temperature_for_model(
+        self, monkeypatch, model, temperature, expected
+    ):
+        _install_openai_temperature_registry(monkeypatch)
         from src.backend.languagemodels.structured_tool_calling.client import (
             resolve_safe_temperature_for_model,
         )
@@ -128,6 +189,7 @@ class TestTemperatureGuards:
         assert resolve_safe_temperature_for_model(model, temperature) == expected
 
     def test_openai_provider_omits_temperature_for_gpt5_mini(self, monkeypatch):
+        _install_openai_temperature_registry(monkeypatch)
         from src.backend.languagemodels.structured_tool_calling.providers import (
             openai_client as provider_module,
         )

@@ -7,6 +7,63 @@ import types
 import src.backend.services  # noqa: F401
 
 
+def _install_openai_temperature_registry(monkeypatch) -> None:
+    import src.backend.services.model_registry_service as registry_module
+
+    snapshot = {
+        "source": "vontology_graph",
+        "models": [
+            {
+                "model_id": "gpt-5.2",
+                "provider": "openai",
+                "concept_id": "#V#openai_gpt52",
+                "registry_entry_id": "#V#openai_gpt52_registry_entry",
+                "api_profiles": [
+                    {
+                        "profile_concept_id": "#V#openai_gpt52_chat_completions_profile",
+                        "api_surface": "chat_completions",
+                        "parameter_constraints": [
+                            {
+                                "constraint_concept_id": "#V#openai_gpt52_temperature_omit_constraint",
+                                "parameter_concept_id": "#V#temperature_parameter",
+                                "parameter": "temperature",
+                                "action": "omit",
+                                "fixed_value": "1.0",
+                            }
+                        ],
+                    }
+                ],
+            },
+            {
+                "model_id": "gpt-5-mini",
+                "provider": "openai",
+                "concept_id": "#V#openai_gpt_5_mini",
+                "registry_entry_id": "#V#openai_gpt5_mini_registry_entry",
+                "api_profiles": [
+                    {
+                        "profile_concept_id": "#V#openai_gpt5_mini_chat_completions_profile",
+                        "api_surface": "chat_completions",
+                        "parameter_constraints": [
+                            {
+                                "constraint_concept_id": "#V#openai_gpt5_mini_temperature_omit_constraint",
+                                "parameter_concept_id": "#V#temperature_parameter",
+                                "parameter": "temperature",
+                                "action": "omit",
+                                "fixed_value": "1.0",
+                            }
+                        ],
+                    }
+                ],
+            },
+        ],
+    }
+    monkeypatch.setattr(
+        registry_module,
+        "get_model_registry_snapshot",
+        lambda *, preferred_language=None: snapshot,
+    )
+
+
 def _build_fake_openai_response(model: str, content: str = "ok"):
     return types.SimpleNamespace(
         choices=[
@@ -24,6 +81,7 @@ def test_llm_interface_openai_structured_config_omits_temperature_for_gpt5_mini(
 ) -> None:
     import src.backend.languagemodels.llm_interface as mod
 
+    _install_openai_temperature_registry(monkeypatch)
     monkeypatch.setattr(
         mod.openai,
         "OpenAI",
@@ -42,6 +100,7 @@ def test_llm_interface_openai_generate_omits_temperature_for_gpt5_mini(
 ) -> None:
     import src.backend.languagemodels.llm_interface as mod
 
+    _install_openai_temperature_registry(monkeypatch)
     captured_kwargs: dict[str, object] = {}
 
     def _create(**kwargs):
@@ -74,6 +133,7 @@ def test_llm_interface_openai_generate_preserves_temperature_for_gpt4(
 ) -> None:
     import src.backend.languagemodels.llm_interface as mod
 
+    _install_openai_temperature_registry(monkeypatch)
     captured_kwargs: dict[str, object] = {}
 
     def _create(**kwargs):
