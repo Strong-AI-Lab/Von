@@ -1604,6 +1604,10 @@ export function __testOnly_setThinkingState(isThinking, request, options) {
     return setThinkingState(isThinking, request, options);
 }
 
+export async function __testOnly_copyActiveThinkingDiagnostics(button = null, request = null) {
+    return copyActiveThinkingDiagnostics(button, request);
+}
+
 function updateThinkingCardStatusBadge(progress) {
     const badgeEl = document.getElementById('thinkingCardStatusBadge');
     if (!badgeEl) {
@@ -19027,7 +19031,14 @@ function setThinkingState(isThinking, request = activeChatRequest, options = {})
         copyDiagnosticsButton.setAttribute('aria-hidden', (isThinking || preserveFinishedCard) ? 'false' : 'true');
         if (!isThinking && !preserveFinishedCard) {
             copyDiagnosticsButton.textContent = 'Copy diagnostics';
-            copyDiagnosticsButton.classList.remove('success-feedback', 'error-feedback');
+            copyDiagnosticsButton.setAttribute('title', 'Copy diagnostics');
+            copyDiagnosticsButton.setAttribute('aria-label', 'Copy diagnostics');
+            copyDiagnosticsButton.classList.remove(
+                'success-feedback',
+                'error-feedback',
+                'copy-json-copied',
+                'copy-json-copy-failed'
+            );
         }
     }
 
@@ -19383,25 +19394,24 @@ function retryActiveChatRequest() {
     }, 0);
 }
 
-async function copyActiveThinkingDiagnostics(button = null) {
-    if (!activeChatRequest) {
+async function copyActiveThinkingDiagnostics(button = null, requestOverride = null) {
+    const request = requestOverride || activeChatRequest;
+    if (!request) {
         return false;
     }
-    const payload = buildThinkingDiagnosticsPayload(activeChatRequest);
+    const payload = buildThinkingDiagnosticsPayload(request);
     if (!payload) {
         return false;
     }
 
     const text = JSON.stringify(payload, null, 2);
-    const copied = await copyTextToClipboard(text);
-
-    if (button) {
-        const original = button.dataset.originalText || button.textContent || 'Copy diagnostics';
-        button.dataset.originalText = original;
-        indicateClipboardResult(button, original, copied);
+    if (button instanceof HTMLButtonElement) {
+        return copyJsonTextWithButtonFeedback(button, text, {
+            fallbackLabel: 'Copy diagnostics'
+        });
     }
 
-    return copied;
+    return copyTextToClipboard(text);
 }
 
 function ensureAbortButtonBound() {

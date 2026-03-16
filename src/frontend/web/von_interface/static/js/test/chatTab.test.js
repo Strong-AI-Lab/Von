@@ -36,6 +36,7 @@ import {
     __testOnly_showNewSharedMessagesIndicator,
     __testOnly_updateScrollToEndButtonVisibility,
     __testOnly_reduceThinkingCardDisplayState,
+    __testOnly_copyActiveThinkingDiagnostics,
     __testOnly_setThinkingState,
     __testOnly_normaliseThinkingActivityHistory,
     __testOnly_renderThinkingCardBodyHTML,
@@ -2299,6 +2300,7 @@ describe('thinking card toggle accessibility', () => {
 
 describe('copy diagnostics button visibility on preserved finished card', () => {
     beforeEach(() => {
+        jest.useFakeTimers();
         document.body.innerHTML = `
             <div id="scrollableField"></div>
             <div class="thinking-card-wrapper" id="thinkingCardWrapper" aria-hidden="true">
@@ -2325,6 +2327,7 @@ describe('copy diagnostics button visibility on preserved finished card', () => 
     });
 
     afterEach(() => {
+        jest.useRealTimers();
         jest.restoreAllMocks();
     });
 
@@ -2352,18 +2355,53 @@ describe('copy diagnostics button visibility on preserved finished card', () => 
         const copyBtn = document.getElementById('copyThinkingDiagnosticsButton');
 
         // Simulate a successful copy feedback state
-        copyBtn.textContent = 'Copied!';
-        copyBtn.classList.add('success-feedback');
+        copyBtn.textContent = '✓ Copied';
+        copyBtn.classList.add('copy-json-copied');
+        copyBtn.setAttribute('title', 'Copied to clipboard');
+        copyBtn.setAttribute('aria-label', 'Copied to clipboard');
 
         // Preserved finished card should keep the feedback text
         __testOnly_setThinkingState(false, {}, { preserveFinishedCard: true });
-        expect(copyBtn.textContent).toBe('Copied!');
-        expect(copyBtn.classList.contains('success-feedback')).toBe(true);
+        expect(copyBtn.textContent).toBe('✓ Copied');
+        expect(copyBtn.classList.contains('copy-json-copied')).toBe(true);
 
         // Full dismissal should reset
         __testOnly_setThinkingState(false, {});
         expect(copyBtn.textContent).toBe('Copy diagnostics');
+        expect(copyBtn.getAttribute('title')).toBe('Copy diagnostics');
+        expect(copyBtn.getAttribute('aria-label')).toBe('Copy diagnostics');
+        expect(copyBtn.classList.contains('copy-json-copied')).toBe(false);
+    });
+
+    test('copy diagnostics button uses shared copied-state feedback after success (JVNAUTOSCI-1458)', async () => {
+        const copyBtn = document.getElementById('copyThinkingDiagnosticsButton');
+        const writeText = jest.fn().mockResolvedValue(undefined);
+        Object.assign(navigator, {
+            clipboard: { writeText }
+        });
+
+        const copied = await __testOnly_copyActiveThinkingDiagnostics(copyBtn, {
+            clientRequestId: 'request-1458',
+            promptRaw: 'diagnose this',
+            thinkingStartedAtMs: Date.now() - 250,
+            latestProgress: null,
+            activityHistory: [],
+            progressEvents: [],
+            phaseHistory: [],
+            workflowDiscovery: null,
+            workflowStagePath: null
+        });
+
+        expect(copied).toBe(true);
+        expect(copyBtn.textContent).toBe('✓ Copied');
+        expect(copyBtn.classList.contains('copy-json-copied')).toBe(true);
         expect(copyBtn.classList.contains('success-feedback')).toBe(false);
+        expect(copyBtn.getAttribute('title')).toBe('Copied to clipboard');
+        expect(copyBtn.getAttribute('aria-label')).toBe('Copied to clipboard');
+
+        jest.advanceTimersByTime(2300);
+        expect(copyBtn.textContent).toBe('Copy diagnostics');
+        expect(copyBtn.classList.contains('copy-json-copied')).toBe(false);
     });
 });
 
