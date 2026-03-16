@@ -261,6 +261,17 @@ class TestKeywordFallbackQueries:
         assert "arxiv workflow" in queries
         assert "arxiv 2602.20478" in queries
 
+    def test_adds_talk_and_seminar_queries_for_presentation_prompt(self) -> None:
+        queries = _build_keyword_fallback_queries(
+            "Can you make the workflow for adding academic talks now?",
+            [],
+        )
+
+        assert "talk representation workflow" in queries
+        assert "technical scientific talk representation workflow" in queries
+        assert "academic presentation workflow" in queries
+        assert "seminar representation workflow" in queries
+
 
 class TestDiscoverWorkflows:
     """Unit tests for discover_workflows function."""

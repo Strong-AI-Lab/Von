@@ -88,6 +88,16 @@ _NON_FORMAL_STAGE_SPECS: tuple[_StageSpec, ...] = (
         runtime_aliases=("tool_calling",),
     ),
     _StageSpec(
+        stage_id="tool_plan",
+        stage_label="Tool-call planning",
+        order=60,
+        stage_kind="non_formal",
+        boundary_type="planning",
+        stage_concept_id="#V#conversation_turn_stage_tool_plan",
+        workflow_id=TOOL_CALLING_WORKFLOW_ID,
+        runtime_aliases=("tool_plan", "plan"),
+    ),
+    _StageSpec(
         stage_id="narration",
         stage_label="Narration rendering",
         order=120,

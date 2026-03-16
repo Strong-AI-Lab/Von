@@ -2274,6 +2274,7 @@ def load_workflow_definition_from_vontology(
         invalid_output_mapping_specs: list[Dict[str, str]] = []
         subworkflow_input_mappings: list[Dict[str, str]] = []
         subworkflow_output_mappings: list[Dict[str, str]] = []
+        subworkflow_static_input_keys: list[str] = []
         subworkflow_failure_mode = ""
         action_contract: dict[str, Any] | None = None
         action_contract_source = ""
@@ -2342,6 +2343,19 @@ def load_workflow_definition_from_vontology(
                 subworkflow_failure_mode = str(
                     input_map.get("failure_mode") or input_map.get("__failure_mode") or ""
                 ).strip()
+                subworkflow_static_input_keys = list(
+                    dict.fromkeys(
+                        str(key).strip()
+                        for key, raw_value in input_map.items()
+                        if isinstance(key, str)
+                        and str(key).strip()
+                        and isinstance(raw_value, str)
+                        and str(raw_value).strip()
+                        and str(key).strip() not in {"workflow_id", "failure_mode"}
+                        and not str(key).strip().startswith("__")
+                        and not str(key).strip().startswith("workflow_step_")
+                    )
+                )
 
             if has_static_workflow_invocation:
                 input_map["workflow_id"] = str(invokes_workflow).strip()
@@ -2708,6 +2722,7 @@ def load_workflow_definition_from_vontology(
                     ),
                     input_mappings=subworkflow_input_mappings,
                     output_mappings=subworkflow_output_mappings,
+                    static_input_keys=subworkflow_static_input_keys,
                     failure_mode=subworkflow_failure_mode,
                 )
         if tool_output_context_mappings:

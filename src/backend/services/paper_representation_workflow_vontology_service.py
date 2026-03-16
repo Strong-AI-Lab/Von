@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import Any
 
-from ..db.repositories.concepts_repository import ConceptsRepository
-from . import concept_service
 from .text_value_service import upsert_singleton_text_relation
+from .workflow_vontology_materialisation_helpers import ensure_instance_typing
 from .workflow_discovery_service import invalidate_workflow_discovery_executability_caches
 from ..workflows import workflow_concept_authority_service as authority_service
 from ..workflows.durable.paper_representation_workflow import (
@@ -885,50 +884,6 @@ def _build_arxiv_workflow_spec() -> authority_service._CanonicalWorkflowPublicat
     )
 
 
-def _load_concept(concept_id: str) -> dict[str, Any] | None:
-    concept_id_clean = str(concept_id or "").strip()
-    if not concept_id_clean:
-        return None
-    try:
-        concept_doc = ConceptsRepository.find_one({"concept_id": concept_id_clean})
-    except Exception:
-        return None
-    return dict(concept_doc) if isinstance(concept_doc, Mapping) else None
-
-
-def _ensure_instance_typing(*, concept_id: str, type_ids: Sequence[str]) -> bool:
-    concept_doc = _load_concept(concept_id)
-    if concept_doc is None:
-        return False
-
-    relationships = dict(concept_doc.get("relationships") or {})
-    existing = relationships.get("is_an_instance_of")
-    if isinstance(existing, list):
-        updated = [
-            str(item).strip()
-            for item in existing
-            if isinstance(item, str) and str(item).strip()
-        ]
-    elif isinstance(existing, str) and existing.strip():
-        updated = [existing.strip()]
-    else:
-        updated = []
-
-    changed = False
-    for type_id in type_ids:
-        type_id_clean = str(type_id or "").strip()
-        if not type_id_clean or type_id_clean in updated:
-            continue
-        updated.append(type_id_clean)
-        changed = True
-    if not changed:
-        return False
-
-    relationships["is_an_instance_of"] = updated
-    concept_service.update_concept(concept_id, {"relationships": relationships})
-    return True
-
-
 def _ensure_workflow_texts(workflow_id: str) -> None:
     shared_context = {
         "source": "JVNAUTOSCI-1415",
@@ -1104,12 +1059,16 @@ def bootstrap_canonical_paper_representation_workflows() -> dict[str, Any]:
         validation_by_workflow_id.update(existing_validation_by_workflow_id)
 
     for workflow_id, spec in specs.items():
-        if _ensure_instance_typing(concept_id=workflow_id, type_ids=_WORKFLOW_TYPE_IDS):
+        if ensure_instance_typing(
+            concept_id=workflow_id,
+            type_ids=_WORKFLOW_TYPE_IDS,
+            remove_type_parent_ids=_WORKFLOW_TYPE_IDS,
+        ):
             typed_workflow_ids.append(workflow_id)
         _ensure_workflow_texts(workflow_id)
 
         for step_concept_id in _step_concept_ids_for_spec(workflow_id=workflow_id, spec=spec):
-            if _ensure_instance_typing(
+            if ensure_instance_typing(
                 concept_id=step_concept_id,
                 type_ids=(_WORKFLOW_STEP_TYPE_ID,),
             ):

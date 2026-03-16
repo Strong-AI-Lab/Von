@@ -243,6 +243,49 @@ class _PromptRequirementEvaluation:
         )
 
 
+def _derive_workflow_selection_rationale(
+    *,
+    selected_workflow_id: str | None,
+    selector_verdict: str | None,
+    selector_source: str | None,
+    candidate_workflow_ids: Sequence[str],
+    explicit_reasoning: str | None = None,
+) -> str:
+    """Return a stable machine-readable workflow-selection rationale code."""
+
+    explicit = str(explicit_reasoning or "").strip()
+    source = (selector_source or "default").strip().lower() or "default"
+    selected = (selected_workflow_id or "").strip()
+    verdict = (selector_verdict or "").strip()
+    candidate_set = {
+        str(item).strip().lower()
+        for item in candidate_workflow_ids
+        if isinstance(item, str) and str(item).strip()
+    }
+
+    if source == "selector_override":
+        if explicit:
+            return f"selector_override:{explicit}"
+        if verdict:
+            return f"selector_override_verdict:{verdict}"
+        return "selector_override"
+    if source == "selector":
+        if selected and selected.lower() in candidate_set:
+            return "selector_selected_discovered_candidate"
+        if verdict:
+            return f"selector_verdict:{verdict}"
+        return "selector_route_without_explicit_verdict"
+    if source == "presenter_mode":
+        return "presenter_mode_route"
+    if source == "default":
+        if explicit:
+            return f"default_reason:{explicit}"
+        return "default_routing_fallback"
+    if explicit:
+        return f"routing_source:{source}:{explicit}"
+    return f"routing_source:{source}"
+
+
 @dataclass(frozen=True)
 class _WorkflowModelPolicyState:
     enabled: bool
@@ -17421,29 +17464,6 @@ class InternalMCPChatOrchestrator:
                 workflow_ids.append(workflow_id)
             return workflow_ids
 
-        def _derive_selection_rationale(
-            *,
-            selected_workflow_id: str | None,
-            selector_verdict: str | None,
-            selector_source: str | None,
-            candidate_workflow_ids: Sequence[str],
-        ) -> str:
-            source = (selector_source or "default").strip().lower() or "default"
-            selected = (selected_workflow_id or "").strip()
-            verdict = (selector_verdict or "").strip()
-            candidate_set = {item.strip().lower() for item in candidate_workflow_ids}
-            if source == "selector":
-                if selected and selected.lower() in candidate_set:
-                    return "selector_selected_discovered_candidate"
-                if verdict:
-                    return f"selector_verdict:{verdict}"
-                return "selector_route_without_explicit_verdict"
-            if source == "presenter_mode":
-                return "presenter_mode_route"
-            if source == "default":
-                return "default_routing_fallback"
-            return f"routing_source:{source}"
-
         def _build_turn_execution_selection_snapshot(
             *,
             workflow_data: Any,
@@ -17524,11 +17544,14 @@ class InternalMCPChatOrchestrator:
             selection_rationale = (
                 _safe_scalar_text(workflow_routing_payload.get("selection_rationale"))
                 or _safe_scalar_text(turn_workflow_selection_payload.get("selection_rationale"))
-                or _derive_selection_rationale(
+                or _derive_workflow_selection_rationale(
                     selected_workflow_id=selected_workflow_id,
                     selector_verdict=selector_verdict,
                     selector_source=selector_source,
                     candidate_workflow_ids=candidate_workflow_ids,
+                    explicit_reasoning=_safe_scalar_text(
+                        workflow_routing_payload.get("reasoning")
+                    ),
                 )
             )
 
@@ -19740,6 +19763,13 @@ class InternalMCPChatOrchestrator:
                     confidence_score=selector_selection.confidence_score,
                     reasoning=selector_selection.reasoning,
                 )
+                selection_rationale = _derive_workflow_selection_rationale(
+                    selected_workflow_id=selector_selection.workflow_id,
+                    selector_verdict=selector_selection.verdict,
+                    selector_source="selector",
+                    candidate_workflow_ids=selector_selection.discovered_workflow_ids,
+                    explicit_reasoning=selector_selection.reasoning,
+                )
                 _emit_progress_local(
                     {
                         "status": "thinking",
@@ -19754,6 +19784,7 @@ class InternalMCPChatOrchestrator:
                         "workflow_match_count": len(discovered_matches),
                         "workflow_candidate_count": len(discovered_matches)
                         + len(excluded_discovered_matches),
+                        "workflow_selection_rationale": selection_rationale,
                     }
                 )
                 aux_llm_calls.append(
@@ -19776,6 +19807,7 @@ class InternalMCPChatOrchestrator:
                         "routing_duration_ms": routing_duration_ms,
                         "confidence_score": selector_selection.confidence_score,
                         "reasoning": selector_selection.reasoning,
+                        "selection_rationale": selection_rationale,
                     }
                 )
                 if trace_enabled and trace is not None:
@@ -19802,6 +19834,7 @@ class InternalMCPChatOrchestrator:
                         "routing_duration_ms": routing_duration_ms,
                         "confidence_score": selector_selection.confidence_score,
                         "reasoning": selector_selection.reasoning,
+                        "selection_rationale": selection_rationale,
                     }
                 # Phase 3: record selection experience tuple.
                 try:
@@ -19831,6 +19864,14 @@ class InternalMCPChatOrchestrator:
                     prompt_id=None,
                     discovered_workflow_ids=(),
                     source="default",
+                    reasoning="selector_exception",
+                )
+                selection_rationale = _derive_workflow_selection_rationale(
+                    selected_workflow_id=CHAT_ASSISTANT_WORKFLOW_ID,
+                    selector_verdict="fallback",
+                    selector_source="default",
+                    candidate_workflow_ids=(),
+                    explicit_reasoning="selector_exception",
                 )
                 _emit_progress_local(
                     {
@@ -19844,6 +19885,7 @@ class InternalMCPChatOrchestrator:
                             CHAT_ASSISTANT_WORKFLOW_ID
                         ),
                         "workflow_task": CHAT_ASSISTANT_WORKFLOW_ID,
+                        "workflow_selection_rationale": selection_rationale,
                     }
                 )
 
@@ -23051,6 +23093,8 @@ class InternalMCPChatOrchestrator:
                 branch_kind, parent_is_target = _classify_branch_kind(predicate)
                 if branch_kind in {"type_hierarchy", "instance_hierarchy"}:
                     has_explicit_hierarchy_predicates = True
+                if branch_kind == "custom":
+                    continue
 
                 parent_node_id = target_id if parent_is_target else source_id
                 child_node_id = source_id if parent_is_target else target_id
@@ -24235,6 +24279,7 @@ class InternalMCPChatOrchestrator:
                 discovered_workflow_ids=discovered_workflow_ids,
                 routing_duration_ms=routing_duration_ms,
                 source="selector_override",
+                reasoning=reason,
             )
 
             override_payload: dict[str, Any] = {
@@ -24323,6 +24368,25 @@ class InternalMCPChatOrchestrator:
         selected_workflow_name = _resolve_selected_workflow_name(
             selected_workflow_id_text
         )
+        workflow_selection_rationale = _derive_workflow_selection_rationale(
+            selected_workflow_id=selected_workflow_id_text,
+            selector_verdict=selector_verdict or None,
+            selector_source=(
+                routing_info.source
+                if isinstance(routing_info, WorkflowRoutingInfo)
+                else None
+            ),
+            candidate_workflow_ids=(
+                routing_info.discovered_workflow_ids
+                if isinstance(routing_info, WorkflowRoutingInfo)
+                else ()
+            ),
+            explicit_reasoning=(
+                routing_info.reasoning
+                if isinstance(routing_info, WorkflowRoutingInfo)
+                else None
+            ),
+        )
         workflow_dispatch_progress: dict[str, Any] = {
             "selected_workflow_id": selected_workflow_id_text,
             "selected_workflow_name": selected_workflow_name,
@@ -24335,6 +24399,7 @@ class InternalMCPChatOrchestrator:
             "workflow_match_count": len(discovered_matches),
             "workflow_candidate_count": len(discovered_matches)
             + len(excluded_discovered_matches),
+            "workflow_selection_rationale": workflow_selection_rationale,
         }
         _emit_phase_transition_local(
             self.PHASE_WORKFLOW_DISPATCH,

@@ -212,6 +212,53 @@ def test_validate_contract_accepts_dynamic_subworkflow_contract() -> None:
     )
 
 
+def test_validate_contract_accepts_static_subworkflow_inputs_as_provided_inputs() -> None:
+    child = _child_workflow_definition(
+        required_inputs=("child_input", "verification_profile")
+    )
+    parent = WorkflowDefinition(
+        workflow_id="#V#static_parent_workflow",
+        initial_state="start",
+        states={
+            "start": WorkflowStateSpec(
+                state_id="start",
+                actions=(WorkflowActionInvocation(action_id=WORKFLOW_SUBWORKFLOW_ACTION_ID),),
+                terminal=True,
+                metadata={
+                    "subworkflow_contract": build_subworkflow_contract(
+                        workflow_id=child.workflow_id,
+                        input_mappings=[
+                            {
+                                "child_input_key": "child_input",
+                                "parent_context_key": "parent_input",
+                            }
+                        ],
+                        output_mappings=[
+                            {
+                                "child_output_field": "child_output",
+                                "parent_context_key": "parent_output",
+                            }
+                        ],
+                        static_input_keys=["verification_profile"],
+                    )
+                },
+            ),
+        },
+        termination_states=("start",),
+        purpose="static parent",
+    )
+
+    validation = validate_workflow_definition_contract(
+        definition=parent,
+        workflow_definition_loader=lambda workflow_id: (
+            child if workflow_id == child.workflow_id else None
+        ),
+    )
+
+    assert validation["valid"] is True
+    assert validation["subworkflow_contract_issues"] == []
+
+
 def test_validate_contract_reports_unresolved_subworkflow_workflow() -> None:
     parent = _parent_with_subworkflow_contract(child_workflow_id="#V#missing_child")
 

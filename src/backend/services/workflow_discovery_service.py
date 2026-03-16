@@ -447,6 +447,30 @@ def _build_keyword_fallback_queries(
             if isinstance(type_name, str) and type_name.strip():
                 candidates.append(type_name.strip())
 
+    query_lower = str(query or "").strip().lower()
+    talk_keywords = (
+        "talk",
+        "presentation",
+        "seminar",
+        "academic talk",
+        "scientific talk",
+        "technical talk",
+    )
+    if any(keyword in query_lower for keyword in talk_keywords):
+        candidates.extend(
+            [
+                "talk workflow",
+                "talk representation workflow",
+                "presentation workflow",
+                "presentation representation workflow",
+                "academic presentation workflow",
+                "technical scientific talk representation workflow",
+                "scientific presentation workflow",
+                "seminar workflow",
+                "seminar representation workflow",
+            ]
+        )
+
     arxiv_ids = extract_arxiv_id_candidates(
         query,
         *[
