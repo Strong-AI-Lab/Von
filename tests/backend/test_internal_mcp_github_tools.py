@@ -8,6 +8,7 @@ from src.backend.integrations.internal_mcp.catalogue import (
     _github_create_branch,
     _github_create_pull_request,
     _github_get_file_contents,
+    _github_issue_read,
     _github_search_code,
     build_default_catalogue,
 )
@@ -82,7 +83,7 @@ def test_github_get_file_contents_success_through_gateway_invoke(monkeypatch) ->
 
     class _FakeProxy:
         async def call_tool(self, tool_name: str, arguments: dict):
-            assert tool_name == "github_get_file_contents"
+            assert tool_name == "get_file_contents"
             assert arguments["owner"] == "Strong-AI-Lab"
             assert arguments["repo"] == "Von"
             return {
@@ -91,7 +92,7 @@ def test_github_get_file_contents_success_through_gateway_invoke(monkeypatch) ->
             }
 
         async def list_tools(self):
-            return [{"name": "github_get_file_contents"}]
+            return [{"name": "get_file_contents"}]
 
         def get_stats(self):
             return {"call_count": 1, "error_count": 0}
@@ -115,6 +116,8 @@ def test_github_get_file_contents_success_through_gateway_invoke(monkeypatch) ->
     )
     payload = result.payload
     assert payload.get("success") is True
+    assert payload.get("tool") == "github_get_file_contents"
+    assert payload.get("proxy_tool") == "get_file_contents"
     assert payload.get("path") == "README.md"
 
 
@@ -153,6 +156,68 @@ def test_github_proxy_error_through_gateway_invoke(monkeypatch) -> None:
     payload = result.payload
     assert payload.get("success") is False
     assert payload.get("error_code") == "github_proxy_error"
+    assert payload.get("error_details", {}).get("proxy_tool") == "get_file_contents"
+
+
+def test_github_pull_request_read_translates_supported_methods(monkeypatch) -> None:
+    from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
+    from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
+
+    class _FakeProxy:
+        async def call_tool(self, tool_name: str, arguments: dict):
+            assert tool_name == "get_pull_request_status"
+            assert arguments == {
+                "owner": "Strong-AI-Lab",
+                "repo": "Von",
+                "pullNumber": 42,
+            }
+            return {"state": "success"}
+
+        async def list_tools(self):
+            return [{"name": "get_pull_request_status"}]
+
+        def get_stats(self):
+            return {"call_count": 1, "error_count": 0}
+
+    async def _fake_get_github_proxy():
+        return _FakeProxy()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.github_proxy_mcp.get_github_proxy",
+        _fake_get_github_proxy,
+    )
+
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    result = gateway.invoke(
+        "github_pull_request_read",
+        {
+            "owner": "Strong-AI-Lab",
+            "repo": "Von",
+            "pullNumber": 42,
+            "method": "get_status",
+        },
+    )
+    payload = result.payload
+
+    assert payload.get("success") is True
+    assert payload.get("tool") == "github_pull_request_read"
+    assert payload.get("proxy_tool") == "get_pull_request_status"
+    assert payload.get("state") == "success"
+
+
+def test_github_issue_read_rejects_unsupported_methods() -> None:
+    result = _github_issue_read(
+        owner="Strong-AI-Lab",
+        repo="Von",
+        issue_number=7,
+        method="get_comments",
+    )
+    assert result.get("success") is False
+    assert result.get("error_code") == "unsupported_operation"
 
 
 def test_github_create_pull_request_success_through_gateway_invoke(monkeypatch) -> None:
@@ -161,13 +226,13 @@ def test_github_create_pull_request_success_through_gateway_invoke(monkeypatch) 
 
     class _FakeProxy:
         async def call_tool(self, tool_name: str, arguments: dict):
-            assert tool_name == "github_create_pull_request"
+            assert tool_name == "create_pull_request"
             assert arguments["owner"] == "Strong-AI-Lab"
             assert arguments["repo"] == "Von"
             return {"number": 42, "html_url": "https://example.test/pr/42"}
 
         async def list_tools(self):
-            return [{"name": "github_create_pull_request"}]
+            return [{"name": "create_pull_request"}]
 
         def get_stats(self):
             return {"call_count": 1, "error_count": 0}
@@ -201,6 +266,7 @@ def test_github_create_pull_request_success_through_gateway_invoke(monkeypatch) 
     assert payload.get("success") is True
     assert payload.get("executed") is True
     assert payload.get("action") == "create_pull_request"
+    assert payload.get("proxy_tool") == "create_pull_request"
 
 
 def test_github_build_env_prefers_repo_dotenv_token(monkeypatch, tmp_path: Path) -> None:

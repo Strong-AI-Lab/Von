@@ -13704,6 +13704,7 @@ def _github_clean_text(value: Any) -> str | None:
 def _github_normalise_response(
     *,
     tool_name: str,
+    proxy_tool_name: str,
     raw_result: Any,
     proxy_stats: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
@@ -13717,17 +13718,86 @@ def _github_normalise_response(
         payload = {"success": True, "result": raw_result}
 
     payload.setdefault("tool", tool_name)
+    if proxy_tool_name != tool_name:
+        payload.setdefault("proxy_tool", proxy_tool_name)
     if isinstance(proxy_stats, Mapping):
         payload.setdefault("proxy_stats", dict(proxy_stats))
     return payload
 
 
+def _github_resolve_proxy_call(
+    tool_name: str,
+    arguments: Mapping[str, Any],
+) -> tuple[str, dict[str, Any]] | dict[str, Any]:
+    # Internal tool names mirror Von's `github_*` surface, while the external
+    # `@modelcontextprotocol/server-github` server exposes mostly unprefixed
+    # names.  Resolve the translation once here so handlers stay simple.
+    proxy_arguments = dict(arguments)
+
+    if tool_name == "github_pull_request_read":
+        method = _github_clean_text(proxy_arguments.pop("method"))
+        method_map = {
+            "get": "get_pull_request",
+            "get_files": "get_pull_request_files",
+            "get_status": "get_pull_request_status",
+            "get_comments": "get_pull_request_comments",
+            "get_reviews": "get_pull_request_reviews",
+        }
+        proxy_tool_name = method_map.get(method or "")
+        if proxy_tool_name is None:
+            return make_error_response(
+                "unsupported_operation",
+                "Configured GitHub MCP server does not support this "
+                f"github_pull_request_read method: {method!r}",
+                details={
+                    "tool": tool_name,
+                    "method": method,
+                    "supported_methods": sorted(method_map),
+                },
+                suggestions=[
+                    "Use one of: get, get_files, get_status, get_comments, get_reviews",
+                    "If you need other pull-request reads, extend the proxy-tool mapping first",
+                ],
+            )
+        return proxy_tool_name, proxy_arguments
+
+    if tool_name == "github_issue_read":
+        method = _github_clean_text(proxy_arguments.pop("method"))
+        method_map = {"get": "get_issue"}
+        proxy_tool_name = method_map.get(method or "")
+        if proxy_tool_name is None:
+            return make_error_response(
+                "unsupported_operation",
+                "Configured GitHub MCP server does not support this "
+                f"github_issue_read method: {method!r}",
+                details={
+                    "tool": tool_name,
+                    "method": method,
+                    "supported_methods": sorted(method_map),
+                },
+                suggestions=[
+                    "Use method=get for the current GitHub MCP server version",
+                    "If you need richer issue reads, add an explicit translation for the target tool",
+                ],
+            )
+        return proxy_tool_name, proxy_arguments
+
+    if tool_name.startswith("github_"):
+        return tool_name.removeprefix("github_"), proxy_arguments
+    return tool_name, proxy_arguments
+
+
 def _github_invoke_proxy_tool(tool_name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
     from .github_proxy_mcp import GitHubProxyError, get_github_proxy
 
+    resolved_call = _github_resolve_proxy_call(tool_name, arguments)
+    if isinstance(resolved_call, dict):
+        return resolved_call
+    proxy_tool_name, proxy_arguments = resolved_call
+
     async def _async_call():
         proxy = await get_github_proxy()
-        result = await proxy.call_tool(tool_name, dict(arguments))
+        result = await proxy.call_tool(proxy_tool_name, proxy_arguments)
         return result, proxy.get_stats()
 
     try:
@@ -13737,7 +13807,12 @@ def _github_invoke_proxy_tool(tool_name: str, arguments: Mapping[str, Any]) -> d
         return make_error_response(
             "github_proxy_error",
             error_message,
-            details={"exception_type": "GitHubProxyError", "tool": tool_name, "message": error_message},
+            details={
+                "exception_type": "GitHubProxyError",
+                "tool": tool_name,
+                "proxy_tool": proxy_tool_name,
+                "message": error_message,
+            },
             suggestions=[
                 "Check GitHub MCP connectivity, command args, and token configuration",
                 "If using VS Code, ensure GITHUB_PERSONAL_ACCESS_TOKEN is set in .env "
@@ -13748,12 +13823,17 @@ def _github_invoke_proxy_tool(tool_name: str, arguments: Mapping[str, Any]) -> d
         return make_error_response(
             "github_proxy_error",
             f"GitHub proxy invocation failed: {exc}",
-            details={"exception_type": type(exc).__name__, "tool": tool_name},
+            details={
+                "exception_type": type(exc).__name__,
+                "tool": tool_name,
+                "proxy_tool": proxy_tool_name,
+            },
             suggestions=["Check GitHub MCP server availability"],
         )
 
     return _github_normalise_response(
         tool_name=tool_name,
+        proxy_tool_name=proxy_tool_name,
         raw_result=raw_result,
         proxy_stats=proxy_stats if isinstance(proxy_stats, Mapping) else None,
     )
