@@ -462,14 +462,33 @@ def build_tool_calling_workflow() -> WorkflowDefinition:
 
     Flow::
 
-        respond ──▸ postcondition_critic ──▸ completion_gate
-             ▲                                      │
-             └──────[completion_gate_repeat_iteration]──────┘
+        preflight_requirements ──▸ respond ──▸ postcondition_critic ──▸ completion_gate
+                                      ▲                                      │
+                                      └──────[completion_gate_repeat_iteration]──────┘
 
     The bounded tool-use loop now lives inside the generic LLM step executor,
-    so the workflow itself only models the ordinary reasoning step plus the
-    postcondition and completion policy stages.
+    so the workflow itself models prompt-requirement preflight, the ordinary
+    reasoning step, and the postcondition and completion policy stages.
     """
+    preflight_requirements = WorkflowStateSpec(
+        state_id="preflight_requirements",
+        actions=(
+            WorkflowActionInvocation(
+                action_id="tool_calling.preflight_requirements",
+                description=(
+                    "Materialise prompt requirements before the tool-calling LLM step."
+                ),
+            ),
+        ),
+        transitions=(
+            WorkflowTransitionSpec(
+                to_state="respond",
+                condition=lambda ctx: True,
+                reason="requirements_preflight_completed",
+            ),
+        ),
+    )
+
     respond = WorkflowStateSpec(
         state_id="respond",
         actions=(
@@ -545,8 +564,9 @@ def build_tool_calling_workflow() -> WorkflowDefinition:
 
     return WorkflowDefinition(
         workflow_id=TOOL_CALLING_WORKFLOW_ID,
-        initial_state="respond",
+        initial_state="preflight_requirements",
         states={
+            "preflight_requirements": preflight_requirements,
             "respond": respond,
             "postcondition_critic": postcondition_critic,
             "completion_gate": completion_gate,
@@ -555,9 +575,9 @@ def build_tool_calling_workflow() -> WorkflowDefinition:
         },
         termination_states=("completed", "failed"),
         purpose=(
-            "Standard tool-calling pipeline implemented as a generic prompt-driven "
-            "LLM step with bounded tool use, followed by postcondition critic and "
-            "completion gate."
+            "Standard tool-calling pipeline with workflow-owned prompt "
+            "requirement preflight, a generic prompt-driven LLM step with "
+            "bounded tool use, and postcondition critic and completion gate."
         ),
     )
 

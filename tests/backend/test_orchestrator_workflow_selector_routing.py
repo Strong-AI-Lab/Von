@@ -3253,11 +3253,17 @@ def test_plain_response_overridden_when_prompt_requires_tool_verification(monkey
         "describe_methods",
         lambda: {"workflow_list_definitions": {"category": "read"}},
     )
+    monkeypatch.setattr(
+        orchestrator._gateway,
+        "invoke",
+        lambda _tool_name, _payload: _InvokeResult({"workflows": []}),
+    )
 
     llm = _CapturingLLM(
         [
             "plain_response",
             "I inspected workflow definitions.",
+            "Here is what exists.",
         ]
     )
 
@@ -3288,6 +3294,128 @@ def test_plain_response_overridden_when_prompt_requires_tool_verification(monkey
     assert "workflow_list_definitions" in (
         override_entry.get("required_prompt_tools") or []
     )
+
+
+def test_incidental_url_prompt_stays_on_plain_response_path(monkeypatch):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+
+    monkeypatch.setattr(
+        orchestrator._gateway,
+        "describe_methods",
+        lambda: {"resilient_extract_url": {"category": "read"}},
+    )
+
+    llm = _CapturingLLM(
+        [
+            "plain_response",
+            "Meeting noted.",
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt="Meeting notice: Zoom link https://example.com/join/abc for tomorrow's call.",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.workflow_id == CHAT_ASSISTANT_WORKFLOW_ID
+    assert result.workflow_routing.verdict == "plain_response"
+    assert result.tool_invocations == ()
+    assert not any(
+        isinstance(entry, dict)
+        and entry.get("type") == "workflow_selector_override"
+        and entry.get("reason") == "required_prompt_tools_missing_preselector"
+        for entry in result.aux_llm_calls
+    )
+
+
+def test_url_read_prompt_uses_tool_workflow_preflight_and_forces_url_tool(monkeypatch):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+
+    gateway_calls: list[tuple[str, dict[str, Any]]] = []
+
+    monkeypatch.setattr(
+        orchestrator._gateway,
+        "describe_methods",
+        lambda: {"resilient_extract_url": {"category": "read"}},
+    )
+
+    def _invoke(tool_name: str, payload: Mapping[str, Any]):
+        gateway_calls.append((tool_name, dict(payload)))
+        return _InvokeResult(
+            {
+                "success": True,
+                "url": payload.get("url"),
+                "title": "Example report",
+                "content": "Example report body",
+            }
+        )
+
+    monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
+
+    llm = _CapturingLLM(
+        [
+            "plain_response",
+            "I can help with that.",
+            "Summary after URL extraction.",
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt="Please read this: https://example.com/report",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
+    assert result.workflow_routing.verdict == "tool_seeking"
+    assert result.workflow_routing.source == "selector_override"
+    extract_call = next(
+        (
+            payload
+            for tool_name, payload in gateway_calls
+            if tool_name == "resilient_extract_url"
+        ),
+        None,
+    )
+    assert extract_call is not None
+    assert extract_call.get("url") == "https://example.com/report"
+    assert any(
+        invocation.get("tool") == "resilient_extract_url"
+        for invocation in result.tool_invocations
+        if isinstance(invocation, dict)
+    )
+
+    preflight_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "prompt_tool_requirements_preflight"
+        ),
+        None,
+    )
+    assert preflight_entry is not None
+    assert preflight_entry.get("required_url_extraction_tool") == "resilient_extract_url"
+
+    retry_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "missing_tool_call_retry"
+            and entry.get("stage") == "response"
+        ),
+        None,
+    )
+    assert retry_entry is not None
+    assert retry_entry.get("mechanism") == "required_tools"
 
 
 def test_write_intent_memory_rehydrates_for_same_session_continuation(monkeypatch):

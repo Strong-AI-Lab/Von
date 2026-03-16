@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from typing import Any, Mapping, MutableMapping, Optional, Sequence
+from typing import Any, Mapping, MutableMapping, Optional, Sequence, cast
 
 from ..services.buttonify_service import (
     parse_buttonify_options_json,
@@ -808,10 +808,30 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
     policy_state, _policy_telemetry = orchestrator._load_workflow_model_policy(None)
     registry_snapshot = get_model_registry_snapshot()
 
-    llm_calls: list[dict[str, Any]] = []
-    aux_llm_calls: list[dict[str, Any]] = []
-    invocations: list[dict[str, Any]] = []
-    tool_messages: list[dict[str, Any]] = []
+    llm_calls = cast(
+        list[dict[str, Any]],
+        request.data.get("llm_calls")
+        if isinstance(request.data.get("llm_calls"), list)
+        else [],
+    )
+    aux_llm_calls = cast(
+        list[dict[str, Any]],
+        request.data.get("aux_llm_calls")
+        if isinstance(request.data.get("aux_llm_calls"), list)
+        else [],
+    )
+    invocations = cast(
+        list[dict[str, Any]],
+        request.data.get("invocations")
+        if isinstance(request.data.get("invocations"), list)
+        else [],
+    )
+    tool_messages = cast(
+        list[dict[str, Any]],
+        request.data.get("tool_messages")
+        if isinstance(request.data.get("tool_messages"), list)
+        else [],
+    )
     selected_models: dict[str, str | None] = {}
 
     def _model_for_stage(inner_stage: str) -> Optional[str]:
@@ -882,6 +902,47 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
         "prompt": rendered_prompt,
         "prompt_for_requirements": request.data.get("prompt_for_requirements")
         or rendered_prompt,
+        "prompt_requirement_url_policy": request.data.get(
+            "prompt_requirement_url_policy"
+        ),
+        "required_prompt_tools": request.data.get("required_prompt_tools") or [],
+        "required_prompt_url_extraction_tool": request.data.get(
+            "required_prompt_url_extraction_tool"
+        ),
+        "required_prompt_url_extraction_url": request.data.get(
+            "required_prompt_url_extraction_url"
+        ),
+        "required_prompt_fetch_concept_ids": (
+            request.data.get("required_prompt_fetch_concept_ids") or []
+        ),
+        "required_prompt_read_file_copy_ids": (
+            request.data.get("required_prompt_read_file_copy_ids") or []
+        ),
+        "required_prompt_scholarly_representation_for_file_copy_ids": (
+            request.data.get(
+                "required_prompt_scholarly_representation_for_file_copy_ids"
+            )
+            or []
+        ),
+        "required_prompt_create_type_name": request.data.get(
+            "required_prompt_create_type_name"
+        ),
+        "missing_prompt_tools": request.data.get("missing_prompt_tools") or [],
+        "missing_prompt_fetch_concept_ids": (
+            request.data.get("missing_prompt_fetch_concept_ids") or []
+        ),
+        "missing_prompt_read_file_copy_ids": (
+            request.data.get("missing_prompt_read_file_copy_ids") or []
+        ),
+        "missing_prompt_scholarly_representation_for_file_copy_ids": (
+            request.data.get(
+                "missing_prompt_scholarly_representation_for_file_copy_ids"
+            )
+            or []
+        ),
+        "missing_tool_call_retry_reason_override": request.data.get(
+            "missing_tool_call_retry_reason_override"
+        ),
         "response": request.data.get("response")
         or request.data.get("current_response")
         or "",

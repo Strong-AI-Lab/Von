@@ -1128,6 +1128,45 @@ def test_derive_prompt_tool_requirements_adds_url_extraction_tool_for_current_pr
     assert "resilient_extract_url" in required_tools
 
 
+def test_derive_prompt_tool_requirements_ignores_incidental_urls_without_read_intent():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=_DummyGateway()  # type: ignore[arg-type]
+    )
+    requirements = orchestrator._derive_prompt_tool_requirements(
+        "Meeting notice: Zoom link https://example.com/join/abc for tomorrow's call.",
+        method_catalogue={
+            "resilient_extract_url": {"description": "resilient URL extraction"},
+            "extract_url": {"description": "URL extraction"},
+        },
+    )
+
+    required_tools = requirements.get("required_tools") or []
+    assert "resilient_extract_url" not in required_tools
+    assert "extract_url" not in required_tools
+    assert requirements.get("required_url_extraction_tool") is None
+    assert requirements.get("required_url_extraction_url") is None
+
+
+def test_infer_required_prompt_tool_retry_tool_calls_forces_url_extraction():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=_DummyGateway()  # type: ignore[arg-type]
+    )
+
+    forced_calls = orchestrator._infer_required_prompt_tool_retry_tool_calls(
+        user_text="Please read this: https://example.com/report",
+        missing_required_tools=["resilient_extract_url"],
+        required_url_extraction_url="https://example.com/report",
+    )
+
+    assert forced_calls == [
+        {
+            "action": "call_tool",
+            "tool": "resilient_extract_url",
+            "payload": {"url": "https://example.com/report"},
+        }
+    ]
+
+
 def test_derive_missing_prompt_requirements_tracks_missing_fetch_targets():
     orchestrator = InternalMCPChatOrchestrator(
         gateway=_ChecklistPromptToolGateway()  # type: ignore[arg-type]
