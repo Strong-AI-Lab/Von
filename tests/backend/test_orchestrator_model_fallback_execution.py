@@ -42,10 +42,18 @@ def _policy_state() -> _WorkflowModelPolicyState:
     )
 
 
+def _bare_orchestrator() -> InternalMCPChatOrchestrator:
+    orchestrator = object.__new__(InternalMCPChatOrchestrator)
+    orchestrator._provider_probe_cache = {}
+    orchestrator._provider_probe_cache_max_entries = 32
+    orchestrator._provider_probe_cooldown_seconds = 0
+    return orchestrator
+
+
 def test_run_llm_with_fallbacks_records_attempt_chain_and_fallback_metadata(
     monkeypatch,
 ) -> None:
-    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _StubGateway()))
+    orchestrator = _bare_orchestrator()
     ollama_candidate = _ModelCandidate(
         provider="ollama",
         model="granite3.3:2b",
@@ -191,7 +199,7 @@ def test_run_llm_with_fallbacks_records_attempt_chain_and_fallback_metadata(
 def test_probe_model_candidate_reachability_uses_failure_cooldown_cache(
     monkeypatch,
 ) -> None:
-    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _StubGateway()))
+    orchestrator = _bare_orchestrator()
     orchestrator._provider_probe_cooldown_seconds = 120
 
     request_calls = {"count": 0}
@@ -202,6 +210,7 @@ def test_probe_model_candidate_reachability_uses_failure_cooldown_cache(
 
     def _fake_get(*_args: Any, **_kwargs: Any) -> _FailingResponse:
         request_calls["count"] += 1
+        time.sleep(0.02)
         return _FailingResponse()
 
     monkeypatch.setattr(
@@ -225,7 +234,56 @@ def test_probe_model_candidate_reachability_uses_failure_cooldown_cache(
     assert second.get("reachable") is False
     assert second.get("cooldown_hit") is True
     assert second.get("cached") is True
+    assert second.get("cached_result_duration_ms") == first.get("duration_ms")
+    assert isinstance(first.get("duration_ms"), int)
+    assert isinstance(second.get("duration_ms"), int)
+    assert second["duration_ms"] < first["duration_ms"]
     assert request_calls["count"] == 1
+
+
+def test_probe_model_candidate_reachability_uses_shorter_timeout_for_local_ollama(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    seen_timeouts: dict[str, float] = {}
+
+    class _SuccessfulResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+    def _fake_get(url: str, *_args: Any, **kwargs: Any) -> _SuccessfulResponse:
+        seen_timeouts[url] = float(kwargs["timeout"])
+        return _SuccessfulResponse()
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.requests.get",
+        _fake_get,
+    )
+
+    local_probe = orchestrator._probe_model_candidate_reachability(
+        telemetry={"provider": "ollama", "host": "http://localhost:11434"}
+    )
+    remote_probe = orchestrator._probe_model_candidate_reachability(
+        telemetry={"provider": "ollama", "host": "http://10.0.0.8:11434"}
+    )
+
+    assert local_probe is not None
+    assert local_probe["provider"] == "ollama"
+    assert local_probe["host"] == "http://localhost:11434"
+    assert local_probe["probe_url"] == "http://localhost:11434/api/tags"
+    assert local_probe["probe_timeout_ms"] == 200
+    assert local_probe["reachable"] is True
+    assert isinstance(local_probe["duration_ms"], int)
+
+    assert remote_probe is not None
+    assert remote_probe["provider"] == "ollama"
+    assert remote_probe["host"] == "http://10.0.0.8:11434"
+    assert remote_probe["probe_url"] == "http://10.0.0.8:11434/api/tags"
+    assert remote_probe["probe_timeout_ms"] == 1200
+    assert remote_probe["reachable"] is True
+    assert isinstance(remote_probe["duration_ms"], int)
+    assert seen_timeouts["http://localhost:11434/api/tags"] == pytest.approx(0.2)
+    assert seen_timeouts["http://10.0.0.8:11434/api/tags"] == pytest.approx(1.2)
 
 
 def test_invoke_with_llm_heartbeat_uses_backfill_timeout_for_summariser(

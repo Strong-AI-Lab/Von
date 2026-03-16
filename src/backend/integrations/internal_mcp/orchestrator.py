@@ -26,6 +26,7 @@ from typing import (
     Sequence,
     TypedDict,
 )
+from urllib.parse import urlparse
 
 from .gateway import InternalMCPGateway, MethodDefinition
 from .schemas import (
@@ -9187,6 +9188,25 @@ class InternalMCPChatOrchestrator:
         return f"http://{host}:11434"
 
     @staticmethod
+    def _is_local_ollama_probe_host(host: str) -> bool:
+        try:
+            parsed = urlparse(host)
+        except Exception:
+            return False
+        hostname = str(parsed.hostname or "").strip().lower()
+        return hostname in {"localhost", "127.0.0.1", "::1"}
+
+    def _ollama_probe_timeout_ms(self, *, host: str) -> int:
+        default_timeout_ms = 200 if self._is_local_ollama_probe_host(host) else 1200
+        return self._coerce_int(
+            None,
+            env_var="VON_INTERNAL_MCP_OLLAMA_PROBE_TIMEOUT_MS",
+            default=default_timeout_ms,
+            min_value=100,
+            max_value=10000,
+        )
+
+    @staticmethod
     def _provider_probe_cache_key(*, provider: str, host: str | None = None) -> str:
         provider_key = str(provider or "").strip().lower()
         host_key = str(host or "").strip().lower()
@@ -9265,15 +9285,10 @@ class InternalMCPChatOrchestrator:
         }:
             return None
 
-        timeout_ms = self._coerce_int(
-            None,
-            env_var="VON_INTERNAL_MCP_OLLAMA_PROBE_TIMEOUT_MS",
-            default=1200,
-            min_value=100,
-            max_value=10000,
-        )
         host = self._normalise_ollama_probe_host(telemetry.get("host"))
+        timeout_ms = self._ollama_probe_timeout_ms(host=host)
         probe_url = f"{host}/api/tags"
+        probe_start = time.perf_counter()
         cooldown_seconds = max(0, int(self._provider_probe_cooldown_seconds))
         if cooldown_seconds > 0:
             cached = self._provider_probe_cache_get(provider=provider, host=host)
@@ -9297,6 +9312,7 @@ class InternalMCPChatOrchestrator:
                     cached_payload.setdefault("provider", provider)
                     cached_payload.setdefault("host", host)
                     cached_payload.setdefault("probe_url", probe_url)
+                    cached_payload.setdefault("probe_timeout_ms", int(timeout_ms))
                     cached_payload["cached"] = True
                     cached_payload["cooldown_hit"] = True
                     cached_payload["cooldown_seconds"] = cooldown_seconds
@@ -9304,9 +9320,14 @@ class InternalMCPChatOrchestrator:
                         max(0.0, (float(cooldown_seconds) - age_seconds) * 1000.0)
                     )
                     cached_payload["cache_age_ms"] = int(age_seconds * 1000.0)
+                    cached_payload["cached_result_duration_ms"] = int(
+                        max(0.0, float(cached_payload.get("duration_ms") or 0.0))
+                    )
+                    cached_payload["duration_ms"] = int(
+                        (time.perf_counter() - probe_start) * 1000.0
+                    )
                     return cached_payload
 
-        probe_start = time.perf_counter()
         try:
             http_response = requests.get(
                 probe_url,
