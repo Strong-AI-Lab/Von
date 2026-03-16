@@ -219,6 +219,8 @@ class _PromptRequirementEvaluation:
     """Canonical prompt-requirement snapshot shared across routing/execution."""
 
     required_tools: tuple[str, ...] = ()
+    required_url_extraction_tool: str | None = None
+    required_url_extraction_url: str | None = None
     required_fetch_concept_ids: tuple[str, ...] = ()
     required_read_file_copy_ids: tuple[str, ...] = ()
     required_scholarly_representation_file_copy_ids: tuple[str, ...] = ()
@@ -614,6 +616,52 @@ class InternalMCPChatOrchestrator:
     )
     _PROMPT_EXPLICIT_TOOL_CALL_PATTERN = re.compile(
         r"\b(?:call|use|run|invoke|execute)\s+`?([a-z_][a-z0-9_]*(?:_[a-z0-9_]+)+)`?\b",
+        flags=re.IGNORECASE,
+    )
+    _PROMPT_URL_PATTERN = re.compile(r"\bhttps?://[^\s<>()\"']+", re.IGNORECASE)
+    _URL_READING_SHORT_FRAME_TEXTS: frozenset[str] = frozenset(
+        {
+            "read this",
+            "read this page",
+            "read this link",
+            "read this url",
+            "extract this",
+            "extract this page",
+            "extract this link",
+            "analyse this",
+            "analyze this",
+            "inspect this",
+            "review this",
+            "summarise this",
+            "summarize this",
+            "open this",
+            "visit this",
+            "look at this",
+            "check this",
+            "check this out",
+            "what about this",
+            "please read this",
+            "please extract this",
+            "please analyse this",
+            "please analyze this",
+            "please inspect this",
+            "please summarise this",
+            "please summarize this",
+            "please review this",
+            "please open this",
+            "please visit this",
+            "this",
+            "this link",
+            "this url",
+            "this page",
+        }
+    )
+    _URL_READING_INTENT_PATTERN = re.compile(
+        r"\b("
+        r"read|extract|inspect|analyse|analyze|review|open|visit|parse|"
+        r"summaris(?:e|ed|ing)|summariz(?:e|ed|ing)|scrape|crawl|"
+        r"look\s+at|check\s+out|what(?:'s|\s+is)\s+on|what\s+does(?:\s+this)?\s+say"
+        r")\b",
         flags=re.IGNORECASE,
     )
     # Matches natural-language MCP tool-family references such as
@@ -1348,6 +1396,13 @@ class InternalMCPChatOrchestrator:
         # driven by #V#tool_calling_workflow state machine.
         registry.register(
             ActionSpec(
+                action_id="tool_calling.preflight_requirements",
+                handler=self._action_tool_calling_preflight_requirements,
+                description="Derive prompt requirements before tool planning.",
+            )
+        )
+        registry.register(
+            ActionSpec(
                 action_id="tool_calling.plan",
                 handler=self._action_tool_calling_plan,
                 description="Initial LLM call + missing-tool-call recovery.",
@@ -2055,6 +2110,13 @@ class InternalMCPChatOrchestrator:
             if isinstance(required_create_type_name_raw, str)
             else None
         )
+        required_url_extraction_url_raw = data.get("required_prompt_url_extraction_url")
+        required_url_extraction_url = (
+            str(required_url_extraction_url_raw).strip()
+            if isinstance(required_url_extraction_url_raw, str)
+            and str(required_url_extraction_url_raw).strip()
+            else None
+        )
         emit_progress_raw = data.get("emit_progress")
         emit_progress_cb: Callable[[Mapping[str, Any]], None] | None = (
             cast(Callable[[Mapping[str, Any]], None], emit_progress_raw)
@@ -2169,6 +2231,7 @@ class InternalMCPChatOrchestrator:
             missing_required_read_file_copy_ids=missing_required_read_file_copy_ids,
             missing_required_scholarly_representation_file_copy_ids=missing_required_scholarly_file_copy_ids,
             required_create_type_name=required_create_type_name,
+            required_url_extraction_url=required_url_extraction_url,
         )
         if forced:
             import json
@@ -3592,6 +3655,125 @@ class InternalMCPChatOrchestrator:
     #   orchestrator_result (pre-built OrchestratorResult for error exits).
     # ------------------------------------------------------------------
 
+    def _action_tool_calling_preflight_requirements(
+        self, request: Any
+    ) -> WorkflowActionResult:
+        """Materialise workflow-owned prompt requirements before tool planning."""
+
+        data = request.data
+        prompt_for_requirements = data.get("prompt_for_requirements")
+        if (
+            not isinstance(prompt_for_requirements, str)
+            or not prompt_for_requirements.strip()
+        ):
+            prompt_for_requirements = data.get("prompt")
+        prompt_text = (
+            prompt_for_requirements.strip()
+            if isinstance(prompt_for_requirements, str)
+            else ""
+        )
+
+        method_catalogue = data.get("method_catalogue")
+        if not isinstance(method_catalogue, Mapping):
+            try:
+                method_catalogue = self._gateway.describe_methods()
+            except Exception:
+                method_catalogue = None
+
+        augmented_context = data.get("augmented_context")
+        context_messages = (
+            cast(Sequence[Mapping[str, Any]], augmented_context)
+            if isinstance(augmented_context, Sequence)
+            and not isinstance(augmented_context, (str, bytes, bytearray))
+            else None
+        )
+
+        url_requirement = dict(
+            self._derive_url_extraction_requirement(
+                prompt_text,
+                method_catalogue=(
+                    method_catalogue if isinstance(method_catalogue, Mapping) else None
+                ),
+            )
+        )
+        prompt_requirements = self._evaluate_prompt_requirements(
+            prompt_text=prompt_text,
+            method_catalogue=(
+                method_catalogue if isinstance(method_catalogue, Mapping) else None
+            ),
+            context_messages=context_messages,
+            tool_invocations=(),
+            url_requirement=url_requirement,
+        )
+
+        self._store_prompt_requirement_evaluation(data, prompt_requirements)
+        data["prompt_requirement_url_policy"] = dict(url_requirement)
+        if isinstance(method_catalogue, Mapping):
+            data["method_catalogue"] = method_catalogue
+
+        aux_log = data.get("aux_llm_calls")
+        if isinstance(aux_log, list):
+            try:
+                aux_log.append(
+                    {
+                        "type": "prompt_tool_requirements_preflight",
+                        "required_tools": list(prompt_requirements.required_tools),
+                        "required_url_extraction_tool": (
+                            prompt_requirements.required_url_extraction_tool
+                        ),
+                        "required_url_extraction_url": (
+                            prompt_requirements.required_url_extraction_url
+                        ),
+                        "missing_tools": list(prompt_requirements.missing_tools),
+                        "url_requirement": dict(url_requirement),
+                    }
+                )
+            except Exception:
+                pass
+
+        outputs: dict[str, Any] = {
+            "prompt_requirement_url_policy": dict(url_requirement),
+            "required_prompt_tools": list(prompt_requirements.required_tools),
+            "required_prompt_url_extraction_tool": (
+                prompt_requirements.required_url_extraction_tool
+            ),
+            "required_prompt_url_extraction_url": (
+                prompt_requirements.required_url_extraction_url
+            ),
+            "required_prompt_fetch_concept_ids": list(
+                prompt_requirements.required_fetch_concept_ids
+            ),
+            "required_prompt_read_file_copy_ids": list(
+                prompt_requirements.required_read_file_copy_ids
+            ),
+            "required_prompt_scholarly_representation_for_file_copy_ids": list(
+                prompt_requirements.required_scholarly_representation_file_copy_ids
+            ),
+            "required_prompt_create_type_name": (
+                prompt_requirements.required_create_type_name
+            ),
+            "missing_prompt_tools": list(prompt_requirements.missing_tools),
+            "missing_prompt_fetch_concept_ids": list(
+                prompt_requirements.missing_fetch_concept_ids
+            ),
+            "missing_prompt_read_file_copy_ids": list(
+                prompt_requirements.missing_read_file_copy_ids
+            ),
+            "missing_prompt_scholarly_representation_for_file_copy_ids": list(
+                prompt_requirements.missing_scholarly_representation_file_copy_ids
+            ),
+            "missing_tool_call_retry_reason_override": (
+                prompt_requirements.missing_retry_reason
+            ),
+            "prompt_requirements_preflight_completed": True,
+            "result": True,
+        }
+        if isinstance(method_catalogue, Mapping):
+            outputs["method_catalogue"] = method_catalogue
+        if isinstance(aux_log, list):
+            outputs["aux_llm_calls"] = aux_log
+        return WorkflowActionResult(outputs=outputs)
+
     def _action_tool_calling_plan(self, request: Any) -> WorkflowActionResult:
         """Phase 1 of tool calling: initial LLM call + missing-tool-call recovery.
 
@@ -3709,6 +3891,7 @@ class InternalMCPChatOrchestrator:
         prompt_for_requirements = data.get("prompt_for_requirements")
         if not isinstance(prompt_for_requirements, str) or not prompt_for_requirements.strip():
             prompt_for_requirements = prompt
+        prompt_requirement_url_policy = data.get("prompt_requirement_url_policy")
 
         prompt_requirements = self._evaluate_prompt_requirements(
             prompt_text=prompt_for_requirements,
@@ -3719,6 +3902,11 @@ class InternalMCPChatOrchestrator:
             ),
             context_messages=augmented_context,
             tool_invocations=(),
+            url_requirement=(
+                prompt_requirement_url_policy
+                if isinstance(prompt_requirement_url_policy, Mapping)
+                else None
+            ),
         )
         required_prompt_tools = list(prompt_requirements.required_tools)
         required_prompt_fetch_concept_ids = list(
@@ -4781,11 +4969,14 @@ class InternalMCPChatOrchestrator:
 
             prompt_for_requirements = data.get("prompt_for_requirements")
             if not isinstance(prompt_for_requirements, str) or not prompt_for_requirements.strip():
-                prompt_for_requirements = data.get("prompt")
+                prompt_for_requirements = (
+                    data.get("prompt") if isinstance(data.get("prompt"), str) else ""
+                )
 
             invocations_for_requirements = cast(
                 Sequence[Mapping[str, Any]], data.get("invocations") or []
             )
+            prompt_requirement_url_policy = data.get("prompt_requirement_url_policy")
             prompt_requirements = self._evaluate_prompt_requirements(
                 prompt_text=prompt_for_requirements,
                 method_catalogue=(
@@ -4795,6 +4986,11 @@ class InternalMCPChatOrchestrator:
                 ),
                 context_messages=augmented_context,
                 tool_invocations=invocations_for_requirements,
+                url_requirement=(
+                    prompt_requirement_url_policy
+                    if isinstance(prompt_requirement_url_policy, Mapping)
+                    else None
+                ),
             )
             required_prompt_tools = list(prompt_requirements.required_tools)
             required_prompt_fetch_concept_ids = list(
@@ -7417,12 +7613,122 @@ class InternalMCPChatOrchestrator:
         return concept_ids
 
     @classmethod
+    def _extract_prompt_urls(cls, prompt_text: Any) -> list[str]:
+        if not isinstance(prompt_text, str) or not prompt_text.strip():
+            return []
+
+        urls: list[str] = []
+        seen: set[str] = set()
+        for match in cls._PROMPT_URL_PATTERN.finditer(prompt_text):
+            url = str(match.group(0) or "").strip().rstrip(".,;:!?)]}>")
+            if not url:
+                continue
+            key = url.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            urls.append(url)
+        return urls
+
+    @classmethod
+    def _prompt_requests_url_reading(cls, prompt_text: str) -> bool:
+        urls = cls._extract_prompt_urls(prompt_text)
+        if not urls:
+            return False
+
+        lowered = prompt_text.casefold()
+        if cls._URL_READING_INTENT_PATTERN.search(lowered):
+            return True
+
+        prompt_without_urls = prompt_text
+        for url in urls:
+            prompt_without_urls = prompt_without_urls.replace(url, " ")
+        stripped = re.sub(r"\s+", " ", prompt_without_urls).strip(
+            " \t\r\n:;,-()[]{}<>\"'"
+        )
+        return stripped.casefold() in cls._URL_READING_SHORT_FRAME_TEXTS if stripped else True
+
+    @classmethod
+    def _derive_url_extraction_requirement(
+        cls,
+        user_prompt: Any,
+        *,
+        method_catalogue: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
+        """Keep URL-reading policy aligned across routing, workflow preflight, and retry."""
+
+        prompt_text = user_prompt if isinstance(user_prompt, str) else ""
+        prompt_urls = cls._extract_prompt_urls(prompt_text)
+        if not prompt_urls:
+            return {
+                "required": False,
+                "url": None,
+                "tool": None,
+                "reason": "no_prompt_url",
+            }
+
+        available_tools: set[str] = set()
+        if isinstance(method_catalogue, Mapping):
+            for tool_name in method_catalogue.keys():
+                if isinstance(tool_name, str) and tool_name.strip():
+                    available_tools.add(tool_name.strip().lower())
+
+        def _tool_available(tool_name: str) -> bool:
+            if not available_tools:
+                return True
+            return tool_name.lower() in available_tools
+
+        allow_default_arxiv_download = bool(
+            cls._extract_arxiv_id_from_text(prompt_text)
+        ) and not prompt_explicitly_denies_write(prompt_text)
+        if cls._infer_arxiv_acquisition_tool_from_prompt(
+            prompt_text,
+            allow_default_download=allow_default_arxiv_download,
+        ):
+            return {
+                "required": False,
+                "url": None,
+                "tool": None,
+                "reason": "arxiv_workflow_preferred",
+            }
+
+        tool_name: str | None = None
+        if _tool_available("resilient_extract_url"):
+            tool_name = "resilient_extract_url"
+        elif _tool_available("extract_url"):
+            tool_name = "extract_url"
+
+        if not tool_name:
+            return {
+                "required": False,
+                "url": prompt_urls[0],
+                "tool": None,
+                "reason": "url_tool_unavailable",
+            }
+
+        if not cls._prompt_requests_url_reading(prompt_text):
+            return {
+                "required": False,
+                "url": prompt_urls[0],
+                "tool": tool_name,
+                "reason": "no_url_reading_intent",
+            }
+
+        return {
+            "required": True,
+            "url": prompt_urls[0],
+            "tool": tool_name,
+            "reason": "url_reading_intent",
+        }
+
+    @classmethod
     def _derive_prompt_tool_requirements(
         cls,
         user_prompt: Any,
         *,
         method_catalogue: Mapping[str, Any] | None = None,
         context_messages: Sequence[Mapping[str, Any]] | None = None,
+        url_requirement: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Derive deterministic prompt requirements for tool recovery."""
 
@@ -7467,10 +7773,6 @@ class InternalMCPChatOrchestrator:
         allow_default_arxiv_download = bool(cls._extract_arxiv_id_from_text(prompt_text)) and not (
             prompt_explicitly_denies_write(prompt_text)
         )
-        has_prompt_url = (
-            isinstance(user_prompt, str)
-            and bool(re.search(r"https?://\S+", user_prompt, re.IGNORECASE))
-        )
 
         seen_required = {
             str(tool_name).strip().lower()
@@ -7492,19 +7794,42 @@ class InternalMCPChatOrchestrator:
         elif preferred_arxiv_tool and not _tool_available(preferred_arxiv_tool):
             preferred_arxiv_tool = None
 
+        url_requirement_map = (
+            dict(url_requirement)
+            if isinstance(url_requirement, Mapping)
+            else dict(
+                cls._derive_url_extraction_requirement(
+                    prompt_text,
+                    method_catalogue=method_catalogue,
+                )
+            )
+        )
+        required_url_extraction_tool = (
+            str(url_requirement_map.get("tool")).strip()
+            if bool(url_requirement_map.get("required"))
+            and isinstance(url_requirement_map.get("tool"), str)
+            and str(url_requirement_map.get("tool")).strip()
+            else None
+        )
+        required_url_extraction_url = (
+            str(url_requirement_map.get("url")).strip()
+            if bool(url_requirement_map.get("required"))
+            and isinstance(url_requirement_map.get("url"), str)
+            and str(url_requirement_map.get("url")).strip()
+            else None
+        )
+
         if preferred_arxiv_tool:
             if preferred_arxiv_tool not in seen_required:
                 required_tools.append(preferred_arxiv_tool)
                 seen_required.add(preferred_arxiv_tool)
-        elif has_prompt_url:
-            url_tool_name: str | None = None
-            if _tool_available("resilient_extract_url"):
-                url_tool_name = "resilient_extract_url"
-            elif _tool_available("extract_url"):
-                url_tool_name = "extract_url"
-            if url_tool_name and url_tool_name not in seen_required:
-                required_tools.append(url_tool_name)
-                seen_required.add(url_tool_name)
+        elif (
+            required_url_extraction_tool
+            and required_url_extraction_url
+            and required_url_extraction_tool not in seen_required
+        ):
+            required_tools.append(required_url_extraction_tool)
+            seen_required.add(required_url_extraction_tool)
         if required_create_type_name and "create_concepts" not in seen_required:
             required_tools.append("create_concepts")
             seen_required.add("create_concepts")
@@ -7533,6 +7858,8 @@ class InternalMCPChatOrchestrator:
 
         return {
             "required_tools": required_tools,
+            "required_url_extraction_tool": required_url_extraction_tool,
+            "required_url_extraction_url": required_url_extraction_url,
             "required_fetch_concept_ids": required_fetch_concept_ids,
             "required_read_file_copy_ids": required_read_file_copy_ids,
             "required_scholarly_representation_for_file_copy_ids": required_scholarly_representation_for_file_copy_ids,
@@ -7700,6 +8027,7 @@ class InternalMCPChatOrchestrator:
         method_catalogue: Mapping[str, Any] | None = None,
         context_messages: Sequence[Mapping[str, Any]] | None = None,
         tool_invocations: Sequence[Mapping[str, Any]] = (),
+        url_requirement: Mapping[str, Any] | None = None,
     ) -> _PromptRequirementEvaluation:
         """Compute prompt-required tools and the still-missing subset once."""
 
@@ -7707,11 +8035,30 @@ class InternalMCPChatOrchestrator:
             prompt_text,
             method_catalogue=method_catalogue,
             context_messages=context_messages,
+            url_requirement=url_requirement,
         )
         required_tools = tuple(
             str(item).strip()
             for item in (prompt_requirement_state.get("required_tools") or [])
             if isinstance(item, str) and str(item).strip()
+        )
+        required_url_extraction_tool_raw = prompt_requirement_state.get(
+            "required_url_extraction_tool"
+        )
+        required_url_extraction_tool = (
+            str(required_url_extraction_tool_raw).strip()
+            if isinstance(required_url_extraction_tool_raw, str)
+            and str(required_url_extraction_tool_raw).strip()
+            else None
+        )
+        required_url_extraction_url_raw = prompt_requirement_state.get(
+            "required_url_extraction_url"
+        )
+        required_url_extraction_url = (
+            str(required_url_extraction_url_raw).strip()
+            if isinstance(required_url_extraction_url_raw, str)
+            and str(required_url_extraction_url_raw).strip()
+            else None
         )
         required_fetch_concept_ids = tuple(
             str(item).strip()
@@ -7774,6 +8121,8 @@ class InternalMCPChatOrchestrator:
 
         return _PromptRequirementEvaluation(
             required_tools=required_tools,
+            required_url_extraction_tool=required_url_extraction_tool,
+            required_url_extraction_url=required_url_extraction_url,
             required_fetch_concept_ids=required_fetch_concept_ids,
             required_read_file_copy_ids=required_read_file_copy_ids,
             required_scholarly_representation_file_copy_ids=required_scholarly_representation_file_copy_ids,
@@ -7799,6 +8148,12 @@ class InternalMCPChatOrchestrator:
         """Persist shared prompt-requirement state into workflow data."""
 
         data["required_prompt_tools"] = list(evaluation.required_tools)
+        data["required_prompt_url_extraction_tool"] = (
+            evaluation.required_url_extraction_tool
+        )
+        data["required_prompt_url_extraction_url"] = (
+            evaluation.required_url_extraction_url
+        )
         data["required_prompt_fetch_concept_ids"] = list(
             evaluation.required_fetch_concept_ids
         )
@@ -16530,6 +16885,7 @@ class InternalMCPChatOrchestrator:
         missing_required_scholarly_representation_file_copy_ids: Sequence[str]
         | None = None,
         required_create_type_name: str | None = None,
+        required_url_extraction_url: str | None = None,
     ) -> list[_ToolCallRequest] | None:
         """Build deterministic tool calls for still-missing explicit requirements."""
 
@@ -16564,6 +16920,27 @@ class InternalMCPChatOrchestrator:
         for tool_name in missing_required_tools:
             name = str(tool_name).strip()
             if not name:
+                continue
+
+            if name in {"resilient_extract_url", "extract_url"}:
+                target_url = (
+                    str(required_url_extraction_url).strip()
+                    if isinstance(required_url_extraction_url, str)
+                    and str(required_url_extraction_url).strip()
+                    else None
+                )
+                if not target_url:
+                    prompt_urls = self._extract_prompt_urls(user_text)
+                    target_url = prompt_urls[0] if prompt_urls else None
+                if not target_url:
+                    continue
+                forced_calls.append(
+                    {
+                        "action": "call_tool",
+                        "tool": name,
+                        "payload": {"url": target_url},
+                    }
+                )
                 continue
 
             if name == "workflow_list_definitions":
@@ -16697,6 +17074,7 @@ class InternalMCPChatOrchestrator:
         missing_required_scholarly_representation_file_copy_ids: Sequence[str]
         | None = None,
         required_create_type_name: str | None = None,
+        required_url_extraction_url: str | None = None,
     ) -> list[_ToolCallRequest] | None:
         """Best-effort deterministic recovery for common missing-tool-call cases.
 
@@ -16751,6 +17129,12 @@ class InternalMCPChatOrchestrator:
                 str(required_create_type_name).strip()
                 if isinstance(required_create_type_name, str)
                 and str(required_create_type_name).strip()
+                else None
+            ),
+            required_url_extraction_url=(
+                str(required_url_extraction_url).strip()
+                if isinstance(required_url_extraction_url, str)
+                and str(required_url_extraction_url).strip()
                 else None
             ),
         )
@@ -19119,11 +19503,16 @@ class InternalMCPChatOrchestrator:
             except Exception:
                 method_catalogue_for_routing = {}
 
+        routing_url_requirement = self._derive_url_extraction_requirement(
+            effective_prompt_for_routing,
+            method_catalogue=method_catalogue_for_routing,
+        )
         routing_prompt_requirements = self._evaluate_prompt_requirements(
             prompt_text=effective_prompt_for_routing,
             method_catalogue=method_catalogue_for_routing,
             context_messages=augmented_context,
             tool_invocations=(),
+            url_requirement=routing_url_requirement,
         )
         prompt_requirements_force_tool_pipeline = (
             routing_prompt_requirements.has_missing_requirements
@@ -19186,6 +19575,12 @@ class InternalMCPChatOrchestrator:
                 "prior_selected_workflow_id": CHAT_ASSISTANT_WORKFLOW_ID,
                 "prior_selector_verdict": None,
                 "required_prompt_tools": list(routing_prompt_requirements.required_tools),
+                "required_prompt_url_extraction_tool": (
+                    routing_prompt_requirements.required_url_extraction_tool
+                ),
+                "required_prompt_url_extraction_url": (
+                    routing_prompt_requirements.required_url_extraction_url
+                ),
                 "missing_prompt_tools": list(routing_prompt_requirements.missing_tools),
                 "required_prompt_fetch_concept_ids": list(
                     routing_prompt_requirements.required_fetch_concept_ids
@@ -19208,6 +19603,7 @@ class InternalMCPChatOrchestrator:
                 "unavailable_required_tools": list(
                     routing_prompt_requirements.unavailable_required_tools
                 ),
+                "prompt_requirement_url_policy": dict(routing_url_requirement),
                 "retry_reason": routing_prompt_requirements.missing_retry_reason,
             }
             aux_llm_calls.append(override_payload)
@@ -19456,10 +19852,10 @@ class InternalMCPChatOrchestrator:
         )
         _TOOL_PIPELINE_ACTION_IDS = frozenset(
             {
-                "tool_calling.plan",
-                "tool_calling.validate",
-                "tool_calling.execute",
-                "tool_calling.backfill",
+                "tool_calling.preflight_requirements",
+                "tool_calling.respond",
+                "turn_execution.critic",
+                "turn_execution.completion_gate",
             }
         )
         _NARRATION_ACTION_IDS = frozenset(
@@ -23889,6 +24285,12 @@ class InternalMCPChatOrchestrator:
                     "required_prompt_tools": list(
                         routing_prompt_requirements.required_tools
                     ),
+                    "required_prompt_url_extraction_tool": (
+                        routing_prompt_requirements.required_url_extraction_tool
+                    ),
+                    "required_prompt_url_extraction_url": (
+                        routing_prompt_requirements.required_url_extraction_url
+                    ),
                     "missing_prompt_tools": list(
                         routing_prompt_requirements.missing_tools
                     ),
@@ -23913,6 +24315,7 @@ class InternalMCPChatOrchestrator:
                     "unavailable_required_tools": list(
                         routing_prompt_requirements.unavailable_required_tools
                     ),
+                    "prompt_requirement_url_policy": dict(routing_url_requirement),
                     "retry_reason": routing_prompt_requirements.missing_retry_reason,
                 },
             )
@@ -24292,6 +24695,7 @@ class InternalMCPChatOrchestrator:
             # Inputs.
             "prompt": prompt,
             "prompt_for_requirements": effective_prompt_for_routing,
+            "prompt_requirement_url_policy": dict(routing_url_requirement),
             "augmented_context": augmented_context,
             "policy_state": policy_state,
             "registry_snapshot": registry_snapshot,

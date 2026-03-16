@@ -627,8 +627,19 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
         ),
     ),
     TOOL_CALLING_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="respond",
+        initial_state="preflight_requirements",
         steps=(
+            _CanonicalStepPublicationSpec(
+                state_id="preflight_requirements",
+                action_id="tool_calling.preflight_requirements",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="respond",
+                        reason="requirements_preflight_completed",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
+            ),
             _CanonicalStepPublicationSpec(
                 state_id="respond",
                 action_id="tool_calling.respond",

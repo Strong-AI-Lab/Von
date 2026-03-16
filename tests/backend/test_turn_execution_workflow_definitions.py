@@ -16,10 +16,18 @@ from src.backend.workflows.workflow_registry import WorkflowRegistry
 def test_tool_calling_workflow_includes_turn_execution_critic_and_gate() -> None:
     workflow = build_tool_calling_workflow()
 
-    assert workflow.initial_state == "respond"
+    assert workflow.initial_state == "preflight_requirements"
+    assert "preflight_requirements" in workflow.states
     assert "respond" in workflow.states
     assert "postcondition_critic" in workflow.states
     assert "completion_gate" in workflow.states
+
+    preflight = workflow.states["preflight_requirements"]
+    assert preflight.actions[0].action_id == "tool_calling.preflight_requirements"
+    assert any(
+        t.to_state == "respond" and t.reason == "requirements_preflight_completed"
+        for t in preflight.transitions
+    )
 
     respond = workflow.states["respond"]
     assert respond.actions[0].action_id == "tool_calling.respond"
