@@ -80,26 +80,79 @@ def _finalise_tool_observation_summary(
     tool_history: list[dict[str, Any]],
     tool_call_start_count: int,
     tool_call_end_count: int,
+    tools_started: int = 0,
+    tools_completed: int = 0,
+    tool_call_count: int | None = None,
+    tool_success_count: int | None = None,
+    tool_failure_count: int | None = None,
+    tool_pending_count: int | None = None,
     limit: int | None = None,
 ) -> dict[str, Any]:
     if isinstance(limit, int) and limit > 0:
         tool_history = tool_history[-limit:]
 
-    tool_success_count = sum(1 for entry in tool_history if entry.get("success") is True)
-    tool_failure_count = sum(
+    history_tool_success_count = sum(
+        1 for entry in tool_history if entry.get("success") is True
+    )
+    history_tool_failure_count = sum(
         1 for entry in tool_history if entry.get("success") is False
     )
-    tool_call_count = len(tool_history)
-    tool_pending_count = max(0, tool_call_count - tool_success_count - tool_failure_count)
+    history_tool_call_count = len(tool_history)
+
+    effective_tool_success_count = max(
+        history_tool_success_count,
+        int(tool_success_count or 0),
+    )
+    effective_tool_failure_count = max(
+        history_tool_failure_count,
+        int(tool_failure_count or 0),
+    )
+    effective_tool_call_start_count = max(
+        0,
+        int(tool_call_start_count),
+        int(tools_started or 0),
+    )
+    effective_tool_call_end_count = max(
+        0,
+        int(tool_call_end_count),
+        int(tools_completed or 0),
+        effective_tool_success_count + effective_tool_failure_count,
+    )
+    effective_tool_call_count = max(
+        history_tool_call_count,
+        int(tool_call_count or 0),
+        effective_tool_call_start_count,
+        effective_tool_call_end_count,
+    )
+    # Pending work should reflect lifecycle evidence, not unresolved history rows
+    # that may come from planning-time placeholders or truncated event tails.
+    effective_tool_pending_count = max(
+        0,
+        effective_tool_call_start_count - effective_tool_call_end_count,
+    )
+    if (
+        effective_tool_call_count == 0
+        and effective_tool_call_start_count == 0
+        and effective_tool_call_end_count == 0
+        and isinstance(tool_pending_count, int)
+        and tool_pending_count > 0
+    ):
+        effective_tool_pending_count = int(tool_pending_count)
+        effective_tool_call_count = max(
+            effective_tool_call_count,
+            effective_tool_success_count
+            + effective_tool_failure_count
+            + effective_tool_pending_count,
+        )
 
     return {
         "tool_history": tool_history,
-        "tool_call_count": tool_call_count,
-        "tool_success_count": tool_success_count,
-        "tool_failure_count": tool_failure_count,
-        "tool_pending_count": tool_pending_count,
-        "tool_call_start_count": max(0, int(tool_call_start_count)),
-        "tool_call_end_count": max(0, int(tool_call_end_count)),
+        "tool_call_count": effective_tool_call_count,
+        "tool_success_count": effective_tool_success_count,
+        "tool_failure_count": effective_tool_failure_count,
+        "tool_pending_count": effective_tool_pending_count,
+        "tool_call_start_count": effective_tool_call_start_count,
+        "tool_call_end_count": effective_tool_call_end_count,
     }
 
 
@@ -123,11 +176,23 @@ def _initialise_tool_observation_summary(
 
     tool_call_start_count = int(_safe_number(summary.get("tool_call_start_count")) or 0)
     tool_call_end_count = int(_safe_number(summary.get("tool_call_end_count")) or 0)
+    counters = summary.get("counters")
+    tools_started = 0
+    tools_completed = 0
+    if isinstance(counters, Mapping):
+        tools_started = int(_safe_number(counters.get("tools_started")) or 0)
+        tools_completed = int(_safe_number(counters.get("tools_completed")) or 0)
 
     return _finalise_tool_observation_summary(
         tool_history=tool_history,
         tool_call_start_count=tool_call_start_count,
         tool_call_end_count=tool_call_end_count,
+        tools_started=tools_started,
+        tools_completed=tools_completed,
+        tool_call_count=int(_safe_number(summary.get("tool_call_count")) or 0),
+        tool_success_count=int(_safe_number(summary.get("tool_success_count")) or 0),
+        tool_failure_count=int(_safe_number(summary.get("tool_failure_count")) or 0),
+        tool_pending_count=int(_safe_number(summary.get("tool_pending_count")) or 0),
         limit=limit,
     )
 
@@ -164,6 +229,10 @@ def update_tool_observation_summary(
             tool_history=tool_history,
             tool_call_start_count=tool_call_start_count,
             tool_call_end_count=tool_call_end_count,
+            tool_call_count=int(current.get("tool_call_count") or 0),
+            tool_success_count=int(current.get("tool_success_count") or 0),
+            tool_failure_count=int(current.get("tool_failure_count") or 0),
+            tool_pending_count=int(current.get("tool_pending_count") or 0),
             limit=limit,
         )
 
@@ -173,6 +242,10 @@ def update_tool_observation_summary(
             tool_history=tool_history,
             tool_call_start_count=tool_call_start_count,
             tool_call_end_count=tool_call_end_count,
+            tool_call_count=int(current.get("tool_call_count") or 0),
+            tool_success_count=int(current.get("tool_success_count") or 0),
+            tool_failure_count=int(current.get("tool_failure_count") or 0),
+            tool_pending_count=int(current.get("tool_pending_count") or 0),
             limit=limit,
         )
 
@@ -189,6 +262,10 @@ def update_tool_observation_summary(
             tool_history=tool_history,
             tool_call_start_count=tool_call_start_count,
             tool_call_end_count=tool_call_end_count,
+            tool_call_count=int(current.get("tool_call_count") or 0),
+            tool_success_count=int(current.get("tool_success_count") or 0),
+            tool_failure_count=int(current.get("tool_failure_count") or 0),
+            tool_pending_count=int(current.get("tool_pending_count") or 0),
             limit=limit,
         )
 
@@ -247,6 +324,10 @@ def update_tool_observation_summary(
         tool_history=tool_history,
         tool_call_start_count=tool_call_start_count,
         tool_call_end_count=tool_call_end_count,
+        tool_call_count=int(current.get("tool_call_count") or 0),
+        tool_success_count=int(current.get("tool_success_count") or 0),
+        tool_failure_count=int(current.get("tool_failure_count") or 0),
+        tool_pending_count=int(current.get("tool_pending_count") or 0),
         limit=limit,
     )
 

@@ -79,6 +79,7 @@ from .parent_specificity_rumination_workflow import (
     register_parent_specificity_rumination_actions,
 )
 from .paper_representation_workflow import register_paper_representation_actions
+from .talk_representation_workflow import register_talk_representation_actions
 from .workflow_gap_recovery_workflow import (
     get_workflow_discovery_gap_recovery_workflow_registration,
     get_workflow_gap_test_workflow_registration,
@@ -100,6 +101,9 @@ from ..workflow_concept_authority_service import (
 )
 from ...services.paper_representation_workflow_vontology_service import (
     bootstrap_canonical_paper_representation_workflows,
+)
+from ...services.talk_representation_workflow_vontology_service import (
+    bootstrap_canonical_talk_representation_workflows,
 )
 
 logger = logging.getLogger(__name__)
@@ -449,6 +453,10 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
         "enabled": bootstrap_allowed,
         "workflow_ids": [],
     }
+    talk_representation_bootstrap_report: Dict[str, Any] = {
+        "enabled": bootstrap_allowed,
+        "workflow_ids": [],
+    }
 
     # 1. Built-in conversation-turn workflows
     register_default_workflows(registry)
@@ -476,10 +484,14 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
                 bootstrap_canonical_paper_representation_workflows()
             )
             paper_representation_bootstrap_report["enabled"] = True
+            talk_representation_bootstrap_report = (
+                bootstrap_canonical_talk_representation_workflows()
+            )
+            talk_representation_bootstrap_report["enabled"] = True
             _resolve_subworkflow_definition.cache_clear()
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(
-                "paper_representation_workflow_bootstrap_failed: %s",
+                "representation_workflow_bootstrap_failed: %s",
                 exc,
             )
             paper_representation_bootstrap_report = {
@@ -487,6 +499,15 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
                 "workflow_ids": [
                     "#V#scholarly_paper_representation_workflow",
                     "#V#arxiv_paper_representation_workflow",
+                ],
+                "error": str(exc),
+            }
+            talk_representation_bootstrap_report = {
+                "enabled": True,
+                "workflow_ids": [
+                    "#V#talk_representation_workflow",
+                    "#V#technical_scientific_talk_representation_workflow",
+                    "#V#academic_presentation_instance_workflow",
                 ],
                 "error": str(exc),
             }
@@ -561,6 +582,7 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
         registry=registry,
         discovered_workflow_ids=discovered_workflow_ids,
         paper_representation_bootstrap_report=paper_representation_bootstrap_report,
+        talk_representation_bootstrap_report=talk_representation_bootstrap_report,
         bootstrap_allowed=bootstrap_allowed,
     )
 
@@ -572,6 +594,7 @@ def _launch_deferred_registry_work(
     registry: WorkflowRegistry,
     discovered_workflow_ids: List[str],
     paper_representation_bootstrap_report: Dict[str, Any],
+    talk_representation_bootstrap_report: Dict[str, Any],
     bootstrap_allowed: bool,
 ) -> None:
     """Launch background thread for bootstrap and parity inventory.
@@ -618,6 +641,9 @@ def _launch_deferred_registry_work(
             authority_report["bootstrap"] = bootstrap_report
             authority_report["paper_representation_bootstrap"] = (
                 paper_representation_bootstrap_report
+            )
+            authority_report["talk_representation_bootstrap"] = (
+                talk_representation_bootstrap_report
             )
 
             inventory_snapshot = _build_workflow_parity_inventory(
@@ -728,6 +754,7 @@ def build_durable_action_registry() -> ActionRegistry:
     register_parent_specificity_concept_dossier_actions(registry)
     register_parent_specificity_rumination_actions(registry)
     register_paper_representation_actions(registry)
+    register_talk_representation_actions(registry)
     register_workflow_gap_recovery_actions(registry)
     register_control_flow_actions(registry, definition_loader=_resolve_subworkflow_definition)
     register_subworkflow_actions(registry, definition_loader=_resolve_subworkflow_definition)

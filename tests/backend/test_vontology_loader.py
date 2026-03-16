@@ -2262,6 +2262,60 @@ class TestSubworkflowCompositionContracts:
             },
         ]
 
+    def test_load_definition_includes_static_subworkflow_inputs_in_contract(self):
+        input_mapping_id = "#V#mapping_subworkflow_input"
+        docs = {
+            "#V#step": {
+                "concept_id": "#V#step",
+                "relationships": {
+                    "#V#hasInputMap": ["verification_profile=technical_scientific_talk"],
+                },
+            },
+            input_mapping_id: {
+                "concept_id": input_mapping_id,
+                "concept_data": {
+                    "workflow_mapping_spec": {
+                        "schema_version": 1,
+                        "mapping_type": "context_key_to_tool_param",
+                        "workflow_step_id": "#V#step",
+                        "tool_id": "#V#child_workflow",
+                        "context_key_concept_id": "#V#workflow_context_key_parent_input",
+                        "tool_param_name": "child_input",
+                    }
+                },
+                "relationships": {},
+            },
+        }
+        steps = [
+            _make_step(
+                "#V#step",
+                invokes_workflow="#V#child_workflow",
+                context_input_mappings=[input_mapping_id],
+            )
+        ]
+        graph = _make_graph(initial_step="#V#step", steps=steps)
+
+        with _stub_fetch_concepts(docs), _stub_narrative():
+            with patch(
+                "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+                return_value=(graph, []),
+            ):
+                defn = load_workflow_definition_from_vontology("#V#parent_workflow")
+
+        assert defn is not None
+        state = defn.states["#V#step"]
+        assert state.actions[0].inputs["verification_profile"] == (
+            "technical_scientific_talk"
+        )
+        metadata = state.metadata
+        assert metadata["subworkflow_contract"]["static_input_keys"] == [
+            "verification_profile"
+        ]
+        assert metadata["subworkflow_contract"]["provided_inputs"] == [
+            "child_input",
+            "verification_profile",
+        ]
+
     def test_load_definition_supports_dynamic_subworkflow_workflow_id_mapping(self):
         workflow_id_mapping_id = "#V#mapping_dynamic_workflow_id"
         input_mapping_id = "#V#mapping_dynamic_child_input"

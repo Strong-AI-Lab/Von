@@ -1493,6 +1493,13 @@ def _build_turn_execution_stage_diagnostics(
             stage_payload["workflow_selector_source"] = _progress_str(
                 latest_progress_payload.get("workflow_selector_source")
             )
+            stage_payload["workflow_selection_rationale"] = _progress_str(
+                latest_progress_payload.get("workflow_selection_rationale")
+            ) or (
+                _progress_str(latest_stage_event.get("workflow_selection_rationale"))
+                if isinstance(latest_stage_event, Mapping)
+                else None
+            )
 
         stage_diagnostics.append(stage_payload)
 
@@ -2598,6 +2605,14 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
                 merged.pop("failure_kind", None)
         else:
             merged.pop("failure_kind", None)
+        if "error_code" in safe_update:
+            error_code = _progress_str(safe_update.get("error_code"))
+            if error_code:
+                merged["error_code"] = error_code
+            else:
+                merged.pop("error_code", None)
+        else:
+            merged.pop("error_code", None)
         merged["request_id"] = request_id
         merged["status"] = status
         merged["stage"] = stage
@@ -2700,6 +2715,9 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
             event_entry["success"] = success_flag
         if _progress_str(merged.get("error")):
             event_entry["error"] = str(merged.get("error"))
+        error_code = _progress_str(merged.get("error_code"))
+        if error_code:
+            event_entry["error_code"] = error_code
         error_class = _progress_str(merged.get("error_class"))
         if error_class:
             event_entry["error_class"] = error_class
@@ -2731,6 +2749,11 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
         selector_source = _progress_str(merged.get("workflow_selector_source"))
         if selector_source:
             event_entry["workflow_selector_source"] = selector_source
+        workflow_selection_rationale = _progress_str(
+            merged.get("workflow_selection_rationale")
+        )
+        if workflow_selection_rationale:
+            event_entry["workflow_selection_rationale"] = workflow_selection_rationale
         workflow_match_count = _progress_number(merged.get("workflow_match_count"))
         if workflow_match_count is not None:
             event_entry["workflow_match_count"] = int(max(0.0, workflow_match_count))
@@ -2777,9 +2800,22 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
             stage_summaries[live_stage_id] = existing_summary
         merged["_stage_summaries"] = stage_summaries
 
+        tool_summary_source = dict(existing) if isinstance(existing, dict) else {}
+        for key_name in (
+            "tool_history",
+            "tool_call_count",
+            "tool_success_count",
+            "tool_failure_count",
+            "tool_pending_count",
+            "tool_call_start_count",
+            "tool_call_end_count",
+            "counters",
+        ):
+            if key_name in safe_update:
+                tool_summary_source[key_name] = safe_update.get(key_name)
         merged.update(
             update_tool_observation_summary(
-                merged,
+                tool_summary_source,
                 event_entry,
                 limit=_TOOL_PROGRESS_DIAGNOSTIC_EVENT_LIMIT,
             )

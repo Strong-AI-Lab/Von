@@ -36,6 +36,19 @@ def _normalise_string_list(value: Any) -> List[str]:
     return result
 
 
+def _merge_unique_strings(*groups: List[str]) -> List[str]:
+    result: List[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for item in group:
+            text = _normalise_text(item)
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            result.append(text)
+    return result
+
+
 def _normalise_input_mappings(value: Any) -> List[Dict[str, str]]:
     if not isinstance(value, list):
         return []
@@ -133,8 +146,14 @@ def normalise_subworkflow_contract(
 
     input_mappings = _normalise_input_mappings(value.get("input_mappings"))
     output_mappings = _normalise_output_mappings(value.get("output_mappings"))
+    static_input_keys = _normalise_string_list(
+        value.get("static_input_keys") or value.get("static_inputs")
+    )
 
-    provided_inputs = [item["child_input_key"] for item in input_mappings]
+    provided_inputs = _merge_unique_strings(
+        [item["child_input_key"] for item in input_mappings],
+        static_input_keys,
+    )
     mapped_outputs = [item["child_output_field"] for item in output_mappings]
 
     required_inputs = (
@@ -154,6 +173,7 @@ def normalise_subworkflow_contract(
             "failure_mode": failure_mode,
             "input_mappings": input_mappings,
             "output_mappings": output_mappings,
+            "static_input_keys": static_input_keys,
             "provided_inputs": provided_inputs,
             "mapped_outputs": mapped_outputs,
             "required_inputs": required_inputs,
@@ -171,6 +191,7 @@ def build_subworkflow_contract(
     candidate_workflow_ids: List[str] | None = None,
     input_mappings: List[Dict[str, str]],
     output_mappings: List[Dict[str, str]],
+    static_input_keys: List[str] | None = None,
     failure_mode: str = WORKFLOW_SUBWORKFLOW_FAILURE_MODE_PROPAGATE,
 ) -> Dict[str, Any]:
     """Build a canonical subworkflow contract payload from mapping lists."""
@@ -187,6 +208,7 @@ def build_subworkflow_contract(
             "failure_mode": failure_mode,
             "input_mappings": input_mappings,
             "output_mappings": output_mappings,
+            "static_input_keys": list(static_input_keys or []),
         }
     )
     if contract is None:
@@ -201,6 +223,7 @@ def build_subworkflow_contract(
             "failure_mode": WORKFLOW_SUBWORKFLOW_FAILURE_MODE_PROPAGATE,
             "input_mappings": [],
             "output_mappings": [],
+            "static_input_keys": _normalise_string_list(static_input_keys),
             "provided_inputs": [],
             "mapped_outputs": [],
             "required_inputs": [],

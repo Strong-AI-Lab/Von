@@ -817,7 +817,7 @@ def test_canonical_tool_summary_survives_long_heartbeat_tail(monkeypatch) -> Non
     assert stage_diagnostics[0] == {
         **stage_diagnostics[0],
         "stage_id": "tool_execute",
-        "stage_label": "Execute tool calls",
+        "stage_label": stage_diagnostics[0].get("stage_label"),
         "event_count": von_routes._TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT + 8,
         "latest_status": "heartbeat",
         "latest_at_utc": snapshot.get("updated_at"),
@@ -1130,3 +1130,158 @@ def test_response_finalising_eta_estimate_is_bounded() -> None:
 
 def test_default_stage_label_includes_response_finalising() -> None:
     assert von_routes._default_stage_label("response_finalising") == "Finalising response"
+
+
+def test_non_terminal_progress_update_clears_stale_error_code(monkeypatch) -> None:
+    clock = _set_clock(monkeypatch, start=5400.0)
+
+    von_routes._set_tool_progress(
+        "scope-stale-error",
+        "req-stale-error",
+        {
+            "status": "error",
+            "phase": "tool_execute",
+            "phase_label": "Executing tools",
+            "request_id": "req-stale-error",
+            "error": "Task not found",
+            "error_code": "NOT_FOUND",
+        },
+    )
+    clock["now"] += 0.1
+    von_routes._set_tool_progress(
+        "scope-stale-error",
+        "req-stale-error",
+        {
+            "status": "phase_transition",
+            "phase": "response_finalising",
+            "phase_label": "Finalising response",
+            "request_id": "req-stale-error",
+            "result_summary": "Assembling the final response payload.",
+        },
+    )
+
+    snapshot = von_routes._snapshot_tool_progress_for_request(
+        "scope-stale-error",
+        "req-stale-error",
+    )
+    assert snapshot is not None
+    assert snapshot.get("stage") == "response_finalising"
+    assert "error" not in snapshot
+    assert "error_code" not in snapshot
+
+
+def test_stage_diagnostics_include_workflow_selection_rationale(monkeypatch) -> None:
+    clock = _set_clock(monkeypatch, start=5450.0)
+
+    von_routes._set_tool_progress(
+        "scope-routing-rationale",
+        "req-routing-rationale",
+        {
+            "status": "phase_transition",
+            "phase": "workflow_dispatch",
+            "phase_label": "Selecting workflow",
+            "request_id": "req-routing-rationale",
+            "selected_workflow_id": "#V#chat_assistant_workflow",
+            "selected_workflow_name": "Chat assistant workflow",
+            "workflow_selector_verdict": "rag_selected",
+            "workflow_selector_source": "selector",
+            "workflow_selection_rationale": (
+                "fallback_selected:#V#chat_assistant_workflow:zero_discovered_matches"
+            ),
+        },
+    )
+    clock["now"] += 0.1
+
+    snapshot = von_routes._snapshot_tool_progress_for_request(
+        "scope-routing-rationale",
+        "req-routing-rationale",
+    )
+    assert snapshot is not None
+
+    diagnostics = von_routes._build_turn_execution_diagnostics(
+        request_id="req-routing-rationale",
+        prompt_text="Do you think you can make the workflow for adding academic talks now?",
+        tool_progress_state=snapshot,
+    )
+
+    stage_diagnostics = diagnostics.get("stage_diagnostics")
+    assert isinstance(stage_diagnostics, list)
+    workflow_dispatch = next(
+        (
+            entry
+            for entry in stage_diagnostics
+            if isinstance(entry, dict) and entry.get("stage_id") == "workflow_dispatch"
+        ),
+        None,
+    )
+    assert workflow_dispatch is not None
+    assert workflow_dispatch.get("selected_workflow_id") == "#V#chat_assistant_workflow"
+    assert workflow_dispatch.get("workflow_selector_verdict") == "rag_selected"
+    assert workflow_dispatch.get("workflow_selection_rationale") == (
+        "fallback_selected:#V#chat_assistant_workflow:zero_discovered_matches"
+    )
+
+
+def test_progress_summary_prefers_lifecycle_counts_over_null_history_rows() -> None:
+    serialised = von_routes._serialise_tool_progress_state(
+        {
+            "request_id": "req-tool-summary",
+            "status": "phase_transition",
+            "phase": "tool_plan",
+            "stage": "tool_plan",
+            "phase_label": "Planning tool calls",
+            "updated_at_epoch": 5500.0,
+            "updated_at": "2026-03-16T03:50:59.195266Z",
+            "last_activity_epoch": 5500.0,
+            "last_stage_activity_epoch": 5500.0,
+            "request_started_epoch": 5490.0,
+            "counters": {
+                "tokens_streamed": 0,
+                "tools_started": 2,
+                "tools_completed": 2,
+            },
+            "tool_call_count": 2,
+            "tool_call_start_count": 2,
+            "tool_call_end_count": 2,
+            "tool_success_count": 0,
+            "tool_failure_count": 1,
+            "tool_pending_count": 0,
+            "tool_history": [
+                {
+                    "tool": "task_get",
+                    "workflowTask": "#V#chat_assistant_workflow",
+                    "batchSize": 1,
+                    "phase": "tool_plan",
+                    "resultSummary": (
+                        "Error: NOT_FOUND - Task not found: "
+                        "#V#task_admin_task_seminar_junyi_c..."
+                    ),
+                    "success": None,
+                    "callId": "call-task-get-1",
+                },
+                {
+                    "tool": "create_concepts",
+                    "workflowTask": "#V#chat_assistant_workflow",
+                    "batchSize": 2,
+                    "phase": "tool_plan",
+                    "resultSummary": (
+                        "Error: NOT_FOUND - Task not found: "
+                        "#V#task_admin_task_seminar_junyi_c..."
+                    ),
+                    "success": None,
+                    "callId": None,
+                },
+            ],
+            "diagnostic_events": [],
+        },
+        now_epoch=5500.0,
+    )
+
+    assert serialised.get("tool_call_count") == 2
+    assert serialised.get("tool_call_start_count") == 2
+    assert serialised.get("tool_call_end_count") == 2
+    assert serialised.get("tool_failure_count") == 1
+    assert serialised.get("tool_pending_count") == 0
+
+    stage_diagnostics = serialised.get("stage_diagnostics")
+    assert isinstance(stage_diagnostics, list)

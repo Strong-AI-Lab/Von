@@ -35,6 +35,16 @@ def _patch_stage_catalogue(monkeypatch: pytest.MonkeyPatch) -> None:
             runtime_aliases=("workflow_dispatch",),
         ),
         stage_model._StageSpec(
+            stage_id="tool_plan",
+            stage_label="Tool-call planning",
+            order=60,
+            stage_kind="non_formal",
+            boundary_type="planning",
+            stage_concept_id="#V#conversation_turn_stage_tool_plan",
+            workflow_id=TOOL_CALLING_WORKFLOW_ID,
+            runtime_aliases=("tool_plan", "plan"),
+        ),
+        stage_model._StageSpec(
             stage_id="tool_execute",
             stage_label="Execute tool calls",
             order=70,
@@ -107,6 +117,7 @@ def test_stage_path_maps_known_runtime_stages_to_catalogue_entries() -> None:
     result = build_conversation_turn_stage_path(
         runtime_stages=[
             "workflow_discovery",
+            "tool_plan",
             "tool_execute",
             "completion_gate",
             "completed",
@@ -119,6 +130,7 @@ def test_stage_path_maps_known_runtime_stages_to_catalogue_entries() -> None:
     path = result["path"]
     assert [entry["stage_id"] for entry in path] == [
         "workflow_discovery",
+        "tool_plan",
         "tool_execute",
         "completion_gate",
         "completed",
