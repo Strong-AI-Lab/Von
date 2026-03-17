@@ -18,6 +18,13 @@ Use the existing canonical pathway in `src/backend/workflows/workflow_concept_au
 
 `publish_canonical_chat_workflow_graphs(...)` now applies strict post-publication validation before a workflow is counted as published.
 
+For explicit Vontology-authored workflow families such as paper/talk
+representation, use `publish_canonical_chat_workflow_graphs(...)` with explicit
+publication specs/definitions/purposes rather than creating temporary
+`source="built_in"` runtime registrations. The runtime registry must consume the
+published Vontology authority; it must not materialise those families on the
+production registry path.
+
 ## Strict Validation Gates
 
 `validate_workflow_definition_contract(...)` in `src/backend/workflows/workflow_definition_identity_service.py` enforces:

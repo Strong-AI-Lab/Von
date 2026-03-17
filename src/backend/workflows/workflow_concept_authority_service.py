@@ -2065,6 +2065,23 @@ def _build_definition_from_publication_spec(
     )
 
 
+def _build_definition_map_from_publication_specs(
+    publication_specs: Mapping[str, _CanonicalWorkflowPublicationSpec],
+) -> Dict[str, WorkflowDefinition]:
+    """Build deterministic synthetic definitions for explicit publication specs."""
+
+    return {
+        workflow_id: _build_definition_from_publication_spec(
+            workflow_id=workflow_id,
+            spec=spec,
+        )
+        for workflow_id, spec in publication_specs.items()
+        if isinstance(workflow_id, str)
+        and workflow_id.strip()
+        and isinstance(spec, _CanonicalWorkflowPublicationSpec)
+    }
+
+
 def _slugify_token(value: str) -> str:
     raw = str(value or "").strip().lower()
     if raw.startswith("#v#"):
@@ -2686,16 +2703,50 @@ def _invalidate_runnable_verification_for_workflow(
 
 def publish_canonical_chat_workflow_graphs(
     *,
-    registry: WorkflowRegistry,
+    registry: WorkflowRegistry | None = None,
     create_missing: bool = True,
     target_workflow_ids: Sequence[str] | None = None,
+    publication_specs: Mapping[str, _CanonicalWorkflowPublicationSpec] | None = None,
+    publication_definitions: Mapping[str, WorkflowDefinition] | None = None,
+    publication_purposes: Mapping[str, str] | None = None,
 ) -> Dict[str, Any]:
     """Publish canonical chat workflows as Vontology process graphs.
 
     The canonical chat workflows remain executable in Python runtime, but their
     workflow topology must be published into Vontology so graph loading and
     introspection surfaces use the same authority.
+
+    ``publication_specs`` / ``publication_definitions`` / ``publication_purposes``
+    allow explicit workflow families to publish authoritative graphs without
+    temporarily registering built-in runtime workflows.
     """
+    explicit_publication_specs: Dict[str, _CanonicalWorkflowPublicationSpec] = {
+        str(workflow_id).strip(): spec
+        for workflow_id, spec in (publication_specs or {}).items()
+        if isinstance(workflow_id, str)
+        and str(workflow_id).strip()
+        and isinstance(spec, _CanonicalWorkflowPublicationSpec)
+    }
+    explicit_publication_definitions: Dict[str, WorkflowDefinition] = {
+        str(workflow_id).strip(): definition
+        for workflow_id, definition in (publication_definitions or {}).items()
+        if isinstance(workflow_id, str)
+        and str(workflow_id).strip()
+        and isinstance(definition, WorkflowDefinition)
+    }
+    explicit_publication_purposes: Dict[str, str] = {
+        str(workflow_id).strip(): str(purpose).strip()
+        for workflow_id, purpose in (publication_purposes or {}).items()
+        if isinstance(workflow_id, str)
+        and str(workflow_id).strip()
+        and isinstance(purpose, str)
+        and str(purpose).strip()
+    }
+    available_publication_specs: Dict[str, _CanonicalWorkflowPublicationSpec] = dict(
+        _CANONICAL_WORKFLOW_PUBLICATION_SPECS
+    )
+    available_publication_specs.update(explicit_publication_specs)
+
     published: list[str] = []
     skipped_missing_registration: list[str] = []
     skipped_missing_concept: list[str] = []
@@ -2710,12 +2761,15 @@ def publish_canonical_chat_workflow_graphs(
 
     if target_workflow_ids is None:
         target_workflow_ids = list(CANONICAL_CHAT_WORKFLOW_IDS)
-        for workflow_id in CANONICAL_DURABLE_WORKFLOW_IDS:
-            if registry.get_registration(workflow_id) is not None:
-                target_workflow_ids.append(workflow_id)
-        for workflow_id in CANONICAL_VONTOLOGY_GOVERNANCE_WORKFLOW_IDS:
-            if registry.get_registration(workflow_id) is not None:
-                target_workflow_ids.append(workflow_id)
+        if registry is not None:
+            for workflow_id in CANONICAL_DURABLE_WORKFLOW_IDS:
+                if registry.get_registration(workflow_id) is not None:
+                    target_workflow_ids.append(workflow_id)
+            for workflow_id in CANONICAL_VONTOLOGY_GOVERNANCE_WORKFLOW_IDS:
+                if registry.get_registration(workflow_id) is not None:
+                    target_workflow_ids.append(workflow_id)
+        for workflow_id in explicit_publication_specs:
+            target_workflow_ids.append(workflow_id)
     else:
         target_workflow_ids = [
             str(item).strip()
@@ -2723,15 +2777,20 @@ def publish_canonical_chat_workflow_graphs(
             if isinstance(item, str) and str(item).strip()
         ]
     target_workflow_ids = list(dict.fromkeys(target_workflow_ids))
+    registry_workflow_ids = (
+        {
+            str(item).strip()
+            for item in registry.all_workflow_ids()
+            if isinstance(item, str) and str(item).strip()
+        }
+        if registry is not None
+        else set()
+    )
     known_workflow_ids = tuple(
         sorted(
-            {
-                str(item).strip()
-                for item in registry.all_workflow_ids()
-                if isinstance(item, str) and str(item).strip()
-            }
+            registry_workflow_ids
             .union(CANONICAL_VONTOLOGY_GOVERNANCE_WORKFLOW_IDS)
-            .union(_CANONICAL_WORKFLOW_PUBLICATION_SPECS.keys())
+            .union(available_publication_specs.keys())
         )
     )
 
@@ -2744,10 +2803,14 @@ def publish_canonical_chat_workflow_graphs(
         authoritative_definition = load_workflow_definition_from_vontology(candidate_id)
         if authoritative_definition is not None:
             return authoritative_definition
-        registered_definition = registry.get(candidate_id)
-        if registered_definition is not None:
-            return registered_definition
-        canonical_spec = _CANONICAL_WORKFLOW_PUBLICATION_SPECS.get(candidate_id)
+        explicit_definition = explicit_publication_definitions.get(candidate_id)
+        if explicit_definition is not None:
+            return explicit_definition
+        if registry is not None:
+            registered_definition = registry.get(candidate_id)
+            if registered_definition is not None:
+                return registered_definition
+        canonical_spec = available_publication_specs.get(candidate_id)
         if canonical_spec is not None:
             return _build_definition_from_publication_spec(
                 workflow_id=candidate_id,
@@ -2756,12 +2819,31 @@ def publish_canonical_chat_workflow_graphs(
         return None
 
     for workflow_id in target_workflow_ids:
-        spec = _CANONICAL_WORKFLOW_PUBLICATION_SPECS.get(workflow_id)
-        registration = registry.get_registration(workflow_id)
-        if spec is None or registration is None:
+        spec = available_publication_specs.get(workflow_id)
+        registration_definition = explicit_publication_definitions.get(workflow_id)
+        workflow_purpose = explicit_publication_purposes.get(workflow_id)
+        registration = None
+        if registry is not None:
+            registration = registry.get_registration(workflow_id)
+            if registration is not None:
+                registration_definition = registration_definition or getattr(
+                    registration,
+                    "definition",
+                    None,
+                )
+                if workflow_purpose is None and isinstance(
+                    getattr(registration, "purpose", None),
+                    str,
+                ):
+                    workflow_purpose = str(registration.purpose).strip() or None
+        if spec is None:
             skipped_missing_registration.append(workflow_id)
             continue
-        registration_definition = getattr(registration, "definition", None)
+        if registration_definition is None:
+            registration_definition = _build_definition_from_publication_spec(
+                workflow_id=workflow_id,
+                spec=spec,
+            )
 
         workflow_doc, workflow_load_error = _load_concept(workflow_id)
         if workflow_load_error:
@@ -2774,7 +2856,7 @@ def publish_canonical_chat_workflow_graphs(
             workflow_doc, created, create_error = _ensure_concept_exists(
                 concept_id=workflow_id,
                 name=_titleise_workflow_id(workflow_id),
-                description=registration.purpose if isinstance(registration.purpose, str) else None,
+                description=workflow_purpose,
                 parent_concept_ids=[preferred_workflow_type] if preferred_workflow_type else [],
             )
             if create_error:
