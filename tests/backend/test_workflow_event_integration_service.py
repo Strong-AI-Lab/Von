@@ -17,11 +17,13 @@ from src.backend.services.workflow_event_integration_service import (
     EVENT_TYPE_EFFORT_UNIT_COMPLETED,
     EVENT_TYPE_FILE_COPY_UPLOADED,
     EVENT_TYPE_TASK_CREATED,
+    EVENT_TYPE_TYPE_CREATED,
     EVENT_TYPE_VONTOLOGY_MUTATED,
     ensure_default_event_bindings,
     launch_event_workflow,
     maybe_launch_effort_unit_completed_workflow,
     maybe_launch_file_copy_uploaded_workflow,
+    maybe_launch_type_created_workflow,
     maybe_launch_vontology_mutation_workflow,
     maybe_launch_task_status_workflow,
 )
@@ -85,10 +87,12 @@ def test_launch_event_workflow_durable_gate_disables_trigger(monkeypatch) -> Non
     assert "hint" in result
 
 
-def test_launch_event_workflow_requires_configured_workflow(monkeypatch) -> None:
+def test_launch_event_workflow_ignores_legacy_env_fallback_without_persisted_binding(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", "1")
     monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "1")
-    monkeypatch.delenv("VON_EVENT_TASK_CREATED_WORKFLOW_ID", raising=False)
+    monkeypatch.setenv("VON_EVENT_TASK_CREATED_WORKFLOW_ID", "#V#legacy_env_workflow")
 
     result = launch_event_workflow(
         event_type=EVENT_TYPE_TASK_CREATED,
@@ -102,8 +106,9 @@ def test_launch_event_workflow_requires_configured_workflow(monkeypatch) -> None
     assert result["outcome"] == "not_triggered"
     assert result["event_type"] == EVENT_TYPE_TASK_CREATED
     assert result["reason"] == "workflow_not_configured"
-    assert result["workflow_id_env"] == "VON_EVENT_TASK_CREATED_WORKFLOW_ID"
     assert "hint" in result
+    assert "workflow_bind_event" in result["hint"]
+    assert "workflow_id_env" not in result
 
 
 @patch("src.backend.services.workflow_event_integration_service.get_instance_manager")
@@ -113,7 +118,6 @@ def test_launch_event_workflow_creates_instance_when_configured(
 ) -> None:
     monkeypatch.setenv("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", "1")
     monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "1")
-    monkeypatch.setenv("VON_EVENT_TASK_CREATED_WORKFLOW_ID", "#V#task_event_workflow")
 
     mock_manager = MagicMock()
     mock_get_instance_manager.return_value = mock_manager
@@ -131,6 +135,7 @@ def test_launch_event_workflow_creates_instance_when_configured(
             event_id="task-1",
             user_id="#V#user_alice",
             org_id="#V#org_nao",
+            workflow_id="#V#task_event_workflow",
             inputs={"task_concept_id": "#V#task_1"},
         )
 
@@ -165,7 +170,6 @@ def test_launch_event_workflow_reports_reused_idempotent_instance(
 ) -> None:
     monkeypatch.setenv("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", "1")
     monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "1")
-    monkeypatch.setenv("VON_EVENT_TASK_CREATED_WORKFLOW_ID", "#V#task_event_workflow")
 
     mock_manager = MagicMock()
     mock_get_instance_manager.return_value = mock_manager
@@ -183,6 +187,7 @@ def test_launch_event_workflow_reports_reused_idempotent_instance(
             event_id="task-1",
             user_id="#V#user_alice",
             org_id="#V#org_nao",
+            workflow_id="#V#task_event_workflow",
             inputs={"task_concept_id": "#V#task_1"},
         )
 
@@ -347,28 +352,12 @@ def test_build_event_workflow_binding_diagnostics_reports_operator_actions() -> 
         enabled=False,
         actor="test",
     )
-    persistent_with_env = EventWorkflowBinding.create(
-        event_type="vontology.mutated",
-        workflow_id="#V#vontology_mutation_governance_workflow",
-        input_mapping={"concept_id": "event.concept_id"},
-        enabled=True,
-        actor="test",
-    )
-
     bindings = [
         {**multiple_enabled_a.to_status_dict(), "source": "persistent"},
         {**multiple_enabled_b.to_status_dict(), "source": "persistent"},
         {**disabled_only.to_status_dict(), "source": "persistent"},
         {**historical_enabled.to_status_dict(), "source": "persistent"},
         {**historical_disabled.to_status_dict(), "source": "persistent"},
-        {**persistent_with_env.to_status_dict(), "source": "persistent"},
-        {
-            "binding_id": "env:vontology.mutated",
-            "event_type": "vontology.mutated",
-            "workflow_id": "#V#env_fallback_workflow",
-            "enabled": True,
-            "source": "environment",
-        },
     ]
 
     diagnostics = workflow_event_service.build_event_workflow_binding_diagnostics(
@@ -382,11 +371,24 @@ def test_build_event_workflow_binding_diagnostics_reports_operator_actions() -> 
     assert by_event["task.created"]["severity"] == "warning"
     assert by_event["concept.updated"]["reason_code"] == "historical_bindings_present"
     assert by_event["concept.updated"]["severity"] == "info"
-    assert (
-        by_event["vontology.mutated"]["reason_code"]
-        == "persistent_bindings_override_environment"
+
+
+@patch("src.backend.services.workflow_event_integration_service.get_instance_manager")
+def test_list_event_workflow_bindings_excludes_env_fallback_entries(
+    mock_get_instance_manager: MagicMock,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_EVENT_TASK_CREATED_WORKFLOW_ID", "#V#legacy_env_workflow")
+    mock_manager = MagicMock()
+    mock_manager.list_event_bindings.return_value = []
+    mock_get_instance_manager.return_value = mock_manager
+
+    bindings = workflow_event_service.list_event_workflow_bindings(
+        event_type=EVENT_TYPE_TASK_CREATED,
+        limit=20,
     )
-    assert by_event["vontology.mutated"]["environment_binding_count"] == 1
+
+    assert bindings == []
 
 
 @patch("src.backend.services.workflow_event_integration_service.get_instance_manager")
@@ -541,7 +543,6 @@ def test_launch_event_workflow_uses_user_only_namespace_when_org_unknown(
 ) -> None:
     monkeypatch.setenv("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", "1")
     monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "1")
-    monkeypatch.setenv("VON_EVENT_TASK_CREATED_WORKFLOW_ID", "#V#task_event_workflow")
 
     mock_manager = MagicMock()
     mock_get_instance_manager.return_value = mock_manager
@@ -559,6 +560,7 @@ def test_launch_event_workflow_uses_user_only_namespace_when_org_unknown(
             event_id="task-namespace-user-only",
             user_id="#V#user_alice",
             org_id=None,
+            workflow_id="#V#task_event_workflow",
             inputs={"task_concept_id": "#V#task_99"},
         )
 
@@ -577,7 +579,6 @@ def test_launch_event_workflow_blocks_when_cadence_window_is_active(
 ) -> None:
     monkeypatch.setenv("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", "1")
     monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "1")
-    monkeypatch.setenv("VON_EVENT_TASK_CREATED_WORKFLOW_ID", "#V#task_event_workflow")
 
     now = datetime.now(timezone.utc)
     mock_manager = MagicMock()
@@ -604,12 +605,13 @@ def test_launch_event_workflow_blocks_when_cadence_window_is_active(
                 "text_relation:#V#hasBackgroundLaunchPolicyJson",
             ),
         ):
-            result = launch_event_workflow(
-                event_type=EVENT_TYPE_TASK_CREATED,
-                event_id="task-cadence-1",
-                user_id="#V#user_alice",
-                org_id="#V#org_nao",
-            )
+                result = launch_event_workflow(
+                    event_type=EVENT_TYPE_TASK_CREATED,
+                    event_id="task-cadence-1",
+                    user_id="#V#user_alice",
+                    org_id="#V#org_nao",
+                    workflow_id="#V#task_event_workflow",
+                )
 
     assert result["success"] is True
     assert result["triggered"] is False
@@ -630,7 +632,6 @@ def test_launch_event_workflow_idempotent_reuse_takes_precedence_over_cadence(
 ) -> None:
     monkeypatch.setenv("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", "1")
     monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "1")
-    monkeypatch.setenv("VON_EVENT_TASK_CREATED_WORKFLOW_ID", "#V#task_event_workflow")
 
     now = datetime.now(timezone.utc)
     mock_manager = MagicMock()
@@ -659,12 +660,13 @@ def test_launch_event_workflow_idempotent_reuse_takes_precedence_over_cadence(
             "text_relation:#V#hasBackgroundLaunchPolicyJson",
         ),
     ):
-        result = launch_event_workflow(
-            event_type=EVENT_TYPE_TASK_CREATED,
-            event_id="task-cadence-existing",
-            user_id="#V#user_alice",
-            org_id="#V#org_nao",
-        )
+            result = launch_event_workflow(
+                event_type=EVENT_TYPE_TASK_CREATED,
+                event_id="task-cadence-existing",
+                user_id="#V#user_alice",
+                org_id="#V#org_nao",
+                workflow_id="#V#task_event_workflow",
+            )
 
     assert result["success"] is True
     assert result["triggered"] is False
@@ -713,7 +715,11 @@ def test_maybe_launch_file_copy_uploaded_workflow_emits_upload_event(
     mock_launch_event_workflow: MagicMock,
 ) -> None:
     mock_ensure_default_event_bindings.return_value = {"success": True, "ensured": True}
-    mock_launch_event_workflow.return_value = {"success": True, "triggered": True}
+    mock_launch_event_workflow.return_value = {
+        "success": True,
+        "triggered": True,
+        "workflow_id": DEFAULT_FILE_COPY_UPLOADED_WORKFLOW_ID,
+    }
 
     result = maybe_launch_file_copy_uploaded_workflow(
         file_copy_concept_id="#V#uploaded_file_copy_123",
@@ -730,8 +736,9 @@ def test_maybe_launch_file_copy_uploaded_workflow_emits_upload_event(
 
     assert result["success"] is True
     assert result["triggered"] is True
+    assert result["event_binding_bootstrap"]["ensured"] is True
     assert result["default_binding_bootstrap"]["ensured"] is True
-    assert result["launch_strategy"] == "single_selected_binding"
+    assert result["launch_strategy"] == "resolved_persistent_bindings"
     assert result["selected_workflow_id"] == DEFAULT_FILE_COPY_UPLOADED_WORKFLOW_ID
     mock_ensure_default_event_bindings.assert_called_once()
 
@@ -739,9 +746,45 @@ def test_maybe_launch_file_copy_uploaded_workflow_emits_upload_event(
     assert called_args is not None
     assert called_args.kwargs["event_type"] == EVENT_TYPE_FILE_COPY_UPLOADED
     assert called_args.kwargs["event_id"] == "#V#uploaded_file_copy_123"
-    assert called_args.kwargs["workflow_id"] == DEFAULT_FILE_COPY_UPLOADED_WORKFLOW_ID
+    assert "workflow_id" not in called_args.kwargs
     assert called_args.kwargs["inputs"]["file_copy_concept_id"] == "#V#uploaded_file_copy_123"
     assert called_args.kwargs["inputs"]["index_in_rag"] is True
+
+
+@patch("src.backend.services.workflow_event_integration_service.launch_event_workflow")
+@patch(
+    "src.backend.services.workflow_event_integration_service.ensure_default_event_bindings"
+)
+def test_maybe_launch_type_created_workflow_bootstraps_and_defers_to_persisted_binding(
+    mock_ensure_default_event_bindings: MagicMock,
+    mock_launch_event_workflow: MagicMock,
+) -> None:
+    mock_ensure_default_event_bindings.return_value = {"success": True, "ensured": True}
+    mock_launch_event_workflow.return_value = {
+        "success": True,
+        "triggered": True,
+        "workflow_id": "#V#salient_predicate_governance_workflow",
+    }
+
+    result = maybe_launch_type_created_workflow(
+        type_concept_id="#V#new_type",
+        created_by_concept_id="#V#user_alice",
+        organisation_concept_id="#V#org_nao",
+        parent_type_ids=["#V#supertype"],
+    )
+
+    assert result["success"] is True
+    assert result["triggered"] is True
+    assert result["event_binding_bootstrap"]["ensured"] is True
+    assert result["selected_workflow_id"] == "#V#salient_predicate_governance_workflow"
+    assert result["launch_strategy"] == "resolved_persistent_bindings"
+    mock_ensure_default_event_bindings.assert_called_once()
+
+    called_args = mock_launch_event_workflow.call_args
+    assert called_args is not None
+    assert called_args.kwargs["event_type"] == EVENT_TYPE_TYPE_CREATED
+    assert "workflow_id" not in called_args.kwargs
+    assert called_args.kwargs["inputs"]["type_concept_id"] == "#V#new_type"
 
 
 @patch("src.backend.services.workflow_event_integration_service.launch_event_workflow")
