@@ -67,3 +67,40 @@ The CI check asserts:
 2. Runtime definition hash matches authoritative Vontology-loaded definition hash.
 
 Any mismatch fails CI and must be resolved by updating the Vontology graph/publication path, not by adding fallback code paths.
+
+## Workflow Purity Scoreboard
+
+`JVNAUTOSCI-1524` extends the parity inventory with a structured
+`workflow_purity` report that tracks the remaining hybrid authority surface.
+
+The report is attached to the existing `parity_inventory` payloads and logged at
+startup under the `workflow_purity` logger key. The counters currently include:
+
+1. `built_in_registration_count`
+2. `remaining_python_workflow_family_count`
+3. `direct_instance_create_callsite_count`
+4. `env_event_binding_count`
+5. `legacy_selector_mode_count`
+6. `builtin_capability_override_count`
+7. `non_vontology_discoverable_workflow_count`
+
+The checked-in CI baseline lives at:
+
+- `tests/backend/fixtures/workflow_purity_baseline.json`
+
+To emit the current report locally:
+
+```powershell
+pdm run python scripts/workflow_purity_report.py
+```
+
+To refresh the baseline deliberately after an approved convergence change:
+
+```powershell
+pdm run python scripts/workflow_purity_report.py --refresh-baseline
+```
+
+Refreshing the baseline is a conscious workflow-first migration step. Do it only
+when the new counter values reflect intended authority reduction or an approved
+re-baselining decision, and commit the updated JSON in the same change as the
+code that justified the shift.

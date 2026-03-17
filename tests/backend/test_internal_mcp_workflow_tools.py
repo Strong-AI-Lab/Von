@@ -542,11 +542,16 @@ def test_workflow_list_definitions_exists_and_returns_data():
     assert "summary_text" in parity_inventory
     assert "diagnostics" in parity_inventory
     assert "parity_policy" in parity_inventory
+    assert "workflow_purity" in parity_inventory
     diagnostics = parity_inventory["diagnostics"]
     assert isinstance(diagnostics, dict)
     assert "drift_detected" in diagnostics
     assert "severity" in diagnostics
     assert "reason_codes" in diagnostics
+    workflow_purity = parity_inventory["workflow_purity"]
+    assert isinstance(workflow_purity, dict)
+    assert "counters" in workflow_purity
+    assert "baseline" in workflow_purity
 
     baseline_telemetry = result["baseline_telemetry"]
     assert isinstance(baseline_telemetry, dict)

@@ -1,24 +1,24 @@
-from pathlib import Path
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
-
-def _read(relative_path: str) -> str:
-    return (PROJECT_ROOT / relative_path).read_text(encoding="utf-8")
+from src.backend.workflows.workflow_purity_report import (
+    build_workflow_purity_report,
+)
 
 
 def test_runtime_event_binding_authority_has_no_env_fallback() -> None:
-    service_text = _read("src/backend/services/workflow_event_integration_service.py")
-    assert "EVENT_WORKFLOW_ID_ENV_MAP" not in service_text
-    assert "_workflow_id_for_event(" not in service_text
+    report = build_workflow_purity_report(registry=None)
+    env_event_binding = report["details"]["env_event_binding_authority"]
+    matches = env_event_binding["matches"]
+    assert matches == []
 
 
 def test_event_binding_tools_no_longer_advertise_env_fallback() -> None:
-    catalogue_text = _read("src/backend/integrations/internal_mcp/catalogue.py")
-    manifest_text = _read("src/backend/mcp_server/vontology_mcp.json")
+    report = build_workflow_purity_report(registry=None)
+    env_event_binding = report["details"]["env_event_binding_authority"]
+    offending_paths = sorted(
+        {
+            entry["path"]
+            for entry in env_event_binding["matches"]
+            if entry["pattern"] == "include_env_fallback"
+        }
+    )
 
-    assert "include_env_fallback" not in catalogue_text
-    assert "environment fallback" not in catalogue_text.lower()
-    assert "include_env_fallback" not in manifest_text
-    assert "environment fallback" not in manifest_text.lower()
+    assert offending_paths == []

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 from functools import lru_cache
+import json
 import logging
 import os
 import threading
@@ -99,6 +100,7 @@ from ..workflow_concept_authority_service import (
     bootstrap_workflow_concepts,
     build_workflow_concept_authority_report,
 )
+from ..workflow_purity_report import build_workflow_purity_report
 from ...services.paper_representation_workflow_vontology_service import (
     bootstrap_canonical_paper_representation_workflows,
 )
@@ -332,6 +334,28 @@ def _build_workflow_parity_inventory(
         )
     )
 
+    workflow_purity = build_workflow_purity_report(registry=registry)
+    workflow_purity_counters = workflow_purity.get("counters", {})
+    workflow_purity_baseline = workflow_purity.get("baseline", {})
+    workflow_purity_comparison = (
+        workflow_purity_baseline.get("comparison", {})
+        if isinstance(workflow_purity_baseline, dict)
+        else {}
+    )
+    if isinstance(workflow_purity_counters, dict):
+        summary_lines.append(
+            (
+                "Workflow purity: "
+                f"built_in_registration_count={int(workflow_purity_counters.get('built_in_registration_count', 0))} "
+                f"remaining_python_workflow_family_count={int(workflow_purity_counters.get('remaining_python_workflow_family_count', 0))} "
+                f"direct_instance_create_callsite_count={int(workflow_purity_counters.get('direct_instance_create_callsite_count', 0))} "
+                f"env_event_binding_count={int(workflow_purity_counters.get('env_event_binding_count', 0))} "
+                f"legacy_selector_mode_count={int(workflow_purity_counters.get('legacy_selector_mode_count', 0))} "
+                f"builtin_capability_override_count={int(workflow_purity_counters.get('builtin_capability_override_count', 0))} "
+                f"non_vontology_discoverable_workflow_count={int(workflow_purity_counters.get('non_vontology_discoverable_workflow_count', 0))}"
+            )
+        )
+
     diagnostics_reason_codes: list[str] = []
     if registry_only_ids:
         diagnostics_reason_codes.append("registry_only")
@@ -341,6 +365,10 @@ def _build_workflow_parity_inventory(
         diagnostics_reason_codes.append("identity_only")
     if authority_drift:
         diagnostics_reason_codes.append("workflow_authority")
+    if isinstance(workflow_purity_comparison, dict) and workflow_purity_comparison.get(
+        "regression_detected"
+    ):
+        diagnostics_reason_codes.append("workflow_purity_regression")
 
     drift_detected = bool(diagnostics_reason_codes)
 
@@ -372,6 +400,7 @@ def _build_workflow_parity_inventory(
             "source_by_workflow_id": source_by_workflow_id,
         },
         "workflow_authority": workflow_authority,
+        "workflow_purity": workflow_purity,
         "summary_lines": summary_lines,
         "summary_text": "\n".join(summary_lines),
         "diagnostics": {
@@ -409,6 +438,13 @@ def _apply_workflow_parity_policy(inventory_snapshot: Dict[str, Any]) -> None:
         "drift_detected": drift_detected,
     }
 
+    workflow_purity = inventory_snapshot.get("workflow_purity")
+    if isinstance(workflow_purity, dict):
+        logger.info(
+            "[workflow_purity] %s",
+            json.dumps(workflow_purity, sort_keys=True),
+        )
+
     if not drift_detected:
         logger.info("[workflow_parity] %s", summary_text)
         return
@@ -428,6 +464,103 @@ def get_workflow_registry_inventory_snapshot() -> Dict[str, Any]:
         if _last_inventory_snapshot is None:
             return {}
         return copy.deepcopy(_last_inventory_snapshot)
+
+
+def _infer_vontology_workflow_ids_from_registry(
+    registry: WorkflowRegistry,
+) -> List[str]:
+    workflow_ids: set[str] = set()
+    try:
+        workflow_ids.update(registry.lazy_workflow_ids())
+    except Exception:
+        pass
+
+    try:
+        all_workflow_ids = list(registry.all_workflow_ids())
+    except Exception:
+        all_workflow_ids = []
+
+    for workflow_id in all_workflow_ids:
+        try:
+            registration = registry.get_registration(workflow_id)
+        except Exception:
+            registration = None
+        source = str(getattr(registration, "source", "") or "").strip().lower()
+        if source == "vontology":
+            workflow_ids.add(workflow_id)
+
+    return sorted(workflow_ids)
+
+
+def get_or_build_workflow_registry_inventory_snapshot(
+    *,
+    registry: WorkflowRegistry | None = None,
+    discovered_workflow_ids: List[str] | None = None,
+) -> Dict[str, Any]:
+    """Return the latest inventory snapshot or build one synchronously.
+
+    Read/introspection surfaces can reach the registry before the deferred
+    bootstrap/parity thread has published `_last_inventory_snapshot`. When that
+    happens, build the same inventory shape synchronously from the already-built
+    registry so callers still receive a stable diagnostics payload.
+    """
+
+    snapshot = get_workflow_registry_inventory_snapshot()
+    if snapshot:
+        return snapshot
+    if registry is None:
+        return snapshot
+
+    inferred_workflow_ids = (
+        list(discovered_workflow_ids)
+        if isinstance(discovered_workflow_ids, list)
+        else _infer_vontology_workflow_ids_from_registry(registry)
+    )
+    authority_report = build_workflow_concept_authority_report(registry=registry)
+    inventory_snapshot = _build_workflow_parity_inventory(
+        registry=registry,
+        discovered_workflow_ids=inferred_workflow_ids,
+        authority_report=authority_report,
+    )
+    _apply_workflow_parity_policy(inventory_snapshot)
+    with _inventory_lock:
+        global _last_inventory_snapshot
+        _last_inventory_snapshot = copy.deepcopy(inventory_snapshot)
+    return inventory_snapshot
+
+
+def _register_python_defined_workflows(registry: WorkflowRegistry) -> None:
+    """Register the current Python-defined workflow surface into ``registry``."""
+
+    # 1. Built-in conversation-turn workflows
+    register_default_workflows(registry)
+
+    # 2. Durable-specific workflows
+    registry.register(get_rag_sync_workflow_registration())
+    registry.register(get_enrichment_workflow_registration())
+    registry.register(get_rumination_workflow_registration())
+    registry.register(get_planning_workflow_registration())
+    registry.register(get_workflow_introspection_maintenance_registration())
+    registry.register(get_file_copy_typing_workflow_registration())
+    registry.register(get_file_copy_upload_classification_workflow_registration())
+    registry.register(get_file_copy_upload_handler_workflow_registration())
+    registry.register(get_file_copy_interpretation_workflow_registration())
+    registry.register(get_entity_identity_resolution_workflow_registration())
+    registry.register(get_jira_task_incremental_import_workflow_registration())
+    registry.register(get_parent_specificity_concept_dossier_workflow_registration())
+    registry.register(get_parent_specificity_rumination_workflow_registration())
+    registry.register(get_workflow_discovery_gap_recovery_workflow_registration())
+    registry.register(get_workflow_gap_test_workflow_registration())
+
+
+def build_workflow_purity_registry_snapshot() -> WorkflowRegistry:
+    """Build a deterministic eager registry for workflow-purity baseline checks."""
+
+    registry = WorkflowRegistry(
+        definition_loader=load_workflow_definition_from_vontology,
+    )
+    _register_python_defined_workflows(registry)
+    return registry
 
 
 # ---------------------------------------------------------------------------
@@ -458,25 +591,7 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
         "workflow_ids": [],
     }
 
-    # 1. Built-in conversation-turn workflows
-    register_default_workflows(registry)
-
-    # 2. Durable-specific workflows
-    registry.register(get_rag_sync_workflow_registration())
-    registry.register(get_enrichment_workflow_registration())
-    registry.register(get_rumination_workflow_registration())
-    registry.register(get_planning_workflow_registration())
-    registry.register(get_workflow_introspection_maintenance_registration())
-    registry.register(get_file_copy_typing_workflow_registration())
-    registry.register(get_file_copy_upload_classification_workflow_registration())
-    registry.register(get_file_copy_upload_handler_workflow_registration())
-    registry.register(get_file_copy_interpretation_workflow_registration())
-    registry.register(get_entity_identity_resolution_workflow_registration())
-    registry.register(get_jira_task_incremental_import_workflow_registration())
-    registry.register(get_parent_specificity_concept_dossier_workflow_registration())
-    registry.register(get_parent_specificity_rumination_workflow_registration())
-    registry.register(get_workflow_discovery_gap_recovery_workflow_registration())
-    registry.register(get_workflow_gap_test_workflow_registration())
+    _register_python_defined_workflows(registry)
 
     if bootstrap_allowed:
         try:

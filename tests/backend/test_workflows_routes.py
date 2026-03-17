@@ -270,8 +270,8 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
     )
     monkeypatch.setattr(
         registry_factory,
-        "get_workflow_registry_inventory_snapshot",
-        lambda: {
+        "get_or_build_workflow_registry_inventory_snapshot",
+        lambda *args, **kwargs: {
             "counts": {"registry": 2, "vontology_discovered": 3},
             "vontology_only_workflow_ids": ["#V#salient_predicate_governance_workflow"],
             "diagnostics": {
@@ -436,8 +436,8 @@ def test_workflow_definitions_list_includes_relation_description_source(monkeypa
     )
     monkeypatch.setattr(
         registry_factory,
-        "get_workflow_registry_inventory_snapshot",
-        lambda: {},
+        "get_or_build_workflow_registry_inventory_snapshot",
+        lambda *args, **kwargs: {},
     )
     monkeypatch.setattr(
         workflows_routes,
@@ -751,8 +751,8 @@ def test_workflow_definitions_list_uses_short_ttl_cache(monkeypatch, app_client)
     )
     monkeypatch.setattr(
         registry_factory,
-        "get_workflow_registry_inventory_snapshot",
-        lambda: {"counts": {"registry": 1, "vontology_discovered": 1}},
+        "get_or_build_workflow_registry_inventory_snapshot",
+        lambda *args, **kwargs: {"counts": {"registry": 1, "vontology_discovered": 1}},
     )
     monkeypatch.setattr(
         workflows_routes,
@@ -825,8 +825,8 @@ def test_workflow_definitions_list_nocache_bypasses_cache(monkeypatch, app_clien
     )
     monkeypatch.setattr(
         registry_factory,
-        "get_workflow_registry_inventory_snapshot",
-        lambda: {"counts": {"registry": 1, "vontology_discovered": 1}},
+        "get_or_build_workflow_registry_inventory_snapshot",
+        lambda *args, **kwargs: {"counts": {"registry": 1, "vontology_discovered": 1}},
     )
     monkeypatch.setattr(
         workflows_routes,

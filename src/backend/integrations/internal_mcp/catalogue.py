@@ -9580,7 +9580,7 @@ def _workflow_list_definitions(**kwargs):
     """List available workflow definitions."""
     from ...workflows.durable.registry_factory import (
         build_durable_workflow_registry_read_only,
-        get_workflow_registry_inventory_snapshot,
+        get_or_build_workflow_registry_inventory_snapshot,
     )
     from ...workflows.workflow_definition_identity_service import (
         build_workflow_definition_identity,
@@ -9665,7 +9665,9 @@ def _workflow_list_definitions(**kwargs):
             "success": True,
             "definitions": definitions,
             "count": len(definitions),
-            "parity_inventory": get_workflow_registry_inventory_snapshot(),
+            "parity_inventory": get_or_build_workflow_registry_inventory_snapshot(
+                registry=registry
+            ),
             "baseline_telemetry": get_workflow_baseline_telemetry_snapshot(),
             "capability_matrix": capability_matrix,
         }
