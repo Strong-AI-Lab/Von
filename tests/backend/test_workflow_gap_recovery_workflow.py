@@ -240,9 +240,11 @@ def test_workflow_gap_recovery_workflows_publish_authoritatively(monkeypatch) ->
     from src.backend.services.workflow_discovery_service import (
         invalidate_workflow_discovery_executability_caches,
     )
-    from src.backend.workflows import workflow_concept_authority_service as authority_service
-    from src.backend.workflows.durable.registry_factory import (
-        build_workflow_registry_read_only,
+    from src.backend.workflows import (
+        workflow_concept_authority_service as authority_service,
+    )
+    from workflow_test_support import (
+        bootstrap_authoritative_reasoning_recovery_workflows,
     )
 
     monkeypatch.setenv("VON_USE_MOCK_DB", "1")
@@ -258,8 +260,7 @@ def test_workflow_gap_recovery_workflows_publish_authoritatively(monkeypatch) ->
                 pass
 
     invalidate_workflow_discovery_executability_caches()
-    registry = build_workflow_registry_read_only()
-    report = authority_service.bootstrap_workflow_concepts(registry=cast(Any, registry))
+    report = bootstrap_authoritative_reasoning_recovery_workflows()
     graph_publication = report.get("graph_publication") or {}
     published_ids = set(graph_publication.get("published_workflow_ids") or [])
     errors_by_workflow_id = graph_publication.get("errors_by_workflow_id") or {}

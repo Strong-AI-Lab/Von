@@ -139,6 +139,7 @@ PARENT_SPECIFICITY_DOSSIER_WORKFLOW_ID = (
 PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID = (
     "#V#parent_specificity_rumination_workflow"
 )
+PLANNING_WORKFLOW_ID = "#V#planning_workflow"
 RUMINATION_WORKFLOW_ID = "#V#rumination_workflow"
 
 
@@ -173,6 +174,7 @@ CANONICAL_DURABLE_WORKFLOW_IDS: tuple[str, ...] = (
     FILE_COPY_INTERPRETATION_WORKFLOW_ID,
     FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID,
     FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
+    PLANNING_WORKFLOW_ID,
     PARENT_SPECIFICITY_DOSSIER_WORKFLOW_ID,
     PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID,
     WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
@@ -1353,6 +1355,70 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
                 ),
             ),
             _CanonicalStepPublicationSpec(state_id="complete"),
+            _CanonicalStepPublicationSpec(state_id="failed"),
+        ),
+    ),
+    PLANNING_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state="assess",
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id="assess",
+                action_id="planning.assess_context",
+                on_failure_state="failed",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="infer",
+                        reason="context_ready",
+                        condition_spec={
+                            "kind": "context_exists",
+                            "key": "planning_context",
+                            "expected": True,
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="failed",
+                        reason="missing_context",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="infer",
+                action_id="planning.infer_plan",
+                on_failure_state="failed",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="validate",
+                        reason="plan_inferred",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="validate",
+                action_id="planning.validate_plan",
+                on_failure_state="failed",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="complete",
+                        reason="validated",
+                        condition_spec={
+                            "kind": "context_exists",
+                            "key": "planning_validation",
+                            "expected": True,
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="failed",
+                        reason="validation_missing",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="complete",
+                action_id="planning.finalise",
+            ),
             _CanonicalStepPublicationSpec(state_id="failed"),
         ),
     ),

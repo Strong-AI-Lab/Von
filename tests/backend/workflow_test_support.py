@@ -15,6 +15,28 @@ from src.backend.workflows.definitions import (
     TURN_COMPLETION_GATE_WORKFLOW_ID,
     WRITE_TOOL_POLICY_WORKFLOW_ID,
 )
+from src.backend.workflows.durable.parent_specificity_concept_dossier_workflow import (
+    PARENT_SPECIFICITY_DOSSIER_WORKFLOW_ID,
+    get_parent_specificity_concept_dossier_workflow_registration,
+)
+from src.backend.workflows.durable.parent_specificity_rumination_workflow import (
+    PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID,
+    get_parent_specificity_rumination_workflow_registration,
+)
+from src.backend.workflows.durable.planning_workflow import (
+    PLANNING_WORKFLOW_ID,
+    get_planning_workflow_registration,
+)
+from src.backend.workflows.durable.rumination_workflow import (
+    RUMINATION_WORKFLOW_ID,
+    get_rumination_workflow_registration,
+)
+from src.backend.workflows.durable.workflow_gap_recovery_workflow import (
+    WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
+    WORKFLOW_GAP_TEST_WORKFLOW_ID,
+    get_workflow_discovery_gap_recovery_workflow_registration,
+    get_workflow_gap_test_workflow_registration,
+)
 from src.backend.workflows.workflow_registry import (
     LazyWorkflowRegistration,
     WorkflowRegistration,
@@ -69,7 +91,40 @@ TEST_WORKFLOW_PURPOSES: dict[str, str] = {
         "Canonical conversation-turn execution workflow that derives required "
         "effects, runs postcondition checks, and gates completion claims."
     ),
+    PLANNING_WORKFLOW_ID: (
+        "Forward inference workflow that proposes concrete, validated next "
+        "actions including tool calls and workflow invocations."
+    ),
+    RUMINATION_WORKFLOW_ID: (
+        "Proactive knowledge quality orchestrator that assesses ontology gaps "
+        "and dispatches enrichment work."
+    ),
+    PARENT_SPECIFICITY_DOSSIER_WORKFLOW_ID: (
+        "Gather multilingual dossier evidence for parent-specificity taxonomy "
+        "analysis."
+    ),
+    PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID: (
+        "Review parent candidates using dossier evidence and apply or defer "
+        "taxonomy refinements."
+    ),
+    WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID: (
+        "Recover from workflow discovery misses by analysing the gap, creating "
+        "candidate workflows, and optionally testing them."
+    ),
+    WORKFLOW_GAP_TEST_WORKFLOW_ID: (
+        "Run and assess a candidate workflow against explicit workflow-gap "
+        "acceptance requirements."
+    ),
 }
+
+AUTHORITATIVE_REASONING_RECOVERY_WORKFLOW_IDS: tuple[str, ...] = (
+    PLANNING_WORKFLOW_ID,
+    RUMINATION_WORKFLOW_ID,
+    PARENT_SPECIFICITY_DOSSIER_WORKFLOW_ID,
+    PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID,
+    WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
+    WORKFLOW_GAP_TEST_WORKFLOW_ID,
+)
 
 
 def build_test_conversation_turn_registry() -> WorkflowRegistry:
@@ -121,4 +176,22 @@ def authoritative_step_id(*, workflow_id: str, state_id: str) -> str:
     return authority_service._step_concept_id(
         workflow_id=workflow_id,
         state_id=state_id,
+    )
+
+
+def bootstrap_authoritative_reasoning_recovery_workflows() -> dict[str, Any]:
+    registry = WorkflowRegistry()
+    for registration in (
+        get_planning_workflow_registration(),
+        get_rumination_workflow_registration(),
+        get_parent_specificity_concept_dossier_workflow_registration(),
+        get_parent_specificity_rumination_workflow_registration(),
+        get_workflow_discovery_gap_recovery_workflow_registration(),
+        get_workflow_gap_test_workflow_registration(),
+    ):
+        registry.register(registration)
+
+    return authority_service.bootstrap_workflow_concepts(
+        registry=registry,
+        target_workflow_ids=AUTHORITATIVE_REASONING_RECOVERY_WORKFLOW_IDS,
     )

@@ -682,134 +682,56 @@ def test_bootstrap_publishes_canonical_chat_graphs_with_loader_runtime_parity(
 def test_bootstrap_publishes_explicit_step_conditions_for_canonical_durable_workflows(
     _reset_mock_workflow_graph_db,
 ):
-    from src.backend.workflows.durable.file_copy_upload_handler_workflow import (
-        FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
+    from src.backend.workflows.durable.planning_workflow import (
+        PLANNING_WORKFLOW_ID,
     )
     from src.backend.workflows.durable.parent_specificity_rumination_workflow import (
         PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID,
-    )
-    from src.backend.workflows.durable.registry_factory import (
-        build_workflow_registry_read_only,
     )
     from src.backend.workflows.durable.workflow_gap_recovery_workflow import (
         WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
     )
     from src.backend.workflows.vontology_loader import build_workflow_process_graph
+    from workflow_test_support import (
+        bootstrap_authoritative_reasoning_recovery_workflows,
+    )
 
-    registry = build_workflow_registry_read_only()
-
-    report = authority_service.bootstrap_workflow_concepts(registry=cast(Any, registry))
+    report = bootstrap_authoritative_reasoning_recovery_workflows()
     errors = (
         (report.get("graph_publication") or {}).get("errors_by_workflow_id") or {}
     )
-    assert FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID not in errors
+    assert PLANNING_WORKFLOW_ID not in errors
     assert PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID not in errors
     assert WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID not in errors
 
-    file_copy_graph, file_copy_warnings = build_workflow_process_graph(
-        FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID
+    planning_graph, planning_warnings = build_workflow_process_graph(
+        PLANNING_WORKFLOW_ID
     )
-    assert file_copy_graph is not None
-    assert file_copy_warnings == []
+    assert planning_graph is not None
+    assert planning_warnings == []
     assert _graph_step_control_flow_conditions(
-        graph=file_copy_graph,
-        workflow_id=FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
-        state_id="classify",
+        graph=planning_graph,
+        workflow_id=PLANNING_WORKFLOW_ID,
+        state_id="assess",
     ) == [
         {
             "to": authority_service._step_concept_id(
-                workflow_id=FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
-                state_id="fail_closed",
+                workflow_id=PLANNING_WORKFLOW_ID,
+                state_id="infer",
             ),
-            "reason": "fail_closed_selected",
+            "reason": "context_ready",
             "condition": {
-                "kind": "context_flag",
-                "key": "upload_fail_closed",
+                "kind": "context_exists",
+                "key": "planning_context",
                 "expected": True,
             },
         },
         {
             "to": authority_service._step_concept_id(
-                workflow_id=FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
-                state_id="specialised",
+                workflow_id=PLANNING_WORKFLOW_ID,
+                state_id="failed",
             ),
-            "reason": "specialised_route_selected",
-            "condition": {
-                "kind": "all",
-                "conditions": [
-                    {
-                        "kind": "context_value_equals",
-                        "key": "upload_route_mode",
-                        "value": "specialised",
-                    },
-                    {
-                        "kind": "context_exists",
-                        "key": "upload_target_workflow_id",
-                        "expected": True,
-                    },
-                    {
-                        "kind": "not",
-                        "condition": {
-                            "kind": "context_value_equals",
-                            "key": "upload_target_workflow_id",
-                            "value": "",
-                        },
-                    },
-                ],
-            },
-        },
-        {
-            "to": authority_service._step_concept_id(
-                workflow_id=FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
-                state_id="interpret",
-            ),
-            "reason": "interpret_route_selected",
-            "condition": {
-                "kind": "context_value_equals",
-                "key": "upload_route_mode",
-                "value": "interpret",
-            },
-        },
-        {
-            "to": authority_service._step_concept_id(
-                workflow_id=FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
-                state_id="noop",
-            ),
-            "reason": "noop_route_selected",
-            "condition": {
-                "kind": "context_value_equals",
-                "key": "upload_route_mode",
-                "value": "noop",
-            },
-        },
-        {
-            "to": authority_service._step_concept_id(
-                workflow_id=FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
-                state_id="interpret",
-            ),
-            "reason": "fallback_interpret_default",
-            "condition": {
-                "kind": "any",
-                "conditions": [
-                    {
-                        "kind": "context_exists",
-                        "key": "upload_allow_interpret_fallback",
-                        "expected": False,
-                    },
-                    {
-                        "kind": "context_flag",
-                        "key": "upload_allow_interpret_fallback",
-                        "expected": True,
-                    },
-                ],
-            },
-        },
-        {
-            "to": authority_service._step_concept_id(
-                workflow_id=FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
-                state_id="noop",
-            ),
-            "reason": "fallback_noop_default",
+            "reason": "missing_context",
             "condition": {"kind": "always"},
         },
     ]
@@ -987,6 +909,74 @@ def test_canonical_workflow_runtime_identity_matches_authoritative_loader(
         assert identity["runtime_definition_hash"]
         assert identity["authoritative_definition_hash"]
         assert identity["hash_mismatch"] is False
+
+
+def test_reasoning_recovery_workflow_runtime_identity_matches_authoritative_loader(
+    _reset_mock_workflow_graph_db,
+):
+    from src.backend.workflows.durable.registry_factory import (
+        build_workflow_registry_read_only,
+    )
+    from src.backend.workflows.vontology_loader import (
+        load_workflow_definition_from_vontology,
+    )
+    from workflow_test_support import (
+        AUTHORITATIVE_REASONING_RECOVERY_WORKFLOW_IDS,
+        bootstrap_authoritative_reasoning_recovery_workflows,
+    )
+
+    bootstrap_authoritative_reasoning_recovery_workflows()
+    runtime_registry = build_workflow_registry_read_only()
+
+    for workflow_id in AUTHORITATIVE_REASONING_RECOVERY_WORKFLOW_IDS:
+        registration = runtime_registry.get_registration(workflow_id)
+        assert registration is not None
+        assert str(registration.source or "").strip().lower() == "vontology"
+
+        authoritative_definition = load_workflow_definition_from_vontology(workflow_id)
+        assert authoritative_definition is not None
+
+        identity = build_workflow_definition_identity(
+            workflow_id=workflow_id,
+            source=registration.source,
+            definition=registration.definition,
+            authoritative_definition=authoritative_definition,
+        )
+        assert identity["runtime_definition_hash"]
+        assert identity["authoritative_definition_hash"]
+        assert identity["hash_mismatch"] is False
+
+
+def test_build_workflow_registry_bootstraps_reasoning_recovery_family_from_vontology(
+    _reset_mock_workflow_graph_db,
+    monkeypatch,
+):
+    from src.backend.db.mongo_client import get_db
+    from src.backend.services.workflow_discovery_service import (
+        invalidate_workflow_discovery_executability_caches,
+    )
+    from src.backend.workflows.durable.registry_factory import build_workflow_registry
+    from workflow_test_support import AUTHORITATIVE_REASONING_RECOVERY_WORKFLOW_IDS
+
+    monkeypatch.setenv("VON_USE_MOCK_DB", "1")
+    monkeypatch.setenv("VON_DB_NAME", "test_von_db")
+    authority_service.clear_workflow_type_resolution_cache()
+
+    db = get_db()
+    if db is not None:
+        for collection_name in ("concepts", "text_relations", "text_values"):
+            try:
+                db.drop_collection(collection_name)
+            except Exception:
+                pass
+
+    invalidate_workflow_discovery_executability_caches()
+    registry = build_workflow_registry()
+
+    for workflow_id in AUTHORITATIVE_REASONING_RECOVERY_WORKFLOW_IDS:
+        registration = registry.get_registration(workflow_id)
+        assert registration is not None
+        assert str(registration.source or "").strip().lower() == "vontology"
 
 
 def test_publish_canonical_graphs_reports_validation_failures(
