@@ -60,13 +60,13 @@ from ...workflows.definitions import (
     TOOL_CALLING_WORKFLOW_ID,
     TURN_COMPLETION_GATE_WORKFLOW_ID,
     WRITE_TOOL_POLICY_WORKFLOW_ID,
-    build_concept_suggestion_preflight_workflow,
 )
 from ...workflows.conversation_turn_stage_model import (
     build_conversation_turn_stage_model_snapshot,
     build_conversation_turn_stage_path,
 )
 from ...workflows.engine import WorkflowExecutor
+from ...workflows.vontology_loader import load_workflow_definition_from_vontology
 from ...workflows.workflow_selector import WorkflowSelector
 from ...workflows.durable.registry_factory import (
     build_workflow_registry,
@@ -14521,15 +14521,28 @@ class InternalMCPChatOrchestrator:
             and isinstance(result.error, str)
             and result.error.startswith("metadata_validation_failed:")
         ):
-            fallback_definition = build_concept_suggestion_preflight_workflow()
-            fallback_result, fallback_error = _execute_workflow(fallback_definition)
-            if fallback_result is not None and fallback_error is None:
+            fallback_definition = self._workflow_registry.get(
+                CONCEPT_SUGGESTION_PREFLIGHT_WORKFLOW_ID
+            ) or load_workflow_definition_from_vontology(
+                CONCEPT_SUGGESTION_PREFLIGHT_WORKFLOW_ID
+            )
+            if fallback_definition is None:
                 metadata_validation_fallback_applied = True
-                result = fallback_result
+                workflow_error = (
+                    "specialised_workflow_authoritative_definition_unavailable:"
+                    f"{CONCEPT_SUGGESTION_PREFLIGHT_WORKFLOW_ID}"
+                )
             else:
-                if fallback_error is not None:
-                    workflow_error = fallback_error
-                metadata_validation_fallback_applied = True
+                fallback_result, fallback_error = _execute_workflow(
+                    fallback_definition
+                )
+                if fallback_result is not None and fallback_error is None:
+                    metadata_validation_fallback_applied = True
+                    result = fallback_result
+                else:
+                    if fallback_error is not None:
+                        workflow_error = fallback_error
+                    metadata_validation_fallback_applied = True
 
         if result is None:
             return {

@@ -25,8 +25,11 @@ from src.backend.workflows.action_registry import (
     WorkflowActionResult,
     WorkflowEnvironment,
 )
-from src.backend.workflows.definitions import build_todo_refresh_workflow
+from src.backend.workflows.definitions import TODO_REFRESH_WORKFLOW_ID
 from src.backend.workflows.engine import WorkflowExecutor
+from workflow_test_support import (
+    build_authoritative_test_workflow_definition,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -560,7 +563,7 @@ class TestTodoRefreshWorkflowIntegration:
 
         env = _make_env()
         result = executor.run(
-            build_todo_refresh_workflow(),
+            build_authoritative_test_workflow_definition(TODO_REFRESH_WORKFLOW_ID),
             environment=env,
             data={"user_namespace": "#V#alice"},
         )
@@ -627,7 +630,7 @@ class TestTodoRefreshWorkflowIntegration:
             default_gmail_profile="test@example.com",
         )
         result = executor.run(
-            build_todo_refresh_workflow(),
+            build_authoritative_test_workflow_definition(TODO_REFRESH_WORKFLOW_ID),
             environment=env,
             data={
                 "user_namespace": "#V#alice",
@@ -655,7 +658,7 @@ class TestTodoRefreshWorkflowIntegration:
 
         env = _make_env(gateway=gateway)
         result = executor.run(
-            build_todo_refresh_workflow(),
+            build_authoritative_test_workflow_definition(TODO_REFRESH_WORKFLOW_ID),
             environment=env,
             data={"user_namespace": "#V#alice"},
         )

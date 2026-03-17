@@ -270,7 +270,7 @@ def test_register_workflow_from_vontology_replaces_existing_registration(monkeyp
 def test_build_registry_prioritises_vontology_on_overlap(monkeypatch):
     overlap_workflow_id = "#V#tool_calling_workflow"
 
-    def _register_defaults(registry: WorkflowRegistry) -> None:
+    def _register_python_defined_workflows(registry: WorkflowRegistry) -> None:
         registry.register(
             _build_registration(
                 overlap_workflow_id,
@@ -279,7 +279,11 @@ def test_build_registry_prioritises_vontology_on_overlap(monkeypatch):
             )
         )
 
-    monkeypatch.setattr(registry_factory, "register_default_workflows", _register_defaults)
+    monkeypatch.setattr(
+        registry_factory,
+        "_register_python_defined_workflows",
+        _register_python_defined_workflows,
+    )
     monkeypatch.setattr(
         registry_factory,
         "get_rag_sync_workflow_registration",

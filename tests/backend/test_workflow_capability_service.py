@@ -21,6 +21,7 @@ from src.backend.services.workflow_capability_service import (
     get_workflow_capability_index,
     reset_workflow_capability_index,
 )
+from workflow_test_support import build_test_conversation_turn_registry
 
 
 # ---------------------------------------------------------------------------
@@ -158,15 +159,11 @@ class TestWorkflowCapabilityIndex:
 
 
 class TestIndexFromRegistry:
-    def test_indexes_built_in_workflows(self):
-        from src.backend.workflows import WorkflowRegistry, register_default_workflows
-
-        registry = WorkflowRegistry()
-        register_default_workflows(registry)
+    def test_indexes_conversation_turn_workflows_from_vontology_purpose(self):
+        registry = build_test_conversation_turn_registry()
         index = WorkflowCapabilityIndex()
         count = index.index_from_registry(registry)
         assert count > 0
-        # Built-in workflows should be indexed.
         results = index.search("tool calling pipeline")
         assert any(r.workflow_id == "#V#tool_calling_workflow" for r in results)
 
@@ -206,24 +203,17 @@ class TestIndexFromRegistry:
 
 
 # ---------------------------------------------------------------------------
-# Built-in capabilities
+# Conversation-turn capabilities from authoritative purpose text
 # ---------------------------------------------------------------------------
 
 
-class TestBuiltinCapabilities:
-    def test_all_expected_workflows_have_capabilities(self):
-        expected = {
-            "#V#chat_assistant_workflow",
-            "#V#tool_calling_workflow",
-            "#V#chat_narration_workflow",
-        }
-        for wf_id in expected:
-            assert wf_id in BUILTIN_WORKFLOW_CAPABILITIES
+class TestPurposeDrivenCapabilities:
+    def test_builtin_override_surface_is_empty(self):
+        assert BUILTIN_WORKFLOW_CAPABILITIES == {}
 
     def test_chat_assistant_matches_greeting_queries(self):
         index = WorkflowCapabilityIndex()
-        for wf_id, text in BUILTIN_WORKFLOW_CAPABILITIES.items():
-            index.index_workflow(wf_id, text)
+        index.index_from_registry(build_test_conversation_turn_registry())
         results = index.search("hello how are you")
         assert len(results) >= 1
         top = results[0]
@@ -231,8 +221,7 @@ class TestBuiltinCapabilities:
 
     def test_tool_calling_matches_data_queries(self):
         index = WorkflowCapabilityIndex()
-        for wf_id, text in BUILTIN_WORKFLOW_CAPABILITIES.items():
-            index.index_workflow(wf_id, text)
+        index.index_from_registry(build_test_conversation_turn_registry())
         results = index.search("search arXiv for papers about transformers")
         assert len(results) >= 1
         top = results[0]
@@ -249,16 +238,19 @@ class TestHelpers:
         assert _workflow_id_to_name("#V#tool_calling_workflow") == "Tool Calling Workflow"
         assert _workflow_id_to_name("some_workflow") == "Some Workflow"
 
-    def test_build_capability_text_uses_builtin(self):
-        text = build_workflow_capability_text("#V#chat_assistant_workflow")
-        assert "conversational" in text.lower()
-
     def test_build_capability_text_uses_purpose(self):
         text = build_workflow_capability_text(
             "#V#unknown_wf",
             purpose="Custom purpose text",
         )
         assert "Custom purpose text" in text
+
+    def test_build_capability_text_prefers_description_when_present(self):
+        text = build_workflow_capability_text(
+            "#V#chat_assistant_workflow",
+            description="Direct conversational response workflow.",
+        )
+        assert "Direct conversational response workflow." in text
 
     def test_build_capability_text_fallback(self):
         text = build_workflow_capability_text("#V#mystery_workflow")

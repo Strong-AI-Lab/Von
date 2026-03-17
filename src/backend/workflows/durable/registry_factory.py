@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, Dict, List
 
-from .. import WorkflowRegistry, register_default_workflows
+from .. import WorkflowRegistry
 from ..workflow_registry import LazyWorkflowRegistration
 from ..action_registry import ActionRegistry, WorkflowActionResult
 from ..mcp_tool_bridge import workflow_action_result_from_mcp_payload
@@ -532,10 +532,9 @@ def get_or_build_workflow_registry_inventory_snapshot(
 def _register_python_defined_workflows(registry: WorkflowRegistry) -> None:
     """Register the current Python-defined workflow surface into ``registry``."""
 
-    # 1. Built-in conversation-turn workflows
-    register_default_workflows(registry)
-
-    # 2. Durable-specific workflows
+    # Conversation-turn workflows are now Vontology-authoritative. Only durable
+    # workflow families that still originate in Python are registered here so
+    # purity diagnostics can track the remaining hybrid surface.
     registry.register(get_rag_sync_workflow_registration())
     registry.register(get_enrichment_workflow_registration())
     registry.register(get_rumination_workflow_registration())

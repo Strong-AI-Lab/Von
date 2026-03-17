@@ -1,14 +1,14 @@
 {
   "counters": {
-    "built_in_registration_count": 26,
-    "builtin_capability_override_count": 11,
+    "built_in_registration_count": 15,
+    "builtin_capability_override_count": 0,
     "direct_instance_create_callsite_count": 4,
     "env_event_binding_count": 0,
     "legacy_selector_mode_count": 1,
-    "non_vontology_discoverable_workflow_count": 26,
-    "remaining_python_workflow_family_count": 17
+    "non_vontology_discoverable_workflow_count": 15,
+    "remaining_python_workflow_family_count": 16
   },
-  "generated_at_utc": "2026-03-17T11:13:51.194451+00:00",
+  "generated_at_utc": "2026-03-17T12:23:42.397123+00:00",
   "report_schema_version": "workflow_purity_report.v1",
   "schema_version": "workflow_purity_baseline.v1"
 }

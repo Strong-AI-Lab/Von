@@ -382,6 +382,25 @@ class TestWorkflowDescriptionResolution:
         assert text == "Canonical V description"
         assert source == "text_relation:#V#hasDescription"
 
+    def test_resolve_narrative_extracts_purpose_from_structured_workflow_json(self):
+        with patch(
+            "src.backend.workflows.vontology_loader.get_texts_for_concept",
+            return_value=[
+                {
+                    "predicate": "hasContent",
+                    "text": (
+                        '{"workflow_id":"#V#demo_workflow",'
+                        '"purpose":"Structured workflow purpose text.",'
+                        '"steps":[{"step_id":"demo"}]}'
+                    ),
+                }
+            ],
+        ):
+            text, source = resolve_workflow_narrative_text("#V#demo_workflow")
+
+        assert text == "Structured workflow purpose text."
+        assert source == "text_relation:hasContent:purpose"
+
     def test_resolve_narrative_returns_none_when_canonical_text_missing(self):
         with patch(
             "src.backend.workflows.vontology_loader.get_texts_for_concept",

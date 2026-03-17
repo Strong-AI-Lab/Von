@@ -9,7 +9,7 @@ import src.backend.db.mongo_client as mongo_client_module
 import src.backend.services.workflow_selection_experience as experience_module
 import src.backend.services.workflow_selection_policy_service as policy_module
 from src.backend.services.prompt_template_service import PromptTemplateService
-from src.backend.workflows import WorkflowRegistry, register_default_workflows
+from src.backend.workflows import WorkflowRegistry
 from src.backend.workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
     TODO_REFRESH_WORKFLOW_ID,
@@ -20,6 +20,7 @@ from test_orchestrator_workflow_selector_routing import (
     _CapturingLLM,
     _build_orchestrator,
 )
+from workflow_test_support import build_test_conversation_turn_registry
 
 
 @pytest.fixture(autouse=True)
@@ -78,8 +79,7 @@ def _record_completed_example(
 
 
 def _build_selector() -> WorkflowSelector:
-    registry = WorkflowRegistry()
-    register_default_workflows(registry)
+    registry = build_test_conversation_turn_registry()
     return WorkflowSelector(
         registry=registry,
         prompt_service=PromptTemplateService(),

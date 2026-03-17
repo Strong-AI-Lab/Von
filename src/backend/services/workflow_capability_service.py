@@ -10,11 +10,9 @@ Architecture:
     - ``WorkflowCapabilityIndex``: In-memory BM25-scored index of workflow
       capability documents.  Fast to build, zero external dependencies,
       supports hybrid keyword + relevance matching.
-    - ``BUILTIN_WORKFLOW_CAPABILITIES``: Rich descriptions for Python-defined
-      workflows that have no Vontology-stored text.  These descriptions are
-      keyword-dense for retrieval quality.
     - ``index_from_registry()``: Indexes all workflows from a registry
-      (both eager and lazy) using purpose metadata and built-in overrides.
+      (both eager and lazy) using purpose metadata and fallback name-derived
+      descriptions only when Vontology metadata is absent.
 
 The dedicated namespace isolates workflow routing from general concept search,
 enabling independent tuning and scaling as the workflow catalogue grows.
@@ -37,77 +35,14 @@ logger = logging.getLogger(__name__)
 WORKFLOW_CAPABILITY_NAMESPACE = "workflow_capabilities"
 
 # -------------------------------------------------------------------------
-# Rich capability descriptions for built-in workflows.
+# Retired Python capability overrides.
 #
-# These are deliberately keyword-dense so that BM25 retrieval can match
-# diverse user queries.  Each description catalogues: purpose, typical
-# triggers, input signals, and output expectations.
+# Conversation-turn routing is now expected to obtain capability text from
+# authoritative Vontology workflow descriptions. Keep the constant so
+# diagnostics and tests can assert that no runtime override surface remains.
 # -------------------------------------------------------------------------
 
-BUILTIN_WORKFLOW_CAPABILITIES: Dict[str, str] = {
-    "#V#chat_assistant_workflow": (
-        "Direct conversational response without tools. "
-        "Use for greetings, acknowledgements, simple questions, general chat, "
-        "opinions, explanations from existing knowledge, clarifications, "
-        "social interactions, follow-up questions, thank-you messages, "
-        "and any exchange that does not require external data retrieval, "
-        "file operations, API calls, or knowledge-base mutations. "
-        "Produces a plain text response without invoking any tools or "
-        "performing any side effects."
-    ),
-    "#V#tool_calling_workflow": (
-        "General-purpose tool-calling pipeline for tasks requiring external actions. "
-        "Use for MCP tool invocations, knowledge-base queries, web searches, "
-        "file operations, downloads, uploads, data mutations, API calls, "
-        "concept creation, relationship management, scholarly article processing, "
-        "arXiv paper retrieval, RAG synchronisation, code execution, "
-        "Jira operations, email interactions, and any task that needs "
-        "to read from or write to external systems. Includes plan, validate, "
-        "execute, and backfill stages with critic evaluation. "
-        "Handles tool_seeking, summarisation, and general tool-dependent tasks."
-    ),
-    "#V#chat_narration_workflow": (
-        "Narrative generation and storytelling pipeline. "
-        "Use for generating prose, narrating content, summarising documents, "
-        "composing extended text, creating narratives from knowledge, "
-        "rendering contextualised descriptions, long-form text generation, "
-        "and storytelling. Produces narration output suitable for rendering."
-    ),
-    "#V#missing_tool_call_workflow": (
-        "Recovery workflow for missing tool-call outputs. "
-        "Handles retry and recovery when assistant responses lack expected "
-        "tool-call results. Internal orchestration recovery mechanism."
-    ),
-    "#V#chat_buttonify_workflow": (
-        "Quick-reply action options output transformation. "
-        "Produces interactive button suggestions for chat responses."
-    ),
-    "#V#todo_refresh_workflow": (
-        "Refresh to-do list from Gmail inbox and cached knowledge-base data. "
-        "Synchronises task lists and pending items."
-    ),
-    "#V#write_tool_policy_workflow": (
-        "Write-tool policy decision pipeline. "
-        "Determines which write tools are permitted for a given chat prompt."
-    ),
-    "#V#concept_suggestion_preflight_workflow": (
-        "Concept suggestion preflight evaluation. "
-        "Evaluates specialised fallback concept suggestions for ontology preflight."
-    ),
-    "#V#kb_mutation_postcondition_critic_workflow": (
-        "Knowledge-base mutation postcondition validation. "
-        "Evaluates whether implicit KB mutation effects were executed and verified."
-    ),
-    "#V#turn_completion_gate_workflow": (
-        "Turn completion gate policy workflow. "
-        "Determines whether it is safe to claim a conversation turn is complete."
-    ),
-    "#V#conversation_turn_execution_workflow": (
-        "Canonical conversation turn execution with critic and completion gate. "
-        "Orchestrates the full turn lifecycle including tool calls, "
-        "response generation, and completion validation."
-    ),
-}
+BUILTIN_WORKFLOW_CAPABILITIES: Dict[str, str] = {}
 
 
 # -------------------------------------------------------------------------
@@ -205,8 +140,9 @@ class WorkflowCapabilityIndex:
     def index_from_registry(self, registry: Any) -> int:
         """Index all workflows from a ``WorkflowRegistry``.
 
-        Uses ``BUILTIN_WORKFLOW_CAPABILITIES`` overrides for built-in
-        workflows and falls back to the registration ``purpose`` field.
+        Uses authoritative registry ``purpose`` metadata when available and
+        falls back to an ID-derived description only when no narrative text
+        is available.
 
         Returns the number of workflows indexed.
         """
@@ -387,16 +323,11 @@ def build_workflow_capability_text(
 ) -> str:
     """Build rich searchable text for a workflow capability document.
 
-    Combines built-in overrides, purpose, description, and metadata
+    Combines purpose, description, and metadata
     into a single searchable text block.
     """
-    # Start with built-in override if available.
     parts: list[str] = []
-    builtin_text = BUILTIN_WORKFLOW_CAPABILITIES.get(workflow_id)
-    if builtin_text:
-        parts.append(builtin_text)
-
-    if purpose and purpose not in (builtin_text or ""):
+    if purpose:
         parts.append(purpose)
     if description and description not in " ".join(parts):
         parts.append(description)

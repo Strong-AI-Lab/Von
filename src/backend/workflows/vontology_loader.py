@@ -1105,6 +1105,24 @@ def _normalise_non_empty_text(value: Any) -> str | None:
     return text or None
 
 
+def _extract_structured_workflow_purpose(text: str) -> str | None:
+    """Extract a human-readable purpose from structured workflow JSON text."""
+
+    raw_text = _normalise_non_empty_text(text)
+    if raw_text is None or not raw_text.startswith("{"):
+        return None
+
+    try:
+        payload = json.loads(raw_text)
+    except Exception:
+        return None
+
+    if not isinstance(payload, Mapping):
+        return None
+
+    return _normalise_non_empty_text(payload.get("purpose"))
+
+
 def resolve_workflow_narrative_text(workflow_id: str) -> tuple[str | None, str]:
     """Resolve workflow narrative text from canonical text relations.
 
@@ -1133,6 +1151,9 @@ def resolve_workflow_narrative_text(workflow_id: str) -> tuple[str | None, str]:
                 continue
             text = _normalise_non_empty_text(item.get("text"))
             if text:
+                structured_purpose = _extract_structured_workflow_purpose(text)
+                if structured_purpose:
+                    return structured_purpose, f"text_relation:{predicate}:purpose"
                 return text, f"text_relation:{predicate}"
 
     return None, WORKFLOW_DESCRIPTION_SOURCE_NONE
