@@ -253,7 +253,7 @@ def _build_workflow_definitions_payload(
 ) -> Dict[str, Any]:
     from ...workflows.durable.registry_factory import (
         build_durable_workflow_registry_read_only,
-        get_workflow_registry_inventory_snapshot,
+        get_or_build_workflow_registry_inventory_snapshot,
     )
     from ...services.workflow_discovery_service import (
         classify_workflow_concept_executability,
@@ -261,7 +261,9 @@ def _build_workflow_definitions_payload(
 
     # Read-only build avoids concept bootstrap writes on list/introspection paths.
     registry = build_durable_workflow_registry_read_only()
-    inventory_snapshot = get_workflow_registry_inventory_snapshot()
+    inventory_snapshot = get_or_build_workflow_registry_inventory_snapshot(
+        registry=registry
+    )
     if not isinstance(inventory_snapshot, dict):
         inventory_snapshot = {}
     workflow_ids = sorted(list(registry.all_workflow_ids()))

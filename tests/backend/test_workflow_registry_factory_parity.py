@@ -66,6 +66,26 @@ def test_workflow_parity_inventory_includes_drift_reason_codes(monkeypatch):
         "build_workflow_process_graph",
         _mock_build_graph,
     )
+    monkeypatch.setattr(
+        registry_factory,
+        "build_workflow_purity_report",
+        lambda registry: {
+            "counters": {
+                "built_in_registration_count": 1,
+                "remaining_python_workflow_family_count": 1,
+                "direct_instance_create_callsite_count": 3,
+                "env_event_binding_count": 0,
+                "legacy_selector_mode_count": 1,
+                "builtin_capability_override_count": 1,
+                "non_vontology_discoverable_workflow_count": 1,
+            },
+            "baseline": {
+                "comparison": {
+                    "regression_detected": False,
+                }
+            },
+        },
+    )
 
     dummy_registry = _DummyRegistry(
         workflow_ids=["#V#wf_registry_only", "#V#wf_ok"],
@@ -126,6 +146,26 @@ def test_workflow_parity_inventory_includes_authority_drift_reason(monkeypatch):
             [],
         ),
     )
+    monkeypatch.setattr(
+        registry_factory,
+        "build_workflow_purity_report",
+        lambda registry: {
+            "counters": {
+                "built_in_registration_count": 1,
+                "remaining_python_workflow_family_count": 1,
+                "direct_instance_create_callsite_count": 3,
+                "env_event_binding_count": 0,
+                "legacy_selector_mode_count": 1,
+                "builtin_capability_override_count": 1,
+                "non_vontology_discoverable_workflow_count": 1,
+            },
+            "baseline": {
+                "comparison": {
+                    "regression_detected": False,
+                }
+            },
+        },
+    )
     dummy_registry = _DummyRegistry(
         workflow_ids=["#V#wf_ok"],
         sources={"#V#wf_ok": "built_in"},
@@ -146,6 +186,53 @@ def test_workflow_parity_inventory_includes_authority_drift_reason(monkeypatch):
     counts = inventory.get("counts", {})
     assert counts.get("authority_missing_concepts") == 1
     assert counts.get("authority_missing_required_type") == 1
+
+
+def test_workflow_parity_inventory_includes_workflow_purity_regression_reason(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        registry_factory,
+        "build_workflow_process_graph",
+        lambda _workflow_id: (
+            {"initial_step": "#V#step_1", "steps": [{"step_id": "#V#step_1"}]},
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "build_workflow_purity_report",
+        lambda registry: {
+            "summary_text": "Workflow purity summary",
+            "counters": {
+                "built_in_registration_count": 2,
+                "remaining_python_workflow_family_count": 3,
+                "direct_instance_create_callsite_count": 3,
+                "env_event_binding_count": 0,
+                "legacy_selector_mode_count": 1,
+                "builtin_capability_override_count": 11,
+                "non_vontology_discoverable_workflow_count": 12,
+            },
+            "baseline": {
+                "comparison": {
+                    "regression_detected": True,
+                }
+            },
+        },
+    )
+    dummy_registry = _DummyRegistry(
+        workflow_ids=["#V#wf_ok"],
+        sources={"#V#wf_ok": "built_in"},
+    )
+
+    inventory = registry_factory._build_workflow_parity_inventory(
+        registry=dummy_registry,  # type: ignore[arg-type]
+        discovered_workflow_ids=["#V#wf_ok"],
+    )
+
+    assert inventory["workflow_purity"]["baseline"]["comparison"]["regression_detected"] is True
+    reasons = inventory.get("diagnostics", {}).get("reason_codes", [])
+    assert "workflow_purity_regression" in reasons
 
 
 def test_register_workflow_from_vontology_replaces_existing_registration(monkeypatch):
@@ -253,6 +340,21 @@ def test_build_registry_prioritises_vontology_on_overlap(monkeypatch):
         registry_factory,
         "_apply_workflow_parity_policy",
         lambda inventory_snapshot: None,
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "_launch_deferred_registry_work",
+        lambda **kwargs: setattr(
+            registry_factory,
+            "_last_inventory_snapshot",
+            registry_factory._build_workflow_parity_inventory(
+                registry=kwargs["registry"],
+                discovered_workflow_ids=kwargs["discovered_workflow_ids"],
+                authority_report=registry_factory.build_workflow_concept_authority_report(
+                    registry=kwargs["registry"]
+                ),
+            ),
+        ),
     )
 
     registry = registry_factory._build_workflow_registry(allow_bootstrap=False)
