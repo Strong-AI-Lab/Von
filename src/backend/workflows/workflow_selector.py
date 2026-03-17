@@ -27,10 +27,13 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Sequence
 
 from src.backend.services.prompt_template_service import PromptTemplateService
+from src.backend.services.workflow_selection_policy_service import (
+    recommend_workflow_with_policy,
+)
 
 from .workflow_registry import WorkflowRegistry
 
@@ -100,6 +103,8 @@ class WorkflowSelection:
     discovered_workflow_ids: tuple[str, ...] = ()
     confidence_score: float = 0.0
     reasoning: str = ""
+    selection_source: str = "selector"
+    selection_metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -107,6 +112,7 @@ class WorkflowSelectionPrompt:
     prompt_id: Optional[str]
     prompt_text: str
     discovered_workflow_ids: tuple[str, ...] = ()
+    policy_recommendation: Mapping[str, Any] = field(default_factory=dict)
 
 
 class WorkflowSelector:
@@ -245,20 +251,63 @@ class WorkflowSelector:
     ) -> WorkflowSelectionPrompt:
         """Build the RAG-first ranker prompt from candidate workflows."""
         candidate_ids: list[str] = []
-        candidate_lines: list[str] = []
+        candidate_entries: list[dict[str, str]] = []
 
         if candidate_workflows:
             for wf in candidate_workflows:
                 cid = str(wf.get("concept_id") or "").strip()
                 if not cid:
                     continue
-                candidate_ids.append(cid)
-                name = wf.get("name", cid)
-                desc = wf.get("description", "")
-                entry = f"- {cid}: {name}"
-                if desc:
-                    entry += f" — {desc}"
-                candidate_lines.append(entry)
+                candidate_entries.append(
+                    {
+                        "concept_id": cid,
+                        "name": str(wf.get("name") or cid),
+                        "description": str(wf.get("description") or ""),
+                    }
+                )
+
+        policy_recommendation = recommend_workflow_with_policy(
+            turn_text=turn_text,
+            candidate_workflows=candidate_entries,
+        )
+        ranked_candidate_ids = tuple(
+            str(item)
+            for item in policy_recommendation.get("ranked_candidate_ids", ())
+            if isinstance(item, str) and item
+        )
+        if ranked_candidate_ids:
+            entry_lookup = {
+                item["concept_id"]: item for item in candidate_entries if item.get("concept_id")
+            }
+            reordered_entries: list[dict[str, str]] = []
+            for workflow_id in ranked_candidate_ids:
+                entry = entry_lookup.pop(workflow_id, None)
+                if entry is not None:
+                    reordered_entries.append(entry)
+            reordered_entries.extend(entry_lookup.values())
+            candidate_entries = reordered_entries
+
+        policy_score_lookup = {
+            str(item.get("workflow_id")): item
+            for item in policy_recommendation.get("candidate_scores", ())
+            if isinstance(item, Mapping) and isinstance(item.get("workflow_id"), str)
+        }
+        candidate_lines: list[str] = []
+        for entry_row in candidate_entries:
+            cid = entry_row["concept_id"]
+            candidate_ids.append(cid)
+            entry = f"- {cid}: {entry_row['name']}"
+            if entry_row["description"]:
+                entry += f" — {entry_row['description']}"
+            policy_score = policy_score_lookup.get(cid)
+            if policy_score is not None and policy_recommendation.get("policy_active"):
+                entry += (
+                    " "
+                    f"[policy prior {float(policy_score.get('average_reward', 0.0)):.2f}; "
+                    f"exploration {float(policy_score.get('exploration_bonus', 0.0)):.2f}; "
+                    f"evidence {int(policy_score.get('attempts', 0))}]"
+                )
+            candidate_lines.append(entry)
 
         # If no candidates were provided (e.g. empty capability index),
         # inject the default workflow as the sole candidate.
@@ -296,6 +345,7 @@ class WorkflowSelector:
             prompt_id=prompt_id,
             prompt_text=prompt_text,
             discovered_workflow_ids=tuple(candidate_ids),
+            policy_recommendation=policy_recommendation,
         )
 
     # ------------------------------------------------------------------
@@ -445,6 +495,7 @@ class WorkflowSelector:
             discovered_workflow_ids=candidate_ids,
             confidence_score=confidence_score,
             reasoning=reasoning,
+            selection_source="selector",
         )
 
     # ------------------------------------------------------------------
@@ -507,6 +558,43 @@ class WorkflowSelector:
             prompt_used=prompt_used,
             raw_response=str(raw_response or ""),
             discovered_workflow_ids=tuple(discovered_ids),
+            selection_source="selector",
+        )
+
+    def resolve_policy_selection(
+        self,
+        *,
+        workflow_id: str,
+        prompt_id: Optional[str],
+        prompt_used: str | None,
+        discovered_workflow_ids: Sequence[str] = (),
+        confidence_score: float = 0.0,
+        reasoning: str = "",
+        selection_metadata: Mapping[str, Any] | None = None,
+    ) -> WorkflowSelection:
+        """Resolve a direct learned-policy recommendation into a selection."""
+
+        candidate_ids = tuple(
+            item for item in discovered_workflow_ids if isinstance(item, str) and item
+        )
+        clean_workflow_id = str(workflow_id or "").strip()
+        if clean_workflow_id not in candidate_ids:
+            clean_workflow_id = self._default_workflow_id
+            verdict = "rag_default"
+        else:
+            verdict = "policy_selected"
+
+        return WorkflowSelection(
+            workflow_id=clean_workflow_id,
+            verdict=verdict,
+            prompt_id=prompt_id,
+            prompt_used=prompt_used,
+            raw_response=f"policy::{clean_workflow_id}",
+            discovered_workflow_ids=candidate_ids,
+            confidence_score=max(0.0, min(1.0, float(confidence_score))),
+            reasoning=str(reasoning or ""),
+            selection_source="policy_direct",
+            selection_metadata=dict(selection_metadata or {}),
         )
 
     # ------------------------------------------------------------------
