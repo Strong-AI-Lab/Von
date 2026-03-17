@@ -114,6 +114,15 @@ _last_inventory_snapshot: Dict[str, Any] | None = None
 _durable_mcp_gateway_lock = Lock()
 _durable_mcp_gateway: Any | None = None
 
+_BOOTSTRAP_ONLY_REASONING_RECOVERY_WORKFLOW_IDS: tuple[str, ...] = (
+    "#V#planning_workflow",
+    "#V#rumination_workflow",
+    "#V#parent_specificity_concept_dossier_workflow",
+    "#V#parent_specificity_rumination_workflow",
+    "#V#workflow_discovery_gap_recovery_workflow",
+    "#V#workflow_gap_test_workflow",
+)
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -537,8 +546,6 @@ def _register_python_defined_workflows(registry: WorkflowRegistry) -> None:
     # purity diagnostics can track the remaining hybrid surface.
     registry.register(get_rag_sync_workflow_registration())
     registry.register(get_enrichment_workflow_registration())
-    registry.register(get_rumination_workflow_registration())
-    registry.register(get_planning_workflow_registration())
     registry.register(get_workflow_introspection_maintenance_registration())
     registry.register(get_file_copy_typing_workflow_registration())
     registry.register(get_file_copy_upload_classification_workflow_registration())
@@ -546,10 +553,44 @@ def _register_python_defined_workflows(registry: WorkflowRegistry) -> None:
     registry.register(get_file_copy_interpretation_workflow_registration())
     registry.register(get_entity_identity_resolution_workflow_registration())
     registry.register(get_jira_task_incremental_import_workflow_registration())
-    registry.register(get_parent_specificity_concept_dossier_workflow_registration())
-    registry.register(get_parent_specificity_rumination_workflow_registration())
-    registry.register(get_workflow_discovery_gap_recovery_workflow_registration())
-    registry.register(get_workflow_gap_test_workflow_registration())
+
+
+def _bootstrap_only_reasoning_recovery_workflow_registrations() -> tuple[Any, ...]:
+    """Return actual registrations used only to publish authoritative graphs."""
+
+    return (
+        get_planning_workflow_registration(),
+        get_rumination_workflow_registration(),
+        get_parent_specificity_concept_dossier_workflow_registration(),
+        get_parent_specificity_rumination_workflow_registration(),
+        get_workflow_discovery_gap_recovery_workflow_registration(),
+        get_workflow_gap_test_workflow_registration(),
+    )
+
+
+def _bootstrap_only_reasoning_recovery_workflow_report(
+    *,
+    bootstrap_allowed: bool,
+) -> Dict[str, Any]:
+    report: Dict[str, Any] = {
+        "enabled": bool(bootstrap_allowed),
+        "workflow_ids": list(_BOOTSTRAP_ONLY_REASONING_RECOVERY_WORKFLOW_IDS),
+    }
+    if not bootstrap_allowed:
+        return report
+
+    temp_registry = WorkflowRegistry(
+        definition_loader=load_workflow_definition_from_vontology,
+    )
+    for registration in _bootstrap_only_reasoning_recovery_workflow_registrations():
+        temp_registry.register(registration)
+
+    bootstrap_report = bootstrap_workflow_concepts(
+        registry=temp_registry,
+        target_workflow_ids=_BOOTSTRAP_ONLY_REASONING_RECOVERY_WORKFLOW_IDS,
+    )
+    report.update(bootstrap_report)
+    return report
 
 
 def build_workflow_purity_registry_snapshot() -> WorkflowRegistry:
@@ -589,6 +630,10 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
         "enabled": bootstrap_allowed,
         "workflow_ids": [],
     }
+    bootstrap_only_reasoning_recovery_report: Dict[str, Any] = {
+        "enabled": bootstrap_allowed,
+        "workflow_ids": list(_BOOTSTRAP_ONLY_REASONING_RECOVERY_WORKFLOW_IDS),
+    }
 
     _register_python_defined_workflows(registry)
 
@@ -602,6 +647,11 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
                 bootstrap_canonical_talk_representation_workflows()
             )
             talk_representation_bootstrap_report["enabled"] = True
+            bootstrap_only_reasoning_recovery_report = (
+                _bootstrap_only_reasoning_recovery_workflow_report(
+                    bootstrap_allowed=True
+                )
+            )
             _resolve_subworkflow_definition.cache_clear()
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(
@@ -697,6 +747,9 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
         discovered_workflow_ids=discovered_workflow_ids,
         paper_representation_bootstrap_report=paper_representation_bootstrap_report,
         talk_representation_bootstrap_report=talk_representation_bootstrap_report,
+        bootstrap_only_reasoning_recovery_report=(
+            bootstrap_only_reasoning_recovery_report
+        ),
         bootstrap_allowed=bootstrap_allowed,
     )
 
@@ -709,6 +762,7 @@ def _launch_deferred_registry_work(
     discovered_workflow_ids: List[str],
     paper_representation_bootstrap_report: Dict[str, Any],
     talk_representation_bootstrap_report: Dict[str, Any],
+    bootstrap_only_reasoning_recovery_report: Dict[str, Any],
     bootstrap_allowed: bool,
 ) -> None:
     """Launch background thread for bootstrap and parity inventory.
@@ -758,6 +812,9 @@ def _launch_deferred_registry_work(
             )
             authority_report["talk_representation_bootstrap"] = (
                 talk_representation_bootstrap_report
+            )
+            authority_report["bootstrap_only_reasoning_recovery_workflows"] = (
+                bootstrap_only_reasoning_recovery_report
             )
 
             inventory_snapshot = _build_workflow_parity_inventory(

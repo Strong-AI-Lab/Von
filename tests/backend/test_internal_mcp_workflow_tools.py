@@ -13,6 +13,7 @@ from src.backend.workflows.durable.models import (
     WorkflowInstanceStatus,
 )
 from src.backend.workflows.durable.scheduler import WorkflowScheduler
+from workflow_test_support import bootstrap_authoritative_reasoning_recovery_workflows
 
 
 def _build_gateway() -> InternalMCPGateway:
@@ -498,6 +499,7 @@ class _InMemoryScheduleWorkflowManager:
 
 
 def test_workflow_list_definitions_exists_and_returns_data():
+    bootstrap_authoritative_reasoning_recovery_workflows()
     catalogue = build_default_catalogue()
     methods = catalogue.list_methods()
     assert "workflow_list_definitions" in methods
@@ -522,12 +524,34 @@ def test_workflow_list_definitions_exists_and_returns_data():
     assert "#V#rag_text_relation_sync_workflow" in def_ids
     assert "#V#enrichment_workflow" in def_ids
     assert "#V#planning_workflow" in def_ids
+    assert "#V#rumination_workflow" in def_ids
+    assert "#V#parent_specificity_concept_dossier_workflow" in def_ids
+    assert "#V#parent_specificity_rumination_workflow" in def_ids
     assert "#V#file_copy_typing_workflow" in def_ids
     assert "#V#file_copy_upload_classification_workflow" in def_ids
     assert "#V#file_copy_upload_handler_workflow" in def_ids
     assert "#V#file_copy_interpretation_workflow" in def_ids
     assert "#V#workflow_discovery_gap_recovery_workflow" in def_ids
     assert "#V#workflow_gap_test_workflow" in def_ids
+    source_by_workflow_id = {
+        item["workflow_id"]: str(item.get("source") or "").strip().lower()
+        for item in result["definitions"]
+    }
+    assert source_by_workflow_id["#V#planning_workflow"] == "vontology"
+    assert source_by_workflow_id["#V#rumination_workflow"] == "vontology"
+    assert (
+        source_by_workflow_id["#V#parent_specificity_concept_dossier_workflow"]
+        == "vontology"
+    )
+    assert (
+        source_by_workflow_id["#V#parent_specificity_rumination_workflow"]
+        == "vontology"
+    )
+    assert (
+        source_by_workflow_id["#V#workflow_discovery_gap_recovery_workflow"]
+        == "vontology"
+    )
+    assert source_by_workflow_id["#V#workflow_gap_test_workflow"] == "vontology"
     assert any("description_source" in d for d in result["definitions"])
     assert any("definition_identity" in d for d in result["definitions"])
     assert any("background_launch_policy_source" in d for d in result["definitions"])
@@ -568,6 +592,7 @@ def test_workflow_list_definitions_exists_and_returns_data():
 
 
 def test_workflow_list_definitions_gateway_invoke_success_path():
+    bootstrap_authoritative_reasoning_recovery_workflows()
     gateway = _build_gateway()
     result = gateway.invoke("workflow_list_definitions", {"limit": 10})
     payload = result.payload
