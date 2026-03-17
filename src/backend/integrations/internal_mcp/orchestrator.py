@@ -18313,6 +18313,9 @@ class InternalMCPChatOrchestrator:
         ):
             try:
                 from ...workflows.durable import WorkflowInstanceManager
+                from ...workflows.durable.workflow_instance_submission_service import (
+                    submit_verified_workflow_instance,
+                )
 
                 durable_instance_manager = WorkflowInstanceManager()
                 source_event_type = (
@@ -18328,10 +18331,8 @@ class InternalMCPChatOrchestrator:
                         f"{workflow_id}:{source_event_type}:{source_event_id}:"
                         f"{str(resolved_stage or '').strip()}"
                     )
-                    (
-                        durable_instance_id,
-                        durable_instance_created_new,
-                    ) = durable_instance_manager.create_instance_for_event(
+                    submission = submit_verified_workflow_instance(
+                        manager=durable_instance_manager,
                         workflow_id=workflow_id,
                         user_id=resolved_user_id,
                         org_id=resolved_org_id,
@@ -18343,15 +18344,25 @@ class InternalMCPChatOrchestrator:
                         max_retries=0,
                     )
                 else:
-                    durable_instance_id = durable_instance_manager.create_instance(
-                        workflow_id,
+                    submission = submit_verified_workflow_instance(
+                        manager=durable_instance_manager,
+                        workflow_id=workflow_id,
                         user_id=resolved_user_id,
                         org_id=resolved_org_id,
                         namespace=resolved_namespace,
                         inputs=_build_durable_inputs_snapshot(),
                         max_retries=0,
                     )
-                    durable_instance_created_new = True
+                if not submission.success or not submission.instance_id:
+                    raise RuntimeError(
+                        submission.error
+                        or (
+                            "Verified durable workflow submission failed "
+                            f"for {workflow_id}"
+                        )
+                    )
+                durable_instance_id = submission.instance_id
+                durable_instance_created_new = submission.created_new
             except Exception as exc:
                 self._logger.warning(
                     "[workflow_instance_telemetry] Failed to create durable instance "

@@ -267,17 +267,33 @@ class TestSubmitDurableRagSync:
         from src.backend.workflows.durable.instance_manager import (
             WorkflowInstanceManager,
         )
+        from src.backend.workflows.durable.workflow_instance_submission_service import (
+            WorkflowInstanceSubmissionResult,
+        )
 
         # Enable workflows and mock the startup module
         with patch.dict(os.environ, {"VON_DURABLE_WORKFLOWS_ENABLE": "1"}):
             # Mock the instance manager
             mock_manager = MagicMock(spec=WorkflowInstanceManager)
-            mock_manager.create_instance.return_value = "test-instance-id"
 
             with patch(
                 "src.backend.workflows.durable.startup.get_instance_manager",
                 return_value=mock_manager,
-            ):
+            ), patch(
+                "src.backend.workflows.durable.workflow_instance_submission_service.submit_verified_workflow_instance",
+                return_value=WorkflowInstanceSubmissionResult(
+                    success=True,
+                    workflow_id="#V#rag_text_relation_sync_workflow",
+                    status="pending",
+                    instance_id="test-instance-id",
+                    verification={
+                        "preflight_passed": True,
+                        "postflight_passed": True,
+                        "runnable_verification_success": True,
+                    },
+                    created_new=True,
+                ),
+            ) as mock_submit:
                 # Import after patching
                 from src.backend.services.rag_text_relation_sync_service import (
                     submit_durable_rag_sync,
@@ -295,9 +311,11 @@ class TestSubmitDurableRagSync:
         assert result["success"] is True
         assert result["instance_id"] == "test-instance-id"
         assert result["namespace"] == "#V#test"
+        assert result["created_new"] is True
+        assert result["submission_status"] == "pending"
+        assert result["verification"]["runnable_verification_success"] is True
 
-        # Verify create_instance was called
-        mock_manager.create_instance.assert_called_once()
+        mock_submit.assert_called_once()
 
 
 class TestWorkflowRegistration:

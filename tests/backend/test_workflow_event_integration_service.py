@@ -8,6 +8,9 @@ from unittest.mock import MagicMock, patch
 
 from src.backend.services import workflow_event_integration_service as workflow_event_service
 from src.backend.workflows.durable.models import EventWorkflowBinding
+from src.backend.workflows.durable.workflow_instance_submission_service import (
+    WorkflowInstanceSubmissionResult,
+)
 from src.backend.services.workflow_event_integration_service import (
     DEFAULT_FILE_COPY_UPLOADED_WORKFLOW_ID,
     EVENT_TYPE_CONCEPT_UPDATED,
@@ -22,6 +25,26 @@ from src.backend.services.workflow_event_integration_service import (
     maybe_launch_vontology_mutation_workflow,
     maybe_launch_task_status_workflow,
 )
+
+
+def _submission_result(
+    *,
+    workflow_id: str,
+    instance_id: str,
+    created_new: bool,
+) -> WorkflowInstanceSubmissionResult:
+    return WorkflowInstanceSubmissionResult(
+        success=True,
+        workflow_id=workflow_id,
+        status="pending" if created_new else "reused",
+        instance_id=instance_id,
+        verification={
+            "preflight_passed": True,
+            "postflight_passed": True,
+            "runnable_verification_success": True,
+        },
+        created_new=created_new,
+    )
 
 
 def test_launch_event_workflow_integration_flag_disables_trigger(monkeypatch) -> None:
@@ -93,16 +116,23 @@ def test_launch_event_workflow_creates_instance_when_configured(
     monkeypatch.setenv("VON_EVENT_TASK_CREATED_WORKFLOW_ID", "#V#task_event_workflow")
 
     mock_manager = MagicMock()
-    mock_manager.create_instance_for_event.return_value = ("instance-123", True)
     mock_get_instance_manager.return_value = mock_manager
 
-    result = launch_event_workflow(
-        event_type=EVENT_TYPE_TASK_CREATED,
-        event_id="task-1",
-        user_id="#V#user_alice",
-        org_id="#V#org_nao",
-        inputs={"task_concept_id": "#V#task_1"},
-    )
+    with patch(
+        "src.backend.services.workflow_event_integration_service.submit_verified_workflow_instance",
+        return_value=_submission_result(
+            workflow_id="#V#task_event_workflow",
+            instance_id="instance-123",
+            created_new=True,
+        ),
+    ) as mock_submit:
+        result = launch_event_workflow(
+            event_type=EVENT_TYPE_TASK_CREATED,
+            event_id="task-1",
+            user_id="#V#user_alice",
+            org_id="#V#org_nao",
+            inputs={"task_concept_id": "#V#task_1"},
+        )
 
     assert result["success"] is True
     assert result["triggered"] is True
@@ -117,9 +147,9 @@ def test_launch_event_workflow_creates_instance_when_configured(
     assert "instance_create_ms" in timings
     assert "total_ms" in timings
 
-    called_args = mock_manager.create_instance_for_event.call_args
+    called_args = mock_submit.call_args
     assert called_args is not None
-    assert called_args.args[0] == "#V#task_event_workflow"
+    assert called_args.kwargs["workflow_id"] == "#V#task_event_workflow"
     assert called_args.kwargs["source_event_type"] == EVENT_TYPE_TASK_CREATED
     assert called_args.kwargs["source_event_id"] == "task-1"
     assert called_args.kwargs["namespace"] == "#V#user_alice/#V#org_nao"
@@ -138,16 +168,23 @@ def test_launch_event_workflow_reports_reused_idempotent_instance(
     monkeypatch.setenv("VON_EVENT_TASK_CREATED_WORKFLOW_ID", "#V#task_event_workflow")
 
     mock_manager = MagicMock()
-    mock_manager.create_instance_for_event.return_value = ("instance-123", False)
     mock_get_instance_manager.return_value = mock_manager
 
-    result = launch_event_workflow(
-        event_type=EVENT_TYPE_TASK_CREATED,
-        event_id="task-1",
-        user_id="#V#user_alice",
-        org_id="#V#org_nao",
-        inputs={"task_concept_id": "#V#task_1"},
-    )
+    with patch(
+        "src.backend.services.workflow_event_integration_service.submit_verified_workflow_instance",
+        return_value=_submission_result(
+            workflow_id="#V#task_event_workflow",
+            instance_id="instance-123",
+            created_new=False,
+        ),
+    ) as mock_submit:
+        result = launch_event_workflow(
+            event_type=EVENT_TYPE_TASK_CREATED,
+            event_id="task-1",
+            user_id="#V#user_alice",
+            org_id="#V#org_nao",
+            inputs={"task_concept_id": "#V#task_1"},
+        )
 
     assert result["success"] is True
     assert result["triggered"] is False
@@ -163,6 +200,7 @@ def test_launch_event_workflow_reports_reused_idempotent_instance(
     assert result["reused_count"] == 1
     assert result["success_count"] == 1
     assert result["failure_count"] == 0
+    assert mock_submit.call_args is not None
 
 
 def test_maybe_launch_task_status_workflow_skips_unconfigured_status(monkeypatch) -> None:
@@ -372,23 +410,30 @@ def test_launch_event_workflow_uses_persistent_binding_input_mapping(
     )
     mock_manager = MagicMock()
     mock_manager.list_event_bindings.return_value = [binding]
-    mock_manager.create_instance_for_event.return_value = ("instance-999", True)
     mock_get_instance_manager.return_value = mock_manager
 
-    result = launch_event_workflow(
-        event_type="type.created",
-        event_id="#V#my_new_type",
-        user_id="#V#user_alice",
-        org_id="#V#org_nao",
-        inputs={"seed": "abc-123"},
-        event_payload={"concept_id": "#V#my_new_type"},
-    )
+    with patch(
+        "src.backend.services.workflow_event_integration_service.submit_verified_workflow_instance",
+        return_value=_submission_result(
+            workflow_id="#V#salient_predicate_governance_workflow",
+            instance_id="instance-999",
+            created_new=True,
+        ),
+    ) as mock_submit:
+        result = launch_event_workflow(
+            event_type="type.created",
+            event_id="#V#my_new_type",
+            user_id="#V#user_alice",
+            org_id="#V#org_nao",
+            inputs={"seed": "abc-123"},
+            event_payload={"concept_id": "#V#my_new_type"},
+        )
 
     assert result["success"] is True
     assert result["triggered"] is True
     assert result["workflow_id"] == "#V#salient_predicate_governance_workflow"
 
-    called_args = mock_manager.create_instance_for_event.call_args
+    called_args = mock_submit.call_args
     assert called_args is not None
     workflow_inputs = called_args.kwargs["inputs"]
     assert workflow_inputs["type_concept_id"] == "#V#my_new_type"
@@ -416,20 +461,27 @@ def test_launch_event_workflow_resolves_braced_event_mapping_expression(
     )
     mock_manager = MagicMock()
     mock_manager.list_event_bindings.return_value = [binding]
-    mock_manager.create_instance_for_event.return_value = ("instance-1000", True)
     mock_get_instance_manager.return_value = mock_manager
 
-    result = launch_event_workflow(
-        event_type="type.created",
-        event_id="#V#my_new_type",
-        user_id="#V#user_alice",
-        org_id="#V#org_nao",
-        event_payload={"concept_id": "#V#my_new_type"},
-    )
+    with patch(
+        "src.backend.services.workflow_event_integration_service.submit_verified_workflow_instance",
+        return_value=_submission_result(
+            workflow_id="#V#salient_predicate_governance_workflow",
+            instance_id="instance-1000",
+            created_new=True,
+        ),
+    ) as mock_submit:
+        result = launch_event_workflow(
+            event_type="type.created",
+            event_id="#V#my_new_type",
+            user_id="#V#user_alice",
+            org_id="#V#org_nao",
+            event_payload={"concept_id": "#V#my_new_type"},
+        )
 
     assert result["success"] is True
     assert result["triggered"] is True
-    called_args = mock_manager.create_instance_for_event.call_args
+    called_args = mock_submit.call_args
     assert called_args is not None
     workflow_inputs = called_args.kwargs["inputs"]
     assert workflow_inputs["target_type_id"] == "#V#my_new_type"
@@ -453,22 +505,29 @@ def test_launch_event_workflow_uses_namespace_override_for_tenancy(
     )
     mock_manager = MagicMock()
     mock_manager.list_event_bindings.return_value = [binding]
-    mock_manager.create_instance_for_event.return_value = ("instance-ns-1", True)
     mock_get_instance_manager.return_value = mock_manager
 
-    result = launch_event_workflow(
-        event_type="type.created",
-        event_id="#V#my_new_type",
-        user_id=None,
-        org_id=None,
-        namespace="#V#user_alice@org_nao",
-        event_payload={"concept_id": "#V#my_new_type"},
-    )
+    with patch(
+        "src.backend.services.workflow_event_integration_service.submit_verified_workflow_instance",
+        return_value=_submission_result(
+            workflow_id="#V#salient_predicate_governance_workflow",
+            instance_id="instance-ns-1",
+            created_new=True,
+        ),
+    ) as mock_submit:
+        result = launch_event_workflow(
+            event_type="type.created",
+            event_id="#V#my_new_type",
+            user_id=None,
+            org_id=None,
+            namespace="#V#user_alice@org_nao",
+            event_payload={"concept_id": "#V#my_new_type"},
+        )
 
     assert result["success"] is True
     assert result["triggered"] is True
 
-    called_args = mock_manager.create_instance_for_event.call_args
+    called_args = mock_submit.call_args
     assert called_args is not None
     assert called_args.kwargs["user_id"] == "#V#user_alice"
     assert called_args.kwargs["org_id"] == "#V#org_nao"
@@ -485,21 +544,28 @@ def test_launch_event_workflow_uses_user_only_namespace_when_org_unknown(
     monkeypatch.setenv("VON_EVENT_TASK_CREATED_WORKFLOW_ID", "#V#task_event_workflow")
 
     mock_manager = MagicMock()
-    mock_manager.create_instance_for_event.return_value = ("instance-user-only", True)
     mock_get_instance_manager.return_value = mock_manager
 
-    result = launch_event_workflow(
-        event_type=EVENT_TYPE_TASK_CREATED,
-        event_id="task-namespace-user-only",
-        user_id="#V#user_alice",
-        org_id=None,
-        inputs={"task_concept_id": "#V#task_99"},
-    )
+    with patch(
+        "src.backend.services.workflow_event_integration_service.submit_verified_workflow_instance",
+        return_value=_submission_result(
+            workflow_id="#V#task_event_workflow",
+            instance_id="instance-user-only",
+            created_new=True,
+        ),
+    ) as mock_submit:
+        result = launch_event_workflow(
+            event_type=EVENT_TYPE_TASK_CREATED,
+            event_id="task-namespace-user-only",
+            user_id="#V#user_alice",
+            org_id=None,
+            inputs={"task_concept_id": "#V#task_99"},
+        )
 
     assert result["success"] is True
     assert result["triggered"] is True
 
-    called_args = mock_manager.create_instance_for_event.call_args
+    called_args = mock_submit.call_args
     assert called_args is not None
     assert called_args.kwargs["namespace"] == "#V#user_alice"
 
@@ -523,24 +589,27 @@ def test_launch_event_workflow_blocks_when_cadence_window_is_active(
     mock_get_instance_manager.return_value = mock_manager
 
     with patch(
-        "src.backend.services.workflow_event_integration_service._workflow_background_launch_policy_for_id",
-        return_value=(
-            {
-                "schema_version": "workflow_background_launch_policy.v1",
-                "enabled": True,
-                "min_interval_seconds": 300,
-                "scope": "global_per_server",
-                "applies_to_sources": ["event"],
-            },
-            "text_relation:#V#hasBackgroundLaunchPolicyJson",
-        ),
-    ):
-        result = launch_event_workflow(
-            event_type=EVENT_TYPE_TASK_CREATED,
-            event_id="task-cadence-1",
-            user_id="#V#user_alice",
-            org_id="#V#org_nao",
-        )
+        "src.backend.services.workflow_event_integration_service.submit_verified_workflow_instance",
+    ) as mock_submit:
+        with patch(
+            "src.backend.services.workflow_event_integration_service._workflow_background_launch_policy_for_id",
+            return_value=(
+                {
+                    "schema_version": "workflow_background_launch_policy.v1",
+                    "enabled": True,
+                    "min_interval_seconds": 300,
+                    "scope": "global_per_server",
+                    "applies_to_sources": ["event"],
+                },
+                "text_relation:#V#hasBackgroundLaunchPolicyJson",
+            ),
+        ):
+            result = launch_event_workflow(
+                event_type=EVENT_TYPE_TASK_CREATED,
+                event_id="task-cadence-1",
+                user_id="#V#user_alice",
+                org_id="#V#org_nao",
+            )
 
     assert result["success"] is True
     assert result["triggered"] is False
@@ -550,6 +619,7 @@ def test_launch_event_workflow_blocks_when_cadence_window_is_active(
     assert isinstance(retry_after_seconds, int)
     assert retry_after_seconds > 0
     assert result.get("cadence_policy_source") == "text_relation:#V#hasBackgroundLaunchPolicyJson"
+    mock_submit.assert_not_called()
     mock_manager.create_instance_for_event.assert_not_called()
 
 
@@ -575,6 +645,8 @@ def test_launch_event_workflow_idempotent_reuse_takes_precedence_over_cadence(
     mock_get_instance_manager.return_value = mock_manager
 
     with patch(
+        "src.backend.services.workflow_event_integration_service.submit_verified_workflow_instance",
+    ) as mock_submit, patch(
         "src.backend.services.workflow_event_integration_service._workflow_background_launch_policy_for_id",
         return_value=(
             {
@@ -600,6 +672,7 @@ def test_launch_event_workflow_idempotent_reuse_takes_precedence_over_cadence(
     assert result["reason"] == "idempotent_reuse"
     assert result["idempotent_reused"] is True
     assert result["instance_id"] == "instance-existing"
+    mock_submit.assert_not_called()
     mock_manager.create_instance_for_event.assert_not_called()
 
 

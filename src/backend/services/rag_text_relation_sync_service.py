@@ -529,6 +529,9 @@ def submit_durable_rag_sync(
         from ..workflows.durable.rag_sync_workflow import (
             RAG_TEXT_RELATION_SYNC_WORKFLOW_ID,
         )
+        from ..workflows.durable.workflow_instance_submission_service import (
+            submit_verified_workflow_instance,
+        )
 
         instance_manager = get_instance_manager()
 
@@ -545,20 +548,34 @@ def submit_durable_rag_sync(
         if concept_ids:
             inputs["concept_ids"] = list(concept_ids)
 
-        # Create and submit the instance
-        instance_id = instance_manager.create_instance(
-            RAG_TEXT_RELATION_SYNC_WORKFLOW_ID,
+        submission = submit_verified_workflow_instance(
+            manager=instance_manager,
+            workflow_id=RAG_TEXT_RELATION_SYNC_WORKFLOW_ID,
             user_id=user_id,
             org_id=org_id,
             namespace=namespace,
             inputs=inputs,
         )
+        if not submission.success:
+            return {
+                "success": False,
+                "workflow_id": RAG_TEXT_RELATION_SYNC_WORKFLOW_ID,
+                "namespace": namespace,
+                "error": str(submission.error or "workflow_submission_failed"),
+                "error_code": submission.error_code,
+                "verification": dict(submission.verification),
+                "submission_status": submission.status,
+                "instance_id": submission.instance_id,
+            }
 
         return {
             "success": True,
-            "instance_id": instance_id,
+            "instance_id": submission.instance_id,
             "workflow_id": RAG_TEXT_RELATION_SYNC_WORKFLOW_ID,
             "namespace": namespace,
+            "verification": dict(submission.verification),
+            "submission_status": submission.status,
+            "created_new": submission.created_new,
         }
 
     except Exception as exc:
