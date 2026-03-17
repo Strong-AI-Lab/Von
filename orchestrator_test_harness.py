@@ -122,12 +122,31 @@ def build_db_independent_orchestrator(
     # is tested separately in test_workflow_selector_rag_first.py.
     monkeypatch.setenv("VON_WORKFLOW_RAG_FIRST_ROUTING", "0")
 
-    from src.backend.workflows import WorkflowRegistry, register_default_workflows
+    from src.backend.workflows import WorkflowRegistry
     from src.backend.workflows.action_registry import ActionRegistry
+    from src.backend.workflows.definitions import CONVERSATION_TURN_WORKFLOW_IDS
+    from src.backend.workflows.workflow_registry import WorkflowRegistration
+    from src.backend.workflows import workflow_concept_authority_service as authority_service
 
     def _build_test_registry() -> WorkflowRegistry:
         registry = WorkflowRegistry()
-        register_default_workflows(registry)
+        for workflow_id in CONVERSATION_TURN_WORKFLOW_IDS:
+            spec = authority_service._CANONICAL_WORKFLOW_PUBLICATION_SPECS.get(
+                workflow_id
+            )
+            if spec is None:
+                continue
+            registry.register(
+                WorkflowRegistration(
+                    workflow_id=workflow_id,
+                    definition=authority_service._build_definition_from_publication_spec(
+                        workflow_id=workflow_id,
+                        spec=spec,
+                    ),
+                    purpose=workflow_id,
+                    source="vontology",
+                )
+            )
         return registry
 
     monkeypatch.setattr(

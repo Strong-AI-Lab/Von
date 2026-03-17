@@ -3,6 +3,9 @@ from typing import Any, cast
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
 )
+from src.backend.workflows.action_registry import ActionRegistry
+from src.backend.workflows import WorkflowRegistry
+from workflow_test_support import register_authoritative_test_workflows
 
 
 class _StubResult:
@@ -35,6 +38,22 @@ class _CapturingLLM:
         if self._responses:
             return self._responses.pop(0)
         return "ok"
+
+
+def _seed_authoritative_conversation_turn_registry(monkeypatch) -> None:
+    def _build_registry() -> WorkflowRegistry:
+        registry = WorkflowRegistry()
+        register_authoritative_test_workflows(registry)
+        return registry
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.build_workflow_registry",
+        _build_registry,
+    )
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.build_durable_action_registry",
+        lambda: ActionRegistry(),
+    )
 
 
 def test_instruction_message_uses_internal_guardrail_wording_without_budget_leak(
@@ -1420,6 +1439,7 @@ def test_specialised_preflight_shadow_mode_reports_evaluation_without_applying(
 ):
     """JVNAUTOSCI-990: shadow mode should evaluate but not apply suggestions."""
 
+    _seed_authoritative_conversation_turn_registry(monkeypatch)
     monkeypatch.setenv("VON_MCP_SPECIALISED_PREFLIGHT_MODE", "shadow")
     monkeypatch.setattr(
         InternalMCPChatOrchestrator,
@@ -1528,6 +1548,7 @@ def test_specialised_preflight_shadow_mode_reports_evaluation_without_applying(
 def test_specialised_preflight_active_mode_applies_fallback_suggestions(monkeypatch):
     """JVNAUTOSCI-990: active mode should merge specialised fallback suggestions."""
 
+    _seed_authoritative_conversation_turn_registry(monkeypatch)
     monkeypatch.setenv("VON_MCP_SPECIALISED_PREFLIGHT_MODE", "active")
     monkeypatch.setattr(
         InternalMCPChatOrchestrator,

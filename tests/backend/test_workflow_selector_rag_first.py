@@ -15,12 +15,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.backend.services.prompt_template_service import PromptTemplateService
-from src.backend.workflows import WorkflowRegistry, register_default_workflows
+from src.backend.workflows import WorkflowRegistry
 from src.backend.workflows.workflow_selector import (
     WorkflowSelection,
     WorkflowSelectionPrompt,
     WorkflowSelector,
 )
+from workflow_test_support import build_test_conversation_turn_registry
 
 
 # ---------------------------------------------------------------------------
@@ -29,9 +30,7 @@ from src.backend.workflows.workflow_selector import (
 
 
 def _build_registry() -> WorkflowRegistry:
-    reg = WorkflowRegistry()
-    register_default_workflows(reg)
-    return reg
+    return build_test_conversation_turn_registry()
 
 
 def _build_selector(*, verdict_mapping=None, default_workflow_id=None) -> WorkflowSelector:

@@ -956,14 +956,14 @@ def test_bootstrap_publishes_file_copy_upload_handler_dynamic_subworkflow_contra
 def test_canonical_workflow_runtime_identity_matches_authoritative_loader(
     _reset_mock_workflow_graph_db,
 ):
-    from src.backend.workflows.definitions import register_default_workflows
     from src.backend.workflows.vontology_loader import (
         load_workflow_definition_from_vontology,
     )
     from src.backend.workflows.workflow_registry import WorkflowRegistry
+    from workflow_test_support import register_authoritative_test_workflows
 
     registry = WorkflowRegistry()
-    register_default_workflows(registry)
+    register_authoritative_test_workflows(registry)
     authority_service.bootstrap_workflow_concepts(registry=cast(Any, registry))
 
     from src.backend.workflows.durable.registry_factory import build_workflow_registry_read_only
@@ -993,11 +993,11 @@ def test_publish_canonical_graphs_reports_validation_failures(
     _reset_mock_workflow_graph_db,
     monkeypatch,
 ):
-    from src.backend.workflows.definitions import register_default_workflows
     from src.backend.workflows.workflow_registry import WorkflowRegistry
+    from workflow_test_support import register_authoritative_test_workflows
 
     registry = WorkflowRegistry()
-    register_default_workflows(registry)
+    register_authoritative_test_workflows(registry)
     authority_service.bootstrap_workflow_concepts(registry=cast(Any, registry))
 
     monkeypatch.setattr(

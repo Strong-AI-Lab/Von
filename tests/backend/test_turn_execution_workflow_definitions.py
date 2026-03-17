@@ -1,21 +1,20 @@
 from src.backend.workflows.definitions import (
-    CHAT_BUTTONIFY_WORKFLOW_ID,
     CONCEPT_SUGGESTION_PREFLIGHT_WORKFLOW_ID,
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+    CHAT_BUTTONIFY_WORKFLOW_ID,
     KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
+    TOOL_CALLING_WORKFLOW_ID,
     TURN_COMPLETION_GATE_WORKFLOW_ID,
-    build_chat_buttonify_workflow,
-    build_concept_suggestion_preflight_workflow,
-    build_tool_calling_workflow,
-    register_default_workflows,
 )
 from src.backend.workflows.engine import WORKFLOW_STEP_EXECUTION_MODE_LLM
-from src.backend.workflows.workflow_registry import WorkflowRegistry
+from workflow_test_support import (
+    build_authoritative_test_workflow_definition,
+    build_test_conversation_turn_registry,
+)
 
 
 def test_tool_calling_workflow_includes_turn_execution_critic_and_gate() -> None:
-    workflow = build_tool_calling_workflow()
-
+    workflow = build_authoritative_test_workflow_definition(TOOL_CALLING_WORKFLOW_ID)
     assert workflow.initial_state == "preflight_requirements"
     assert "preflight_requirements" in workflow.states
     assert "respond" in workflow.states
@@ -25,7 +24,8 @@ def test_tool_calling_workflow_includes_turn_execution_critic_and_gate() -> None
     preflight = workflow.states["preflight_requirements"]
     assert preflight.actions[0].action_id == "tool_calling.preflight_requirements"
     assert any(
-        t.to_state == "respond" and t.reason == "requirements_preflight_completed"
+        t.to_state == "respond"
+        and t.reason == "requirements_preflight_completed"
         for t in preflight.transitions
     )
 
@@ -44,26 +44,27 @@ def test_tool_calling_workflow_includes_turn_execution_critic_and_gate() -> None
     completion_gate = workflow.states["completion_gate"]
     assert completion_gate.actions[0].action_id == "turn_execution.completion_gate"
     assert any(
-        t.to_state == "respond" and t.reason == "completion_gate_repeat_iteration"
+        t.to_state == "respond"
+        and t.reason == "completion_gate_repeat_iteration"
         for t in completion_gate.transitions
     )
     assert any(t.to_state == "completed" for t in completion_gate.transitions)
 
 
-def test_register_default_workflows_includes_turn_execution_workflows() -> None:
-    registry = WorkflowRegistry()
-    register_default_workflows(registry)
+def test_test_registry_includes_turn_execution_workflows() -> None:
+    registry = build_test_conversation_turn_registry()
 
-    assert registry.get(CHAT_BUTTONIFY_WORKFLOW_ID) is not None
-    assert registry.get(CONCEPT_SUGGESTION_PREFLIGHT_WORKFLOW_ID) is not None
-    assert registry.get(KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID) is not None
-    assert registry.get(TURN_COMPLETION_GATE_WORKFLOW_ID) is not None
-    assert registry.get(CONVERSATION_TURN_EXECUTION_WORKFLOW_ID) is not None
+    assert registry.has(CHAT_BUTTONIFY_WORKFLOW_ID)
+    assert registry.has(CONCEPT_SUGGESTION_PREFLIGHT_WORKFLOW_ID)
+    assert registry.has(KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID)
+    assert registry.has(TURN_COMPLETION_GATE_WORKFLOW_ID)
+    assert registry.has(CONVERSATION_TURN_EXECUTION_WORKFLOW_ID)
 
 
 def test_concept_suggestion_preflight_workflow_has_single_guardrailed_step() -> None:
-    workflow = build_concept_suggestion_preflight_workflow()
-
+    workflow = build_authoritative_test_workflow_definition(
+        CONCEPT_SUGGESTION_PREFLIGHT_WORKFLOW_ID
+    )
     assert workflow.initial_state == "suggest"
     assert "suggest" in workflow.states
     assert "completed" in workflow.states
@@ -74,8 +75,7 @@ def test_concept_suggestion_preflight_workflow_has_single_guardrailed_step() -> 
 
 
 def test_buttonify_workflow_exposes_transformation_states() -> None:
-    workflow = build_chat_buttonify_workflow()
-
+    workflow = build_authoritative_test_workflow_definition(CHAT_BUTTONIFY_WORKFLOW_ID)
     assert workflow.initial_state == "assess_input"
     assert "assess_input" in workflow.states
     assert "select_prompt" in workflow.states

@@ -22,11 +22,12 @@ from src.backend.services.workflow_selection_experience import (
     record_selection_experience,
     reset_selection_experience,
 )
-from src.backend.workflows import WorkflowRegistry, register_default_workflows
+from src.backend.workflows import WorkflowRegistry
 from src.backend.workflows.workflow_selector import (
     WorkflowSelection,
     WorkflowSelector,
 )
+from workflow_test_support import build_test_conversation_turn_registry
 
 
 # ---------------------------------------------------------------------------
@@ -35,9 +36,7 @@ from src.backend.workflows.workflow_selector import (
 
 
 def _build_registry() -> WorkflowRegistry:
-    reg = WorkflowRegistry()
-    register_default_workflows(reg)
-    return reg
+    return build_test_conversation_turn_registry()
 
 
 def _build_selector(*, verdict_mapping=None, default_workflow_id=None) -> WorkflowSelector:
