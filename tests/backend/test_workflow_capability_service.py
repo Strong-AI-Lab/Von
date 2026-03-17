@@ -184,7 +184,7 @@ class TestIndexFromRegistry:
         results = index.search("research papers key insights")
         assert any(r.workflow_id == "#V#test_lazy_wf" for r in results)
 
-    def test_lazy_without_purpose_uses_fallback(self):
+    def test_lazy_without_purpose_is_skipped(self):
         from src.backend.workflows import WorkflowRegistry
         from src.backend.workflows.workflow_registry import LazyWorkflowRegistration
 
@@ -196,10 +196,37 @@ class TestIndexFromRegistry:
         registry.register_lazy(lazy)
         index = WorkflowCapabilityIndex()
         count = index.index_from_registry(registry)
-        assert count >= 1
-        # Even without purpose, the ID-derived name should be searchable.
+        assert count == 0
         results = index.search("entity resolution")
-        assert any(r.workflow_id == "#V#entity_resolution_workflow" for r in results)
+        assert all(r.workflow_id != "#V#entity_resolution_workflow" for r in results)
+
+    def test_non_vontology_registration_is_skipped(self):
+        from src.backend.workflows import WorkflowRegistry
+        from src.backend.workflows.workflow_registry import WorkflowRegistration
+        from src.backend.workflows.engine import WorkflowDefinition, WorkflowStateSpec
+
+        registry = WorkflowRegistry()
+        definition = WorkflowDefinition(
+            workflow_id="#V#built_in_workflow",
+            initial_state="start",
+            states={"start": WorkflowStateSpec(state_id="start", terminal=True)},
+            termination_states=("start",),
+            purpose="Built-in workflow purpose text",
+        )
+        registry.register(
+            WorkflowRegistration(
+                workflow_id="#V#built_in_workflow",
+                definition=definition,
+                purpose="Built-in workflow purpose text",
+                source="built_in",
+            )
+        )
+
+        index = WorkflowCapabilityIndex()
+        count = index.index_from_registry(registry)
+
+        assert count == 0
+        assert index.search("workflow purpose text") == []
 
 
 # ---------------------------------------------------------------------------

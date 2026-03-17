@@ -11,8 +11,8 @@ Architecture:
       capability documents.  Fast to build, zero external dependencies,
       supports hybrid keyword + relevance matching.
     - ``index_from_registry()``: Indexes all workflows from a registry
-      (both eager and lazy) using purpose metadata and fallback name-derived
-      descriptions only when Vontology metadata is absent.
+      (both eager and lazy) using authoritative Vontology narrative text and
+      skipping non-authoritative or textless workflows.
 
 The dedicated namespace isolates workflow routing from general concept search,
 enabling independent tuning and scaling as the workflow catalogue grows.
@@ -140,49 +140,77 @@ class WorkflowCapabilityIndex:
     def index_from_registry(self, registry: Any) -> int:
         """Index all workflows from a ``WorkflowRegistry``.
 
-        Uses authoritative registry ``purpose`` metadata when available and
-        falls back to an ID-derived description only when no narrative text
-        is available.
+        Only indexes workflows whose routing text is already authoritative:
+        Vontology-sourced registrations with non-empty narrative text.
+        Non-authoritative registrations and textless workflows are skipped so
+        discovery fails closed instead of routing on guessed fallback prose.
 
         Returns the number of workflows indexed.
         """
         count = 0
+        skipped_non_authoritative = 0
+        skipped_missing_purpose = 0
+
+        def _index_candidate(
+            *,
+            workflow_id: str,
+            purpose: Any,
+            source: Any,
+        ) -> None:
+            nonlocal count
+            nonlocal skipped_non_authoritative
+            nonlocal skipped_missing_purpose
+
+            text, reason = _resolve_authoritative_capability_text(
+                workflow_id=workflow_id,
+                source=source,
+                purpose=purpose,
+            )
+            if text is None:
+                if reason == "non_authoritative_source":
+                    skipped_non_authoritative += 1
+                elif reason == "missing_authoritative_purpose":
+                    skipped_missing_purpose += 1
+                return
+
+            self.index_workflow(
+                workflow_id,
+                text,
+                metadata={
+                    "name": _workflow_id_to_name(workflow_id),
+                    "source": str(source or "unknown"),
+                    "purpose": _normalise_capability_text(purpose),
+                },
+            )
+            count += 1
+
         # Eager registrations.
         for wid in list(registry.eager_workflow_ids()):
             reg = registry._workflows.get(wid)  # type: ignore[attr-defined]
-            purpose = (reg.purpose if reg else None) or ""
-            text = BUILTIN_WORKFLOW_CAPABILITIES.get(wid) or purpose
-            if not text:
-                text = _workflow_id_to_description(wid)
-            name = _workflow_id_to_name(wid)
-            source = (reg.source if reg else None) or "unknown"
-            self.index_workflow(
-                wid, text,
-                metadata={"name": name, "source": source, "purpose": purpose},
+            _index_candidate(
+                workflow_id=wid,
+                purpose=(reg.purpose if reg else None),
+                source=(reg.source if reg else None),
             )
-            count += 1
 
         # Lazy registrations (metadata only, no definition load).
         for wid in list(registry.lazy_workflow_ids()):
             lazy = registry._lazy.get(wid)  # type: ignore[attr-defined]
-            purpose = (lazy.purpose if lazy else None) or ""
-            text = BUILTIN_WORKFLOW_CAPABILITIES.get(wid) or purpose
-            if not text:
-                text = _workflow_id_to_description(wid)
-            name = _workflow_id_to_name(wid)
-            source = (lazy.source if lazy else None) or "unknown"
-            self.index_workflow(
-                wid, text,
-                metadata={"name": name, "source": source, "purpose": purpose},
+            _index_candidate(
+                workflow_id=wid,
+                purpose=(lazy.purpose if lazy else None),
+                source=(lazy.source if lazy else None),
             )
-            count += 1
 
         logger.info(
             "[workflow_capability_index] Indexed %d workflows "
-            "(%d eager, %d lazy)",
+            "(%d eager, %d lazy), skipped_non_authoritative=%d "
+            "skipped_missing_authoritative_text=%d",
             count,
             len(list(registry.eager_workflow_ids())),
             len(list(registry.lazy_workflow_ids())),
+            skipped_non_authoritative,
+            skipped_missing_purpose,
         )
         return count
 
@@ -312,6 +340,32 @@ def _workflow_id_to_description(workflow_id: str) -> str:
     """Derive a minimal fallback description from a workflow ID."""
     name = _workflow_id_to_name(workflow_id)
     return f"{name} workflow."
+
+
+def _normalise_capability_text(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
+
+
+def _resolve_authoritative_capability_text(
+    *,
+    workflow_id: str,
+    source: Any,
+    purpose: Any,
+) -> tuple[str | None, str]:
+    """Return authoritative routing text or a deterministic skip reason."""
+
+    _ = workflow_id
+    source_token = str(source or "").strip().lower()
+    if source_token != "vontology":
+        return None, "non_authoritative_source"
+
+    purpose_text = _normalise_capability_text(purpose)
+    if not purpose_text:
+        return None, "missing_authoritative_purpose"
+
+    return purpose_text, "authoritative_purpose"
 
 
 def build_workflow_capability_text(

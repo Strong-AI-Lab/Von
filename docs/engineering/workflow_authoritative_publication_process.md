@@ -91,6 +91,11 @@ startup under the `workflow_purity` logger key. The counters currently include:
 6. `builtin_capability_override_count`
 7. `non_vontology_discoverable_workflow_count`
 
+Capability indexing now also fails closed for routing: the workflow capability
+index should only index `source=vontology` workflows with non-empty
+authoritative narrative text. Non-authoritative registrations and textless
+workflows must be skipped rather than receiving guessed fallback routing prose.
+
 The checked-in CI baseline lives at:
 
 - `tests/backend/fixtures/workflow_purity_baseline.json`
