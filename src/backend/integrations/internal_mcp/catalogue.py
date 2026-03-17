@@ -9860,7 +9860,7 @@ def _workflow_bind_event(**kwargs):
 
 
 def _workflow_list_event_bindings(**kwargs):
-    """List event -> workflow bindings (persistent + optional env fallback)."""
+    """List authoritative persisted event -> workflow bindings."""
 
     from ...services.workflow_event_integration_service import (
         build_event_workflow_binding_diagnostics,
@@ -9869,7 +9869,6 @@ def _workflow_list_event_bindings(**kwargs):
 
     event_type = kwargs.get("event_type")
     enabled_only = kwargs.get("enabled_only", False)
-    include_env_fallback = kwargs.get("include_env_fallback", True)
     try:
         limit = int(kwargs.get("limit", 100))
     except (TypeError, ValueError):
@@ -9880,13 +9879,10 @@ def _workflow_list_event_bindings(**kwargs):
         event_type = None
     if not isinstance(enabled_only, bool):
         enabled_only = bool(enabled_only)
-    if not isinstance(include_env_fallback, bool):
-        include_env_fallback = bool(include_env_fallback)
 
     bindings = list_event_workflow_bindings(
         event_type=event_type,
         enabled_only=enabled_only,
-        include_env_fallback=include_env_fallback,
         limit=limit,
     )
     diagnostics = build_event_workflow_binding_diagnostics(bindings)
@@ -16136,7 +16132,6 @@ def _chat_introspect(
         )
 
         event_workflow_bindings_detailed = list_event_workflow_bindings(
-            include_env_fallback=True,
             limit=200,
         )
     except Exception:
@@ -21018,7 +21013,6 @@ def build_default_catalogue() -> MethodCatalogue:
                 optional={
                     "event_type": (str, type(None)),
                     "enabled_only": bool,
-                    "include_env_fallback": bool,
                     "limit": int,
                 },
                 allow_unknown=True,
@@ -21037,8 +21031,7 @@ def build_default_catalogue() -> MethodCatalogue:
             ),
             category="read",
             description=(
-                "List event bindings from persistent storage, with optional environment fallback "
-                "entries for legacy compatibility."
+                "List authoritative persisted event bindings from workflow storage."
             ),
         ),
         MethodDefinition(

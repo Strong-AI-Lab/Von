@@ -2860,7 +2860,7 @@
         },
         {
             "name": "workflow_list_event_bindings",
-            "description": "List event bindings from persistent storage, with optional environment fallback entries for legacy compatibility.",
+            "description": "List authoritative persisted event bindings from workflow storage.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2871,9 +2871,6 @@
                         ]
                     },
                     "enabled_only": {
-                        "type": "boolean"
-                    },
-                    "include_env_fallback": {
                         "type": "boolean"
                     },
                     "limit": {
