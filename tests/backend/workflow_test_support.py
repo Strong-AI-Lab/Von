@@ -31,6 +31,26 @@ from src.backend.workflows.durable.rumination_workflow import (
     RUMINATION_WORKFLOW_ID,
     get_rumination_workflow_registration,
 )
+from src.backend.workflows.durable.rag_sync_workflow import (
+    RAG_TEXT_RELATION_SYNC_WORKFLOW_ID,
+    get_rag_sync_workflow_registration,
+)
+from src.backend.workflows.durable.enrichment_workflow import (
+    ENRICHMENT_WORKFLOW_ID,
+    get_enrichment_workflow_registration,
+)
+from src.backend.workflows.durable.workflow_introspection_maintenance_workflow import (
+    WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
+    get_workflow_introspection_maintenance_registration,
+)
+from src.backend.workflows.durable.entity_identity_resolution_workflow import (
+    ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID,
+    get_entity_identity_resolution_workflow_registration,
+)
+from src.backend.workflows.durable.jira_task_incremental_import_workflow import (
+    JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID,
+    get_jira_task_incremental_import_workflow_registration,
+)
 from src.backend.workflows.durable.workflow_gap_recovery_workflow import (
     WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
     WORKFLOW_GAP_TEST_WORKFLOW_ID,
@@ -91,6 +111,26 @@ TEST_WORKFLOW_PURPOSES: dict[str, str] = {
         "Canonical conversation-turn execution workflow that derives required "
         "effects, runs postcondition checks, and gates completion claims."
     ),
+    RAG_TEXT_RELATION_SYNC_WORKFLOW_ID: (
+        "Synchronise Vontology text relations to the RAG store with checkpointed "
+        "batch upserts."
+    ),
+    ENRICHMENT_WORKFLOW_ID: (
+        "Generate missing text relations for concepts using a parameterised "
+        "enrichment workflow."
+    ),
+    WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID: (
+        "Diagnose workflow and prompt incidents, plan bounded repairs, and verify "
+        "maintenance outcomes."
+    ),
+    ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID: (
+        "Detect duplicate entities, apply confidence-scored resolutions, and "
+        "summarise identity-maintenance results."
+    ),
+    JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID: (
+        "Synchronise Jira tasks into Von via the shared incremental migration "
+        "runner."
+    ),
     PLANNING_WORKFLOW_ID: (
         "Forward inference workflow that proposes concrete, validated next "
         "actions including tool calls and workflow invocations."
@@ -124,6 +164,13 @@ AUTHORITATIVE_REASONING_RECOVERY_WORKFLOW_IDS: tuple[str, ...] = (
     PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID,
     WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
     WORKFLOW_GAP_TEST_WORKFLOW_ID,
+)
+AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS: tuple[str, ...] = (
+    RAG_TEXT_RELATION_SYNC_WORKFLOW_ID,
+    ENRICHMENT_WORKFLOW_ID,
+    WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
+    ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID,
+    JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID,
 )
 
 
@@ -194,4 +241,21 @@ def bootstrap_authoritative_reasoning_recovery_workflows() -> dict[str, Any]:
     return authority_service.bootstrap_workflow_concepts(
         registry=registry,
         target_workflow_ids=AUTHORITATIVE_REASONING_RECOVERY_WORKFLOW_IDS,
+    )
+
+
+def bootstrap_authoritative_support_maintenance_workflows() -> dict[str, Any]:
+    registry = WorkflowRegistry()
+    for registration in (
+        get_rag_sync_workflow_registration(),
+        get_enrichment_workflow_registration(),
+        get_workflow_introspection_maintenance_registration(),
+        get_entity_identity_resolution_workflow_registration(),
+        get_jira_task_incremental_import_workflow_registration(),
+    ):
+        registry.register(registration)
+
+    return authority_service.bootstrap_workflow_concepts(
+        registry=registry,
+        target_workflow_ids=AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS,
     )

@@ -979,6 +979,172 @@ def test_build_workflow_registry_bootstraps_reasoning_recovery_family_from_vonto
         assert str(registration.source or "").strip().lower() == "vontology"
 
 
+def test_bootstrap_publishes_explicit_step_conditions_for_support_maintenance_workflows(
+    _reset_mock_workflow_graph_db,
+):
+    from src.backend.workflows.durable.workflow_introspection_maintenance_workflow import (
+        WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
+    )
+    from src.backend.workflows.durable.jira_task_incremental_import_workflow import (
+        JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID,
+    )
+    from src.backend.workflows.vontology_loader import build_workflow_process_graph
+    from workflow_test_support import (
+        bootstrap_authoritative_support_maintenance_workflows,
+    )
+
+    report = bootstrap_authoritative_support_maintenance_workflows()
+    errors = (
+        (report.get("graph_publication") or {}).get("errors_by_workflow_id") or {}
+    )
+    assert WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID not in errors
+    assert JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID not in errors
+
+    maintenance_graph, maintenance_warnings = build_workflow_process_graph(
+        WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID
+    )
+    assert maintenance_graph is not None
+    assert maintenance_warnings == []
+    assert _graph_step_control_flow_conditions(
+        graph=maintenance_graph,
+        workflow_id=WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
+        state_id="assess",
+    ) == [
+        {
+            "to": authority_service._step_concept_id(
+                workflow_id=WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
+                state_id="failed",
+            ),
+            "reason": "on_failure",
+            "condition": {
+                "kind": "context_flag",
+                "key": "last_action_failed",
+                "expected": True,
+            },
+        },
+        {
+            "to": authority_service._step_concept_id(
+                workflow_id=WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
+                state_id="diagnose",
+            ),
+            "reason": "evidence_ready",
+            "condition": {
+                "kind": "context_flag",
+                "key": "maintenance_evidence",
+                "expected": True,
+            },
+        },
+        {
+            "to": authority_service._step_concept_id(
+                workflow_id=WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
+                state_id="failed",
+            ),
+            "reason": "missing_evidence",
+            "condition": {"kind": "always"},
+        },
+    ]
+
+    jira_graph, jira_warnings = build_workflow_process_graph(
+        JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID
+    )
+    assert jira_graph is not None
+    assert jira_warnings == []
+    assert _graph_step_control_flow_conditions(
+        graph=jira_graph,
+        workflow_id=JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID,
+        state_id="run_sync",
+    ) == [
+        {
+            "to": authority_service._step_concept_id(
+                workflow_id=JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID,
+                state_id="failed",
+            ),
+            "reason": "sync_failed",
+            "condition": {
+                "kind": "context_flag",
+                "key": "last_action_failed",
+                "expected": True,
+            },
+        },
+        {
+            "to": authority_service._step_concept_id(
+                workflow_id=JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID,
+                state_id="complete",
+            ),
+            "reason": "sync_complete",
+            "condition": {"kind": "always"},
+        },
+    ]
+
+
+def test_support_maintenance_workflow_runtime_identity_matches_authoritative_loader(
+    _reset_mock_workflow_graph_db,
+):
+    from src.backend.workflows.durable.registry_factory import (
+        build_workflow_registry_read_only,
+    )
+    from src.backend.workflows.vontology_loader import (
+        load_workflow_definition_from_vontology,
+    )
+    from workflow_test_support import (
+        AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS,
+        bootstrap_authoritative_support_maintenance_workflows,
+    )
+
+    bootstrap_authoritative_support_maintenance_workflows()
+    runtime_registry = build_workflow_registry_read_only()
+
+    for workflow_id in AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS:
+        registration = runtime_registry.get_registration(workflow_id)
+        assert registration is not None
+        assert str(registration.source or "").strip().lower() == "vontology"
+
+        authoritative_definition = load_workflow_definition_from_vontology(workflow_id)
+        assert authoritative_definition is not None
+
+        identity = build_workflow_definition_identity(
+            workflow_id=workflow_id,
+            source=registration.source,
+            definition=registration.definition,
+            authoritative_definition=authoritative_definition,
+        )
+        assert identity["runtime_definition_hash"]
+        assert identity["authoritative_definition_hash"]
+        assert identity["hash_mismatch"] is False
+
+
+def test_build_workflow_registry_bootstraps_support_maintenance_family_from_vontology(
+    _reset_mock_workflow_graph_db,
+    monkeypatch,
+):
+    from src.backend.db.mongo_client import get_db
+    from src.backend.services.workflow_discovery_service import (
+        invalidate_workflow_discovery_executability_caches,
+    )
+    from src.backend.workflows.durable.registry_factory import build_workflow_registry
+    from workflow_test_support import AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS
+
+    monkeypatch.setenv("VON_USE_MOCK_DB", "1")
+    monkeypatch.setenv("VON_DB_NAME", "test_von_db")
+    authority_service.clear_workflow_type_resolution_cache()
+
+    db = get_db()
+    if db is not None:
+        for collection_name in ("concepts", "text_relations", "text_values"):
+            try:
+                db.drop_collection(collection_name)
+            except Exception:
+                pass
+
+    invalidate_workflow_discovery_executability_caches()
+    registry = build_workflow_registry()
+
+    for workflow_id in AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS:
+        registration = registry.get_registration(workflow_id)
+        assert registration is not None
+        assert str(registration.source or "").strip().lower() == "vontology"
+
+
 def test_publish_canonical_graphs_reports_validation_failures(
     _reset_mock_workflow_graph_db,
     monkeypatch,

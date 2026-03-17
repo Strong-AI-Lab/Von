@@ -13,7 +13,10 @@ from src.backend.workflows.durable.models import (
     WorkflowInstanceStatus,
 )
 from src.backend.workflows.durable.scheduler import WorkflowScheduler
-from workflow_test_support import bootstrap_authoritative_reasoning_recovery_workflows
+from workflow_test_support import (
+    bootstrap_authoritative_reasoning_recovery_workflows,
+    bootstrap_authoritative_support_maintenance_workflows,
+)
 
 
 def _build_gateway() -> InternalMCPGateway:
@@ -500,6 +503,7 @@ class _InMemoryScheduleWorkflowManager:
 
 def test_workflow_list_definitions_exists_and_returns_data():
     bootstrap_authoritative_reasoning_recovery_workflows()
+    bootstrap_authoritative_support_maintenance_workflows()
     catalogue = build_default_catalogue()
     methods = catalogue.list_methods()
     assert "workflow_list_definitions" in methods
@@ -523,6 +527,9 @@ def test_workflow_list_definitions_exists_and_returns_data():
     # (rag_sync_workflow is registered in build_durable_workflow_registry)
     assert "#V#rag_text_relation_sync_workflow" in def_ids
     assert "#V#enrichment_workflow" in def_ids
+    assert "#V#workflow_introspection_maintenance_workflow" in def_ids
+    assert "#V#entity_identity_resolution_workflow" in def_ids
+    assert "#V#jira_task_incremental_import_workflow" in def_ids
     assert "#V#planning_workflow" in def_ids
     assert "#V#rumination_workflow" in def_ids
     assert "#V#parent_specificity_concept_dossier_workflow" in def_ids
@@ -537,6 +544,20 @@ def test_workflow_list_definitions_exists_and_returns_data():
         item["workflow_id"]: str(item.get("source") or "").strip().lower()
         for item in result["definitions"]
     }
+    assert source_by_workflow_id["#V#rag_text_relation_sync_workflow"] == "vontology"
+    assert source_by_workflow_id["#V#enrichment_workflow"] == "vontology"
+    assert (
+        source_by_workflow_id["#V#workflow_introspection_maintenance_workflow"]
+        == "vontology"
+    )
+    assert (
+        source_by_workflow_id["#V#entity_identity_resolution_workflow"]
+        == "vontology"
+    )
+    assert (
+        source_by_workflow_id["#V#jira_task_incremental_import_workflow"]
+        == "vontology"
+    )
     assert source_by_workflow_id["#V#planning_workflow"] == "vontology"
     assert source_by_workflow_id["#V#rumination_workflow"] == "vontology"
     assert (
@@ -593,6 +614,7 @@ def test_workflow_list_definitions_exists_and_returns_data():
 
 def test_workflow_list_definitions_gateway_invoke_success_path():
     bootstrap_authoritative_reasoning_recovery_workflows()
+    bootstrap_authoritative_support_maintenance_workflows()
     gateway = _build_gateway()
     result = gateway.invoke("workflow_list_definitions", {"limit": 10})
     payload = result.payload

@@ -122,6 +122,13 @@ _BOOTSTRAP_ONLY_REASONING_RECOVERY_WORKFLOW_IDS: tuple[str, ...] = (
     "#V#workflow_discovery_gap_recovery_workflow",
     "#V#workflow_gap_test_workflow",
 )
+_BOOTSTRAP_ONLY_SUPPORT_MAINTENANCE_WORKFLOW_IDS: tuple[str, ...] = (
+    "#V#rag_text_relation_sync_workflow",
+    "#V#enrichment_workflow",
+    "#V#workflow_introspection_maintenance_workflow",
+    "#V#entity_identity_resolution_workflow",
+    "#V#jira_task_incremental_import_workflow",
+)
 
 
 def _utc_now_iso() -> str:
@@ -544,15 +551,10 @@ def _register_python_defined_workflows(registry: WorkflowRegistry) -> None:
     # Conversation-turn workflows are now Vontology-authoritative. Only durable
     # workflow families that still originate in Python are registered here so
     # purity diagnostics can track the remaining hybrid surface.
-    registry.register(get_rag_sync_workflow_registration())
-    registry.register(get_enrichment_workflow_registration())
-    registry.register(get_workflow_introspection_maintenance_registration())
     registry.register(get_file_copy_typing_workflow_registration())
     registry.register(get_file_copy_upload_classification_workflow_registration())
     registry.register(get_file_copy_upload_handler_workflow_registration())
     registry.register(get_file_copy_interpretation_workflow_registration())
-    registry.register(get_entity_identity_resolution_workflow_registration())
-    registry.register(get_jira_task_incremental_import_workflow_registration())
 
 
 def _bootstrap_only_reasoning_recovery_workflow_registrations() -> tuple[Any, ...]:
@@ -588,6 +590,43 @@ def _bootstrap_only_reasoning_recovery_workflow_report(
     bootstrap_report = bootstrap_workflow_concepts(
         registry=temp_registry,
         target_workflow_ids=_BOOTSTRAP_ONLY_REASONING_RECOVERY_WORKFLOW_IDS,
+    )
+    report.update(bootstrap_report)
+    return report
+
+
+def _bootstrap_only_support_maintenance_workflow_registrations() -> tuple[Any, ...]:
+    """Return maintenance registrations used only to publish authoritative graphs."""
+
+    return (
+        get_rag_sync_workflow_registration(),
+        get_enrichment_workflow_registration(),
+        get_workflow_introspection_maintenance_registration(),
+        get_entity_identity_resolution_workflow_registration(),
+        get_jira_task_incremental_import_workflow_registration(),
+    )
+
+
+def _bootstrap_only_support_maintenance_workflow_report(
+    *,
+    bootstrap_allowed: bool,
+) -> Dict[str, Any]:
+    report: Dict[str, Any] = {
+        "enabled": bool(bootstrap_allowed),
+        "workflow_ids": list(_BOOTSTRAP_ONLY_SUPPORT_MAINTENANCE_WORKFLOW_IDS),
+    }
+    if not bootstrap_allowed:
+        return report
+
+    temp_registry = WorkflowRegistry(
+        definition_loader=load_workflow_definition_from_vontology,
+    )
+    for registration in _bootstrap_only_support_maintenance_workflow_registrations():
+        temp_registry.register(registration)
+
+    bootstrap_report = bootstrap_workflow_concepts(
+        registry=temp_registry,
+        target_workflow_ids=_BOOTSTRAP_ONLY_SUPPORT_MAINTENANCE_WORKFLOW_IDS,
     )
     report.update(bootstrap_report)
     return report
@@ -634,6 +673,10 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
         "enabled": bootstrap_allowed,
         "workflow_ids": list(_BOOTSTRAP_ONLY_REASONING_RECOVERY_WORKFLOW_IDS),
     }
+    bootstrap_only_support_maintenance_report: Dict[str, Any] = {
+        "enabled": bootstrap_allowed,
+        "workflow_ids": list(_BOOTSTRAP_ONLY_SUPPORT_MAINTENANCE_WORKFLOW_IDS),
+    }
 
     _register_python_defined_workflows(registry)
 
@@ -649,6 +692,11 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
             talk_representation_bootstrap_report["enabled"] = True
             bootstrap_only_reasoning_recovery_report = (
                 _bootstrap_only_reasoning_recovery_workflow_report(
+                    bootstrap_allowed=True
+                )
+            )
+            bootstrap_only_support_maintenance_report = (
+                _bootstrap_only_support_maintenance_workflow_report(
                     bootstrap_allowed=True
                 )
             )
@@ -673,6 +721,16 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
                     "#V#technical_scientific_talk_representation_workflow",
                     "#V#academic_presentation_instance_workflow",
                 ],
+                "error": str(exc),
+            }
+            bootstrap_only_reasoning_recovery_report = {
+                "enabled": True,
+                "workflow_ids": list(_BOOTSTRAP_ONLY_REASONING_RECOVERY_WORKFLOW_IDS),
+                "error": str(exc),
+            }
+            bootstrap_only_support_maintenance_report = {
+                "enabled": True,
+                "workflow_ids": list(_BOOTSTRAP_ONLY_SUPPORT_MAINTENANCE_WORKFLOW_IDS),
                 "error": str(exc),
             }
 
@@ -750,6 +808,9 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
         bootstrap_only_reasoning_recovery_report=(
             bootstrap_only_reasoning_recovery_report
         ),
+        bootstrap_only_support_maintenance_report=(
+            bootstrap_only_support_maintenance_report
+        ),
         bootstrap_allowed=bootstrap_allowed,
     )
 
@@ -763,6 +824,7 @@ def _launch_deferred_registry_work(
     paper_representation_bootstrap_report: Dict[str, Any],
     talk_representation_bootstrap_report: Dict[str, Any],
     bootstrap_only_reasoning_recovery_report: Dict[str, Any],
+    bootstrap_only_support_maintenance_report: Dict[str, Any],
     bootstrap_allowed: bool,
 ) -> None:
     """Launch background thread for bootstrap and parity inventory.
@@ -815,6 +877,9 @@ def _launch_deferred_registry_work(
             )
             authority_report["bootstrap_only_reasoning_recovery_workflows"] = (
                 bootstrap_only_reasoning_recovery_report
+            )
+            authority_report["bootstrap_only_support_maintenance_workflows"] = (
+                bootstrap_only_support_maintenance_report
             )
 
             inventory_snapshot = _build_workflow_parity_inventory(

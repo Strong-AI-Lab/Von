@@ -373,15 +373,20 @@ def test_registered_in_registry_factory():
         WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
     )
     from src.backend.workflows.durable.registry_factory import (
+        _build_workflow_registry,
         build_durable_action_registry,
-        build_workflow_registry,
     )
+    from workflow_test_support import (
+        bootstrap_authoritative_support_maintenance_workflows,
+    )
+
+    bootstrap_authoritative_support_maintenance_workflows()
 
     with patch(
         "src.backend.workflows.durable.registry_factory.discover_workflow_ids",
-        return_value=[],
+        return_value=[WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID],
     ):
-        workflow_registry = build_workflow_registry()
+        workflow_registry = _build_workflow_registry(allow_bootstrap=False)
         assert WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID in workflow_registry.all_workflow_ids()
 
     action_registry = build_durable_action_registry()
