@@ -18960,6 +18960,72 @@ class InternalMCPChatOrchestrator:
         def _orchestrator_duration_ms() -> float:
             return (time.perf_counter() - orchestrator_start) * 1000.0
 
+        def _finalise_selection_experience_record(
+            *,
+            result: OrchestratorResult,
+            outcome: str,
+            final_state: str | None = None,
+            completed: bool | None = None,
+            retry_attempts: int = 0,
+            completion_gate_repeat_attempts: int = 0,
+        ) -> None:
+            if not isinstance(selection_experience_id, str) or not selection_experience_id:
+                return
+
+            usage = result.llm_usage if isinstance(result.llm_usage, Mapping) else {}
+            safe_outcome = str(outcome or "").strip() or "unknown"
+            prompt_tokens = usage.get("prompt_tokens")
+            completion_tokens = usage.get("completion_tokens")
+            total_tokens = usage.get("total_tokens")
+            outcome_payload = {
+                "selected_workflow_id": (
+                    routing_info.workflow_id
+                    if isinstance(routing_info, WorkflowRoutingInfo)
+                    else None
+                ),
+                "final_state": final_state,
+                "completed": bool(completed) if completed is not None else None,
+                "retry_attempts": max(0, int(retry_attempts)),
+                "completion_gate_repeat_attempts": max(
+                    0, int(completion_gate_repeat_attempts)
+                ),
+                "orchestrator_duration_ms": float(
+                    result.orchestrator_duration_ms
+                    if isinstance(result.orchestrator_duration_ms, (int, float))
+                    else _orchestrator_duration_ms()
+                ),
+                "prompt_tokens": int(prompt_tokens)
+                if isinstance(prompt_tokens, int)
+                else 0,
+                "completion_tokens": int(completion_tokens)
+                if isinstance(completion_tokens, int)
+                else 0,
+                "total_tokens": int(total_tokens)
+                if isinstance(total_tokens, int)
+                else 0,
+                "workflow_gap_recovery_applied": any(
+                    isinstance(entry, Mapping)
+                    and entry.get("type") == "workflow_gap_recovery"
+                    and entry.get("status") == "applied"
+                    for entry in result.aux_llm_calls
+                ),
+            }
+            if safe_outcome == "follow_up_required":
+                outcome_payload["completion_gate_requires_follow_up"] = True
+
+            try:
+                from ...services.workflow_selection_experience import (
+                    finalise_selection_experience,
+                )
+
+                finalise_selection_experience(
+                    experience_id=selection_experience_id,
+                    outcome=safe_outcome,
+                    outcome_metadata=outcome_payload,
+                )
+            except Exception:
+                pass
+
         def _build_tool_call_parse_error_result(
             tool_call_parse_error: ToolCallParsingError,
             *,
@@ -19581,6 +19647,7 @@ class InternalMCPChatOrchestrator:
             )
 
         routing_info: WorkflowRoutingInfo | None = None
+        selection_experience_id: str | None = None
         if prompt_requirements_force_tool_pipeline:
             routing_info = WorkflowRoutingInfo(
                 workflow_id=TOOL_CALLING_WORKFLOW_ID,
@@ -19686,6 +19753,11 @@ class InternalMCPChatOrchestrator:
                 turn_text=effective_prompt_for_routing,
                 discovered_workflows=discovered_matches or None,
             )
+            selector_policy = (
+                dict(selector_prompt.policy_recommendation)
+                if isinstance(selector_prompt.policy_recommendation, Mapping)
+                else {}
+            )
 
             def _emit_selector_progress(info: Mapping[str, Any]) -> None:
                 payload = dict(info)
@@ -19718,36 +19790,71 @@ class InternalMCPChatOrchestrator:
                 _emit_progress_local(payload)
 
             try:
-                selector_response_text, classifier_model, selector_candidate = (
-                    self._run_llm_with_fallbacks(
-                        stage="workflow_dispatch",
-                        policy_stage="classifier",
-                        prompt="Select workflow",
-                        context=[
-                            {
-                                "role": "system",
-                                "content": selector_prompt.prompt_text,
-                            }
-                        ],
-                        default_client=llm_client,
-                        default_model=model,
-                        policy_state=policy_state,
-                        registry_snapshot=registry_snapshot,
-                        user_concept_id=user_concept_id,
-                        org_concept_id=org_concept_id,
-                        llm_calls_log=llm_calls,
-                        aux_log=aux_llm_calls,
-                        record_llm_call=_record_llm_call,
-                        emit_progress=_emit_selector_progress,
+                classifier_model = None
+                selector_candidate = None
+                if (
+                    isinstance(selector_policy.get("recommended_workflow_id"), str)
+                    and selector_policy.get("guidance_mode") == "direct"
+                ):
+                    _emit_progress_local(
+                        {
+                            "status": "thinking",
+                            "stage": "workflow_dispatch",
+                            "phase": "workflow_dispatch",
+                            "phase_label": "Applying learned workflow policy",
+                            "workflow_match_count": len(discovered_matches),
+                            "workflow_candidate_count": len(discovered_matches)
+                            + len(excluded_discovered_matches),
+                        }
                     )
-                )
-                selector_selection = self._workflow_selector.resolve_selection(
-                    raw_response=selector_response_text,
-                    prompt_id=selector_prompt.prompt_id,
-                    prompt_used=selector_prompt.prompt_text,
-                    discovered_workflow_ids=selector_prompt.discovered_workflow_ids,
-                )
+                    selector_selection = self._workflow_selector.resolve_policy_selection(
+                        workflow_id=str(selector_policy.get("recommended_workflow_id")),
+                        prompt_id=selector_prompt.prompt_id,
+                        prompt_used=selector_prompt.prompt_text,
+                        discovered_workflow_ids=selector_prompt.discovered_workflow_ids,
+                        confidence_score=float(
+                            selector_policy.get("confidence_score", 0.0)
+                        ),
+                        reasoning=str(selector_policy.get("reasoning") or ""),
+                        selection_metadata=selector_policy,
+                    )
+                else:
+                    selector_response_text, classifier_model, selector_candidate = (
+                        self._run_llm_with_fallbacks(
+                            stage="workflow_dispatch",
+                            policy_stage="classifier",
+                            prompt="Select workflow",
+                            context=[
+                                {
+                                    "role": "system",
+                                    "content": selector_prompt.prompt_text,
+                                }
+                            ],
+                            default_client=llm_client,
+                            default_model=model,
+                            policy_state=policy_state,
+                            registry_snapshot=registry_snapshot,
+                            user_concept_id=user_concept_id,
+                            org_concept_id=org_concept_id,
+                            llm_calls_log=llm_calls,
+                            aux_log=aux_llm_calls,
+                            record_llm_call=_record_llm_call,
+                            emit_progress=_emit_selector_progress,
+                        )
+                    )
+                    selector_selection = self._workflow_selector.resolve_selection(
+                        raw_response=selector_response_text,
+                        prompt_id=selector_prompt.prompt_id,
+                        prompt_used=selector_prompt.prompt_text,
+                        discovered_workflow_ids=selector_prompt.discovered_workflow_ids,
+                    )
                 routing_duration_ms = (time.perf_counter() - selector_start) * 1000.0
+                selection_source = (
+                    selector_selection.selection_source
+                    if isinstance(selector_selection.selection_source, str)
+                    and selector_selection.selection_source.strip()
+                    else "selector"
+                )
                 selected_workflow_name = _resolve_selected_workflow_name(
                     selector_selection.workflow_id
                 )
@@ -19759,14 +19866,14 @@ class InternalMCPChatOrchestrator:
                     prompt_id=selector_selection.prompt_id,
                     discovered_workflow_ids=selector_selection.discovered_workflow_ids,
                     routing_duration_ms=routing_duration_ms,
-                    source="selector",
+                    source=selection_source,
                     confidence_score=selector_selection.confidence_score,
                     reasoning=selector_selection.reasoning,
                 )
                 selection_rationale = _derive_workflow_selection_rationale(
                     selected_workflow_id=selector_selection.workflow_id,
                     selector_verdict=selector_selection.verdict,
-                    selector_source="selector",
+                    selector_source=selection_source,
                     candidate_workflow_ids=selector_selection.discovered_workflow_ids,
                     explicit_reasoning=selector_selection.reasoning,
                 )
@@ -19792,6 +19899,7 @@ class InternalMCPChatOrchestrator:
                         "type": "workflow_selector",
                         "workflow_id": selector_selection.workflow_id,
                         "verdict": selector_selection.verdict,
+                        "selection_source": selection_source,
                         "prompt_id": selector_selection.prompt_id,
                         "policy_stage": "classifier",
                         "model_name": classifier_model,
@@ -19807,6 +19915,13 @@ class InternalMCPChatOrchestrator:
                         "routing_duration_ms": routing_duration_ms,
                         "confidence_score": selector_selection.confidence_score,
                         "reasoning": selector_selection.reasoning,
+                        "policy_guidance_mode": selector_policy.get("guidance_mode"),
+                        "policy_snapshot_id": selector_policy.get("snapshot_id"),
+                        "policy_candidate_scores": list(
+                            selector_policy.get("candidate_scores", ())
+                        )
+                        if isinstance(selector_policy.get("candidate_scores"), list)
+                        else None,
                         "selection_rationale": selection_rationale,
                     }
                 )
@@ -19814,6 +19929,7 @@ class InternalMCPChatOrchestrator:
                     trace.metadata["workflow_selector"] = {
                         "workflow_id": selector_selection.workflow_id,
                         "verdict": selector_selection.verdict,
+                        "selection_source": selection_source,
                         "prompt_id": selector_selection.prompt_id,
                         "policy_stage": "classifier",
                         "model_name": classifier_model,
@@ -19834,14 +19950,22 @@ class InternalMCPChatOrchestrator:
                         "routing_duration_ms": routing_duration_ms,
                         "confidence_score": selector_selection.confidence_score,
                         "reasoning": selector_selection.reasoning,
+                        "policy_guidance_mode": selector_policy.get("guidance_mode"),
+                        "policy_snapshot_id": selector_policy.get("snapshot_id"),
+                        "policy_candidate_scores": list(
+                            selector_policy.get("candidate_scores", ())
+                        )
+                        if isinstance(selector_policy.get("candidate_scores"), list)
+                        else None,
                         "selection_rationale": selection_rationale,
                     }
-                # Phase 3: record selection experience tuple.
+                # Phase 4: record selection experience tuple for later outcome
+                # finalisation and policy training.
                 try:
                     from ...services.workflow_selection_experience import (
                         record_selection_experience,
                     )
-                    record_selection_experience(
+                    selection_experience = record_selection_experience(
                         turn_id=str(turn_id or ""),
                         query=effective_prompt_for_routing[:500],
                         candidate_workflow_ids=list(
@@ -19849,11 +19973,14 @@ class InternalMCPChatOrchestrator:
                         ),
                         selected_workflow_id=selector_selection.workflow_id,
                         verdict=selector_selection.verdict,
+                        selection_source=selection_source,
+                        selection_metadata=selector_selection.selection_metadata,
                         confidence_score=selector_selection.confidence_score,
                         reasoning=selector_selection.reasoning,
                         model_name=str(classifier_model or ""),
                         routing_duration_ms=routing_duration_ms,
                     )
+                    selection_experience_id = selection_experience.experience_id
                 except Exception:
                     pass  # Best-effort; never block routing.
             except Exception as exc:
@@ -19888,6 +20015,27 @@ class InternalMCPChatOrchestrator:
                         "workflow_selection_rationale": selection_rationale,
                     }
                 )
+                try:
+                    from ...services.workflow_selection_experience import (
+                        record_selection_experience,
+                    )
+
+                    selection_experience = record_selection_experience(
+                        turn_id=str(turn_id or ""),
+                        query=effective_prompt_for_routing[:500],
+                        candidate_workflow_ids=(),
+                        selected_workflow_id=CHAT_ASSISTANT_WORKFLOW_ID,
+                        verdict="fallback",
+                        selection_source="default",
+                        selection_metadata={"selector_error": str(exc)},
+                        confidence_score=0.0,
+                        reasoning="selector_exception",
+                        model_name="",
+                        routing_duration_ms=0.0,
+                    )
+                    selection_experience_id = selection_experience.experience_id
+                except Exception:
+                    pass
 
         _STATIC_SELECTOR_VERDICTS = frozenset(
             {"plain_response", "tool_seeking", "summarisation", "narration", "fallback"}
@@ -19923,10 +20071,15 @@ class InternalMCPChatOrchestrator:
         )
         selector_requests_narration = selector_verdict == "narration"
         selector_requests_custom_workflow = bool(
-            selector_verdict
-            and selector_verdict not in _STATIC_SELECTOR_VERDICTS
-            and selected_workflow_id_text
-            and selected_workflow_id_text.lower() == selector_verdict
+            selected_workflow_id_text
+            and (
+                selector_verdict == "policy_selected"
+                or (
+                    selector_verdict
+                    and selector_verdict not in _STATIC_SELECTOR_VERDICTS
+                    and selected_workflow_id_text.lower() == selector_verdict
+                )
+            )
         )
         write_tool_candidates_for_routing = sorted(
             {
@@ -24607,6 +24760,12 @@ class InternalMCPChatOrchestrator:
                 render_plan=_result_render_plan(),
             )
             result = _maybe_apply_workflow_gap_recovery(result)
+            _finalise_selection_experience_record(
+                result=result,
+                outcome="completed",
+                final_state="plain_response",
+                completed=True,
+            )
             _persist_trace(status="completed")
             return result
 
@@ -24684,6 +24843,12 @@ class InternalMCPChatOrchestrator:
                         render_plan=_result_render_plan(),
                     )
                     result = _maybe_apply_workflow_gap_recovery(result)
+                    _finalise_selection_experience_record(
+                        result=result,
+                        outcome="completed" if wf_result.completed else "failed",
+                        final_state=wf_result.final_state,
+                        completed=wf_result.completed,
+                    )
                     _persist_trace(status="completed")
                     return result
                 self._logger.warning(
@@ -24728,6 +24893,12 @@ class InternalMCPChatOrchestrator:
                 orchestrator_duration_ms=_orchestrator_duration_ms(),
                 workflow_routing=routing_info,
                 render_plan=_result_render_plan(),
+            )
+            _finalise_selection_experience_record(
+                result=result,
+                outcome="failed",
+                final_state="tool_workflow_unavailable",
+                completed=False,
             )
             _persist_trace(status="completed")
             return result
@@ -24859,14 +25030,34 @@ class InternalMCPChatOrchestrator:
                 orchestrator_duration_ms=_orchestrator_duration_ms(),
                 workflow_routing=routing_info,
             )
+            _finalise_selection_experience_record(
+                result=result,
+                outcome="failed",
+                final_state="tool_workflow_missing",
+                completed=False,
+            )
             _persist_trace(status="completed")
             return result
 
         # Unpack the workflow result.
         if tc_result.data.get("orchestrator_result") is not None:
             # Handler produced a pre-built OrchestratorResult (error case).
+            prebuilt_result = tc_result.data["orchestrator_result"]
+            if isinstance(prebuilt_result, OrchestratorResult):
+                _finalise_selection_experience_record(
+                    result=prebuilt_result,
+                    outcome="failed",
+                    final_state=tc_result.final_state,
+                    completed=tc_result.completed,
+                    retry_attempts=int(
+                        tc_result.data.get("missing_tool_call_retry_attempts", 0)
+                    ),
+                    completion_gate_repeat_attempts=int(
+                        tc_result.data.get("completion_gate_loop_attempts", 0)
+                    ),
+                )
             _persist_trace(status="completed")
-            return tc_result.data["orchestrator_result"]
+            return prebuilt_result
 
         final_response = tc_result.data.get("final_response", "")
         if not isinstance(final_response, str):
@@ -24936,6 +25127,24 @@ class InternalMCPChatOrchestrator:
             render_plan=_result_render_plan(),
         )
         result = _maybe_apply_workflow_gap_recovery(result)
+        _finalise_selection_experience_record(
+            result=result,
+            outcome=(
+                "completed"
+                if gate_safe_to_claim_completion and not gate_requires_follow_up
+                else "follow_up_required"
+                if tc_result.completed
+                else "failed"
+            ),
+            final_state=tc_result.final_state,
+            completed=tc_result.completed,
+            retry_attempts=int(
+                tc_result.data.get("missing_tool_call_retry_attempts", 0)
+            ),
+            completion_gate_repeat_attempts=int(
+                tc_result.data.get("completion_gate_loop_attempts", 0)
+            ),
+        )
         _persist_trace(status=terminal_trace_status)
         return result
 
