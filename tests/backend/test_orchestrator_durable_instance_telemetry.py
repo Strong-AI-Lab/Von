@@ -8,6 +8,9 @@ import pytest
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
 )
+from src.backend.workflows.durable.workflow_instance_submission_service import (
+    WorkflowInstanceSubmissionResult,
+)
 from src.backend.workflows import (
     WorkflowDefinition,
     WorkflowStateSpec,
@@ -64,11 +67,71 @@ def _build_orchestrator() -> InternalMCPChatOrchestrator:
     return InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
 
 
+def _patch_submit_verified_instance(monkeypatch) -> None:
+    def _fake_submit_verified_workflow_instance(**kwargs: Any):
+        manager = kwargs["manager"]
+        workflow_id = str(kwargs.get("workflow_id") or "").strip()
+        inputs = kwargs.get("inputs")
+        source_event_type = kwargs.get("source_event_type")
+        source_event_id = kwargs.get("source_event_id")
+        event_idempotency_key = kwargs.get("event_idempotency_key")
+        if (
+            isinstance(source_event_type, str)
+            and source_event_type.strip()
+            and isinstance(source_event_id, str)
+            and source_event_id.strip()
+            and isinstance(event_idempotency_key, str)
+            and event_idempotency_key.strip()
+        ):
+            instance_id, created_new = manager.create_instance_for_event(
+                workflow_id=workflow_id,
+                user_id=str(kwargs.get("user_id") or "anonymous"),
+                org_id=str(kwargs.get("org_id") or "default"),
+                namespace=str(kwargs.get("namespace") or "anonymous/default"),
+                event_idempotency_key=event_idempotency_key,
+                source_event_type=source_event_type,
+                source_event_id=source_event_id,
+                inputs=dict(inputs or {}),
+                max_retries=int(kwargs.get("max_retries", 3) or 0),
+            )
+            status = "pending" if created_new else "reused"
+        else:
+            instance_id = manager.create_instance(
+                workflow_id,
+                user_id=str(kwargs.get("user_id") or "anonymous"),
+                org_id=str(kwargs.get("org_id") or "default"),
+                namespace=str(kwargs.get("namespace") or "anonymous/default"),
+                inputs=dict(inputs or {}),
+                max_retries=int(kwargs.get("max_retries", 3) or 0),
+            )
+            created_new = True
+            status = "pending"
+
+        return WorkflowInstanceSubmissionResult(
+            success=True,
+            workflow_id=workflow_id,
+            status=status,
+            instance_id=instance_id,
+            verification={
+                "preflight_passed": True,
+                "postflight_passed": True,
+                "runnable_verification_success": True,
+            },
+            created_new=created_new,
+        )
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.workflow_instance_submission_service.submit_verified_workflow_instance",
+        _fake_submit_verified_workflow_instance,
+    )
+
+
 def test_execute_workflow_persists_completed_durable_instance_with_turn_summary(
     monkeypatch,
 ) -> None:
     orchestrator = _build_orchestrator()
     fake_manager = _FakeWorkflowInstanceManager()
+    _patch_submit_verified_instance(monkeypatch)
 
     monkeypatch.setattr(
         "src.backend.workflows.durable.WorkflowInstanceManager",
@@ -234,6 +297,7 @@ def test_execute_workflow_marks_durable_instance_failed_on_exception(
 ) -> None:
     orchestrator = _build_orchestrator()
     fake_manager = _FakeWorkflowInstanceManager()
+    _patch_submit_verified_instance(monkeypatch)
 
     monkeypatch.setattr(
         "src.backend.workflows.durable.WorkflowInstanceManager",
@@ -294,6 +358,7 @@ def test_execute_workflow_materialises_terminal_effect_evidence_on_gateway_path(
 ) -> None:
     orchestrator = _build_orchestrator()
     fake_manager = _FakeWorkflowInstanceManager()
+    _patch_submit_verified_instance(monkeypatch)
 
     monkeypatch.setattr(
         "src.backend.workflows.durable.WorkflowInstanceManager",

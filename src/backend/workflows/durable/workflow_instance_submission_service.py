@@ -103,6 +103,7 @@ class WorkflowInstanceSubmissionResult:
     status: str
     instance_id: str | None
     verification: Mapping[str, Any]
+    created_new: bool | None = None
     error_code: str | None = None
     error: str | None = None
 
@@ -115,6 +116,8 @@ class WorkflowInstanceSubmissionResult:
         }
         if isinstance(self.instance_id, str) and self.instance_id:
             payload["instance_id"] = self.instance_id
+        if isinstance(self.created_new, bool):
+            payload["created_new"] = self.created_new
         if isinstance(self.error_code, str) and self.error_code:
             payload["error_code"] = self.error_code
         if isinstance(self.error, str) and self.error:
@@ -861,6 +864,7 @@ def submit_verified_workflow_instance(
     """Create a durable workflow instance only when runnable verification passes."""
 
     workflow_id = str(workflow_id or "").strip()
+    inputs_payload = dict(inputs or {})
     preflight = verify_workflow_runnable(workflow_id)
     verification_payload = _build_submission_verification_payload(
         preflight=preflight,
@@ -879,27 +883,53 @@ def submit_verified_workflow_instance(
                 "instance was not created."
             ),
             verification=verification_payload,
+            created_new=None,
         )
 
-    instance_id = manager.create_instance(
-        workflow_id,
-        user_id=user_id,
-        org_id=org_id,
-        namespace=namespace,
-        inputs=dict(inputs or {}),
-        schedule_id=schedule_id,
-        max_retries=max_retries,
-        source_event_type=source_event_type,
-        source_event_id=source_event_id,
-        event_idempotency_key=event_idempotency_key,
+    use_event_idempotency_submission = all(
+        isinstance(value, str) and value.strip()
+        for value in (
+            source_event_type,
+            source_event_id,
+            event_idempotency_key,
+        )
     )
+    created_new = True
+    if use_event_idempotency_submission:
+        instance_id, created_new = manager.create_instance_for_event(
+            workflow_id=workflow_id,
+            user_id=user_id,
+            org_id=org_id,
+            namespace=namespace,
+            event_idempotency_key=str(event_idempotency_key).strip(),
+            source_event_type=str(source_event_type).strip(),
+            source_event_id=str(source_event_id).strip(),
+            inputs=inputs_payload,
+            schedule_id=schedule_id,
+            max_retries=max_retries,
+        )
+    else:
+        instance_id = manager.create_instance(
+            workflow_id,
+            user_id=user_id,
+            org_id=org_id,
+            namespace=namespace,
+            inputs=inputs_payload,
+            schedule_id=schedule_id,
+            max_retries=max_retries,
+            source_event_type=source_event_type,
+            source_event_id=source_event_id,
+            event_idempotency_key=event_idempotency_key,
+        )
 
-    postflight = verify_workflow_runnable(workflow_id)
+    # Idempotent event reuse should not retroactively fail a previously created
+    # instance if the workflow definition drifts after the original launch.
+    postflight = preflight if not created_new else verify_workflow_runnable(workflow_id)
     verification_payload = _build_submission_verification_payload(
         preflight=preflight,
         postflight=postflight,
     )
-    if not postflight.runnable_verification_success:
+    if created_new and not postflight.runnable_verification_success:
         manager.mark_failed(
             instance_id,
             error=f"workflow_postflight_not_runnable:{workflow_id}",
@@ -916,14 +946,16 @@ def submit_verified_workflow_instance(
                 "instance marked failed."
             ),
             verification=verification_payload,
+            created_new=True,
         )
 
     return WorkflowInstanceSubmissionResult(
         success=True,
         workflow_id=workflow_id,
-        status="pending",
+        status="pending" if created_new else "reused",
         instance_id=instance_id,
         verification=verification_payload,
+        created_new=created_new,
     )
 
 

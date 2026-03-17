@@ -4,7 +4,9 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from src.backend.workflows.durable.workflow_instance_submission_service import (
+    WorkflowRunnableVerification,
     invalidate_workflow_runnable_verification_cache,
+    submit_verified_workflow_instance,
     verify_workflow_runnable,
 )
 from src.backend.workflows.engine import (
@@ -78,6 +80,25 @@ def _make_action_registry(*, supports_action: bool, fallback: bool = False) -> M
     else:
         registry.has.return_value = False
     return registry
+
+
+def _make_verification(
+    *,
+    workflow_id: str = "#V#candidate_workflow",
+    runnable: bool = True,
+) -> WorkflowRunnableVerification:
+    return WorkflowRunnableVerification(
+        workflow_id=workflow_id,
+        conceptual_representation_success=runnable,
+        executable_registration_success=runnable,
+        runnable_verification_success=runnable,
+        fallback_action_routing_enabled=False,
+        discovered_action_ids=(),
+        unsupported_action_ids=(),
+        integrity_issues=(),
+        warnings=(),
+        errors=(),
+    )
 
 
 def test_verify_workflow_runnable_rejects_initial_vacuous_step() -> None:
@@ -586,3 +607,66 @@ def test_verify_workflow_runnable_accepts_resolved_subworkflow_contract() -> Non
     assert verification.runnable_verification_success is True
     assert "workflow_subworkflow_unresolved" not in verification.errors
     assert "workflow_subworkflow_contract_mismatch" not in verification.errors
+
+
+def test_submit_verified_workflow_instance_uses_event_idempotent_creation() -> None:
+    manager = MagicMock()
+    manager.create_instance_for_event.return_value = ("instance-evt-1", True)
+    verification = _make_verification()
+
+    with patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.verify_workflow_runnable",
+        side_effect=[verification, verification],
+    ) as mock_verify:
+        result = submit_verified_workflow_instance(
+            manager=manager,
+            workflow_id="#V#candidate_workflow",
+            user_id="#V#user_alice",
+            org_id="#V#org_nao",
+            namespace="#V#user_alice/#V#org_nao",
+            inputs={"seed": "abc-123"},
+            source_event_type="task.created",
+            source_event_id="task-1",
+            event_idempotency_key="evt:task.created:task-1",
+        )
+
+    assert result.success is True
+    assert result.instance_id == "instance-evt-1"
+    assert result.created_new is True
+    assert result.status == "pending"
+    assert result.verification["runnable_verification_success"] is True
+    manager.create_instance_for_event.assert_called_once()
+    manager.create_instance.assert_not_called()
+    assert mock_verify.call_count == 2
+
+
+def test_submit_verified_workflow_instance_preserves_idempotent_reuse_without_postflight_failure() -> None:
+    manager = MagicMock()
+    manager.create_instance_for_event.return_value = ("instance-evt-existing", False)
+    verification = _make_verification()
+
+    with patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.verify_workflow_runnable",
+        return_value=verification,
+    ) as mock_verify:
+        result = submit_verified_workflow_instance(
+            manager=manager,
+            workflow_id="#V#candidate_workflow",
+            user_id="#V#user_alice",
+            org_id="#V#org_nao",
+            namespace="#V#user_alice/#V#org_nao",
+            inputs={"seed": "abc-123"},
+            source_event_type="task.created",
+            source_event_id="task-1",
+            event_idempotency_key="evt:task.created:task-1",
+        )
+
+    assert result.success is True
+    assert result.instance_id == "instance-evt-existing"
+    assert result.created_new is False
+    assert result.status == "reused"
+    assert result.verification["postflight_passed"] is True
+    manager.create_instance_for_event.assert_called_once()
+    manager.create_instance.assert_not_called()
+    manager.mark_failed.assert_not_called()
+    mock_verify.assert_called_once_with("#V#candidate_workflow")

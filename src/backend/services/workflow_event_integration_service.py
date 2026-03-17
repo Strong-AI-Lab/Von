@@ -20,6 +20,9 @@ from .feature_flags import (
 )
 from ..workflows.durable.models import EventWorkflowBinding
 from ..workflows.durable.startup import get_instance_manager
+from ..workflows.durable.workflow_instance_submission_service import (
+    submit_verified_workflow_instance,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -967,8 +970,9 @@ def _launch_single_event_binding(
         }
 
     instance_create_started = perf_counter()
-    instance_id, created_new = manager.create_instance_for_event(
-        resolved_workflow_id,
+    submission = submit_verified_workflow_instance(
+        manager=manager,
+        workflow_id=resolved_workflow_id,
         user_id=(user_id or "anonymous"),
         org_id=(org_id or "default"),
         namespace=namespace,
@@ -981,6 +985,32 @@ def _launch_single_event_binding(
         (perf_counter() - instance_create_started) * 1000.0,
         3,
     )
+    if not submission.success:
+        return {
+            "success": False,
+            "triggered": False,
+            "outcome": "not_triggered",
+            "reason": str(submission.error_code or "workflow_submission_failed"),
+            "hint": str(
+                submission.error
+                or "Verified workflow submission rejected this event launch."
+            ),
+            "workflow_id": resolved_workflow_id,
+            "instance_id": submission.instance_id,
+            "event_type": event_type,
+            "event_id": safe_event_id,
+            "idempotency_key": event_idempotency_key,
+            "idempotent_reused": False,
+            "verification": dict(submission.verification),
+            "submission_status": submission.status,
+            "launch_check_timings_ms": {
+                **launch_check_timings_ms,
+                "total_ms": round((perf_counter() - launch_checks_started) * 1000.0, 3),
+            },
+        }
+
+    instance_id = submission.instance_id
+    created_new = submission.created_new is not False
 
     logger.info(
         "[workflow_event] %s event=%s workflow=%s instance=%s created_new=%s",
@@ -1009,6 +1039,8 @@ def _launch_single_event_binding(
         "event_id": safe_event_id,
         "idempotency_key": event_idempotency_key,
         "idempotent_reused": not created_new,
+        "verification": dict(submission.verification),
+        "submission_status": submission.status,
         "cadence_policy": cadence_gate.get("policy"),
         "cadence_policy_source": cadence_gate.get("policy_source"),
         "launch_check_timings_ms": {
