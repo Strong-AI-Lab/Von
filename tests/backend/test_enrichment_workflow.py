@@ -409,16 +409,21 @@ class TestEnrichmentRegistration:
         from src.backend.workflows.durable.enrichment_workflow import (
             ENRICHMENT_WORKFLOW_ID,
         )
+        from workflow_test_support import (
+            bootstrap_authoritative_support_maintenance_workflows,
+        )
+
+        bootstrap_authoritative_support_maintenance_workflows()
 
         with (
             patch(
                 "src.backend.workflows.durable.registry_factory.discover_workflow_ids",
-                return_value=[],
+                return_value=[ENRICHMENT_WORKFLOW_ID],
             ),
         ):
             from src.backend.workflows.durable.registry_factory import (
-                build_workflow_registry,
+                _build_workflow_registry,
             )
 
-            registry = build_workflow_registry()
+            registry = _build_workflow_registry(allow_bootstrap=False)
             assert ENRICHMENT_WORKFLOW_ID in registry.all_workflow_ids()

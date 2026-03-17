@@ -139,6 +139,15 @@ PARENT_SPECIFICITY_DOSSIER_WORKFLOW_ID = (
 PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID = (
     "#V#parent_specificity_rumination_workflow"
 )
+RAG_TEXT_RELATION_SYNC_WORKFLOW_ID = "#V#rag_text_relation_sync_workflow"
+ENRICHMENT_WORKFLOW_ID = "#V#enrichment_workflow"
+WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID = (
+    "#V#workflow_introspection_maintenance_workflow"
+)
+ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID = "#V#entity_identity_resolution_workflow"
+JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID = (
+    "#V#jira_task_incremental_import_workflow"
+)
 PLANNING_WORKFLOW_ID = "#V#planning_workflow"
 RUMINATION_WORKFLOW_ID = "#V#rumination_workflow"
 
@@ -170,10 +179,15 @@ CANONICAL_CHAT_WORKFLOW_IDS: tuple[str, ...] = (
 
 # Additional built-in workflows that should be published when registered.
 CANONICAL_DURABLE_WORKFLOW_IDS: tuple[str, ...] = (
+    RAG_TEXT_RELATION_SYNC_WORKFLOW_ID,
+    ENRICHMENT_WORKFLOW_ID,
     FILE_COPY_TYPING_WORKFLOW_ID,
     FILE_COPY_INTERPRETATION_WORKFLOW_ID,
     FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID,
     FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
+    WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
+    ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID,
+    JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID,
     PLANNING_WORKFLOW_ID,
     PARENT_SPECIFICITY_DOSSIER_WORKFLOW_ID,
     PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID,
@@ -1447,6 +1461,337 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
                 state_id="complete",
                 action_id="rumination.finalise",
             ),
+            _CanonicalStepPublicationSpec(state_id="failed"),
+        ),
+    ),
+    RAG_TEXT_RELATION_SYNC_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state="collect",
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id="collect",
+                action_id="rag_sync.collect_docs",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="batch",
+                        reason="docs_collected",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "collected_docs",
+                            "expected": True,
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="complete",
+                        reason="no_docs_to_sync",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="batch",
+                action_id="rag_sync.prepare_batch",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="upsert",
+                        reason="batch_prepared",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "current_batch",
+                            "expected": True,
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="complete",
+                        reason="all_batches_processed",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="upsert",
+                action_id="rag_sync.upsert_batch",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="batch",
+                        reason="more_batches",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "has_more_batches",
+                            "expected": True,
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="complete",
+                        reason="all_batches_done",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="complete",
+                action_id="rag_sync.finalise",
+            ),
+            _CanonicalStepPublicationSpec(state_id="failed"),
+        ),
+    ),
+    ENRICHMENT_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state="collect",
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id="collect",
+                action_id="enrichment.collect_candidates",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="batch",
+                        reason="candidates_found",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "candidate_ids",
+                            "expected": True,
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="complete",
+                        reason="no_candidates",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="batch",
+                action_id="enrichment.prepare_batch",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="generate",
+                        reason="batch_ready",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "current_batch",
+                            "expected": True,
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="complete",
+                        reason="all_processed",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="generate",
+                action_id="enrichment.process_batch",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="batch",
+                        reason="more_batches_pending",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "has_more_batches",
+                            "expected": True,
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="complete",
+                        reason="processing_complete",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="complete",
+                action_id="enrichment.finalise",
+            ),
+            _CanonicalStepPublicationSpec(state_id="failed"),
+        ),
+    ),
+    WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state="assess",
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id="assess",
+                action_id="workflow_introspection.assess_context",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="failed",
+                        reason="on_failure",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "last_action_failed",
+                            "expected": True,
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="diagnose",
+                        reason="evidence_ready",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "maintenance_evidence",
+                            "expected": True,
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="failed",
+                        reason="missing_evidence",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="diagnose",
+                action_id="workflow_introspection.diagnose_conflation",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="failed",
+                        reason="on_failure",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "last_action_failed",
+                            "expected": True,
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="plan",
+                        reason="diagnosis_ready",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "maintenance_diagnosis",
+                            "expected": True,
+                        },
+                    ),
+                ),
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="plan",
+                action_id="workflow_introspection.plan_repairs",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="failed",
+                        reason="on_failure",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "last_action_failed",
+                            "expected": True,
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="apply",
+                        reason="planned",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="apply",
+                action_id="workflow_introspection.apply_repairs",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="failed",
+                        reason="on_failure",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "last_action_failed",
+                            "expected": True,
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="verify",
+                        reason="applied_or_skipped",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="verify",
+                action_id="workflow_introspection.verify_repairs",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="failed",
+                        reason="on_failure",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "last_action_failed",
+                            "expected": True,
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="complete",
+                        reason="verified_or_noop",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="complete",
+                action_id="workflow_introspection.finalise",
+            ),
+            _CanonicalStepPublicationSpec(state_id="failed"),
+        ),
+    ),
+    ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state="scan",
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id="scan",
+                action_id="identity_resolution.scan_candidates",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="apply",
+                        reason="recommendations_ready",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "duplicate_recommendations",
+                            "expected": True,
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="complete",
+                        reason="nothing_to_apply",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="apply",
+                action_id="identity_resolution.apply_resolutions",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="complete",
+                        reason="apply_complete",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id="complete",
+                action_id="identity_resolution.finalise",
+            ),
+            _CanonicalStepPublicationSpec(state_id="failed"),
+        ),
+    ),
+    JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state="run_sync",
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id="run_sync",
+                action_id="jira_task_incremental_import.run_sync",
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="failed",
+                        reason="sync_failed",
+                        condition_spec={
+                            "kind": "context_flag",
+                            "key": "last_action_failed",
+                            "expected": True,
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state="complete",
+                        reason="sync_complete",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
+            ),
+            _CanonicalStepPublicationSpec(state_id="complete"),
             _CanonicalStepPublicationSpec(state_id="failed"),
         ),
     ),

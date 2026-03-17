@@ -55,8 +55,16 @@ def test_incremental_import_workflow_executes_shared_runner(monkeypatch) -> None
 
 def test_registry_factory_registers_incremental_import_workflow(monkeypatch) -> None:
     import src.backend.workflows.durable.registry_factory as factory
+    from workflow_test_support import (
+        bootstrap_authoritative_support_maintenance_workflows,
+    )
 
-    monkeypatch.setattr(factory, "discover_workflow_ids", lambda: [])
+    bootstrap_authoritative_support_maintenance_workflows()
+    monkeypatch.setattr(
+        factory,
+        "discover_workflow_ids",
+        lambda: [mod.JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID],
+    )
     monkeypatch.setattr(
         factory,
         "build_workflow_concept_authority_report",
