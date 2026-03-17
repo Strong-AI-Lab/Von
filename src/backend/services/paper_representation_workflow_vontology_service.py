@@ -27,7 +27,6 @@ from ..workflows.vontology_loader import (
 from ..workflows.workflow_definition_identity_service import (
     validate_workflow_definition_contract,
 )
-from ..workflows.workflow_registry import WorkflowRegistration, WorkflowRegistry
 
 SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID = "#V#scholarly_paper_representation_workflow"
 ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID = "#V#arxiv_paper_representation_workflow"
@@ -931,28 +930,22 @@ def _step_concept_ids_for_spec(
     return tuple(ordered_ids)
 
 
-def _build_publication_registry() -> tuple[
-    WorkflowRegistry,
-    dict[str, authority_service._CanonicalWorkflowPublicationSpec],
+def _build_publication_specs() -> dict[
+    str,
+    authority_service._CanonicalWorkflowPublicationSpec,
 ]:
-    registry = WorkflowRegistry()
-    specs = {
+    return {
         SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID: _build_scholarly_workflow_spec(),
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID: _build_arxiv_workflow_spec(),
     }
-    for workflow_id, spec in specs.items():
-        registry.register(
-            WorkflowRegistration(
-                workflow_id=workflow_id,
-                definition=authority_service._build_definition_from_publication_spec(
-                    workflow_id=workflow_id,
-                    spec=spec,
-                ),
-                purpose=_workflow_content(workflow_id),
-                source="built_in",
-            )
-        )
-    return registry, specs
+
+
+def _build_publication_purposes(workflow_ids: Sequence[str]) -> dict[str, str]:
+    return {
+        workflow_id: _workflow_content(workflow_id)
+        for workflow_id in workflow_ids
+        if isinstance(workflow_id, str) and workflow_id.strip()
+    }
 
 
 def _validate_existing_materialisation(
@@ -1015,8 +1008,12 @@ def _validate_existing_materialisation(
 def bootstrap_canonical_paper_representation_workflows() -> dict[str, Any]:
     """Publish and validate the canonical scholarly-paper workflow family."""
 
-    registry, specs = _build_publication_registry()
+    specs = _build_publication_specs()
     target_workflow_ids = tuple(specs.keys())
+    publication_definitions = authority_service._build_definition_map_from_publication_specs(
+        specs
+    )
+    publication_purposes = _build_publication_purposes(target_workflow_ids)
     already_current, existing_validation_by_workflow_id = (
         _validate_existing_materialisation(target_workflow_ids=target_workflow_ids)
     )
@@ -1041,16 +1038,12 @@ def bootstrap_canonical_paper_representation_workflows() -> dict[str, Any]:
             "skipped": True,
         }
     else:
-        original_specs = dict(authority_service._CANONICAL_WORKFLOW_PUBLICATION_SPECS)
-        authority_service._CANONICAL_WORKFLOW_PUBLICATION_SPECS.update(specs)
-        try:
-            publication_report = authority_service.publish_canonical_chat_workflow_graphs(
-                registry=registry,
-                target_workflow_ids=target_workflow_ids,
-            )
-        finally:
-            authority_service._CANONICAL_WORKFLOW_PUBLICATION_SPECS.clear()
-            authority_service._CANONICAL_WORKFLOW_PUBLICATION_SPECS.update(original_specs)
+        publication_report = authority_service.publish_canonical_chat_workflow_graphs(
+            target_workflow_ids=target_workflow_ids,
+            publication_specs=specs,
+            publication_definitions=publication_definitions,
+            publication_purposes=publication_purposes,
+        )
 
     typed_workflow_ids: list[str] = []
     typed_step_ids: list[str] = []

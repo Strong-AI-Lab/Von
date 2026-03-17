@@ -6,9 +6,9 @@
     "env_event_binding_count": 0,
     "legacy_selector_mode_count": 1,
     "non_vontology_discoverable_workflow_count": 4,
-    "remaining_python_workflow_family_count": 16
+    "remaining_python_workflow_family_count": 14
   },
-  "generated_at_utc": "2026-03-17T22:54:02.832635+00:00",
+  "generated_at_utc": "2026-03-17T23:11:18.740348+00:00",
   "report_schema_version": "workflow_purity_report.v1",
   "schema_version": "workflow_purity_baseline.v1"
 }

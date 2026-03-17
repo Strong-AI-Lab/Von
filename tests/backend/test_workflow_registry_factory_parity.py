@@ -372,3 +372,89 @@ def test_build_registry_prioritises_vontology_on_overlap(monkeypatch):
         snapshot.get("registry_sources", {}).get("source_by_workflow_id", {})
     )
     assert source_by_workflow_id.get(overlap_workflow_id) == "vontology"
+
+
+def test_runtime_registry_bootstrap_excludes_representation_publication_reports(
+    monkeypatch,
+):
+    from src.backend.services import workflow_capability_service
+
+    class _InlineThread:
+        def __init__(self, *, target, name, daemon):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    class _FakeCapabilityIndex:
+        def index_from_registry(self, registry):
+            return len(list(registry.all_workflow_ids()))
+
+    monkeypatch.setattr(registry_factory, "_register_python_defined_workflows", lambda registry: None)
+    monkeypatch.setattr(registry_factory, "discover_workflow_ids", lambda: [])
+    monkeypatch.setattr(
+        registry_factory,
+        "bootstrap_workflow_concepts",
+        lambda registry: {
+            "counts": {
+                "registry_workflows": len(list(registry.all_workflow_ids())),
+                "created": 0,
+                "updated": 0,
+                "unchanged": 0,
+                "errors": 0,
+            },
+            "required_type_ids": [],
+            "preferred_type_id": None,
+            "created_workflow_ids": [],
+            "updated_workflow_ids": [],
+            "unchanged_workflow_ids": [],
+            "errors_by_workflow_id": {},
+        },
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "build_workflow_concept_authority_report",
+        lambda registry: {
+            "drift_detected": False,
+            "counts": {
+                "missing_concepts": 0,
+                "missing_required_type": 0,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "_bootstrap_only_reasoning_recovery_workflow_report",
+        lambda *, bootstrap_allowed: {
+            "enabled": bootstrap_allowed,
+            "workflow_ids": ["#V#planning_workflow"],
+        },
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "_bootstrap_only_support_maintenance_workflow_report",
+        lambda *, bootstrap_allowed: {
+            "enabled": bootstrap_allowed,
+            "workflow_ids": ["#V#rag_text_relation_sync_workflow"],
+        },
+    )
+    monkeypatch.setattr(registry_factory, "batch_fetch_workflow_purposes", lambda workflow_ids: {})
+    monkeypatch.setattr(
+        workflow_capability_service,
+        "get_workflow_capability_index",
+        lambda: _FakeCapabilityIndex(),
+    )
+    monkeypatch.setattr(registry_factory.threading, "Thread", _InlineThread)
+    monkeypatch.setattr(registry_factory, "_apply_workflow_parity_policy", lambda inventory_snapshot: None)
+    monkeypatch.setattr(registry_factory, "_last_inventory_snapshot", None)
+
+    registry_factory._build_workflow_registry(allow_bootstrap=True)
+    snapshot = registry_factory.get_workflow_registry_inventory_snapshot()
+
+    authority_report = snapshot.get("workflow_authority", {})
+    assert "paper_representation_bootstrap" not in authority_report
+    assert "talk_representation_bootstrap" not in authority_report
+    assert authority_report.get("bootstrap_only_reasoning_recovery_workflows") == {
+        "enabled": True,
+        "workflow_ids": ["#V#planning_workflow"],
+    }

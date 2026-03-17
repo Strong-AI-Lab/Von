@@ -101,12 +101,6 @@ from ..workflow_concept_authority_service import (
     build_workflow_concept_authority_report,
 )
 from ..workflow_purity_report import build_workflow_purity_report
-from ...services.paper_representation_workflow_vontology_service import (
-    bootstrap_canonical_paper_representation_workflows,
-)
-from ...services.talk_representation_workflow_vontology_service import (
-    bootstrap_canonical_talk_representation_workflows,
-)
 
 logger = logging.getLogger(__name__)
 _inventory_lock = Lock()
@@ -661,14 +655,6 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
     bootstrap_enabled = os.getenv("VON_WORKFLOW_CONCEPT_BOOTSTRAP_ENABLE", "1")
     bootstrap_enabled = bootstrap_enabled.strip().lower() in {"1", "true", "yes", "on"}
     bootstrap_allowed = bool(allow_bootstrap and bootstrap_enabled)
-    paper_representation_bootstrap_report: Dict[str, Any] = {
-        "enabled": bootstrap_allowed,
-        "workflow_ids": [],
-    }
-    talk_representation_bootstrap_report: Dict[str, Any] = {
-        "enabled": bootstrap_allowed,
-        "workflow_ids": [],
-    }
     bootstrap_only_reasoning_recovery_report: Dict[str, Any] = {
         "enabled": bootstrap_allowed,
         "workflow_ids": list(_BOOTSTRAP_ONLY_REASONING_RECOVERY_WORKFLOW_IDS),
@@ -682,14 +668,9 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
 
     if bootstrap_allowed:
         try:
-            paper_representation_bootstrap_report = (
-                bootstrap_canonical_paper_representation_workflows()
-            )
-            paper_representation_bootstrap_report["enabled"] = True
-            talk_representation_bootstrap_report = (
-                bootstrap_canonical_talk_representation_workflows()
-            )
-            talk_representation_bootstrap_report["enabled"] = True
+            # Representation workflow families are now materialised explicitly by
+            # their own Vontology publication services. The runtime registry must
+            # consume that published authority rather than re-bootstrap it here.
             bootstrap_only_reasoning_recovery_report = (
                 _bootstrap_only_reasoning_recovery_workflow_report(
                     bootstrap_allowed=True
@@ -703,26 +684,9 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
             _resolve_subworkflow_definition.cache_clear()
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(
-                "representation_workflow_bootstrap_failed: %s",
+                "workflow_bootstrap_report_build_failed: %s",
                 exc,
             )
-            paper_representation_bootstrap_report = {
-                "enabled": True,
-                "workflow_ids": [
-                    "#V#scholarly_paper_representation_workflow",
-                    "#V#arxiv_paper_representation_workflow",
-                ],
-                "error": str(exc),
-            }
-            talk_representation_bootstrap_report = {
-                "enabled": True,
-                "workflow_ids": [
-                    "#V#talk_representation_workflow",
-                    "#V#technical_scientific_talk_representation_workflow",
-                    "#V#academic_presentation_instance_workflow",
-                ],
-                "error": str(exc),
-            }
             bootstrap_only_reasoning_recovery_report = {
                 "enabled": True,
                 "workflow_ids": list(_BOOTSTRAP_ONLY_REASONING_RECOVERY_WORKFLOW_IDS),
@@ -803,8 +767,6 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
     _launch_deferred_registry_work(
         registry=registry,
         discovered_workflow_ids=discovered_workflow_ids,
-        paper_representation_bootstrap_report=paper_representation_bootstrap_report,
-        talk_representation_bootstrap_report=talk_representation_bootstrap_report,
         bootstrap_only_reasoning_recovery_report=(
             bootstrap_only_reasoning_recovery_report
         ),
@@ -821,8 +783,6 @@ def _launch_deferred_registry_work(
     *,
     registry: WorkflowRegistry,
     discovered_workflow_ids: List[str],
-    paper_representation_bootstrap_report: Dict[str, Any],
-    talk_representation_bootstrap_report: Dict[str, Any],
     bootstrap_only_reasoning_recovery_report: Dict[str, Any],
     bootstrap_only_support_maintenance_report: Dict[str, Any],
     bootstrap_allowed: bool,
@@ -869,12 +829,6 @@ def _launch_deferred_registry_work(
                 registry=registry,
             )
             authority_report["bootstrap"] = bootstrap_report
-            authority_report["paper_representation_bootstrap"] = (
-                paper_representation_bootstrap_report
-            )
-            authority_report["talk_representation_bootstrap"] = (
-                talk_representation_bootstrap_report
-            )
             authority_report["bootstrap_only_reasoning_recovery_workflows"] = (
                 bootstrap_only_reasoning_recovery_report
             )

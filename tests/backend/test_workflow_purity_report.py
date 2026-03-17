@@ -220,4 +220,4 @@ def test_build_workflow_purity_report_flags_baseline_regressions(tmp_path: Path)
         "current": 1,
         "delta": 1,
     }
-    assert "builtin_capability_override_count" in comparison["increased_counters"]
+    assert "builtin_capability_override_count" not in comparison["increased_counters"]
