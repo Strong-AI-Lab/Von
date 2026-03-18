@@ -1,5 +1,6 @@
 import json
 
+from src.backend.workflows.durable import registry_factory
 from src.backend.workflows.durable.registry_factory import (
     build_workflow_purity_registry_snapshot,
 )
@@ -23,3 +24,22 @@ def test_workflow_purity_baseline_has_no_regression() -> None:
         "Workflow purity counters regressed relative to the checked-in baseline.\n"
         f"{json.dumps(report, indent=2, sort_keys=True)}"
     )
+
+
+def test_workflow_purity_registry_snapshot_skips_live_vontology_resolution(
+    monkeypatch,
+) -> None:
+    def _unexpected(*args, **kwargs):
+        raise AssertionError("purity snapshot must not call live Vontology helpers")
+
+    monkeypatch.setattr(
+        registry_factory,
+        "_build_expected_authoritative_workflow_report",
+        _unexpected,
+    )
+    monkeypatch.setattr(registry_factory, "discover_workflow_ids", _unexpected)
+    monkeypatch.setattr(registry_factory, "_launch_deferred_registry_work", _unexpected)
+
+    registry = build_workflow_purity_registry_snapshot()
+
+    assert list(registry.all_workflow_ids()) == []

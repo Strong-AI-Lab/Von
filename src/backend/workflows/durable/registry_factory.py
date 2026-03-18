@@ -573,10 +573,31 @@ def _register_python_defined_workflows(registry: WorkflowRegistry) -> None:
     return None
 
 
-def build_workflow_purity_registry_snapshot() -> WorkflowRegistry:
-    """Build the actual runtime registry path for workflow-purity checks."""
+def _build_workflow_purity_source_snapshot() -> WorkflowRegistry:
+    """Build a deterministic registry snapshot for purity reporting.
 
-    return build_workflow_registry_read_only()
+    The workflow-purity report is a regression gate over code-authored runtime
+    authority surfaces. It must stay usable in standalone operator runs even if
+    live Vontology discovery or authoritative graph loading is slow. Keep this
+    snapshot intentionally DB-free and limited to code-registered workflow
+    sources only.
+    """
+
+    registry = WorkflowRegistry()
+    _register_python_defined_workflows(registry)
+    return registry
+
+
+def build_workflow_purity_registry_snapshot() -> WorkflowRegistry:
+    """Build the registry snapshot used by standalone workflow-purity checks.
+
+    This intentionally excludes live workflow discovery, authoritative graph
+    loading, and deferred registry diagnostics. Those paths are valuable for
+    runtime parity checks, but they make the purity report unsuitable as a fast
+    operator-visible regression gate.
+    """
+
+    return _build_workflow_purity_source_snapshot()
 
 
 # ---------------------------------------------------------------------------

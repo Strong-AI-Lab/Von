@@ -231,9 +231,16 @@ def _collect_registry_sources(registry: Any | None) -> dict[str, Any]:
     for workflow_id in workflow_ids:
         source = "unknown"
         try:
-            registration = registry.get_registration(workflow_id)
-            if registration is not None:
-                source = str(getattr(registration, "source", "") or "").strip() or "unknown"
+            get_source = getattr(registry, "get_registration_source", None)
+            if callable(get_source):
+                source = str(get_source(workflow_id, resolve_lazy=False) or "").strip() or "unknown"
+            else:
+                registration = registry.get_registration(workflow_id)
+                if registration is not None:
+                    source = (
+                        str(getattr(registration, "source", "") or "").strip()
+                        or "unknown"
+                    )
         except Exception:
             source = "unknown"
         source_by_workflow_id[workflow_id] = source

@@ -218,6 +218,42 @@ class WorkflowRegistry:
             return reg
         return self._resolve_lazy(workflow_id)
 
+    def get_registration_source(
+        self,
+        workflow_id: str,
+        *,
+        resolve_lazy: bool = False,
+    ) -> str | None:
+        """Return the registration source for *workflow_id*.
+
+        Introspection/reporting call paths often need source metadata without
+        triggering lazy definition resolution. By default this consults eager
+        registrations first, then lazy placeholders, and only resolves lazily
+        when ``resolve_lazy`` is explicitly requested.
+        """
+
+        reg = self._workflows.get(workflow_id)
+        if reg is not None:
+            source = reg.source
+            if isinstance(source, str) and source.strip():
+                return source.strip()
+            return None
+
+        lazy = self._lazy.get(workflow_id)
+        if lazy is not None and not resolve_lazy:
+            source = lazy.source
+            if isinstance(source, str) and source.strip():
+                return source.strip()
+            return None
+
+        resolved = self._resolve_lazy(workflow_id) if resolve_lazy else None
+        if resolved is None:
+            return None
+        source = resolved.source
+        if isinstance(source, str) and source.strip():
+            return source.strip()
+        return None
+
     def all_workflow_ids(self) -> Iterable[str]:
         """Return all known workflow IDs (both eager and lazy)."""
         ids = set(self._workflows.keys())
