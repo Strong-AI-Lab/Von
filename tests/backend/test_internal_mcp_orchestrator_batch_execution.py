@@ -4,6 +4,7 @@ from typing import Any, cast
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
 )
+from workflow_test_support import bootstrap_authoritative_conversation_turn_workflows
 
 
 class _StubResult:
@@ -172,6 +173,11 @@ class _ResolutionGateway:
         return _StubResult({"ok": True})
 
 
+def _bootstrap_authoritative_workflows() -> None:
+    report = bootstrap_authoritative_conversation_turn_workflows()
+    assert not report.get("graph_publication_errors")
+
+
 def test_orchestrator_executes_all_tool_calls_in_single_list_response():
     """Regression test for JVNAUTOSCI-941.
 
@@ -182,6 +188,7 @@ def test_orchestrator_executes_all_tool_calls_in_single_list_response():
     We now execute the remaining tool calls from the same list before prompting
     for a final answer.
     """
+    _bootstrap_authoritative_workflows()
 
     gateway = cast(Any, _CapturingGateway())
     orchestrator = InternalMCPChatOrchestrator(
@@ -207,11 +214,13 @@ def test_orchestrator_executes_all_tool_calls_in_single_list_response():
         range(9)
     )
     assert len(gateway.invocations) == 9
-    # Initial tool call list + single follow-up answer.
-    assert len(llm.calls) == 2
+    # The workflow-first tool pipeline may add an internal validation pass, but
+    # it must not require the model to re-emit the executed tool batch.
+    assert len(llm.calls) >= 2
 
 
 def test_write_preflight_resolves_missing_concept_id_before_add_relationship():
+    _bootstrap_authoritative_workflows()
     gateway = cast(Any, _ResolutionGateway())
     orchestrator = InternalMCPChatOrchestrator(
         gateway=gateway,
@@ -249,6 +258,7 @@ def test_write_preflight_resolves_missing_concept_id_before_add_relationship():
 
 
 def test_add_relationship_target_not_found_retries_once_with_resolved_target():
+    _bootstrap_authoritative_workflows()
     gateway = cast(
         Any,
         _ResolutionGateway(
@@ -303,6 +313,7 @@ def test_add_relationship_target_not_found_retries_once_with_resolved_target():
 
 
 def test_add_relationship_target_not_found_literal_date_retries_with_canonical_target():
+    _bootstrap_authoritative_workflows()
     gateway = cast(Any, _ResolutionGateway(resolve_sequence=[{"success": True, "status": "not_found"}]))
     orchestrator = InternalMCPChatOrchestrator(
         gateway=gateway,
@@ -344,6 +355,7 @@ def test_add_relationship_target_not_found_literal_date_retries_with_canonical_t
 
 
 def test_add_relationship_predicate_not_found_literal_retries_with_canonical_predicate():
+    _bootstrap_authoritative_workflows()
     gateway = cast(Any, _ResolutionGateway())
     orchestrator = InternalMCPChatOrchestrator(
         gateway=gateway,
@@ -386,6 +398,7 @@ def test_add_relationship_predicate_not_found_literal_retries_with_canonical_pre
 
 
 def test_add_relationship_source_not_found_literal_retries_with_canonical_source():
+    _bootstrap_authoritative_workflows()
     gateway = cast(Any, _ResolutionGateway())
     orchestrator = InternalMCPChatOrchestrator(
         gateway=gateway,

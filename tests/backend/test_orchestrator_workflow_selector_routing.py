@@ -55,7 +55,9 @@ class _StubGateway:
     enabled = True
 
     def describe_methods(self) -> dict[str, Any]:
-        return {}
+        return {
+            "renderer_resolve_applicability": {"category": "read"},
+        }
 
     def invoke(self, _tool_name: str, _payload: Mapping[str, Any]):
         raise AssertionError("Gateway should not be invoked in this test")
@@ -195,7 +197,9 @@ def test_workflow_selector_routes_to_narration_workflow(monkeypatch):
     # Ensure we actually invoked the selector and then narration.
     assert len(llm.calls) == 3
     assert llm.calls[0]["prompt"] == "Select workflow"
-    assert llm.calls[2]["prompt"] == "Generate <spoken> talk track"
+    narration_prompt = str(llm.calls[2]["prompt"] or "")
+    assert "<spoken>" in narration_prompt
+    assert "spoken" in narration_prompt.lower()
 
     aux_types = [
         entry.get("type") for entry in result.aux_llm_calls if isinstance(entry, dict)
@@ -2642,7 +2646,7 @@ def test_selector_fires_without_presenter_mode(monkeypatch):
         if isinstance(e, dict) and e.get("type") == "workflow_selector"
     )
     assert selector_entry["workflow_id"] == TOOL_CALLING_WORKFLOW_ID
-    assert selector_entry["verdict"] == "tool_seeking"
+    assert selector_entry["verdict"] == "rag_selected"
 
 
 # ---------------------------------------------------------------------------
@@ -2696,8 +2700,14 @@ def test_selector_receives_discovered_workflows(monkeypatch):
         None,
     )
     assert selector_entry is not None
-    assert selector_entry.get("discovered_workflow_ids", []) == []
-    assert selector_entry.get("discovery_candidate_count") == 1
+    discovered_ids = set(selector_entry.get("discovered_workflow_ids", []))
+    assert "#V#custom_analysis_workflow" not in discovered_ids
+    assert {
+        CHAT_ASSISTANT_WORKFLOW_ID,
+        TOOL_CALLING_WORKFLOW_ID,
+        CHAT_NARRATION_WORKFLOW_ID,
+    }.issubset(discovered_ids)
+    assert selector_entry.get("discovery_candidate_count") == 4
     assert selector_entry.get("discovery_excluded_count") == 1
 
     # Since the workflow is not in the registry, execute_workflow returns None
@@ -2749,7 +2759,13 @@ def test_non_executable_discovered_workflow_filtered_by_default(monkeypatch):
         None,
     )
     assert selector_entry is not None
-    assert selector_entry.get("discovered_workflow_ids", []) == []
+    discovered_ids = set(selector_entry.get("discovered_workflow_ids", []))
+    assert TODO_REFRESH_WORKFLOW_ID not in discovered_ids
+    assert {
+        CHAT_ASSISTANT_WORKFLOW_ID,
+        TOOL_CALLING_WORKFLOW_ID,
+        CHAT_NARRATION_WORKFLOW_ID,
+    }.issubset(discovered_ids)
     assert selector_entry.get("discovery_excluded_count") == 1
 
     execution_entry = next(
@@ -2864,7 +2880,7 @@ def test_workflow_selector_emits_dispatch_progress_events(monkeypatch):
     assert workflow_dispatch_events
     assert any(
         entry.get("phase_label") == "Selecting workflow"
-        and entry.get("workflow_candidate_count") == 1
+        and entry.get("workflow_candidate_count") == 3
         for entry in workflow_dispatch_events
     )
     assert any(
@@ -2879,13 +2895,13 @@ def test_workflow_selector_emits_dispatch_progress_events(monkeypatch):
     selected_event = next(
         entry
         for entry in workflow_dispatch_events
-        if entry.get("workflow_selector_verdict") == "tool_seeking"
+        if entry.get("workflow_selector_verdict") == "rag_selected"
         and entry.get("status") == "thinking"
     )
     assert selected_event.get("phase_label") == "Workflow selected"
     assert selected_event.get("selected_workflow_id") == TOOL_CALLING_WORKFLOW_ID
     assert result.workflow_routing is not None
-    assert result.workflow_routing.verdict == "tool_seeking"
+    assert result.workflow_routing.verdict == "rag_selected"
 
 
 # ---------------------------------------------------------------------------
@@ -3148,7 +3164,7 @@ def test_plain_response_has_routing_info(monkeypatch):
 
     assert result.workflow_routing is not None
     assert isinstance(result.workflow_routing, WorkflowRoutingInfo)
-    assert result.workflow_routing.verdict == "plain_response"
+    assert result.workflow_routing.verdict == "rag_selected"
     assert result.workflow_routing.workflow_id == CHAT_ASSISTANT_WORKFLOW_ID
     assert result.workflow_routing.source == "selector"
 
@@ -3264,7 +3280,7 @@ def test_workflow_selector_uses_provider_aware_classifier_fallback(monkeypatch):
 
     assert result.response_text == "Hello! How can I help?"
     assert result.workflow_routing is not None
-    assert result.workflow_routing.verdict == "plain_response"
+    assert result.workflow_routing.verdict == "rag_selected"
     assert len(llm.calls) == 1
     assert llm.calls[0]["prompt"] == "Hi there"
 
@@ -3327,6 +3343,8 @@ def test_plain_response_overridden_to_tool_pipeline_for_mutative_intent(monkeypa
         [
             "plain_response",  # selector verdict
             "I can create that relationship in the knowledge base.",  # tool-calling planner
+            "Relationship creation needs tool execution.",
+            "Final response after tool workflow.",
         ]
     )
 
@@ -3339,7 +3357,7 @@ def test_plain_response_overridden_to_tool_pipeline_for_mutative_intent(monkeypa
     )
 
     assert result.workflow_routing is not None
-    assert result.workflow_routing.verdict == "tool_seeking"
+    assert result.workflow_routing.verdict == "tool_contract_override"
     assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
     assert result.workflow_routing.source == "selector_override"
 
@@ -3381,7 +3399,7 @@ def test_plain_response_overridden_when_prompt_requires_tool_verification(monkey
     )
 
     assert result.workflow_routing is not None
-    assert result.workflow_routing.verdict == "tool_seeking"
+    assert result.workflow_routing.verdict == "tool_contract_preselected"
     assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
     assert result.workflow_routing.source == "selector_override"
 
@@ -3427,7 +3445,7 @@ def test_incidental_url_prompt_stays_on_plain_response_path(monkeypatch):
 
     assert result.workflow_routing is not None
     assert result.workflow_routing.workflow_id == CHAT_ASSISTANT_WORKFLOW_ID
-    assert result.workflow_routing.verdict == "plain_response"
+    assert result.workflow_routing.verdict == "rag_selected"
     assert result.tool_invocations == ()
     assert not any(
         isinstance(entry, dict)
@@ -3479,7 +3497,7 @@ def test_url_read_prompt_uses_tool_workflow_preflight_and_forces_url_tool(monkey
 
     assert result.workflow_routing is not None
     assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
-    assert result.workflow_routing.verdict == "tool_seeking"
+    assert result.workflow_routing.verdict == "tool_contract_preselected"
     assert result.workflow_routing.source == "selector_override"
     extract_call = next(
         (
@@ -3539,6 +3557,8 @@ def test_write_intent_memory_rehydrates_for_same_session_continuation(monkeypatc
             [
                 "plain_response",
                 "First tool-calling turn.",
+                "Follow-through response.",
+                "Final response after tool workflow.",
             ]
         ),
         model=None,
@@ -3546,7 +3566,7 @@ def test_write_intent_memory_rehydrates_for_same_session_continuation(monkeypatc
         conversation_session_id="session-1328-same",
     )
     assert first.workflow_routing is not None
-    assert first.workflow_routing.verdict == "tool_seeking"
+    assert first.workflow_routing.verdict == "tool_contract_override"
     assert first.workflow_routing.source == "selector_override"
 
     second = orchestrator.run(
@@ -3556,6 +3576,8 @@ def test_write_intent_memory_rehydrates_for_same_session_continuation(monkeypatc
             [
                 "plain_response",
                 "Continuation turn.",
+                "Follow-through response.",
+                "Final response after tool workflow.",
             ]
         ),
         model=None,
@@ -3563,7 +3585,7 @@ def test_write_intent_memory_rehydrates_for_same_session_continuation(monkeypatc
         conversation_session_id="session-1328-same",
     )
     assert second.workflow_routing is not None
-    assert second.workflow_routing.verdict == "tool_seeking"
+    assert second.workflow_routing.verdict == "tool_contract_override"
     assert second.workflow_routing.source == "selector_override"
 
     rehydrate_entry = next(
@@ -3609,6 +3631,8 @@ def test_write_intent_memory_rejects_cross_session_continuation(monkeypatch):
             [
                 "plain_response",
                 "First tool-calling turn.",
+                "Follow-through response.",
+                "Final response after tool workflow.",
             ]
         ),
         model=None,
@@ -3616,7 +3640,7 @@ def test_write_intent_memory_rejects_cross_session_continuation(monkeypatch):
         conversation_session_id="session-1328-a",
     )
     assert first.workflow_routing is not None
-    assert first.workflow_routing.verdict == "tool_seeking"
+    assert first.workflow_routing.verdict == "tool_contract_override"
     assert first.workflow_routing.source == "selector_override"
 
     second = orchestrator.run(
@@ -3633,7 +3657,7 @@ def test_write_intent_memory_rejects_cross_session_continuation(monkeypatch):
         conversation_session_id="session-1328-b",
     )
     assert second.workflow_routing is not None
-    assert second.workflow_routing.verdict == "plain_response"
+    assert second.workflow_routing.verdict == "rag_selected"
     assert second.workflow_routing.source == "selector"
 
     aux_types = [
@@ -3676,6 +3700,8 @@ def test_write_intent_memory_rehydrates_for_low_risk_confirm_structure_prompt(
             [
                 "plain_response",
                 "First tool-calling turn.",
+                "Follow-through response.",
+                "Final response after tool workflow.",
             ]
         ),
         model=None,
@@ -3683,7 +3709,7 @@ def test_write_intent_memory_rehydrates_for_low_risk_confirm_structure_prompt(
         conversation_session_id="session-1328-structure",
     )
     assert first.workflow_routing is not None
-    assert first.workflow_routing.verdict == "tool_seeking"
+    assert first.workflow_routing.verdict == "tool_contract_override"
     assert first.workflow_routing.source == "selector_override"
 
     second = orchestrator.run(
@@ -3693,6 +3719,8 @@ def test_write_intent_memory_rehydrates_for_low_risk_confirm_structure_prompt(
             [
                 "plain_response",
                 "Continuation turn.",
+                "Follow-through response.",
+                "Final response after tool workflow.",
             ]
         ),
         model=None,
@@ -3700,7 +3728,7 @@ def test_write_intent_memory_rehydrates_for_low_risk_confirm_structure_prompt(
         conversation_session_id="session-1328-structure",
     )
     assert second.workflow_routing is not None
-    assert second.workflow_routing.verdict == "tool_seeking"
+    assert second.workflow_routing.verdict == "tool_contract_override"
     assert second.workflow_routing.source == "selector_override"
 
     rehydrate_entry = next(
@@ -3769,6 +3797,8 @@ def test_preselected_tool_planner_receives_authoritative_workflow_continuation_c
         [
             "tool_seeking",
             "I'll continue the representation work.",
+            "Follow-through response.",
+            "Final response after tool workflow.",
         ]
     )
 
@@ -3782,7 +3812,7 @@ def test_preselected_tool_planner_receives_authoritative_workflow_continuation_c
     )
 
     assert result.workflow_routing is not None
-    assert result.workflow_routing.verdict == "tool_seeking"
+    assert result.workflow_routing.verdict == "tool_contract_preselected"
     assert result.workflow_routing.source == "selector_override"
 
     planner_context = llm.calls[0]["context"] or []
@@ -3838,7 +3868,7 @@ def test_tool_seeking_has_routing_info(monkeypatch):
     )
 
     assert result.workflow_routing is not None
-    assert result.workflow_routing.verdict == "tool_seeking"
+    assert result.workflow_routing.verdict == "rag_selected"
     assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
     assert result.workflow_routing.source == "selector"
 
@@ -3899,7 +3929,6 @@ def test_selector_enabled_by_default(monkeypatch):
     selector = WorkflowSelector(
         registry=MagicMock(),
         prompt_service=MagicMock(),
-        verdict_mapping={},
     )
     assert selector.enabled()
 
@@ -3910,7 +3939,7 @@ def test_selector_can_be_disabled_via_env(monkeypatch):
     assert not orchestrator._workflow_selector.enabled()
 
 
-def test_selector_resolve_selection_extracts_static_verdict_from_free_form_output():
+def test_selector_resolve_selection_extracts_workflow_id_from_json_output():
     registry = MagicMock()
     registry.all_workflow_ids.return_value = {
         CHAT_ASSISTANT_WORKFLOW_ID,
@@ -3919,20 +3948,16 @@ def test_selector_resolve_selection_extracts_static_verdict_from_free_form_outpu
     selector = WorkflowSelector(
         registry=registry,
         prompt_service=MagicMock(),
-        verdict_mapping={
-            "plain_response": CHAT_ASSISTANT_WORKFLOW_ID,
-            "tool_seeking": TOOL_CALLING_WORKFLOW_ID,
-        },
     )
 
     selection = selector.resolve_selection(
-        raw_response='{"verdict":"tool_seeking"}',
+        raw_response=f'{{"workflow_id":"{TOOL_CALLING_WORKFLOW_ID}"}}',
         prompt_id=None,
         prompt_used=None,
-        discovered_workflow_ids=(),
+        discovered_workflow_ids=(TOOL_CALLING_WORKFLOW_ID,),
     )
 
-    assert selection.verdict == "tool_seeking"
+    assert selection.verdict == "rag_selected"
     assert selection.workflow_id == TOOL_CALLING_WORKFLOW_ID
 
 
@@ -3945,10 +3970,6 @@ def test_selector_resolve_selection_extracts_discovered_workflow_from_free_form_
     selector = WorkflowSelector(
         registry=registry,
         prompt_service=MagicMock(),
-        verdict_mapping={
-            "plain_response": CHAT_ASSISTANT_WORKFLOW_ID,
-            "tool_seeking": TOOL_CALLING_WORKFLOW_ID,
-        },
     )
 
     selection = selector.resolve_selection(
@@ -3958,11 +3979,11 @@ def test_selector_resolve_selection_extracts_discovered_workflow_from_free_form_
         discovered_workflow_ids=(TODO_REFRESH_WORKFLOW_ID,),
     )
 
-    assert selection.verdict == TODO_REFRESH_WORKFLOW_ID
+    assert selection.verdict == "rag_selected"
     assert selection.workflow_id == TODO_REFRESH_WORKFLOW_ID
 
 
-def test_selector_resolve_selection_invalid_output_falls_back_to_plain_response():
+def test_selector_resolve_selection_invalid_output_falls_back_to_default_workflow():
     registry = MagicMock()
     registry.all_workflow_ids.return_value = {
         CHAT_ASSISTANT_WORKFLOW_ID,
@@ -3971,10 +3992,6 @@ def test_selector_resolve_selection_invalid_output_falls_back_to_plain_response(
     selector = WorkflowSelector(
         registry=registry,
         prompt_service=MagicMock(),
-        verdict_mapping={
-            "plain_response": CHAT_ASSISTANT_WORKFLOW_ID,
-            "tool_seeking": TOOL_CALLING_WORKFLOW_ID,
-        },
     )
 
     selection = selector.resolve_selection(
@@ -3984,7 +4001,7 @@ def test_selector_resolve_selection_invalid_output_falls_back_to_plain_response(
         discovered_workflow_ids=(),
     )
 
-    assert selection.verdict == "plain_response"
+    assert selection.verdict == "rag_default"
     assert selection.workflow_id == CHAT_ASSISTANT_WORKFLOW_ID
 
 

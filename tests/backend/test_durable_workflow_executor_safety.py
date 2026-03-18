@@ -493,6 +493,73 @@ def test_durable_executor_off_mode_skips_metadata_checks(monkeypatch) -> None:
     )
 
 
+def test_durable_executor_materialises_terminal_effect_evidence() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#durable_terminal_effect_validation",
+        initial_state="done",
+        states={
+            "done": WorkflowStateSpec(
+                state_id="done",
+                terminal=True,
+                metadata={
+                    "effects": [
+                        (
+                            "#V#workflow_effect_"
+                            "durable_terminal_effect_validation_done_terminal"
+                        )
+                    ]
+                },
+            ),
+        },
+    )
+
+    instance = _build_instance(definition.workflow_id)
+    manager = MagicMock()
+    manager.get_instance.return_value = instance
+    manager.is_cancelled.return_value = False
+    manager.extend_lock.return_value = True
+    manager.checkpoint.return_value = True
+
+    executor = DurableWorkflowExecutor(
+        registry=ActionRegistry(),
+        instance_manager=manager,
+    )
+
+    with (
+        patch(
+            "src.backend.languagemodels.llm_interface.get_llm_client",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "src.backend.languagemodels.llm_interface.get_active_model_name",
+            return_value="test-model",
+        ),
+    ):
+        result = executor.run_durable(
+            "instance-1",
+            definition,
+            resume_from_checkpoint=False,
+        )
+
+    terminal_effect_id = (
+        "#V#workflow_effect_durable_terminal_effect_validation_done_terminal"
+    )
+    assert result.completed is True
+    assert result.error is None
+    assert result.data.get(terminal_effect_id) is True
+    assert (
+        result.data.get(
+            "workflow_effect_durable_terminal_effect_validation_done_terminal"
+        )
+        is True
+    )
+    events = result.data.get("workflow_terminal_effect_events")
+    assert isinstance(events, list)
+    assert events
+    assert events[-1].get("status") == "terminal_effect_materialised"
+    assert events[-1].get("symbol") == terminal_effect_id
+
+
 def test_durable_executor_applies_output_mapping_before_metadata_validation() -> None:
     definition = WorkflowDefinition(
         workflow_id="#V#durable_output_mapping_validation",

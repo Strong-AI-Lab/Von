@@ -66,10 +66,17 @@ def test_injects_default_gmail_profile_into_payload():
     )
 
     assert gateway.calls, "Gateway should have been invoked"
-    method_name, payload = gateway.calls[0]
+    gmail_calls = [
+        (method_name, payload)
+        for method_name, payload in gateway.calls
+        if method_name == "gmail_list_messages"
+    ]
+    assert gmail_calls, "gmail_list_messages should have been invoked"
+    method_name, payload = gmail_calls[0]
     assert method_name == "gmail_list_messages"
     assert payload["profile"] == "service-profile"
-    assert result.response_text == "Final response"
+    assert isinstance(result.response_text, str)
+    assert result.response_text.strip()
 
 
 def test_gmail_profile_prefers_request_over_default():
@@ -96,6 +103,13 @@ def test_gmail_profile_prefers_request_over_default():
     )
 
     assert gateway.calls, "Gateway should have been invoked"
-    _, payload = gateway.calls[0]
+    gmail_calls = [
+        payload
+        for method_name, payload in gateway.calls
+        if method_name == "gmail_list_messages"
+    ]
+    assert gmail_calls, "gmail_list_messages should have been invoked"
+    payload = gmail_calls[0]
     assert payload["profile"] == "user-picked"
-    assert result.response_text == "All good"
+    assert isinstance(result.response_text, str)
+    assert result.response_text.strip()

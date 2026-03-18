@@ -2,8 +2,7 @@
 
 Tests cover:
 - RAG-first mode: candidate-based selection without static verdicts.
-- Legacy mode: backward-compatible verdict mapping.
-- Prompt construction in both modes.
+- Prompt construction.
 - Label extraction from LLM responses.
 - Fallback behaviour when no candidates match.
 """
@@ -33,13 +32,11 @@ def _build_registry() -> WorkflowRegistry:
     return build_test_conversation_turn_registry()
 
 
-def _build_selector(*, verdict_mapping=None, default_workflow_id=None) -> WorkflowSelector:
+def _build_selector(*, default_workflow_id=None) -> WorkflowSelector:
     kwargs: dict = {
         "registry": _build_registry(),
         "prompt_service": PromptTemplateService(),
     }
-    if verdict_mapping is not None:
-        kwargs["verdict_mapping"] = verdict_mapping
     if default_workflow_id is not None:
         kwargs["default_workflow_id"] = default_workflow_id
     return WorkflowSelector(**kwargs)
@@ -184,118 +181,17 @@ class TestRagFirstPrompt:
 
 
 # ---------------------------------------------------------------------------
-# Legacy mode (backward compatibility)
-# ---------------------------------------------------------------------------
-
-
-class TestLegacyMode:
-    def test_legacy_mode_enabled_with_verdict_mapping(self):
-        selector = _build_selector(
-            verdict_mapping={
-                "plain_response": "#V#chat_assistant_workflow",
-                "tool_seeking": "#V#tool_calling_workflow",
-            },
-        )
-        assert selector.rag_first is False
-
-    def test_legacy_resolves_static_verdicts(self):
-        selector = _build_selector(
-            verdict_mapping={
-                "plain_response": "#V#chat_assistant_workflow",
-                "tool_seeking": "#V#tool_calling_workflow",
-                "narration": "#V#chat_narration_workflow",
-            },
-        )
-        result = selector.resolve_selection(
-            raw_response="tool_seeking",
-            prompt_id=None,
-            prompt_used="test",
-        )
-        assert result.workflow_id == "#V#tool_calling_workflow"
-        assert result.verdict == "tool_seeking"
-
-    def test_legacy_resolves_discovered_workflow(self):
-        selector = _build_selector(
-            verdict_mapping={
-                "plain_response": "#V#chat_assistant_workflow",
-                "tool_seeking": "#V#tool_calling_workflow",
-            },
-        )
-        result = selector.resolve_selection(
-            raw_response="#V#todo_refresh_workflow",
-            prompt_id=None,
-            prompt_used="test",
-            discovered_workflow_ids=["#V#todo_refresh_workflow"],
-        )
-        assert result.workflow_id == "#V#todo_refresh_workflow"
-
-    def test_legacy_fallback_to_plain_response(self):
-        selector = _build_selector(
-            verdict_mapping={
-                "plain_response": "#V#chat_assistant_workflow",
-                "tool_seeking": "#V#tool_calling_workflow",
-            },
-        )
-        result = selector.resolve_selection(
-            raw_response="gibberish_unknown",
-            prompt_id=None,
-            prompt_used="test",
-        )
-        assert result.workflow_id == "#V#chat_assistant_workflow"
-        assert result.verdict == "plain_response"
-
-
-# ---------------------------------------------------------------------------
-# Legacy prompt construction
-# ---------------------------------------------------------------------------
-
-
-class TestLegacyPrompt:
-    def test_legacy_prompt_contains_verdicts(self):
-        selector = _build_selector(
-            verdict_mapping={
-                "plain_response": "#V#chat_assistant_workflow",
-                "tool_seeking": "#V#tool_calling_workflow",
-            },
-        )
-        prompt = selector.prepare_selection_prompt(
-            turn_text="hi",
-        )
-        assert "plain_response" in prompt.prompt_text
-        assert "tool_seeking" in prompt.prompt_text
-
-    def test_legacy_prompt_appends_discovered_workflows(self):
-        selector = _build_selector(
-            verdict_mapping={
-                "plain_response": "#V#chat_assistant_workflow",
-            },
-        )
-        prompt = selector.prepare_selection_prompt(
-            turn_text="hi",
-            discovered_workflows=[
-                {
-                    "concept_id": "#V#special_workflow",
-                    "name": "Special",
-                    "description": "Does special things",
-                },
-            ],
-        )
-        assert "#V#special_workflow" in prompt.prompt_text
-        assert "Special" in prompt.prompt_text
-        assert len(prompt.discovered_workflow_ids) == 1
-
-
-# ---------------------------------------------------------------------------
 # Label extraction
 # ---------------------------------------------------------------------------
 
 
 class TestLabelExtraction:
-    def test_extract_plain_text_verdict(self):
+    def test_extract_plain_text_workflow_id(self):
         label = WorkflowSelector._extract_candidate_label(
-            raw_response="tool_seeking",
+            raw_response="#V#tool_calling_workflow",
+            discovered_workflow_ids=["#V#tool_calling_workflow"],
         )
-        assert label == "tool_seeking"
+        assert label == "#V#tool_calling_workflow"
 
     def test_extract_discovered_workflow_id(self):
         label = WorkflowSelector._extract_candidate_label(
@@ -313,15 +209,16 @@ class TestLabelExtraction:
         )
         assert label == "#V#test_wf"
 
-    def test_extract_verdict_from_verbose_text(self):
+    def test_extract_workflow_id_from_verbose_text(self):
         label = WorkflowSelector._extract_candidate_label(
-            raw_response="Based on the request, I recommend tool_seeking.",
+            raw_response="Based on the request, I recommend #V#tool_calling_workflow.",
+            discovered_workflow_ids=["#V#tool_calling_workflow"],
         )
-        assert label == "tool_seeking"
+        assert label == "#V#tool_calling_workflow"
 
     def test_normalise_strips_whitespace_and_quotes(self):
-        label = WorkflowSelector._normalise_candidate("  'tool_seeking'  ")
-        assert label == "tool_seeking"
+        label = WorkflowSelector._normalise_candidate("  '#V#tool_calling_workflow'  ")
+        assert label == "#v#tool_calling_workflow"
 
 
 # ---------------------------------------------------------------------------

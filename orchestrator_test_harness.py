@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -118,9 +119,6 @@ def build_db_independent_orchestrator(
 
     env_val = "1" if selector_enabled else "0"
     monkeypatch.setenv("VON_CHAT_WORKFLOW_SELECTOR_ENABLED", env_val)
-    # Default to legacy selector mode in the harness — RAG-first routing
-    # is tested separately in test_workflow_selector_rag_first.py.
-    monkeypatch.setenv("VON_WORKFLOW_RAG_FIRST_ROUTING", "0")
 
     from src.backend.workflows import WorkflowRegistry
     from src.backend.workflows.action_registry import ActionRegistry
@@ -226,6 +224,36 @@ def build_db_independent_orchestrator(
     monkeypatch.setattr(
         "src.backend.services.turn_execution_record_service.build_conversation_turn_stage_path",
         _stub_stage_path,
+    )
+
+    original_render_prompt = orchestrator._prompt_templates.render_prompt
+
+    def _render_prompt_with_narration_fallback(
+        prompt_ids: Any,
+        *,
+        fallback: Any = None,
+        variables: Any = None,
+        max_chars: Any = None,
+    ) -> Any:
+        if not prompt_ids and not fallback:
+            return SimpleNamespace(
+                text=(
+                    "Produce a concise spoken summary of the on-screen content. "
+                    "Return only the spoken talk track."
+                ),
+                prompt_id="#V#test_narration_prompt",
+            )
+        return original_render_prompt(
+            prompt_ids,
+            fallback=fallback,
+            variables=variables,
+            max_chars=max_chars,
+        )
+
+    monkeypatch.setattr(
+        orchestrator._prompt_templates,
+        "render_prompt",
+        _render_prompt_with_narration_fallback,
     )
 
     return orchestrator

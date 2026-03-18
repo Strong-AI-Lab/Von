@@ -16,6 +16,7 @@ from ..engine import (
     apply_tool_output_context_mappings,
     execute_workflow_step_invocation,
     evaluate_transition_condition_spec,
+    materialise_terminal_effect_context,
     resolve_action_inputs_from_context,
     state_has_on_break_transition,
     state_has_on_continue_transition,
@@ -511,6 +512,13 @@ class DurableWorkflowExecutor:
                     final_state=current_state,
                     error="workflow_continue_outside_loop_scope",
                     checkpoint=True,
+                )
+
+            if current_state in termination_states:
+                materialise_terminal_effect_context(
+                    context=context,
+                    state_spec=state_spec,
+                    state_id=current_state,
                 )
 
             if state_has_unknown_route and bool(context.get("last_action_unknown")):

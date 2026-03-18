@@ -508,6 +508,8 @@ def _build_gateway_runtime(
             if request.environment.max_tool_invocations is not None
             else 1
         ),
+        max_tool_result_chars=request.environment.max_tool_result_chars,
+        max_tool_result_field_chars=request.environment.max_tool_result_field_chars,
         tool_batch_cap=(
             max(1, int(request.inputs.get("tool_batch_cap") or 4))
             if request.inputs.get("tool_batch_cap") is not None
@@ -796,6 +798,8 @@ def execute_llm_step(request: WorkflowActionRequest) -> WorkflowActionResult:
             if request.environment.max_tool_invocations is not None
             else 1
         ),
+        max_tool_result_chars=request.environment.max_tool_result_chars,
+        max_tool_result_field_chars=request.environment.max_tool_result_field_chars,
         tool_batch_cap=(
             max(1, int(request.inputs.get("tool_batch_cap") or 4))
             if request.inputs.get("tool_batch_cap") is not None

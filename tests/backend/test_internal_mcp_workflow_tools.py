@@ -14,6 +14,7 @@ from src.backend.workflows.durable.models import (
 )
 from src.backend.workflows.durable.scheduler import WorkflowScheduler
 from workflow_test_support import (
+    bootstrap_authoritative_file_copy_workflows,
     bootstrap_authoritative_reasoning_recovery_workflows,
     bootstrap_authoritative_support_maintenance_workflows,
 )
@@ -502,6 +503,7 @@ class _InMemoryScheduleWorkflowManager:
 
 
 def test_workflow_list_definitions_exists_and_returns_data():
+    bootstrap_authoritative_file_copy_workflows()
     bootstrap_authoritative_reasoning_recovery_workflows()
     bootstrap_authoritative_support_maintenance_workflows()
     catalogue = build_default_catalogue()
@@ -573,6 +575,13 @@ def test_workflow_list_definitions_exists_and_returns_data():
         == "vontology"
     )
     assert source_by_workflow_id["#V#workflow_gap_test_workflow"] == "vontology"
+    assert source_by_workflow_id["#V#file_copy_typing_workflow"] == "vontology"
+    assert (
+        source_by_workflow_id["#V#file_copy_upload_classification_workflow"]
+        == "vontology"
+    )
+    assert source_by_workflow_id["#V#file_copy_upload_handler_workflow"] == "vontology"
+    assert source_by_workflow_id["#V#file_copy_interpretation_workflow"] == "vontology"
     assert any("description_source" in d for d in result["definitions"])
     assert any("definition_identity" in d for d in result["definitions"])
     assert any("background_launch_policy_source" in d for d in result["definitions"])
@@ -613,6 +622,7 @@ def test_workflow_list_definitions_exists_and_returns_data():
 
 
 def test_workflow_list_definitions_gateway_invoke_success_path():
+    bootstrap_authoritative_file_copy_workflows()
     bootstrap_authoritative_reasoning_recovery_workflows()
     bootstrap_authoritative_support_maintenance_workflows()
     gateway = _build_gateway()

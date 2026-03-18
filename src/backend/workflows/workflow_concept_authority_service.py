@@ -2857,7 +2857,9 @@ def publish_canonical_chat_workflow_graphs(
                 concept_id=workflow_id,
                 name=_titleise_workflow_id(workflow_id),
                 description=workflow_purpose,
-                parent_concept_ids=[preferred_workflow_type] if preferred_workflow_type else [],
+                parent_concept_ids=_existing_parent_concept_ids(
+                    preferred_workflow_type
+                ),
             )
             if create_error:
                 errors_by_workflow_id[workflow_id] = (
@@ -3474,6 +3476,22 @@ def clear_workflow_type_resolution_cache() -> None:
     resolve_available_workflow_type_ids.cache_clear()
 
 
+def _existing_parent_concept_ids(*candidate_ids: str | None) -> list[str]:
+    """Return only workflow parent concept IDs that already exist."""
+
+    existing: list[str] = []
+    seen: set[str] = set()
+    for candidate_id in candidate_ids:
+        cleaned = str(candidate_id or "").strip()
+        if not cleaned or cleaned in seen:
+            continue
+        if not _concept_exists_fast(cleaned):
+            continue
+        seen.add(cleaned)
+        existing.append(cleaned)
+    return existing
+
+
 def _build_workflow_identity_bootstrap_report(
     *,
     workflow_ids: Sequence[str],
@@ -3590,7 +3608,7 @@ def bootstrap_workflow_concept_identities(
                 continue
 
             try:
-                parent_ids = [preferred_type_id] if preferred_type_id else []
+                parent_ids = _existing_parent_concept_ids(preferred_type_id)
                 concept_service.create_concept(
                     name=_titleise_workflow_id(workflow_id),
                     concept_id=workflow_id,
