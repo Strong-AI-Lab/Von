@@ -4,6 +4,10 @@ from pathlib import Path
 from src.backend.services.workflow_capability_service import (
     BUILTIN_WORKFLOW_CAPABILITIES,
 )
+from src.backend.workflows.workflow_registry import (
+    LazyWorkflowRegistration,
+    WorkflowRegistry,
+)
 from src.backend.workflows.workflow_purity_report import (
     build_workflow_purity_report,
 )
@@ -221,3 +225,54 @@ def test_build_workflow_purity_report_flags_baseline_regressions(tmp_path: Path)
         "delta": 1,
     }
     assert "builtin_capability_override_count" not in comparison["increased_counters"]
+
+
+def test_build_workflow_purity_report_does_not_resolve_lazy_registrations(
+    tmp_path: Path,
+) -> None:
+    baseline_path = tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workflow_purity_baseline.v1",
+                "counters": {
+                    "built_in_registration_count": 0,
+                    "remaining_python_workflow_family_count": 0,
+                    "direct_instance_create_callsite_count": 0,
+                    "env_event_binding_count": 0,
+                    "legacy_selector_mode_count": 0,
+                    "builtin_capability_override_count": len(
+                        BUILTIN_WORKFLOW_CAPABILITIES
+                    ),
+                    "non_vontology_discoverable_workflow_count": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loader_calls: list[str] = []
+
+    def _unexpected_loader(workflow_id: str):
+        loader_calls.append(workflow_id)
+        raise AssertionError("purity reporting must not resolve lazy workflow definitions")
+
+    registry = WorkflowRegistry(definition_loader=_unexpected_loader)
+    registry.register_lazy(
+        LazyWorkflowRegistration(
+            workflow_id="#V#lazy_vontology_workflow",
+            source="vontology",
+        )
+    )
+
+    report = build_workflow_purity_report(
+        registry=registry,
+        project_root=tmp_path,
+        baseline_path=baseline_path,
+    )
+
+    assert loader_calls == []
+    assert report["details"]["registry_source_counts"] == {"vontology": 1}
+    assert report["counters"]["built_in_registration_count"] == 0
+    assert report["counters"]["non_vontology_discoverable_workflow_count"] == 0
