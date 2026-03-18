@@ -618,9 +618,9 @@ def test_create_workflow_instance_route_rejects_unrunnable_workflow(
         "/api/workflows/instances",
         json={
             "workflow_id": "#V#non_runnable_workflow",
-            "user_id": "user-1",
-            "org_id": "org-1",
-            "namespace": "user-1/org-1",
+            "user_id": "#V#user_1",
+            "org_id": "#V#org_1",
+            "namespace": "#V#user_1/#V#org_1",
             "inputs": {"seed": "value"},
         },
     )
@@ -645,9 +645,9 @@ def test_trigger_workflow_schedule_route_rejects_unrunnable_workflow(
     schedule = types.SimpleNamespace(
         schedule_id="#V#schedule_test_1",
         workflow_id="#V#non_runnable_workflow",
-        user_id="user-1",
-        org_id="org-1",
-        namespace="user-1/org-1",
+        user_id="#V#user_1",
+        org_id="#V#org_1",
+        namespace="#V#user_1@org_1",
         default_inputs={"seed": "value"},
     )
 
@@ -687,6 +687,38 @@ def test_trigger_workflow_schedule_route_rejects_unrunnable_workflow(
     assert "workflow_definition_not_registered" in payload["verification"]["preflight"][
         "errors"
     ]
+
+
+def test_create_workflow_schedule_route_canonicalises_legacy_namespace(
+    monkeypatch, app_client
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    captured: dict[str, object] = {}
+
+    def _create_schedule(schedule):
+        captured["schedule"] = schedule
+        return schedule.schedule_id
+
+    manager = types.SimpleNamespace(create_schedule=_create_schedule)
+    monkeypatch.setattr(workflows_routes, "_get_instance_manager", lambda: manager)
+
+    response = app_client.post(
+        "/api/workflows/schedules",
+        json={
+            "workflow_id": "#V#alpha_workflow",
+            "user_id": "#V#user_1",
+            "org_id": "#V#org_1",
+            "namespace": "#V#user_1/#V#org_1",
+            "schedule_type": "interval",
+            "interval_seconds": 60,
+            "default_inputs": {"seed": "value"},
+        },
+    )
+
+    assert response.status_code == 201
+    schedule = captured["schedule"]
+    assert getattr(schedule, "namespace", None) == "#V#user_1@org_1"
 
 
 def test_list_workflow_instances_returns_retryable_degraded_payload_for_mongo_timeout(

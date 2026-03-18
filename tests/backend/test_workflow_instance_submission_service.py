@@ -637,6 +637,10 @@ def test_submit_verified_workflow_instance_uses_event_idempotent_creation() -> N
     assert result.verification["runnable_verification_success"] is True
     manager.create_instance_for_event.assert_called_once()
     manager.create_instance.assert_not_called()
+    assert (
+        manager.create_instance_for_event.call_args.kwargs["namespace"]
+        == "#V#user_alice@org_nao"
+    )
     assert mock_verify.call_count == 2
 
 
@@ -669,4 +673,27 @@ def test_submit_verified_workflow_instance_preserves_idempotent_reuse_without_po
     manager.create_instance_for_event.assert_called_once()
     manager.create_instance.assert_not_called()
     manager.mark_failed.assert_not_called()
+    assert (
+        manager.create_instance_for_event.call_args.kwargs["namespace"]
+        == "#V#user_alice@org_nao"
+    )
     mock_verify.assert_called_once_with("#V#candidate_workflow")
+
+
+def test_submit_verified_workflow_instance_rejects_unresolvable_namespace() -> None:
+    manager = MagicMock()
+
+    result = submit_verified_workflow_instance(
+        manager=manager,
+        workflow_id="#V#candidate_workflow",
+        user_id="user-1",
+        org_id="org-1",
+        namespace="user-1/org-1",
+        inputs={"seed": "abc-123"},
+    )
+
+    assert result.success is False
+    assert result.status == "rejected_preflight"
+    assert result.error_code == "invalid_namespace"
+    manager.create_instance_for_event.assert_not_called()
+    manager.create_instance.assert_not_called()

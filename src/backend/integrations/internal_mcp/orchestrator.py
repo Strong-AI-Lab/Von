@@ -19927,7 +19927,29 @@ class InternalMCPChatOrchestrator:
                         reasoning=str(selector_policy.get("reasoning") or ""),
                         selection_metadata=selector_policy,
                     )
+                elif not selector_prompt.prompt_text:
+                    _emit_progress_local(
+                        {
+                            "status": "thinking",
+                            "stage": "workflow_dispatch",
+                            "phase": "workflow_dispatch",
+                            "phase_label": "Workflow selection unavailable",
+                            "workflow_selector_verdict": (
+                                selector_prompt.prompt_failure_reason
+                                or "selector_prompt_unavailable"
+                            ),
+                            "workflow_match_count": len(discovered_matches),
+                            "workflow_candidate_count": len(selector_candidate_matches)
+                            + len(excluded_discovered_matches),
+                        }
+                    )
+                    selector_selection = (
+                        self._workflow_selector.resolve_prompt_unavailable_selection(
+                            selection_prompt=selector_prompt,
+                        )
+                    )
                 else:
+                    selector_prompt_text = selector_prompt.prompt_text
                     selector_response_text, classifier_model, selector_candidate = (
                         self._run_llm_with_fallbacks(
                             stage="workflow_dispatch",
@@ -19936,7 +19958,7 @@ class InternalMCPChatOrchestrator:
                             context=[
                                 {
                                     "role": "system",
-                                    "content": selector_prompt.prompt_text,
+                                    "content": selector_prompt_text,
                                 }
                             ],
                             default_client=llm_client,
@@ -19954,7 +19976,7 @@ class InternalMCPChatOrchestrator:
                     selector_selection = self._workflow_selector.resolve_selection(
                         raw_response=selector_response_text,
                         prompt_id=selector_prompt.prompt_id,
-                        prompt_used=selector_prompt.prompt_text,
+                        prompt_used=selector_prompt_text,
                         discovered_workflow_ids=selector_prompt.discovered_workflow_ids,
                     )
                 routing_duration_ms = (time.perf_counter() - selector_start) * 1000.0
@@ -20024,6 +20046,20 @@ class InternalMCPChatOrchestrator:
                         "routing_duration_ms": routing_duration_ms,
                         "confidence_score": selector_selection.confidence_score,
                         "reasoning": selector_selection.reasoning,
+                        "prompt_failure_reason": (
+                            selector_selection.selection_metadata.get(
+                                "prompt_failure_reason"
+                            )
+                            if isinstance(selector_selection.selection_metadata, Mapping)
+                            else None
+                        ),
+                        "prompt_failure_detail": (
+                            selector_selection.selection_metadata.get(
+                                "prompt_failure_detail"
+                            )
+                            if isinstance(selector_selection.selection_metadata, Mapping)
+                            else None
+                        ),
                         "policy_guidance_mode": selector_policy.get("guidance_mode"),
                         "policy_snapshot_id": selector_policy.get("snapshot_id"),
                         "policy_candidate_scores": list(
@@ -20059,6 +20095,20 @@ class InternalMCPChatOrchestrator:
                         "routing_duration_ms": routing_duration_ms,
                         "confidence_score": selector_selection.confidence_score,
                         "reasoning": selector_selection.reasoning,
+                        "prompt_failure_reason": (
+                            selector_selection.selection_metadata.get(
+                                "prompt_failure_reason"
+                            )
+                            if isinstance(selector_selection.selection_metadata, Mapping)
+                            else None
+                        ),
+                        "prompt_failure_detail": (
+                            selector_selection.selection_metadata.get(
+                                "prompt_failure_detail"
+                            )
+                            if isinstance(selector_selection.selection_metadata, Mapping)
+                            else None
+                        ),
                         "policy_guidance_mode": selector_policy.get("guidance_mode"),
                         "policy_snapshot_id": selector_policy.get("snapshot_id"),
                         "policy_candidate_scores": list(

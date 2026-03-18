@@ -9,6 +9,11 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
     _WorkflowModelPolicyState,
 )
+from workflow_test_support import (
+    TEST_WORKFLOW_SELECTOR_PROMPT_ID,
+    TEST_WORKFLOW_SELECTOR_PROMPT_TEMPLATE,
+    render_test_prompt_template,
+)
 
 
 def _stub_stage_model_snapshot() -> dict[str, Any]:
@@ -232,6 +237,11 @@ def build_db_independent_orchestrator(
     )
 
     original_render_prompt = orchestrator._prompt_templates.render_prompt
+    selector_prompt_ids = {
+        str(item).strip()
+        for item in (orchestrator._TURN_SELECTOR_PROMPTS or ())
+        if isinstance(item, str) and str(item).strip()
+    }
 
     def _render_prompt_with_narration_fallback(
         prompt_ids: Any,
@@ -240,6 +250,23 @@ def build_db_independent_orchestrator(
         variables: Any = None,
         max_chars: Any = None,
     ) -> Any:
+        requested_prompt_ids = [
+            str(item).strip()
+            for item in (prompt_ids or ())
+            if isinstance(item, str) and str(item).strip()
+        ]
+        if requested_prompt_ids and any(
+            item in selector_prompt_ids for item in requested_prompt_ids
+        ):
+            return SimpleNamespace(
+                text=render_test_prompt_template(
+                    TEST_WORKFLOW_SELECTOR_PROMPT_TEMPLATE,
+                    dict(variables or {}),
+                ),
+                prompt_id=requested_prompt_ids[0] or TEST_WORKFLOW_SELECTOR_PROMPT_ID,
+                variables=dict(variables or {}),
+                truncated=False,
+            )
         if not prompt_ids and not fallback:
             return SimpleNamespace(
                 text=(

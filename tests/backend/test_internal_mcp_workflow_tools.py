@@ -30,6 +30,7 @@ def _build_gateway() -> InternalMCPGateway:
 
 def _patch_submit_verified_instance_success(monkeypatch) -> None:
     """Make success-path tests independent of external workflow authority state."""
+    from src.backend.services.namespace_service import resolve_canonical_namespace
     from src.backend.workflows.durable.workflow_instance_submission_service import (
         WorkflowInstanceSubmissionResult,
     )
@@ -40,9 +41,11 @@ def _patch_submit_verified_instance_success(monkeypatch) -> None:
         user_id = str(kwargs.get("user_id") or "anonymous").strip() or "anonymous"
         org_id = str(kwargs.get("org_id") or "default").strip() or "default"
         namespace = (
-            str(kwargs.get("namespace") or f"{user_id}/{org_id}").strip()
-            or f"{user_id}/{org_id}"
+            resolve_canonical_namespace(kwargs.get("namespace"), user_id, org_id)
+            or str(kwargs.get("namespace") or "").strip()
         )
+        if not namespace:
+            raise AssertionError("workflow test helper expected canonical namespace")
         inputs = kwargs.get("inputs")
         max_retries_raw = kwargs.get("max_retries", 3)
         try:
@@ -695,7 +698,7 @@ def test_workflow_create_list_get_instance_gateway_paths(monkeypatch):
     assert detail.get("success") is True
     assert detail.get("instance_id") == instance_id
     assert detail.get("workflow_id") == workflow_id
-    assert detail.get("namespace") == "#V#user/#V#org"
+    assert detail.get("namespace") == "#V#user@org"
     assert detail.get("inputs") == {"seed": "value"}
 
 
@@ -1172,6 +1175,7 @@ def test_workflow_schedule_gateway_tools_integrate_with_scheduler(monkeypatch):
     assert create_result.get("success") is True
     schedule_id = create_result.get("schedule_id")
     assert isinstance(schedule_id, str)
+    assert manager.schedules[schedule_id].namespace == "#V#user@org"
 
     scheduler = WorkflowScheduler(manager, check_interval_seconds=0.01)  # type: ignore[arg-type]
     scheduler._process_due_schedules()
@@ -1181,6 +1185,7 @@ def test_workflow_schedule_gateway_tools_integrate_with_scheduler(monkeypatch):
     assert metrics["due_schedules_seen_total"] == 1
     assert len(manager.instances) == 1
     assert manager.instances[0]["schedule_id"] == schedule_id
+    assert manager.instances[0]["namespace"] == "#V#user@org"
 
     trigger_result = gateway.invoke(
         "workflow_trigger_schedule",
@@ -1218,6 +1223,7 @@ def test_workflow_schedule_execute_checkpoint_fail_retry_resume(monkeypatch):
     assert created_schedule.get("success") is True
     schedule_id = created_schedule.get("schedule_id")
     assert isinstance(schedule_id, str)
+    assert manager.schedules[schedule_id].namespace == "#V#user@org"
 
     scheduler = WorkflowScheduler(manager, check_interval_seconds=0.01)  # type: ignore[arg-type]
     scheduler._process_due_schedules()

@@ -25,6 +25,10 @@ from ...services.workflow_episode_service import (
     get_workflow_usage_aggregates_for_workflows,
     list_workflow_use_episodes,
 )
+from ...services.namespace_service import (
+    coerce_namespace,
+    resolve_canonical_namespace,
+)
 from ...workflows.trace_store import (
     get_workflow_execution_trace,
     list_recent_workflow_execution_traces,
@@ -724,9 +728,9 @@ def api_create_workflow_instance():
     Request body:
     {
         "workflow_id": "#V#example_workflow",
-        "user_id": "user-123",
-        "org_id": "org-456",
-        "namespace": "user-123/org-456",
+        "user_id": "#V#user_123",
+        "org_id": "#V#org_456",
+        "namespace": "#V#user_123@org_456",
         "inputs": {"param1": "value1"},
         "max_retries": 3
     }
@@ -739,7 +743,20 @@ def api_create_workflow_instance():
 
     user_id = data.get("user_id", "anonymous")
     org_id = data.get("org_id", "default")
-    namespace = data.get("namespace", f"{user_id}/{org_id}")
+    namespace = resolve_canonical_namespace(
+        data.get("namespace"),
+        user_id,
+        org_id,
+    )
+    if not namespace:
+        return (
+            jsonify(
+                {
+                    "error": "namespace must be canonical or derivable from user_id/org_id",
+                }
+            ),
+            400,
+        )
     inputs = data.get("inputs", {})
     max_retries = data.get("max_retries", 3)
 
@@ -778,7 +795,9 @@ def api_list_workflow_instances():
     """
     user_id = request.args.get("user_id")
     org_id = request.args.get("org_id")
-    namespace = request.args.get("namespace")
+    namespace = coerce_namespace(request.args.get("namespace")) or request.args.get(
+        "namespace"
+    )
     status_str = request.args.get("status")
     workflow_id = request.args.get("workflow_id")
     source_event_type = request.args.get("source_event_type")
@@ -1065,9 +1084,9 @@ def api_create_workflow_schedule():
     Request body:
     {
         "workflow_id": "#V#example_workflow",
-        "user_id": "user-123",
-        "org_id": "org-456",
-        "namespace": "user-123/org-456",
+        "user_id": "#V#user_123",
+        "org_id": "#V#org_456",
+        "namespace": "#V#user_123@org_456",
         "schedule_type": "interval" | "cron" | "once",
         "interval_seconds": 3600,  // for interval type
         "cron_expression": "0 9 * * 1-5",  // for cron type
@@ -1084,7 +1103,20 @@ def api_create_workflow_schedule():
 
     user_id = data.get("user_id", "anonymous")
     org_id = data.get("org_id", "default")
-    namespace = data.get("namespace", f"{user_id}/{org_id}")
+    namespace = resolve_canonical_namespace(
+        data.get("namespace"),
+        user_id,
+        org_id,
+    )
+    if not namespace:
+        return (
+            jsonify(
+                {
+                    "error": "namespace must be canonical or derivable from user_id/org_id",
+                }
+            ),
+            400,
+        )
     default_inputs = data.get("default_inputs", {})
     description = data.get("description")
 

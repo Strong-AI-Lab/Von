@@ -18,6 +18,11 @@ from .feature_flags import (
     get_durable_workflows_enabled,
     get_event_workflow_integration_enabled,
 )
+from .namespace_service import (
+    concept_id_to_namespace_slug,
+    coerce_namespace,
+    derive_namespace_for_actor,
+)
 from ..workflows.durable.models import EventWorkflowBinding
 from ..workflows.durable.startup import get_instance_manager
 from ..workflows.durable.workflow_instance_submission_service import (
@@ -68,24 +73,21 @@ def _build_event_idempotency_key(
 
 
 def _build_namespace(user_id: str | None, org_id: str | None) -> str:
-    safe_user = (user_id or "anonymous").strip() or "anonymous"
-    safe_org = (org_id or "").strip()
+    safe_user = concept_id_to_namespace_slug(user_id) or "anonymous"
+    safe_org = concept_id_to_namespace_slug(org_id)
 
-    # Prefer user-only namespace when org context is unknown.
-    # Historical user/default placeholders made monitor scoping opaque and
-    # prevented reliable namespace filtering once org-scoped namespaces landed.
+    namespace = derive_namespace_for_actor(safe_user, safe_org)
+    if namespace:
+        return namespace
+
+    # Keep the fallback canonical even if upstream identifiers are malformed.
     if safe_org:
-        return f"{safe_user}/{safe_org}"
-    if safe_user != "anonymous":
-        return safe_user
-    return "anonymous/default"
+        return f"#V#{safe_user}@{safe_org}"
+    return f"#V#{safe_user}"
 
 
 def _normalise_namespace_override(namespace: str | None) -> str | None:
-    if not isinstance(namespace, str):
-        return None
-    cleaned = namespace.strip()
-    return cleaned or None
+    return coerce_namespace(namespace)
 
 
 def _derive_actor_context_from_namespace(

@@ -13,14 +13,17 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.backend.services.prompt_template_service import PromptTemplateService
+import src.backend.services.workflow_selection_policy_service as policy_module
 from src.backend.workflows import WorkflowRegistry
 from src.backend.workflows.workflow_selector import (
     WorkflowSelection,
     WorkflowSelectionPrompt,
     WorkflowSelector,
 )
-from workflow_test_support import build_test_conversation_turn_registry
+from workflow_test_support import (
+    build_test_conversation_turn_registry,
+    build_test_prompt_service,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -35,11 +38,17 @@ def _build_registry() -> WorkflowRegistry:
 def _build_selector(*, default_workflow_id=None) -> WorkflowSelector:
     kwargs: dict = {
         "registry": _build_registry(),
-        "prompt_service": PromptTemplateService(),
+        "prompt_service": build_test_prompt_service(),
     }
     if default_workflow_id is not None:
         kwargs["default_workflow_id"] = default_workflow_id
     return WorkflowSelector(**kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _disable_learned_policy(monkeypatch: pytest.MonkeyPatch):
+    policy_module.clear_live_selection_policy()
+    monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +158,7 @@ class TestRagFirstPrompt:
             ],
         )
         assert isinstance(prompt, WorkflowSelectionPrompt)
+        assert prompt.prompt_text is not None
         assert "#V#tool_calling_workflow" in prompt.prompt_text
         assert "#V#chat_assistant_workflow" in prompt.prompt_text
         assert "Tool Calling" in prompt.prompt_text
@@ -163,6 +173,7 @@ class TestRagFirstPrompt:
             turn_text="hello",
             discovered_workflows=[],
         )
+        assert prompt.prompt_text is not None
         assert "#V#chat_assistant_workflow" in prompt.prompt_text
         assert len(prompt.discovered_workflow_ids) == 1
 
@@ -177,7 +188,57 @@ class TestRagFirstPrompt:
                 },
             ],
         )
+        assert prompt.prompt_text is not None
         assert "What is the meaning of life?" in prompt.prompt_text
+
+    def test_prompt_missing_candidate_list_fails_closed(self):
+        selector = WorkflowSelector(
+            registry=_build_registry(),
+            prompt_service=build_test_prompt_service(
+                prompt_text="Route this turn:\n{turn_text}\n",
+            ),
+        )
+
+        prompt = selector.prepare_selection_prompt(
+            turn_text="Find arXiv papers about transformers",
+            discovered_workflows=[
+                {
+                    "concept_id": "#V#tool_calling_workflow",
+                    "name": "Tool Calling",
+                    "description": "General-purpose tool-calling pipeline.",
+                }
+            ],
+        )
+
+        assert prompt.prompt_failure_reason == "selector_prompt_missing_candidate_list"
+        assert prompt.prompt_text is not None
+
+    def test_select_workflow_prompt_unavailable_fails_closed_without_selector_llm(self):
+        selector = WorkflowSelector(
+            registry=_build_registry(),
+            prompt_service=build_test_prompt_service(prompt_text=None),
+            default_workflow_id="#V#chat_assistant_workflow",
+        )
+        mock_llm = MagicMock()
+
+        result = selector.select_workflow(
+            llm_client=mock_llm,
+            model="test-model",
+            turn_text="Find papers about AI",
+            discovered_workflows=[
+                {
+                    "concept_id": "#V#tool_calling_workflow",
+                    "name": "Tool Calling",
+                    "description": "General-purpose tool pipeline.",
+                }
+            ],
+        )
+
+        assert isinstance(result, WorkflowSelection)
+        assert result.workflow_id == "#V#chat_assistant_workflow"
+        assert result.verdict == "selector_prompt_unavailable"
+        assert result.selection_source == "selector_fail_closed"
+        mock_llm.generate.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

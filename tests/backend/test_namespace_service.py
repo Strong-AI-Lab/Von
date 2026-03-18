@@ -7,17 +7,21 @@ Tests namespace derivation, parsing, and validation for composite user@org names
 import pytest
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 # Add parent directory to path to enable imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.backend.services.namespace_service import (
+    coerce_namespace,
     derive_namespace,
+    derive_namespace_for_actor,
     parse_namespace,
     is_org_scoped,
     get_user_id,
     get_org_id,
     normalize_namespace,
+    resolve_canonical_namespace,
 )
 
 
@@ -67,7 +71,7 @@ class TestDeriveNamespace:
     def test_none_user_id(self):
         """Test that None user_id raises ValueError."""
         with pytest.raises(ValueError, match="user_id is required"):
-            derive_namespace(None)
+            derive_namespace(cast(Any, None))
 
 
 class TestParseNamespace:
@@ -106,7 +110,7 @@ class TestParseNamespace:
     def test_parse_none_namespace(self):
         """Test that None namespace raises ValueError."""
         with pytest.raises(ValueError, match="Invalid namespace"):
-            parse_namespace(None)
+            parse_namespace(cast(Any, None))
 
     def test_parse_empty_string(self):
         """Test that empty string namespace raises ValueError."""
@@ -182,6 +186,35 @@ class TestNormalizeNamespace:
         """Test that normalising invalid namespace raises ValueError."""
         with pytest.raises(ValueError):
             normalize_namespace("invalid")
+
+
+class TestCompatibilityNormalisation:
+    """Tests for compatibility helpers used at workflow write boundaries."""
+
+    def test_coerce_legacy_slash_namespace(self):
+        assert coerce_namespace("#V#user_alpha/#V#org_beta") == "#V#user_alpha@org_beta"
+
+    def test_derive_namespace_for_actor_accepts_concept_ids(self):
+        assert (
+            derive_namespace_for_actor("#V#user_alpha", "#V#org_beta")
+            == "#V#user_alpha@org_beta"
+        )
+
+    def test_resolve_canonical_namespace_prefers_explicit_canonicalised_value(self):
+        assert (
+            resolve_canonical_namespace(
+                "#V#user_alpha/#V#org_beta",
+                "#V#different_user",
+                "#V#different_org",
+            )
+            == "#V#user_alpha@org_beta"
+        )
+
+    def test_resolve_canonical_namespace_derives_from_actor_when_missing(self):
+        assert (
+            resolve_canonical_namespace(None, "#V#user_alpha", "#V#org_beta")
+            == "#V#user_alpha@org_beta"
+        )
 
 
 class TestEdgeCases:

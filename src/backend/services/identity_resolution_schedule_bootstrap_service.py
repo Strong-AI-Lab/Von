@@ -13,6 +13,7 @@ import os
 import threading
 from typing import Any
 
+from .namespace_service import coerce_namespace, derive_namespace_for_actor
 from ..workflows.durable.models import ScheduleType, WorkflowSchedule
 from ..workflows.durable.startup import get_instance_manager
 from ..workflows.durable.entity_identity_resolution_workflow import (
@@ -66,9 +67,14 @@ def _desired_schedule_config() -> dict[str, Any]:
     org_id = str(
         os.getenv("VON_IDENTITY_RESOLUTION_SCHEDULE_ORG_ID", "#V#default")
     ).strip() or "#V#default"
-    namespace = str(
-        os.getenv("VON_IDENTITY_RESOLUTION_SCHEDULE_NAMESPACE", f"{user_id}/{org_id}")
-    ).strip() or f"{user_id}/{org_id}"
+    namespace_override = coerce_namespace(
+        os.getenv("VON_IDENTITY_RESOLUTION_SCHEDULE_NAMESPACE")
+    )
+    namespace = (
+        namespace_override
+        or derive_namespace_for_actor(user_id, org_id)
+        or "#V#system"
+    )
 
     interval_seconds = _coerce_int(
         os.getenv("VON_IDENTITY_RESOLUTION_SCHEDULE_INTERVAL_SECONDS"),

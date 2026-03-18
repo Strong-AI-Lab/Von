@@ -2649,6 +2649,68 @@ def test_selector_fires_without_presenter_mode(monkeypatch):
     assert selector_entry["verdict"] == "rag_selected"
 
 
+def test_selector_prompt_unavailable_fails_closed_without_selector_llm(monkeypatch):
+    """Missing authoritative selector prompt should skip selector LLM dispatch."""
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    original_render_prompt = orchestrator._prompt_templates.render_prompt
+
+    def _render_without_selector_prompt(
+        prompt_ids: Any,
+        *,
+        fallback: Any = None,
+        variables: Any = None,
+        max_chars: Any = None,
+    ) -> Any:
+        requested_prompt_ids = {
+            str(item).strip()
+            for item in (prompt_ids or ())
+            if isinstance(item, str) and str(item).strip()
+        }
+        if requested_prompt_ids.intersection(orchestrator._TURN_SELECTOR_PROMPTS):
+            return None
+        return original_render_prompt(
+            prompt_ids,
+            fallback=fallback,
+            variables=variables,
+            max_chars=max_chars,
+        )
+
+    monkeypatch.setattr(
+        orchestrator._prompt_templates,
+        "render_prompt",
+        _render_without_selector_prompt,
+    )
+
+    llm = _CapturingLLM(
+        [
+            "I'll help with that.",
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt="hello",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert len(llm.calls) == 1
+    assert all(call["prompt"] != "Select workflow" for call in llm.calls)
+    assert result.response_text == "I'll help with that."
+
+    selector_entry = next(
+        e
+        for e in result.aux_llm_calls
+        if isinstance(e, dict) and e.get("type") == "workflow_selector"
+    )
+    assert selector_entry["workflow_id"] == CHAT_ASSISTANT_WORKFLOW_ID
+    assert selector_entry["verdict"] == "selector_prompt_unavailable"
+    assert selector_entry["selection_source"] == "selector_fail_closed"
+    assert selector_entry["prompt_failure_reason"] == "selector_prompt_unavailable"
+
+
 # ---------------------------------------------------------------------------
 # JVNAUTOSCI-922 Phase 1.3: Discovered workflows in selector prompt.
 # ---------------------------------------------------------------------------

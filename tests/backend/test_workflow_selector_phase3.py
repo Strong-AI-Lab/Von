@@ -14,7 +14,7 @@ import json
 
 import pytest
 
-from src.backend.services.prompt_template_service import PromptTemplateService
+import src.backend.services.workflow_selection_policy_service as policy_module
 from src.backend.services.workflow_selection_experience import (
     SelectionExperienceTuple,
     get_recent_experiences,
@@ -27,7 +27,10 @@ from src.backend.workflows.workflow_selector import (
     WorkflowSelection,
     WorkflowSelector,
 )
-from workflow_test_support import build_test_conversation_turn_registry
+from workflow_test_support import (
+    build_test_conversation_turn_registry,
+    build_test_prompt_service,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -42,11 +45,17 @@ def _build_registry() -> WorkflowRegistry:
 def _build_selector(*, default_workflow_id=None) -> WorkflowSelector:
     kwargs: dict = {
         "registry": _build_registry(),
-        "prompt_service": PromptTemplateService(),
+        "prompt_service": build_test_prompt_service(),
     }
     if default_workflow_id is not None:
         kwargs["default_workflow_id"] = default_workflow_id
     return WorkflowSelector(**kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _disable_learned_policy(monkeypatch: pytest.MonkeyPatch):
+    policy_module.clear_live_selection_policy()
+    monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
 
 
 _TOOL_WORKFLOW = "#V#tool_calling_workflow"
@@ -251,6 +260,7 @@ class TestEnhancedPrompt:
                 },
             ],
         )
+        assert prompt.prompt_text is not None
         assert "JSON" in prompt.prompt_text
         assert "confidence" in prompt.prompt_text
         assert "reasoning" in prompt.prompt_text
@@ -264,6 +274,7 @@ class TestEnhancedPrompt:
                 {"concept_id": _TOOL_WORKFLOW, "name": "Tools", "description": "Tools."},
             ],
         )
+        assert prompt.prompt_text is not None
         assert _CHAT_WORKFLOW in prompt.prompt_text
         assert _TOOL_WORKFLOW in prompt.prompt_text
 

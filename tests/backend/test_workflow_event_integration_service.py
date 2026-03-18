@@ -155,7 +155,7 @@ def test_launch_event_workflow_creates_instance_when_configured(
     assert called_args.kwargs["workflow_id"] == "#V#task_event_workflow"
     assert called_args.kwargs["source_event_type"] == EVENT_TYPE_TASK_CREATED
     assert called_args.kwargs["source_event_id"] == "task-1"
-    assert called_args.kwargs["namespace"] == "#V#user_alice/#V#org_nao"
+    assert called_args.kwargs["namespace"] == "#V#user_alice@org_nao"
     assert called_args.kwargs["event_idempotency_key"].startswith(
         "evt:task.created:",
     )
@@ -462,6 +462,44 @@ def test_launch_event_workflow_uses_namespace_override_for_tenancy(
     assert result["success"] is True
     assert result["triggered"] is True
 
+    called_args = mock_submit.call_args
+    assert called_args is not None
+    assert called_args.kwargs["user_id"] == "#V#user_alice"
+    assert called_args.kwargs["org_id"] == "#V#org_nao"
+    assert called_args.kwargs["namespace"] == "#V#user_alice@org_nao"
+
+
+@patch("src.backend.services.workflow_event_integration_service.get_instance_manager")
+def test_launch_event_workflow_normalises_legacy_namespace_override(
+    mock_get_instance_manager: MagicMock,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", "1")
+    monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "1")
+
+    mock_manager = MagicMock()
+    mock_get_instance_manager.return_value = mock_manager
+
+    with patch(
+        "src.backend.services.workflow_event_integration_service.submit_verified_workflow_instance",
+        return_value=_submission_result(
+            workflow_id="#V#task_event_workflow",
+            instance_id="instance-ns-legacy",
+            created_new=True,
+        ),
+    ) as mock_submit:
+        result = launch_event_workflow(
+            event_type=EVENT_TYPE_TASK_CREATED,
+            event_id="task-legacy-namespace",
+            user_id=None,
+            org_id=None,
+            namespace="#V#user_alice/#V#org_nao",
+            workflow_id="#V#task_event_workflow",
+            inputs={"task_concept_id": "#V#task_99"},
+        )
+
+    assert result["success"] is True
+    assert result["triggered"] is True
     called_args = mock_submit.call_args
     assert called_args is not None
     assert called_args.kwargs["user_id"] == "#V#user_alice"

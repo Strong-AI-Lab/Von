@@ -8,7 +8,6 @@ import pytest
 import src.backend.db.mongo_client as mongo_client_module
 import src.backend.services.workflow_selection_experience as experience_module
 import src.backend.services.workflow_selection_policy_service as policy_module
-from src.backend.services.prompt_template_service import PromptTemplateService
 from src.backend.workflows import WorkflowRegistry
 from src.backend.workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
@@ -20,7 +19,10 @@ from test_orchestrator_workflow_selector_routing import (
     _CapturingLLM,
     _build_orchestrator,
 )
-from workflow_test_support import build_test_conversation_turn_registry
+from workflow_test_support import (
+    build_test_conversation_turn_registry,
+    build_test_prompt_service,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -82,7 +84,7 @@ def _build_selector() -> WorkflowSelector:
     registry = build_test_conversation_turn_registry()
     return WorkflowSelector(
         registry=registry,
-        prompt_service=PromptTemplateService(),
+        prompt_service=build_test_prompt_service(),
     )
 
 
@@ -92,7 +94,7 @@ def _build_rag_first_orchestrator(
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
     orchestrator._workflow_selector = WorkflowSelector(
         registry=orchestrator._workflow_registry,
-        prompt_service=PromptTemplateService(),
+        prompt_service=build_test_prompt_service(),
         classifier_prompt_ids=orchestrator._TURN_SELECTOR_PROMPTS,
         default_workflow_id=CHAT_ASSISTANT_WORKFLOW_ID,
     )

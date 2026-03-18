@@ -9,7 +9,7 @@ Example: #V#michael_witbrock@sail
 """
 
 import re
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 
 def derive_namespace(
@@ -45,6 +45,98 @@ def derive_namespace(
         return f"#V#{user_id}@{org_id}"
     else:
         return f"#V#{user_id}"
+
+
+def concept_id_to_namespace_slug(value: Any) -> Optional[str]:
+    """Return a namespace slug from a concept ID or already-slugged value."""
+
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if cleaned.startswith("#V#"):
+        cleaned = cleaned[3:]
+    cleaned = cleaned.strip()
+    return cleaned or None
+
+
+def derive_namespace_for_actor(
+    user_id: Any,
+    org_id: Any = None,
+) -> Optional[str]:
+    """Derive a canonical namespace from concept IDs or namespace slugs."""
+
+    user_slug = concept_id_to_namespace_slug(user_id)
+    if not user_slug:
+        return None
+    org_slug = concept_id_to_namespace_slug(org_id)
+    try:
+        return derive_namespace(user_slug, org_slug)
+    except ValueError:
+        return None
+
+
+def coerce_namespace(value: Any) -> Optional[str]:
+    """Normalise common namespace encodings to canonical ``#V#user@org`` form."""
+
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+
+    if cleaned.startswith("#V#"):
+        body = cleaned[3:].strip()
+        if not body:
+            return None
+        if "@" in body:
+            user_raw, org_raw = body.split("@", 1)
+            return derive_namespace_for_actor(user_raw, org_raw)
+        if "/" in body:
+            user_raw, org_raw = body.split("/", 1)
+            return derive_namespace_for_actor(user_raw, org_raw)
+        return derive_namespace_for_actor(body)
+
+    if "@" in cleaned:
+        user_raw, org_raw = cleaned.split("@", 1)
+        return derive_namespace_for_actor(user_raw, org_raw)
+    if "/" in cleaned:
+        user_raw, org_raw = cleaned.split("/", 1)
+        return derive_namespace_for_actor(user_raw, org_raw)
+    return derive_namespace_for_actor(cleaned)
+
+
+def resolve_canonical_namespace(
+    namespace: Any,
+    user_id: Any = None,
+    org_id: Any = None,
+    *,
+    preserve_explicit: bool = False,
+) -> Optional[str]:
+    """Prefer canonical explicit namespace text, otherwise derive from actor IDs.
+
+    This helper lets workflow write paths converge on one authoritative namespace
+    derivation pathway while still allowing bounded compatibility for legacy read
+    surfaces or explicit caller-provided opaque identifiers when requested.
+    """
+
+    cleaned_explicit = None
+    if isinstance(namespace, str):
+        cleaned_explicit = namespace.strip() or None
+
+    canonical = coerce_namespace(cleaned_explicit)
+    if canonical:
+        return canonical
+
+    derived = derive_namespace_for_actor(user_id, org_id)
+    if derived:
+        return derived
+
+    if preserve_explicit:
+        return cleaned_explicit
+
+    return None
 
 
 def parse_namespace(namespace: str) -> Dict[str, Optional[str]]:

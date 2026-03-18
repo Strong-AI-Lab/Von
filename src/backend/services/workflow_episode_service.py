@@ -48,7 +48,9 @@ def _namespace_equivalents(namespace: str | None) -> list[str]:
 
     Workflow episodes have historically used both ``user/org`` and
     ``#V#user@org`` forms. The monitor should treat these as equivalent when
-    querying episodes, while still remaining namespace-scoped.
+    querying episodes, while still remaining namespace-scoped. New workflow
+    launches should emit canonical namespaces; this helper is read-side
+    compatibility for historical data only.
     """
     clean_namespace = _safe_str(namespace)
     if clean_namespace is None:

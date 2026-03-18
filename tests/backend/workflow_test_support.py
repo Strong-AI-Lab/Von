@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import cast
 from typing import Any
 
@@ -211,6 +212,59 @@ AUTHORITATIVE_FILE_COPY_WORKFLOW_IDS: tuple[str, ...] = (
     FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
     FILE_COPY_INTERPRETATION_WORKFLOW_ID,
 )
+
+TEST_WORKFLOW_SELECTOR_PROMPT_ID = "#V#chat_turn_classifier_prompt"
+TEST_WORKFLOW_SELECTOR_PROMPT_TEMPLATE = (
+    "You are a workflow router. Given the user's request and the candidate "
+    "workflows below, select the single best workflow.\n\n"
+    "Return JSON with fields workflow_id, confidence, and reasoning.\n\n"
+    "User request:\n{turn_text}\n\n"
+    "Candidate workflows:\n{candidate_list}\n"
+)
+
+
+def render_test_prompt_template(
+    template: str,
+    variables: dict[str, Any] | None = None,
+) -> str:
+    rendered = str(template)
+    for key, value in dict(variables or {}).items():
+        rendered = rendered.replace("{" + str(key) + "}", str(value))
+    return rendered
+
+
+def build_test_prompt_service(
+    *,
+    prompt_text: str | None = TEST_WORKFLOW_SELECTOR_PROMPT_TEMPLATE,
+    prompt_id: str = TEST_WORKFLOW_SELECTOR_PROMPT_ID,
+    error: Exception | None = None,
+) -> Any:
+    class _TestPromptService:
+        def render_prompt(
+            self,
+            concept_ids: Any,
+            *,
+            variables: Any = None,
+            fallback: Any = None,
+            max_chars: Any = None,
+        ) -> Any:
+            _ = (concept_ids, fallback, max_chars)
+            if error is not None:
+                raise error
+            if prompt_text is None:
+                return None
+            rendered = render_test_prompt_template(
+                prompt_text,
+                dict(variables or {}),
+            )
+            return SimpleNamespace(
+                prompt_id=prompt_id,
+                text=rendered,
+                variables=dict(variables or {}),
+                truncated=False,
+            )
+
+    return _TestPromptService()
 
 
 def build_test_conversation_turn_registry() -> WorkflowRegistry:

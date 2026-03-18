@@ -61,7 +61,7 @@ def test_bootstrap_reuses_existing_matching_schedule(monkeypatch) -> None:
         interval_seconds=14400,
         user_id="#V#system",
         org_id="#V#default",
-        namespace="#V#system/#V#default",
+        namespace="#V#system@default",
         default_inputs={
             "managed_schedule_key": mod.PARENT_SPECIFICITY_SCHEDULE_MANAGED_KEY,
             "scan_limit": 24,
@@ -95,7 +95,7 @@ def test_bootstrap_disables_mismatch_and_recreates(monkeypatch) -> None:
         interval_seconds=1800,
         user_id="#V#system",
         org_id="#V#default",
-        namespace="#V#system/#V#default",
+        namespace="#V#system@default",
         default_inputs={
             "managed_schedule_key": mod.PARENT_SPECIFICITY_SCHEDULE_MANAGED_KEY,
             "scan_limit": 12,
@@ -118,3 +118,38 @@ def test_bootstrap_disables_mismatch_and_recreates(monkeypatch) -> None:
     assert report["created_count"] == 1
     assert report["disabled_count"] == 1
     assert (mismatched.schedule_id, False) in fake.enabled_updates
+
+
+def test_bootstrap_recreates_legacy_namespace_schedule(monkeypatch) -> None:
+    from src.backend.services import parent_specificity_schedule_bootstrap_service as mod
+
+    _reset_bootstrap_state(mod)
+    legacy = WorkflowSchedule.create_interval(
+        mod.PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID,
+        interval_seconds=14400,
+        user_id="#V#system",
+        org_id="#V#default",
+        namespace="#V#system/#V#default",
+        default_inputs={
+            "managed_schedule_key": mod.PARENT_SPECIFICITY_SCHEDULE_MANAGED_KEY,
+            "scan_limit": 24,
+            "max_mutations_per_run": 4,
+            "min_confidence": 0.92,
+            "reanalyse_after_hours": 168,
+        },
+        description="managed",
+    )
+    legacy.enabled = True
+
+    fake = _FakeManager([legacy])
+    monkeypatch.setattr(mod, "get_instance_manager", lambda: fake)
+    monkeypatch.setenv("VON_PARENT_SPECIFICITY_SCHEDULE_ENABLE", "1")
+    monkeypatch.setenv("VON_PARENT_SPECIFICITY_SCHEDULE_INTERVAL_SECONDS", "14400")
+
+    report = mod.ensure_parent_specificity_background_schedule()
+
+    assert report["success"] is True
+    assert report["created_count"] == 1
+    assert report["disabled_count"] == 1
+    assert (legacy.schedule_id, False) in fake.enabled_updates
+    assert fake.created[0].namespace == "#V#system@default"

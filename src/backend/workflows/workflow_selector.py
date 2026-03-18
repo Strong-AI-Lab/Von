@@ -26,34 +26,16 @@ from src.backend.services.workflow_selection_policy_service import (
 from .workflow_registry import WorkflowRegistry
 
 
-# -----------------------------------------------------------------------
-# RAG-first ranker prompt (Phase 2 default)
-# -----------------------------------------------------------------------
-
-_DEFAULT_RANKER_PROMPT = (
-    "You are a workflow router.  Given the user's request and a set of "
-    "candidate workflows, select the single best workflow.\n\n"
-    "Return a JSON object with exactly these fields:\n"
-    '- "workflow_id": the concept_id of the best workflow '
-    "(e.g. #V#tool_calling_workflow)\n"
-    '- "confidence": a float between 0.0 and 1.0 indicating selection '
-    "confidence\n"
-    '- "reasoning": a brief explanation (1-2 sentences) of why this '
-    "workflow fits\n\n"
-    "Rules:\n"
-    "- Choose the workflow whose capabilities best match the user's intent.\n"
-    "- If the request requires tools, data retrieval, file operations, API "
-    "calls, or knowledge-base mutations, prefer a tool-calling or "
-    "specialised workflow.\n"
-    "- If the request is a simple greeting, question, or acknowledgement "
-    "that needs no external data, choose the chat assistant workflow.\n"
-    "- Canonical artefact identifiers and URLs (arXiv IDs, DOIs, file "
-    "references) usually require a tool-calling or specialised workflow.\n"
-    "- Set confidence to 1.0 when the match is unambiguous, lower when "
-    "multiple workflows could apply.\n\n"
-    "User request:\n{turn_text}\n\n"
-    "Candidate workflows:\n{candidate_list}\n"
+# Fail closed if the authoritative selector prompt cannot be resolved from
+# Vontology or omits the required routing context variables.
+SELECTOR_PROMPT_UNAVAILABLE_REASON = "selector_prompt_unavailable"
+SELECTOR_PROMPT_RENDER_ERROR_REASON = "selector_prompt_render_error"
+SELECTOR_PROMPT_MISSING_CANDIDATE_LIST_REASON = (
+    "selector_prompt_missing_candidate_list"
 )
+SELECTOR_PROMPT_MISSING_TURN_TEXT_REASON = "selector_prompt_missing_turn_text"
+SELECTOR_FAIL_CLOSED_SOURCE = "selector_fail_closed"
+
 
 @dataclass(frozen=True)
 class WorkflowSelection:
@@ -72,9 +54,11 @@ class WorkflowSelection:
 @dataclass(frozen=True)
 class WorkflowSelectionPrompt:
     prompt_id: Optional[str]
-    prompt_text: str
+    prompt_text: str | None
     discovered_workflow_ids: tuple[str, ...] = ()
     policy_recommendation: Mapping[str, Any] = field(default_factory=dict)
+    prompt_failure_reason: str | None = None
+    prompt_failure_detail: str | None = None
 
 
 class WorkflowSelector:
@@ -91,13 +75,11 @@ class WorkflowSelector:
         prompt_service: PromptTemplateService,
         default_workflow_id: str = "#V#chat_assistant_workflow",
         classifier_prompt_ids: Sequence[str] = ("#V#chat_turn_classifier_prompt",),
-        fallback_prompt: str | None = None,
     ) -> None:
         self._registry = registry
         self._prompt_service = prompt_service
         self._default_workflow_id = default_workflow_id
         self._classifier_prompt_ids = tuple(classifier_prompt_ids)
-        self._fallback_prompt = fallback_prompt or _DEFAULT_RANKER_PROMPT
     _JSON_SELECTION_KEYS = (
         "workflow_id",
         "workflow",
@@ -143,9 +125,34 @@ class WorkflowSelector:
             turn_text=turn_text,
             discovered_workflows=discovered_workflows,
         )
+        prompt_text = selection_prompt.prompt_text
+        selection_policy = (
+            dict(selection_prompt.policy_recommendation)
+            if isinstance(selection_prompt.policy_recommendation, Mapping)
+            else {}
+        )
+        if (
+            isinstance(selection_policy.get("recommended_workflow_id"), str)
+            and selection_policy.get("guidance_mode") == "direct"
+        ):
+            return self.resolve_policy_selection(
+                workflow_id=str(selection_policy.get("recommended_workflow_id")),
+                prompt_id=selection_prompt.prompt_id,
+                prompt_used=selection_prompt.prompt_text,
+                discovered_workflow_ids=selection_prompt.discovered_workflow_ids,
+                confidence_score=float(
+                    selection_policy.get("confidence_score", 0.0)
+                ),
+                reasoning=str(selection_policy.get("reasoning") or ""),
+                selection_metadata=selection_policy,
+            )
+        if not prompt_text:
+            return self.resolve_prompt_unavailable_selection(
+                selection_prompt=selection_prompt,
+            )
         response = llm_client.generate(
             prompt="Select workflow",
-            context=[{"role": "system", "content": selection_prompt.prompt_text}],
+            context=[{"role": "system", "content": prompt_text}],
             model=model,
         )
         return self.resolve_selection(
@@ -256,30 +263,52 @@ class WorkflowSelector:
 
         candidate_list = "\n".join(candidate_lines)
 
-        # Try Vontology prompt template first, then fall back.
-        prompt = self._prompt_service.render_prompt(
-            self._classifier_prompt_ids,
-            variables={"turn_text": turn_text, "candidate_list": candidate_list},
-            fallback=self._fallback_prompt,
-            max_chars=6000,
-        )
-        prompt_id = prompt.prompt_id if prompt else None
-        prompt_text = prompt.text if prompt else self._fallback_prompt
-
-        # If the rendered prompt doesn't contain the candidate list
-        # (e.g. because the Vontology template doesn't have the
-        # {candidate_list} variable), append it.
-        if "{candidate_list}" in prompt_text:
-            prompt_text = prompt_text.replace("{candidate_list}", candidate_list)
-        elif candidate_list and candidate_list not in prompt_text:
-            prompt_text = _DEFAULT_RANKER_PROMPT.format(
-                turn_text=turn_text,
-                candidate_list=candidate_list,
+        try:
+            prompt = self._prompt_service.render_prompt(
+                self._classifier_prompt_ids,
+                variables={"turn_text": turn_text, "candidate_list": candidate_list},
+                fallback=None,
+                max_chars=6000,
             )
-            prompt_id = None  # Using fallback ranker prompt.
+        except Exception as exc:
+            return WorkflowSelectionPrompt(
+                prompt_id=None,
+                prompt_text=None,
+                discovered_workflow_ids=tuple(candidate_ids),
+                policy_recommendation=policy_recommendation,
+                prompt_failure_reason=SELECTOR_PROMPT_RENDER_ERROR_REASON,
+                prompt_failure_detail=str(exc),
+            )
+
+        if prompt is None or not isinstance(prompt.text, str) or not prompt.text.strip():
+            return WorkflowSelectionPrompt(
+                prompt_id=None,
+                prompt_text=None,
+                discovered_workflow_ids=tuple(candidate_ids),
+                policy_recommendation=policy_recommendation,
+                prompt_failure_reason=SELECTOR_PROMPT_UNAVAILABLE_REASON,
+            )
+
+        prompt_text = prompt.text.strip()
+        if candidate_list and candidate_list not in prompt_text:
+            return WorkflowSelectionPrompt(
+                prompt_id=prompt.prompt_id,
+                prompt_text=prompt_text,
+                discovered_workflow_ids=tuple(candidate_ids),
+                policy_recommendation=policy_recommendation,
+                prompt_failure_reason=SELECTOR_PROMPT_MISSING_CANDIDATE_LIST_REASON,
+            )
+        if turn_text and turn_text not in prompt_text:
+            return WorkflowSelectionPrompt(
+                prompt_id=prompt.prompt_id,
+                prompt_text=prompt_text,
+                discovered_workflow_ids=tuple(candidate_ids),
+                policy_recommendation=policy_recommendation,
+                prompt_failure_reason=SELECTOR_PROMPT_MISSING_TURN_TEXT_REASON,
+            )
 
         return WorkflowSelectionPrompt(
-            prompt_id=prompt_id,
+            prompt_id=prompt.prompt_id,
             prompt_text=prompt_text,
             discovered_workflow_ids=tuple(candidate_ids),
             policy_recommendation=policy_recommendation,
@@ -414,6 +443,39 @@ class WorkflowSelector:
             reasoning=str(reasoning or ""),
             selection_source="policy_direct",
             selection_metadata=dict(selection_metadata or {}),
+        )
+
+    def resolve_prompt_unavailable_selection(
+        self,
+        *,
+        selection_prompt: WorkflowSelectionPrompt,
+    ) -> WorkflowSelection:
+        """Return an explicit fail-closed selection when prompt authority is missing."""
+
+        failure_reason = (
+            selection_prompt.prompt_failure_reason or SELECTOR_PROMPT_UNAVAILABLE_REASON
+        )
+        selection_metadata: dict[str, Any] = {
+            "prompt_failure_reason": failure_reason,
+        }
+        if (
+            isinstance(selection_prompt.prompt_failure_detail, str)
+            and selection_prompt.prompt_failure_detail
+        ):
+            selection_metadata["prompt_failure_detail"] = (
+                selection_prompt.prompt_failure_detail
+            )
+        return WorkflowSelection(
+            workflow_id=self._default_workflow_id,
+            verdict=failure_reason,
+            prompt_id=selection_prompt.prompt_id,
+            prompt_used=selection_prompt.prompt_text,
+            raw_response="",
+            discovered_workflow_ids=selection_prompt.discovered_workflow_ids,
+            confidence_score=0.0,
+            reasoning=failure_reason,
+            selection_source=SELECTOR_FAIL_CLOSED_SOURCE,
+            selection_metadata=selection_metadata,
         )
 
     # ------------------------------------------------------------------

@@ -5779,17 +5779,29 @@ def onboard_new_member():
             or "anonymous"
         )
 
+        from ...services.namespace_service import resolve_canonical_namespace
+
         requested_namespace = data.get("namespace")
         if not isinstance(requested_namespace, str) or not requested_namespace.strip():
             requested_namespace = None
-        namespace = namespace_resolution.get("namespace") or requested_namespace
+        namespace = resolve_canonical_namespace(
+            namespace_resolution.get("namespace") or requested_namespace,
+            user_id,
+            org_id if org_id != "default" else None,
+        )
         if not isinstance(namespace, str) or not namespace.strip():
-            if isinstance(user_id, str) and user_id.startswith("#V#"):
-                namespace = _derive_namespace_for_user_org(
-                    user_id, org_id if org_id != "default" else None
-                )
-            if not isinstance(namespace, str) or not namespace.strip():
-                namespace = f"{user_id}/{org_id}"
+            return (
+                jsonify(
+                    {
+                        "error": "namespace_resolution_failed",
+                        "message": (
+                            "Workflow launch namespace must be canonical or "
+                            "derivable from authenticated user/org context."
+                        ),
+                    }
+                ),
+                400,
+            )
 
         manager = get_instance_manager()
         attempt_payloads: list[dict[str, Any]] = []

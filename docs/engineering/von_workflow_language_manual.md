@@ -1,7 +1,7 @@
 # Von Workflow Language (VWL) Manual
 
 Status: Draft (current implementation-aligned)
-Last updated: 2026-03-15 (Pacific/Auckland)
+Last updated: 2026-03-18 (Pacific/Auckland)
 Audience: Human engineers and AI agents
 
 ## 1. Purpose and Scope
@@ -258,19 +258,40 @@ Compilation flow:
 Important deterministic ordering:
 
 - Generated branch precedence for implicit branch links is:
-  Explicit declarative `conditions` listed on the step are evaluated first, in
+- Explicit declarative `conditions` listed on the step are evaluated first, in
   stored order.
-  - `on_failure`
-  - `on_unknown`
-  - `on_approval_required`
-  - `on_break`
-  - `on_continue`
-  - `on_true`/`on_false`
-  - `next_step`
+- `on_failure`
+- `on_unknown`
+- `on_approval_required`
+- `on_break`
+- `on_continue`
+- `on_true`/`on_false`
+- `next_step`
 
 `on_failure` and `on_unknown` compile to context-flag conditions (`last_action_failed`, `last_action_unknown`).
 `on_approval_required` compiles to a context-flag condition (`approval_required == true`).
 `on_break`/`on_continue` compile to control-signal conditions (`last_control_signal == break|continue`).
+
+### 6.1 Runtime Registry Authority
+
+Production runtime registry construction is now read-only with respect to
+workflow authority:
+
+- the runtime registry MUST discover already-materialised workflow concepts from
+  Vontology and load definitions from Vontology on demand;
+- the runtime registry MUST NOT publish or materialise authoritative workflow
+  graphs from Python workflow-definition helpers during normal startup or route
+  selection;
+- Python workflow-definition modules MAY remain for test support, publication
+  repair, or action registration, but they are not production registration
+  authority;
+- workflow parity/purity checks are expected to fail closed on drift by default,
+  and authoritative routing text is expected to come from `source=vontology`
+  workflows with non-empty narrative text.
+- authoritative selector prompts for workflow routing MUST also come from
+  Vontology prompt concepts; missing or malformed selector prompts MUST fail
+  closed with explicit diagnostics instead of regenerating a code-authored
+  ranker prompt.
 
 ## 7. Execution Semantics
 
@@ -336,6 +357,10 @@ For live chat progress payloads used by workflow-aware thinking-card rendering:
 - workflow discovery SHOULD emit an explicit completion payload even when zero workflows match, so the UI can render a visible "no applicable workflow found" step rather than silently omitting discovery outcome;
 - live workflow-dispatch progress SHOULD expose `selected_workflow_id` and SHOULD expose a human-readable `selected_workflow_name` when available;
 - selector metadata such as `workflow_selector_verdict` and `workflow_selector_source` SHOULD be preserved in the live payload so the UI can explain why a workflow route was chosen;
+- selector fail-closed diagnostics such as `selector_prompt_unavailable` or
+  `selector_prompt_missing_candidate_list` SHOULD remain visible in live payloads
+  and traces when authoritative routing prompt content is unavailable or
+  malformed;
 - tool history and tool success/failure/pending counters SHOULD be derived from concrete tool lifecycle events (`tool_call_start` / terminal tool events) rather than route-selection metadata such as `workflow_task`;
 - thinking-card step labels SHOULD prefer canonical workflow-stage labels (for example `Workflow discovery`, `Workflow dispatch`, `Plan tool calls`) over transport/internal labels such as `orchestrator_start`.
 
@@ -622,7 +647,7 @@ This enables workflow authors to declare expected context variables and their de
 
 ### 10.4 File-Copy Upload Routing Workflows (JVNAUTOSCI-1309)
 
-Built-in workflow IDs:
+Canonical workflow IDs:
 
 - `#V#file_copy_upload_classification_workflow`
 - `#V#file_copy_upload_handler_workflow`
@@ -643,15 +668,9 @@ Safety semantics:
 
 Event-launch semantics:
 
-- `file_copy.uploaded` launches use a single selected workflow strategy (`#V#file_copy_upload_handler_workflow` by default) to avoid duplicate uncontrolled launches.
-- Default event bindings are bootstrapped idempotently; conflicting bindings are not overwritten.
+- `file_copy.uploaded` launches resolve through persisted workflow event bindings; the canonical production route is a single enabled binding to `#V#file_copy_upload_handler_workflow` to avoid duplicate uncontrolled launches.
+- Production runtime no longer bootstraps default `file_copy.uploaded` bindings from Python. Missing bindings MUST surface explicit `workflow_not_configured` diagnostics instead of silently recreating authority at runtime.
 - Operators should resolve obsolete `file_copy.uploaded` routes through workflow binding governance (`workflow_list_event_bindings`, `workflow_set_event_binding_enabled`, `workflow_delete_event_binding`) rather than by adding Python-side routing switches.
-
-Current implementation caveat (JVNAUTOSCI-1415):
-
-- the upload-classification scholarly default still points at `#V#integration_scholarly_paper_representation_workflow` in code (`src/backend/workflows/durable/file_copy_upload_classification_workflow.py`);
-- that ID is not currently a Vontology concept, while `#V#scholarly_paper_representation_workflow` does exist as a Vontology workflow concept;
-- until `JVNAUTOSCI-1415` aligns these identities, treat the upload scholarly target as an implementation split rather than a clean single-source workflow authority.
 
 ### 10.5 PDF Diagram-Aware Organisation Extraction (JVNAUTOSCI-1017)
 
@@ -945,6 +964,11 @@ Operational cadence controls include:
 - `workflow_trigger_schedule`
 
 These tools are the default operational control surface for VWL runtime behaviour.
+Workflow instance and schedule creation paths canonicalise namespace context to
+`#V#user@org` (or `#V#user` when no organisation scope exists) via the
+namespace service. Legacy slash-form inputs may still be accepted on read/query
+surfaces or normalised at write boundaries for compatibility, but new
+authoritative workflow launches must not emit fresh `user/org` namespaces.
 
 ## 15. Conformance Checklist for Workflow Authors
 

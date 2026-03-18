@@ -33,6 +33,7 @@ from ...services.feature_flags import (
     get_durable_workflows_enabled,
     get_event_workflow_integration_enabled,
 )
+from ...services.namespace_service import resolve_canonical_namespace
 from ..engine import WorkflowDefinition
 from ..vontology_loader import (
     build_workflow_process_graph,
@@ -865,6 +866,33 @@ def submit_verified_workflow_instance(
 
     workflow_id = str(workflow_id or "").strip()
     inputs_payload = dict(inputs or {})
+    canonical_namespace = resolve_canonical_namespace(namespace, user_id, org_id)
+    if not canonical_namespace:
+        return WorkflowInstanceSubmissionResult(
+            success=False,
+            workflow_id=workflow_id,
+            status="rejected_preflight",
+            instance_id=None,
+            error_code="invalid_namespace",
+            error=(
+                "Workflow instance namespace could not be resolved to canonical "
+                "Vontology form."
+            ),
+            verification={
+                "runnable_verification_success": False,
+                "preflight_passed": False,
+                "postflight_passed": False,
+                "preflight": {
+                    "workflow_id": workflow_id,
+                    "runnable_verification_success": False,
+                    "errors": ["invalid_namespace"],
+                    "warnings": [],
+                },
+                "postflight": None,
+                "namespace_resolution_error": "invalid_namespace",
+            },
+            created_new=None,
+        )
     preflight = verify_workflow_runnable(workflow_id)
     verification_payload = _build_submission_verification_payload(
         preflight=preflight,
@@ -900,7 +928,7 @@ def submit_verified_workflow_instance(
             workflow_id=workflow_id,
             user_id=user_id,
             org_id=org_id,
-            namespace=namespace,
+            namespace=canonical_namespace,
             event_idempotency_key=str(event_idempotency_key).strip(),
             source_event_type=str(source_event_type).strip(),
             source_event_id=str(source_event_id).strip(),
@@ -913,7 +941,7 @@ def submit_verified_workflow_instance(
             workflow_id,
             user_id=user_id,
             org_id=org_id,
-            namespace=namespace,
+            namespace=canonical_namespace,
             inputs=inputs_payload,
             schedule_id=schedule_id,
             max_retries=max_retries,

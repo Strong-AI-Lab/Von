@@ -63,7 +63,7 @@ def test_bootstrap_reuses_existing_matching_schedule(monkeypatch) -> None:
         interval_seconds=interval_seconds,
         user_id="#V#system",
         org_id="#V#default",
-        namespace="#V#system/#V#default",
+        namespace="#V#system@default",
         default_inputs={
             "managed_schedule_key": mod.IDENTITY_RESOLUTION_SCHEDULE_MANAGED_KEY,
         },
@@ -96,7 +96,7 @@ def test_bootstrap_disables_mismatch_and_recreates(monkeypatch) -> None:
         interval_seconds=1800,
         user_id="#V#system",
         org_id="#V#default",
-        namespace="#V#system/#V#default",
+        namespace="#V#system@default",
         default_inputs={
             "managed_schedule_key": mod.IDENTITY_RESOLUTION_SCHEDULE_MANAGED_KEY,
         },
@@ -115,3 +115,34 @@ def test_bootstrap_disables_mismatch_and_recreates(monkeypatch) -> None:
     assert report["created_count"] == 1
     assert report["disabled_count"] == 1
     assert (mismatched.schedule_id, False) in fake.enabled_updates
+
+
+def test_bootstrap_recreates_legacy_namespace_schedule(monkeypatch) -> None:
+    from src.backend.services import identity_resolution_schedule_bootstrap_service as mod
+
+    _reset_bootstrap_state(mod)
+    legacy = WorkflowSchedule.create_interval(
+        mod.ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID,
+        interval_seconds=21600,
+        user_id="#V#system",
+        org_id="#V#default",
+        namespace="#V#system/#V#default",
+        default_inputs={
+            "managed_schedule_key": mod.IDENTITY_RESOLUTION_SCHEDULE_MANAGED_KEY,
+        },
+        description="managed",
+    )
+    legacy.enabled = True
+
+    fake = _FakeManager([legacy])
+    monkeypatch.setattr(mod, "get_instance_manager", lambda: fake)
+    monkeypatch.setenv("VON_IDENTITY_RESOLUTION_SCHEDULE_ENABLE", "1")
+    monkeypatch.setenv("VON_IDENTITY_RESOLUTION_SCHEDULE_INTERVAL_SECONDS", "21600")
+
+    report = mod.ensure_identity_resolution_background_schedule()
+
+    assert report["success"] is True
+    assert report["created_count"] == 1
+    assert report["disabled_count"] == 1
+    assert (legacy.schedule_id, False) in fake.enabled_updates
+    assert fake.created[0].namespace == "#V#system@default"

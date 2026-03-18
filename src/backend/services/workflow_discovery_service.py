@@ -67,6 +67,9 @@ EXECUTABILITY_WORKFLOW_STEP_PARTIALLY_VACUOUS = "workflow_step_partially_vacuous
 EXECUTABILITY_WORKFLOW_STEP_COMPLETELY_VACUOUS = (
     "workflow_step_completely_vacuous"
 )
+ROUTING_EXCLUSION_MISSING_AUTHORITATIVE_PURPOSE = (
+    "missing_authoritative_purpose"
+)
 
 _EXECUTABILITY_REASON_PRIORITY = {
     EXECUTABILITY_EXECUTABLE_NOW: 2,
@@ -775,6 +778,22 @@ def _compute_candidate_confidence(match: WorkflowMatch) -> float:
     return min(1.0, round(score, 3))
 
 
+def _has_authoritative_routing_text(concept_id: str) -> bool:
+    """Return whether the workflow exposes authoritative Vontology narrative text."""
+
+    if not isinstance(concept_id, str) or not concept_id.strip():
+        return False
+
+    try:
+        from ..workflows.vontology_loader import resolve_workflow_narrative_text
+
+        narrative_text, _source = resolve_workflow_narrative_text(concept_id)
+    except Exception:
+        return False
+
+    return isinstance(narrative_text, str) and bool(narrative_text.strip())
+
+
 def _annotate_and_rank_candidates(
     matches: List[WorkflowMatch],
     *,
@@ -786,14 +805,22 @@ def _annotate_and_rank_candidates(
         is_executable, reason, detail = _classify_workflow_concept_executability(
             match.concept_id
         )
+        has_authoritative_text = _has_authoritative_routing_text(match.concept_id)
         match.is_executable = bool(is_executable)
         match.executability_reason = reason
         match.executability_detail = detail
         # Discovery-level policy baseline: only executable candidates are
         # considered safe before orchestrator-level policy checks are applied.
-        match.is_policy_safe = bool(is_executable)
-        match.routing_eligible = bool(is_executable)
-        match.routing_exclusion_reason = None if is_executable else reason
+        match.is_policy_safe = bool(is_executable and has_authoritative_text)
+        match.routing_eligible = bool(is_executable and has_authoritative_text)
+        if not is_executable:
+            match.routing_exclusion_reason = reason
+        elif not has_authoritative_text:
+            match.routing_exclusion_reason = (
+                ROUTING_EXCLUSION_MISSING_AUTHORITATIVE_PURPOSE
+            )
+        else:
+            match.routing_exclusion_reason = None
         match.confidence_score = _compute_candidate_confidence(match)
         annotated.append(match)
 

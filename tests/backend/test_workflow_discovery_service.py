@@ -24,6 +24,7 @@ from src.backend.services.workflow_discovery_service import (
     EXECUTABILITY_WORKFLOW_STEP_PARTIALLY_VACUOUS,
     EXECUTABILITY_WORKFLOW_STEP_INTEGRITY,
     EXECUTABILITY_NON_EXECUTABLE_DESIGN_ARTIFACT,
+    ROUTING_EXCLUSION_MISSING_AUTHORITATIVE_PURPOSE,
     WORKFLOW_TYPE_IDS,
     WorkflowDiscoveryResult,
     WorkflowMatch,
@@ -377,11 +378,15 @@ class TestDiscoverWorkflows:
         "src.backend.services.workflow_discovery_service._search_workflows_vontology"
     )
     @patch(
+        "src.backend.services.workflow_discovery_service._has_authoritative_routing_text"
+    )
+    @patch(
         "src.backend.services.workflow_discovery_service._classify_workflow_concept_executability"
     )
     def test_mixed_candidates_expose_reason_codes_and_routing_subset(
         self,
         mock_classify: MagicMock,
+        mock_has_authoritative_text: MagicMock,
         mock_vontology: MagicMock,
         mock_semantic: MagicMock,
     ) -> None:
@@ -406,6 +411,7 @@ class TestDiscoverWorkflows:
             )
 
         mock_classify.side_effect = _classify
+        mock_has_authoritative_text.side_effect = lambda concept_id: concept_id == "#V#wf_exec"
 
         with patch(
             "src.backend.services.workflow_discovery_service._enrich_workflow_matches",
@@ -429,11 +435,16 @@ class TestDiscoverWorkflows:
         "src.backend.services.workflow_discovery_service._search_workflows_vontology"
     )
     @patch(
+        "src.backend.services.workflow_discovery_service._has_authoritative_routing_text",
+        return_value=True,
+    )
+    @patch(
         "src.backend.services.workflow_discovery_service._classify_workflow_concept_executability"
     )
     def test_allow_non_executable_override_keeps_mixed_routing_candidates(
         self,
         mock_classify: MagicMock,
+        mock_has_authoritative_text: MagicMock,
         mock_vontology: MagicMock,
         mock_semantic: MagicMock,
     ) -> None:
@@ -563,6 +574,40 @@ class TestDiscoverWorkflowsForTurn:
         assert "Scholarly paper file copy" in fallback_queries
         assert "PDF file copy" in fallback_queries
         assert "route_hint=scholarly" in result.query
+
+    @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
+    @patch("src.backend.services.workflow_discovery_service._has_authoritative_routing_text")
+    @patch("src.backend.services.workflow_discovery_service._classify_workflow_concept_executability")
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_name_fallback")
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_vontology")
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
+    def test_textless_fallback_match_is_visible_but_not_routing_eligible(
+        self,
+        mock_semantic: MagicMock,
+        mock_vontology: MagicMock,
+        mock_name_fallback: MagicMock,
+        mock_classify: MagicMock,
+        mock_has_authoritative_text: MagicMock,
+        mock_enrich: MagicMock,
+    ) -> None:
+        mock_semantic.return_value = [
+            WorkflowMatch("#V#textless_candidate", "Textless candidate", relevance_score=0.86)
+        ]
+        mock_vontology.return_value = []
+        mock_name_fallback.return_value = []
+        mock_classify.return_value = (True, EXECUTABILITY_EXECUTABLE_NOW, None)
+        mock_has_authoritative_text.return_value = False
+        mock_enrich.side_effect = lambda matches: matches
+
+        result = discover_workflows("Represent the uploaded paper now", max_results=1)
+
+        assert len(result.matches) == 1
+        assert result.matches[0].routing_eligible is False
+        assert (
+            result.matches[0].routing_exclusion_reason
+            == ROUTING_EXCLUSION_MISSING_AUTHORITATIVE_PURPOSE
+        )
+        assert result.routing_matches == []
 
     @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
     @patch("src.backend.services.workflow_discovery_service._search_workflows_name_fallback")

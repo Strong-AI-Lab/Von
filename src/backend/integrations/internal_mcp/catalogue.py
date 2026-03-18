@@ -10011,6 +10011,7 @@ def _workflow_delete_event_binding(**kwargs):
 
 def _workflow_create_instance(**kwargs):
     """Create a new durable workflow instance."""
+    from ...services.namespace_service import resolve_canonical_namespace
     from ...workflows.durable import WorkflowInstanceManager
     from ...workflows.durable.workflow_instance_submission_service import (
         submit_verified_workflow_instance,
@@ -10040,11 +10041,12 @@ def _workflow_create_instance(**kwargs):
         if isinstance(org_id_raw, str) and org_id_raw.strip()
         else "default"
     )
-    namespace = (
-        namespace_raw.strip()
-        if isinstance(namespace_raw, str) and namespace_raw.strip()
-        else f"{user_id}/{org_id}"
-    )
+    namespace = resolve_canonical_namespace(namespace_raw, user_id, org_id)
+    if not namespace:
+        return make_error_response(
+            "invalid_namespace",
+            "namespace must be canonical or derivable from user_id/org_id",
+        )
     inputs = inputs_raw if isinstance(inputs_raw, dict) else {}
     try:
         max_retries = int(max_retries_raw)
@@ -10073,6 +10075,7 @@ def _workflow_create_instance(**kwargs):
 
 def _workflow_list_instances(**kwargs):
     """List workflow instances with filters."""
+    from ...services.namespace_service import coerce_namespace
     from ...workflows.durable import WorkflowInstanceManager, WorkflowInstanceStatus
 
     user_id = kwargs.get("user_id")
@@ -10086,11 +10089,9 @@ def _workflow_list_instances(**kwargs):
     request_id = kwargs.get("request_id") or kwargs.get("turn_id")
     from_utc = kwargs.get("from_utc")
     to_utc = kwargs.get("to_utc")
-    namespace = (
-        namespace_raw.strip()
-        if isinstance(namespace_raw, str) and namespace_raw.strip()
-        else None
-    )
+    namespace = coerce_namespace(namespace_raw)
+    if namespace is None and isinstance(namespace_raw, str) and namespace_raw.strip():
+        namespace = namespace_raw.strip()
     try:
         limit = int(kwargs.get("limit", 50))
     except (TypeError, ValueError):
@@ -10255,6 +10256,7 @@ def _workflow_retry_instance(**kwargs):
 def _workflow_create_schedule(**kwargs):
     """Create a new workflow schedule."""
     from datetime import datetime, timezone
+    from ...services.namespace_service import resolve_canonical_namespace
     from ...workflows.durable import (
         WorkflowInstanceManager,
         WorkflowSchedule,
@@ -10271,7 +10273,12 @@ def _workflow_create_schedule(**kwargs):
 
     user_id = kwargs.get("user_id", "anonymous")
     org_id = kwargs.get("org_id", "default")
-    namespace = kwargs.get("namespace", f"{user_id}/{org_id}")
+    namespace = resolve_canonical_namespace(kwargs.get("namespace"), user_id, org_id)
+    if not namespace:
+        return make_error_response(
+            "invalid_namespace",
+            "namespace must be canonical or derivable from user_id/org_id",
+        )
     default_inputs = kwargs.get("default_inputs", {})
     description = kwargs.get("description")
 
