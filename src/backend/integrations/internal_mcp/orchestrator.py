@@ -19687,10 +19687,9 @@ class InternalMCPChatOrchestrator:
         # ----------------------------------------------------------------
         # JVNAUTOSCI-825 + 922: Workflow selection for all turns.
         #
-        # The selector is the primary routing mechanism — it decides
+        # The selector is the authoritative routing mechanism — it decides
         # whether to run tool-calling, narration, a discovered workflow,
-        # or a direct plain response (no tool overhead).  Enabled by
-        # default; disable with VON_CHAT_WORKFLOW_SELECTOR_ENABLED=0.
+        # or a direct plain response (no tool overhead).
         #
         # Discovery results from discover_workflows_for_turn() are piped
         # into the selector so the classifier can route to dynamically

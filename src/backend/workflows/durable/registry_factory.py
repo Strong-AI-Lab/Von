@@ -25,65 +25,50 @@ from ..workflow_registry import LazyWorkflowRegistration
 from ..action_registry import ActionRegistry, WorkflowActionResult
 from ..mcp_tool_bridge import workflow_action_result_from_mcp_payload
 from .rag_sync_workflow import (
-    get_rag_sync_workflow_registration,
     register_rag_sync_actions,
 )
 from .enrichment_workflow import (
-    get_enrichment_workflow_registration,
     register_enrichment_actions,
 )
 from .rumination_workflow import (
-    get_rumination_workflow_registration,
     register_rumination_actions,
 )
 from .planning_workflow import (
-    get_planning_workflow_registration,
     register_planning_actions,
 )
 from .workflow_introspection_maintenance_workflow import (
-    get_workflow_introspection_maintenance_registration,
     register_workflow_introspection_maintenance_actions,
 )
 from .file_copy_interpretation_workflow import (
-    get_file_copy_interpretation_workflow_registration,
     register_file_copy_interpretation_actions,
 )
 from .file_copy_typing_workflow import (
-    get_file_copy_typing_workflow_registration,
     register_file_copy_typing_actions,
 )
 from .file_copy_upload_classification_workflow import (
-    get_file_copy_upload_classification_workflow_registration,
     register_file_copy_upload_classification_actions,
 )
 from .file_copy_upload_handler_workflow import (
-    get_file_copy_upload_handler_workflow_registration,
     register_file_copy_upload_handler_actions,
 )
 from .entity_identity_resolution_workflow import (
-    get_entity_identity_resolution_workflow_registration,
     register_entity_identity_resolution_actions,
 )
 from .jira_task_incremental_import_workflow import (
-    get_jira_task_incremental_import_workflow_registration,
     register_jira_task_incremental_import_actions,
 )
 from .jira_task_full_reconciliation_workflow import (
     register_jira_task_full_reconciliation_actions,
 )
 from .parent_specificity_concept_dossier_workflow import (
-    get_parent_specificity_concept_dossier_workflow_registration,
     register_parent_specificity_concept_dossier_actions,
 )
 from .parent_specificity_rumination_workflow import (
-    get_parent_specificity_rumination_workflow_registration,
     register_parent_specificity_rumination_actions,
 )
 from .paper_representation_workflow import register_paper_representation_actions
 from .talk_representation_workflow import register_talk_representation_actions
 from .workflow_gap_recovery_workflow import (
-    get_workflow_discovery_gap_recovery_workflow_registration,
-    get_workflow_gap_test_workflow_registration,
     register_workflow_gap_recovery_actions,
 )
 from ..skill_interop import register_skill_interop_actions
@@ -97,7 +82,6 @@ from ..vontology_loader import (
     batch_fetch_workflow_purposes,
 )
 from ..workflow_concept_authority_service import (
-    bootstrap_workflow_concepts,
     build_workflow_concept_authority_report,
 )
 from ..workflow_purity_report import build_workflow_purity_report
@@ -108,14 +92,14 @@ _last_inventory_snapshot: Dict[str, Any] | None = None
 _durable_mcp_gateway_lock = Lock()
 _durable_mcp_gateway: Any | None = None
 
-_BOOTSTRAP_ONLY_FILE_COPY_WORKFLOW_IDS: tuple[str, ...] = (
+_EXPECTED_AUTHORITATIVE_FILE_COPY_WORKFLOW_IDS: tuple[str, ...] = (
     "#V#file_copy_typing_workflow",
     "#V#file_copy_upload_classification_workflow",
     "#V#file_copy_upload_handler_workflow",
     "#V#file_copy_interpretation_workflow",
 )
 
-_BOOTSTRAP_ONLY_REASONING_RECOVERY_WORKFLOW_IDS: tuple[str, ...] = (
+_EXPECTED_AUTHORITATIVE_REASONING_RECOVERY_WORKFLOW_IDS: tuple[str, ...] = (
     "#V#planning_workflow",
     "#V#rumination_workflow",
     "#V#parent_specificity_concept_dossier_workflow",
@@ -123,7 +107,7 @@ _BOOTSTRAP_ONLY_REASONING_RECOVERY_WORKFLOW_IDS: tuple[str, ...] = (
     "#V#workflow_discovery_gap_recovery_workflow",
     "#V#workflow_gap_test_workflow",
 )
-_BOOTSTRAP_ONLY_SUPPORT_MAINTENANCE_WORKFLOW_IDS: tuple[str, ...] = (
+_EXPECTED_AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS: tuple[str, ...] = (
     "#V#rag_text_relation_sync_workflow",
     "#V#enrichment_workflow",
     "#V#workflow_introspection_maintenance_workflow",
@@ -201,40 +185,38 @@ def _get_or_build_durable_mcp_gateway():
         return _durable_mcp_gateway
 
 
-def _bootstrap_only_file_copy_workflow_registrations() -> tuple[Any, ...]:
-    """Return file-copy registrations used only to publish authoritative graphs."""
-
-    return (
-        get_file_copy_typing_workflow_registration(),
-        get_file_copy_upload_classification_workflow_registration(),
-        get_file_copy_upload_handler_workflow_registration(),
-        get_file_copy_interpretation_workflow_registration(),
-    )
-
-
-def _bootstrap_only_file_copy_workflow_report(
+def _build_expected_authoritative_workflow_report(
     *,
-    bootstrap_allowed: bool,
+    workflow_ids: tuple[str, ...],
 ) -> Dict[str, Any]:
-    report: Dict[str, Any] = {
-        "enabled": bool(bootstrap_allowed),
-        "workflow_ids": list(_BOOTSTRAP_ONLY_FILE_COPY_WORKFLOW_IDS),
+    """Report whether required authoritative workflows resolve from Vontology.
+
+    Runtime registry construction is intentionally read-only. Missing workflows
+    must surface as diagnostics rather than being materialised from Python
+    registration helpers.
+    """
+
+    resolved_workflow_ids: list[str] = []
+    missing_workflow_ids: list[str] = []
+    for workflow_id in workflow_ids:
+        definition = load_workflow_definition_from_vontology(workflow_id)
+        if definition is None:
+            missing_workflow_ids.append(workflow_id)
+        else:
+            resolved_workflow_ids.append(workflow_id)
+
+    return {
+        "enabled": False,
+        "reason": "runtime_bootstrap_removed",
+        "workflow_ids": list(workflow_ids),
+        "resolved_workflow_ids": resolved_workflow_ids,
+        "missing_workflow_ids": missing_workflow_ids,
+        "counts": {
+            "required": len(workflow_ids),
+            "resolved": len(resolved_workflow_ids),
+            "missing": len(missing_workflow_ids),
+        },
     }
-    if not bootstrap_allowed:
-        return report
-
-    temp_registry = WorkflowRegistry(
-        definition_loader=load_workflow_definition_from_vontology,
-    )
-    for registration in _bootstrap_only_file_copy_workflow_registrations():
-        temp_registry.register(registration)
-
-    bootstrap_report = bootstrap_workflow_concepts(
-        registry=temp_registry,
-        target_workflow_ids=_BOOTSTRAP_ONLY_FILE_COPY_WORKFLOW_IDS,
-    )
-    report.update(bootstrap_report)
-    return report
 
 
 def _durable_mcp_fallback_action(request: Any) -> WorkflowActionResult:
@@ -591,89 +573,10 @@ def _register_python_defined_workflows(registry: WorkflowRegistry) -> None:
     return None
 
 
-def _bootstrap_only_reasoning_recovery_workflow_registrations() -> tuple[Any, ...]:
-    """Return actual registrations used only to publish authoritative graphs."""
-
-    return (
-        get_planning_workflow_registration(),
-        get_rumination_workflow_registration(),
-        get_parent_specificity_concept_dossier_workflow_registration(),
-        get_parent_specificity_rumination_workflow_registration(),
-        get_workflow_discovery_gap_recovery_workflow_registration(),
-        get_workflow_gap_test_workflow_registration(),
-    )
-
-
-def _bootstrap_only_reasoning_recovery_workflow_report(
-    *,
-    bootstrap_allowed: bool,
-) -> Dict[str, Any]:
-    report: Dict[str, Any] = {
-        "enabled": bool(bootstrap_allowed),
-        "workflow_ids": list(_BOOTSTRAP_ONLY_REASONING_RECOVERY_WORKFLOW_IDS),
-    }
-    if not bootstrap_allowed:
-        return report
-
-    temp_registry = WorkflowRegistry(
-        definition_loader=load_workflow_definition_from_vontology,
-    )
-    for registration in _bootstrap_only_reasoning_recovery_workflow_registrations():
-        temp_registry.register(registration)
-
-    bootstrap_report = bootstrap_workflow_concepts(
-        registry=temp_registry,
-        target_workflow_ids=_BOOTSTRAP_ONLY_REASONING_RECOVERY_WORKFLOW_IDS,
-    )
-    report.update(bootstrap_report)
-    return report
-
-
-def _bootstrap_only_support_maintenance_workflow_registrations() -> tuple[Any, ...]:
-    """Return maintenance registrations used only to publish authoritative graphs."""
-
-    return (
-        get_rag_sync_workflow_registration(),
-        get_enrichment_workflow_registration(),
-        get_workflow_introspection_maintenance_registration(),
-        get_entity_identity_resolution_workflow_registration(),
-        get_jira_task_incremental_import_workflow_registration(),
-    )
-
-
-def _bootstrap_only_support_maintenance_workflow_report(
-    *,
-    bootstrap_allowed: bool,
-) -> Dict[str, Any]:
-    report: Dict[str, Any] = {
-        "enabled": bool(bootstrap_allowed),
-        "workflow_ids": list(_BOOTSTRAP_ONLY_SUPPORT_MAINTENANCE_WORKFLOW_IDS),
-    }
-    if not bootstrap_allowed:
-        return report
-
-    temp_registry = WorkflowRegistry(
-        definition_loader=load_workflow_definition_from_vontology,
-    )
-    for registration in _bootstrap_only_support_maintenance_workflow_registrations():
-        temp_registry.register(registration)
-
-    bootstrap_report = bootstrap_workflow_concepts(
-        registry=temp_registry,
-        target_workflow_ids=_BOOTSTRAP_ONLY_SUPPORT_MAINTENANCE_WORKFLOW_IDS,
-    )
-    report.update(bootstrap_report)
-    return report
-
-
 def build_workflow_purity_registry_snapshot() -> WorkflowRegistry:
-    """Build a deterministic eager registry for workflow-purity baseline checks."""
+    """Build the actual runtime registry path for workflow-purity checks."""
 
-    registry = WorkflowRegistry(
-        definition_loader=load_workflow_definition_from_vontology,
-    )
-    _register_python_defined_workflows(registry)
-    return registry
+    return build_workflow_registry_read_only()
 
 
 # ---------------------------------------------------------------------------
@@ -686,69 +589,29 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
 
     Args:
         allow_bootstrap:
-            When False, skip concept bootstrap writes and keep this call path
-            read-only for diagnostics/introspection surfaces.
+            Retained for backwards compatibility. Runtime registry construction
+            is now read-only regardless of this flag so workflow authority must
+            come from already-materialised Vontology artefacts.
     """
     registry = WorkflowRegistry(
         definition_loader=load_workflow_definition_from_vontology,
     )
-    bootstrap_enabled = os.getenv("VON_WORKFLOW_CONCEPT_BOOTSTRAP_ENABLE", "1")
-    bootstrap_enabled = bootstrap_enabled.strip().lower() in {"1", "true", "yes", "on"}
-    bootstrap_allowed = bool(allow_bootstrap and bootstrap_enabled)
-    bootstrap_only_file_copy_report: Dict[str, Any] = {
-        "enabled": bootstrap_allowed,
-        "workflow_ids": list(_BOOTSTRAP_ONLY_FILE_COPY_WORKFLOW_IDS),
-    }
-    bootstrap_only_reasoning_recovery_report: Dict[str, Any] = {
-        "enabled": bootstrap_allowed,
-        "workflow_ids": list(_BOOTSTRAP_ONLY_REASONING_RECOVERY_WORKFLOW_IDS),
-    }
-    bootstrap_only_support_maintenance_report: Dict[str, Any] = {
-        "enabled": bootstrap_allowed,
-        "workflow_ids": list(_BOOTSTRAP_ONLY_SUPPORT_MAINTENANCE_WORKFLOW_IDS),
-    }
+    requested_bootstrap = bool(allow_bootstrap)
+    expected_authoritative_file_copy_report = _build_expected_authoritative_workflow_report(
+        workflow_ids=_EXPECTED_AUTHORITATIVE_FILE_COPY_WORKFLOW_IDS,
+    )
+    expected_authoritative_reasoning_recovery_report = (
+        _build_expected_authoritative_workflow_report(
+            workflow_ids=_EXPECTED_AUTHORITATIVE_REASONING_RECOVERY_WORKFLOW_IDS,
+        )
+    )
+    expected_authoritative_support_maintenance_report = (
+        _build_expected_authoritative_workflow_report(
+            workflow_ids=_EXPECTED_AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS,
+        )
+    )
 
     _register_python_defined_workflows(registry)
-
-    if bootstrap_allowed:
-        try:
-            bootstrap_only_file_copy_report = (
-                _bootstrap_only_file_copy_workflow_report(bootstrap_allowed=True)
-            )
-            # Representation workflow families are now materialised explicitly by
-            # their own Vontology publication services. The runtime registry must
-            # consume that published authority rather than re-bootstrap it here.
-            bootstrap_only_reasoning_recovery_report = (
-                _bootstrap_only_reasoning_recovery_workflow_report(
-                    bootstrap_allowed=True
-                )
-            )
-            bootstrap_only_support_maintenance_report = (
-                _bootstrap_only_support_maintenance_workflow_report(
-                    bootstrap_allowed=True
-                )
-            )
-            _resolve_subworkflow_definition.cache_clear()
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(
-                "workflow_bootstrap_report_build_failed: %s",
-                exc,
-            )
-            bootstrap_only_file_copy_report = {
-                "enabled": True,
-                "workflow_ids": list(_BOOTSTRAP_ONLY_FILE_COPY_WORKFLOW_IDS),
-                "error": str(exc),
-            }
-            bootstrap_only_reasoning_recovery_report = {
-                "enabled": True,
-                "workflow_ids": list(_BOOTSTRAP_ONLY_REASONING_RECOVERY_WORKFLOW_IDS),
-                "error": str(exc),
-            }
-            bootstrap_only_support_maintenance_report = {
-                "enabled": True,
-                "workflow_ids": list(_BOOTSTRAP_ONLY_SUPPORT_MAINTENANCE_WORKFLOW_IDS),
-                "error": str(exc),
-            }
 
     # 3. Vontology-discovered workflows — lazy registration
     #    (JVNAUTOSCI-1424 Phase 1: defer expensive per-workflow DB loads)
@@ -819,14 +682,14 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
     _launch_deferred_registry_work(
         registry=registry,
         discovered_workflow_ids=discovered_workflow_ids,
-        bootstrap_only_file_copy_report=bootstrap_only_file_copy_report,
-        bootstrap_only_reasoning_recovery_report=(
-            bootstrap_only_reasoning_recovery_report
+        expected_authoritative_file_copy_report=expected_authoritative_file_copy_report,
+        expected_authoritative_reasoning_recovery_report=(
+            expected_authoritative_reasoning_recovery_report
         ),
-        bootstrap_only_support_maintenance_report=(
-            bootstrap_only_support_maintenance_report
+        expected_authoritative_support_maintenance_report=(
+            expected_authoritative_support_maintenance_report
         ),
-        bootstrap_allowed=bootstrap_allowed,
+        requested_bootstrap=requested_bootstrap,
     )
 
     return registry
@@ -836,21 +699,24 @@ def _launch_deferred_registry_work(
     *,
     registry: WorkflowRegistry,
     discovered_workflow_ids: List[str],
-    bootstrap_only_file_copy_report: Dict[str, Any],
-    bootstrap_only_reasoning_recovery_report: Dict[str, Any],
-    bootstrap_only_support_maintenance_report: Dict[str, Any],
-    bootstrap_allowed: bool,
+    expected_authoritative_file_copy_report: Dict[str, Any],
+    expected_authoritative_reasoning_recovery_report: Dict[str, Any],
+    expected_authoritative_support_maintenance_report: Dict[str, Any],
+    requested_bootstrap: bool,
 ) -> None:
-    """Launch background thread for bootstrap and parity inventory.
+    """Launch background thread for parity inventory and capability indexing.
 
-    This work is important for data consistency and diagnostics but must
-    not block Flask startup.  The daemon flag ensures the thread does not
-    prevent process exit.
+    Runtime workflow bootstrap has been removed; the deferred work now only
+    builds diagnostics and the capability index without mutating workflow
+    authority during registry construction.
     """
 
     def _deferred_work() -> None:
         try:
             bootstrap_report: Dict[str, Any] = {
+                "enabled": False,
+                "requested": requested_bootstrap,
+                "reason": "runtime_bootstrap_removed",
                 "counts": {
                     "registry_workflows": len(list(registry.all_workflow_ids())),
                     "created": 0,
@@ -865,32 +731,19 @@ def _launch_deferred_registry_work(
                 "unchanged_workflow_ids": [],
                 "errors_by_workflow_id": {},
             }
-            if bootstrap_allowed:
-                try:
-                    bootstrap_report = bootstrap_workflow_concepts(registry=registry)
-                except Exception as exc:  # pragma: no cover - defensive
-                    logger.warning(
-                        "workflow_concept_bootstrap_failed: %s",
-                        exc,
-                    )
-                    bootstrap_report["errors_by_workflow_id"] = {
-                        "__bootstrap__": str(exc),
-                    }
-                    bootstrap_report["counts"]["errors"] = 1
-            bootstrap_report["enabled"] = bootstrap_allowed
 
             authority_report = build_workflow_concept_authority_report(
                 registry=registry,
             )
             authority_report["bootstrap"] = bootstrap_report
-            authority_report["bootstrap_only_file_copy_workflows"] = (
-                bootstrap_only_file_copy_report
+            authority_report["expected_authoritative_file_copy_workflows"] = (
+                expected_authoritative_file_copy_report
             )
-            authority_report["bootstrap_only_reasoning_recovery_workflows"] = (
-                bootstrap_only_reasoning_recovery_report
+            authority_report["expected_authoritative_reasoning_recovery_workflows"] = (
+                expected_authoritative_reasoning_recovery_report
             )
-            authority_report["bootstrap_only_support_maintenance_workflows"] = (
-                bootstrap_only_support_maintenance_report
+            authority_report["expected_authoritative_support_maintenance_workflows"] = (
+                expected_authoritative_support_maintenance_report
             )
 
             inventory_discovered_workflow_ids = sorted(
@@ -966,12 +819,16 @@ def _launch_deferred_registry_work(
 
 
 def build_workflow_registry() -> WorkflowRegistry:
-    """Build a unified WorkflowRegistry with mutating bootstrap enabled by policy."""
+    """Build the unified runtime WorkflowRegistry.
+
+    Kept as the main entry point for runtime consumers. The build path is now
+    read-only and expects workflow authority to already exist in Vontology.
+    """
     return _build_workflow_registry(allow_bootstrap=True)
 
 
 def build_workflow_registry_read_only() -> WorkflowRegistry:
-    """Build a unified WorkflowRegistry without concept bootstrap side effects."""
+    """Build the unified WorkflowRegistry without side effects."""
     return _build_workflow_registry(allow_bootstrap=False)
 
 

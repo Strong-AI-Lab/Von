@@ -139,7 +139,7 @@ def _handle_run_sync(request: WorkflowActionRequest) -> WorkflowActionResult:
     )
 
 
-def build_jira_task_incremental_import_workflow() -> WorkflowDefinition:
+def build_jira_task_incremental_import_workflow_test_definition() -> WorkflowDefinition:
     run_sync = WorkflowStateSpec(
         state_id="run_sync",
         actions=(
@@ -183,10 +183,10 @@ def build_jira_task_incremental_import_workflow() -> WorkflowDefinition:
     )
 
 
-def get_jira_task_incremental_import_workflow_registration() -> WorkflowRegistration:
+def build_jira_task_incremental_import_workflow_test_registration() -> WorkflowRegistration:
     return WorkflowRegistration(
         workflow_id=JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID,
-        definition=build_jira_task_incremental_import_workflow(),
+        definition=build_jira_task_incremental_import_workflow_test_definition(),
         purpose=(
             "Background incremental Jira task import using the shared migration runner."
         ),
@@ -209,7 +209,7 @@ __all__ = [
     "JIRA_TASK_INCREMENTAL_IMPORT_ACTION_ID",
     "JIRA_TASK_INCREMENTAL_IMPORT_VERSION",
     "JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID",
-    "build_jira_task_incremental_import_workflow",
-    "get_jira_task_incremental_import_workflow_registration",
+    "build_jira_task_incremental_import_workflow_test_definition",
+    "build_jira_task_incremental_import_workflow_test_registration",
     "register_jira_task_incremental_import_actions",
 ]

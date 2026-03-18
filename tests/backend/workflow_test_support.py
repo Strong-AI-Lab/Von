@@ -18,61 +18,61 @@ from src.backend.workflows.definitions import (
 )
 from src.backend.workflows.durable.parent_specificity_concept_dossier_workflow import (
     PARENT_SPECIFICITY_DOSSIER_WORKFLOW_ID,
-    get_parent_specificity_concept_dossier_workflow_registration,
+    build_parent_specificity_concept_dossier_workflow_test_registration,
 )
 from src.backend.workflows.durable.parent_specificity_rumination_workflow import (
     PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID,
-    get_parent_specificity_rumination_workflow_registration,
+    build_parent_specificity_rumination_workflow_test_registration,
 )
 from src.backend.workflows.durable.planning_workflow import (
     PLANNING_WORKFLOW_ID,
-    get_planning_workflow_registration,
+    build_planning_workflow_test_registration,
 )
 from src.backend.workflows.durable.rumination_workflow import (
     RUMINATION_WORKFLOW_ID,
-    get_rumination_workflow_registration,
+    build_rumination_workflow_test_registration,
 )
 from src.backend.workflows.durable.rag_sync_workflow import (
     RAG_TEXT_RELATION_SYNC_WORKFLOW_ID,
-    get_rag_sync_workflow_registration,
+    build_rag_text_relation_sync_workflow_test_registration,
 )
 from src.backend.workflows.durable.enrichment_workflow import (
     ENRICHMENT_WORKFLOW_ID,
-    get_enrichment_workflow_registration,
+    build_enrichment_workflow_test_registration,
 )
 from src.backend.workflows.durable.workflow_introspection_maintenance_workflow import (
     WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
-    get_workflow_introspection_maintenance_registration,
+    build_workflow_introspection_maintenance_workflow_test_registration,
 )
 from src.backend.workflows.durable.entity_identity_resolution_workflow import (
     ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID,
-    get_entity_identity_resolution_workflow_registration,
+    build_entity_identity_resolution_workflow_test_registration,
 )
 from src.backend.workflows.durable.jira_task_incremental_import_workflow import (
     JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID,
-    get_jira_task_incremental_import_workflow_registration,
+    build_jira_task_incremental_import_workflow_test_registration,
 )
 from src.backend.workflows.durable.workflow_gap_recovery_workflow import (
     WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
     WORKFLOW_GAP_TEST_WORKFLOW_ID,
-    get_workflow_discovery_gap_recovery_workflow_registration,
-    get_workflow_gap_test_workflow_registration,
+    build_workflow_discovery_gap_recovery_workflow_test_registration,
+    build_workflow_gap_test_registration,
 )
 from src.backend.workflows.durable.file_copy_interpretation_workflow import (
     FILE_COPY_INTERPRETATION_WORKFLOW_ID,
-    get_file_copy_interpretation_workflow_registration,
+    build_file_copy_interpretation_workflow_test_registration,
 )
 from src.backend.workflows.durable.file_copy_typing_workflow import (
     FILE_COPY_TYPING_WORKFLOW_ID,
-    get_file_copy_typing_workflow_registration,
+    build_file_copy_typing_workflow_test_registration,
 )
 from src.backend.workflows.durable.file_copy_upload_classification_workflow import (
     FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID,
-    get_file_copy_upload_classification_workflow_registration,
+    build_file_copy_upload_classification_workflow_test_registration,
 )
 from src.backend.workflows.durable.file_copy_upload_handler_workflow import (
     FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
-    get_file_copy_upload_handler_workflow_registration,
+    build_file_copy_upload_handler_workflow_test_registration,
 )
 from src.backend.workflows.workflow_registry import (
     LazyWorkflowRegistration,
@@ -282,12 +282,12 @@ def authoritative_step_id(*, workflow_id: str, state_id: str) -> str:
 def bootstrap_authoritative_reasoning_recovery_workflows() -> dict[str, Any]:
     registry = WorkflowRegistry()
     for registration in (
-        get_planning_workflow_registration(),
-        get_rumination_workflow_registration(),
-        get_parent_specificity_concept_dossier_workflow_registration(),
-        get_parent_specificity_rumination_workflow_registration(),
-        get_workflow_discovery_gap_recovery_workflow_registration(),
-        get_workflow_gap_test_workflow_registration(),
+        build_planning_workflow_test_registration(),
+        build_rumination_workflow_test_registration(),
+        build_parent_specificity_concept_dossier_workflow_test_registration(),
+        build_parent_specificity_rumination_workflow_test_registration(),
+        build_workflow_discovery_gap_recovery_workflow_test_registration(),
+        build_workflow_gap_test_registration(),
     ):
         registry.register(registration)
 
@@ -300,11 +300,11 @@ def bootstrap_authoritative_reasoning_recovery_workflows() -> dict[str, Any]:
 def bootstrap_authoritative_support_maintenance_workflows() -> dict[str, Any]:
     registry = WorkflowRegistry()
     for registration in (
-        get_rag_sync_workflow_registration(),
-        get_enrichment_workflow_registration(),
-        get_workflow_introspection_maintenance_registration(),
-        get_entity_identity_resolution_workflow_registration(),
-        get_jira_task_incremental_import_workflow_registration(),
+        build_rag_text_relation_sync_workflow_test_registration(),
+        build_enrichment_workflow_test_registration(),
+        build_workflow_introspection_maintenance_workflow_test_registration(),
+        build_entity_identity_resolution_workflow_test_registration(),
+        build_jira_task_incremental_import_workflow_test_registration(),
     ):
         registry.register(registration)
 
@@ -317,10 +317,10 @@ def bootstrap_authoritative_support_maintenance_workflows() -> dict[str, Any]:
 def bootstrap_authoritative_file_copy_workflows() -> dict[str, Any]:
     registry = WorkflowRegistry()
     for registration in (
-        get_file_copy_typing_workflow_registration(),
-        get_file_copy_upload_classification_workflow_registration(),
-        get_file_copy_upload_handler_workflow_registration(),
-        get_file_copy_interpretation_workflow_registration(),
+        build_file_copy_typing_workflow_test_registration(),
+        build_file_copy_upload_classification_workflow_test_registration(),
+        build_file_copy_upload_handler_workflow_test_registration(),
+        build_file_copy_interpretation_workflow_test_registration(),
     ):
         registry.register(registration)
 

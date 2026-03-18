@@ -12,14 +12,12 @@ from src.backend.workflows.durable.workflow_instance_submission_service import (
     WorkflowInstanceSubmissionResult,
 )
 from src.backend.services.workflow_event_integration_service import (
-    DEFAULT_FILE_COPY_UPLOADED_WORKFLOW_ID,
     EVENT_TYPE_CONCEPT_UPDATED,
     EVENT_TYPE_EFFORT_UNIT_COMPLETED,
     EVENT_TYPE_FILE_COPY_UPLOADED,
     EVENT_TYPE_TASK_CREATED,
     EVENT_TYPE_TYPE_CREATED,
     EVENT_TYPE_VONTOLOGY_MUTATED,
-    ensure_default_event_bindings,
     launch_event_workflow,
     maybe_launch_effort_unit_completed_workflow,
     maybe_launch_file_copy_uploaded_workflow,
@@ -256,66 +254,6 @@ def test_maybe_launch_task_status_workflow_triggers_configured_status(
     )
 
 
-@patch("src.backend.services.workflow_event_integration_service.get_instance_manager")
-def test_ensure_default_event_bindings_disables_conflicting_file_copy_routes(
-    mock_get_instance_manager: MagicMock,
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("VON_EVENT_BINDINGS_BOOTSTRAP_ENABLE", "1")
-    monkeypatch.setattr(workflow_event_service, "_DEFAULT_BINDINGS_ENSURED", False)
-
-    type_binding = EventWorkflowBinding.create(
-        event_type="type.created",
-        workflow_id="#V#salient_predicate_governance_workflow",
-        input_mapping={"type_concept_id": "event.concept_id"},
-        enabled=True,
-        actor="system.bootstrap",
-    )
-    canonical_upload_binding = EventWorkflowBinding.create(
-        event_type=EVENT_TYPE_FILE_COPY_UPLOADED,
-        workflow_id=DEFAULT_FILE_COPY_UPLOADED_WORKFLOW_ID,
-        input_mapping={"concept_id": "event.file_copy_concept_id"},
-        enabled=True,
-        actor="system.bootstrap",
-    )
-    conflicting_upload_binding = EventWorkflowBinding.create(
-        event_type=EVENT_TYPE_FILE_COPY_UPLOADED,
-        workflow_id="#V#legacy_upload_workflow",
-        input_mapping={"concept_id": "event.file_copy_concept_id"},
-        enabled=True,
-        actor="legacy.bootstrap",
-    )
-    disabled_conflict = EventWorkflowBinding.from_doc(
-        {
-            **conflicting_upload_binding.to_doc(),
-            "enabled": False,
-            "revision": conflicting_upload_binding.revision + 1,
-        }
-    )
-
-    mock_manager = MagicMock()
-    mock_manager.upsert_event_binding.side_effect = [
-        (type_binding, True, False),
-        (canonical_upload_binding, False, True),
-    ]
-    mock_manager.list_event_bindings.return_value = [
-        canonical_upload_binding,
-        conflicting_upload_binding,
-    ]
-    mock_manager.set_event_binding_enabled.return_value = disabled_conflict
-    mock_get_instance_manager.return_value = mock_manager
-
-    result = ensure_default_event_bindings()
-
-    assert result["success"] is True
-    assert result["disabled_conflicts"] == 1
-    mock_manager.set_event_binding_enabled.assert_called_once_with(
-        conflicting_upload_binding.binding_id,
-        enabled=False,
-        actor="system.bootstrap",
-    )
-
-
 def test_build_event_workflow_binding_diagnostics_reports_operator_actions() -> None:
     multiple_enabled_a = EventWorkflowBinding.create(
         event_type="file_copy.uploaded",
@@ -376,9 +314,7 @@ def test_build_event_workflow_binding_diagnostics_reports_operator_actions() -> 
 @patch("src.backend.services.workflow_event_integration_service.get_instance_manager")
 def test_list_event_workflow_bindings_excludes_env_fallback_entries(
     mock_get_instance_manager: MagicMock,
-    monkeypatch,
 ) -> None:
-    monkeypatch.setenv("VON_EVENT_TASK_CREATED_WORKFLOW_ID", "#V#legacy_env_workflow")
     mock_manager = MagicMock()
     mock_manager.list_event_bindings.return_value = []
     mock_get_instance_manager.return_value = mock_manager
@@ -398,7 +334,6 @@ def test_launch_event_workflow_uses_persistent_binding_input_mapping(
 ) -> None:
     monkeypatch.setenv("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", "1")
     monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "1")
-    monkeypatch.delenv("VON_EVENT_TYPE_CREATED_WORKFLOW_ID", raising=False)
 
     binding = EventWorkflowBinding.create(
         event_type="type.created",
@@ -450,7 +385,6 @@ def test_launch_event_workflow_resolves_braced_event_mapping_expression(
 ) -> None:
     monkeypatch.setenv("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", "1")
     monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "1")
-    monkeypatch.delenv("VON_EVENT_TYPE_CREATED_WORKFLOW_ID", raising=False)
 
     binding = EventWorkflowBinding.create(
         event_type="type.created",
@@ -496,7 +430,6 @@ def test_launch_event_workflow_uses_namespace_override_for_tenancy(
 ) -> None:
     monkeypatch.setenv("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", "1")
     monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "1")
-    monkeypatch.delenv("VON_EVENT_TYPE_CREATED_WORKFLOW_ID", raising=False)
 
     binding = EventWorkflowBinding.create(
         event_type="type.created",
@@ -707,18 +640,15 @@ def test_maybe_launch_effort_unit_completed_workflow_emits_completion_event(
 
 
 @patch("src.backend.services.workflow_event_integration_service.launch_event_workflow")
-@patch(
-    "src.backend.services.workflow_event_integration_service.ensure_default_event_bindings"
-)
 def test_maybe_launch_file_copy_uploaded_workflow_emits_upload_event(
-    mock_ensure_default_event_bindings: MagicMock,
     mock_launch_event_workflow: MagicMock,
 ) -> None:
-    mock_ensure_default_event_bindings.return_value = {"success": True, "ensured": True}
     mock_launch_event_workflow.return_value = {
         "success": True,
         "triggered": True,
-        "workflow_id": DEFAULT_FILE_COPY_UPLOADED_WORKFLOW_ID,
+        "workflow_id": "#V#file_copy_upload_handler_workflow",
+        "selected_workflow_id": "#V#file_copy_upload_handler_workflow",
+        "launch_strategy": "resolved_persistent_bindings",
     }
 
     result = maybe_launch_file_copy_uploaded_workflow(
@@ -736,11 +666,8 @@ def test_maybe_launch_file_copy_uploaded_workflow_emits_upload_event(
 
     assert result["success"] is True
     assert result["triggered"] is True
-    assert result["event_binding_bootstrap"]["ensured"] is True
-    assert result["default_binding_bootstrap"]["ensured"] is True
     assert result["launch_strategy"] == "resolved_persistent_bindings"
-    assert result["selected_workflow_id"] == DEFAULT_FILE_COPY_UPLOADED_WORKFLOW_ID
-    mock_ensure_default_event_bindings.assert_called_once()
+    assert result["selected_workflow_id"] == "#V#file_copy_upload_handler_workflow"
 
     called_args = mock_launch_event_workflow.call_args
     assert called_args is not None
@@ -750,20 +677,16 @@ def test_maybe_launch_file_copy_uploaded_workflow_emits_upload_event(
     assert called_args.kwargs["inputs"]["file_copy_concept_id"] == "#V#uploaded_file_copy_123"
     assert called_args.kwargs["inputs"]["index_in_rag"] is True
 
-
 @patch("src.backend.services.workflow_event_integration_service.launch_event_workflow")
-@patch(
-    "src.backend.services.workflow_event_integration_service.ensure_default_event_bindings"
-)
-def test_maybe_launch_type_created_workflow_bootstraps_and_defers_to_persisted_binding(
-    mock_ensure_default_event_bindings: MagicMock,
+def test_maybe_launch_type_created_workflow_defers_to_persisted_binding(
     mock_launch_event_workflow: MagicMock,
 ) -> None:
-    mock_ensure_default_event_bindings.return_value = {"success": True, "ensured": True}
     mock_launch_event_workflow.return_value = {
         "success": True,
         "triggered": True,
         "workflow_id": "#V#salient_predicate_governance_workflow",
+        "selected_workflow_id": "#V#salient_predicate_governance_workflow",
+        "launch_strategy": "resolved_persistent_bindings",
     }
 
     result = maybe_launch_type_created_workflow(
@@ -775,10 +698,8 @@ def test_maybe_launch_type_created_workflow_bootstraps_and_defers_to_persisted_b
 
     assert result["success"] is True
     assert result["triggered"] is True
-    assert result["event_binding_bootstrap"]["ensured"] is True
     assert result["selected_workflow_id"] == "#V#salient_predicate_governance_workflow"
     assert result["launch_strategy"] == "resolved_persistent_bindings"
-    mock_ensure_default_event_bindings.assert_called_once()
 
     called_args = mock_launch_event_workflow.call_args
     assert called_args is not None

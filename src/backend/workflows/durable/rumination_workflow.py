@@ -214,7 +214,7 @@ def _resolve_relation_policy_input(
     }
 
 
-def build_rumination_workflow() -> WorkflowDefinition:
+def build_rumination_workflow_test_definition() -> WorkflowDefinition:
     """Build the rumination orchestrator workflow definition.
 
     Context keys consumed:
@@ -1541,11 +1541,11 @@ def _handle_finalise(request: WorkflowActionRequest) -> WorkflowActionResult:
 # ---------------------------------------------------------------------------
 
 
-def get_rumination_workflow_registration() -> WorkflowRegistration:
+def build_rumination_workflow_test_registration() -> WorkflowRegistration:
     """Get the workflow registration for the rumination orchestrator."""
     return WorkflowRegistration(
         workflow_id=RUMINATION_WORKFLOW_ID,
-        definition=build_rumination_workflow(),
+        definition=build_rumination_workflow_test_definition(),
         purpose="Proactive knowledge quality orchestrator — assesses gaps and dispatches enrichment.",
         source="built_in",
     )

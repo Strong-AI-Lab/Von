@@ -20,7 +20,7 @@ def test_incremental_import_workflow_executes_shared_runner(monkeypatch) -> None
 
     monkeypatch.setattr(mod, "run_jira_task_migration_sync", _fake_run)
 
-    registration = mod.get_jira_task_incremental_import_workflow_registration()
+    registration = mod.build_jira_task_incremental_import_workflow_test_registration()
     registry = ActionRegistry()
     mod.register_jira_task_incremental_import_actions(registry)
 

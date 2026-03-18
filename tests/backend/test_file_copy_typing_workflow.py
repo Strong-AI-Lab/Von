@@ -5,13 +5,13 @@ from src.backend.workflows.durable.file_copy_typing_workflow import (
     FILE_COPY_TYPING_PREDICATE,
     FILE_COPY_TYPING_SCHEMA_VERSION,
     FILE_COPY_TYPING_WORKFLOW_ID,
-    build_file_copy_typing_workflow,
+    build_file_copy_typing_workflow_test_definition,
     register_file_copy_typing_actions,
 )
 
 
-def test_build_file_copy_typing_workflow_definition_shape() -> None:
-    workflow = build_file_copy_typing_workflow()
+def test_build_file_copy_typing_workflow_test_definition_definition_shape() -> None:
+    workflow = build_file_copy_typing_workflow_test_definition()
 
     assert workflow.workflow_id == FILE_COPY_TYPING_WORKFLOW_ID
     assert workflow.initial_state == "infer"

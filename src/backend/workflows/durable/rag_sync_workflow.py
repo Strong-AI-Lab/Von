@@ -39,7 +39,7 @@ DEFAULT_RAG_SYNC_BATCH_SIZE = 200
 DEFAULT_RAG_SYNC_LIMIT = 5000
 
 
-def build_rag_text_relation_sync_workflow() -> WorkflowDefinition:
+def build_rag_text_relation_sync_workflow_test_definition() -> WorkflowDefinition:
     """Build the RAG text relation sync workflow definition.
 
     This workflow synchronises text relations from Vontology to the RAG store
@@ -416,11 +416,11 @@ def _handle_finalise(request: WorkflowActionRequest) -> WorkflowActionResult:
 # ---------------------------------------------------------------------------
 
 
-def get_rag_sync_workflow_registration() -> WorkflowRegistration:
+def build_rag_text_relation_sync_workflow_test_registration() -> WorkflowRegistration:
     """Get the workflow registration for RAG text relation sync."""
     return WorkflowRegistration(
         workflow_id=RAG_TEXT_RELATION_SYNC_WORKFLOW_ID,
-        definition=build_rag_text_relation_sync_workflow(),
+        definition=build_rag_text_relation_sync_workflow_test_definition(),
         purpose="Synchronise Vontology text relations to RAG store with checkpointing.",
         source="built_in",
     )

@@ -8,10 +8,10 @@ from unittest.mock import patch
 def test_workflow_definition_structure() -> None:
     from src.backend.workflows.durable.entity_identity_resolution_workflow import (
         ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID,
-        build_entity_identity_resolution_workflow,
+        build_entity_identity_resolution_workflow_test_definition,
     )
 
-    workflow = build_entity_identity_resolution_workflow()
+    workflow = build_entity_identity_resolution_workflow_test_definition()
     assert workflow.workflow_id == ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID
     assert workflow.initial_state == "scan"
     assert set(workflow.states.keys()) == {"scan", "apply", "complete", "failed"}

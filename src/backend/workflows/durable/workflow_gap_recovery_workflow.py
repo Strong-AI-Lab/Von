@@ -1212,7 +1212,7 @@ def _handle_finalise_recovery(request: WorkflowActionRequest) -> WorkflowActionR
     return WorkflowActionResult(status="success", outputs=outputs)
 
 
-def build_workflow_discovery_gap_recovery_workflow() -> WorkflowDefinition:
+def build_workflow_discovery_gap_recovery_workflow_test_definition() -> WorkflowDefinition:
     collect_context = WorkflowStateSpec(
         state_id="collect_context",
         actions=(
@@ -1526,7 +1526,7 @@ def build_workflow_discovery_gap_recovery_workflow() -> WorkflowDefinition:
     )
 
 
-def build_workflow_gap_test_workflow() -> WorkflowDefinition:
+def build_workflow_gap_test_definition() -> WorkflowDefinition:
     run_test = WorkflowStateSpec(
         state_id="run_test",
         actions=(
@@ -1558,10 +1558,10 @@ def build_workflow_gap_test_workflow() -> WorkflowDefinition:
     )
 
 
-def get_workflow_discovery_gap_recovery_workflow_registration() -> WorkflowRegistration:
+def build_workflow_discovery_gap_recovery_workflow_test_registration() -> WorkflowRegistration:
     return WorkflowRegistration(
         workflow_id=WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
-        definition=build_workflow_discovery_gap_recovery_workflow(),
+        definition=build_workflow_discovery_gap_recovery_workflow_test_definition(),
         purpose=(
             "Analyse workflow-discovery misses, create candidate workflows in Vontology, and retry them when confidence is high enough."
         ),
@@ -1569,10 +1569,10 @@ def get_workflow_discovery_gap_recovery_workflow_registration() -> WorkflowRegis
     )
 
 
-def get_workflow_gap_test_workflow_registration() -> WorkflowRegistration:
+def build_workflow_gap_test_registration() -> WorkflowRegistration:
     return WorkflowRegistration(
         workflow_id=WORKFLOW_GAP_TEST_WORKFLOW_ID,
-        definition=build_workflow_gap_test_workflow(),
+        definition=build_workflow_gap_test_definition(),
         purpose=(
             "Run and evaluate candidate workflows against explicit acceptance requirements before replacing a fallback response."
         ),
@@ -1633,9 +1633,9 @@ def register_workflow_gap_recovery_actions(registry: ActionRegistry) -> None:
 
 
 __all__ = [
-    "build_workflow_discovery_gap_recovery_workflow",
-    "build_workflow_gap_test_workflow",
-    "get_workflow_discovery_gap_recovery_workflow_registration",
-    "get_workflow_gap_test_workflow_registration",
+    "build_workflow_discovery_gap_recovery_workflow_test_definition",
+    "build_workflow_gap_test_definition",
+    "build_workflow_discovery_gap_recovery_workflow_test_registration",
+    "build_workflow_gap_test_registration",
     "register_workflow_gap_recovery_actions",
 ]

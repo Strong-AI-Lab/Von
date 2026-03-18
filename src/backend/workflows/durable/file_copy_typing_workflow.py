@@ -160,7 +160,7 @@ def _handle_persist_typing(request: WorkflowActionRequest) -> WorkflowActionResu
     return WorkflowActionResult(status="success", outputs=outputs)
 
 
-def build_file_copy_typing_workflow() -> WorkflowDefinition:
+def build_file_copy_typing_workflow_test_definition() -> WorkflowDefinition:
     infer_writes_context_keys = [
         "typing_version",
         "typing_schema_version",
@@ -257,10 +257,10 @@ def build_file_copy_typing_workflow() -> WorkflowDefinition:
     )
 
 
-def get_file_copy_typing_workflow_registration() -> WorkflowRegistration:
+def build_file_copy_typing_workflow_test_registration() -> WorkflowRegistration:
     return WorkflowRegistration(
         workflow_id=FILE_COPY_TYPING_WORKFLOW_ID,
-        definition=build_file_copy_typing_workflow(),
+        definition=build_file_copy_typing_workflow_test_definition(),
         purpose=(
             "Persist authoritative file-copy typing and route hints for upload, "
             "discovery, and continuation workflows."
@@ -291,7 +291,7 @@ __all__ = [
     "FILE_COPY_TYPING_SCHEMA_VERSION",
     "FILE_COPY_TYPING_WORKFLOW_ID",
     "FILE_COPY_TYPING_WORKFLOW_VERSION",
-    "build_file_copy_typing_workflow",
-    "get_file_copy_typing_workflow_registration",
+    "build_file_copy_typing_workflow_test_definition",
+    "build_file_copy_typing_workflow_test_registration",
     "register_file_copy_typing_actions",
 ]

@@ -15,7 +15,6 @@ workflow ID out.
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Sequence
 
@@ -24,7 +23,6 @@ from src.backend.services.workflow_selection_policy_service import (
     recommend_workflow_with_policy,
 )
 
-from .definitions import CHAT_NARRATION_WORKFLOW_ID, TOOL_CALLING_WORKFLOW_ID
 from .workflow_registry import WorkflowRegistry
 
 
@@ -111,13 +109,6 @@ class WorkflowSelector:
     _JSON_CONFIDENCE_KEYS = ("confidence", "confidence_score", "score")
     _JSON_REASONING_KEYS = ("reasoning", "reason", "explanation", "rationale")
     _CANDIDATE_BOUNDARY_STRIP = " \t\r\n`'\".,;:!?()[]{}<>"
-    _COMPAT_SELECTION_ALIASES = {
-        "tool_seeking": TOOL_CALLING_WORKFLOW_ID,
-        "tool_calling": TOOL_CALLING_WORKFLOW_ID,
-        "summarisation": TOOL_CALLING_WORKFLOW_ID,
-        "narration": CHAT_NARRATION_WORKFLOW_ID,
-    }
-
     @property
     def rag_first(self) -> bool:
         """Retained for backwards-compatible introspection.
@@ -127,15 +118,13 @@ class WorkflowSelector:
         return True
 
     def enabled(self) -> bool:
-        """Check whether the workflow selector is enabled.
+        """Return whether workflow selection is enabled for routing.
 
-        JVNAUTOSCI-825: Defaults to ON.  The selector is the primary
-        routing mechanism for chat turns.  Disable with
-        VON_CHAT_WORKFLOW_SELECTOR_ENABLED=0 to fall back to the legacy
-        always-tool-calling path.
+        The selector is always the authoritative routing path now. The method is
+        retained only so existing call sites and tests do not need a separate
+        interface migration.
         """
-        value = os.getenv("VON_CHAT_WORKFLOW_SELECTOR_ENABLED", "1").strip().lower()
-        return value not in {"0", "false", "off"}
+        return True
 
     # ------------------------------------------------------------------
     # High-level API
@@ -364,34 +353,20 @@ class WorkflowSelector:
             workflow_id = matched_id
             verdict = "rag_selected"
         else:
-            compat_match = self._resolve_compat_selection_alias(
-                label=label_lower,
-                candidate_lookup=candidate_lookup,
-                candidate_workflow_ids=candidate_ids,
-            )
-            if compat_match:
-                workflow_id = compat_match
-                verdict = "rag_selected"
-                if (
-                    workflow_id == self._default_workflow_id
-                    and compat_match not in candidate_ids
-                ):
-                    verdict = "rag_default"
+            # Fallback: try to find a candidate in the raw text.
+            raw_text = str(raw_response or "").lower()
+            for cid in candidate_ids:
+                if cid.lower() in raw_text:
+                    workflow_id = cid
+                    verdict = "rag_selected"
+                    break
             else:
-                # Fallback: try to find a candidate in the raw text.
-                raw_text = str(raw_response or "").lower()
-                for cid in candidate_ids:
-                    if cid.lower() in raw_text:
-                        workflow_id = cid
-                        verdict = "rag_selected"
-                        break
-                else:
-                    # Ultimate fallback to default workflow.
-                    workflow_id = self._default_workflow_id
-                    verdict = "rag_default"
-                    # Lower confidence for fallback selections.
-                    if confidence_score > 0.0:
-                        confidence_score = min(confidence_score, 0.3)
+                # Ultimate fallback to default workflow.
+                workflow_id = self._default_workflow_id
+                verdict = "rag_default"
+                # Lower confidence for fallback selections.
+                if confidence_score > 0.0:
+                    confidence_score = min(confidence_score, 0.3)
 
         return WorkflowSelection(
             workflow_id=workflow_id,
@@ -404,33 +379,6 @@ class WorkflowSelector:
             reasoning=reasoning,
             selection_source="selector",
         )
-
-    def _resolve_compat_selection_alias(
-        self,
-        *,
-        label: str,
-        candidate_lookup: Mapping[str, str],
-        candidate_workflow_ids: Sequence[str],
-    ) -> str | None:
-        """Normalise stale label-style outputs to current workflow IDs.
-
-        This preserves a single candidate-based routing path while tolerating
-        older prompt bodies or cached tests during the migration. The alias is
-        only accepted when the mapped workflow is already eligible for this
-        turn, except for the default plain-response fallback.
-        """
-        if label == "plain_response":
-            default_match = candidate_lookup.get(self._default_workflow_id.lower())
-            if default_match is not None:
-                return default_match
-            if not tuple(candidate_workflow_ids):
-                return self._default_workflow_id
-            return None
-
-        alias_workflow_id = self._COMPAT_SELECTION_ALIASES.get(label)
-        if not alias_workflow_id:
-            return None
-        return candidate_lookup.get(alias_workflow_id.lower())
 
     def resolve_policy_selection(
         self,

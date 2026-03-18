@@ -523,7 +523,7 @@ def _handle_persist_route_decision(request: WorkflowActionRequest) -> WorkflowAc
         )
 
 
-def build_file_copy_upload_classification_workflow() -> WorkflowDefinition:
+def build_file_copy_upload_classification_workflow_test_definition() -> WorkflowDefinition:
     classify_writes_context_keys = [
         "classification_version",
         "route_key",
@@ -608,10 +608,10 @@ def build_file_copy_upload_classification_workflow() -> WorkflowDefinition:
     )
 
 
-def get_file_copy_upload_classification_workflow_registration() -> WorkflowRegistration:
+def build_file_copy_upload_classification_workflow_test_registration() -> WorkflowRegistration:
     return WorkflowRegistration(
         workflow_id=FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID,
-        definition=build_file_copy_upload_classification_workflow(),
+        definition=build_file_copy_upload_classification_workflow_test_definition(),
         purpose=(
             "Classify uploaded file copies and persist route decisions before "
             "dispatching into specialised or baseline workflows."
@@ -651,7 +651,7 @@ __all__ = [
     "FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID",
     "FILE_COPY_UPLOAD_ROUTE_DECISION_PREDICATE",
     "FILE_COPY_UPLOAD_CLASSIFICATION_VERSION",
-    "build_file_copy_upload_classification_workflow",
-    "get_file_copy_upload_classification_workflow_registration",
+    "build_file_copy_upload_classification_workflow_test_definition",
+    "build_file_copy_upload_classification_workflow_test_registration",
     "register_file_copy_upload_classification_actions",
 ]

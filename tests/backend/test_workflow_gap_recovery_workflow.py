@@ -14,14 +14,14 @@ from src.backend.workflows.durable.workflow_gap_recovery_workflow import (
     WORKFLOW_GAP_FINALISE_RECOVERY_ACTION_ID,
     WORKFLOW_GAP_RUN_CANDIDATE_TEST_ACTION_ID,
     WORKFLOW_GAP_TEST_WORKFLOW_ID,
-    build_workflow_discovery_gap_recovery_workflow,
-    build_workflow_gap_test_workflow,
+    build_workflow_discovery_gap_recovery_workflow_test_definition,
+    build_workflow_gap_test_definition,
     register_workflow_gap_recovery_actions,
 )
 
 
 def test_build_workflow_gap_recovery_definition_shape() -> None:
-    workflow = build_workflow_discovery_gap_recovery_workflow()
+    workflow = build_workflow_discovery_gap_recovery_workflow_test_definition()
 
     assert workflow.workflow_id == WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID
     assert workflow.initial_state == "collect_context"
@@ -37,7 +37,7 @@ def test_build_workflow_gap_recovery_definition_shape() -> None:
     }
     assert workflow.termination_states == ("complete", "failed")
 
-    test_workflow = build_workflow_gap_test_workflow()
+    test_workflow = build_workflow_gap_test_definition()
     assert test_workflow.workflow_id == WORKFLOW_GAP_TEST_WORKFLOW_ID
     assert test_workflow.initial_state == "run_test"
     assert set(test_workflow.states.keys()) == {"run_test", "complete", "failed"}

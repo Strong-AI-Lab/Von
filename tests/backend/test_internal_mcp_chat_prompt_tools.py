@@ -166,8 +166,24 @@ def test_chat_introspect_redacts_sensitive_values_and_reports_presence(monkeypat
         "src.backend.services.settings_service.get_setting",
         lambda name: "OPENAI_API_KEY" if name == "openai_api_key_env_var" else None,
     )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_event_integration_service.list_event_workflow_bindings",
+        lambda limit=200: [
+            {
+                "event_type": "task.created",
+                "workflow_id": "#V#todo_refresh_workflow",
+            },
+            {
+                "event_type": "task.status_changed",
+                "workflow_id": "#V#task_status_transition_workflow",
+            },
+            {
+                "event_type": "message.direct_created",
+                "workflow_id": "#V#direct_message_routing_workflow",
+            },
+        ],
+    )
     monkeypatch.setenv("OPENAI_API_KEY", "sk-live")
-    monkeypatch.setenv("VON_CHAT_WORKFLOW_SELECTOR_ENABLED", "1")
     monkeypatch.setenv("VON_DETERMINISTIC_INTROSPECTION", "1")
     monkeypatch.setenv("VON_WORKFLOWS_TRACE_ENABLED", "0")
     monkeypatch.setenv("VON_CRITIC_ENABLE", "0")
@@ -176,15 +192,6 @@ def test_chat_introspect_redacts_sensitive_values_and_reports_presence(monkeypat
     monkeypatch.setenv("VON_INTERNAL_MCP_JIRA_EXECUTE_MODE", "0")
     monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "1")
     monkeypatch.setenv("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", "1")
-    monkeypatch.setenv("VON_EVENT_TASK_CREATED_WORKFLOW_ID", "#V#todo_refresh_workflow")
-    monkeypatch.setenv(
-        "VON_EVENT_TASK_STATUS_CHANGED_WORKFLOW_ID",
-        "#V#task_status_transition_workflow",
-    )
-    monkeypatch.setenv(
-        "VON_EVENT_DIRECT_MESSAGE_WORKFLOW_ID",
-        "#V#direct_message_routing_workflow",
-    )
 
     result = _chat_introspect(
         namespace="#V#michael_witbrock", organisation_concept_id="#V#uoa"

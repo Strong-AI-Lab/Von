@@ -376,7 +376,7 @@ def build_workflow_purity_report(
             python_workflow_families.get("family_file_count", 0)
         ),
         "direct_instance_create_callsite_count": int(
-            direct_create.get("total_callsites", 0)
+            direct_create.get("offending_callsite_count", 0)
         ),
         "env_event_binding_count": int(env_event_binding.get("total_matches", 0)),
         "legacy_selector_mode_count": int(legacy_selector.get("module_count", 0)),

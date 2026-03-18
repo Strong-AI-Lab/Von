@@ -286,26 +286,6 @@ def test_build_registry_prioritises_vontology_on_overlap(monkeypatch):
     )
     monkeypatch.setattr(
         registry_factory,
-        "get_rag_sync_workflow_registration",
-        lambda: _build_registration("#V#rag_sync", purpose="rag"),
-    )
-    monkeypatch.setattr(
-        registry_factory,
-        "get_enrichment_workflow_registration",
-        lambda: _build_registration("#V#enrichment", purpose="enrichment"),
-    )
-    monkeypatch.setattr(
-        registry_factory,
-        "get_rumination_workflow_registration",
-        lambda: _build_registration("#V#rumination", purpose="rumination"),
-    )
-    monkeypatch.setattr(
-        registry_factory,
-        "get_planning_workflow_registration",
-        lambda: _build_registration("#V#planning", purpose="planning"),
-    )
-    monkeypatch.setattr(
-        registry_factory,
         "discover_workflow_ids",
         lambda: [overlap_workflow_id],
     )
@@ -394,25 +374,6 @@ def test_runtime_registry_bootstrap_excludes_representation_publication_reports(
     monkeypatch.setattr(registry_factory, "discover_workflow_ids", lambda: [])
     monkeypatch.setattr(
         registry_factory,
-        "bootstrap_workflow_concepts",
-        lambda registry: {
-            "counts": {
-                "registry_workflows": len(list(registry.all_workflow_ids())),
-                "created": 0,
-                "updated": 0,
-                "unchanged": 0,
-                "errors": 0,
-            },
-            "required_type_ids": [],
-            "preferred_type_id": None,
-            "created_workflow_ids": [],
-            "updated_workflow_ids": [],
-            "unchanged_workflow_ids": [],
-            "errors_by_workflow_id": {},
-        },
-    )
-    monkeypatch.setattr(
-        registry_factory,
         "build_workflow_concept_authority_report",
         lambda registry: {
             "drift_detected": False,
@@ -424,26 +385,18 @@ def test_runtime_registry_bootstrap_excludes_representation_publication_reports(
     )
     monkeypatch.setattr(
         registry_factory,
-        "_bootstrap_only_reasoning_recovery_workflow_report",
-        lambda *, bootstrap_allowed: {
-            "enabled": bootstrap_allowed,
-            "workflow_ids": ["#V#planning_workflow"],
-        },
-    )
-    monkeypatch.setattr(
-        registry_factory,
-        "_bootstrap_only_support_maintenance_workflow_report",
-        lambda *, bootstrap_allowed: {
-            "enabled": bootstrap_allowed,
-            "workflow_ids": ["#V#rag_text_relation_sync_workflow"],
-        },
-    )
-    monkeypatch.setattr(
-        registry_factory,
-        "_bootstrap_only_file_copy_workflow_report",
-        lambda *, bootstrap_allowed: {
-            "enabled": bootstrap_allowed,
-            "workflow_ids": ["#V#file_copy_upload_handler_workflow"],
+        "_build_expected_authoritative_workflow_report",
+        lambda *, workflow_ids: {
+            "enabled": False,
+            "reason": "runtime_bootstrap_removed",
+            "workflow_ids": list(workflow_ids),
+            "resolved_workflow_ids": list(workflow_ids),
+            "missing_workflow_ids": [],
+            "counts": {
+                "required": len(workflow_ids),
+                "resolved": len(workflow_ids),
+                "missing": 0,
+            },
         },
     )
     monkeypatch.setattr(registry_factory, "batch_fetch_workflow_purposes", lambda workflow_ids: {})
@@ -462,11 +415,18 @@ def test_runtime_registry_bootstrap_excludes_representation_publication_reports(
     authority_report = snapshot.get("workflow_authority", {})
     assert "paper_representation_bootstrap" not in authority_report
     assert "talk_representation_bootstrap" not in authority_report
-    assert authority_report.get("bootstrap_only_reasoning_recovery_workflows") == {
-        "enabled": True,
-        "workflow_ids": ["#V#planning_workflow"],
-    }
-    assert authority_report.get("bootstrap_only_file_copy_workflows") == {
-        "enabled": True,
-        "workflow_ids": ["#V#file_copy_upload_handler_workflow"],
-    }
+    assert authority_report.get("bootstrap", {}).get("enabled") is False
+    assert authority_report.get("bootstrap", {}).get("requested") is True
+    assert authority_report.get("bootstrap", {}).get("reason") == "runtime_bootstrap_removed"
+
+    reasoning_recovery = authority_report.get(
+        "expected_authoritative_reasoning_recovery_workflows", {}
+    )
+    assert reasoning_recovery.get("enabled") is False
+    assert reasoning_recovery.get("reason") == "runtime_bootstrap_removed"
+    assert "#V#planning_workflow" in reasoning_recovery.get("workflow_ids", [])
+
+    file_copy = authority_report.get("expected_authoritative_file_copy_workflows", {})
+    assert file_copy.get("enabled") is False
+    assert file_copy.get("reason") == "runtime_bootstrap_removed"
+    assert "#V#file_copy_upload_handler_workflow" in file_copy.get("workflow_ids", [])

@@ -646,7 +646,7 @@ def _handle_finalise(request: WorkflowActionRequest) -> WorkflowActionResult:
     )
 
 
-def build_planning_workflow() -> WorkflowDefinition:
+def build_planning_workflow_test_definition() -> WorkflowDefinition:
     """Build the forward inference and planning workflow definition."""
     assess = WorkflowStateSpec(
         state_id="assess",
@@ -777,11 +777,11 @@ def build_planning_workflow() -> WorkflowDefinition:
     )
 
 
-def get_planning_workflow_registration() -> WorkflowRegistration:
+def build_planning_workflow_test_registration() -> WorkflowRegistration:
     """Return registration for the built-in planning workflow."""
     return WorkflowRegistration(
         workflow_id=PLANNING_WORKFLOW_ID,
-        definition=build_planning_workflow(),
+        definition=build_planning_workflow_test_definition(),
         purpose=(
             "Forward inference workflow that proposes concrete, validated next actions "
             "including tool calls and workflow invocations."

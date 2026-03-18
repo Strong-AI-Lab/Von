@@ -227,20 +227,19 @@ class TestLabelExtraction:
 
 
 class TestEnabled:
-    def test_enabled_default(self, monkeypatch):
-        monkeypatch.setenv("VON_CHAT_WORKFLOW_SELECTOR_ENABLED", "1")
+    def test_enabled_default(self):
         selector = _build_selector()
         assert selector.enabled() is True
 
-    def test_disabled_by_env(self, monkeypatch):
+    def test_enabled_ignores_legacy_zero_toggle(self, monkeypatch):
         monkeypatch.setenv("VON_CHAT_WORKFLOW_SELECTOR_ENABLED", "0")
         selector = _build_selector()
-        assert selector.enabled() is False
+        assert selector.enabled() is True
 
-    def test_disabled_by_false(self, monkeypatch):
+    def test_enabled_ignores_legacy_false_toggle(self, monkeypatch):
         monkeypatch.setenv("VON_CHAT_WORKFLOW_SELECTOR_ENABLED", "false")
         selector = _build_selector()
-        assert selector.enabled() is False
+        assert selector.enabled() is True
 
 
 # ---------------------------------------------------------------------------

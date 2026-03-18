@@ -33,11 +33,11 @@ class TestEnrichmentWorkflowDefinition:
 
     def test_workflow_structure(self) -> None:
         from src.backend.workflows.durable.enrichment_workflow import (
-            build_enrichment_workflow,
+            build_enrichment_workflow_test_definition,
             ENRICHMENT_WORKFLOW_ID,
         )
 
-        wf = build_enrichment_workflow()
+        wf = build_enrichment_workflow_test_definition()
         assert wf.workflow_id == ENRICHMENT_WORKFLOW_ID
         assert wf.initial_state == "collect"
         assert "collect" in wf.states
@@ -48,20 +48,20 @@ class TestEnrichmentWorkflowDefinition:
 
     def test_terminal_states(self) -> None:
         from src.backend.workflows.durable.enrichment_workflow import (
-            build_enrichment_workflow,
+            build_enrichment_workflow_test_definition,
         )
 
-        wf = build_enrichment_workflow()
+        wf = build_enrichment_workflow_test_definition()
         assert wf.states["complete"].terminal is True
         assert wf.states["failed"].terminal is True
         assert wf.states["collect"].terminal is False
 
     def test_transitions_from_collect(self) -> None:
         from src.backend.workflows.durable.enrichment_workflow import (
-            build_enrichment_workflow,
+            build_enrichment_workflow_test_definition,
         )
 
-        wf = build_enrichment_workflow()
+        wf = build_enrichment_workflow_test_definition()
         transitions = wf.states["collect"].transitions
         to_states = [t.to_state for t in transitions]
         assert "batch" in to_states
@@ -378,11 +378,11 @@ class TestEnrichmentRegistration:
 
     def test_workflow_registration(self) -> None:
         from src.backend.workflows.durable.enrichment_workflow import (
-            get_enrichment_workflow_registration,
+            build_enrichment_workflow_test_registration,
             ENRICHMENT_WORKFLOW_ID,
         )
 
-        reg = get_enrichment_workflow_registration()
+        reg = build_enrichment_workflow_test_registration()
         assert reg.workflow_id == ENRICHMENT_WORKFLOW_ID
         assert reg.source == "built_in"
 
@@ -415,11 +415,9 @@ class TestEnrichmentRegistration:
 
         bootstrap_authoritative_support_maintenance_workflows()
 
-        with (
-            patch(
-                "src.backend.workflows.durable.registry_factory.discover_workflow_ids",
-                return_value=[ENRICHMENT_WORKFLOW_ID],
-            ),
+        with patch(
+            "src.backend.workflows.durable.registry_factory.discover_workflow_ids",
+            return_value=[ENRICHMENT_WORKFLOW_ID],
         ):
             from src.backend.workflows.durable.registry_factory import (
                 _build_workflow_registry,

@@ -349,7 +349,7 @@ def _handle_persist_route_outcome(request: WorkflowActionRequest) -> WorkflowAct
         )
 
 
-def build_file_copy_upload_handler_workflow() -> WorkflowDefinition:
+def build_file_copy_upload_handler_workflow_test_definition() -> WorkflowDefinition:
     typing_inputs = {
         **dict(_FILE_COPY_CONTEXT_INPUTS),
         "workflow_id": FILE_COPY_TYPING_WORKFLOW_ID,
@@ -724,10 +724,10 @@ def build_file_copy_upload_handler_workflow() -> WorkflowDefinition:
     )
 
 
-def get_file_copy_upload_handler_workflow_registration() -> WorkflowRegistration:
+def build_file_copy_upload_handler_workflow_test_registration() -> WorkflowRegistration:
     return WorkflowRegistration(
         workflow_id=FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
-        definition=build_file_copy_upload_handler_workflow(),
+        definition=build_file_copy_upload_handler_workflow_test_definition(),
         purpose=(
             "General workflow-first upload handler that routes file copies into "
             "specialised or baseline interpretation workflows."
@@ -771,7 +771,7 @@ __all__ = [
     "FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID",
     "FILE_COPY_UPLOAD_ROUTE_OUTCOME_PREDICATE",
     "FILE_COPY_UPLOAD_HANDLER_VERSION",
-    "build_file_copy_upload_handler_workflow",
-    "get_file_copy_upload_handler_workflow_registration",
+    "build_file_copy_upload_handler_workflow_test_definition",
+    "build_file_copy_upload_handler_workflow_test_registration",
     "register_file_copy_upload_handler_actions",
 ]

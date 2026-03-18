@@ -16108,9 +16108,7 @@ def _chat_introspect(
             orchestrator_tool_batch_cap = None
             orchestrator_missing_tool_call_retry_cap = None
 
-    workflow_selector_enabled = _env_flag(
-        "VON_CHAT_WORKFLOW_SELECTOR_ENABLED", default="1"
-    )
+    workflow_selector_enabled = True
     workflow_trace_enabled = _env_flag("VON_WORKFLOWS_TRACE_ENABLED", default="0")
     critic_enabled = _env_flag("VON_CRITIC_ENABLE", default="0")
     deterministic_introspection_enabled = _env_flag(
@@ -16166,10 +16164,8 @@ def _chat_introspect(
         and orchestrator_max_tool_invocations <= 0
     ):
         inferred_runtime_mode = "llm_only"
-    elif workflow_selector_enabled:
-        inferred_runtime_mode = "workflow_routed_tool_calling"
     else:
-        inferred_runtime_mode = "legacy_tool_calling"
+        inferred_runtime_mode = "workflow_routed_tool_calling"
 
     workflow_mode = {
         "runtime_mode": inferred_runtime_mode,
