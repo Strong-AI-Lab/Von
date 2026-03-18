@@ -115,10 +115,10 @@ def build_db_independent_orchestrator(
     These tests target routing and write-policy behaviour, not Mongo-backed
     workflow discovery or model registry resolution. Keep the harness minimal
     so orchestration-path regressions fail fast instead of hanging on startup.
+    When tests need to suppress selector-driven routing, do that by patching
+    the selector object directly rather than relying on removed runtime env
+    toggles.
     """
-
-    env_val = "1" if selector_enabled else "0"
-    monkeypatch.setenv("VON_CHAT_WORKFLOW_SELECTOR_ENABLED", env_val)
 
     from src.backend.workflows import WorkflowRegistry
     from src.backend.workflows.action_registry import ActionRegistry
@@ -216,6 +216,11 @@ def build_db_independent_orchestrator(
     monkeypatch.setattr(
         "src.backend.integrations.internal_mcp.orchestrator.build_conversation_turn_stage_path",
         _stub_stage_path,
+    )
+    monkeypatch.setattr(
+        orchestrator._workflow_selector,
+        "enabled",
+        lambda: selector_enabled,
     )
     monkeypatch.setattr(
         "src.backend.services.turn_execution_record_service.build_conversation_turn_stage_model_snapshot",

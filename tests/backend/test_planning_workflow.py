@@ -30,10 +30,10 @@ class TestPlanningWorkflowDefinition:
     def test_workflow_structure(self) -> None:
         from src.backend.workflows.durable.planning_workflow import (
             PLANNING_WORKFLOW_ID,
-            build_planning_workflow,
+            build_planning_workflow_test_definition,
         )
 
-        wf = build_planning_workflow()
+        wf = build_planning_workflow_test_definition()
         assert wf.workflow_id == PLANNING_WORKFLOW_ID
         assert wf.initial_state == "assess"
         assert "assess" in wf.states
@@ -43,9 +43,9 @@ class TestPlanningWorkflowDefinition:
         assert "failed" in wf.states
 
     def test_failure_routes_exist(self) -> None:
-        from src.backend.workflows.durable.planning_workflow import build_planning_workflow
+        from src.backend.workflows.durable.planning_workflow import build_planning_workflow_test_definition
 
-        wf = build_planning_workflow()
+        wf = build_planning_workflow_test_definition()
         for state_id in ("assess", "infer", "validate"):
             reasons = [t.reason for t in wf.states[state_id].transitions]
             assert "on_failure" in reasons
@@ -306,10 +306,10 @@ class TestPlanningRegistration:
     def test_workflow_registration(self) -> None:
         from src.backend.workflows.durable.planning_workflow import (
             PLANNING_WORKFLOW_ID,
-            get_planning_workflow_registration,
+            build_planning_workflow_test_registration,
         )
 
-        registration = get_planning_workflow_registration()
+        registration = build_planning_workflow_test_registration()
         assert registration.workflow_id == PLANNING_WORKFLOW_ID
         assert registration.source == "built_in"
 
@@ -328,7 +328,7 @@ class TestPlanningRegistration:
         ):
             assert registry.has(action_id), f"Missing action: {action_id}"
 
-    def test_registered_in_factory(self) -> None:
+    def test_runtime_registry_does_not_register_python_test_definition(self) -> None:
         from src.backend.workflows.durable.planning_workflow import PLANNING_WORKFLOW_ID
 
         with patch(
@@ -338,4 +338,4 @@ class TestPlanningRegistration:
             from src.backend.workflows.durable.registry_factory import build_workflow_registry
 
             registry = build_workflow_registry()
-            assert PLANNING_WORKFLOW_ID in registry.all_workflow_ids()
+            assert PLANNING_WORKFLOW_ID not in registry.all_workflow_ids()

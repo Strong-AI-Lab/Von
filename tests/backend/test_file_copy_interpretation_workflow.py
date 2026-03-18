@@ -3,14 +3,14 @@ from __future__ import annotations
 from src.backend.workflows.action_registry import ActionRegistry
 from src.backend.workflows.durable.file_copy_interpretation_workflow import (
     FILE_COPY_INTERPRETATION_WORKFLOW_ID,
-    build_file_copy_interpretation_workflow,
-    get_file_copy_interpretation_workflow_registration,
+    build_file_copy_interpretation_workflow_test_definition,
+    build_file_copy_interpretation_workflow_test_registration,
     register_file_copy_interpretation_actions,
 )
 
 
-def test_build_file_copy_interpretation_workflow_definition_shape() -> None:
-    workflow = build_file_copy_interpretation_workflow()
+def test_build_file_copy_interpretation_workflow_test_definition_definition_shape() -> None:
+    workflow = build_file_copy_interpretation_workflow_test_definition()
 
     assert workflow.workflow_id == FILE_COPY_INTERPRETATION_WORKFLOW_ID
     assert workflow.initial_state == "interpret"
@@ -39,8 +39,8 @@ def test_build_file_copy_interpretation_workflow_definition_shape() -> None:
     )
 
 
-def test_get_file_copy_interpretation_workflow_registration() -> None:
-    registration = get_file_copy_interpretation_workflow_registration()
+def test_build_file_copy_interpretation_workflow_test_registration() -> None:
+    registration = build_file_copy_interpretation_workflow_test_registration()
 
     assert registration.workflow_id == FILE_COPY_INTERPRETATION_WORKFLOW_ID
     assert registration.source == "built_in"

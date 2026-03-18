@@ -7,13 +7,13 @@ from src.backend.workflows.durable.file_copy_upload_classification_workflow impo
     DEFAULT_SCHOLARLY_WORKFLOW_ID,
     FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID,
     FILE_COPY_UPLOAD_ROUTE_DECISION_PREDICATE,
-    build_file_copy_upload_classification_workflow,
+    build_file_copy_upload_classification_workflow_test_definition,
     register_file_copy_upload_classification_actions,
 )
 
 
-def test_build_file_copy_upload_classification_workflow_definition_shape() -> None:
-    workflow = build_file_copy_upload_classification_workflow()
+def test_build_file_copy_upload_classification_workflow_test_definition_definition_shape() -> None:
+    workflow = build_file_copy_upload_classification_workflow_test_definition()
 
     assert workflow.workflow_id == FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID
     assert workflow.initial_state == "classify"

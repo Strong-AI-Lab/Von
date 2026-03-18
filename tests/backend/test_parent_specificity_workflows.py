@@ -6,10 +6,10 @@ from __future__ import annotations
 def test_dossier_workflow_definition_structure() -> None:
     from src.backend.workflows.durable.parent_specificity_concept_dossier_workflow import (
         PARENT_SPECIFICITY_DOSSIER_WORKFLOW_ID,
-        build_parent_specificity_concept_dossier_workflow,
+        build_parent_specificity_concept_dossier_workflow_test_definition,
     )
 
-    workflow = build_parent_specificity_concept_dossier_workflow()
+    workflow = build_parent_specificity_concept_dossier_workflow_test_definition()
     assert workflow.workflow_id == PARENT_SPECIFICITY_DOSSIER_WORKFLOW_ID
     assert workflow.initial_state == "collect"
     assert set(workflow.states.keys()) == {"collect", "complete", "failed"}
@@ -91,7 +91,7 @@ def test_collect_dossier_gathers_multilingual_texts_and_relations(monkeypatch) -
 
 def test_parent_specificity_rumination_workflow_definition_structure() -> None:
     from src.backend.workflows.durable.parent_specificity_rumination_workflow import (
-        build_parent_specificity_rumination_workflow,
+        build_parent_specificity_rumination_workflow_test_definition,
     )
     from src.backend.workflows.parent_specificity_workflow_contracts import (
         PARENT_SPECIFICITY_DOSSIER_CONTEXT_INPUT_MAPPING_CONCEPT_ID,
@@ -102,7 +102,7 @@ def test_parent_specificity_rumination_workflow_definition_structure() -> None:
         WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE,
     )
 
-    workflow = build_parent_specificity_rumination_workflow()
+    workflow = build_parent_specificity_rumination_workflow_test_definition()
     assert workflow.initial_state == "assess"
     assert set(workflow.states.keys()) == {
         "assess",

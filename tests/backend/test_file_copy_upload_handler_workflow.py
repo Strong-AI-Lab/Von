@@ -6,7 +6,7 @@ from src.backend.workflows.action_registry import ActionRegistry, WorkflowEnviro
 from src.backend.workflows.durable.file_copy_upload_handler_workflow import (
     FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
     FILE_COPY_UPLOAD_ROUTE_OUTCOME_PREDICATE,
-    build_file_copy_upload_handler_workflow,
+    build_file_copy_upload_handler_workflow_test_definition,
     register_file_copy_upload_handler_actions,
 )
 from src.backend.workflows.durable.file_copy_typing_workflow import (
@@ -14,8 +14,8 @@ from src.backend.workflows.durable.file_copy_typing_workflow import (
 )
 
 
-def test_build_file_copy_upload_handler_workflow_definition_shape() -> None:
-    workflow = build_file_copy_upload_handler_workflow()
+def test_build_file_copy_upload_handler_workflow_test_definition_definition_shape() -> None:
+    workflow = build_file_copy_upload_handler_workflow_test_definition()
 
     assert workflow.workflow_id == FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID
     assert workflow.initial_state == "typing"

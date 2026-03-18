@@ -646,7 +646,7 @@ def _cluster_count_after_apply(
     return len(clusters)
 
 
-def build_entity_identity_resolution_workflow() -> WorkflowDefinition:
+def build_entity_identity_resolution_workflow_test_definition() -> WorkflowDefinition:
     scan = WorkflowStateSpec(
         state_id="scan",
         actions=(
@@ -1045,10 +1045,10 @@ def _handle_finalise(request: WorkflowActionRequest) -> WorkflowActionResult:
     return WorkflowActionResult(outputs={"identity_resolution_result": result})
 
 
-def get_entity_identity_resolution_workflow_registration() -> WorkflowRegistration:
+def build_entity_identity_resolution_workflow_test_registration() -> WorkflowRegistration:
     return WorkflowRegistration(
         workflow_id=ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID,
-        definition=build_entity_identity_resolution_workflow(),
+        definition=build_entity_identity_resolution_workflow_test_definition(),
         purpose=(
             "Background duplicate-entity detection, confidence-scored resolution, "
             "and provenance maintenance."

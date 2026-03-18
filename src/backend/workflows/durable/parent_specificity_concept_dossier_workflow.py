@@ -138,7 +138,7 @@ def _split_relation_hits(hits: list[dict[str, Any]]) -> tuple[list[dict[str, Any
     return outgoing, incoming
 
 
-def build_parent_specificity_concept_dossier_workflow() -> WorkflowDefinition:
+def build_parent_specificity_concept_dossier_workflow_test_definition() -> WorkflowDefinition:
     collect = WorkflowStateSpec(
         state_id="collect",
         actions=(
@@ -315,10 +315,10 @@ def _handle_collect_dossier(request: WorkflowActionRequest) -> WorkflowActionRes
     )
 
 
-def get_parent_specificity_concept_dossier_workflow_registration() -> WorkflowRegistration:
+def build_parent_specificity_concept_dossier_workflow_test_registration() -> WorkflowRegistration:
     return WorkflowRegistration(
         workflow_id=PARENT_SPECIFICITY_DOSSIER_WORKFLOW_ID,
-        definition=build_parent_specificity_concept_dossier_workflow(),
+        definition=build_parent_specificity_concept_dossier_workflow_test_definition(),
         purpose=(
             "Gather multilingual dossier evidence for parent-specificity "
             "taxonomy analysis."
@@ -347,7 +347,7 @@ __all__ = [
     "DEFAULT_DOSSIER_RELATION_LIMIT",
     "DEFAULT_DOSSIER_TEXT_LIMIT",
     "PARENT_SPECIFICITY_DOSSIER_WORKFLOW_ID",
-    "build_parent_specificity_concept_dossier_workflow",
-    "get_parent_specificity_concept_dossier_workflow_registration",
+    "build_parent_specificity_concept_dossier_workflow_test_definition",
+    "build_parent_specificity_concept_dossier_workflow_test_registration",
     "register_parent_specificity_concept_dossier_actions",
 ]

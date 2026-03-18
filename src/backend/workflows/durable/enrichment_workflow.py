@@ -68,7 +68,7 @@ Relationships: {relationships}
 Respond with ONLY the text, no preamble or explanation."""
 
 
-def build_enrichment_workflow() -> WorkflowDefinition:
+def build_enrichment_workflow_test_definition() -> WorkflowDefinition:
     """Build the parameterised enrichment workflow definition.
 
     Context keys consumed:
@@ -620,11 +620,11 @@ def _handle_finalise(request: WorkflowActionRequest) -> WorkflowActionResult:
 # ---------------------------------------------------------------------------
 
 
-def get_enrichment_workflow_registration() -> WorkflowRegistration:
+def build_enrichment_workflow_test_registration() -> WorkflowRegistration:
     """Get the workflow registration for the parameterised enrichment workflow."""
     return WorkflowRegistration(
         workflow_id=ENRICHMENT_WORKFLOW_ID,
-        definition=build_enrichment_workflow(),
+        definition=build_enrichment_workflow_test_definition(),
         purpose="Generate missing text relations for concepts (parameterised by predicate).",
         source="built_in",
     )

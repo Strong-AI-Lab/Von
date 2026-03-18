@@ -634,15 +634,13 @@ def test_bootstrap_publishes_canonical_chat_graphs_with_loader_runtime_parity(
         build_workflow_process_graph,
         load_workflow_definition_from_vontology,
     )
+    from workflow_test_support import build_authoritative_test_workflow_definition
 
     registry = build_workflow_registry_read_only()
     expected_published_ids = {
         workflow_id
-        for workflow_id in (
-            *authority_service.CANONICAL_CHAT_WORKFLOW_IDS,
-            *authority_service.CANONICAL_DURABLE_WORKFLOW_IDS,
-        )
-        if registry.get_registration(workflow_id) is not None
+        for workflow_id in authority_service.CANONICAL_CHAT_WORKFLOW_IDS
+        if workflow_id in authority_service._CANONICAL_WORKFLOW_PUBLICATION_SPECS
     }
 
     report = authority_service.bootstrap_workflow_concepts(registry=cast(Any, registry))
@@ -670,8 +668,7 @@ def test_bootstrap_publishes_canonical_chat_graphs_with_loader_runtime_parity(
 
         loaded_definition = load_workflow_definition_from_vontology(workflow_id)
         assert loaded_definition is not None
-        built_in_definition = registry.get(workflow_id)
-        assert built_in_definition is not None
+        built_in_definition = build_authoritative_test_workflow_definition(workflow_id)
 
         expected_initial_state = authority_service._step_concept_id(
             workflow_id=workflow_id,
@@ -724,17 +721,17 @@ def test_bootstrap_publishes_explicit_step_conditions_for_canonical_durable_work
     _reset_mock_workflow_graph_db,
 ):
     from src.backend.workflows.durable.file_copy_interpretation_workflow import (
-        get_file_copy_interpretation_workflow_registration,
+        build_file_copy_interpretation_workflow_test_registration,
     )
     from src.backend.workflows.durable.file_copy_typing_workflow import (
-        get_file_copy_typing_workflow_registration,
+        build_file_copy_typing_workflow_test_registration,
     )
     from src.backend.workflows.durable.file_copy_upload_classification_workflow import (
-        get_file_copy_upload_classification_workflow_registration,
+        build_file_copy_upload_classification_workflow_test_registration,
     )
     from src.backend.workflows.durable.file_copy_upload_handler_workflow import (
         FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
-        get_file_copy_upload_handler_workflow_registration,
+        build_file_copy_upload_handler_workflow_test_registration,
     )
     from src.backend.workflows.durable.planning_workflow import (
         PLANNING_WORKFLOW_ID,
@@ -759,10 +756,10 @@ def test_bootstrap_publishes_explicit_step_conditions_for_canonical_durable_work
 
     registry = build_workflow_registry_read_only()
     for registration in (
-        get_file_copy_typing_workflow_registration(),
-        get_file_copy_interpretation_workflow_registration(),
-        get_file_copy_upload_classification_workflow_registration(),
-        get_file_copy_upload_handler_workflow_registration(),
+        build_file_copy_typing_workflow_test_registration(),
+        build_file_copy_interpretation_workflow_test_registration(),
+        build_file_copy_upload_classification_workflow_test_registration(),
+        build_file_copy_upload_handler_workflow_test_registration(),
     ):
         registry.register(registration)
 
@@ -875,17 +872,17 @@ def test_bootstrap_publishes_file_copy_upload_handler_dynamic_subworkflow_contra
 ):
     from src.backend.workflows.durable.file_copy_interpretation_workflow import (
         FILE_COPY_INTERPRETATION_WORKFLOW_ID,
-        get_file_copy_interpretation_workflow_registration,
+        build_file_copy_interpretation_workflow_test_registration,
     )
     from src.backend.workflows.durable.file_copy_typing_workflow import (
-        get_file_copy_typing_workflow_registration,
+        build_file_copy_typing_workflow_test_registration,
     )
     from src.backend.workflows.durable.file_copy_upload_classification_workflow import (
-        get_file_copy_upload_classification_workflow_registration,
+        build_file_copy_upload_classification_workflow_test_registration,
     )
     from src.backend.workflows.durable.file_copy_upload_handler_workflow import (
         FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
-        get_file_copy_upload_handler_workflow_registration,
+        build_file_copy_upload_handler_workflow_test_registration,
     )
     from src.backend.workflows.vontology_loader import (
         load_workflow_definition_from_vontology,
@@ -894,10 +891,10 @@ def test_bootstrap_publishes_file_copy_upload_handler_dynamic_subworkflow_contra
 
     registry = WorkflowRegistry()
     for registration in (
-        get_file_copy_typing_workflow_registration(),
-        get_file_copy_interpretation_workflow_registration(),
-        get_file_copy_upload_classification_workflow_registration(),
-        get_file_copy_upload_handler_workflow_registration(),
+        build_file_copy_typing_workflow_test_registration(),
+        build_file_copy_interpretation_workflow_test_registration(),
+        build_file_copy_upload_classification_workflow_test_registration(),
+        build_file_copy_upload_handler_workflow_test_registration(),
     ):
         registry.register(registration)
 
@@ -1051,7 +1048,7 @@ def test_reasoning_recovery_workflow_runtime_identity_matches_authoritative_load
         assert identity["hash_mismatch"] is False
 
 
-def test_build_workflow_registry_bootstraps_reasoning_recovery_family_from_vontology(
+def test_build_workflow_registry_loads_reasoning_recovery_family_after_explicit_publication(
     _reset_mock_workflow_graph_db,
     monkeypatch,
 ):
@@ -1060,7 +1057,10 @@ def test_build_workflow_registry_bootstraps_reasoning_recovery_family_from_vonto
         invalidate_workflow_discovery_executability_caches,
     )
     from src.backend.workflows.durable.registry_factory import build_workflow_registry
-    from workflow_test_support import AUTHORITATIVE_REASONING_RECOVERY_WORKFLOW_IDS
+    from workflow_test_support import (
+        AUTHORITATIVE_REASONING_RECOVERY_WORKFLOW_IDS,
+        bootstrap_authoritative_reasoning_recovery_workflows,
+    )
 
     monkeypatch.setenv("VON_USE_MOCK_DB", "1")
     monkeypatch.setenv("VON_DB_NAME", "test_von_db")
@@ -1074,6 +1074,7 @@ def test_build_workflow_registry_bootstraps_reasoning_recovery_family_from_vonto
             except Exception:
                 pass
 
+    bootstrap_authoritative_reasoning_recovery_workflows()
     invalidate_workflow_discovery_executability_caches()
     registry = build_workflow_registry()
 
@@ -1217,7 +1218,7 @@ def test_support_maintenance_workflow_runtime_identity_matches_authoritative_loa
         assert identity["hash_mismatch"] is False
 
 
-def test_build_workflow_registry_bootstraps_support_maintenance_family_from_vontology(
+def test_build_workflow_registry_loads_support_maintenance_family_after_explicit_publication(
     _reset_mock_workflow_graph_db,
     monkeypatch,
 ):
@@ -1226,7 +1227,10 @@ def test_build_workflow_registry_bootstraps_support_maintenance_family_from_vont
         invalidate_workflow_discovery_executability_caches,
     )
     from src.backend.workflows.durable.registry_factory import build_workflow_registry
-    from workflow_test_support import AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS
+    from workflow_test_support import (
+        AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS,
+        bootstrap_authoritative_support_maintenance_workflows,
+    )
 
     monkeypatch.setenv("VON_USE_MOCK_DB", "1")
     monkeypatch.setenv("VON_DB_NAME", "test_von_db")
@@ -1240,6 +1244,7 @@ def test_build_workflow_registry_bootstraps_support_maintenance_family_from_vont
             except Exception:
                 pass
 
+    bootstrap_authoritative_support_maintenance_workflows()
     invalidate_workflow_discovery_executability_caches()
     registry = build_workflow_registry()
 

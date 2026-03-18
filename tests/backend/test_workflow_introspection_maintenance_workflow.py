@@ -19,10 +19,10 @@ def _request(*, action_id: str, data: dict, namespace: str = "#V#user@org"):
 def test_workflow_structure():
     from src.backend.workflows.durable.workflow_introspection_maintenance_workflow import (
         WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
-        build_workflow_introspection_maintenance_workflow,
+        build_workflow_introspection_maintenance_workflow_test_definition,
     )
 
-    wf = build_workflow_introspection_maintenance_workflow()
+    wf = build_workflow_introspection_maintenance_workflow_test_definition()
     assert wf.workflow_id == WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID
     assert wf.initial_state == "assess"
     assert set(wf.states.keys()) == {

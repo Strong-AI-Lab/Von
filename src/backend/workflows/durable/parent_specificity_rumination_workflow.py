@@ -491,7 +491,7 @@ def _ensure_intervening_type(
     }
 
 
-def build_parent_specificity_rumination_workflow() -> WorkflowDefinition:
+def build_parent_specificity_rumination_workflow_test_definition() -> WorkflowDefinition:
     assess = WorkflowStateSpec(
         state_id="assess",
         actions=(
@@ -1193,10 +1193,10 @@ def _handle_finalise(request: WorkflowActionRequest) -> WorkflowActionResult:
     )
 
 
-def get_parent_specificity_rumination_workflow_registration() -> WorkflowRegistration:
+def build_parent_specificity_rumination_workflow_test_registration() -> WorkflowRegistration:
     return WorkflowRegistration(
         workflow_id=PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID,
-        definition=build_parent_specificity_rumination_workflow(),
+        definition=build_parent_specificity_rumination_workflow_test_definition(),
         purpose=(
             "Actively improve parent/type specificity from multilingual descriptions "
             "and relationship evidence."
@@ -1251,7 +1251,7 @@ __all__ = [
     "DEFAULT_SCAN_LIMIT",
     "DEFAULT_SCAN_TEXT_LIMIT",
     "PARENT_SPECIFICITY_AUDIT_FIELD",
-    "build_parent_specificity_rumination_workflow",
-    "get_parent_specificity_rumination_workflow_registration",
+    "build_parent_specificity_rumination_workflow_test_definition",
+    "build_parent_specificity_rumination_workflow_test_registration",
     "register_parent_specificity_rumination_actions",
 ]

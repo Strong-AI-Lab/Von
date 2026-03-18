@@ -1551,7 +1551,7 @@ def _handle_finalise(request: WorkflowActionRequest) -> WorkflowActionResult:
     return WorkflowActionResult(outputs={"workflow_maintenance_result": result})
 
 
-def build_workflow_introspection_maintenance_workflow() -> WorkflowDefinition:
+def build_workflow_introspection_maintenance_workflow_test_definition() -> WorkflowDefinition:
     assess = WorkflowStateSpec(
         state_id="assess",
         actions=(
@@ -1699,10 +1699,10 @@ def build_workflow_introspection_maintenance_workflow() -> WorkflowDefinition:
     )
 
 
-def get_workflow_introspection_maintenance_registration() -> WorkflowRegistration:
+def build_workflow_introspection_maintenance_workflow_test_registration() -> WorkflowRegistration:
     return WorkflowRegistration(
         workflow_id=WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
-        definition=build_workflow_introspection_maintenance_workflow(),
+        definition=build_workflow_introspection_maintenance_workflow_test_definition(),
         purpose=(
             "Diagnose workflow/prompt conflation and apply bounded self-maintenance "
             "repairs through MCP tools."

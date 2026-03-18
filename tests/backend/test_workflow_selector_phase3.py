@@ -217,7 +217,7 @@ class TestSelectionConfidenceReasoning:
         assert result.verdict == "rag_default"
         assert result.confidence_score == 0.0
 
-    def test_free_form_legacy_label_maps_to_candidate_without_reasoning(self):
+    def test_free_form_legacy_label_falls_back_to_default_without_reasoning(self):
         selector = _build_selector(default_workflow_id=_CHAT_WORKFLOW)
         result = selector.resolve_selection(
             raw_response="tool_seeking",
@@ -225,8 +225,8 @@ class TestSelectionConfidenceReasoning:
             prompt_used="test",
             discovered_workflow_ids=[_TOOL_WORKFLOW],
         )
-        assert result.workflow_id == _TOOL_WORKFLOW
-        assert result.verdict == "rag_selected"
+        assert result.workflow_id == _CHAT_WORKFLOW
+        assert result.verdict == "rag_default"
         assert result.confidence_score == 0.0
         assert result.reasoning == ""
 

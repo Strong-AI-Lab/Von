@@ -18,16 +18,6 @@ from .feature_flags import (
     get_durable_workflows_enabled,
     get_event_workflow_integration_enabled,
 )
-from ..workflows.durable.file_copy_upload_classification_workflow import (
-    DEFAULT_ALLOW_INTERPRET_FALLBACK,
-    DEFAULT_BUSINESS_CARD_WORKFLOW_ID,
-    DEFAULT_CV_WORKFLOW_ID,
-    DEFAULT_FORCE_ROUTE_KEY_SENTINEL,
-    DEFAULT_MINIMUM_MUTATION_CONFIDENCE,
-    DEFAULT_MINIMUM_ROUTE_SCORE,
-    DEFAULT_SCHOLARLY_WORKFLOW_ID,
-    DEFAULT_UNUSED_SPECIALISED_WORKFLOW_ID,
-)
 from ..workflows.durable.models import EventWorkflowBinding
 from ..workflows.durable.startup import get_instance_manager
 from ..workflows.durable.workflow_instance_submission_service import (
@@ -52,57 +42,6 @@ EVENT_TYPE_TEXT_RELATION_UPDATED = "text_relation.updated"
 EVENT_TYPE_TEXT_RELATION_DELETED = "text_relation.deleted"
 EVENT_TYPE_VONTOLOGY_MUTATED = "vontology.mutated"
 EVENT_TYPE_FILE_COPY_UPLOADED = "file_copy.uploaded"
-DEFAULT_FILE_COPY_UPLOADED_WORKFLOW_ID = "#V#file_copy_upload_handler_workflow"
-
-
-def _file_copy_uploaded_binding_inputs() -> dict[str, str]:
-    """Return the authoritative input mapping for file-copy upload launch."""
-
-    return {
-        "concept_id": "event.file_copy_concept_id",
-        "file_copy_concept_id": "event.file_copy_concept_id",
-        "content_type": "event.content_type",
-        "original_filename": "event.original_filename",
-        "size_bytes": "event.size_bytes",
-        "sha256": "event.sha256",
-        "blob_uri": "event.blob_uri",
-        "index_in_rag": "event.index_in_rag",
-        "minimum_route_score": str(DEFAULT_MINIMUM_ROUTE_SCORE),
-        "minimum_mutation_confidence": str(DEFAULT_MINIMUM_MUTATION_CONFIDENCE),
-        "force_route_key": DEFAULT_FORCE_ROUTE_KEY_SENTINEL,
-        "allow_interpret_fallback": str(DEFAULT_ALLOW_INTERPRET_FALLBACK).lower(),
-        "scholarly_workflow_id": DEFAULT_SCHOLARLY_WORKFLOW_ID,
-        "cv_workflow_id": DEFAULT_CV_WORKFLOW_ID,
-        "business_card_workflow_id": DEFAULT_BUSINESS_CARD_WORKFLOW_ID,
-        "meeting_workflow_id": DEFAULT_UNUSED_SPECIALISED_WORKFLOW_ID,
-    }
-
-# Bootstrap definitions exist only to materialise authoritative persisted
-# bindings. Runtime launch must resolve from persistent records rather than from
-# this in-memory table.
-_BOOTSTRAP_EVENT_BINDINGS: tuple[dict[str, Any], ...] = (
-    {
-        "event_type": EVENT_TYPE_TYPE_CREATED,
-        "workflow_id": "#V#salient_predicate_governance_workflow",
-        "input_mapping": {"type_concept_id": "event.concept_id"},
-        "enabled": True,
-    },
-    {
-        "event_type": EVENT_TYPE_FILE_COPY_UPLOADED,
-        "workflow_id": DEFAULT_FILE_COPY_UPLOADED_WORKFLOW_ID,
-        "input_mapping": _file_copy_uploaded_binding_inputs(),
-        "enabled": True,
-        "replace_existing": True,
-        "exclusive": True,
-    },
-)
-_BOOTSTRAP_EVENT_TYPES = frozenset(
-    str(item.get("event_type") or "").strip()
-    for item in _BOOTSTRAP_EVENT_BINDINGS
-    if isinstance(item, dict)
-)
-
-_DEFAULT_BINDINGS_ENSURED = False
 
 
 def _task_status_trigger_values() -> set[str]:
@@ -246,144 +185,6 @@ def _normalise_event_binding_mapping(
         if key_clean and value_clean:
             normalised[key_clean] = value_clean
     return normalised
-
-
-def ensure_default_event_bindings() -> dict[str, Any]:
-    """Best-effort bootstrap of canonical persisted event bindings.
-
-    This materialises authoritative records only. Runtime launch must still
-    resolve from persisted bindings after this function returns.
-    """
-
-    global _DEFAULT_BINDINGS_ENSURED
-    if _DEFAULT_BINDINGS_ENSURED:
-        return {
-            "success": True,
-            "ensured": True,
-            "created_count": 0,
-            "updated_count": 0,
-            "unchanged_count": 0,
-            "skipped_conflicts": 0,
-        }
-
-    if os.getenv("VON_EVENT_BINDINGS_BOOTSTRAP_ENABLE", "1").strip().lower() not in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }:
-        _DEFAULT_BINDINGS_ENSURED = True
-        return {
-            "success": True,
-            "ensured": False,
-            "reason": "bootstrap_disabled",
-            "created_count": 0,
-            "updated_count": 0,
-            "unchanged_count": 0,
-            "skipped_conflicts": 0,
-        }
-
-    created_count = 0
-    updated_count = 0
-    unchanged_count = 0
-    disabled_conflicts = 0
-    skipped_conflicts = 0
-    errors: list[str] = []
-    exclusive_targets: list[tuple[str, str]] = []
-
-    try:
-        manager = get_instance_manager()
-        if not hasattr(manager, "upsert_event_binding"):
-            _DEFAULT_BINDINGS_ENSURED = True
-            return {
-                "success": False,
-                "ensured": False,
-                "reason": "event_binding_persistence_unavailable",
-                "created_count": 0,
-                "updated_count": 0,
-                "unchanged_count": 0,
-                "skipped_conflicts": 0,
-            }
-
-        for binding in _BOOTSTRAP_EVENT_BINDINGS:
-            try:
-                _saved_binding, created, updated = manager.upsert_event_binding(
-                    event_type=binding["event_type"],
-                    workflow_id=binding["workflow_id"],
-                    input_mapping=binding.get("input_mapping"),
-                    enabled=bool(binding.get("enabled", True)),
-                    actor="system.bootstrap",
-                    replace_existing=bool(binding.get("replace_existing", False)),
-                )
-                if bool(binding.get("exclusive")):
-                    exclusive_targets.append(
-                        (_saved_binding.event_type, _saved_binding.binding_id)
-                    )
-                if created:
-                    created_count += 1
-                elif updated:
-                    updated_count += 1
-                else:
-                    unchanged_count += 1
-            except ValueError as exc:
-                if str(exc) == "binding_conflict":
-                    skipped_conflicts += 1
-                    continue
-                errors.append(str(exc))
-            except Exception as exc:  # pragma: no cover - defensive
-                errors.append(str(exc))
-
-        if hasattr(manager, "list_event_bindings") and hasattr(
-            manager, "set_event_binding_enabled"
-        ):
-            for event_type, canonical_binding_id in exclusive_targets:
-                try:
-                    bindings = manager.list_event_bindings(
-                        event_type=event_type,
-                        enabled_only=True,
-                        limit=500,
-                    )
-                except Exception as exc:  # pragma: no cover - defensive
-                    errors.append(
-                        f"exclusive_binding_list_failed:{event_type}:{exc}"
-                    )
-                    continue
-                for existing in bindings:
-                    if not isinstance(existing, EventWorkflowBinding):
-                        continue
-                    if existing.binding_id == canonical_binding_id:
-                        continue
-                    if not bool(existing.enabled):
-                        continue
-                    try:
-                        updated_binding = manager.set_event_binding_enabled(
-                            existing.binding_id,
-                            enabled=False,
-                            actor="system.bootstrap",
-                        )
-                    except Exception as exc:  # pragma: no cover - defensive
-                        errors.append(
-                            f"exclusive_binding_disable_failed:{event_type}:{existing.binding_id}:{exc}"
-                        )
-                        continue
-                    if isinstance(updated_binding, EventWorkflowBinding):
-                        disabled_conflicts += 1
-    except Exception as exc:  # pragma: no cover - defensive
-        errors.append(str(exc))
-
-    if not errors:
-        _DEFAULT_BINDINGS_ENSURED = True
-
-    return {
-        "success": len(errors) == 0,
-        "ensured": len(errors) == 0,
-        "created_count": created_count,
-        "updated_count": updated_count,
-        "unchanged_count": unchanged_count,
-        "disabled_conflicts": disabled_conflicts,
-        "skipped_conflicts": skipped_conflicts,
-        "errors": errors,
-    }
 
 
 def _fetch_persistent_bindings(
@@ -559,36 +360,6 @@ def _resolve_bindings_for_event(event_type: str) -> list[dict[str, Any]]:
         for binding in all_bindings
         if str(binding.get("event_type") or "").strip() == event_type
     ]
-
-
-def _supports_bootstrap_event_bindings(event_type: str) -> bool:
-    return str(event_type or "").strip() in _BOOTSTRAP_EVENT_TYPES
-
-
-def _ensure_bootstrap_event_bindings_for(
-    event_type: str,
-) -> dict[str, Any] | None:
-    if not _supports_bootstrap_event_bindings(event_type):
-        return None
-    return ensure_default_event_bindings()
-
-
-def _annotate_bootstrap_launch_result(
-    launch_result: dict[str, Any],
-    *,
-    bootstrap_report: dict[str, Any] | None,
-) -> dict[str, Any]:
-    if not isinstance(launch_result, dict):
-        return launch_result
-    if isinstance(bootstrap_report, dict):
-        launch_result["event_binding_bootstrap"] = bootstrap_report
-        # Keep the historical field for callers that already read it.
-        launch_result["default_binding_bootstrap"] = bootstrap_report
-    workflow_id = str(launch_result.get("workflow_id") or "").strip()
-    if workflow_id:
-        launch_result["selected_workflow_id"] = workflow_id
-    launch_result["launch_strategy"] = "resolved_persistent_bindings"
-    return launch_result
 
 
 def _extract_path_value(payload: dict[str, Any], path: str) -> tuple[bool, Any]:
@@ -1106,19 +877,14 @@ def launch_event_workflow(
         resolved_bindings = _resolve_bindings_for_event(event_type)
 
     if not resolved_bindings:
-        hint = (
-            "Materialise the canonical persisted event binding for this event, or "
-            "register an event binding using workflow_bind_event."
-            if _supports_bootstrap_event_bindings(event_type)
-            else "Register an event binding using workflow_bind_event for this event type."
-        )
         return {
             "success": False,
             "triggered": False,
             "outcome": "not_triggered",
             "event_type": event_type,
             "reason": "workflow_not_configured",
-            "hint": hint,
+            "hint": "Register a persisted event binding using workflow_bind_event for this event type.",
+            "launch_strategy": "resolved_persistent_bindings",
         }
 
     raw_event_payload = (
@@ -1215,6 +981,10 @@ def launch_event_workflow(
         result["reused_count"] = 1 if bool(result.get("idempotent_reused")) else 0
         result["success_count"] = 1 if bool(result.get("success")) else 0
         result["failure_count"] = 0 if bool(result.get("success")) else 1
+        workflow_id = str(result.get("workflow_id") or "").strip()
+        if workflow_id:
+            result["selected_workflow_id"] = workflow_id
+        result["launch_strategy"] = "resolved_persistent_bindings"
         return result
 
     triggered_count = sum(1 for item in launches if bool(item.get("triggered")))
@@ -1262,6 +1032,7 @@ def launch_event_workflow(
         "success_count": success_count,
         "failure_count": len(launches) - success_count,
         "non_trigger_reasons": non_trigger_reasons,
+        "launch_strategy": "resolved_persistent_bindings",
     }
 
 
@@ -1417,8 +1188,7 @@ def maybe_launch_type_created_workflow(
 ) -> dict[str, Any]:
     """Launch workflow(s) bound to type.created for new type concepts."""
 
-    bootstrap_report = _ensure_bootstrap_event_bindings_for(EVENT_TYPE_TYPE_CREATED)
-    launch_result = launch_event_workflow(
+    return launch_event_workflow(
         event_type=EVENT_TYPE_TYPE_CREATED,
         event_id=str(type_concept_id),
         user_id=created_by_concept_id,
@@ -1434,10 +1204,6 @@ def maybe_launch_type_created_workflow(
             "type_concept_id": type_concept_id,
             "parent_type_ids": list(parent_type_ids or []),
         },
-    )
-    return _annotate_bootstrap_launch_result(
-        launch_result,
-        bootstrap_report=bootstrap_report,
     )
 
 
@@ -1558,10 +1324,7 @@ def maybe_launch_file_copy_uploaded_workflow(
             "hint": "Provide file_copy_concept_id for upload-event workflow launch.",
         }
 
-    bootstrap_report = _ensure_bootstrap_event_bindings_for(
-        EVENT_TYPE_FILE_COPY_UPLOADED
-    )
-    launch_result = launch_event_workflow(
+    return launch_event_workflow(
         event_type=EVENT_TYPE_FILE_COPY_UPLOADED,
         event_id=concept_id,
         user_id=uploaded_by_concept_id,
@@ -1589,8 +1352,4 @@ def maybe_launch_file_copy_uploaded_workflow(
             "uploaded_at": uploaded_at_iso,
             "index_in_rag": bool(index_in_rag),
         },
-    )
-    return _annotate_bootstrap_launch_result(
-        launch_result,
-        bootstrap_report=bootstrap_report,
     )

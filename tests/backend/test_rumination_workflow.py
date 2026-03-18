@@ -34,11 +34,11 @@ class TestRuminationWorkflowDefinition:
 
     def test_workflow_structure(self) -> None:
         from src.backend.workflows.durable.rumination_workflow import (
-            build_rumination_workflow,
+            build_rumination_workflow_test_definition,
             RUMINATION_WORKFLOW_ID,
         )
 
-        wf = build_rumination_workflow()
+        wf = build_rumination_workflow_test_definition()
         assert wf.workflow_id == RUMINATION_WORKFLOW_ID
         assert wf.initial_state == "assess"
         assert "assess" in wf.states
@@ -49,20 +49,20 @@ class TestRuminationWorkflowDefinition:
 
     def test_terminal_states(self) -> None:
         from src.backend.workflows.durable.rumination_workflow import (
-            build_rumination_workflow,
+            build_rumination_workflow_test_definition,
         )
 
-        wf = build_rumination_workflow()
+        wf = build_rumination_workflow_test_definition()
         assert wf.states["complete"].terminal is True
         assert wf.states["failed"].terminal is True
         assert wf.states["assess"].terminal is False
 
     def test_assess_transitions(self) -> None:
         from src.backend.workflows.durable.rumination_workflow import (
-            build_rumination_workflow,
+            build_rumination_workflow_test_definition,
         )
 
-        wf = build_rumination_workflow()
+        wf = build_rumination_workflow_test_definition()
         transitions = wf.states["assess"].transitions
         to_states = [t.to_state for t in transitions]
         assert "plan" in to_states
@@ -1001,11 +1001,11 @@ class TestRuminationRegistration:
 
     def test_workflow_registration(self) -> None:
         from src.backend.workflows.durable.rumination_workflow import (
-            get_rumination_workflow_registration,
+            build_rumination_workflow_test_registration,
             RUMINATION_WORKFLOW_ID,
         )
 
-        reg = get_rumination_workflow_registration()
+        reg = build_rumination_workflow_test_registration()
         assert reg.workflow_id == RUMINATION_WORKFLOW_ID
         assert reg.source == "built_in"
 
@@ -1027,7 +1027,7 @@ class TestRuminationRegistration:
         for action_id in expected:
             assert registry.has(action_id), f"Missing: {action_id}"
 
-    def test_registered_in_factory(self) -> None:
+    def test_runtime_registry_does_not_register_python_test_definition(self) -> None:
         from src.backend.workflows.durable.rumination_workflow import (
             RUMINATION_WORKFLOW_ID,
         )
@@ -1041,4 +1041,4 @@ class TestRuminationRegistration:
             )
 
             registry = build_workflow_registry()
-            assert RUMINATION_WORKFLOW_ID in registry.all_workflow_ids()
+            assert RUMINATION_WORKFLOW_ID not in registry.all_workflow_ids()

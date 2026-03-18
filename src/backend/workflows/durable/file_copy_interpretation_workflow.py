@@ -28,7 +28,7 @@ _FILE_COPY_CONTEXT_INPUTS = {
 }
 
 
-def build_file_copy_interpretation_workflow() -> WorkflowDefinition:
+def build_file_copy_interpretation_workflow_test_definition() -> WorkflowDefinition:
     interpret = WorkflowStateSpec(
         state_id="interpret",
         actions=(
@@ -93,10 +93,10 @@ def build_file_copy_interpretation_workflow() -> WorkflowDefinition:
     )
 
 
-def get_file_copy_interpretation_workflow_registration() -> WorkflowRegistration:
+def build_file_copy_interpretation_workflow_test_registration() -> WorkflowRegistration:
     return WorkflowRegistration(
         workflow_id=FILE_COPY_INTERPRETATION_WORKFLOW_ID,
-        definition=build_file_copy_interpretation_workflow(),
+        definition=build_file_copy_interpretation_workflow_test_definition(),
         purpose=(
             "Interpret uploaded file copies with image/document extraction and "
             "persisted concept enrichment."

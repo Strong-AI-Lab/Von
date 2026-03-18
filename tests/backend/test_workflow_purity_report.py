@@ -137,7 +137,7 @@ def test_build_workflow_purity_report_counts_runtime_and_code_impurity(
     assert report["counters"] == {
         "built_in_registration_count": 2,
         "remaining_python_workflow_family_count": 3,
-        "direct_instance_create_callsite_count": 3,
+        "direct_instance_create_callsite_count": 0,
         "env_event_binding_count": 0,
         "legacy_selector_mode_count": 1,
         "builtin_capability_override_count": len(BUILTIN_WORKFLOW_CAPABILITIES),

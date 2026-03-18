@@ -46,13 +46,13 @@ class TestRagSyncWorkflowDefinition:
         )
 
     def test_build_workflow_returns_definition(self) -> None:
-        """build_rag_text_relation_sync_workflow() should return a WorkflowDefinition."""
+        """build_rag_text_relation_sync_workflow_test_definition() should return a WorkflowDefinition."""
         from src.backend.workflows.durable.rag_sync_workflow import (
-            build_rag_text_relation_sync_workflow,
+            build_rag_text_relation_sync_workflow_test_definition,
         )
         from src.backend.workflows.engine import WorkflowDefinition
 
-        workflow = build_rag_text_relation_sync_workflow()
+        workflow = build_rag_text_relation_sync_workflow_test_definition()
 
         assert isinstance(workflow, WorkflowDefinition)
         assert workflow.workflow_id == "#V#rag_text_relation_sync_workflow"
@@ -60,10 +60,10 @@ class TestRagSyncWorkflowDefinition:
     def test_workflow_has_expected_states(self) -> None:
         """Workflow should have correct state machine structure."""
         from src.backend.workflows.durable.rag_sync_workflow import (
-            build_rag_text_relation_sync_workflow,
+            build_rag_text_relation_sync_workflow_test_definition,
         )
 
-        workflow = build_rag_text_relation_sync_workflow()
+        workflow = build_rag_text_relation_sync_workflow_test_definition()
         # states is a dict[str, WorkflowStateSpec]
         state_ids = list(workflow.states.keys())
 
@@ -76,20 +76,20 @@ class TestRagSyncWorkflowDefinition:
     def test_workflow_initial_state_is_collect(self) -> None:
         """Workflow should start at the collect state."""
         from src.backend.workflows.durable.rag_sync_workflow import (
-            build_rag_text_relation_sync_workflow,
+            build_rag_text_relation_sync_workflow_test_definition,
         )
 
-        workflow = build_rag_text_relation_sync_workflow()
+        workflow = build_rag_text_relation_sync_workflow_test_definition()
 
         assert workflow.initial_state == "collect"
 
     def test_workflow_terminal_states(self) -> None:
         """Complete and failed should be terminal states."""
         from src.backend.workflows.durable.rag_sync_workflow import (
-            build_rag_text_relation_sync_workflow,
+            build_rag_text_relation_sync_workflow_test_definition,
         )
 
-        workflow = build_rag_text_relation_sync_workflow()
+        workflow = build_rag_text_relation_sync_workflow_test_definition()
 
         assert "complete" in workflow.termination_states
         assert "failed" in workflow.termination_states
@@ -321,15 +321,15 @@ class TestSubmitDurableRagSync:
 class TestWorkflowRegistration:
     """Tests for workflow registration in startup."""
 
-    def test_get_rag_sync_workflow_registration_returns_registration(self) -> None:
-        """get_rag_sync_workflow_registration() should return a WorkflowRegistration."""
+    def test_build_rag_text_relation_sync_workflow_test_registration_returns_registration(self) -> None:
+        """build_rag_text_relation_sync_workflow_test_registration() should return a WorkflowRegistration."""
         from src.backend.workflows.durable.rag_sync_workflow import (
-            get_rag_sync_workflow_registration,
+            build_rag_text_relation_sync_workflow_test_registration,
             RAG_TEXT_RELATION_SYNC_WORKFLOW_ID,
         )
         from src.backend.workflows.workflow_registry import WorkflowRegistration
 
-        registration = get_rag_sync_workflow_registration()
+        registration = build_rag_text_relation_sync_workflow_test_registration()
 
         assert isinstance(registration, WorkflowRegistration)
         assert registration.workflow_id == RAG_TEXT_RELATION_SYNC_WORKFLOW_ID

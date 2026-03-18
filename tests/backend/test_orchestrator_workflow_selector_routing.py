@@ -175,7 +175,7 @@ def test_workflow_selector_routes_to_narration_workflow(monkeypatch):
 
     llm = _CapturingLLM(
         [
-            "narration",  # workflow selector verdict
+            CHAT_NARRATION_WORKFLOW_ID,  # workflow selector verdict
             "Here is the answer on screen.",  # main assistant screen response
             "<spoken>Short talk track.</spoken>",  # narration generation
         ]
@@ -256,7 +256,7 @@ def test_renderer_applicability_can_enable_narration_when_flag_enabled(monkeypat
 
     llm = _CapturingLLM(
         [
-            "tool_seeking",  # workflow selector verdict
+            TOOL_CALLING_WORKFLOW_ID,  # workflow selector verdict
             "Here is the answer on screen.",  # tool-calling final response
             "<spoken>Short talk track.</spoken>",  # narration generation
         ]
@@ -334,7 +334,7 @@ def test_renderer_applicability_error_preserves_selector_narration(monkeypatch):
 
     llm = _CapturingLLM(
         [
-            "narration",  # workflow selector verdict
+            CHAT_NARRATION_WORKFLOW_ID,  # workflow selector verdict
             "Here is the answer on screen.",  # main assistant screen response
             "<spoken>Short talk track.</spoken>",  # narration generation
         ]
@@ -382,7 +382,7 @@ def test_renderer_applicability_flag_off_preserves_default_rendering(monkeypatch
 
     llm = _CapturingLLM(
         [
-            "tool_seeking",
+            TOOL_CALLING_WORKFLOW_ID,
             "Here is the answer on screen.",
         ]
     )
@@ -433,7 +433,7 @@ def test_renderer_applicability_non_narration_renderer_keeps_screen_only(monkeyp
 
     llm = _CapturingLLM(
         [
-            "tool_seeking",
+            TOOL_CALLING_WORKFLOW_ID,
             "Here is the answer on screen.",
         ]
     )
@@ -519,7 +519,7 @@ def test_renderer_applicability_uses_concept_backed_request_when_available(monke
 
     llm = _CapturingLLM(
         [
-            "tool_seeking",
+            TOOL_CALLING_WORKFLOW_ID,
         ]
     )
 
@@ -650,7 +650,7 @@ def test_renderer_render_plan_includes_table_record_sets_from_tool_messages(monk
 
     monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
 
-    llm = _CapturingLLM(["tool_seeking"])
+    llm = _CapturingLLM([TOOL_CALLING_WORKFLOW_ID])
 
     result = orchestrator.run(
         prompt="Show tasks and dependencies",
@@ -784,7 +784,7 @@ def test_renderer_render_plan_includes_workflow_view_from_tool_messages(monkeypa
 
     monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
 
-    llm = _CapturingLLM(["tool_seeking"])
+    llm = _CapturingLLM([TOOL_CALLING_WORKFLOW_ID])
 
     result = orchestrator.run(
         prompt="Show workflow progress",
@@ -900,7 +900,7 @@ def test_renderer_selection_gates_screen_element_families(monkeypatch):
 
     monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
 
-    llm = _CapturingLLM(["tool_seeking"])
+    llm = _CapturingLLM([TOOL_CALLING_WORKFLOW_ID])
     result = orchestrator.run(
         prompt="Show workflow progress",
         context=[],
@@ -997,7 +997,7 @@ def test_renderer_selection_uses_profile_screen_families_for_custom_renderer_typ
 
     monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
 
-    llm = _CapturingLLM(["tool_seeking"])
+    llm = _CapturingLLM([TOOL_CALLING_WORKFLOW_ID])
     result = orchestrator.run(
         prompt="Show metrics chart",
         context=[],
@@ -1098,7 +1098,7 @@ def test_renderer_selection_emits_timeline_elements_for_timeline_renderer(monkey
 
     monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
 
-    llm = _CapturingLLM(["tool_seeking"])
+    llm = _CapturingLLM([TOOL_CALLING_WORKFLOW_ID])
     result = orchestrator.run(
         prompt="Show timeline",
         context=[],
@@ -1202,7 +1202,7 @@ def test_renderer_selection_emits_calendar_elements_for_calendar_renderer(monkey
 
     monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
 
-    llm = _CapturingLLM(["tool_seeking"])
+    llm = _CapturingLLM([TOOL_CALLING_WORKFLOW_ID])
     result = orchestrator.run(
         prompt="Show calendar",
         context=[],
@@ -1319,7 +1319,7 @@ def test_renderer_selection_emits_chart_elements_for_chart_renderer(monkeypatch)
 
     monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
 
-    llm = _CapturingLLM(["tool_seeking"])
+    llm = _CapturingLLM([TOOL_CALLING_WORKFLOW_ID])
     result = orchestrator.run(
         prompt="Show chart",
         context=[],
@@ -1444,7 +1444,7 @@ def test_renderer_selection_emits_location_elements_for_location_renderer(monkey
 
     monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
 
-    llm = _CapturingLLM(["tool_seeking"])
+    llm = _CapturingLLM([TOOL_CALLING_WORKFLOW_ID])
     result = orchestrator.run(
         prompt="Show locations",
         context=[],
@@ -1556,7 +1556,7 @@ def test_renderer_selection_emits_document_elements_for_document_renderer(monkey
 
     monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
 
-    llm = _CapturingLLM(["tool_seeking"])
+    llm = _CapturingLLM([TOOL_CALLING_WORKFLOW_ID])
     result = orchestrator.run(
         prompt="Show document excerpts",
         context=[],
@@ -1664,7 +1664,7 @@ def test_renderer_selection_emits_task_view_elements_for_task_renderer(monkeypat
 
     monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
 
-    llm = _CapturingLLM(["tool_seeking"])
+    llm = _CapturingLLM([TOOL_CALLING_WORKFLOW_ID])
     result = orchestrator.run(
         prompt="Show task cards",
         context=[],
@@ -1780,7 +1780,7 @@ def test_renderer_selection_emits_kanban_elements_for_kanban_renderer(monkeypatc
 
     monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
 
-    llm = _CapturingLLM(["tool_seeking"])
+    llm = _CapturingLLM([TOOL_CALLING_WORKFLOW_ID])
     result = orchestrator.run(
         prompt="Show task kanban",
         context=[],
@@ -1896,7 +1896,7 @@ def test_renderer_selection_emits_relation_graph_elements_for_graph_renderer(mon
 
     monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
 
-    llm = _CapturingLLM(["tool_seeking"])
+    llm = _CapturingLLM([TOOL_CALLING_WORKFLOW_ID])
     result = orchestrator.run(
         prompt="Show relation graph",
         context=[],
@@ -2018,7 +2018,7 @@ def test_renderer_selection_skips_hierarchy_view_for_custom_relation_edges(monke
 
     monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
 
-    llm = _CapturingLLM(["tool_seeking"])
+    llm = _CapturingLLM([TOOL_CALLING_WORKFLOW_ID])
     result = orchestrator.run(
         prompt="Show the hierarchy",
         context=[],
@@ -2105,7 +2105,7 @@ def test_renderer_selection_fallback_when_no_types_selected(monkeypatch):
 
     monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
 
-    llm = _CapturingLLM(["tool_seeking"])
+    llm = _CapturingLLM([TOOL_CALLING_WORKFLOW_ID])
     result = orchestrator.run(
         prompt="Show tasks",
         context=[],
@@ -2186,7 +2186,7 @@ def test_renderer_selection_emits_hierarchy_from_taxonomy_screen_text(monkeypatc
 
     monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
 
-    llm = _CapturingLLM(["tool_seeking"])
+    llm = _CapturingLLM([TOOL_CALLING_WORKFLOW_ID])
     result = orchestrator.run(
         prompt="Show the taxonomy recommendation",
         context=[],
@@ -2273,7 +2273,7 @@ def test_renderer_selection_hierarchy_parser_tolerates_indented_root_rows(monkey
 
     monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
 
-    llm = _CapturingLLM(["tool_seeking"])
+    llm = _CapturingLLM([TOOL_CALLING_WORKFLOW_ID])
     result = orchestrator.run(
         prompt="Show a taxonomy hierarchy",
         context=[],
@@ -2386,7 +2386,7 @@ def test_renderer_render_plan_skips_malformed_tool_messages_for_table_record_set
 
     monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
 
-    llm = _CapturingLLM(["tool_seeking"])
+    llm = _CapturingLLM([TOOL_CALLING_WORKFLOW_ID])
 
     result = orchestrator.run(
         prompt="Show tasks and dependencies",
@@ -2416,7 +2416,7 @@ def test_renderer_applicability_missing_definitions_falls_back_screen_only(monke
 
     llm = _CapturingLLM(
         [
-            "tool_seeking",
+            TOOL_CALLING_WORKFLOW_ID,
             "Here is the answer on screen.",
         ]
     )
@@ -2488,7 +2488,7 @@ def test_renderer_applicability_bootstrap_defaults_surface_resolver_error_detail
 
     monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
 
-    llm = _CapturingLLM(["tool_seeking", "Here is the answer on screen."])
+    llm = _CapturingLLM([TOOL_CALLING_WORKFLOW_ID, "Here is the answer on screen."])
 
     result = orchestrator.run(
         prompt="Explain this briefly",
@@ -2563,7 +2563,7 @@ def test_renderer_applicability_multimodal_selection_sets_spoken_plus_screen(mon
 
     llm = _CapturingLLM(
         [
-            "tool_seeking",
+            TOOL_CALLING_WORKFLOW_ID,
             "Here is the answer on screen.",
             "<spoken>Short talk track.</spoken>",
         ]
@@ -2617,7 +2617,7 @@ def test_selector_fires_without_presenter_mode(monkeypatch):
     # No presenter mode context — selector should still fire.
     llm = _CapturingLLM(
         [
-            "tool_seeking",  # workflow selector verdict
+            TOOL_CALLING_WORKFLOW_ID,  # workflow selector verdict
             "I'll help with that.",  # main assistant response (plan handler)
         ]
     )
@@ -2837,7 +2837,7 @@ def test_non_executable_discovered_workflow_can_be_overridden(monkeypatch):
 
 def test_workflow_selector_emits_dispatch_progress_events(monkeypatch):
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
-    llm = _CapturingLLM(["tool_seeking", "Fallback response."])
+    llm = _CapturingLLM([TOOL_CALLING_WORKFLOW_ID, "Fallback response."])
     captured_progress: list[dict[str, Any]] = []
     tracker = ProgressTracker(callback=lambda info: captured_progress.append(dict(info)))
 
@@ -3118,7 +3118,7 @@ def test_plain_response_skips_tool_calling(monkeypatch):
 
     llm = _CapturingLLM(
         [
-            "plain_response",  # selector verdict
+            CHAT_ASSISTANT_WORKFLOW_ID,  # selector verdict
             "Hello! How can I help?",  # direct planner response
         ]
     )
@@ -3149,7 +3149,7 @@ def test_plain_response_has_routing_info(monkeypatch):
 
     llm = _CapturingLLM(
         [
-            "plain_response",  # selector verdict
+            CHAT_ASSISTANT_WORKFLOW_ID,  # selector verdict
             "Just a chat reply.",  # planner response
         ]
     )
@@ -3210,7 +3210,7 @@ def test_workflow_selector_uses_provider_aware_classifier_fallback(monkeypatch):
 
     class _SelectorFallbackClient:
         def generate(self, *_args: Any, **_kwargs: Any) -> str:
-            return "plain_response"
+            return CHAT_ASSISTANT_WORKFLOW_ID
 
     def _create_client_for_candidate(
         candidate: _ModelCandidate,
@@ -3341,7 +3341,7 @@ def test_plain_response_overridden_to_tool_pipeline_for_mutative_intent(monkeypa
 
     llm = _CapturingLLM(
         [
-            "plain_response",  # selector verdict
+            CHAT_ASSISTANT_WORKFLOW_ID,  # selector verdict
             "I can create that relationship in the knowledge base.",  # tool-calling planner
             "Relationship creation needs tool execution.",
             "Final response after tool workflow.",
@@ -3384,7 +3384,7 @@ def test_plain_response_overridden_when_prompt_requires_tool_verification(monkey
 
     llm = _CapturingLLM(
         [
-            "plain_response",
+            CHAT_ASSISTANT_WORKFLOW_ID,
             "I inspected workflow definitions.",
             "Here is what exists.",
         ]
@@ -3430,7 +3430,7 @@ def test_incidental_url_prompt_stays_on_plain_response_path(monkeypatch):
 
     llm = _CapturingLLM(
         [
-            "plain_response",
+            CHAT_ASSISTANT_WORKFLOW_ID,
             "Meeting noted.",
         ]
     )
@@ -3481,7 +3481,7 @@ def test_url_read_prompt_uses_tool_workflow_preflight_and_forces_url_tool(monkey
 
     llm = _CapturingLLM(
         [
-            "plain_response",
+            CHAT_ASSISTANT_WORKFLOW_ID,
             "I can help with that.",
             "Summary after URL extraction.",
         ]
@@ -3555,7 +3555,7 @@ def test_write_intent_memory_rehydrates_for_same_session_continuation(monkeypatc
         context=[],
         llm_client=_CapturingLLM(
             [
-                "plain_response",
+                CHAT_ASSISTANT_WORKFLOW_ID,
                 "First tool-calling turn.",
                 "Follow-through response.",
                 "Final response after tool workflow.",
@@ -3574,7 +3574,7 @@ def test_write_intent_memory_rehydrates_for_same_session_continuation(monkeypatc
         context=[],
         llm_client=_CapturingLLM(
             [
-                "plain_response",
+                CHAT_ASSISTANT_WORKFLOW_ID,
                 "Continuation turn.",
                 "Follow-through response.",
                 "Final response after tool workflow.",
@@ -3629,7 +3629,7 @@ def test_write_intent_memory_rejects_cross_session_continuation(monkeypatch):
         context=[],
         llm_client=_CapturingLLM(
             [
-                "plain_response",
+                CHAT_ASSISTANT_WORKFLOW_ID,
                 "First tool-calling turn.",
                 "Follow-through response.",
                 "Final response after tool workflow.",
@@ -3648,7 +3648,7 @@ def test_write_intent_memory_rejects_cross_session_continuation(monkeypatch):
         context=[],
         llm_client=_CapturingLLM(
             [
-                "plain_response",
+                CHAT_ASSISTANT_WORKFLOW_ID,
                 "Plain response only.",
             ]
         ),
@@ -3698,7 +3698,7 @@ def test_write_intent_memory_rehydrates_for_low_risk_confirm_structure_prompt(
         context=[],
         llm_client=_CapturingLLM(
             [
-                "plain_response",
+                CHAT_ASSISTANT_WORKFLOW_ID,
                 "First tool-calling turn.",
                 "Follow-through response.",
                 "Final response after tool workflow.",
@@ -3717,7 +3717,7 @@ def test_write_intent_memory_rehydrates_for_low_risk_confirm_structure_prompt(
         context=[],
         llm_client=_CapturingLLM(
             [
-                "plain_response",
+                CHAT_ASSISTANT_WORKFLOW_ID,
                 "Continuation turn.",
                 "Follow-through response.",
                 "Final response after tool workflow.",
@@ -3795,7 +3795,7 @@ def test_preselected_tool_planner_receives_authoritative_workflow_continuation_c
 
     llm = _CapturingLLM(
         [
-            "tool_seeking",
+            TOOL_CALLING_WORKFLOW_ID,
             "I'll continue the representation work.",
             "Follow-through response.",
             "Final response after tool workflow.",
@@ -3854,7 +3854,7 @@ def test_tool_seeking_has_routing_info(monkeypatch):
 
     llm = _CapturingLLM(
         [
-            "tool_seeking",  # selector verdict
+            TOOL_CALLING_WORKFLOW_ID,  # selector verdict
             "Let me search for that.",  # plan handler response (no tools found)
         ]
     )
@@ -3884,7 +3884,7 @@ def test_routing_duration_ms_in_aux_llm_calls(monkeypatch):
 
     llm = _CapturingLLM(
         [
-            "plain_response",
+            CHAT_ASSISTANT_WORKFLOW_ID,
             "Quick reply.",
         ]
     )
@@ -3922,8 +3922,7 @@ def test_routing_duration_ms_in_aux_llm_calls(monkeypatch):
 
 
 def test_selector_enabled_by_default(monkeypatch):
-    """Without setting the env var, the selector should be enabled by default."""
-    # Remove the env var entirely so we test the code-level default ("1").
+    """The selector remains enabled without any compatibility toggle."""
     monkeypatch.delenv("VON_CHAT_WORKFLOW_SELECTOR_ENABLED", raising=False)
 
     selector = WorkflowSelector(
@@ -3932,11 +3931,15 @@ def test_selector_enabled_by_default(monkeypatch):
     )
     assert selector.enabled()
 
+def test_selector_ignores_legacy_disable_env(monkeypatch):
+    """Legacy selector env toggles no longer affect runtime routing."""
+    monkeypatch.setenv("VON_CHAT_WORKFLOW_SELECTOR_ENABLED", "0")
 
-def test_selector_can_be_disabled_via_env(monkeypatch):
-    """Setting VON_CHAT_WORKFLOW_SELECTOR_ENABLED=0 should disable the selector."""
-    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=False)
-    assert not orchestrator._workflow_selector.enabled()
+    selector = WorkflowSelector(
+        registry=MagicMock(),
+        prompt_service=MagicMock(),
+    )
+    assert selector.enabled()
 
 
 def test_selector_resolve_selection_extracts_workflow_id_from_json_output():
@@ -4006,12 +4009,12 @@ def test_selector_resolve_selection_invalid_output_falls_back_to_default_workflo
 
 
 # ---------------------------------------------------------------------------
-# JVNAUTOSCI-825: Routing info absent when selector disabled.
+# JVNAUTOSCI-825: Routing info absent when the selector is suppressed in tests.
 # ---------------------------------------------------------------------------
 
 
-def test_no_routing_info_when_selector_disabled(monkeypatch):
-    """When the selector is disabled, workflow_routing should be None."""
+def test_no_routing_info_when_selector_suppressed_in_harness(monkeypatch):
+    """Harness-level selector suppression should omit workflow_routing data."""
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=False)
 
     llm = _CapturingLLM(["A direct response."])
@@ -4052,7 +4055,7 @@ def test_discovery_miss_invokes_gap_recovery_after_plain_fallback(monkeypatch):
 
     monkeypatch.setattr(orchestrator, "execute_workflow", _fake_execute_workflow)
 
-    llm = _CapturingLLM(["plain_response", "Fallback response."])
+    llm = _CapturingLLM([CHAT_ASSISTANT_WORKFLOW_ID, "Fallback response."])
     result = orchestrator.run(
         prompt="Handle this missing workflow.",
         context=[],
@@ -4139,6 +4142,3 @@ def test_custom_workflow_result_preserves_messages_and_invocations(monkeypatch):
     assert result.response_text == "Custom workflow response."
     assert result.extra_messages == ({"role": "tool", "content": "custom output"},)
     assert result.tool_invocations == ({"tool": "search_concepts"},)
-
-
-

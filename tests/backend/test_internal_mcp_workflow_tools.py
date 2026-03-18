@@ -636,7 +636,7 @@ def test_workflow_list_definitions_gateway_invoke_success_path():
 
 def test_workflow_list_definitions_skips_bootstrap_writes():
     with patch(
-        "src.backend.workflows.durable.registry_factory.bootstrap_workflow_concepts",
+        "src.backend.workflows.workflow_concept_authority_service.bootstrap_workflow_concepts",
         side_effect=AssertionError("workflow_list_definitions should be read-only"),
     ):
         handler = build_default_catalogue().get("workflow_list_definitions").handler
@@ -1295,4 +1295,3 @@ def test_workflow_trigger_schedule_rejects_unrunnable_workflow(monkeypatch):
     preflight = verification.get("preflight") or {}
     assert "workflow_definition_not_registered" in (preflight.get("errors") or [])
     assert len(manager.instances) == 0
-
