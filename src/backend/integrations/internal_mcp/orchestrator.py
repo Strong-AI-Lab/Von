@@ -1098,27 +1098,13 @@ class InternalMCPChatOrchestrator:
         self._workflow_executor = WorkflowExecutor(
             registry=self._action_registry, max_transitions=50
         )
-        # JVNAUTOSCI-1424 Phase 2: RAG-first routing support.
-        # The selector uses RAG-first candidate matching by default.
-        # Set VON_WORKFLOW_RAG_FIRST_ROUTING=0 to fall back to the legacy
-        # static verdict taxonomy during rollback.
-        rag_first = os.getenv("VON_WORKFLOW_RAG_FIRST_ROUTING", "1").strip().lower() not in {
-            "0", "false", "off",
-        }
+        # JVNAUTOSCI-1521: production routing now has one selector path.
         selector_kwargs: dict[str, Any] = {
             "registry": self._workflow_registry,
             "prompt_service": self._prompt_templates,
             "classifier_prompt_ids": self._TURN_SELECTOR_PROMPTS,
+            "default_workflow_id": CHAT_ASSISTANT_WORKFLOW_ID,
         }
-        if rag_first:
-            selector_kwargs["default_workflow_id"] = CHAT_ASSISTANT_WORKFLOW_ID
-        else:
-            selector_kwargs["verdict_mapping"] = {
-                "plain_response": CHAT_ASSISTANT_WORKFLOW_ID,
-                "tool_seeking": TOOL_CALLING_WORKFLOW_ID,
-                "summarisation": TOOL_CALLING_WORKFLOW_ID,
-                "narration": CHAT_NARRATION_WORKFLOW_ID,
-            }
         self._workflow_selector = WorkflowSelector(**selector_kwargs)
         self._last_base_system_prompt_telemetry: dict[str, Any] | None = None
 
@@ -1654,13 +1640,9 @@ class InternalMCPChatOrchestrator:
             if isinstance(required_prompt_create_type_name_raw, str)
             else ""
         )
-        allow_semantic_retry = bool(
-            missing_prompt_tools
-            or missing_prompt_fetch_concept_ids
-            or missing_prompt_read_file_copy_ids
-            or missing_prompt_scholarly_file_copy_ids
-            or required_prompt_create_type_name
-        )
+        # Keep heuristic/classifier retry available for ordinary "I'll do it
+        # now" tool promises as well as explicit prompt-requirement failures.
+        allow_semantic_retry = True
         retries_remaining_before = max(0, retry_budget - retry_attempts)
         data["missing_tool_call_retry_attempts"] = retry_attempts
         data["missing_tool_call_retry_budget"] = retry_budget
@@ -2645,6 +2627,8 @@ class InternalMCPChatOrchestrator:
             user_namespace=environment.user_namespace,
             auxiliary_system_prompt=environment.auxiliary_system_prompt,
             max_tool_invocations=environment.max_tool_invocations,
+            max_tool_result_chars=environment.max_tool_result_chars,
+            max_tool_result_field_chars=environment.max_tool_result_field_chars,
             default_gmail_profile=(
                 data.get("gmail_profile") or environment.default_gmail_profile
             ),
@@ -9193,6 +9177,7 @@ class InternalMCPChatOrchestrator:
             seen_values.add(candidate_value)
             if not _exists(candidate_value):
                 continue
+            return candidate_value, strategy
         return None, None
 
     def _is_write_tool(
@@ -12150,12 +12135,45 @@ class InternalMCPChatOrchestrator:
                 preview_str = (
                     preview_str[: self._max_tool_result_chars] + "\n... [truncated]"
                 )
-            result["payload"] = {
+            truncated_payload = {
                 "_truncated": True,
                 "_original_chars": len(encoded),
                 "_preview": preview_str,
             }
-            return json.dumps(result, default=str)
+            result["payload"] = truncated_payload
+            encoded_truncated = json.dumps(result, default=str)
+            if len(encoded_truncated) <= self._max_tool_result_chars:
+                return encoded_truncated
+
+            # The preview string itself is JSON-escaped again inside the final
+            # envelope, so trim against the encoded envelope size rather than
+            # only the raw preview size.
+            for _ in range(3):
+                overflow = len(encoded_truncated) - self._max_tool_result_chars
+                if overflow <= 0:
+                    return encoded_truncated
+                current_preview = str(truncated_payload.get("_preview") or "")
+                if not current_preview:
+                    break
+                clip_to = max(0, len(current_preview) - overflow - 64)
+                if clip_to >= len(current_preview):
+                    break
+                next_preview = current_preview[:clip_to].rstrip()
+                if next_preview:
+                    next_preview += "\n... [truncated]"
+                truncated_payload["_preview"] = next_preview
+                encoded_truncated = json.dumps(result, default=str)
+                if len(encoded_truncated) <= self._max_tool_result_chars:
+                    return encoded_truncated
+
+            result["payload"] = {
+                "_truncated": True,
+                "_original_chars": len(encoded),
+            }
+            encoded_minimal = json.dumps(result, default=str)
+            if len(encoded_minimal) <= self._max_tool_result_chars:
+                return encoded_minimal
+            return encoded_minimal[: self._max_tool_result_chars]
         except Exception:
             # Fallback to manual coercion if payload is not JSON serialisable
             safe_payload = result.get("payload")
@@ -14142,6 +14160,17 @@ class InternalMCPChatOrchestrator:
             payload["errors"].append("rag_namespace_missing")
             return payload
 
+        try:
+            described_methods = self._gateway.describe_methods()
+        except Exception:
+            described_methods = {}
+        if not (
+            isinstance(described_methods, Mapping)
+            and "search_knowledge_base" in described_methods
+        ):
+            payload["errors"].append("rag_search_tool_unavailable")
+            return payload
+
         rag_payload = {
             "query": query,
             "namespace": namespace,
@@ -14498,6 +14527,8 @@ class InternalMCPChatOrchestrator:
             user_namespace=user_namespace,
             auxiliary_system_prompt=None,
             max_tool_invocations=None,
+            max_tool_result_chars=self._max_tool_result_chars,
+            max_tool_result_field_chars=self._max_tool_result_field_chars,
             default_gmail_profile=self._default_gmail_profile,
         )
 
@@ -18561,6 +18592,8 @@ class InternalMCPChatOrchestrator:
             user_namespace=user_namespace,
             auxiliary_system_prompt=auxiliary_system_prompt,
             max_tool_invocations=self._max_tool_invocations,
+            max_tool_result_chars=self._max_tool_result_chars,
+            max_tool_result_field_chars=self._max_tool_result_field_chars,
             default_gmail_profile=self._default_gmail_profile,
         )
         try:
@@ -19665,17 +19698,70 @@ class InternalMCPChatOrchestrator:
         # ----------------------------------------------------------------
         discovered_matches: list[dict[str, Any]] = []
         excluded_discovered_matches: list[dict[str, Any]] = []
+
+        def _build_selector_default_candidates() -> list[dict[str, Any]]:
+            candidate_ids = (
+                CHAT_ASSISTANT_WORKFLOW_ID,
+                TOOL_CALLING_WORKFLOW_ID,
+                CHAT_NARRATION_WORKFLOW_ID,
+            )
+            candidates: list[dict[str, Any]] = []
+            for workflow_id in candidate_ids:
+                registration = self._workflow_registry.get_registration(workflow_id)
+                if registration is None:
+                    continue
+                name = workflow_id[3:] if workflow_id.startswith("#V#") else workflow_id
+                name = name.replace("_", " ").strip().title() or workflow_id
+                description = str(getattr(registration, "purpose", "") or "").strip()
+                candidates.append(
+                    {
+                        "concept_id": workflow_id,
+                        "name": name,
+                        "description": description,
+                        "is_executable": True,
+                        "executability_reason": "executable_now",
+                        "is_policy_safe": True,
+                        "routing_eligible": True,
+                        "routing_exclusion_reason": None,
+                    }
+                )
+            return candidates
+
+        def _merge_selector_candidates(
+            primary: Sequence[Mapping[str, Any]],
+            secondary: Sequence[Mapping[str, Any]],
+        ) -> list[dict[str, Any]]:
+            merged: list[dict[str, Any]] = []
+            seen_ids: set[str] = set()
+            for source in (primary, secondary):
+                for item in source:
+                    if not isinstance(item, Mapping):
+                        continue
+                    concept_id = str(item.get("concept_id") or "").strip()
+                    if not concept_id:
+                        continue
+                    dedupe_key = concept_id.lower()
+                    if dedupe_key in seen_ids:
+                        continue
+                    seen_ids.add(dedupe_key)
+                    merged.append(dict(item))
+            return merged
+
         if isinstance(workflow_discovery_result, Mapping):
             discovered_matches, excluded_discovered_matches = (
                 self._prepare_selector_discovered_matches(workflow_discovery_result)
             )
+        selector_candidate_matches = _merge_selector_candidates(
+            _build_selector_default_candidates(),
+            discovered_matches,
+        )
 
         routing_info: WorkflowRoutingInfo | None = None
         selection_experience_id: str | None = None
         if prompt_requirements_force_tool_pipeline:
             routing_info = WorkflowRoutingInfo(
                 workflow_id=TOOL_CALLING_WORKFLOW_ID,
-                verdict="tool_seeking",
+                verdict="tool_contract_preselected",
                 prompt_id=None,
                 discovered_workflow_ids=(),
                 source="selector_override",
@@ -19733,7 +19819,7 @@ class InternalMCPChatOrchestrator:
             if not clean_workflow_id:
                 return None
 
-            for match in (*discovered_matches, *excluded_discovered_matches):
+            for match in (*selector_candidate_matches, *excluded_discovered_matches):
                 if not isinstance(match, Mapping):
                     continue
                 match_id = match.get("concept_id")
@@ -19768,14 +19854,14 @@ class InternalMCPChatOrchestrator:
                     "phase_label": "Selecting workflow",
                     "subtask": "Choose the best workflow for this turn",
                     "workflow_match_count": len(discovered_matches),
-                    "workflow_candidate_count": len(discovered_matches)
+                    "workflow_candidate_count": len(selector_candidate_matches)
                     + len(excluded_discovered_matches),
                 }
             )
             selector_start = time.perf_counter()
             selector_prompt = self._workflow_selector.prepare_selection_prompt(
                 turn_text=effective_prompt_for_routing,
-                discovered_workflows=discovered_matches or None,
+                discovered_workflows=selector_candidate_matches or None,
             )
             selector_policy = (
                 dict(selector_prompt.policy_recommendation)
@@ -19809,7 +19895,7 @@ class InternalMCPChatOrchestrator:
                 payload.setdefault("workflow_match_count", len(discovered_matches))
                 payload.setdefault(
                     "workflow_candidate_count",
-                    len(discovered_matches) + len(excluded_discovered_matches),
+                    len(selector_candidate_matches) + len(excluded_discovered_matches),
                 )
                 _emit_progress_local(payload)
 
@@ -19827,7 +19913,7 @@ class InternalMCPChatOrchestrator:
                             "phase": "workflow_dispatch",
                             "phase_label": "Applying learned workflow policy",
                             "workflow_match_count": len(discovered_matches),
-                            "workflow_candidate_count": len(discovered_matches)
+                            "workflow_candidate_count": len(selector_candidate_matches)
                             + len(excluded_discovered_matches),
                         }
                     )
@@ -19913,7 +19999,7 @@ class InternalMCPChatOrchestrator:
                         "workflow_task": selector_selection.workflow_id
                         or selector_selection.verdict,
                         "workflow_match_count": len(discovered_matches),
-                        "workflow_candidate_count": len(discovered_matches)
+                        "workflow_candidate_count": len(selector_candidate_matches)
                         + len(excluded_discovered_matches),
                         "workflow_selection_rationale": selection_rationale,
                     }
@@ -19933,7 +20019,7 @@ class InternalMCPChatOrchestrator:
                         "discovered_workflow_ids": list(
                             selector_selection.discovered_workflow_ids
                         ),
-                        "discovery_candidate_count": len(discovered_matches)
+                        "discovery_candidate_count": len(selector_candidate_matches)
                         + len(excluded_discovered_matches),
                         "discovery_excluded_count": len(excluded_discovered_matches),
                         "routing_duration_ms": routing_duration_ms,
@@ -19963,7 +20049,7 @@ class InternalMCPChatOrchestrator:
                         "discovered_workflow_ids": list(
                             selector_selection.discovered_workflow_ids
                         ),
-                        "discovery_candidate_count": len(discovered_matches)
+                        "discovery_candidate_count": len(selector_candidate_matches)
                         + len(excluded_discovered_matches),
                         "discovery_excluded_count": len(excluded_discovered_matches),
                         "excluded_discovered_workflow_ids": [
@@ -20011,7 +20097,7 @@ class InternalMCPChatOrchestrator:
                 selected_workflow_id = CHAT_ASSISTANT_WORKFLOW_ID
                 routing_info = WorkflowRoutingInfo(
                     workflow_id=CHAT_ASSISTANT_WORKFLOW_ID,
-                    verdict="fallback",
+                    verdict="selector_exception",
                     prompt_id=None,
                     discovered_workflow_ids=(),
                     source="default",
@@ -20019,7 +20105,7 @@ class InternalMCPChatOrchestrator:
                 )
                 selection_rationale = _derive_workflow_selection_rationale(
                     selected_workflow_id=CHAT_ASSISTANT_WORKFLOW_ID,
-                    selector_verdict="fallback",
+                    selector_verdict="selector_exception",
                     selector_source="default",
                     candidate_workflow_ids=(),
                     explicit_reasoning="selector_exception",
@@ -20030,7 +20116,7 @@ class InternalMCPChatOrchestrator:
                         "stage": "workflow_dispatch",
                         "phase": "workflow_dispatch",
                         "phase_label": "Workflow selection fallback",
-                        "workflow_selector_verdict": "fallback",
+                        "workflow_selector_verdict": "selector_exception",
                         "selected_workflow_id": CHAT_ASSISTANT_WORKFLOW_ID,
                         "selected_workflow_name": _resolve_selected_workflow_name(
                             CHAT_ASSISTANT_WORKFLOW_ID
@@ -20049,7 +20135,7 @@ class InternalMCPChatOrchestrator:
                         query=effective_prompt_for_routing[:500],
                         candidate_workflow_ids=(),
                         selected_workflow_id=CHAT_ASSISTANT_WORKFLOW_ID,
-                        verdict="fallback",
+                        verdict="selector_exception",
                         selection_source="default",
                         selection_metadata={"selector_error": str(exc)},
                         confidence_score=0.0,
@@ -20061,9 +20147,53 @@ class InternalMCPChatOrchestrator:
                 except Exception:
                     pass
 
-        _STATIC_SELECTOR_VERDICTS = frozenset(
-            {"plain_response", "tool_seeking", "summarisation", "narration", "fallback"}
-        )
+        def _workflow_action_ids(workflow_id: str | None) -> set[str]:
+            if not isinstance(workflow_id, str) or not workflow_id.strip():
+                return set()
+            workflow_def = self._workflow_registry.get(workflow_id.strip())
+            if workflow_def is None:
+                return set()
+            action_ids: set[str] = set()
+            for state in workflow_def.states.values():
+                for action in state.actions:
+                    action_id = str(action.action_id or "").strip()
+                    if action_id:
+                        action_ids.add(action_id)
+            return action_ids
+
+        def _workflow_matches_action_contract(
+            workflow_id: str | None,
+            *,
+            required_action_ids: frozenset[str],
+        ) -> bool:
+            action_ids = _workflow_action_ids(workflow_id)
+            return bool(action_ids) and required_action_ids.issubset(action_ids)
+
+        def _resolve_workflow_id_for_action_contract(
+            *,
+            required_action_ids: frozenset[str],
+            preferred_workflow_id: str | None = None,
+        ) -> str | None:
+            preferred = (
+                preferred_workflow_id.strip()
+                if isinstance(preferred_workflow_id, str)
+                and preferred_workflow_id.strip()
+                else None
+            )
+            if preferred and _workflow_matches_action_contract(
+                preferred, required_action_ids=required_action_ids
+            ):
+                return preferred
+            for workflow_id in self._workflow_registry.all_workflow_ids():
+                candidate = str(workflow_id).strip()
+                if not candidate:
+                    continue
+                if _workflow_matches_action_contract(
+                    candidate, required_action_ids=required_action_ids
+                ):
+                    return candidate
+            return None
+
         _TOOL_PIPELINE_ACTION_IDS = frozenset(
             {
                 "tool_calling.preflight_requirements",
@@ -20093,17 +20223,38 @@ class InternalMCPChatOrchestrator:
             and routing_info.verdict.strip()
             else ""
         )
-        selector_requests_narration = selector_verdict == "narration"
-        selector_requests_custom_workflow = bool(
-            selected_workflow_id_text
+        selected_uses_tool_pipeline_contract = _workflow_matches_action_contract(
+            selected_workflow_id_text,
+            required_action_ids=_TOOL_PIPELINE_ACTION_IDS,
+        )
+        selected_uses_narration_contract = _workflow_matches_action_contract(
+            selected_workflow_id_text,
+            required_action_ids=_NARRATION_ACTION_IDS,
+        )
+        selected_requests_explicit_narration_workflow = (
+            selected_workflow_id_text == CHAT_NARRATION_WORKFLOW_ID
+        )
+        has_explicit_workflow_routing = isinstance(routing_info, WorkflowRoutingInfo)
+        selected_prefers_direct_response = bool(
+            has_explicit_workflow_routing
             and (
-                selector_verdict == "policy_selected"
-                or (
-                    selector_verdict
-                    and selector_verdict not in _STATIC_SELECTOR_VERDICTS
-                    and selected_workflow_id_text.lower() == selector_verdict
-                )
+                selected_workflow_id_text == CHAT_ASSISTANT_WORKFLOW_ID
+                or selected_requests_explicit_narration_workflow
+                or selected_uses_narration_contract
             )
+        )
+        selector_requests_narration = bool(
+            has_explicit_workflow_routing
+            and (
+                selected_requests_explicit_narration_workflow
+                or selected_uses_narration_contract
+            )
+        )
+        selector_requests_custom_workflow = bool(
+            has_explicit_workflow_routing
+            and selected_workflow_id_text
+            and not selected_prefers_direct_response
+            and not selected_uses_tool_pipeline_contract
         )
         write_tool_candidates_for_routing = sorted(
             {
@@ -20231,53 +20382,6 @@ class InternalMCPChatOrchestrator:
                     aux_llm_calls.append(dict(write_intent_persist_telemetry))
                 except Exception:
                     pass
-
-        def _workflow_action_ids(workflow_id: str | None) -> set[str]:
-            if not isinstance(workflow_id, str) or not workflow_id.strip():
-                return set()
-            workflow_def = self._workflow_registry.get(workflow_id.strip())
-            if workflow_def is None:
-                return set()
-            action_ids: set[str] = set()
-            for state in workflow_def.states.values():
-                for action in state.actions:
-                    action_id = str(action.action_id or "").strip()
-                    if action_id:
-                        action_ids.add(action_id)
-            return action_ids
-
-        def _workflow_matches_action_contract(
-            workflow_id: str | None,
-            *,
-            required_action_ids: frozenset[str],
-        ) -> bool:
-            action_ids = _workflow_action_ids(workflow_id)
-            return bool(action_ids) and required_action_ids.issubset(action_ids)
-
-        def _resolve_workflow_id_for_action_contract(
-            *,
-            required_action_ids: frozenset[str],
-            preferred_workflow_id: str | None = None,
-        ) -> str | None:
-            preferred = (
-                preferred_workflow_id.strip()
-                if isinstance(preferred_workflow_id, str)
-                and preferred_workflow_id.strip()
-                else None
-            )
-            if preferred and _workflow_matches_action_contract(
-                preferred, required_action_ids=required_action_ids
-            ):
-                return preferred
-            for workflow_id in self._workflow_registry.all_workflow_ids():
-                candidate = str(workflow_id).strip()
-                if not candidate:
-                    continue
-                if _workflow_matches_action_contract(
-                    candidate, required_action_ids=required_action_ids
-                ):
-                    return candidate
-            return None
 
         # Feature-flagged step toward ontology-driven render planning:
         # resolve whether narration should be part of the response rendering.
@@ -23615,11 +23719,11 @@ class InternalMCPChatOrchestrator:
             context_tags: list[str] = ["chat_turn_rendering"]
             if presenter_mode_requested:
                 context_tags.append("presenter_mode")
-            if selector_verdict == "narration":
+            if selected_uses_narration_contract:
                 context_tags.append("workflow:narration")
-            elif selector_verdict in {"tool_seeking", "summarisation"}:
+            elif selected_uses_tool_pipeline_contract:
                 context_tags.append("workflow:tool_calling")
-            elif selector_verdict in {"plain_response", "fallback"}:
+            elif selected_prefers_direct_response:
                 context_tags.append("workflow:assistant")
 
             temporal_metadata: dict[str, Any] = {}
@@ -24102,6 +24206,19 @@ class InternalMCPChatOrchestrator:
                 aux_llm_calls.append(dict(decision))
                 return dict(decision)
 
+            if "renderer_resolve_applicability" not in method_catalogue_for_routing:
+                decision["reason"] = "tool_unavailable"
+                _apply_screen_element_mapping(
+                    decision,
+                    screen_text=screen_text,
+                    tool_messages=tool_messages,
+                    resolver_attempted=False,
+                    resolver_success=False,
+                    selected_renderer_types=(),
+                )
+                aux_llm_calls.append(dict(decision))
+                return dict(decision)
+
             request_payload, payload_diagnostics = _build_renderer_request_payload(
                 screen_text,
                 tool_invocations=tool_invocations,
@@ -24306,8 +24423,19 @@ class InternalMCPChatOrchestrator:
                 tool_messages=tool_messages,
             )
             renderer_mode = str(renderer_plan.get("render_mode") or "").strip().lower()
+            renderer_requests_narration = bool(renderer_plan.get("should_narrate"))
+            selected_narration_workflow = bool(
+                selected_workflow_id_text == CHAT_NARRATION_WORKFLOW_ID
+                or (
+                    isinstance(routing_info, WorkflowRoutingInfo)
+                    and routing_info.workflow_id == CHAT_NARRATION_WORKFLOW_ID
+                )
+            )
             should_route_narration = (
-                selector_requests_narration or renderer_mode == "spoken+screen"
+                selected_narration_workflow
+                or selector_requests_narration
+                or renderer_requests_narration
+                or renderer_mode == "spoken+screen"
             )
             if not should_route_narration:
                 return screen_text
@@ -24401,17 +24529,13 @@ class InternalMCPChatOrchestrator:
         # JVNAUTOSCI-825: Route turns to the appropriate pathway.
         #
         # Three routing tiers:
-        #   1. plain_response  — direct LLM call without tool context
+        #   1. direct_response — direct LLM call without tool context
         #   2. custom_workflow — execute selected discovered workflow
         #   3. tool_pipeline   — execute registry workflow matching tool contract
         # ----------------------------------------------------------------
         # This was already evaluated before workflow selection so prompt-required
         # tools can dominate routing deterministically, even when selector output
         # is noisy or unavailable.
-        selected_uses_tool_pipeline_contract = _workflow_matches_action_contract(
-            selected_workflow_id_text,
-            required_action_ids=_TOOL_PIPELINE_ACTION_IDS,
-        )
 
         def _force_tool_pipeline_routing(
             *,
@@ -24424,6 +24548,8 @@ class InternalMCPChatOrchestrator:
             nonlocal selector_verdict
             nonlocal selector_requests_narration
             nonlocal selector_requests_custom_workflow
+            nonlocal selected_uses_narration_contract
+            nonlocal selected_prefers_direct_response
             nonlocal routing_info
             nonlocal selected_uses_tool_pipeline_contract
 
@@ -24437,9 +24563,11 @@ class InternalMCPChatOrchestrator:
             )
             selected_workflow_id = TOOL_CALLING_WORKFLOW_ID
             selected_workflow_id_text = TOOL_CALLING_WORKFLOW_ID
-            selector_verdict = "tool_seeking"
+            selector_verdict = "tool_contract_override"
             selector_requests_narration = False
             selector_requests_custom_workflow = False
+            selected_uses_narration_contract = False
+            selected_prefers_direct_response = False
             selected_uses_tool_pipeline_contract = True
 
             prompt_id = None
@@ -24451,7 +24579,7 @@ class InternalMCPChatOrchestrator:
                 routing_duration_ms = routing_info.routing_duration_ms
             routing_info = WorkflowRoutingInfo(
                 workflow_id=TOOL_CALLING_WORKFLOW_ID,
-                verdict="tool_seeking",
+                verdict="tool_contract_override",
                 prompt_id=prompt_id,
                 discovered_workflow_ids=discovered_workflow_ids,
                 routing_duration_ms=routing_duration_ms,
@@ -24475,13 +24603,13 @@ class InternalMCPChatOrchestrator:
                 trace.metadata["workflow_selector_override"] = dict(override_payload)
 
         if (
-            selector_verdict == "plain_response"
+            selected_prefers_direct_response
             and mutative_intent_requires_tool_routing
             and not selected_uses_tool_pipeline_contract
         ):
             _force_tool_pipeline_routing(
                 reason="mutative_intent_requires_tool_pipeline",
-                excluded_selector_verdicts=["plain_response"],
+                excluded_selector_verdicts=[selector_verdict or "direct_response"],
                 extra_payload={
                     "write_policy_reason": write_routing_policy_reason,
                     "write_tool_candidate_count": len(
@@ -24574,7 +24702,7 @@ class InternalMCPChatOrchestrator:
                 else None
             ),
             "workflow_match_count": len(discovered_matches),
-            "workflow_candidate_count": len(discovered_matches)
+            "workflow_candidate_count": len(selector_candidate_matches)
             + len(excluded_discovered_matches),
             "workflow_selection_rationale": workflow_selection_rationale,
         }
@@ -24720,12 +24848,10 @@ class InternalMCPChatOrchestrator:
                 render_plan=base_result.render_plan,
             )
 
-        # Tier 1: Plain response — skip tool-calling overhead entirely.
-        # When the classifier says "plain_response", there is no need
-        # to build tool context, inject write-policy, or run the
-        # plan→validate→execute→backfill pipeline.  This saves an LLM
-        # round-trip worth of system prompt tokens and reduces latency.
-        if selector_verdict == "plain_response" and not selected_uses_tool_pipeline_contract:
+        # Tier 1: Direct response — skip tool-calling overhead entirely.
+        # This is reserved for the chat assistant workflow and workflows that
+        # explicitly request narration over a direct screen response.
+        if selected_prefers_direct_response and not selected_uses_tool_pipeline_contract:
             _emit_phase_transition_local(
                 self.PHASE_PLAIN_RESPONSE,
                 extra=workflow_dispatch_progress,
@@ -24737,7 +24863,7 @@ class InternalMCPChatOrchestrator:
                     inputs={
                         "prompt": prompt,
                         "model": planner_model or "default",
-                        "routing": "plain_response",
+                        "routing": "direct_response",
                     },
                 )
             response, planner_model, _ = self._run_llm_with_fallbacks(
@@ -24769,6 +24895,11 @@ class InternalMCPChatOrchestrator:
                 response if isinstance(response, str) else str(response),
                 aux_log=aux_llm_calls if isinstance(aux_llm_calls, list) else None,
                 source_stage="run.plain_response",
+            )
+            response_text = _maybe_apply_narration_routing(
+                response_text,
+                tool_invocations=(),
+                tool_messages=(),
             )
             response_text = _maybe_apply_critic(response_text)
             response_text = _maybe_append_completion_claim_validation(response_text)
@@ -24934,6 +25065,8 @@ class InternalMCPChatOrchestrator:
             user_namespace=user_namespace,
             auxiliary_system_prompt=auxiliary_system_prompt,
             max_tool_invocations=self._max_tool_invocations,
+            max_tool_result_chars=self._max_tool_result_chars,
+            max_tool_result_field_chars=self._max_tool_result_field_chars,
             default_gmail_profile=gmail_profile or self._default_gmail_profile,
         )
         auto_proceed_minimal_imposition_enabled = (

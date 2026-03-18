@@ -178,12 +178,12 @@ geo = [
 include = ["src"]
 executionEnvironments = [
     # Use project root so that top-level package name 'src' resolves.
-    { root = ".", extraPaths = ["src"] }
+    { root = ".", extraPaths = ["src", "tests/backend"] }
 ]
 typeCheckingMode = "basic"
 reportMissingImports = true
 reportMissingTypeStubs = false
-extraPaths = ["src"]
+extraPaths = ["src", "tests/backend"]
 stubPath = "typings"
 venvPath = "."
 venv = ".venv"

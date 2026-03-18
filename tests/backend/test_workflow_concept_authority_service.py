@@ -109,6 +109,11 @@ def test_bootstrap_workflow_concept_identities_creates_missing(monkeypatch):
         "resolve_available_workflow_type_ids",
         lambda: ("#V#ai_workflow",),
     )
+    monkeypatch.setattr(
+        authority_service,
+        "_concept_exists_fast",
+        lambda concept_id: concept_id == "#V#ai_workflow",
+    )
     monkeypatch.setattr(authority_service, "_load_concept", lambda _cid: (None, None))
 
     created_payloads: list[dict] = []
@@ -136,6 +141,42 @@ def test_bootstrap_workflow_concept_identities_creates_missing(monkeypatch):
     assert payload["concept_id"] == "#V#wf_create"
     assert payload["parent_concept_ids"] == ["#V#ai_workflow"]
     assert payload["create_as_instance"] is True
+
+
+def test_bootstrap_workflow_concept_identities_skips_missing_parent_types(
+    monkeypatch,
+):
+    registry = _DummyRegistry(workflow_ids=["#V#wf_create"])
+
+    monkeypatch.setattr(
+        authority_service,
+        "resolve_available_workflow_type_ids",
+        lambda: ("#V#ai_workflow",),
+    )
+    monkeypatch.setattr(authority_service, "_concept_exists_fast", lambda _cid: False)
+    monkeypatch.setattr(authority_service, "_load_concept", lambda _cid: (None, None))
+
+    created_payloads: list[dict] = []
+
+    def _mock_create_concept(**kwargs):
+        created_payloads.append(kwargs)
+        return {"concept_id": kwargs.get("concept_id")}
+
+    monkeypatch.setattr(
+        authority_service.concept_service,
+        "create_concept",
+        _mock_create_concept,
+    )
+
+    report = authority_service.bootstrap_workflow_concept_identities(
+        registry=cast(Any, registry)
+    )
+
+    assert report["counts"]["created"] == 1
+    payload = next(
+        item for item in created_payloads if item.get("concept_id") == "#V#wf_create"
+    )
+    assert payload["parent_concept_ids"] == []
 
 
 def test_bootstrap_workflow_concepts_can_skip_optional_side_effects(monkeypatch):
@@ -682,6 +723,19 @@ def test_bootstrap_publishes_canonical_chat_graphs_with_loader_runtime_parity(
 def test_bootstrap_publishes_explicit_step_conditions_for_canonical_durable_workflows(
     _reset_mock_workflow_graph_db,
 ):
+    from src.backend.workflows.durable.file_copy_interpretation_workflow import (
+        get_file_copy_interpretation_workflow_registration,
+    )
+    from src.backend.workflows.durable.file_copy_typing_workflow import (
+        get_file_copy_typing_workflow_registration,
+    )
+    from src.backend.workflows.durable.file_copy_upload_classification_workflow import (
+        get_file_copy_upload_classification_workflow_registration,
+    )
+    from src.backend.workflows.durable.file_copy_upload_handler_workflow import (
+        FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
+        get_file_copy_upload_handler_workflow_registration,
+    )
     from src.backend.workflows.durable.planning_workflow import (
         PLANNING_WORKFLOW_ID,
     )
@@ -691,10 +745,9 @@ def test_bootstrap_publishes_explicit_step_conditions_for_canonical_durable_work
     from src.backend.workflows.durable.workflow_gap_recovery_workflow import (
         WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
     )
+    from src.backend.workflows.durable.registry_factory import build_workflow_registry_read_only
     from src.backend.workflows.vontology_loader import build_workflow_process_graph
-    from workflow_test_support import (
-        bootstrap_authoritative_reasoning_recovery_workflows,
-    )
+    from workflow_test_support import bootstrap_authoritative_reasoning_recovery_workflows
 
     report = bootstrap_authoritative_reasoning_recovery_workflows()
     errors = (
@@ -703,6 +756,21 @@ def test_bootstrap_publishes_explicit_step_conditions_for_canonical_durable_work
     assert PLANNING_WORKFLOW_ID not in errors
     assert PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID not in errors
     assert WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID not in errors
+
+    registry = build_workflow_registry_read_only()
+    for registration in (
+        get_file_copy_typing_workflow_registration(),
+        get_file_copy_interpretation_workflow_registration(),
+        get_file_copy_upload_classification_workflow_registration(),
+        get_file_copy_upload_handler_workflow_registration(),
+    ):
+        registry.register(registration)
+
+    report = authority_service.bootstrap_workflow_concepts(registry=cast(Any, registry))
+    file_copy_errors = (
+        (report.get("graph_publication") or {}).get("errors_by_workflow_id") or {}
+    )
+    assert FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID not in file_copy_errors
 
     planning_graph, planning_warnings = build_workflow_process_graph(
         PLANNING_WORKFLOW_ID
@@ -893,6 +961,42 @@ def test_canonical_workflow_runtime_identity_matches_authoritative_loader(
     runtime_registry = build_workflow_registry_read_only()
 
     for workflow_id in authority_service.CANONICAL_CHAT_WORKFLOW_IDS:
+        registration = runtime_registry.get_registration(workflow_id)
+        assert registration is not None
+        assert str(registration.source or "").strip().lower() == "vontology"
+
+        authoritative_definition = load_workflow_definition_from_vontology(workflow_id)
+        assert authoritative_definition is not None
+
+        identity = build_workflow_definition_identity(
+            workflow_id=workflow_id,
+            source=registration.source,
+            definition=registration.definition,
+            authoritative_definition=authoritative_definition,
+        )
+        assert identity["runtime_definition_hash"]
+        assert identity["authoritative_definition_hash"]
+        assert identity["hash_mismatch"] is False
+
+
+def test_file_copy_workflow_runtime_identity_matches_authoritative_loader(
+    _reset_mock_workflow_graph_db,
+):
+    from src.backend.workflows.durable.registry_factory import (
+        build_workflow_registry_read_only,
+    )
+    from src.backend.workflows.vontology_loader import (
+        load_workflow_definition_from_vontology,
+    )
+    from workflow_test_support import (
+        AUTHORITATIVE_FILE_COPY_WORKFLOW_IDS,
+        bootstrap_authoritative_file_copy_workflows,
+    )
+
+    bootstrap_authoritative_file_copy_workflows()
+    runtime_registry = build_workflow_registry_read_only()
+
+    for workflow_id in AUTHORITATIVE_FILE_COPY_WORKFLOW_IDS:
         registration = runtime_registry.get_registration(workflow_id)
         assert registration is not None
         assert str(registration.source or "").strip().lower() == "vontology"

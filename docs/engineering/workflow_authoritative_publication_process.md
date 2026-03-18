@@ -91,6 +91,16 @@ startup under the `workflow_purity` logger key. The counters currently include:
 6. `builtin_capability_override_count`
 7. `non_vontology_discoverable_workflow_count`
 
+Parity enforcement now defaults to `fail`, not `warn`. Production startup should
+raise on authority drift unless a developer explicitly relaxes
+`VON_WORKFLOW_PARITY_ENFORCEMENT` for bounded local diagnostics.
+
+The runtime registry must also keep bootstrap-only workflow families separate
+from production registration authority. Python definitions that remain for
+bootstrap/test support, such as the file-copy family during convergence, may be
+used to publish or repair authoritative Vontology graphs, but they must not be
+counted as discoverable production registrations.
+
 Capability indexing now also fails closed for routing: the workflow capability
 index should only index `source=vontology` workflows with non-empty
 authoritative narrative text. Non-authoritative registrations and textless

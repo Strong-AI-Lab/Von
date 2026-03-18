@@ -55,6 +55,8 @@ class WorkflowEnvironment:
     user_namespace: str | None = None
     auxiliary_system_prompt: str | None = None
     max_tool_invocations: int | None = None
+    max_tool_result_chars: int | None = None
+    max_tool_result_field_chars: int | None = None
     default_gmail_profile: str | None = None
 
 

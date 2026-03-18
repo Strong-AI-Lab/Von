@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import cast
 from typing import Any
 
 from src.backend.workflows.definitions import (
@@ -57,6 +58,22 @@ from src.backend.workflows.durable.workflow_gap_recovery_workflow import (
     get_workflow_discovery_gap_recovery_workflow_registration,
     get_workflow_gap_test_workflow_registration,
 )
+from src.backend.workflows.durable.file_copy_interpretation_workflow import (
+    FILE_COPY_INTERPRETATION_WORKFLOW_ID,
+    get_file_copy_interpretation_workflow_registration,
+)
+from src.backend.workflows.durable.file_copy_typing_workflow import (
+    FILE_COPY_TYPING_WORKFLOW_ID,
+    get_file_copy_typing_workflow_registration,
+)
+from src.backend.workflows.durable.file_copy_upload_classification_workflow import (
+    FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID,
+    get_file_copy_upload_classification_workflow_registration,
+)
+from src.backend.workflows.durable.file_copy_upload_handler_workflow import (
+    FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
+    get_file_copy_upload_handler_workflow_registration,
+)
 from src.backend.workflows.workflow_registry import (
     LazyWorkflowRegistration,
     WorkflowRegistration,
@@ -110,6 +127,22 @@ TEST_WORKFLOW_PURPOSES: dict[str, str] = {
     CONVERSATION_TURN_EXECUTION_WORKFLOW_ID: (
         "Canonical conversation-turn execution workflow that derives required "
         "effects, runs postcondition checks, and gates completion claims."
+    ),
+    FILE_COPY_TYPING_WORKFLOW_ID: (
+        "Infer and persist authoritative file-copy typing so downstream "
+        "workflows can route from Vontology-backed artefact taxonomy."
+    ),
+    FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID: (
+        "Classify uploaded file copies and persist route decisions before "
+        "dispatching into specialised or baseline workflows."
+    ),
+    FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID: (
+        "General workflow-first upload handler that routes file copies into "
+        "specialised or baseline interpretation workflows."
+    ),
+    FILE_COPY_INTERPRETATION_WORKFLOW_ID: (
+        "Interpret uploaded file copies with image/document extraction and "
+        "persisted concept enrichment."
     ),
     RAG_TEXT_RELATION_SYNC_WORKFLOW_ID: (
         "Synchronise Vontology text relations to the RAG store with checkpointed "
@@ -172,6 +205,12 @@ AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS: tuple[str, ...] = (
     ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID,
     JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID,
 )
+AUTHORITATIVE_FILE_COPY_WORKFLOW_IDS: tuple[str, ...] = (
+    FILE_COPY_TYPING_WORKFLOW_ID,
+    FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID,
+    FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID,
+    FILE_COPY_INTERPRETATION_WORKFLOW_ID,
+)
 
 
 def build_test_conversation_turn_registry() -> WorkflowRegistry:
@@ -219,6 +258,20 @@ def register_authoritative_test_workflows(
     return registry
 
 
+def bootstrap_authoritative_test_workflows(
+    workflow_ids: tuple[str, ...],
+) -> dict[str, Any]:
+    registry = WorkflowRegistry()
+    register_authoritative_test_workflows(registry, workflow_ids=workflow_ids)
+    return authority_service.bootstrap_workflow_concepts(registry=cast(Any, registry))
+
+
+def bootstrap_authoritative_conversation_turn_workflows() -> dict[str, Any]:
+    return bootstrap_authoritative_test_workflows(
+        authority_service.CANONICAL_CHAT_WORKFLOW_IDS
+    )
+
+
 def authoritative_step_id(*, workflow_id: str, state_id: str) -> str:
     return authority_service._step_concept_id(
         workflow_id=workflow_id,
@@ -258,4 +311,20 @@ def bootstrap_authoritative_support_maintenance_workflows() -> dict[str, Any]:
     return authority_service.bootstrap_workflow_concepts(
         registry=registry,
         target_workflow_ids=AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS,
+    )
+
+
+def bootstrap_authoritative_file_copy_workflows() -> dict[str, Any]:
+    registry = WorkflowRegistry()
+    for registration in (
+        get_file_copy_typing_workflow_registration(),
+        get_file_copy_upload_classification_workflow_registration(),
+        get_file_copy_upload_handler_workflow_registration(),
+        get_file_copy_interpretation_workflow_registration(),
+    ):
+        registry.register(registration)
+
+    return authority_service.bootstrap_workflow_concepts(
+        registry=cast(Any, registry),
+        target_workflow_ids=AUTHORITATIVE_FILE_COPY_WORKFLOW_IDS,
     )

@@ -71,7 +71,7 @@ def test_destructive_write_blocks_pending_confirmation(monkeypatch):
         gateway=cast(Any, gateway),
         max_tool_invocations=1,
     )
-    llm = _CapturingLLM([_tool_call(), "Done."])
+    llm = _CapturingLLM([_tool_call(), "Done.", "Done."])
 
     result = orchestrator.run(
         prompt="Delete concept #V#guarded_concept.",
@@ -109,7 +109,7 @@ def test_destructive_write_allows_recent_confirmation(monkeypatch):
         gateway=cast(Any, gateway),
         max_tool_invocations=1,
     )
-    llm = _CapturingLLM([_tool_call(), "Done."])
+    llm = _CapturingLLM([_tool_call(), "Done.", "Done."])
 
     result = orchestrator.run(
         prompt="Yes, do it.",

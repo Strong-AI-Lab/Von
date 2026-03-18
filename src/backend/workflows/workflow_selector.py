@@ -1,32 +1,21 @@
 """Workflow selector that routes chat turns to workflow definitions.
 
-JVNAUTOSCI-1424 Phase 2: RAG-first workflow routing.  The selector
-receives candidate workflows from the capability index (including
-built-in workflows like chat_assistant and tool_calling on equal footing
-with Vontology-authored workflows) and asks an LLM ranker to choose the
-best candidate for the user's request.
+JVNAUTOSCI-1424 Phase 2 introduced RAG-first workflow routing: the selector
+receives candidate workflows from discovery/capability matching and asks an
+LLM ranker to choose the single best workflow for the user's request.
 
-JVNAUTOSCI-1424 Phase 3: Model-based selection.  The selector now
-requests structured JSON output from the LLM ranker, extracting a
-confidence score (0.0–1.0) and reasoning trace alongside the workflow
-selection.  This decouples precision (model-based selection) from recall
-(RAG candidate retrieval) and lays the groundwork for Phase 4 RL
-optimisation by recording experience tuples.
+JVNAUTOSCI-1424 Phase 3 added structured model output so the selector can
+carry confidence and reasoning alongside the chosen workflow.
 
-The static verdict taxonomy (plain_response, tool_seeking, summarisation,
-narration) is retired.  All workflows — built-in and Vontology — compete
-as RAG-retrieved candidates.
-
-Legacy compatibility: if ``verdict_mapping`` is provided at construction,
-the old static-verdict path is used so existing code can transition
-incrementally.
+JVNAUTOSCI-1521 removes the retired static-verdict selector mode. Production
+routing now has one authoritative selection path: candidate workflows in,
+workflow ID out.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Sequence
 
@@ -35,6 +24,7 @@ from src.backend.services.workflow_selection_policy_service import (
     recommend_workflow_with_policy,
 )
 
+from .definitions import CHAT_NARRATION_WORKFLOW_ID, TOOL_CALLING_WORKFLOW_ID
 from .workflow_registry import WorkflowRegistry
 
 
@@ -67,32 +57,6 @@ _DEFAULT_RANKER_PROMPT = (
     "Candidate workflows:\n{candidate_list}\n"
 )
 
-# -----------------------------------------------------------------------
-# Legacy static-verdict prompt (deprecated, kept for transitional use)
-# -----------------------------------------------------------------------
-
-_LEGACY_CLASSIFIER_PROMPT = (
-    "You are a workflow router for the next assistant turn.\n"
-    "Return exactly one routing label and nothing else.\n"
-    "Allowed labels: plain_response, tool_seeking, summarisation, narration.\n"
-    "Do not return prose, JSON, punctuation, explanations, code fences, or more than one label.\n"
-    "Choose tool_seeking whenever satisfying the request likely requires tools, MCP calls, retrieval, downloads, reads, searches, file access, or additive knowledge-base mutations.\n"
-    "Canonical artefact identifiers and URLs usually imply tool_seeking when acting on the artefact is needed, including bare arXiv URLs or arXiv IDs.\n"
-    "Choose plain_response only for direct conversational replies that do not need tools.\n"
-    "User+assistant turn so far:\n"
-    "{turn_text}\n"
-)
-
-_LEGACY_DISCOVERY_SUFFIX = (
-    "\n\n"
-    "In addition to the standard verdicts, these specialised workflows are available.\n"
-    "If the user's request clearly matches one, respond with its concept_id instead "
-    "of a standard verdict.  Only choose a specialised workflow when the match is "
-    "strong — default to tool_seeking or plain_response when uncertain.\n\n"
-    "{discovered_workflows}\n"
-)
-
-
 @dataclass(frozen=True)
 class WorkflowSelection:
     workflow_id: str
@@ -118,11 +82,8 @@ class WorkflowSelectionPrompt:
 class WorkflowSelector:
     """Select a workflow for a chat turn.
 
-    JVNAUTOSCI-1424 Phase 2: RAG-first routing.  When ``verdict_mapping``
-    is None (the default), the selector operates in RAG-first mode —
-    all candidate workflows (built-in + Vontology) are presented to the
-    LLM ranker on equal footing.  When ``verdict_mapping`` is provided,
-    the legacy static-verdict path is used for backward compatibility.
+    The selector is intentionally single-path: all candidate workflows
+    compete on equal footing and the selector resolves one workflow ID.
     """
 
     def __init__(
@@ -130,28 +91,15 @@ class WorkflowSelector:
         *,
         registry: WorkflowRegistry,
         prompt_service: PromptTemplateService,
-        verdict_mapping: Mapping[str, str] | None = None,
         default_workflow_id: str = "#V#chat_assistant_workflow",
         classifier_prompt_ids: Sequence[str] = ("#V#chat_turn_classifier_prompt",),
         fallback_prompt: str | None = None,
     ) -> None:
         self._registry = registry
         self._prompt_service = prompt_service
-        self._verdict_mapping = dict(verdict_mapping) if verdict_mapping else None
         self._default_workflow_id = default_workflow_id
         self._classifier_prompt_ids = tuple(classifier_prompt_ids)
-        self._fallback_prompt = fallback_prompt or (
-            _LEGACY_CLASSIFIER_PROMPT if self._verdict_mapping else _DEFAULT_RANKER_PROMPT
-        )
-        self._rag_first = self._verdict_mapping is None
-
-    # Legacy verdicts kept for backward-compat extraction.
-    _LEGACY_VERDICTS = (
-        "plain_response",
-        "tool_seeking",
-        "summarisation",
-        "narration",
-    )
+        self._fallback_prompt = fallback_prompt or _DEFAULT_RANKER_PROMPT
     _JSON_SELECTION_KEYS = (
         "workflow_id",
         "workflow",
@@ -163,11 +111,20 @@ class WorkflowSelector:
     _JSON_CONFIDENCE_KEYS = ("confidence", "confidence_score", "score")
     _JSON_REASONING_KEYS = ("reasoning", "reason", "explanation", "rationale")
     _CANDIDATE_BOUNDARY_STRIP = " \t\r\n`'\".,;:!?()[]{}<>"
+    _COMPAT_SELECTION_ALIASES = {
+        "tool_seeking": TOOL_CALLING_WORKFLOW_ID,
+        "tool_calling": TOOL_CALLING_WORKFLOW_ID,
+        "summarisation": TOOL_CALLING_WORKFLOW_ID,
+        "narration": CHAT_NARRATION_WORKFLOW_ID,
+    }
 
     @property
     def rag_first(self) -> bool:
-        """True when operating in RAG-first mode (no static verdict taxonomy)."""
-        return self._rag_first
+        """Retained for backwards-compatible introspection.
+
+        The selector is always in candidate-based workflow mode.
+        """
+        return True
 
     def enabled(self) -> bool:
         """Check whether the workflow selector is enabled.
@@ -221,22 +178,13 @@ class WorkflowSelector:
     ) -> WorkflowSelectionPrompt:
         """Build the selection prompt.
 
-        In RAG-first mode, *discovered_workflows* contains ALL candidates
-        (including built-in workflows) from the capability index.  The
-        prompt lists every candidate so the LLM ranker can choose the
-        best one.
-
-        In legacy mode, the prompt uses the static-verdict classifier
-        with discovered workflows as an optional addendum.
+        *discovered_workflows* contains all currently eligible candidates
+        (including built-in workflows). The prompt lists every candidate so
+        the LLM ranker can choose the best one.
         """
-        if self._rag_first:
-            return self._prepare_rag_first_prompt(
-                turn_text=turn_text,
-                candidate_workflows=discovered_workflows,
-            )
-        return self._prepare_legacy_prompt(
+        return self._prepare_rag_first_prompt(
             turn_text=turn_text,
-            discovered_workflows=discovered_workflows,
+            candidate_workflows=discovered_workflows,
         )
 
     # ------------------------------------------------------------------
@@ -349,51 +297,6 @@ class WorkflowSelector:
         )
 
     # ------------------------------------------------------------------
-    # Legacy prompt (backward compatibility)
-    # ------------------------------------------------------------------
-
-    def _prepare_legacy_prompt(
-        self,
-        *,
-        turn_text: str,
-        discovered_workflows: Sequence[Mapping[str, Any]] | None = None,
-    ) -> WorkflowSelectionPrompt:
-        """Build the legacy static-verdict classifier prompt."""
-        prompt = self._prompt_service.render_prompt(
-            self._classifier_prompt_ids,
-            variables={"turn_text": turn_text},
-            fallback=self._fallback_prompt,
-            max_chars=4000,
-        )
-        prompt_id = prompt.prompt_id if prompt else None
-        prompt_text = prompt.text if prompt else self._fallback_prompt
-
-        discovered_ids: list[str] = []
-        if discovered_workflows:
-            lines: list[str] = []
-            for wf in discovered_workflows:
-                cid = wf.get("concept_id", "")
-                name = wf.get("name", cid)
-                desc = wf.get("description", "")
-                if not cid:
-                    continue
-                discovered_ids.append(cid)
-                entry = f"- {cid}: {name}"
-                if desc:
-                    entry += f" — {desc}"
-                lines.append(entry)
-            if lines:
-                prompt_text += _LEGACY_DISCOVERY_SUFFIX.format(
-                    discovered_workflows="\n".join(lines)
-                )
-
-        return WorkflowSelectionPrompt(
-            prompt_id=prompt_id,
-            prompt_text=prompt_text,
-            discovered_workflow_ids=tuple(discovered_ids),
-        )
-
-    # ------------------------------------------------------------------
     # Selection resolution
     # ------------------------------------------------------------------
 
@@ -407,24 +310,14 @@ class WorkflowSelector:
     ) -> WorkflowSelection:
         """Resolve a raw LLM response into a workflow selection.
 
-        In RAG-first mode, *discovered_workflow_ids* contains ALL
-        candidate workflow_ids.  The response is matched against them.
-
-        In legacy mode, the response is matched against static verdicts
-        first, then discovered workflow IDs.
+        *discovered_workflow_ids* contains all eligible workflow IDs for the
+        turn. The selector resolves the model output against that set.
         """
-        if self._rag_first:
-            return self._resolve_rag_first(
-                raw_response=raw_response,
-                prompt_id=prompt_id,
-                prompt_used=prompt_used,
-                candidate_workflow_ids=discovered_workflow_ids,
-            )
-        return self._resolve_legacy(
+        return self._resolve_rag_first(
             raw_response=raw_response,
             prompt_id=prompt_id,
             prompt_used=prompt_used,
-            discovered_workflow_ids=discovered_workflow_ids,
+            candidate_workflow_ids=discovered_workflow_ids,
         )
 
     # ------------------------------------------------------------------
@@ -471,20 +364,34 @@ class WorkflowSelector:
             workflow_id = matched_id
             verdict = "rag_selected"
         else:
-            # Fallback: try to find a candidate in the raw text.
-            raw_text = str(raw_response or "").lower()
-            for cid in candidate_ids:
-                if cid.lower() in raw_text:
-                    workflow_id = cid
-                    verdict = "rag_selected"
-                    break
+            compat_match = self._resolve_compat_selection_alias(
+                label=label_lower,
+                candidate_lookup=candidate_lookup,
+                candidate_workflow_ids=candidate_ids,
+            )
+            if compat_match:
+                workflow_id = compat_match
+                verdict = "rag_selected"
+                if (
+                    workflow_id == self._default_workflow_id
+                    and compat_match not in candidate_ids
+                ):
+                    verdict = "rag_default"
             else:
-                # Ultimate fallback to default workflow.
-                workflow_id = self._default_workflow_id
-                verdict = "rag_default"
-                # Lower confidence for fallback selections.
-                if confidence_score > 0.0:
-                    confidence_score = min(confidence_score, 0.3)
+                # Fallback: try to find a candidate in the raw text.
+                raw_text = str(raw_response or "").lower()
+                for cid in candidate_ids:
+                    if cid.lower() in raw_text:
+                        workflow_id = cid
+                        verdict = "rag_selected"
+                        break
+                else:
+                    # Ultimate fallback to default workflow.
+                    workflow_id = self._default_workflow_id
+                    verdict = "rag_default"
+                    # Lower confidence for fallback selections.
+                    if confidence_score > 0.0:
+                        confidence_score = min(confidence_score, 0.3)
 
         return WorkflowSelection(
             workflow_id=workflow_id,
@@ -498,68 +405,32 @@ class WorkflowSelector:
             selection_source="selector",
         )
 
-    # ------------------------------------------------------------------
-    # Legacy resolution (backward compatibility)
-    # ------------------------------------------------------------------
-
-    def _resolve_legacy(
+    def _resolve_compat_selection_alias(
         self,
         *,
-        raw_response: Any,
-        prompt_id: Optional[str],
-        prompt_used: str | None,
-        discovered_workflow_ids: Sequence[str] = (),
-    ) -> WorkflowSelection:
-        """Resolve selection using static verdict mapping (legacy path)."""
-        verdict = self._extract_candidate_label(
-            raw_response=raw_response,
-            discovered_workflow_ids=discovered_workflow_ids,
-        )
-        verdict_lookup = verdict.lower()
-        resolved_verdict = verdict
-        discovered_ids = tuple(
-            item for item in discovered_workflow_ids
-            if isinstance(item, str) and item
-        )
-        discovered_lookup = {item.lower(): item for item in discovered_ids}
+        label: str,
+        candidate_lookup: Mapping[str, str],
+        candidate_workflow_ids: Sequence[str],
+    ) -> str | None:
+        """Normalise stale label-style outputs to current workflow IDs.
 
-        mapping = self._verdict_mapping or {}
+        This preserves a single candidate-based routing path while tolerating
+        older prompt bodies or cached tests during the migration. The alias is
+        only accepted when the mapped workflow is already eligible for this
+        turn, except for the default plain-response fallback.
+        """
+        if label == "plain_response":
+            default_match = candidate_lookup.get(self._default_workflow_id.lower())
+            if default_match is not None:
+                return default_match
+            if not tuple(candidate_workflow_ids):
+                return self._default_workflow_id
+            return None
 
-        # 1. Check static verdict mapping.
-        workflow_id = mapping.get(verdict_lookup)
-
-        # 2. Check if the verdict is a discovered workflow concept_id.
-        discovered_match = discovered_lookup.get(verdict_lookup)
-        if not workflow_id and discovered_match:
-            workflow_id = discovered_match
-            resolved_verdict = discovered_match
-
-        # 3. Fallback to plain_response mapping.
-        if not workflow_id:
-            workflow_id = mapping.get("plain_response") or self._default_workflow_id
-            resolved_verdict = "plain_response"
-
-        if not isinstance(workflow_id, str):
-            workflow_id = ""
-
-        # Validate workflow_id is in the registry.
-        if workflow_id and workflow_id not in self._registry.all_workflow_ids():
-            if workflow_id not in discovered_ids:
-                fallback_id = mapping.get("plain_response") or self._default_workflow_id
-                workflow_id = (
-                    fallback_id if isinstance(fallback_id, str) else workflow_id
-                )
-                resolved_verdict = "plain_response"
-
-        return WorkflowSelection(
-            workflow_id=workflow_id or "",
-            verdict=resolved_verdict or "",
-            prompt_id=prompt_id,
-            prompt_used=prompt_used,
-            raw_response=str(raw_response or ""),
-            discovered_workflow_ids=tuple(discovered_ids),
-            selection_source="selector",
-        )
+        alias_workflow_id = self._COMPAT_SELECTION_ALIASES.get(label)
+        if not alias_workflow_id:
+            return None
+        return candidate_lookup.get(alias_workflow_id.lower())
 
     def resolve_policy_selection(
         self,
@@ -678,9 +549,6 @@ class WorkflowSelector:
 
         for snippet in snippets:
             normalised = cls._normalise_candidate(snippet)
-            # Check legacy verdicts (for backward-compat extraction).
-            if normalised in cls._LEGACY_VERDICTS:
-                return normalised
             discovered_match = discovered_lookup.get(normalised)
             if discovered_match:
                 return discovered_match
@@ -689,10 +557,6 @@ class WorkflowSelector:
         for workflow_id in discovered_ids:
             if workflow_id.lower() in lowered:
                 return workflow_id
-
-        static_match = cls._extract_static_verdict_from_text(lowered)
-        if static_match:
-            return static_match
 
         return cls._normalise_candidate(raw_text)
 
@@ -713,19 +577,6 @@ class WorkflowSelector:
                 if isinstance(value, str) and value.strip():
                     return value
         return None
-
-    @classmethod
-    def _extract_static_verdict_from_text(cls, lowered_text: str) -> str | None:
-        """Extract a legacy static verdict from text.  Kept for compatibility."""
-        best_match: tuple[int, str] | None = None
-        for verdict in cls._LEGACY_VERDICTS:
-            match = re.search(rf"\b{re.escape(verdict)}\b", lowered_text)
-            if not match:
-                continue
-            position = match.start()
-            if best_match is None or position < best_match[0]:
-                best_match = (position, verdict)
-        return best_match[1] if best_match is not None else None
 
     @classmethod
     def _normalise_candidate(cls, value: str) -> str:

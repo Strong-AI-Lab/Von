@@ -438,6 +438,14 @@ def test_runtime_registry_bootstrap_excludes_representation_publication_reports(
             "workflow_ids": ["#V#rag_text_relation_sync_workflow"],
         },
     )
+    monkeypatch.setattr(
+        registry_factory,
+        "_bootstrap_only_file_copy_workflow_report",
+        lambda *, bootstrap_allowed: {
+            "enabled": bootstrap_allowed,
+            "workflow_ids": ["#V#file_copy_upload_handler_workflow"],
+        },
+    )
     monkeypatch.setattr(registry_factory, "batch_fetch_workflow_purposes", lambda workflow_ids: {})
     monkeypatch.setattr(
         workflow_capability_service,
@@ -457,4 +465,8 @@ def test_runtime_registry_bootstrap_excludes_representation_publication_reports(
     assert authority_report.get("bootstrap_only_reasoning_recovery_workflows") == {
         "enabled": True,
         "workflow_ids": ["#V#planning_workflow"],
+    }
+    assert authority_report.get("bootstrap_only_file_copy_workflows") == {
+        "enabled": True,
+        "workflow_ids": ["#V#file_copy_upload_handler_workflow"],
     }

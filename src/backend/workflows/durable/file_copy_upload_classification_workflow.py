@@ -43,6 +43,12 @@ FILE_COPY_UPLOAD_ROUTE_DECISION_PREDICATE = (
 )
 FILE_COPY_UPLOAD_CLASSIFICATION_VERSION = "file_copy_upload_classification.v1"
 
+DEFAULT_MINIMUM_ROUTE_SCORE = 0.58
+DEFAULT_MINIMUM_MUTATION_CONFIDENCE = 0.84
+DEFAULT_ALLOW_INTERPRET_FALLBACK = True
+DEFAULT_FORCE_ROUTE_KEY_SENTINEL = "__auto__"
+DEFAULT_UNUSED_SPECIALISED_WORKFLOW_ID = "__unused__"
+
 DEFAULT_SCHOLARLY_WORKFLOW_ID = "#V#scholarly_paper_representation_workflow"
 DEFAULT_CV_WORKFLOW_ID = "#V#file_copy_cv_representation_workflow"
 DEFAULT_BUSINESS_CARD_WORKFLOW_ID = "#V#file_copy_business_card_representation_workflow"
@@ -287,17 +293,17 @@ def _build_classification_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
     size_bytes = _coerce_int(raw.get("size_bytes"))
     allow_interpret_fallback = _coerce_bool(
         raw.get("allow_interpret_fallback"),
-        default=True,
+        default=DEFAULT_ALLOW_INTERPRET_FALLBACK,
     )
     min_route_score = _coerce_float(
         raw.get("minimum_route_score"),
-        default=0.58,
+        default=DEFAULT_MINIMUM_ROUTE_SCORE,
         minimum=0.2,
         maximum=0.95,
     )
     min_mutation_confidence = _coerce_float(
         raw.get("minimum_mutation_confidence"),
-        default=0.84,
+        default=DEFAULT_MINIMUM_MUTATION_CONFIDENCE,
         minimum=0.5,
         maximum=0.99,
     )
@@ -634,6 +640,14 @@ def register_file_copy_upload_classification_actions(registry: ActionRegistry) -
 
 
 __all__ = [
+    "DEFAULT_ALLOW_INTERPRET_FALLBACK",
+    "DEFAULT_BUSINESS_CARD_WORKFLOW_ID",
+    "DEFAULT_CV_WORKFLOW_ID",
+    "DEFAULT_FORCE_ROUTE_KEY_SENTINEL",
+    "DEFAULT_MINIMUM_MUTATION_CONFIDENCE",
+    "DEFAULT_MINIMUM_ROUTE_SCORE",
+    "DEFAULT_SCHOLARLY_WORKFLOW_ID",
+    "DEFAULT_UNUSED_SPECIALISED_WORKFLOW_ID",
     "FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID",
     "FILE_COPY_UPLOAD_ROUTE_DECISION_PREDICATE",
     "FILE_COPY_UPLOAD_CLASSIFICATION_VERSION",

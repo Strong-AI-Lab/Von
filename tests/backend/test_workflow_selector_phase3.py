@@ -39,13 +39,11 @@ def _build_registry() -> WorkflowRegistry:
     return build_test_conversation_turn_registry()
 
 
-def _build_selector(*, verdict_mapping=None, default_workflow_id=None) -> WorkflowSelector:
+def _build_selector(*, default_workflow_id=None) -> WorkflowSelector:
     kwargs: dict = {
         "registry": _build_registry(),
         "prompt_service": PromptTemplateService(),
     }
-    if verdict_mapping is not None:
-        kwargs["verdict_mapping"] = verdict_mapping
     if default_workflow_id is not None:
         kwargs["default_workflow_id"] = default_workflow_id
     return WorkflowSelector(**kwargs)
@@ -219,20 +217,16 @@ class TestSelectionConfidenceReasoning:
         assert result.verdict == "rag_default"
         assert result.confidence_score == 0.0
 
-    def test_legacy_mode_has_zero_confidence(self):
-        """Legacy mode does not extract confidence/reasoning."""
-        selector = _build_selector(
-            verdict_mapping={
-                "plain_response": _CHAT_WORKFLOW,
-                "tool_seeking": _TOOL_WORKFLOW,
-            },
-        )
+    def test_free_form_legacy_label_maps_to_candidate_without_reasoning(self):
+        selector = _build_selector(default_workflow_id=_CHAT_WORKFLOW)
         result = selector.resolve_selection(
             raw_response="tool_seeking",
             prompt_id=None,
             prompt_used="test",
+            discovered_workflow_ids=[_TOOL_WORKFLOW],
         )
         assert result.workflow_id == _TOOL_WORKFLOW
+        assert result.verdict == "rag_selected"
         assert result.confidence_score == 0.0
         assert result.reasoning == ""
 

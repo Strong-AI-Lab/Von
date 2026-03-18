@@ -18,6 +18,16 @@ from .feature_flags import (
     get_durable_workflows_enabled,
     get_event_workflow_integration_enabled,
 )
+from ..workflows.durable.file_copy_upload_classification_workflow import (
+    DEFAULT_ALLOW_INTERPRET_FALLBACK,
+    DEFAULT_BUSINESS_CARD_WORKFLOW_ID,
+    DEFAULT_CV_WORKFLOW_ID,
+    DEFAULT_FORCE_ROUTE_KEY_SENTINEL,
+    DEFAULT_MINIMUM_MUTATION_CONFIDENCE,
+    DEFAULT_MINIMUM_ROUTE_SCORE,
+    DEFAULT_SCHOLARLY_WORKFLOW_ID,
+    DEFAULT_UNUSED_SPECIALISED_WORKFLOW_ID,
+)
 from ..workflows.durable.models import EventWorkflowBinding
 from ..workflows.durable.startup import get_instance_manager
 from ..workflows.durable.workflow_instance_submission_service import (
@@ -44,6 +54,29 @@ EVENT_TYPE_VONTOLOGY_MUTATED = "vontology.mutated"
 EVENT_TYPE_FILE_COPY_UPLOADED = "file_copy.uploaded"
 DEFAULT_FILE_COPY_UPLOADED_WORKFLOW_ID = "#V#file_copy_upload_handler_workflow"
 
+
+def _file_copy_uploaded_binding_inputs() -> dict[str, str]:
+    """Return the authoritative input mapping for file-copy upload launch."""
+
+    return {
+        "concept_id": "event.file_copy_concept_id",
+        "file_copy_concept_id": "event.file_copy_concept_id",
+        "content_type": "event.content_type",
+        "original_filename": "event.original_filename",
+        "size_bytes": "event.size_bytes",
+        "sha256": "event.sha256",
+        "blob_uri": "event.blob_uri",
+        "index_in_rag": "event.index_in_rag",
+        "minimum_route_score": str(DEFAULT_MINIMUM_ROUTE_SCORE),
+        "minimum_mutation_confidence": str(DEFAULT_MINIMUM_MUTATION_CONFIDENCE),
+        "force_route_key": DEFAULT_FORCE_ROUTE_KEY_SENTINEL,
+        "allow_interpret_fallback": str(DEFAULT_ALLOW_INTERPRET_FALLBACK).lower(),
+        "scholarly_workflow_id": DEFAULT_SCHOLARLY_WORKFLOW_ID,
+        "cv_workflow_id": DEFAULT_CV_WORKFLOW_ID,
+        "business_card_workflow_id": DEFAULT_BUSINESS_CARD_WORKFLOW_ID,
+        "meeting_workflow_id": DEFAULT_UNUSED_SPECIALISED_WORKFLOW_ID,
+    }
+
 # Bootstrap definitions exist only to materialise authoritative persisted
 # bindings. Runtime launch must resolve from persistent records rather than from
 # this in-memory table.
@@ -57,16 +90,7 @@ _BOOTSTRAP_EVENT_BINDINGS: tuple[dict[str, Any], ...] = (
     {
         "event_type": EVENT_TYPE_FILE_COPY_UPLOADED,
         "workflow_id": DEFAULT_FILE_COPY_UPLOADED_WORKFLOW_ID,
-        "input_mapping": {
-            "concept_id": "event.file_copy_concept_id",
-            "file_copy_concept_id": "event.file_copy_concept_id",
-            "content_type": "event.content_type",
-            "original_filename": "event.original_filename",
-            "size_bytes": "event.size_bytes",
-            "sha256": "event.sha256",
-            "blob_uri": "event.blob_uri",
-            "index_in_rag": "event.index_in_rag",
-        },
+        "input_mapping": _file_copy_uploaded_binding_inputs(),
         "enabled": True,
         "replace_existing": True,
         "exclusive": True,

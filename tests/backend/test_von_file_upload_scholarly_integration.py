@@ -24,6 +24,7 @@ from src.backend.workflows.durable.startup import (
     create_durable_executor,
     get_instance_manager,
 )
+from workflow_test_support import bootstrap_authoritative_file_copy_workflows
 
 _SOURCE_DB_NAME = "test_1337_source_db"
 _CLONE_DB_NAME = "test_1337_clone_db"
@@ -195,8 +196,10 @@ def _run_pending_file_copy_instance(instance_id: str):
     assert claimed.status == WorkflowInstanceStatus.RUNNING
 
     registry = build_workflow_registry_read_only()
-    definition = registry.get(workflow_id)
-    assert definition is not None
+    registration = registry.get_registration(workflow_id)
+    assert registration is not None
+    assert str(registration.source or "").strip().lower() == "vontology"
+    definition = registration.definition
 
     executor = create_durable_executor(
         build_durable_action_registry(),
@@ -255,6 +258,11 @@ def _collect_text_values(concept_id: str, predicate: str) -> list[str]:
     return texts
 
 
+def _is_complete_terminal_state(state_id: str) -> bool:
+    state = str(state_id or "").strip()
+    return state == "complete" or state.endswith("_complete")
+
+
 def test_upload_event_workflow_materialises_scholarly_representation_in_ontology_clone(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -284,6 +292,15 @@ def test_upload_event_workflow_materialises_scholarly_representation_in_ontology
 
     monkeypatch.setenv("VON_DB_NAME", _CLONE_DB_NAME)
     mongo_client_module.invalidate_connection()
+    bootstrap_report = bootstrap_authoritative_file_copy_workflows()
+    graph_errors = (bootstrap_report.get("graph_publication") or {}).get(
+        "errors_by_workflow_id"
+    ) or {}
+    assert graph_errors == {}
+
+    from src.backend.services import workflow_event_integration_service
+
+    workflow_event_integration_service._DEFAULT_BINDINGS_ENSURED = False
 
     from src.backend.services.blob_store import BlobRef
 
@@ -326,7 +343,7 @@ def test_upload_event_workflow_materialises_scholarly_representation_in_ontology
     assert first_instance_id
     first_result, first_instance = _run_pending_file_copy_instance(first_instance_id)
     assert first_result.completed is True
-    assert first_result.final_state == "complete"
+    assert _is_complete_terminal_state(first_result.final_state)
     assert first_instance.status == WorkflowInstanceStatus.COMPLETED
 
     first_file_copy_id = str((first_body.get("uploaded") or {}).get("concept_id") or "")
