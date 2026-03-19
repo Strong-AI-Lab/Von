@@ -17,6 +17,7 @@ import {
     __testOnly_setWorkflowShowDesigns,
     __testOnly_buildWorkflowStatusQuery,
     __testOnly_buildWorkflowStatusStreamQuery,
+    __testOnly_applyWorkflowStatusUpdate,
     __testOnly_buildLlmDebugMetadata,
     __testOnly_extractImageFilesFromClipboardEvent,
     __testOnly_convertInlineQuotedStrongSegmentsToButtons,
@@ -787,7 +788,13 @@ describe('workflow monitor definitions refresh contention handling', () => {
 });
 
 describe('workflow monitor active snapshot degradation handling', () => {
+    async function flushMicrotasks() {
+        await Promise.resolve();
+        await Promise.resolve();
+    }
+
     beforeEach(() => {
+        jest.useFakeTimers();
         document.body.innerHTML = `
             <div id="workflowStatusPanel"></div>
             <div id="workflowStatusBody"></div>
@@ -800,56 +807,166 @@ describe('workflow monitor active snapshot degradation handling', () => {
     });
 
     afterEach(() => {
+        jest.useRealTimers();
         delete global.fetch;
         __testOnly_resetWorkflowDefinitionsState();
         __testOnly_resetWorkflowStatusState();
     });
 
-    test('shows retryable snapshot degradation without blanking last loaded active workflows', async () => {
-        global.fetch = jest.fn(() => Promise.resolve({
-            ok: true,
-            status: 200,
-            json: async () => ({
-                items: [
-                    {
-                        instance_id: 'wf-1',
-                        workflow_id: '#V#demo_retry_workflow',
-                        status: 'running',
-                        current_state: 'waiting_for_input',
-                        progress: { current: 1, total: 2 }
-                    }
-                ]
-            })
-        }));
+    test('auto-retries retryable active snapshot failures and clears the banner after a later success', async () => {
+        let fetchCount = 0;
+        global.fetch = jest.fn(() => {
+            fetchCount += 1;
+            if (fetchCount === 1) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    headers: { get: () => null },
+                    json: async () => ({
+                        items: [
+                            {
+                                instance_id: 'wf-1',
+                                workflow_id: '#V#demo_retry_workflow',
+                                status: 'running',
+                                current_state: 'waiting_for_input',
+                                progress: { current: 1, total: 2 }
+                            }
+                        ]
+                    })
+                });
+            }
+            if (fetchCount === 2) {
+                return Promise.resolve({
+                    ok: false,
+                    status: 503,
+                    headers: {
+                        get: (name) => (String(name).toLowerCase() === 'retry-after' ? '1' : null)
+                    },
+                    json: async () => ({
+                        items: [],
+                        count: 0,
+                        degraded: true,
+                        retryable: true,
+                        retry_after_seconds: 1,
+                        error: 'Workflow monitor temporarily unavailable; please retry.',
+                        detail: 'server selection timeout while reading workflow_instances'
+                    })
+                });
+            }
+            return Promise.resolve({
+                ok: true,
+                status: 200,
+                headers: { get: () => null },
+                json: async () => ({
+                    items: [
+                        {
+                            instance_id: 'wf-1',
+                            workflow_id: '#V#demo_retry_workflow',
+                            status: 'running',
+                            current_state: 'resumed_after_retry',
+                            progress: { current: 2, total: 2 }
+                        }
+                    ]
+                })
+            });
+        });
 
         await __testOnly_refreshWorkflowStatusSnapshot();
         expect(document.getElementById('workflowStatusBody').textContent).toContain(
             'demo retry workflow'
         );
+        expect(document.getElementById('workflowStatusBody').textContent).toContain('wf-1');
 
+        await __testOnly_refreshWorkflowStatusSnapshot();
+
+        const bodyText = document.getElementById('workflowStatusBody').textContent;
+        expect(bodyText).toContain('showing live updates while retrying');
+        expect(bodyText).toContain('demo retry workflow');
+        expect(fetchCount).toBe(2);
+        const payload = __testOnly_buildWorkflowMonitorExportPayload();
+        expect(payload.monitor_state.active_loading).toBe(false);
+        expect(payload.monitor_state.active_notice).toContain('retrying in 1.2s');
+        expect(payload.active_instances_snapshot.payload.retryable).toBe(true);
+        expect(payload.active_instances_snapshot.payload.retry_scheduled_in_ms).toBe(1200);
+
+        jest.advanceTimersByTime(1300);
+        await flushMicrotasks();
+
+        expect(fetchCount).toBe(3);
+        expect(document.getElementById('workflowStatusBody').textContent).toContain(
+            'resumed_after_retry'
+        );
+        expect(document.getElementById('workflowStatusBody').textContent).not.toContain(
+            'snapshot unavailable'
+        );
+    });
+
+    test('shows visible refresh state while an active snapshot request is in flight', async () => {
+        let resolveFetch;
+        global.fetch = jest.fn(() => new Promise((resolve) => {
+            resolveFetch = resolve;
+        }));
+
+        const refreshPromise = __testOnly_refreshWorkflowStatusSnapshot();
+
+        expect(document.getElementById('workflowStatusRefresh').disabled).toBe(true);
+        expect(document.getElementById('workflowStatusRefresh').textContent).toBe('Refreshing...');
+        expect(document.getElementById('workflowStatusBody').textContent).toContain(
+            'Refreshing workflow monitor'
+        );
+
+        resolveFetch({
+            ok: true,
+            status: 200,
+            headers: { get: () => null },
+            json: async () => ({ items: [] })
+        });
+        await refreshPromise;
+
+        expect(document.getElementById('workflowStatusRefresh').disabled).toBe(false);
+        expect(document.getElementById('workflowStatusRefresh').textContent).toBe('Refresh');
+        expect(document.getElementById('workflowStatusBody').textContent).toContain(
+            'No active workflows'
+        );
+    });
+
+    test('renders separate instance identifiers when two active instances share the same workflow', async () => {
         global.fetch = jest.fn(() => Promise.resolve({
             ok: false,
             status: 503,
+            headers: { get: () => null },
             json: async () => ({
                 items: [],
                 count: 0,
                 degraded: true,
                 retryable: true,
                 error: 'Workflow monitor temporarily unavailable; please retry.',
-                detail: 'server selection timeout while reading workflow_instances'
+                detail: 'read circuit open'
             })
         }));
 
         await __testOnly_refreshWorkflowStatusSnapshot();
 
+        __testOnly_applyWorkflowStatusUpdate({
+            instance_id: 'wf-dup-1',
+            workflow_id: '#V#jira_task_full_reconciliation_workflow',
+            status: 'running',
+            current_state: '#V#jira_task_full_reconciliation_refresh_recent_updates_step',
+            progress: { current: 1, total: 5 }
+        });
+        __testOnly_applyWorkflowStatusUpdate({
+            instance_id: 'wf-dup-2',
+            workflow_id: '#V#jira_task_full_reconciliation_workflow',
+            status: 'running',
+            current_state: '#V#jira_task_full_reconciliation_refresh_recent_updates_step',
+            progress: { current: 1, total: 5 }
+        });
+
         const bodyText = document.getElementById('workflowStatusBody').textContent;
-        expect(bodyText).toContain('Workflow monitor temporarily unavailable');
-        expect(bodyText).toContain('demo retry workflow');
-        const payload = __testOnly_buildWorkflowMonitorExportPayload();
-        expect(payload.monitor_state.active_notice).toContain(
-            'Workflow monitor temporarily unavailable'
-        );
-        expect(payload.active_instances_snapshot.payload.retryable).toBe(true);
+        expect(bodyText).toContain('showing live updates');
+        expect(bodyText).toContain('wf-dup-1');
+        expect(bodyText).toContain('wf-dup-2');
+        expect(document.querySelectorAll('.workflow-status-item').length).toBe(2);
     });
 });
 

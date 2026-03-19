@@ -6020,6 +6020,12 @@ footer {
     font-size: 12px;
 }
 
+.workflow-status-instance-id {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size: 11px;
+    color: #334155;
+}
+
 .workflow-status-progress {
     margin-top: 8px;
 }

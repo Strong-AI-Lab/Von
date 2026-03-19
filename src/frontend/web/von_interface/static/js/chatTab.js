@@ -157,6 +157,12 @@ const SSE_RECONNECT_MAX_DELAY_MS = 30000;
 const WORKFLOW_STATUS_ACTIVE = new Set(['pending', 'running', 'paused']);
 const WORKFLOW_STATUS_RECONNECT_BASE_MS = 1500;
 const WORKFLOW_STATUS_RECONNECT_MAX_MS = 20000;
+const WORKFLOW_STATUS_SNAPSHOT_FETCH_TIMEOUT_MS = 15000;
+const WORKFLOW_STATUS_SNAPSHOT_RETRY_BASE_MS = 1200;
+const WORKFLOW_STATUS_SNAPSHOT_RETRY_MAX_MS = 8000;
+const WORKFLOW_STATUS_SNAPSHOT_RETRY_MAX_ATTEMPTS = 4;
+const WORKFLOW_STATUS_SNAPSHOT_RETRY_DEFAULT_SECONDS = 2;
+const WORKFLOW_STATUS_INSTANCE_ID_INLINE_MAX_CHARS = 24;
 const workflowStatusStreamState = {
     eventSource: null,
     reconnectAttempts: 0,
@@ -165,7 +171,10 @@ const workflowStatusStreamState = {
     lastSnapshotAt: 0,
     snapshotError: '',
     snapshotNotice: '',
-    lastSnapshotPayload: null
+    lastSnapshotPayload: null,
+    loading: false,
+    retryTimeoutId: null,
+    retryAttempt: 0
 };
 const workflowDefinitionsState = {
     visible: false,
@@ -17287,15 +17296,25 @@ async function openWorkflowEpisodesPopup(workflowId, workflowName) {
 }
 
 function updateWorkflowStatusActionButtons() {
-    const { toggleAvailableButton } = getWorkflowStatusElements();
-    if (!toggleAvailableButton) return;
-
     const showAvailable = Boolean(workflowDefinitionsState.visible);
-    toggleAvailableButton.setAttribute('aria-pressed', showAvailable ? 'true' : 'false');
-    toggleAvailableButton.textContent = showAvailable ? 'Show active' : 'Show available';
-    toggleAvailableButton.title = showAvailable
-        ? 'Show active workflow instances'
-        : 'Show available workflows';
+    const { toggleAvailableButton, refreshButton } = getWorkflowStatusElements();
+    if (toggleAvailableButton) {
+        toggleAvailableButton.setAttribute('aria-pressed', showAvailable ? 'true' : 'false');
+        toggleAvailableButton.textContent = showAvailable ? 'Show active' : 'Show available';
+        toggleAvailableButton.title = showAvailable
+            ? 'Show active workflow instances'
+            : 'Show available workflows';
+    }
+    if (refreshButton) {
+        const loading = showAvailable
+            ? workflowDefinitionsState.loading
+            : workflowStatusStreamState.loading;
+        refreshButton.disabled = loading;
+        refreshButton.textContent = loading ? 'Refreshing...' : 'Refresh';
+        refreshButton.title = showAvailable
+            ? (loading ? 'Refreshing available workflows' : 'Refresh workflows')
+            : (loading ? 'Refreshing active workflows' : 'Refresh workflows');
+    }
 }
 
 function formatWorkflowName(workflowId) {
@@ -17310,6 +17329,15 @@ function formatWorkflowName(workflowId) {
 function formatWorkflowStatusLabel(status) {
     if (!status) return 'unknown';
     return String(status).replace(/_/g, ' ');
+}
+
+function formatWorkflowStatusInstanceId(instanceId) {
+    const trimmed = String(instanceId || '').trim();
+    if (!trimmed) return '';
+    if (trimmed.length <= WORKFLOW_STATUS_INSTANCE_ID_INLINE_MAX_CHARS) {
+        return trimmed;
+    }
+    return `${trimmed.slice(0, 12)}...${trimmed.slice(-6)}`;
 }
 
 function cssEscape(value) {
@@ -17486,6 +17514,7 @@ function buildWorkflowMonitorExportPayload() {
             mode: workflowDefinitionsState.visible ? 'available_workflows' : 'active_instances',
             show_available: Boolean(workflowDefinitionsState.visible),
             show_designs: Boolean(workflowDefinitionsState.showDesigns),
+            active_loading: Boolean(workflowStatusStreamState.loading),
             loading_available: Boolean(workflowDefinitionsState.loading),
             active_error: workflowStatusStreamState.snapshotError || null,
             active_notice: workflowStatusStreamState.snapshotNotice || null,
@@ -17578,6 +17607,7 @@ function renderWorkflowStatusList(items) {
 
     const html = ordered.map((item) => {
         const workflowIdRaw = typeof item?.workflow_id === 'string' ? item.workflow_id.trim() : '';
+        const instanceIdRaw = typeof item?.instance_id === 'string' ? item.instance_id.trim() : '';
         const workflowNameText = formatWorkflowName(workflowIdRaw);
         const workflowConceptId = _normalisePotentialConceptId(workflowIdRaw);
         const workflowName = renderConceptSelectionButtonHTML(workflowConceptId, workflowNameText, {
@@ -17591,6 +17621,10 @@ function renderWorkflowStatusList(items) {
         const progressCurrent = Number.isFinite(progress.current) ? Number(progress.current) : null;
         const progressTotal = Number.isFinite(progress.total) ? Number(progress.total) : null;
         const progressMessage = escapeHtml(progress.message || '');
+        const instanceIdText = formatWorkflowStatusInstanceId(instanceIdRaw);
+        const instanceMeta = instanceIdRaw
+            ? `<div class="workflow-status-meta">Instance: <span class="workflow-status-instance-id" title="${escapeHtml(instanceIdRaw)}">${escapeHtml(instanceIdText)}</span></div>`
+            : '';
 
         let percent = null;
         if (progressCurrent !== null && progressTotal && progressTotal > 0) {
@@ -17626,6 +17660,7 @@ function renderWorkflowStatusList(items) {
                 <span class="workflow-status-badge status-${statusClass}">${statusLabel}</span>
               </div>
               <div class="workflow-status-meta">State: ${currentState || '—'}</div>
+              ${instanceMeta}
               <div class="workflow-status-progress">
                 ${progressBar}
                 ${progressLabel}
@@ -17785,6 +17820,7 @@ function bindWorkflowStatusConceptLinks() {
 
 function renderWorkflowStatusBody() {
     bindWorkflowStatusConceptLinks();
+    updateWorkflowStatusActionButtons();
     if (workflowDefinitionsState.visible) {
         renderWorkflowDefinitionsList(workflowDefinitionsState.items);
         return;
@@ -17797,47 +17833,79 @@ function applyWorkflowStatusUpdate(payload) {
     const status = payload.status || '';
     if (!WORKFLOW_STATUS_ACTIVE.has(status)) {
         workflowStatusStreamState.items.delete(payload.instance_id);
+        syncWorkflowStatusSnapshotNotice();
         renderWorkflowStatusBody();
         return;
     }
     workflowStatusStreamState.items.set(payload.instance_id, payload);
+    syncWorkflowStatusSnapshotNotice();
     renderWorkflowStatusBody();
 }
 
-async function refreshWorkflowStatusSnapshot({ silent = false } = {}) {
+async function refreshWorkflowStatusSnapshot({ silent = false, preserveRetryAttempt = false } = {}) {
     const { panel } = getWorkflowStatusElements();
     if (!panel) return;
+    if (workflowStatusStreamState.loading) return;
 
     const params = buildWorkflowStatusQuery();
     params.set('limit', '50');
 
+    if (!preserveRetryAttempt) {
+        workflowStatusStreamState.retryAttempt = 0;
+        clearWorkflowStatusSnapshotRetryTimer();
+    }
+    workflowStatusStreamState.loading = true;
+    workflowStatusStreamState.snapshotError = '';
+    syncWorkflowStatusSnapshotNotice();
+    renderWorkflowStatusBody();
+
+    let timeoutId = null;
+
     try {
-        const resp = await fetch(`/api/workflows/instances?${params.toString()}`,
-            { method: 'GET', headers: buildChatFetchHeaders() });
+        const controller = new AbortController();
+        timeoutId = setTimeout(() => controller.abort(), WORKFLOW_STATUS_SNAPSHOT_FETCH_TIMEOUT_MS);
+        const resp = await fetch(
+            `/api/workflows/instances?${params.toString()}`,
+            {
+                method: 'GET',
+                headers: buildChatFetchHeaders(),
+                signal: controller.signal
+            }
+        );
+        clearTimeout(timeoutId);
+        timeoutId = null;
         const data = await resp.json().catch(() => null);
         const payload = (data && typeof data === 'object') ? data : {};
         if (!resp.ok || payload?.degraded === true) {
-            const hasItems = workflowStatusStreamState.items.size > 0;
             const detail = (typeof payload?.detail === 'string' && payload.detail.trim())
                 ? payload.detail.trim()
                 : '';
             const retryable = Boolean(payload?.retryable) || resp.status === 503;
-            workflowStatusStreamState.lastSnapshotPayload = {
-                ...payload,
-                status: resp.status,
-                retryable,
-                degraded: true
-            };
+            workflowStatusStreamState.loading = false;
             if (retryable) {
-                workflowStatusStreamState.snapshotError = '';
-                workflowStatusStreamState.snapshotNotice = hasItems
-                    ? 'Workflow monitor temporarily unavailable; showing last loaded active workflows.'
-                    : 'Workflow monitor temporarily unavailable; please retry.';
+                applyWorkflowStatusSnapshotRetryableState({
+                    payload: {
+                        ...payload,
+                        status: resp.status,
+                        retryable,
+                        degraded: true
+                    },
+                    response: resp,
+                    detail
+                });
             } else {
-                workflowStatusStreamState.snapshotNotice = '';
+                clearWorkflowStatusSnapshotRetryTimer();
+                workflowStatusStreamState.retryAttempt = 0;
+                workflowStatusStreamState.lastSnapshotPayload = {
+                    ...payload,
+                    status: resp.status,
+                    retryable: false,
+                    degraded: Boolean(payload?.degraded)
+                };
                 workflowStatusStreamState.snapshotError = detail
                     ? `Could not load workflow monitor: ${detail}`
                     : 'Could not load workflow monitor';
+                syncWorkflowStatusSnapshotNotice();
             }
             renderWorkflowStatusBody();
             if (!silent) {
@@ -17848,6 +17916,8 @@ async function refreshWorkflowStatusSnapshot({ silent = false } = {}) {
             }
             return;
         }
+        clearWorkflowStatusSnapshotRetryTimer();
+        workflowStatusStreamState.retryAttempt = 0;
         const items = Array.isArray(data?.items) ? data.items : [];
         workflowStatusStreamState.items.clear();
         items.forEach((item) => {
@@ -17856,25 +17926,29 @@ async function refreshWorkflowStatusSnapshot({ silent = false } = {}) {
             }
         });
         workflowStatusStreamState.lastSnapshotAt = Date.now();
+        workflowStatusStreamState.loading = false;
         workflowStatusStreamState.snapshotError = '';
-        workflowStatusStreamState.snapshotNotice = '';
         workflowStatusStreamState.lastSnapshotPayload = payload;
+        syncWorkflowStatusSnapshotNotice();
         renderWorkflowStatusBody();
     } catch (err) {
-        const hasItems = workflowStatusStreamState.items.size > 0;
-        workflowStatusStreamState.snapshotError = '';
-        workflowStatusStreamState.snapshotNotice = hasItems
-            ? 'Workflow monitor temporarily unavailable; showing last loaded active workflows.'
-            : 'Workflow monitor temporarily unavailable; please retry.';
-        workflowStatusStreamState.lastSnapshotPayload = {
-            error: 'workflow_status_snapshot_failed',
-            detail: err instanceof Error ? err.message : String(err || 'unknown_error'),
-            retryable: true,
-            degraded: true
-        };
+        workflowStatusStreamState.loading = false;
+        applyWorkflowStatusSnapshotRetryableState({
+            payload: {
+                error: 'workflow_status_snapshot_failed',
+                detail: err instanceof Error ? err.message : String(err || 'unknown_error'),
+                retryable: true,
+                degraded: true
+            },
+            detail: err instanceof Error ? err.message : String(err || 'unknown_error')
+        });
         renderWorkflowStatusBody();
         if (!silent) {
             console.warn('[workflowStatus] Snapshot fetch failed', err);
+        }
+    } finally {
+        if (timeoutId) {
+            clearTimeout(timeoutId);
         }
     }
 }
@@ -17907,6 +17981,29 @@ function parseWorkflowDefinitionsRetryAfterSeconds(payload, response) {
     return WORKFLOW_DEFINITIONS_CONTENTION_RETRY_DEFAULT_SECONDS;
 }
 
+function parseWorkflowStatusSnapshotRetryAfterSeconds(payload, response) {
+    const payloadValue = Number(payload?.retry_after_seconds);
+    if (Number.isFinite(payloadValue) && payloadValue > 0) {
+        return payloadValue;
+    }
+    const headerValue = response?.headers?.get?.('Retry-After');
+    const headerSeconds = parseRetryAfterHeaderSeconds(headerValue);
+    if (Number.isFinite(headerSeconds) && headerSeconds > 0) {
+        return headerSeconds;
+    }
+    return WORKFLOW_STATUS_SNAPSHOT_RETRY_DEFAULT_SECONDS;
+}
+
+function shouldAutoRefreshWorkflowStatusSnapshot() {
+    const { panel } = getWorkflowStatusElements();
+    if (!panel || workflowDefinitionsState.visible) return false;
+    return isDocumentVisibleForRealtimeConnections();
+}
+
+function formatRetryDelaySeconds(delayMs) {
+    return Math.max(0.1, Math.round((delayMs / 1000) * 10) / 10);
+}
+
 function parseWorkflowDefinitionsCacheRetryAfterSeconds(payload) {
     const cacheValue = Number(payload?.cache?.retry_after_seconds);
     if (Number.isFinite(cacheValue) && cacheValue > 0) {
@@ -17916,7 +18013,87 @@ function parseWorkflowDefinitionsCacheRetryAfterSeconds(payload) {
 }
 
 function formatWorkflowDefinitionsRetryDelaySeconds(delayMs) {
-    return Math.max(0.1, Math.round((delayMs / 1000) * 10) / 10);
+    return formatRetryDelaySeconds(delayMs);
+}
+
+function clearWorkflowStatusSnapshotRetryTimer() {
+    if (workflowStatusStreamState.retryTimeoutId) {
+        clearTimeout(workflowStatusStreamState.retryTimeoutId);
+        workflowStatusStreamState.retryTimeoutId = null;
+    }
+}
+
+function scheduleWorkflowStatusSnapshotRetry({ delayMs, silent = true } = {}) {
+    clearWorkflowStatusSnapshotRetryTimer();
+    const boundedDelay = Math.max(50, Math.round(Number(delayMs) || 0));
+    workflowStatusStreamState.retryTimeoutId = setTimeout(() => {
+        workflowStatusStreamState.retryTimeoutId = null;
+        void refreshWorkflowStatusSnapshot({
+            silent: Boolean(silent),
+            preserveRetryAttempt: true
+        });
+    }, boundedDelay);
+}
+
+function syncWorkflowStatusSnapshotNotice() {
+    if (workflowStatusStreamState.snapshotError) {
+        workflowStatusStreamState.snapshotNotice = '';
+        return;
+    }
+    if (workflowStatusStreamState.loading) {
+        workflowStatusStreamState.snapshotNotice = 'Refreshing workflow monitor...';
+        return;
+    }
+    const payload = workflowStatusStreamState.lastSnapshotPayload;
+    if (!payload || payload.degraded !== true) {
+        workflowStatusStreamState.snapshotNotice = '';
+        return;
+    }
+    const retryScheduledInMs = Number(payload?.retry_scheduled_in_ms);
+    const hasRetrySchedule = Number.isFinite(retryScheduledInMs) && retryScheduledInMs > 0;
+    const hasItems = workflowStatusStreamState.items.size > 0;
+    if (hasItems) {
+        workflowStatusStreamState.snapshotNotice = hasRetrySchedule
+            ? `Workflow monitor snapshot unavailable; showing live updates while retrying in ${formatRetryDelaySeconds(retryScheduledInMs)}s...`
+            : 'Workflow monitor snapshot unavailable; showing live updates from the stream.';
+        return;
+    }
+    workflowStatusStreamState.snapshotNotice = hasRetrySchedule
+        ? `Workflow monitor temporarily unavailable; retrying in ${formatRetryDelaySeconds(retryScheduledInMs)}s...`
+        : 'Workflow monitor temporarily unavailable. Press Refresh to try again.';
+}
+
+function applyWorkflowStatusSnapshotRetryableState({ payload, response, detail = '' } = {}) {
+    const attempt = Math.max(1, workflowStatusStreamState.retryAttempt + 1);
+    const retryAfterSeconds = parseWorkflowStatusSnapshotRetryAfterSeconds(payload, response);
+    const retryAfterMs = Math.max(0, Math.round(Number(retryAfterSeconds) * 1000) || 0);
+    const exponentialDelayMs = Math.min(
+        WORKFLOW_STATUS_SNAPSHOT_RETRY_BASE_MS * (2 ** (attempt - 1)),
+        WORKFLOW_STATUS_SNAPSHOT_RETRY_MAX_MS
+    );
+    const retryDelayMs = Math.max(exponentialDelayMs, retryAfterMs);
+    const shouldRetry = (
+        attempt <= WORKFLOW_STATUS_SNAPSHOT_RETRY_MAX_ATTEMPTS
+        && shouldAutoRefreshWorkflowStatusSnapshot()
+    );
+
+    workflowStatusStreamState.retryAttempt = attempt;
+    workflowStatusStreamState.snapshotError = '';
+    workflowStatusStreamState.lastSnapshotPayload = {
+        ...(payload && typeof payload === 'object' ? payload : {}),
+        detail: detail || payload?.detail || null,
+        retryable: true,
+        degraded: true,
+        retry_attempt: attempt,
+        retry_scheduled_in_ms: shouldRetry ? retryDelayMs : null
+    };
+
+    if (shouldRetry) {
+        scheduleWorkflowStatusSnapshotRetry({ delayMs: retryDelayMs, silent: true });
+    } else {
+        clearWorkflowStatusSnapshotRetryTimer();
+    }
+    syncWorkflowStatusSnapshotNotice();
 }
 
 function clearWorkflowDefinitionsRetryTimer() {
@@ -18300,10 +18477,12 @@ function initializeWorkflowStatusPanel() {
             updateWorkflowStatusActionButtons();
 
             if (workflowDefinitionsState.visible) {
+                clearWorkflowStatusSnapshotRetryTimer();
                 void refreshAvailableWorkflowDefinitions({ silent: true });
             } else {
                 clearWorkflowDefinitionsRetryTimer();
                 renderWorkflowStatusBody();
+                void refreshWorkflowStatusSnapshot({ silent: true });
             }
         });
         toggleAvailableButton.dataset.bound = 'true';
@@ -18359,6 +18538,7 @@ function handleRealtimeConnectionsVisibilityChange() {
     if (!visible) {
         closeSharedConversationStream();
         stopWorkflowStatusStream('workflow_stream_stopped_visibility_hidden');
+        clearWorkflowStatusSnapshotRetryTimer();
         stopIncomingInvitePolling();
         stopSharedSessionBadgePolling();
         try {
@@ -18405,7 +18585,10 @@ async function handleOrgSwitchForChatTab(_detail) {
 
     closeSharedConversationStream();
     stopWorkflowStatusStream('workflow_stream_stopped_org_switch');
+    clearWorkflowStatusSnapshotRetryTimer();
     workflowStatusStreamState.items.clear();
+    workflowStatusStreamState.loading = false;
+    workflowStatusStreamState.retryAttempt = 0;
     workflowStatusStreamState.snapshotError = '';
     workflowStatusStreamState.snapshotNotice = '';
     workflowStatusStreamState.lastSnapshotPayload = null;
@@ -18477,7 +18660,13 @@ function handleAuthStatusChangeForChatTab(detail) {
 
     closeSharedConversationStream();
     stopWorkflowStatusStream('workflow_stream_stopped_auth_change');
+    clearWorkflowStatusSnapshotRetryTimer();
     workflowStatusStreamState.items.clear();
+    workflowStatusStreamState.loading = false;
+    workflowStatusStreamState.retryAttempt = 0;
+    workflowStatusStreamState.snapshotError = '';
+    workflowStatusStreamState.snapshotNotice = '';
+    workflowStatusStreamState.lastSnapshotPayload = null;
     renderWorkflowStatusBody();
 
     if (detail?.authenticated !== false) {
@@ -21338,11 +21527,17 @@ export async function __testOnly_refreshWorkflowStatusSnapshot(options = {}) {
     return refreshWorkflowStatusSnapshot(options);
 }
 export function __testOnly_resetWorkflowStatusState() {
+    clearWorkflowStatusSnapshotRetryTimer();
     workflowStatusStreamState.items.clear();
     workflowStatusStreamState.lastSnapshotAt = 0;
+    workflowStatusStreamState.loading = false;
+    workflowStatusStreamState.retryAttempt = 0;
     workflowStatusStreamState.snapshotError = '';
     workflowStatusStreamState.snapshotNotice = '';
     workflowStatusStreamState.lastSnapshotPayload = null;
+}
+export function __testOnly_applyWorkflowStatusUpdate(payload) {
+    applyWorkflowStatusUpdate(payload);
 }
 export function __testOnly_renderWorkflowDefinitionsBody(items = []) {
     workflowDefinitionsState.visible = true;
