@@ -205,6 +205,7 @@ def test_rag_list_collections_includes_expected_collections():
     assert "chat_history_sessions" in collections
     assert "file_copy_concepts" in collections
     assert "turn_execution_records" in collections
+    assert "experiment_runs" in collections
     assert "rag_documents" in collections
     assert "vontology_text_relations" in collections
 
@@ -216,6 +217,8 @@ def test_rag_list_collections_includes_expected_collections():
     assert by_name["file_copy_concepts"]["get_supported"] is True
     assert by_name["turn_execution_records"]["list_supported"] is True
     assert by_name["turn_execution_records"]["get_supported"] is True
+    assert by_name["experiment_runs"]["list_supported"] is True
+    assert by_name["experiment_runs"]["get_supported"] is True
     assert by_name["rag_documents"]["list_supported"] is False
     assert by_name["rag_documents"]["get_supported"] is False
 

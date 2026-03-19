@@ -1159,6 +1159,36 @@ def resolve_workflow_narrative_text(workflow_id: str) -> tuple[str | None, str]:
     return None, WORKFLOW_DESCRIPTION_SOURCE_NONE
 
 
+def resolve_workflow_initial_step(
+    workflow_id: str,
+    workflow_doc: Mapping[str, Any] | None = None,
+) -> str | None:
+    """Resolve a workflow's initial step ID without loading the full definition."""
+
+    workflow_id_text = _normalise_non_empty_text(workflow_id)
+    if workflow_id_text is None:
+        return None
+
+    doc = workflow_doc
+    if not isinstance(doc, Mapping):
+        doc = ConceptsRepository.find_one(
+            {"concept_id": workflow_id_text},
+            {"concept_id": 1, "relationships": 1},
+        )
+    if not isinstance(doc, Mapping):
+        return None
+
+    relationships = doc.get("relationships") or {}
+    if not isinstance(relationships, Mapping):
+        return None
+
+    initial_step = _first_relationship_target(
+        relationships,
+        WORKFLOW_GRAPH_PREDICATE_ALIASES["hasInitialStep"],
+    )
+    return _normalise_non_empty_text(initial_step)
+
+
 def _coerce_bool(value: Any) -> bool | None:
     if isinstance(value, bool):
         return value

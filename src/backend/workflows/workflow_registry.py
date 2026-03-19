@@ -218,6 +218,17 @@ class WorkflowRegistry:
             return reg
         return self._resolve_lazy(workflow_id)
 
+    def peek_registration(
+        self,
+        workflow_id: str,
+    ) -> WorkflowRegistration | LazyWorkflowRegistration | None:
+        """Return eager or lazy registration metadata without resolving lazily."""
+
+        reg = self._workflows.get(workflow_id)
+        if reg is not None:
+            return reg
+        return self._lazy.get(workflow_id)
+
     def get_registration_source(
         self,
         workflow_id: str,

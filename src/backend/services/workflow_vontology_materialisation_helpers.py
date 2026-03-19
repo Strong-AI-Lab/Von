@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+from contextlib import contextmanager
 from collections.abc import Mapping, Sequence
+from collections.abc import Iterator
 from typing import Any
 
 from ..db.repositories.concepts_repository import ConceptsRepository
@@ -117,9 +120,42 @@ def stable_named_instance_concept_id(name: str, *, prefix: str) -> str:
     return f"#V#{prefix_clean}_{slug}_{digest}"
 
 
+@contextmanager
+def suspend_event_workflow_integration() -> Iterator[None]:
+    """Temporarily disable event-driven workflow launches during materialisation.
+
+    Canonical workflow publication and repair should not recursively trigger
+    event-driven mutation workflows while authoring workflow concepts, steps,
+    and text relations. Bulk authoring also suppresses per-mutation workflow
+    discovery cache invalidation because bootstrap services perform one
+    authoritative invalidation after publication completes.
+    """
+
+    prior_event = os.environ.get("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE")
+    prior_discovery = os.environ.get(
+        "VON_WORKFLOW_DISCOVERY_CACHE_INVALIDATION_ENABLE"
+    )
+    os.environ["VON_EVENT_WORKFLOW_INTEGRATION_ENABLE"] = "0"
+    os.environ["VON_WORKFLOW_DISCOVERY_CACHE_INVALIDATION_ENABLE"] = "0"
+    try:
+        yield
+    finally:
+        if prior_event is None:
+            os.environ.pop("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", None)
+        else:
+            os.environ["VON_EVENT_WORKFLOW_INTEGRATION_ENABLE"] = prior_event
+        if prior_discovery is None:
+            os.environ.pop("VON_WORKFLOW_DISCOVERY_CACHE_INVALIDATION_ENABLE", None)
+        else:
+            os.environ["VON_WORKFLOW_DISCOVERY_CACHE_INVALIDATION_ENABLE"] = (
+                prior_discovery
+            )
+
+
 __all__ = [
     "ensure_instance_typing",
     "load_concept",
     "normalise_relationship_targets",
     "stable_named_instance_concept_id",
+    "suspend_event_workflow_integration",
 ]

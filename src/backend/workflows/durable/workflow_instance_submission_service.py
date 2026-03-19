@@ -46,10 +46,6 @@ from ..workflow_definition_identity_service import (
     validate_workflow_definition_contract,
 )
 from .instance_manager import WorkflowInstanceManager
-from .registry_factory import (
-    build_durable_action_registry,
-    build_workflow_registry_read_only,
-)
 
 _RUNNABLE_CACHE_TTL_ENV = "VON_WORKFLOW_RUNNABLE_CACHE_TTL_SECONDS"
 _RUNNABLE_CACHE_MAX_ENTRIES_ENV = "VON_WORKFLOW_RUNNABLE_CACHE_MAX_ENTRIES"
@@ -668,6 +664,11 @@ def verify_workflow_runnable(workflow_id: str) -> WorkflowRunnableVerification:
         _invalidate_cache_if_feature_signature_changed(feature_signature)
 
         prep_started = perf_counter()
+        from .registry_factory import (
+            build_durable_action_registry,
+            build_workflow_registry_read_only,
+        )
+
         registry = build_workflow_registry_read_only()
         definition = registry.get(workflow_id)
         registration = getattr(registry, "get_registration", lambda _wid: None)(workflow_id)

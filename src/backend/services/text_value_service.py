@@ -22,7 +22,12 @@ from ..models.text_value_models import (
     TextValueModel,
     TextRelationModel,
 )
+from .feature_flags import get_event_workflow_integration_enabled
 from ..security.access_control import can_access_concept
+
+_EVENT_TYPE_TEXT_RELATION_UPSERTED = "text_relation.upserted"
+_EVENT_TYPE_TEXT_RELATION_UPDATED = "text_relation.updated"
+_EVENT_TYPE_TEXT_RELATION_DELETED = "text_relation.deleted"
 
 
 def _now() -> datetime:
@@ -66,6 +71,9 @@ def _emit_text_relation_mutation_event(
     extra_payload: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Best-effort workflow event emission for text-relation mutations."""
+
+    if not get_event_workflow_integration_enabled(default=True):
+        return
 
     try:
         from .workflow_event_integration_service import (
@@ -283,26 +291,19 @@ def upsert_text_for_concept(
         payload["context"] = context
 
     if relation_created or context_updated:
-        try:
-            from .workflow_event_integration_service import (
-                EVENT_TYPE_TEXT_RELATION_UPSERTED,
-            )
-
-            _emit_text_relation_mutation_event(
-                event_type=EVENT_TYPE_TEXT_RELATION_UPSERTED,
-                subject_concept_id=subject_concept_id,
-                relation_id=relation_id,
-                predicate=predicate,
-                text=stored_text,
-                lang=lang,
-                extra_payload={
-                    "relation_created": relation_created,
-                    "context_updated": context_updated,
-                    "text_value_id": text_value_id,
-                },
-            )
-        except Exception:
-            pass
+        _emit_text_relation_mutation_event(
+            event_type=_EVENT_TYPE_TEXT_RELATION_UPSERTED,
+            subject_concept_id=subject_concept_id,
+            relation_id=relation_id,
+            predicate=predicate,
+            text=stored_text,
+            lang=lang,
+            extra_payload={
+                "relation_created": relation_created,
+                "context_updated": context_updated,
+                "text_value_id": text_value_id,
+            },
+        )
 
     return payload
 
@@ -549,22 +550,15 @@ def update_text_relation_text(
         "updated": relation_updated,
     }
     if relation_updated:
-        try:
-            from .workflow_event_integration_service import (
-                EVENT_TYPE_TEXT_RELATION_UPDATED,
-            )
-
-            _emit_text_relation_mutation_event(
-                event_type=EVENT_TYPE_TEXT_RELATION_UPDATED,
-                subject_concept_id=subject_concept_id,
-                relation_id=relation_id,
-                predicate=str(rel.get("predicate") or ""),
-                text=new_raw,
-                lang=lang,
-                extra_payload={"text_value_id": new_text_value_id},
-            )
-        except Exception:
-            pass
+        _emit_text_relation_mutation_event(
+            event_type=_EVENT_TYPE_TEXT_RELATION_UPDATED,
+            subject_concept_id=subject_concept_id,
+            relation_id=relation_id,
+            predicate=str(rel.get("predicate") or ""),
+            text=new_raw,
+            lang=lang,
+            extra_payload={"text_value_id": new_text_value_id},
+        )
     return result
 
 
@@ -659,20 +653,15 @@ def delete_text_relation_by_predicate_and_text(
         "text": text,
         "orphaned_text_value_deleted": orphaned,
     }
-    try:
-        from .workflow_event_integration_service import EVENT_TYPE_TEXT_RELATION_DELETED
-
-        _emit_text_relation_mutation_event(
-            event_type=EVENT_TYPE_TEXT_RELATION_DELETED,
-            subject_concept_id=subject_concept_id,
-            relation_id=relation_id,
-            predicate=predicate,
-            text=raw_text,
-            lang=lang,
-            extra_payload={"orphaned_text_value_deleted": orphaned},
-        )
-    except Exception:
-        pass
+    _emit_text_relation_mutation_event(
+        event_type=_EVENT_TYPE_TEXT_RELATION_DELETED,
+        subject_concept_id=subject_concept_id,
+        relation_id=relation_id,
+        predicate=predicate,
+        text=raw_text,
+        lang=lang,
+        extra_payload={"orphaned_text_value_deleted": orphaned},
+    )
     return result
 
 
@@ -711,18 +700,13 @@ def delete_text_relation(
         "relation_id": relation_id,
         "orphaned_text_value_deleted": orphaned,
     }
-    try:
-        from .workflow_event_integration_service import EVENT_TYPE_TEXT_RELATION_DELETED
-
-        _emit_text_relation_mutation_event(
-            event_type=EVENT_TYPE_TEXT_RELATION_DELETED,
-            subject_concept_id=subject_concept_id,
-            relation_id=relation_id,
-            predicate=predicate if isinstance(predicate, str) else None,
-            extra_payload={"orphaned_text_value_deleted": orphaned},
-        )
-    except Exception:
-        pass
+    _emit_text_relation_mutation_event(
+        event_type=_EVENT_TYPE_TEXT_RELATION_DELETED,
+        subject_concept_id=subject_concept_id,
+        relation_id=relation_id,
+        predicate=predicate if isinstance(predicate, str) else None,
+        extra_payload={"orphaned_text_value_deleted": orphaned},
+    )
     return result
 
 

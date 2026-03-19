@@ -15,6 +15,23 @@ def test_internal_mcp_catalogue_builds_and_includes_relationship_tools():
     assert "turn_execution_build_benchmark" in methods
     assert "turn_execution_backfill_from_chat_history" in methods
     assert "turn_execution_namespace_coverage_report" in methods
+    assert "testing_theory_create_slice" in methods
+    assert "testing_theory_import_canonical_context" in methods
+    assert "testing_theory_assert_local_claims" in methods
+    assert "testing_theory_compute_diff" in methods
+    assert "testing_theory_rollback_local_writes" in methods
+    assert "testing_theory_promote_validated_claims" in methods
+    assert "testing_theory_gc_expired" in methods
+    assert "experiment_create_spec" in methods
+    assert "experiment_start_run" in methods
+    assert "experiment_record_observation" in methods
+    assert "experiment_compute_verdict" in methods
+    assert "experiment_emit_learning_signal" in methods
+    assert "experiment_execute_target_workflow" in methods
+    assert "experiment_execute_regression_suite" in methods
+    assert "experiment_run_list" in methods
+    assert "experiment_run_get" in methods
+    assert "testing_prepare_meeting_invitation_spec" in methods
 
 
 def test_internal_mcp_gmail_list_messages_accepts_max_results_aliases():

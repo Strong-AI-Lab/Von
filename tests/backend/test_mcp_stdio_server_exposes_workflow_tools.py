@@ -20,6 +20,23 @@ WORKFLOW_TOOL_NAMES = {
     "workflow_set_schedule_enabled",
     "workflow_delete_schedule",
     "workflow_trigger_schedule",
+    "testing_theory_create_slice",
+    "testing_theory_import_canonical_context",
+    "testing_theory_assert_local_claims",
+    "testing_theory_compute_diff",
+    "testing_theory_rollback_local_writes",
+    "testing_theory_promote_validated_claims",
+    "testing_theory_gc_expired",
+    "experiment_create_spec",
+    "experiment_start_run",
+    "experiment_record_observation",
+    "experiment_compute_verdict",
+    "experiment_emit_learning_signal",
+    "experiment_execute_target_workflow",
+    "experiment_execute_regression_suite",
+    "experiment_run_list",
+    "experiment_run_get",
+    "testing_prepare_meeting_invitation_spec",
 }
 
 

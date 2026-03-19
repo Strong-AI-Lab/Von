@@ -77,6 +77,10 @@ from ..security.access_control import (
     apply_concept_query_filter,
 )
 from .description_metadata_service import extract_inline_description_metadata
+from .feature_flags import (
+    get_event_workflow_integration_enabled,
+    get_workflow_discovery_cache_invalidation_enabled,
+)
 from .text_value_service import get_texts_for_concept, upsert_text_for_concept
 from ..db.repositories.text_value_repository import TextRelationsRepository
 
@@ -119,11 +123,12 @@ def _invalidate_concept_mutation_caches() -> None:
         pass
 
     try:
-        from .workflow_discovery_service import (
-            invalidate_workflow_discovery_executability_caches,
-        )
+        if get_workflow_discovery_cache_invalidation_enabled(default=True):
+            from .workflow_discovery_service import (
+                invalidate_workflow_discovery_executability_caches,
+            )
 
-        invalidate_workflow_discovery_executability_caches()
+            invalidate_workflow_discovery_executability_caches()
     except Exception:
         pass
 
@@ -155,6 +160,75 @@ def _normalise_creation_scope_mode(scope_mode: Any) -> Optional[str]:
     return _CONCEPT_SCOPE_MODE_ALIASES.get(cleaned)
 
 
+def _resolve_actor_context_hint(
+    *,
+    user_id: Optional[str],
+    org_id: Optional[str],
+    namespace: Optional[str],
+) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve explicit actor hints without importing workflow event machinery.
+
+    Global concept authoring and event-disabled mutation paths should not need
+    to load the durable event->workflow integration stack just to compute
+    diagnostics or no-op actor hints.
+    """
+
+    resolved_user = user_id.strip() if isinstance(user_id, str) and user_id.strip() else None
+    resolved_org = org_id.strip() if isinstance(org_id, str) and org_id.strip() else None
+
+    if namespace and (resolved_user is None or resolved_org is None):
+        try:
+            from .namespace_service import coerce_namespace, parse_namespace
+
+            canonical_namespace = coerce_namespace(namespace)
+            if canonical_namespace:
+                parsed = parse_namespace(canonical_namespace)
+                parsed_user = parsed.get("user_id")
+                parsed_org = parsed.get("org_id")
+                if resolved_user is None and isinstance(parsed_user, str) and parsed_user.strip():
+                    resolved_user = f"#V#{parsed_user.strip()}"
+                if resolved_org is None and isinstance(parsed_org, str) and parsed_org.strip():
+                    resolved_org = f"#V#{parsed_org.strip()}"
+        except Exception:
+            pass
+
+    return resolved_user, resolved_org
+
+
+def _resolve_creation_actor_context(
+    *,
+    created_by_concept_id: Optional[str],
+    organisation_concept_id: Optional[str],
+    event_namespace: Optional[str],
+) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve actor context for visibility decisions without workflow imports."""
+
+    actor_user_id, actor_org_id = _resolve_actor_context_hint(
+        user_id=created_by_concept_id,
+        org_id=organisation_concept_id,
+        namespace=event_namespace,
+    )
+
+    if actor_user_id is None:
+        try:
+            actor_user_id = get_effective_user_concept_id()
+        except Exception:
+            actor_user_id = None
+
+    if actor_org_id is None:
+        try:
+            from flask import has_request_context, session as flask_session
+
+            if has_request_context():
+                org_raw = flask_session.get("organisation_concept_id")
+                if isinstance(org_raw, str) and org_raw.strip():
+                    actor_org_id = org_raw.strip()
+        except Exception:
+            actor_org_id = None
+
+    return actor_user_id, actor_org_id
+
+
 def _resolve_creation_visibility_scope(
     *,
     created_by_concept_id: Optional[str],
@@ -163,8 +237,6 @@ def _resolve_creation_visibility_scope(
     visibility_scope_mode: Optional[str],
 ) -> Dict[str, Any]:
     """Resolve concept visibility restrictions and diagnostics for create_concept."""
-
-    from .workflow_event_integration_service import resolve_event_actor_context
     from ..security.visibility_predicates import (
         set_specific_to_org_values,
         set_specific_to_user_values,
@@ -181,10 +253,10 @@ def _resolve_creation_visibility_scope(
             f"Unknown visibility_scope_mode '{visibility_scope_mode}'. Using default authenticated scoping."
         )
 
-    actor_user_id, actor_org_id = resolve_event_actor_context(
-        user_id=created_by_concept_id,
-        org_id=organisation_concept_id,
-        namespace=event_namespace,
+    actor_user_id, actor_org_id = _resolve_creation_actor_context(
+        created_by_concept_id=created_by_concept_id,
+        organisation_concept_id=organisation_concept_id,
+        event_namespace=event_namespace,
     )
 
     relationships: Dict[str, List[str]] = {}
@@ -192,49 +264,56 @@ def _resolve_creation_visibility_scope(
     scope_source = "missing_authenticated_context"
 
     if requested_scope_mode == CONCEPT_SCOPE_GLOBAL_GENERAL:
-        effective_scope_mode = CONCEPT_SCOPE_GLOBAL_GENERAL
-        scope_source = "request.scope_mode"
-    else:
-        mode_for_resolution = requested_scope_mode
-        if mode_for_resolution == CONCEPT_SCOPE_ORGANISATION_GENERAL and not actor_org_id:
-            warnings.append(
-                "organisation_general requested without organisation context; falling back to authenticated defaults."
-            )
-            mode_for_resolution = CONCEPT_SCOPE_USER_ORG_DEFAULT
+        return {
+            "requested_scope_mode": requested_scope_mode,
+            "effective_scope_mode": CONCEPT_SCOPE_GLOBAL_GENERAL,
+            "scope_source": "request.scope_mode",
+            "created_by_concept_id": actor_user_id,
+            "organisation_concept_id": actor_org_id,
+            "relationships": relationships,
+            "warnings": warnings,
+        }
 
-        if mode_for_resolution == CONCEPT_SCOPE_ORGANISATION_GENERAL:
-            if actor_org_id:
-                relationships = set_specific_to_org_values(
-                    relationships,
-                    [actor_org_id],
-                )
-                effective_scope_mode = CONCEPT_SCOPE_ORGANISATION_GENERAL
-                scope_source = "request.scope_mode"
-            else:
-                # Defensive fallback for static typing and unexpected context drift.
-                effective_scope_mode = CONCEPT_SCOPE_GLOBAL_GENERAL
-                scope_source = "missing_authenticated_context"
-        elif actor_user_id:
-            relationships = set_specific_to_user_values(
+    mode_for_resolution = requested_scope_mode
+    if mode_for_resolution == CONCEPT_SCOPE_ORGANISATION_GENERAL and not actor_org_id:
+        warnings.append(
+            "organisation_general requested without organisation context; falling back to authenticated defaults."
+        )
+        mode_for_resolution = CONCEPT_SCOPE_USER_ORG_DEFAULT
+
+    if mode_for_resolution == CONCEPT_SCOPE_ORGANISATION_GENERAL:
+        if actor_org_id:
+            relationships = set_specific_to_org_values(
                 relationships,
-                [actor_user_id],
+                [actor_org_id],
             )
-            if actor_org_id:
-                relationships = set_specific_to_org_values(
-                    relationships,
-                    [actor_org_id],
-                )
-                effective_scope_mode = CONCEPT_SCOPE_USER_ORG_DEFAULT
-            else:
-                effective_scope_mode = CONCEPT_SCOPE_USER_ONLY_DEFAULT
-            scope_source = (
-                "request.scope_mode"
-                if mode_for_resolution == CONCEPT_SCOPE_USER_ORG_DEFAULT
-                else "authenticated_context"
-            )
+            effective_scope_mode = CONCEPT_SCOPE_ORGANISATION_GENERAL
+            scope_source = "request.scope_mode"
         else:
+            # Defensive fallback for static typing and unexpected context drift.
             effective_scope_mode = CONCEPT_SCOPE_GLOBAL_GENERAL
             scope_source = "missing_authenticated_context"
+    elif actor_user_id:
+        relationships = set_specific_to_user_values(
+            relationships,
+            [actor_user_id],
+        )
+        if actor_org_id:
+            relationships = set_specific_to_org_values(
+                relationships,
+                [actor_org_id],
+            )
+            effective_scope_mode = CONCEPT_SCOPE_USER_ORG_DEFAULT
+        else:
+            effective_scope_mode = CONCEPT_SCOPE_USER_ONLY_DEFAULT
+        scope_source = (
+            "request.scope_mode"
+            if mode_for_resolution == CONCEPT_SCOPE_USER_ORG_DEFAULT
+            else "authenticated_context"
+        )
+    else:
+        effective_scope_mode = CONCEPT_SCOPE_GLOBAL_GENERAL
+        scope_source = "missing_authenticated_context"
 
     return {
         "requested_scope_mode": requested_scope_mode,
@@ -561,7 +640,7 @@ def create_concept(
             )
 
         workflow_event_launches: Dict[str, Any] = {}
-        if concept_identifier:
+        if concept_identifier and get_event_workflow_integration_enabled(default=True):
             # Keep mutation emission in this canonical create path so all
             # create surfaces (routes, MCP tools, internal services) stay consistent.
             try:
@@ -1269,41 +1348,42 @@ def update_concept(concept_id: str, update_data: Dict[str, Any]) -> Dict[str, An
                     reconcile_err,
                 )
 
-        try:
-            from .workflow_event_integration_service import (
-                EVENT_TYPE_CONCEPT_UPDATED,
-                maybe_launch_vontology_mutation_workflow,
-                resolve_event_actor_context,
-            )
+        if get_event_workflow_integration_enabled(default=True):
+            try:
+                from .workflow_event_integration_service import (
+                    EVENT_TYPE_CONCEPT_UPDATED,
+                    maybe_launch_vontology_mutation_workflow,
+                    resolve_event_actor_context,
+                )
 
-            updated_concept_id = (
-                str(updated_concept_doc.get("concept_id") or "").strip()
-                if isinstance(updated_concept_doc, dict)
-                else ""
-            ) or concept_id
-            actor_id, actor_org = resolve_event_actor_context()
-            mutation_launch = maybe_launch_vontology_mutation_workflow(
-                mutation_event_type=EVENT_TYPE_CONCEPT_UPDATED,
-                mutation_id=updated_concept_id,
-                user_id=actor_id,
-                org_id=actor_org,
-                event_payload={
-                    "concept_id": updated_concept_id,
-                    "updated_fields": sorted(list(update_data.keys())),
-                },
-                inputs={
-                    "concept_id": updated_concept_id,
-                    "updated_fields": sorted(list(update_data.keys())),
-                },
-            )
-            if isinstance(updated_concept_doc, dict):
-                updated_concept_doc["workflow_event_launch"] = mutation_launch
-        except Exception as workflow_exc:
-            logger.warning(
-                "update_concept: workflow event launch failed for %s: %s",
-                concept_id,
-                workflow_exc,
-            )
+                updated_concept_id = (
+                    str(updated_concept_doc.get("concept_id") or "").strip()
+                    if isinstance(updated_concept_doc, dict)
+                    else ""
+                ) or concept_id
+                actor_id, actor_org = resolve_event_actor_context()
+                mutation_launch = maybe_launch_vontology_mutation_workflow(
+                    mutation_event_type=EVENT_TYPE_CONCEPT_UPDATED,
+                    mutation_id=updated_concept_id,
+                    user_id=actor_id,
+                    org_id=actor_org,
+                    event_payload={
+                        "concept_id": updated_concept_id,
+                        "updated_fields": sorted(list(update_data.keys())),
+                    },
+                    inputs={
+                        "concept_id": updated_concept_id,
+                        "updated_fields": sorted(list(update_data.keys())),
+                    },
+                )
+                if isinstance(updated_concept_doc, dict):
+                    updated_concept_doc["workflow_event_launch"] = mutation_launch
+            except Exception as workflow_exc:
+                logger.warning(
+                    "update_concept: workflow event launch failed for %s: %s",
+                    concept_id,
+                    workflow_exc,
+                )
 
         _invalidate_concept_mutation_caches()
         return updated_concept_doc
@@ -1374,28 +1454,29 @@ def delete_concept(concept_id: str) -> bool:
                 raise ConceptNotFoundError(
                     f"concept with ID '{concept_id}' not found for deletion."
                 )
-            try:
-                from .workflow_event_integration_service import (
-                    EVENT_TYPE_CONCEPT_DELETED,
-                    maybe_launch_vontology_mutation_workflow,
-                    resolve_event_actor_context,
-                )
+            if get_event_workflow_integration_enabled(default=True):
+                try:
+                    from .workflow_event_integration_service import (
+                        EVENT_TYPE_CONCEPT_DELETED,
+                        maybe_launch_vontology_mutation_workflow,
+                        resolve_event_actor_context,
+                    )
 
-                actor_id, actor_org = resolve_event_actor_context()
-                maybe_launch_vontology_mutation_workflow(
-                    mutation_event_type=EVENT_TYPE_CONCEPT_DELETED,
-                    mutation_id=concept_id,
-                    user_id=actor_id,
-                    org_id=actor_org,
-                    event_payload={"concept_id": concept_id},
-                    inputs={"concept_id": concept_id},
-                )
-            except Exception as workflow_exc:
-                logger.warning(
-                    "delete_concept: workflow event launch failed for %s: %s",
-                    concept_id,
-                    workflow_exc,
-                )
+                    actor_id, actor_org = resolve_event_actor_context()
+                    maybe_launch_vontology_mutation_workflow(
+                        mutation_event_type=EVENT_TYPE_CONCEPT_DELETED,
+                        mutation_id=concept_id,
+                        user_id=actor_id,
+                        org_id=actor_org,
+                        event_payload={"concept_id": concept_id},
+                        inputs={"concept_id": concept_id},
+                    )
+                except Exception as workflow_exc:
+                    logger.warning(
+                        "delete_concept: workflow event launch failed for %s: %s",
+                        concept_id,
+                        workflow_exc,
+                    )
             _invalidate_concept_mutation_caches()
             return bool(result.acknowledged and result.deleted_count > 0)
 
@@ -1431,36 +1512,37 @@ def delete_concept(concept_id: str) -> bool:
                 f"Delete failed for concept '{canonical_concept_id}': {delete_report.get('error') or delete_report.get('message') or delete_report}"
             )
 
-        try:
-            from .workflow_event_integration_service import (
-                EVENT_TYPE_CONCEPT_DELETED,
-                maybe_launch_vontology_mutation_workflow,
-                resolve_event_actor_context,
-            )
+        if get_event_workflow_integration_enabled(default=True):
+            try:
+                from .workflow_event_integration_service import (
+                    EVENT_TYPE_CONCEPT_DELETED,
+                    maybe_launch_vontology_mutation_workflow,
+                    resolve_event_actor_context,
+                )
 
-            actor_id, actor_org = resolve_event_actor_context()
-            maybe_launch_vontology_mutation_workflow(
-                mutation_event_type=EVENT_TYPE_CONCEPT_DELETED,
-                mutation_id=canonical_concept_id,
-                user_id=actor_id,
-                org_id=actor_org,
-                event_payload={
-                    "concept_id": canonical_concept_id,
-                    "removed_text_relations_count": total_rel,
-                    "removed_orphan_text_values_count": total_tv,
-                },
-                inputs={
-                    "concept_id": canonical_concept_id,
-                    "removed_text_relations_count": total_rel,
-                    "removed_orphan_text_values_count": total_tv,
-                },
-            )
-        except Exception as workflow_exc:
-            logger.warning(
-                "delete_concept: workflow event launch failed for %s: %s",
-                canonical_concept_id,
-                workflow_exc,
-            )
+                actor_id, actor_org = resolve_event_actor_context()
+                maybe_launch_vontology_mutation_workflow(
+                    mutation_event_type=EVENT_TYPE_CONCEPT_DELETED,
+                    mutation_id=canonical_concept_id,
+                    user_id=actor_id,
+                    org_id=actor_org,
+                    event_payload={
+                        "concept_id": canonical_concept_id,
+                        "removed_text_relations_count": total_rel,
+                        "removed_orphan_text_values_count": total_tv,
+                    },
+                    inputs={
+                        "concept_id": canonical_concept_id,
+                        "removed_text_relations_count": total_rel,
+                        "removed_orphan_text_values_count": total_tv,
+                    },
+                )
+            except Exception as workflow_exc:
+                logger.warning(
+                    "delete_concept: workflow event launch failed for %s: %s",
+                    canonical_concept_id,
+                    workflow_exc,
+                )
 
         _invalidate_concept_mutation_caches()
 

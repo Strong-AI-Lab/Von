@@ -1,7 +1,7 @@
 # Von Workflow Language (VWL) Manual
 
 Status: Draft (current implementation-aligned)
-Last updated: 2026-03-18 (Pacific/Auckland)
+Last updated: 2026-03-19 (Pacific/Auckland)
 Audience: Human engineers and AI agents
 
 ## 1. Purpose and Scope
@@ -43,9 +43,12 @@ Primary implementation anchors:
 - `src/backend/workflows/workflow_definition_identity_service.py`
 - `src/backend/workflows/durable/models.py`
 - `src/backend/workflows/durable/control_flow_actions.py`
+- `src/backend/workflows/durable/testing_workflow_actions.py`
 - `src/backend/workflows/durable/worker.py`
 - `src/backend/workflows/durable/scheduler.py`
 - `src/backend/workflows/durable/workflow_instance_submission_service.py`
+- `src/backend/services/testing_theory_service.py`
+- `src/backend/services/experiment_run_service.py`
 - `src/backend/server/utils_flask.py`
 - `src/backend/integrations/internal_mcp/catalogue.py`
 
@@ -939,6 +942,13 @@ Operational cadence controls include:
 - `workflow_mcp_health_check`
 - `workflow_list_event_bindings`
 
+Operator-facing discovery rule:
+
+- `workflow_list_definitions` SHOULD remain responsive even when full parity diagnostics are still being built.
+- When deferred inventory/parity work has not yet published a full snapshot, the tool MAY return `parity_inventory.build_state="pending_background_build"` with reason code `inventory_pending_background_build`.
+- When a listed workflow is still represented only by a lazy registry placeholder, the tool MAY return `definition_loaded=false` and `definition_identity.build_state="pending_lazy_definition"` rather than forcing immediate full definition materialisation.
+- Clients and authoring workflows MUST treat this as a non-error read state rather than inferring workflow-authority drift from the temporary absence of a full parity snapshot.
+
 ### 14.2 Instance Control
 
 - `workflow_create_instance`
@@ -969,6 +979,24 @@ Workflow instance and schedule creation paths canonicalise namespace context to
 namespace service. Legacy slash-form inputs may still be accepted on read/query
 surfaces or normalised at write boundaries for compatibility, but new
 authoritative workflow launches must not emit fresh `user/org` namespaces.
+
+### 14.5 Testing Workflow Theory and Experiment Library
+
+Testing Workflows are now a first-class reusable VWL action family rather than ad-hoc orchestration code. The reusable deterministic surfaces are:
+
+- Theory-slice control: `testing_theory_create_slice`, `testing_theory_import_canonical_context`, `testing_theory_assert_local_claims`, `testing_theory_compute_diff`, `testing_theory_rollback_local_writes`, `testing_theory_promote_validated_claims`, `testing_theory_gc_expired`
+- Experiment control: `experiment_create_spec`, `experiment_start_run`, `experiment_record_observation`, `experiment_compute_verdict`, `experiment_emit_learning_signal`, `experiment_execute_target_workflow`, `experiment_execute_regression_suite`
+- Scenario helper: `testing_prepare_meeting_invitation_spec`
+- Evidence inspection: `experiment_run_list`, `experiment_run_get`
+
+Semantic rules:
+
+- Testing workflows SHOULD materialise first-class `#V#testing_theory`, `#V#ephemeral_theory`, `#V#experiment_spec`, and `#V#experiment_run` artefacts rather than hiding the state inside workflow-local context only.
+- `experiment_compute_verdict` is the canonical promotion-gate precursor. A passing verdict MAY recommend promotion-ready assertions, but canonical writes MUST still pass through an explicit promotion gate step or workflow.
+- `experiment_emit_learning_signal` is the canonical bridge from experiment evidence into workflow-selection learning loops and retained-case replay.
+- `experiment_execute_target_workflow` MAY run in awaited mode (`await_terminal=true`). In that mode it SHOULD poll the launched durable child instance to a terminal state or timeout, surface final-status evidence under `workflow_execution`, and record a generic experiment observation when a `run_id` is supplied.
+- `testing_prepare_meeting_invitation_spec` MUST default to conservative verdict rules. Meeting-invitation experiments require all declared expected outcomes to be evidenced before a passing verdict is allowed; a pure execution-only observation is intentionally insufficient for promotion.
+- Outcome text predicates such as `#V#has_expected_outcome` and `#V#has_observed_outcome` are multi-valued evidence surfaces and MUST NOT be collapsed to singleton semantics.
 
 ## 15. Conformance Checklist for Workflow Authors
 

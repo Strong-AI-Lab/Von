@@ -8913,6 +8913,253 @@ def _turn_execution_get(**kwargs):
     return _rag_get_item(**forwarded)
 
 
+def _experiment_run_list(**kwargs):
+    forwarded = dict(kwargs)
+    forwarded["collection"] = "experiment_runs"
+    return _rag_list_indexed(**forwarded)
+
+
+def _experiment_run_get(**kwargs):
+    run_id = kwargs.get("run_id")
+    session_id = kwargs.get("session_id")
+    target = run_id if run_id is not None else session_id
+    if not isinstance(target, str) or not target.strip():
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: run_id",
+            details={"missing": ["run_id"]},
+            suggestions=["Provide run_id (or session_id alias)"],
+        )
+    forwarded = dict(kwargs)
+    forwarded["collection"] = "experiment_runs"
+    forwarded["session_id"] = target.strip()
+    return _rag_get_item(**forwarded)
+
+
+def _testing_theory_create_slice(**kwargs):
+    from ...services.testing_theory_service import create_testing_theory_slice
+
+    return create_testing_theory_slice(
+        name=str(kwargs.get("name") or "Ephemeral testing theory").strip(),
+        theory_id=kwargs.get("theory_id"),
+        namespace=kwargs.get("namespace"),
+        user_id=kwargs.get("user_id"),
+        org_id=kwargs.get("org_id"),
+        included_canonical_concept_ids=kwargs.get("included_canonical_concept_ids") or (),
+        included_theory_ids=kwargs.get("included_theory_ids") or (),
+        expected_observations=kwargs.get("expected_observations") or (),
+        promotion_policy=kwargs.get("promotion_policy"),
+        retention_policy=kwargs.get("retention_policy"),
+        experiment_spec_id=kwargs.get("experiment_spec_id"),
+        ttl_seconds=kwargs.get("ttl_seconds"),
+        description=kwargs.get("description"),
+    )
+
+
+def _testing_theory_import_canonical_context(**kwargs):
+    from ...services.testing_theory_service import import_canonical_context_into_theory
+
+    return import_canonical_context_into_theory(
+        theory_id=str(kwargs.get("theory_id") or "").strip(),
+        concept_ids=kwargs.get("concept_ids") or (),
+        theory_ids=kwargs.get("theory_ids") or (),
+    )
+
+
+def _testing_theory_assert_local_claims(**kwargs):
+    from ...services.testing_theory_service import assert_testing_theory_local_claims
+
+    claims = kwargs.get("claims")
+    if claims is None and "claim" in kwargs:
+        claims = kwargs.get("claim")
+    return assert_testing_theory_local_claims(
+        theory_id=str(kwargs.get("theory_id") or "").strip(),
+        claims=claims or (),
+    )
+
+
+def _testing_theory_compute_diff(**kwargs):
+    from ...services.testing_theory_service import compute_testing_theory_diff
+
+    return compute_testing_theory_diff(theory_id=str(kwargs.get("theory_id") or "").strip())
+
+
+def _testing_theory_rollback_local_writes(**kwargs):
+    from ...services.testing_theory_service import rollback_testing_theory_local_writes
+
+    return rollback_testing_theory_local_writes(
+        theory_id=str(kwargs.get("theory_id") or "").strip(),
+        assertion_ids=kwargs.get("assertion_ids") or (),
+        clear_all=bool(kwargs.get("clear_all", False)),
+    )
+
+
+def _testing_theory_promote_validated_claims(**kwargs):
+    from ...services.testing_theory_service import promote_testing_theory_validated_claims
+
+    return promote_testing_theory_validated_claims(
+        theory_id=str(kwargs.get("theory_id") or "").strip(),
+        assertion_ids=kwargs.get("assertion_ids") or (),
+        experiment_run_id=kwargs.get("experiment_run_id"),
+        required_verdict=str(kwargs.get("required_verdict") or "pass").strip(),
+    )
+
+
+def _testing_theory_gc_expired(**kwargs):
+    from ...services.testing_theory_service import garbage_collect_expired_testing_theories
+
+    return garbage_collect_expired_testing_theories(
+        now_utc=kwargs.get("now_utc"),
+        limit=int(kwargs.get("limit", 100)),
+    )
+
+
+def _experiment_create_spec(**kwargs):
+    from ...services.experiment_run_service import create_experiment_spec
+
+    return create_experiment_spec(
+        name=str(kwargs.get("name") or "Testing experiment").strip(),
+        experiment_spec_id=kwargs.get("experiment_spec_id"),
+        namespace=kwargs.get("namespace"),
+        user_id=kwargs.get("user_id"),
+        org_id=kwargs.get("org_id"),
+        description=kwargs.get("description"),
+        target_workflow_ids=kwargs.get("target_workflow_ids") or (),
+        target_capability_ids=kwargs.get("target_capability_ids") or (),
+        candidate_workflow_ids=kwargs.get("candidate_workflow_ids") or (),
+        theory_id=kwargs.get("theory_id"),
+        experiment_suite_id=kwargs.get("experiment_suite_id"),
+        fixture_payload=kwargs.get("fixture_payload"),
+        theory_setup=kwargs.get("theory_setup"),
+        expected_outcomes=kwargs.get("expected_outcomes") or (),
+        allowed_side_effects=kwargs.get("allowed_side_effects") or (),
+        forbidden_side_effects=kwargs.get("forbidden_side_effects") or (),
+        verdict_rules=kwargs.get("verdict_rules"),
+        replay_policy=kwargs.get("replay_policy"),
+        promotion_policy=kwargs.get("promotion_policy"),
+        metadata=kwargs.get("metadata"),
+    )
+
+
+def _experiment_start_run(**kwargs):
+    from ...services.experiment_run_service import start_experiment_run
+
+    return start_experiment_run(
+        experiment_spec_id=str(kwargs.get("experiment_spec_id") or "").strip(),
+        run_id=kwargs.get("run_id"),
+        theory_id=kwargs.get("theory_id"),
+        namespace=kwargs.get("namespace"),
+        user_id=kwargs.get("user_id"),
+        org_id=kwargs.get("org_id"),
+        target_workflow_ids=kwargs.get("target_workflow_ids") or (),
+        candidate_workflow_ids=kwargs.get("candidate_workflow_ids") or (),
+        benchmark_tier=kwargs.get("benchmark_tier"),
+        benchmark_world_id=kwargs.get("benchmark_world_id"),
+        selection_experience_id=kwargs.get("selection_experience_id"),
+        turn_execution_request_ids=kwargs.get("turn_execution_request_ids") or (),
+        metadata=kwargs.get("metadata"),
+    )
+
+
+def _experiment_record_observation(**kwargs):
+    from ...services.experiment_run_service import record_experiment_observation
+
+    observations = kwargs.get("observations")
+    if observations is None and "observation" in kwargs:
+        observations = kwargs.get("observation")
+    return record_experiment_observation(
+        run_id=str(kwargs.get("run_id") or "").strip(),
+        observations=observations or (),
+        turn_execution_request_ids=kwargs.get("turn_execution_request_ids") or (),
+    )
+
+
+def _experiment_compute_verdict(**kwargs):
+    from ...services.experiment_run_service import compute_experiment_verdict
+
+    return compute_experiment_verdict(run_id=str(kwargs.get("run_id") or "").strip())
+
+
+def _experiment_emit_learning_signal(**kwargs):
+    from ...services.experiment_run_service import emit_experiment_learning_signal
+
+    return emit_experiment_learning_signal(
+        run_id=str(kwargs.get("run_id") or "").strip(),
+        selection_experience_id=kwargs.get("selection_experience_id"),
+        turn_text=kwargs.get("turn_text"),
+        expected_workflow_id=kwargs.get("expected_workflow_id"),
+        baseline_workflow_id=kwargs.get("baseline_workflow_id"),
+    )
+
+
+def _experiment_execute_target_workflow(**kwargs):
+    from ...workflows.durable import WorkflowInstanceManager
+
+    workflow_id = str(kwargs.get("workflow_id") or "").strip()
+    if not workflow_id:
+        return make_error_response(
+            "missing_parameter",
+            "workflow_id is required",
+            details={"missing": ["workflow_id"]},
+        )
+
+    workflow_inputs = kwargs.get("workflow_inputs")
+    if not isinstance(workflow_inputs, Mapping):
+        workflow_inputs = {}
+    manager = WorkflowInstanceManager()
+    instance_id = manager.create_instance(
+        workflow_id,
+        user_id=str(kwargs.get("user_id") or "anonymous").strip() or "anonymous",
+        org_id=str(kwargs.get("org_id") or "default").strip() or "default",
+        namespace=str(kwargs.get("namespace") or "#V#anonymous@default").strip()
+        or "#V#anonymous@default",
+        inputs=dict(workflow_inputs),
+        max_retries=int(kwargs.get("max_retries", 1)),
+    )
+    return {
+        "success": True,
+        "workflow_id": workflow_id,
+        "instance_id": instance_id,
+        "workflow_execution": {
+            "workflow_id": workflow_id,
+            "instance_id": instance_id,
+            "launch_mode": "durable_instance",
+            "workflow_inputs": dict(workflow_inputs),
+        },
+    }
+
+
+def _experiment_execute_regression_suite(**kwargs):
+    from ...services.experiment_run_service import execute_regression_suite
+
+    return execute_regression_suite(
+        execution_tier=str(kwargs.get("execution_tier") or "tier1").strip() or "tier1",
+        cases=kwargs.get("cases") or (),
+        benchmark_scenario=kwargs.get("benchmark_scenario"),
+        output_root=kwargs.get("output_root"),
+        run_id=str(kwargs.get("run_id") or "").strip() or None,
+    )
+
+
+def _testing_prepare_meeting_invitation_spec(**kwargs):
+    from ...services.experiment_run_service import (
+        prepare_meeting_invitation_experiment_spec,
+    )
+
+    return prepare_meeting_invitation_experiment_spec(
+        invitation_text=str(kwargs.get("invitation_text") or "").strip(),
+        experiment_spec_id=kwargs.get("experiment_spec_id"),
+        name=kwargs.get("name"),
+        namespace=kwargs.get("namespace"),
+        user_id=kwargs.get("user_id"),
+        org_id=kwargs.get("org_id"),
+        candidate_workflow_ids=kwargs.get("candidate_workflow_ids") or (),
+        expected_meeting_type=kwargs.get("expected_meeting_type"),
+        expected_structure_fields=kwargs.get("expected_structure_fields") or (),
+        expected_downstream_actions=kwargs.get("expected_downstream_actions") or (),
+    )
+
+
 def _turn_execution_search_failures(**kwargs):
     include_completed = bool(kwargs.get("include_completed", False))
     forwarded = dict(kwargs)
@@ -9582,12 +9829,8 @@ def _workflow_list_definitions(**kwargs):
         build_durable_workflow_registry_read_only,
         get_or_build_workflow_registry_inventory_snapshot,
     )
-    from ...workflows.workflow_definition_identity_service import (
-        build_workflow_definition_identity,
-    )
-    from ...workflows.vontology_loader import (
-        resolve_workflow_background_launch_policy,
-        resolve_workflow_description,
+    from ...workflows.workflow_listing_service import (
+        build_workflow_listing_entry,
     )
     from ...workflows.workflow_baseline_telemetry import (
         get_workflow_baseline_telemetry_snapshot,
@@ -9598,61 +9841,17 @@ def _workflow_list_definitions(**kwargs):
     try:
         # Diagnostics should be read-only: avoid bootstrap writes on introspection
         # pathways such as workflow_list_definitions and health checks.
-        registry = build_durable_workflow_registry_read_only()
+        registry = build_durable_workflow_registry_read_only(defer_parity_work=True)
         ids = sorted(list(registry.all_workflow_ids()))
 
         # Enriched descriptions
         definitions = []
         for wid in ids[:limit]:
-            registration = registry.get_registration(wid)
-            defn = registration.definition if registration is not None else registry.get(wid)
-            source = (
-                str(getattr(registration, "source", "") or "").strip()
-                if registration is not None
-                else "unknown"
-            ) or "unknown"
-            description, description_source = resolve_workflow_description(
-                wid,
-                workflow_source=(registration.source if registration is not None else None),
-                registration_purpose=(
-                    registration.purpose if registration is not None else None
-                ),
-                definition_purpose=(getattr(defn, "purpose", "") if defn else None),
-            )
-            background_launch_policy = None
-            background_launch_policy_source = "none"
-            definition_metadata = getattr(defn, "metadata", None)
-            if isinstance(definition_metadata, Mapping):
-                policy_from_definition = definition_metadata.get(
-                    "background_launch_policy"
-                )
-                if isinstance(policy_from_definition, dict):
-                    background_launch_policy = dict(policy_from_definition)
-                    background_launch_policy_source = str(
-                        definition_metadata.get("background_launch_policy_source")
-                        or "definition.metadata"
-                    )
-            if background_launch_policy is None:
-                (
-                    background_launch_policy,
-                    background_launch_policy_source,
-                ) = resolve_workflow_background_launch_policy(wid)
             definitions.append(
-                {
-                    "workflow_id": wid,
-                    "description": description,
-                    "description_source": description_source,
-                    "initial_state": defn.initial_state if defn else "",
-                    "source": source,
-                    "background_launch_policy": background_launch_policy,
-                    "background_launch_policy_source": background_launch_policy_source,
-                    "definition_identity": build_workflow_definition_identity(
-                        workflow_id=wid,
-                        source=source,
-                        definition=defn,
-                        authoritative_definition=defn if source.lower() == "vontology" else None,
-                    ),
-                }
+                build_workflow_listing_entry(
+                    registry=registry,
+                    workflow_id=wid,
+                )
             )
 
         # Resolve capabilities from the authoritative internal catalogue so
@@ -9666,7 +9865,8 @@ def _workflow_list_definitions(**kwargs):
             "definitions": definitions,
             "count": len(definitions),
             "parity_inventory": get_or_build_workflow_registry_inventory_snapshot(
-                registry=registry
+                registry=registry,
+                allow_sync_build=False,
             ),
             "baseline_telemetry": get_workflow_baseline_telemetry_snapshot(),
             "capability_matrix": capability_matrix,
@@ -11806,6 +12006,10 @@ def _resolve_rag_collection_from_kwargs(kwargs: dict) -> dict[str, object]:
         "execution_records": "turn_execution_records",
         "turn_record": "turn_execution_records",
         "turn_records": "turn_execution_records",
+        "experiment_run": "experiment_runs",
+        "experiment_runs": "experiment_runs",
+        "experiment": "experiment_runs",
+        "experiments": "experiment_runs",
     }
     effective = aliases.get(lowered, lowered)
     return {
@@ -11903,6 +12107,25 @@ def _rag_list_collections(**kwargs):
             "get_supported_reason": None,
             "item_kind": "turn_execution_record",
             "source_system": "mongo.turn_execution_records",
+        },
+        {
+            "collection": "experiment_runs",
+            "label": "Experiment runs",
+            "description": (
+                "Testing Workflow experiment runs stored in MongoDB (experiment_runs). "
+                "Includes linked experiment specs, theory slices, observations, verdicts, "
+                "promotion recommendations, and retained replay cases."
+            ),
+            "list_tool": "rag_list_indexed",
+            "get_tool": "rag_get_item",
+            "search_tool": None,
+            "list_supported": True,
+            "get_supported": True,
+            "search_supported": False,
+            "list_supported_reason": None,
+            "get_supported_reason": None,
+            "item_kind": "experiment_run",
+            "source_system": "mongo.experiment_runs",
         },
         {
             "collection": "rag_documents",
@@ -12876,6 +13099,139 @@ def _rag_list_indexed(**kwargs):
             source_system="mongo.turn_execution_records",
         )
 
+    if collection == "experiment_runs":
+        coll = db["experiment_runs"]
+
+        query: dict[str, Any] = {"namespace": ns}
+        experiment_spec_id = kwargs.get("experiment_spec_id")
+        if isinstance(experiment_spec_id, str) and experiment_spec_id.strip():
+            query["experiment_spec_id"] = experiment_spec_id.strip()
+
+        theory_id = kwargs.get("theory_id")
+        if isinstance(theory_id, str) and theory_id.strip():
+            query["theory_id"] = theory_id.strip()
+
+        workflow_id = kwargs.get("workflow_id")
+        if isinstance(workflow_id, str) and workflow_id.strip():
+            query["target_workflow_ids"] = workflow_id.strip()
+
+        benchmark_tier = kwargs.get("benchmark_tier")
+        if isinstance(benchmark_tier, str) and benchmark_tier.strip():
+            query["benchmark_tier"] = benchmark_tier.strip()
+
+        verdict_values: list[str] = []
+        verdict_single = kwargs.get("verdict")
+        if isinstance(verdict_single, str) and verdict_single.strip():
+            verdict_values.append(verdict_single.strip())
+        verdicts_many = kwargs.get("verdicts")
+        if isinstance(verdicts_many, list):
+            for item in verdicts_many:
+                if isinstance(item, str) and item.strip():
+                    verdict_values.append(item.strip())
+        if verdict_values:
+            deduped_verdicts = list(dict.fromkeys(verdict_values))
+            if len(deduped_verdicts) == 1:
+                query["verdict"] = deduped_verdicts[0]
+            else:
+                query["verdict"] = {"$in": deduped_verdicts}
+
+        from_utc = kwargs.get("from_utc")
+        to_utc = kwargs.get("to_utc")
+        created_range: dict[str, str] = {}
+        if isinstance(from_utc, str) and from_utc.strip():
+            created_range["$gte"] = from_utc.strip()
+        if isinstance(to_utc, str) and to_utc.strip():
+            created_range["$lte"] = to_utc.strip()
+        if created_range:
+            query["created_at_utc"] = created_range
+
+        cursor = (
+            coll.find(
+                query,
+                {
+                    "run_id": 1,
+                    "experiment_spec_id": 1,
+                    "theory_id": 1,
+                    "created_at_utc": 1,
+                    "updated_at_utc": 1,
+                    "namespace": 1,
+                    "status": 1,
+                    "verdict": 1,
+                    "benchmark_tier": 1,
+                    "target_workflow_ids": 1,
+                    "metrics": 1,
+                    "promotion_recommendation": 1,
+                    "replay_case": 1,
+                },
+            )
+            .skip(offset)
+            .limit(limit)
+        )
+        items: list[dict[str, Any]] = []
+        for doc in cursor:
+            if not isinstance(doc, dict):
+                continue
+            raw_metrics = doc.get("metrics")
+            metrics: Mapping[str, Any]
+            if isinstance(raw_metrics, Mapping):
+                metrics = raw_metrics
+            else:
+                metrics = {}
+
+            raw_promotion = doc.get("promotion_recommendation")
+            promotion: Mapping[str, Any]
+            if isinstance(raw_promotion, Mapping):
+                promotion = raw_promotion
+            else:
+                promotion = {}
+
+            raw_replay_case = doc.get("replay_case")
+            replay_case: Mapping[str, Any]
+            if isinstance(raw_replay_case, Mapping):
+                replay_case = raw_replay_case
+            else:
+                replay_case = {}
+            items.append(
+                {
+                    "collection": collection,
+                    "session_id": doc.get("run_id"),
+                    "run_id": doc.get("run_id"),
+                    "experiment_spec_id": doc.get("experiment_spec_id"),
+                    "theory_id": doc.get("theory_id"),
+                    "created_at_utc": doc.get("created_at_utc"),
+                    "updated_at_utc": doc.get("updated_at_utc"),
+                    "namespace": doc.get("namespace"),
+                    "status": doc.get("status"),
+                    "verdict": doc.get("verdict"),
+                    "benchmark_tier": doc.get("benchmark_tier"),
+                    "target_workflow_ids": doc.get("target_workflow_ids") or [],
+                    "observation_total": metrics.get("observation_total"),
+                    "replay_case_id": replay_case.get("case_id"),
+                    "promotion_recommended": promotion.get("recommended"),
+                    "item_kind": "experiment_run",
+                    "source_system": "mongo.experiment_runs",
+                    "namespace_source": ns_report.get("namespace_source"),
+                }
+            )
+
+        payload = {
+            "collection": collection,
+            **collection_report,
+            "items": items,
+            "total": coll.count_documents(query),
+            "limit": limit,
+            "offset": offset,
+            "effective_namespace": ns,
+            "effective_namespace_source": ns_report.get("namespace_source"),
+            **ns_report,
+            "success": True,
+        }
+        return _with_rag_provenance(
+            payload=payload,
+            item_kind="experiment_run_list",
+            source_system="mongo.experiment_runs",
+        )
+
     if collection == "vontology_text_relations":
         from ...services.rag_text_relation_sync_service import (
             list_text_relation_index_items,
@@ -13256,6 +13612,54 @@ def _rag_get_item(**kwargs):
             payload=payload,
             item_kind="turn_execution_record_item",
             source_system="mongo.turn_execution_records",
+        )
+
+    if collection == "experiment_runs":
+        coll = db["experiment_runs"]
+        doc = coll.find_one({"run_id": session_id, "namespace": ns})
+        if not doc:
+            return make_error_response(
+                "not_found",
+                f"Experiment run {session_id} not found",
+                details={"run_id": session_id, "namespace": ns},
+                suggestions=["Check the run_id and namespace"],
+            )
+
+        payload = {
+            "collection": collection,
+            **collection_report,
+            "session_id": doc.get("run_id"),
+            "run_id": doc.get("run_id"),
+            "experiment_spec_id": doc.get("experiment_spec_id"),
+            "theory_id": doc.get("theory_id"),
+            "created_at_utc": doc.get("created_at_utc"),
+            "updated_at_utc": doc.get("updated_at_utc"),
+            "completed_at_utc": doc.get("completed_at_utc"),
+            "namespace": doc.get("namespace"),
+            "status": doc.get("status"),
+            "verdict": doc.get("verdict"),
+            "benchmark_tier": doc.get("benchmark_tier"),
+            "target_workflow_ids": doc.get("target_workflow_ids") or [],
+            "candidate_workflow_ids": doc.get("candidate_workflow_ids") or [],
+            "turn_execution_request_ids": doc.get("turn_execution_request_ids") or [],
+            "observations": doc.get("observations") or [],
+            "metrics": doc.get("metrics") or {},
+            "verdict_summary": doc.get("verdict_summary") or {},
+            "promotion_recommendation": doc.get("promotion_recommendation") or {},
+            "learning_signal": doc.get("learning_signal") or {},
+            "replay_case": doc.get("replay_case") or {},
+            "item_kind": "experiment_run",
+            "source_system": "mongo.experiment_runs",
+            "namespace_source": ns_report.get("namespace_source"),
+            "effective_namespace": ns,
+            "effective_namespace_source": ns_report.get("namespace_source"),
+            **ns_report,
+            "success": True,
+        }
+        return _with_rag_provenance(
+            payload=payload,
+            item_kind="experiment_run_item",
+            source_system="mongo.experiment_runs",
         )
 
     if collection == "vontology_text_relations":
@@ -19987,7 +20391,7 @@ def build_default_catalogue() -> MethodCatalogue:
             ),
             output_schema=None,
             category="read",
-            description="List namespace-scoped RAG items for the selected collection (KA sessions, chat sessions, file-copy concepts, turn execution records, text relations).",
+            description="List namespace-scoped RAG items for the selected collection (KA sessions, chat sessions, file-copy concepts, turn execution records, experiment runs, text relations).",
         ),
         MethodDefinition(
             name="rag_get_item",
@@ -20035,6 +20439,331 @@ def build_default_catalogue() -> MethodCatalogue:
                 "Use for deterministic evidence triage across conversations. "
                 "Includes MCP-visible rag_indexing_state diagnostics per record."
             ),
+        ),
+        MethodDefinition(
+            name="experiment_run_list",
+            handler=_experiment_run_list,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "namespace": (str, type(None)),
+                    "limit": (int,),
+                    "offset": (int,),
+                    "experiment_spec_id": (str, type(None)),
+                    "theory_id": (str, type(None)),
+                    "workflow_id": (str, type(None)),
+                    "benchmark_tier": (str, type(None)),
+                    "verdict": (str, type(None)),
+                    "verdicts": (list,),
+                    "from_utc": (str, type(None)),
+                    "to_utc": (str, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "List experiment runs with structured filters. "
+                    "This is a convenience wrapper over rag_list_indexed(collection='experiment_runs')."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "List Testing Workflow experiment runs, including verdicts, promotion recommendations, and replay-handle summaries."
+            ),
+        ),
+        MethodDefinition(
+            name="experiment_run_get",
+            handler=_experiment_run_get,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "run_id": (str, type(None)),
+                    "session_id": (str, type(None)),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description="Get one experiment run by run_id (session_id accepted as alias).",
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Fetch a single Testing Workflow experiment run with observations, verdict summary, promotion recommendation, and retained replay case."
+            ),
+        ),
+        MethodDefinition(
+            name="testing_theory_create_slice",
+            handler=_testing_theory_create_slice,
+            input_schema=Schema(
+                required={"name": str},
+                optional={
+                    "theory_id": (str, type(None)),
+                    "namespace": (str, type(None)),
+                    "user_id": (str, type(None)),
+                    "org_id": (str, type(None)),
+                    "included_canonical_concept_ids": (list,),
+                    "included_theory_ids": (list,),
+                    "expected_observations": (list,),
+                    "promotion_policy": (dict,),
+                    "retention_policy": (dict,),
+                    "experiment_spec_id": (str, type(None)),
+                    "ttl_seconds": (int,),
+                    "description": (str, type(None)),
+                },
+                allow_unknown=True,
+                description="Create a bounded, non-authoritative testing theory slice.",
+            ),
+            output_schema=None,
+            category="write",
+            description="Create an ephemeral testing theory slice with TTL, promotion policy, and expected observations.",
+        ),
+        MethodDefinition(
+            name="testing_theory_import_canonical_context",
+            handler=_testing_theory_import_canonical_context,
+            input_schema=Schema(
+                required={"theory_id": str},
+                optional={"concept_ids": (list,), "theory_ids": (list,)},
+                allow_unknown=True,
+                description="Import canonical concepts or other theory IDs into a testing theory slice.",
+            ),
+            output_schema=None,
+            category="write",
+            description="Add canonical context or included theory references to an existing testing theory slice.",
+        ),
+        MethodDefinition(
+            name="testing_theory_assert_local_claims",
+            handler=_testing_theory_assert_local_claims,
+            input_schema=Schema(
+                required={"theory_id": str},
+                optional={"claim": (dict,), "claims": (list,)},
+                allow_unknown=True,
+                description="Assert one or more local, non-canonical claims inside a testing theory slice.",
+            ),
+            output_schema=None,
+            category="write",
+            description="Record provisional theory-local assertions without mutating canonical Vontology.",
+        ),
+        MethodDefinition(
+            name="testing_theory_compute_diff",
+            handler=_testing_theory_compute_diff,
+            input_schema=Schema(
+                required={"theory_id": str},
+                optional={},
+                allow_unknown=True,
+                description="Compute the canonical-versus-theory diff for a testing theory slice.",
+            ),
+            output_schema=None,
+            category="read",
+            description="Compare theory-local assertions against canonical state and identify promotion-ready entries.",
+        ),
+        MethodDefinition(
+            name="testing_theory_rollback_local_writes",
+            handler=_testing_theory_rollback_local_writes,
+            input_schema=Schema(
+                required={"theory_id": str},
+                optional={"assertion_ids": (list,), "clear_all": (bool,)},
+                allow_unknown=True,
+                description="Rollback selected or all proposed local assertions in a testing theory slice.",
+            ),
+            output_schema=None,
+            category="write",
+            description="Mark selected local theory assertions as rolled back without touching canonical state.",
+        ),
+        MethodDefinition(
+            name="testing_theory_promote_validated_claims",
+            handler=_testing_theory_promote_validated_claims,
+            input_schema=Schema(
+                required={"theory_id": str},
+                optional={
+                    "assertion_ids": (list,),
+                    "experiment_run_id": (str, type(None)),
+                    "required_verdict": (str, type(None)),
+                },
+                allow_unknown=True,
+                description="Promote validated theory-local assertions through the explicit testing promotion gate.",
+            ),
+            output_schema=None,
+            category="write",
+            description="Promote validated local assertions into canonical Vontology only after experiment-gated checks pass.",
+        ),
+        MethodDefinition(
+            name="testing_theory_gc_expired",
+            handler=_testing_theory_gc_expired,
+            input_schema=Schema(
+                required={},
+                optional={"now_utc": (str, type(None)), "limit": (int,)},
+                allow_unknown=True,
+                description="Expire theory slices whose TTL has elapsed and mark remaining proposed assertions as expired.",
+            ),
+            output_schema=None,
+            category="write",
+            description="Garbage-collect expired testing theory slices according to their TTL policy.",
+        ),
+        MethodDefinition(
+            name="experiment_create_spec",
+            handler=_experiment_create_spec,
+            input_schema=Schema(
+                required={"name": str},
+                optional={
+                    "experiment_spec_id": (str, type(None)),
+                    "namespace": (str, type(None)),
+                    "user_id": (str, type(None)),
+                    "org_id": (str, type(None)),
+                    "description": (str, type(None)),
+                    "target_workflow_ids": (list,),
+                    "target_capability_ids": (list,),
+                    "candidate_workflow_ids": (list,),
+                    "theory_id": (str, type(None)),
+                    "experiment_suite_id": (str, type(None)),
+                    "fixture_payload": (dict,),
+                    "theory_setup": (dict,),
+                    "expected_outcomes": (list,),
+                    "allowed_side_effects": (list,),
+                    "forbidden_side_effects": (list,),
+                    "verdict_rules": (dict,),
+                    "replay_policy": (dict,),
+                    "promotion_policy": (dict,),
+                    "metadata": (dict,),
+                },
+                allow_unknown=True,
+                description="Create or update an experiment specification for Testing Workflows.",
+            ),
+            output_schema=None,
+            category="write",
+            description="Create a first-class experiment spec with target workflows, fixtures, verdict rules, and replay policy.",
+        ),
+        MethodDefinition(
+            name="experiment_start_run",
+            handler=_experiment_start_run,
+            input_schema=Schema(
+                required={"experiment_spec_id": str},
+                optional={
+                    "run_id": (str, type(None)),
+                    "theory_id": (str, type(None)),
+                    "namespace": (str, type(None)),
+                    "user_id": (str, type(None)),
+                    "org_id": (str, type(None)),
+                    "target_workflow_ids": (list,),
+                    "candidate_workflow_ids": (list,),
+                    "benchmark_tier": (str, type(None)),
+                    "benchmark_world_id": (str, type(None)),
+                    "selection_experience_id": (str, type(None)),
+                    "turn_execution_request_ids": (list,),
+                    "metadata": (dict,),
+                },
+                allow_unknown=True,
+                description="Start a new experiment run bound to an experiment spec and optional testing theory.",
+            ),
+            output_schema=None,
+            category="write",
+            description="Create a first-class experiment_run artefact and projection for Testing Workflow evidence capture.",
+        ),
+        MethodDefinition(
+            name="experiment_record_observation",
+            handler=_experiment_record_observation,
+            input_schema=Schema(
+                required={"run_id": str},
+                optional={
+                    "observation": (dict,),
+                    "observations": (list,),
+                    "turn_execution_request_ids": (list,),
+                },
+                allow_unknown=True,
+                description="Record one or more observations against an experiment run.",
+            ),
+            output_schema=None,
+            category="write",
+            description="Append structured observations, tool evidence, and workflow evidence to an experiment run.",
+        ),
+        MethodDefinition(
+            name="experiment_compute_verdict",
+            handler=_experiment_compute_verdict,
+            input_schema=Schema(
+                required={"run_id": str},
+                optional={},
+                allow_unknown=True,
+                description="Compute the final experiment verdict from recorded observations and safety checks.",
+            ),
+            output_schema=None,
+            category="write",
+            description="Compute the final experiment verdict and promotion recommendation for an experiment run.",
+        ),
+        MethodDefinition(
+            name="experiment_emit_learning_signal",
+            handler=_experiment_emit_learning_signal,
+            input_schema=Schema(
+                required={"run_id": str},
+                optional={
+                    "selection_experience_id": (str, type(None)),
+                    "turn_text": (str, type(None)),
+                    "expected_workflow_id": (str, type(None)),
+                    "baseline_workflow_id": (str, type(None)),
+                },
+                allow_unknown=True,
+                description="Emit a learning-compatible replay signal from an experiment run.",
+            ),
+            output_schema=None,
+            category="write",
+            description="Persist replay-case data from an experiment run and feed compatible learning-loop signals into workflow selection experience.",
+        ),
+        MethodDefinition(
+            name="experiment_execute_target_workflow",
+            handler=_experiment_execute_target_workflow,
+            input_schema=Schema(
+                required={"workflow_id": str},
+                optional={
+                    "workflow_inputs": (dict,),
+                    "namespace": (str, type(None)),
+                    "user_id": (str, type(None)),
+                    "org_id": (str, type(None)),
+                    "max_retries": (int,),
+                },
+                allow_unknown=True,
+                description="Launch a target workflow as part of a testing experiment.",
+            ),
+            output_schema=None,
+            category="write",
+            description="Launch a target workflow in durable mode so Testing Workflows can bind execution evidence to experiment runs.",
+        ),
+        MethodDefinition(
+            name="experiment_execute_regression_suite",
+            handler=_experiment_execute_regression_suite,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "execution_tier": (str, type(None)),
+                    "run_id": (str, type(None)),
+                    "cases": (list,),
+                    "benchmark_scenario": (dict,),
+                    "output_root": (str, type(None)),
+                },
+                allow_unknown=True,
+                description="Execute a synthetic regression suite in Tier 1 or escalate to the Tier 2 benchmark harness. When run_id is provided, record the suite result as experiment-run evidence.",
+            ),
+            output_schema=None,
+            category="write",
+            description="Run a synthetic workflow-regression suite, including Tier 2 benchmark escalation when requested.",
+        ),
+        MethodDefinition(
+            name="testing_prepare_meeting_invitation_spec",
+            handler=_testing_prepare_meeting_invitation_spec,
+            input_schema=Schema(
+                required={"invitation_text": str},
+                optional={
+                    "experiment_spec_id": (str, type(None)),
+                    "name": (str, type(None)),
+                    "namespace": (str, type(None)),
+                    "user_id": (str, type(None)),
+                    "org_id": (str, type(None)),
+                    "candidate_workflow_ids": (list,),
+                    "expected_meeting_type": (str, type(None)),
+                    "expected_structure_fields": (list,),
+                    "expected_downstream_actions": (list,),
+                },
+                allow_unknown=True,
+                description="Create a meeting-invitation-focused experiment spec and suggested theory-slice inputs.",
+            ),
+            output_schema=None,
+            category="write",
+            description="Prepare the first concrete Testing Workflow scenario for meeting-invitation derivation and validation.",
         ),
         MethodDefinition(
             name="turn_execution_get",

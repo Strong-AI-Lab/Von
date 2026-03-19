@@ -43,6 +43,18 @@ def get_event_workflow_integration_enabled(*, default: bool = True) -> bool:
     return _read_env_flag("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", default=default)
 
 
+def get_workflow_discovery_cache_invalidation_enabled(
+    *,
+    default: bool = True,
+) -> bool:
+    """Return whether mutation paths should invalidate workflow discovery caches."""
+
+    return _read_env_flag(
+        "VON_WORKFLOW_DISCOVERY_CACHE_INVALIDATION_ENABLE",
+        default=default,
+    )
+
+
 def get_display_elements_screen_fence_compat_enabled(*, default: bool = True) -> bool:
     """Return whether legacy screen-fence backfill compatibility remains enabled.
 

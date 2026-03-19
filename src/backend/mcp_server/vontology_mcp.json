@@ -343,6 +343,461 @@
             }
         },
         {
+            "name": "experiment_compute_verdict",
+            "description": "Compute the final experiment verdict and promotion recommendation for an experiment run.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "run_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "run_id"
+                ],
+                "additionalProperties": true,
+                "description": "Compute the final experiment verdict from recorded observations and safety checks."
+            }
+        },
+        {
+            "name": "experiment_create_spec",
+            "description": "Create a first-class experiment spec with target workflows, fixtures, verdict rules, and replay policy.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string"
+                    },
+                    "experiment_spec_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "user_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "org_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "description": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "target_workflow_ids": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "target_capability_ids": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "candidate_workflow_ids": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "theory_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "experiment_suite_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "fixture_payload": {
+                        "type": "object",
+                        "additionalProperties": true
+                    },
+                    "theory_setup": {
+                        "type": "object",
+                        "additionalProperties": true
+                    },
+                    "expected_outcomes": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "allowed_side_effects": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "forbidden_side_effects": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "verdict_rules": {
+                        "type": "object",
+                        "additionalProperties": true
+                    },
+                    "replay_policy": {
+                        "type": "object",
+                        "additionalProperties": true
+                    },
+                    "promotion_policy": {
+                        "type": "object",
+                        "additionalProperties": true
+                    },
+                    "metadata": {
+                        "type": "object",
+                        "additionalProperties": true
+                    }
+                },
+                "required": [
+                    "name"
+                ],
+                "additionalProperties": true,
+                "description": "Create or update an experiment specification for Testing Workflows."
+            }
+        },
+        {
+            "name": "experiment_emit_learning_signal",
+            "description": "Persist replay-case data from an experiment run and feed compatible learning-loop signals into workflow selection experience.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "run_id": {
+                        "type": "string"
+                    },
+                    "selection_experience_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "turn_text": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "expected_workflow_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "baseline_workflow_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "run_id"
+                ],
+                "additionalProperties": true,
+                "description": "Emit a learning-compatible replay signal from an experiment run."
+            }
+        },
+        {
+            "name": "experiment_execute_regression_suite",
+            "description": "Run a synthetic workflow-regression suite, including Tier 2 benchmark escalation when requested.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "execution_tier": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "run_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "cases": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "benchmark_scenario": {
+                        "type": "object",
+                        "additionalProperties": true
+                    },
+                    "output_root": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Execute a synthetic regression suite in Tier 1 or escalate to the Tier 2 benchmark harness. When run_id is provided, record the suite result as experiment-run evidence."
+            }
+        },
+        {
+            "name": "experiment_execute_target_workflow",
+            "description": "Launch a target workflow in durable mode so Testing Workflows can bind execution evidence to experiment runs.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workflow_id": {
+                        "type": "string"
+                    },
+                    "workflow_inputs": {
+                        "type": "object",
+                        "additionalProperties": true
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "user_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "org_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "max_retries": {
+                        "type": "integer"
+                    }
+                },
+                "required": [
+                    "workflow_id"
+                ],
+                "additionalProperties": true,
+                "description": "Launch a target workflow as part of a testing experiment."
+            }
+        },
+        {
+            "name": "experiment_record_observation",
+            "description": "Append structured observations, tool evidence, and workflow evidence to an experiment run.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "run_id": {
+                        "type": "string"
+                    },
+                    "observation": {
+                        "type": "object",
+                        "additionalProperties": true
+                    },
+                    "observations": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "turn_execution_request_ids": {
+                        "type": "array",
+                        "items": {}
+                    }
+                },
+                "required": [
+                    "run_id"
+                ],
+                "additionalProperties": true,
+                "description": "Record one or more observations against an experiment run."
+            }
+        },
+        {
+            "name": "experiment_run_get",
+            "description": "Fetch a single Testing Workflow experiment run with observations, verdict summary, promotion recommendation, and retained replay case.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "run_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "session_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Get one experiment run by run_id (session_id accepted as alias)."
+            }
+        },
+        {
+            "name": "experiment_run_list",
+            "description": "List Testing Workflow experiment runs, including verdicts, promotion recommendations, and replay-handle summaries.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "limit": {
+                        "type": "integer"
+                    },
+                    "offset": {
+                        "type": "integer"
+                    },
+                    "experiment_spec_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "theory_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "workflow_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "benchmark_tier": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "verdict": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "verdicts": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "from_utc": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "to_utc": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "List experiment runs with structured filters. This is a convenience wrapper over rag_list_indexed(collection='experiment_runs')."
+            }
+        },
+        {
+            "name": "experiment_start_run",
+            "description": "Create a first-class experiment_run artefact and projection for Testing Workflow evidence capture.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "experiment_spec_id": {
+                        "type": "string"
+                    },
+                    "run_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "theory_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "user_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "org_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "target_workflow_ids": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "candidate_workflow_ids": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "benchmark_tier": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "benchmark_world_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "selection_experience_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "turn_execution_request_ids": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "metadata": {
+                        "type": "object",
+                        "additionalProperties": true
+                    }
+                },
+                "required": [
+                    "experiment_spec_id"
+                ],
+                "additionalProperties": true,
+                "description": "Start a new experiment run bound to an experiment spec and optional testing theory."
+            }
+        },
+        {
             "name": "extract_annotations",
             "description": "Find concept mentions in text and suggest ontology links. Use when user provides text/document and wants to identify which ontology concepts appear in it. Returns concept matches with context. Not for general concept search.",
             "inputSchema": {
@@ -1906,6 +2361,292 @@
                 ],
                 "additionalProperties": true,
                 "description": "search_web input: query (str, required), max_results (int, default 10), search_depth (str, 'basic'|'advanced', default 'basic'), include_domains (list of str, domain whitelist), exclude_domains (list of str, domain blacklist), include_answer (bool, AI-generated answer), include_raw_content (bool, full page content), include_images (bool, image URLs)"
+            }
+        },
+        {
+            "name": "testing_prepare_meeting_invitation_spec",
+            "description": "Prepare the first concrete Testing Workflow scenario for meeting-invitation derivation and validation.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "invitation_text": {
+                        "type": "string"
+                    },
+                    "experiment_spec_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "name": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "user_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "org_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "candidate_workflow_ids": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "expected_meeting_type": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "expected_structure_fields": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "expected_downstream_actions": {
+                        "type": "array",
+                        "items": {}
+                    }
+                },
+                "required": [
+                    "invitation_text"
+                ],
+                "additionalProperties": true,
+                "description": "Create a meeting-invitation-focused experiment spec and suggested theory-slice inputs."
+            }
+        },
+        {
+            "name": "testing_theory_assert_local_claims",
+            "description": "Record provisional theory-local assertions without mutating canonical Vontology.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "theory_id": {
+                        "type": "string"
+                    },
+                    "claim": {
+                        "type": "object",
+                        "additionalProperties": true
+                    },
+                    "claims": {
+                        "type": "array",
+                        "items": {}
+                    }
+                },
+                "required": [
+                    "theory_id"
+                ],
+                "additionalProperties": true,
+                "description": "Assert one or more local, non-canonical claims inside a testing theory slice."
+            }
+        },
+        {
+            "name": "testing_theory_compute_diff",
+            "description": "Compare theory-local assertions against canonical state and identify promotion-ready entries.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "theory_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "theory_id"
+                ],
+                "additionalProperties": true,
+                "description": "Compute the canonical-versus-theory diff for a testing theory slice."
+            }
+        },
+        {
+            "name": "testing_theory_create_slice",
+            "description": "Create an ephemeral testing theory slice with TTL, promotion policy, and expected observations.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string"
+                    },
+                    "theory_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "user_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "org_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "included_canonical_concept_ids": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "included_theory_ids": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "expected_observations": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "promotion_policy": {
+                        "type": "object",
+                        "additionalProperties": true
+                    },
+                    "retention_policy": {
+                        "type": "object",
+                        "additionalProperties": true
+                    },
+                    "experiment_spec_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "ttl_seconds": {
+                        "type": "integer"
+                    },
+                    "description": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "name"
+                ],
+                "additionalProperties": true,
+                "description": "Create a bounded, non-authoritative testing theory slice."
+            }
+        },
+        {
+            "name": "testing_theory_gc_expired",
+            "description": "Garbage-collect expired testing theory slices according to their TTL policy.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "now_utc": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "limit": {
+                        "type": "integer"
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Expire theory slices whose TTL has elapsed and mark remaining proposed assertions as expired."
+            }
+        },
+        {
+            "name": "testing_theory_import_canonical_context",
+            "description": "Add canonical context or included theory references to an existing testing theory slice.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "theory_id": {
+                        "type": "string"
+                    },
+                    "concept_ids": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "theory_ids": {
+                        "type": "array",
+                        "items": {}
+                    }
+                },
+                "required": [
+                    "theory_id"
+                ],
+                "additionalProperties": true,
+                "description": "Import canonical concepts or other theory IDs into a testing theory slice."
+            }
+        },
+        {
+            "name": "testing_theory_promote_validated_claims",
+            "description": "Promote validated local assertions into canonical Vontology only after experiment-gated checks pass.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "theory_id": {
+                        "type": "string"
+                    },
+                    "assertion_ids": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "experiment_run_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "required_verdict": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "theory_id"
+                ],
+                "additionalProperties": true,
+                "description": "Promote validated theory-local assertions through the explicit testing promotion gate."
+            }
+        },
+        {
+            "name": "testing_theory_rollback_local_writes",
+            "description": "Mark selected local theory assertions as rolled back without touching canonical state.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "theory_id": {
+                        "type": "string"
+                    },
+                    "assertion_ids": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "clear_all": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [
+                    "theory_id"
+                ],
+                "additionalProperties": true,
+                "description": "Rollback selected or all proposed local assertions in a testing theory slice."
             }
         },
         {

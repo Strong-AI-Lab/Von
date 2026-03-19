@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -591,7 +592,9 @@ def test_workflow_list_definitions_exists_and_returns_data():
     first_definition = result["definitions"][0]
     identity = first_definition.get("definition_identity") or {}
     assert identity.get("schema_version") == "workflow_definition_identity.v1"
-    assert identity.get("definition_hash")
+    assert identity.get("definition_hash") or identity.get("build_state") == (
+        "pending_lazy_definition"
+    )
 
     parity_inventory = result["parity_inventory"]
     assert isinstance(parity_inventory, dict)
@@ -646,6 +649,160 @@ def test_workflow_list_definitions_skips_bootstrap_writes():
         result = handler(limit=10)
 
     assert result.get("success") is True
+
+
+def test_workflow_list_definitions_requests_pending_inventory_when_snapshot_absent(
+    monkeypatch,
+):
+    class _Registry:
+        def __init__(self) -> None:
+            self._definition = SimpleNamespace(
+                initial_state="start",
+                purpose="Testing workflow",
+                metadata={},
+            )
+            self._registration = SimpleNamespace(
+                definition=self._definition,
+                source="vontology",
+                purpose="Testing workflow",
+            )
+
+        def all_workflow_ids(self) -> list[str]:
+            return ["#V#meeting_invitation_testing_workflow"]
+
+        def peek_registration(self, workflow_id: str):
+            if workflow_id == "#V#meeting_invitation_testing_workflow":
+                return self._registration
+            return None
+
+        def get_registration_source(self, workflow_id: str, *, resolve_lazy: bool = False):
+            if workflow_id == "#V#meeting_invitation_testing_workflow":
+                return "vontology"
+            return None
+
+    handler = build_default_catalogue().get("workflow_list_definitions").handler
+    calls: dict[str, Any] = {}
+
+    def _build_registry(**kwargs):
+        calls["registry_kwargs"] = dict(kwargs)
+        return _Registry()
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.registry_factory.build_durable_workflow_registry_read_only",
+        _build_registry,
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.registry_factory.get_or_build_workflow_registry_inventory_snapshot",
+        lambda **kwargs: calls.update(kwargs)
+        or {
+            "build_state": "pending_background_build",
+            "counts": {},
+            "summary_text": "pending",
+            "diagnostics": {"reason_codes": ["inventory_pending_background_build"]},
+            "parity_policy": {"mode": "fail", "drift_detected": False},
+            "workflow_purity": {"counters": {}, "baseline": {}},
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.workflow_listing_service.build_workflow_listing_entry",
+        lambda **_kwargs: {
+            "workflow_id": "#V#meeting_invitation_testing_workflow",
+            "description": "Testing workflow",
+            "description_source": "registration",
+            "initial_state": "start",
+            "source": "vontology",
+            "background_launch_policy": None,
+            "background_launch_policy_source": "none",
+            "definition_identity": {
+                "schema_version": "workflow_definition_identity.v1",
+                "definition_hash": "pending-hash",
+            },
+            "definition_loaded": False,
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.workflow_baseline_telemetry.get_workflow_baseline_telemetry_snapshot",
+        lambda: {},
+    )
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.catalogue.build_default_catalogue",
+        lambda: SimpleNamespace(list_methods=lambda: []),
+    )
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.catalogue.build_workflow_surface_capability_matrix",
+        lambda *, internal_method_names: {"surfaces": {}},
+    )
+
+    result = handler(limit=10)
+
+    assert result.get("success") is True
+    assert calls["registry_kwargs"]["defer_parity_work"] is True
+    assert calls["allow_sync_build"] is False
+    assert result["parity_inventory"]["build_state"] == "pending_background_build"
+
+
+def test_workflow_list_definitions_does_not_resolve_lazy_definitions_for_summary(
+    monkeypatch,
+):
+    class _LazyRegistration:
+        purpose = "Lazy workflow"
+        source = "vontology"
+
+    class _Registry:
+        def all_workflow_ids(self) -> list[str]:
+            return ["#V#meeting_invitation_testing_workflow"]
+
+        def peek_registration(self, workflow_id: str):
+            if workflow_id == "#V#meeting_invitation_testing_workflow":
+                return _LazyRegistration()
+            return None
+
+        def get_registration(self, workflow_id: str):
+            raise AssertionError("lazy definition resolution should not be required")
+
+        def get(self, workflow_id: str):
+            raise AssertionError("workflow definition should not be loaded")
+
+        def get_registration_source(self, workflow_id: str, *, resolve_lazy: bool = False):
+            if workflow_id == "#V#meeting_invitation_testing_workflow":
+                return "vontology"
+            return None
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.registry_factory.build_durable_workflow_registry_read_only",
+        lambda **_kwargs: _Registry(),
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.registry_factory.get_or_build_workflow_registry_inventory_snapshot",
+        lambda **_kwargs: {"build_state": "pending_background_build"},
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.vontology_loader.resolve_workflow_description",
+        lambda *_args, **_kwargs: ("Lazy workflow", "registration"),
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.vontology_loader.resolve_workflow_initial_step",
+        lambda _workflow_id: "#V#start",
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.vontology_loader.resolve_workflow_background_launch_policy",
+        lambda _workflow_id: (None, "none"),
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.workflow_baseline_telemetry.get_workflow_baseline_telemetry_snapshot",
+        lambda: {"workflow_discovery_executable_hit_ratio": 1.0},
+    )
+
+    handler = build_default_catalogue().get("workflow_list_definitions").handler
+    result = handler(limit=10)
+
+    assert result.get("success") is True
+    definition = result["definitions"][0]
+    assert definition["definition_loaded"] is False
+    identity = definition["definition_identity"]
+    assert identity["build_state"] == "pending_lazy_definition"
+    assert identity["reason_code"] == "lazy_definition_not_loaded"
+    assert identity["definition_hash"] is None
 
 
 def test_workflow_list_instances_gateway_invoke_error_path():

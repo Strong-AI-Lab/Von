@@ -430,3 +430,38 @@ def test_runtime_registry_bootstrap_excludes_representation_publication_reports(
     assert file_copy.get("enabled") is False
     assert file_copy.get("reason") == "runtime_bootstrap_removed"
     assert "#V#file_copy_upload_handler_workflow" in file_copy.get("workflow_ids", [])
+
+
+def test_get_or_build_inventory_snapshot_returns_pending_when_sync_build_disabled(
+    monkeypatch,
+):
+    registry = WorkflowRegistry()
+    registry.register(
+        _build_registration(
+            "#V#meeting_invitation_testing_workflow",
+            source="vontology",
+            purpose="Meeting invitation testing workflow",
+        )
+    )
+    monkeypatch.setattr(registry_factory, "_last_inventory_snapshot", None)
+    monkeypatch.setattr(
+        registry_factory,
+        "build_workflow_concept_authority_report",
+        lambda registry: (_ for _ in ()).throw(
+            AssertionError("allow_sync_build=False should not trigger authority scans")
+        ),
+    )
+
+    snapshot = registry_factory.get_or_build_workflow_registry_inventory_snapshot(
+        registry=registry,
+        allow_sync_build=False,
+    )
+
+    assert snapshot["build_state"] == "pending_background_build"
+    assert snapshot["registry_workflow_ids"] == ["#V#meeting_invitation_testing_workflow"]
+    assert snapshot["vontology_discovered_workflow_ids"] == [
+        "#V#meeting_invitation_testing_workflow"
+    ]
+    assert snapshot["diagnostics"]["reason_codes"] == [
+        "inventory_pending_background_build"
+    ]

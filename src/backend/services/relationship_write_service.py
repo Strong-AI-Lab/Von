@@ -26,6 +26,7 @@ from ..db.repositories.concepts_repository import (
     ConceptsRepository,
     RELATIONSHIP_KINDS,
 )
+from .feature_flags import get_event_workflow_integration_enabled
 from ..vontology.utils_vontology import is_predicate, is_type, is_pure_instance
 from ..vontology.code_concepts_registry import (
     build_virtual_concept_doc,
@@ -101,6 +102,9 @@ def _emit_relationship_mutation_event(
     is_structural: bool,
 ) -> None:
     """Best-effort workflow event emission for relationship mutations."""
+
+    if not get_event_workflow_integration_enabled(default=True):
+        return
 
     try:
         from .workflow_event_integration_service import (

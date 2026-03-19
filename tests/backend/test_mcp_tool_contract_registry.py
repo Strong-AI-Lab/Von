@@ -102,7 +102,7 @@ def test_jira_family_surface_is_sourced_from_canonical_registry() -> None:
         assert registry[name].internal_method_name == name
 
 
-def test_turn_execution_tools_are_exposed_on_vontology_stdio_surface() -> None:
+def test_testing_and_turn_execution_tools_are_exposed_on_vontology_stdio_surface() -> None:
     payloads = get_surface_tool_payloads(SURFACE_VONTOLOGY_STDIO)
     names = {item["name"] for item in payloads}
 
@@ -113,6 +113,23 @@ def test_turn_execution_tools_are_exposed_on_vontology_stdio_surface() -> None:
         "turn_execution_build_benchmark",
         "turn_execution_backfill_from_chat_history",
         "turn_execution_namespace_coverage_report",
+        "testing_theory_create_slice",
+        "testing_theory_import_canonical_context",
+        "testing_theory_assert_local_claims",
+        "testing_theory_compute_diff",
+        "testing_theory_rollback_local_writes",
+        "testing_theory_promote_validated_claims",
+        "testing_theory_gc_expired",
+        "experiment_create_spec",
+        "experiment_start_run",
+        "experiment_record_observation",
+        "experiment_compute_verdict",
+        "experiment_emit_learning_signal",
+        "experiment_execute_target_workflow",
+        "experiment_execute_regression_suite",
+        "experiment_run_list",
+        "experiment_run_get",
+        "testing_prepare_meeting_invitation_spec",
     }
     assert expected.issubset(names)
     for tool_name in expected:

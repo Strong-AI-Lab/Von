@@ -45,13 +45,12 @@ from ...workflows.durable.workflow_instance_submission_service import (
 )
 from ...workflows.vontology_loader import (
     build_workflow_process_graph,
-    resolve_workflow_description,
     resolve_workflow_narrative_text,
 )
 from ...workflows.workflow_definition_identity_service import (
-    build_workflow_definition_identity,
     build_workflow_definition_identity_from_graph,
 )
+from ...workflows.workflow_listing_service import build_workflow_listing_entry
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +67,8 @@ _WORKFLOW_DEFINITIONS_REFRESH_LOCKS: Dict[
 _WORKFLOW_DEFINITIONS_CACHE_MAX_ENTRIES = 32
 _WORKFLOW_DEFINITIONS_CACHE_TTL_SECONDS_DEFAULT = 8.0
 _WORKFLOW_DEFINITIONS_REFRESH_RETRY_AFTER_SECONDS_DEFAULT = 1.0
+_WORKFLOW_DEFINITIONS_EXECUTABILITY_PENDING_REASON = "inspection_summary_pending"
+_WORKFLOW_DEFINITIONS_EXECUTABILITY_PENDING_DETAIL = "lazy_definition_not_loaded"
 
 
 def _is_transient_workflow_instances_error(exc: Exception) -> bool:
@@ -264,9 +265,10 @@ def _build_workflow_definitions_payload(
     )
 
     # Read-only build avoids concept bootstrap writes on list/introspection paths.
-    registry = build_durable_workflow_registry_read_only()
+    registry = build_durable_workflow_registry_read_only(defer_parity_work=True)
     inventory_snapshot = get_or_build_workflow_registry_inventory_snapshot(
-        registry=registry
+        registry=registry,
+        allow_sync_build=False,
     )
     if not isinstance(inventory_snapshot, dict):
         inventory_snapshot = {}
@@ -282,40 +284,10 @@ def _build_workflow_definitions_payload(
 
     items: List[Dict[str, Any]] = []
     for workflow_id in selected_ids:
-        registration = registry.get_registration(workflow_id)
-        definition = (
-            registration.definition if registration is not None else registry.get(workflow_id)
-        )
-
-        registration_purpose = registration.purpose if registration is not None else None
-        definition_purpose = (
-            getattr(definition, "purpose", "") if definition is not None else None
-        )
-        description, description_source = resolve_workflow_description(
-            workflow_id,
-            workflow_source=(registration.source if registration is not None else None),
-            registration_purpose=registration_purpose,
-            definition_purpose=definition_purpose,
-        )
-        source = "unknown"
-        if registration is not None:
-            if isinstance(registration.source, str) and registration.source.strip():
-                source = registration.source.strip()
-        definition_identity = build_workflow_definition_identity(
+        listing_entry = build_workflow_listing_entry(
+            registry=registry,
             workflow_id=workflow_id,
-            source=source,
-            definition=definition,
-            authoritative_definition=(
-                definition if source.lower() == "vontology" and definition is not None else None
-            ),
         )
-
-        initial_state = ""
-        if definition is not None:
-            state_value = getattr(definition, "initial_state", "")
-            if isinstance(state_value, str):
-                initial_state = state_value
-
         usage = (
             usage_aggregate_map.get(workflow_id, {})
             if isinstance(usage_aggregate_map, dict)
@@ -325,28 +297,28 @@ def _build_workflow_definitions_payload(
         completions = usage.get("completions")
         completion_rate = usage.get("completion_rate")
 
-        try:
-            is_executable, executability_reason, executability_detail = (
-                classify_workflow_concept_executability(workflow_id)
-            )
-        except Exception as exc:
-            logger.warning(
-                "Workflow executability classification failed for %s: %s",
-                workflow_id,
-                exc,
-            )
+        if not bool(listing_entry.get("definition_loaded")):
             is_executable = False
-            executability_reason = "classification_error"
-            executability_detail = f"classification_error:{type(exc).__name__}"
+            executability_reason = _WORKFLOW_DEFINITIONS_EXECUTABILITY_PENDING_REASON
+            executability_detail = _WORKFLOW_DEFINITIONS_EXECUTABILITY_PENDING_DETAIL
+        else:
+            try:
+                is_executable, executability_reason, executability_detail = (
+                    classify_workflow_concept_executability(workflow_id)
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Workflow executability classification failed for %s: %s",
+                    workflow_id,
+                    exc,
+                )
+                is_executable = False
+                executability_reason = "classification_error"
+                executability_detail = f"classification_error:{type(exc).__name__}"
 
         items.append(
             {
-                "workflow_id": workflow_id,
-                "description": description,
-                "description_source": description_source,
-                "initial_state": initial_state,
-                "source": source,
-                "definition_identity": definition_identity,
+                **listing_entry,
                 "attempts": int(attempts) if isinstance(attempts, (int, float)) else 0,
                 "completions": (
                     int(completions) if isinstance(completions, (int, float)) else 0

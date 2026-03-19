@@ -24,57 +24,6 @@ from .. import WorkflowRegistry
 from ..workflow_registry import LazyWorkflowRegistration
 from ..action_registry import ActionRegistry, WorkflowActionResult
 from ..mcp_tool_bridge import workflow_action_result_from_mcp_payload
-from .rag_sync_workflow import (
-    register_rag_sync_actions,
-)
-from .enrichment_workflow import (
-    register_enrichment_actions,
-)
-from .rumination_workflow import (
-    register_rumination_actions,
-)
-from .planning_workflow import (
-    register_planning_actions,
-)
-from .workflow_introspection_maintenance_workflow import (
-    register_workflow_introspection_maintenance_actions,
-)
-from .file_copy_interpretation_workflow import (
-    register_file_copy_interpretation_actions,
-)
-from .file_copy_typing_workflow import (
-    register_file_copy_typing_actions,
-)
-from .file_copy_upload_classification_workflow import (
-    register_file_copy_upload_classification_actions,
-)
-from .file_copy_upload_handler_workflow import (
-    register_file_copy_upload_handler_actions,
-)
-from .entity_identity_resolution_workflow import (
-    register_entity_identity_resolution_actions,
-)
-from .jira_task_incremental_import_workflow import (
-    register_jira_task_incremental_import_actions,
-)
-from .jira_task_full_reconciliation_workflow import (
-    register_jira_task_full_reconciliation_actions,
-)
-from .parent_specificity_concept_dossier_workflow import (
-    register_parent_specificity_concept_dossier_actions,
-)
-from .parent_specificity_rumination_workflow import (
-    register_parent_specificity_rumination_actions,
-)
-from .paper_representation_workflow import register_paper_representation_actions
-from .talk_representation_workflow import register_talk_representation_actions
-from .workflow_gap_recovery_workflow import (
-    register_workflow_gap_recovery_actions,
-)
-from ..skill_interop import register_skill_interop_actions
-from .subworkflow_actions import register_subworkflow_actions
-from .control_flow_actions import register_control_flow_actions
-from .workflow_creation_workflow import register_workflow_creation_actions
 from ..vontology_loader import (
     build_workflow_process_graph,
     discover_workflow_ids,
@@ -517,20 +466,104 @@ def _infer_vontology_workflow_ids_from_registry(
 
     for workflow_id in all_workflow_ids:
         try:
-            registration = registry.get_registration(workflow_id)
+            source_value = registry.get_registration_source(
+                workflow_id,
+                resolve_lazy=False,
+            )
         except Exception:
-            registration = None
-        source = str(getattr(registration, "source", "") or "").strip().lower()
+            source_value = None
+        source = str(source_value or "").strip().lower()
         if source == "vontology":
             workflow_ids.add(workflow_id)
 
     return sorted(workflow_ids)
 
 
+def _build_pending_workflow_inventory_snapshot(
+    *,
+    registry: WorkflowRegistry,
+    discovered_workflow_ids: List[str] | None = None,
+) -> Dict[str, Any]:
+    """Return a lightweight placeholder until background parity work finishes.
+
+    Operator-facing read surfaces should stay responsive even when the full
+    parity snapshot has not been published yet. This payload preserves the
+    stable shape expected by clients while making the deferred-build state
+    explicit instead of performing an expensive synchronous graph scan.
+    """
+
+    registry_ids = sorted(set(registry.all_workflow_ids()))
+    discovered_ids = (
+        sorted(
+            {
+                wid
+                for wid in (discovered_workflow_ids or [])
+                if isinstance(wid, str) and wid.strip()
+            }
+        )
+        or _infer_vontology_workflow_ids_from_registry(registry)
+    )
+    summary_lines = [
+        "Workflow parity inventory pending background build.",
+        f"Registry workflows available now: {len(registry_ids)}.",
+        f"Discovered Vontology workflow IDs: {len(discovered_ids)}.",
+    ]
+    return {
+        "generated_at_utc": _utc_now_iso(),
+        "build_state": "pending_background_build",
+        "counts": {
+            "registry": len(registry_ids),
+            "vontology_discovered": len(discovered_ids),
+            "overlap": 0,
+            "registry_only": 0,
+            "vontology_only": 0,
+            "graph_complete": 0,
+            "identity_only": 0,
+            "authority_missing_concepts": 0,
+            "authority_missing_required_type": 0,
+        },
+        "registry_workflow_ids": registry_ids,
+        "vontology_discovered_workflow_ids": discovered_ids,
+        "overlap_workflow_ids": [],
+        "registry_only_workflow_ids": [],
+        "vontology_only_workflow_ids": [],
+        "representation": {
+            "graph_complete_workflow_ids": [],
+            "identity_only_workflow_ids": [],
+            "graph_warnings_by_workflow_id": {},
+        },
+        "registry_sources": {"counts": {}, "source_by_workflow_id": {}},
+        "workflow_authority": {
+            "build_state": "pending_background_build",
+            "drift_detected": False,
+            "counts": {"missing_concepts": 0, "missing_required_type": 0},
+        },
+        "workflow_purity": {
+            "build_state": "pending_background_build",
+            "counters": {},
+            "baseline": {},
+        },
+        "summary_lines": summary_lines,
+        "summary_text": "\n".join(summary_lines),
+        "diagnostics": {
+            "drift_detected": False,
+            "severity": "pending",
+            "reason_codes": ["inventory_pending_background_build"],
+        },
+        "parity_policy": {
+            "mode": os.getenv("VON_WORKFLOW_PARITY_ENFORCEMENT", "fail")
+            .strip()
+            .lower(),
+            "drift_detected": False,
+        },
+    }
+
+
 def get_or_build_workflow_registry_inventory_snapshot(
     *,
     registry: WorkflowRegistry | None = None,
     discovered_workflow_ids: List[str] | None = None,
+    allow_sync_build: bool = True,
 ) -> Dict[str, Any]:
     """Return the latest inventory snapshot or build one synchronously.
 
@@ -545,6 +578,11 @@ def get_or_build_workflow_registry_inventory_snapshot(
         return snapshot
     if registry is None:
         return snapshot
+    if not allow_sync_build:
+        return _build_pending_workflow_inventory_snapshot(
+            registry=registry,
+            discovered_workflow_ids=discovered_workflow_ids,
+        )
 
     inferred_workflow_ids = (
         list(discovered_workflow_ids)
@@ -605,7 +643,11 @@ def build_workflow_purity_registry_snapshot() -> WorkflowRegistry:
 # ---------------------------------------------------------------------------
 
 
-def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
+def _build_workflow_registry(
+    *,
+    allow_bootstrap: bool,
+    force_background_deferred_work: bool = False,
+) -> WorkflowRegistry:
     """Build the unified workflow registry.
 
     Args:
@@ -618,19 +660,6 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
         definition_loader=load_workflow_definition_from_vontology,
     )
     requested_bootstrap = bool(allow_bootstrap)
-    expected_authoritative_file_copy_report = _build_expected_authoritative_workflow_report(
-        workflow_ids=_EXPECTED_AUTHORITATIVE_FILE_COPY_WORKFLOW_IDS,
-    )
-    expected_authoritative_reasoning_recovery_report = (
-        _build_expected_authoritative_workflow_report(
-            workflow_ids=_EXPECTED_AUTHORITATIVE_REASONING_RECOVERY_WORKFLOW_IDS,
-        )
-    )
-    expected_authoritative_support_maintenance_report = (
-        _build_expected_authoritative_workflow_report(
-            workflow_ids=_EXPECTED_AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS,
-        )
-    )
 
     _register_python_defined_workflows(registry)
 
@@ -703,14 +732,17 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
     _launch_deferred_registry_work(
         registry=registry,
         discovered_workflow_ids=discovered_workflow_ids,
-        expected_authoritative_file_copy_report=expected_authoritative_file_copy_report,
-        expected_authoritative_reasoning_recovery_report=(
-            expected_authoritative_reasoning_recovery_report
+        expected_authoritative_file_copy_workflow_ids=(
+            _EXPECTED_AUTHORITATIVE_FILE_COPY_WORKFLOW_IDS
         ),
-        expected_authoritative_support_maintenance_report=(
-            expected_authoritative_support_maintenance_report
+        expected_authoritative_reasoning_recovery_workflow_ids=(
+            _EXPECTED_AUTHORITATIVE_REASONING_RECOVERY_WORKFLOW_IDS
+        ),
+        expected_authoritative_support_maintenance_workflow_ids=(
+            _EXPECTED_AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS
         ),
         requested_bootstrap=requested_bootstrap,
+        force_background=force_background_deferred_work,
     )
 
     return registry
@@ -720,10 +752,11 @@ def _launch_deferred_registry_work(
     *,
     registry: WorkflowRegistry,
     discovered_workflow_ids: List[str],
-    expected_authoritative_file_copy_report: Dict[str, Any],
-    expected_authoritative_reasoning_recovery_report: Dict[str, Any],
-    expected_authoritative_support_maintenance_report: Dict[str, Any],
+    expected_authoritative_file_copy_workflow_ids: tuple[str, ...],
+    expected_authoritative_reasoning_recovery_workflow_ids: tuple[str, ...],
+    expected_authoritative_support_maintenance_workflow_ids: tuple[str, ...],
     requested_bootstrap: bool,
+    force_background: bool = False,
 ) -> None:
     """Launch background thread for parity inventory and capability indexing.
 
@@ -750,8 +783,28 @@ def _launch_deferred_registry_work(
                 "created_workflow_ids": [],
                 "updated_workflow_ids": [],
                 "unchanged_workflow_ids": [],
-                "errors_by_workflow_id": {},
+                    "errors_by_workflow_id": {},
             }
+
+            expected_authoritative_file_copy_report = (
+                _build_expected_authoritative_workflow_report(
+                    workflow_ids=expected_authoritative_file_copy_workflow_ids,
+                )
+            )
+            expected_authoritative_reasoning_recovery_report = (
+                _build_expected_authoritative_workflow_report(
+                    workflow_ids=(
+                        expected_authoritative_reasoning_recovery_workflow_ids
+                    ),
+                )
+            )
+            expected_authoritative_support_maintenance_report = (
+                _build_expected_authoritative_workflow_report(
+                    workflow_ids=(
+                        expected_authoritative_support_maintenance_workflow_ids
+                    ),
+                )
+            )
 
             authority_report = build_workflow_concept_authority_report(
                 registry=registry,
@@ -827,7 +880,7 @@ def _launch_deferred_registry_work(
             )
 
     parity_mode = os.getenv("VON_WORKFLOW_PARITY_ENFORCEMENT", "fail").strip().lower()
-    if parity_mode in {"fail", "strict", "error"}:
+    if not force_background and parity_mode in {"fail", "strict", "error"}:
         _deferred_work()
         return
 
@@ -848,9 +901,21 @@ def build_workflow_registry() -> WorkflowRegistry:
     return _build_workflow_registry(allow_bootstrap=True)
 
 
-def build_workflow_registry_read_only() -> WorkflowRegistry:
-    """Build the unified WorkflowRegistry without side effects."""
-    return _build_workflow_registry(allow_bootstrap=False)
+def build_workflow_registry_read_only(
+    *,
+    defer_parity_work: bool = False,
+) -> WorkflowRegistry:
+    """Build the unified WorkflowRegistry without side effects.
+
+    ``defer_parity_work=True`` keeps operator-facing read surfaces responsive by
+    forcing deferred inventory/parity work into a daemon thread even when
+    parity enforcement is configured as strict. Callers that need an immediate
+    fully-built parity snapshot should use the default synchronous behaviour.
+    """
+    return _build_workflow_registry(
+        allow_bootstrap=False,
+        force_background_deferred_work=defer_parity_work,
+    )
 
 
 # Keep the old name as an alias for backward compatibility.
@@ -863,17 +928,57 @@ build_durable_workflow_registry_read_only = build_workflow_registry_read_only
 # ---------------------------------------------------------------------------
 
 
-def build_durable_action_registry() -> ActionRegistry:
-    """Build an ActionRegistry containing durable workflow action handlers.
+def _register_durable_action_modules(registry: ActionRegistry) -> None:
+    """Lazily import durable action families only when action execution is needed.
 
-    This registers handlers for background/durable workflows only
-    (rag_sync, enrichment, rumination, planning).  The
-    orchestrator's conversation-turn
-    handlers (narration, missing-tool-call, write-policy, todo-refresh)
-    are added separately via ``ActionRegistry.merge()`` in the
-    orchestrator constructor.
+    Read-only workflow inspection surfaces import this module too, so keep the
+    heavy action/workflow module graph out of the import path unless an actual
+    ActionRegistry is being built.
     """
-    registry = ActionRegistry()
+
+    from ..skill_interop import register_skill_interop_actions
+    from .control_flow_actions import register_control_flow_actions
+    from .enrichment_workflow import register_enrichment_actions
+    from .entity_identity_resolution_workflow import (
+        register_entity_identity_resolution_actions,
+    )
+    from .file_copy_interpretation_workflow import (
+        register_file_copy_interpretation_actions,
+    )
+    from .file_copy_typing_workflow import register_file_copy_typing_actions
+    from .file_copy_upload_classification_workflow import (
+        register_file_copy_upload_classification_actions,
+    )
+    from .file_copy_upload_handler_workflow import (
+        register_file_copy_upload_handler_actions,
+    )
+    from .jira_task_full_reconciliation_workflow import (
+        register_jira_task_full_reconciliation_actions,
+    )
+    from .jira_task_incremental_import_workflow import (
+        register_jira_task_incremental_import_actions,
+    )
+    from .paper_representation_workflow import register_paper_representation_actions
+    from .parent_specificity_concept_dossier_workflow import (
+        register_parent_specificity_concept_dossier_actions,
+    )
+    from .parent_specificity_rumination_workflow import (
+        register_parent_specificity_rumination_actions,
+    )
+    from .planning_workflow import register_planning_actions
+    from .rag_sync_workflow import register_rag_sync_actions
+    from .rumination_workflow import register_rumination_actions
+    from .subworkflow_actions import register_subworkflow_actions
+    from .talk_representation_workflow import register_talk_representation_actions
+    from .testing_workflow_actions import register_testing_workflow_actions
+    from .workflow_creation_workflow import register_workflow_creation_actions
+    from .workflow_gap_recovery_workflow import (
+        register_workflow_gap_recovery_actions,
+    )
+    from .workflow_introspection_maintenance_workflow import (
+        register_workflow_introspection_maintenance_actions,
+    )
+
     register_rag_sync_actions(registry)
     register_enrichment_actions(registry)
     register_rumination_actions(registry)
@@ -894,7 +999,22 @@ def build_durable_action_registry() -> ActionRegistry:
     register_control_flow_actions(registry, definition_loader=_resolve_subworkflow_definition)
     register_subworkflow_actions(registry, definition_loader=_resolve_subworkflow_definition)
     register_workflow_creation_actions(registry)
+    register_testing_workflow_actions(registry)
     register_skill_interop_actions(registry)
+
+
+def build_durable_action_registry() -> ActionRegistry:
+    """Build an ActionRegistry containing durable workflow action handlers.
+
+    This registers handlers for background/durable workflows only
+    (rag_sync, enrichment, rumination, planning).  The
+    orchestrator's conversation-turn
+    handlers (narration, missing-tool-call, write-policy, todo-refresh)
+    are added separately via ``ActionRegistry.merge()`` in the
+    orchestrator constructor.
+    """
+    registry = ActionRegistry()
+    _register_durable_action_modules(registry)
     # Keep durable action routing aligned with orchestrator routing: if an
     # action ID is not explicitly registered, treat it as an MCP tool name.
     registry.set_fallback_handler(_durable_mcp_fallback_action)

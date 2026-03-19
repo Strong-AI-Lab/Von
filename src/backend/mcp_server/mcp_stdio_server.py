@@ -127,6 +127,43 @@ from src.backend.integrations.internal_mcp.catalogue import (
 from src.backend.integrations.internal_mcp.catalogue import (
     _turn_execution_backfill_from_chat_history,
 )
+from src.backend.integrations.internal_mcp.catalogue import _experiment_compute_verdict
+from src.backend.integrations.internal_mcp.catalogue import _experiment_create_spec
+from src.backend.integrations.internal_mcp.catalogue import (
+    _experiment_emit_learning_signal,
+)
+from src.backend.integrations.internal_mcp.catalogue import (
+    _experiment_execute_regression_suite,
+)
+from src.backend.integrations.internal_mcp.catalogue import (
+    _experiment_execute_target_workflow,
+)
+from src.backend.integrations.internal_mcp.catalogue import _experiment_record_observation
+from src.backend.integrations.internal_mcp.catalogue import _experiment_run_get
+from src.backend.integrations.internal_mcp.catalogue import _experiment_run_list
+from src.backend.integrations.internal_mcp.catalogue import _experiment_start_run
+from src.backend.integrations.internal_mcp.catalogue import (
+    _testing_prepare_meeting_invitation_spec,
+)
+from src.backend.integrations.internal_mcp.catalogue import (
+    _testing_theory_assert_local_claims,
+)
+from src.backend.integrations.internal_mcp.catalogue import (
+    _testing_theory_compute_diff,
+)
+from src.backend.integrations.internal_mcp.catalogue import (
+    _testing_theory_create_slice,
+)
+from src.backend.integrations.internal_mcp.catalogue import _testing_theory_gc_expired
+from src.backend.integrations.internal_mcp.catalogue import (
+    _testing_theory_import_canonical_context,
+)
+from src.backend.integrations.internal_mcp.catalogue import (
+    _testing_theory_promote_validated_claims,
+)
+from src.backend.integrations.internal_mcp.catalogue import (
+    _testing_theory_rollback_local_writes,
+)
 from src.backend.integrations.internal_mcp.catalogue import _turn_execution_get
 from src.backend.integrations.internal_mcp.catalogue import _turn_execution_list
 from src.backend.integrations.internal_mcp.catalogue import (
@@ -2863,6 +2900,168 @@ async def _handle_turn_execution_namespace_coverage_report(
     )
 
 
+async def _handle_experiment_run_list(arguments: dict[str, Any]) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _experiment_run_list,
+        arguments,
+        tool_family_label="Experiment",
+    )
+
+
+async def _handle_experiment_run_get(arguments: dict[str, Any]) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _experiment_run_get,
+        arguments,
+        tool_family_label="Experiment",
+    )
+
+
+async def _handle_testing_theory_create_slice(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _testing_theory_create_slice,
+        arguments,
+        tool_family_label="TestingTheory",
+    )
+
+
+async def _handle_testing_theory_import_canonical_context(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _testing_theory_import_canonical_context,
+        arguments,
+        tool_family_label="TestingTheory",
+    )
+
+
+async def _handle_testing_theory_assert_local_claims(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _testing_theory_assert_local_claims,
+        arguments,
+        tool_family_label="TestingTheory",
+    )
+
+
+async def _handle_testing_theory_compute_diff(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _testing_theory_compute_diff,
+        arguments,
+        tool_family_label="TestingTheory",
+    )
+
+
+async def _handle_testing_theory_rollback_local_writes(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _testing_theory_rollback_local_writes,
+        arguments,
+        tool_family_label="TestingTheory",
+    )
+
+
+async def _handle_testing_theory_promote_validated_claims(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _testing_theory_promote_validated_claims,
+        arguments,
+        tool_family_label="TestingTheory",
+    )
+
+
+async def _handle_testing_theory_gc_expired(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _testing_theory_gc_expired,
+        arguments,
+        tool_family_label="TestingTheory",
+    )
+
+
+async def _handle_experiment_create_spec(arguments: dict[str, Any]) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _experiment_create_spec,
+        arguments,
+        tool_family_label="Experiment",
+    )
+
+
+async def _handle_experiment_start_run(arguments: dict[str, Any]) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _experiment_start_run,
+        arguments,
+        tool_family_label="Experiment",
+    )
+
+
+async def _handle_experiment_record_observation(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _experiment_record_observation,
+        arguments,
+        tool_family_label="Experiment",
+    )
+
+
+async def _handle_experiment_compute_verdict(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _experiment_compute_verdict,
+        arguments,
+        tool_family_label="Experiment",
+    )
+
+
+async def _handle_experiment_emit_learning_signal(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _experiment_emit_learning_signal,
+        arguments,
+        tool_family_label="Experiment",
+    )
+
+
+async def _handle_experiment_execute_target_workflow(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _experiment_execute_target_workflow,
+        arguments,
+        tool_family_label="Experiment",
+    )
+
+
+async def _handle_experiment_execute_regression_suite(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _experiment_execute_regression_suite,
+        arguments,
+        tool_family_label="Experiment",
+    )
+
+
+async def _handle_testing_prepare_meeting_invitation_spec(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _testing_prepare_meeting_invitation_spec,
+        arguments,
+        tool_family_label="TestingWorkflow",
+    )
+
+
 # Task management handlers (JVNAUTOSCI-1040)
 async def _handle_create_task(arguments: dict[str, Any]) -> list[TextContent]:
     title = arguments.get("title")
@@ -3032,6 +3231,23 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "merge_concepts": _handle_merge_concepts,
     "update_concept": _handle_update_concept,
     "search_knowledge_base": _handle_search_knowledge_base,
+    "experiment_run_list": _handle_experiment_run_list,
+    "experiment_run_get": _handle_experiment_run_get,
+    "testing_theory_create_slice": _handle_testing_theory_create_slice,
+    "testing_theory_import_canonical_context": _handle_testing_theory_import_canonical_context,
+    "testing_theory_assert_local_claims": _handle_testing_theory_assert_local_claims,
+    "testing_theory_compute_diff": _handle_testing_theory_compute_diff,
+    "testing_theory_rollback_local_writes": _handle_testing_theory_rollback_local_writes,
+    "testing_theory_promote_validated_claims": _handle_testing_theory_promote_validated_claims,
+    "testing_theory_gc_expired": _handle_testing_theory_gc_expired,
+    "experiment_create_spec": _handle_experiment_create_spec,
+    "experiment_start_run": _handle_experiment_start_run,
+    "experiment_record_observation": _handle_experiment_record_observation,
+    "experiment_compute_verdict": _handle_experiment_compute_verdict,
+    "experiment_emit_learning_signal": _handle_experiment_emit_learning_signal,
+    "experiment_execute_target_workflow": _handle_experiment_execute_target_workflow,
+    "experiment_execute_regression_suite": _handle_experiment_execute_regression_suite,
+    "testing_prepare_meeting_invitation_spec": _handle_testing_prepare_meeting_invitation_spec,
     "turn_execution_list": _handle_turn_execution_list,
     "turn_execution_get": _handle_turn_execution_get,
     "turn_execution_search_failures": _handle_turn_execution_search_failures,
