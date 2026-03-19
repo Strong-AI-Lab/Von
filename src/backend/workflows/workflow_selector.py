@@ -56,6 +56,7 @@ class WorkflowSelectionPrompt:
     prompt_id: Optional[str]
     prompt_text: str | None
     discovered_workflow_ids: tuple[str, ...] = ()
+    candidate_entries: tuple[dict[str, Any], ...] = ()
     policy_recommendation: Mapping[str, Any] = field(default_factory=dict)
     prompt_failure_reason: str | None = None
     prompt_failure_detail: str | None = None
@@ -257,11 +258,26 @@ class WorkflowSelector:
         # inject the default workflow as the sole candidate.
         if not candidate_ids:
             candidate_ids.append(self._default_workflow_id)
+            candidate_entries.append(
+                {
+                    "concept_id": self._default_workflow_id,
+                    "name": "Default workflow",
+                    "description": "",
+                }
+            )
             candidate_lines.append(
                 f"- {self._default_workflow_id}: Default workflow"
             )
 
         candidate_list = "\n".join(candidate_lines)
+        immutable_candidate_entries = tuple(
+            {
+                "concept_id": str(entry.get("concept_id") or ""),
+                "name": str(entry.get("name") or ""),
+                "description": str(entry.get("description") or ""),
+            }
+            for entry in candidate_entries
+        )
 
         try:
             prompt = self._prompt_service.render_prompt(
@@ -275,6 +291,7 @@ class WorkflowSelector:
                 prompt_id=None,
                 prompt_text=None,
                 discovered_workflow_ids=tuple(candidate_ids),
+                candidate_entries=immutable_candidate_entries,
                 policy_recommendation=policy_recommendation,
                 prompt_failure_reason=SELECTOR_PROMPT_RENDER_ERROR_REASON,
                 prompt_failure_detail=str(exc),
@@ -285,6 +302,7 @@ class WorkflowSelector:
                 prompt_id=None,
                 prompt_text=None,
                 discovered_workflow_ids=tuple(candidate_ids),
+                candidate_entries=immutable_candidate_entries,
                 policy_recommendation=policy_recommendation,
                 prompt_failure_reason=SELECTOR_PROMPT_UNAVAILABLE_REASON,
             )
@@ -295,6 +313,7 @@ class WorkflowSelector:
                 prompt_id=prompt.prompt_id,
                 prompt_text=prompt_text,
                 discovered_workflow_ids=tuple(candidate_ids),
+                candidate_entries=immutable_candidate_entries,
                 policy_recommendation=policy_recommendation,
                 prompt_failure_reason=SELECTOR_PROMPT_MISSING_CANDIDATE_LIST_REASON,
             )
@@ -303,6 +322,7 @@ class WorkflowSelector:
                 prompt_id=prompt.prompt_id,
                 prompt_text=prompt_text,
                 discovered_workflow_ids=tuple(candidate_ids),
+                candidate_entries=immutable_candidate_entries,
                 policy_recommendation=policy_recommendation,
                 prompt_failure_reason=SELECTOR_PROMPT_MISSING_TURN_TEXT_REASON,
             )
@@ -311,6 +331,7 @@ class WorkflowSelector:
             prompt_id=prompt.prompt_id,
             prompt_text=prompt_text,
             discovered_workflow_ids=tuple(candidate_ids),
+            candidate_entries=immutable_candidate_entries,
             policy_recommendation=policy_recommendation,
         )
 

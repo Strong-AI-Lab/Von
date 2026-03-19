@@ -74,7 +74,10 @@ from ...services.tool_progress_store_service import (
     fetch_tool_progress_state,
     store_tool_progress_state,
 )
-from ...services.turn_execution_record_service import build_turn_execution_record
+from ...services.turn_execution_record_service import (
+    build_turn_execution_record,
+    build_workflow_routing_diagnostics,
+)
 from ...workflows import (
     CHAT_BUTTONIFY_WORKFLOW_ID,
     CHAT_NARRATION_WORKFLOW_ID,
@@ -1513,8 +1516,10 @@ def _build_turn_execution_diagnostics(
     elapsed_ms: float | int | None = None,
     tool_progress_state: dict[str, Any] | None = None,
     workflow_discovery: dict[str, Any] | None = None,
+    workflow_routing: dict[str, Any] | None = None,
     generated_at_utc: str | None = None,
     llm_calls: list[dict[str, Any]] | None = None,
+    aux_llm_calls: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     code_version_details = get_runtime_code_version_info()
 
@@ -1609,6 +1614,16 @@ def _build_turn_execution_diagnostics(
         stage_diagnostics=stage_diagnostics,
         latest_progress=latest_progress,
     )
+    workflow_routing_diagnostics = build_workflow_routing_diagnostics(
+        workflow_discovery=workflow_payload,
+        workflow_routing=workflow_routing if isinstance(workflow_routing, dict) else None,
+        turn_execution_diagnostics={
+            "latest_progress": latest_progress,
+            "phase_history": phase_history,
+            "workflow_stage_path": workflow_stage_path,
+        },
+        aux_llm_calls=aux_llm_calls if isinstance(aux_llm_calls, list) else None,
+    )
 
     return {
         "generated_at_utc": _progress_str(generated_at_utc) or _now_utc_iso(),
@@ -1633,6 +1648,7 @@ def _build_turn_execution_diagnostics(
             _progress_number(tool_observation_summary.get("tool_call_end_count")) or 0
         ),
         "workflow_discovery": workflow_payload,
+        "workflow_routing_diagnostics": workflow_routing_diagnostics,
         "workflow_stage_model": build_conversation_turn_stage_model_snapshot(),
         "workflow_stage_path": workflow_stage_path,
         "stage_diagnostics": stage_diagnostics,
@@ -3725,6 +3741,14 @@ def _finalise_llm_debug_info(
             ),
         )
         llm_debug_info["turn_execution_record"] = turn_execution_record
+        routing_diagnostics = turn_execution_record.get("workflow_routing_diagnostics")
+        if isinstance(routing_diagnostics, Mapping):
+            llm_debug_info["workflow_routing_diagnostics"] = dict(routing_diagnostics)
+            diagnostics_payload = llm_debug_info.get("turn_execution_diagnostics")
+            if isinstance(diagnostics_payload, dict):
+                diagnostics_payload["workflow_routing_diagnostics"] = dict(
+                    routing_diagnostics
+                )
     except Exception as exc:
         try:
             current_app.logger.warning(
@@ -9221,7 +9245,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             elapsed_ms=(time.perf_counter() - request_start_perf) * 1000.0,
             tool_progress_state=tool_progress_snapshot,
             workflow_discovery=workflow_discovery_result,
+            workflow_routing=workflow_routing_info,
             llm_calls=llm_interaction["calls"],
+            aux_llm_calls=auxiliary_llm_calls,
         )
 
         workflow_use_episodes = [
@@ -9492,6 +9518,13 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 elapsed_ms=error_elapsed_ms,
                 tool_progress_state=error_tool_progress_snapshot,
                 workflow_discovery=error_workflow_discovery,
+                workflow_routing=error_workflow_routing,
+                aux_llm_calls=(
+                    auxiliary_llm_calls
+                    if "auxiliary_llm_calls" in locals()
+                    and isinstance(auxiliary_llm_calls, list)
+                    else None
+                ),
             ),
         }
         error_debug_info = _finalise_llm_debug_info(

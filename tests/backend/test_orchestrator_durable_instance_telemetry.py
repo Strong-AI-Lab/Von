@@ -157,6 +157,14 @@ def test_execute_workflow_persists_completed_durable_instance_with_turn_summary(
                     "selected_workflow_id": "#V#tool_calling_workflow",
                     "selector_verdict": "tool_seeking",
                 },
+                "workflow_routing_diagnostics": {
+                    "schema_version": "workflow_routing_diagnostics.v1",
+                    "selected_workflow_id": "#V#tool_calling_workflow",
+                    "dispatch": {
+                        "selected_execution_mode": "tool_pipeline",
+                        "last_successful_boundary": "workflow_terminal",
+                    },
+                },
             },
             "completion_gate_decision": "escalation_required",
             "completion_gate_decision_reason": "Required mutation was not executed.",
@@ -227,6 +235,12 @@ def test_execute_workflow_persists_completed_durable_instance_with_turn_summary(
     assert selection_contract.get("selected_workflow_id") == "#V#tool_calling_workflow"
     assert selection_contract.get("selector_verdict") == "tool_seeking"
     assert isinstance(selection_contract.get("selection_rationale"), str)
+    routing_diagnostics = turn_contract.get("workflow_routing_diagnostics")
+    assert isinstance(routing_diagnostics, dict)
+    assert routing_diagnostics.get("schema_version") == "workflow_routing_diagnostics.v1"
+    assert routing_diagnostics.get("dispatch", {}).get("selected_execution_mode") == (
+        "tool_pipeline"
+    )
     contract_stage_model = turn_contract.get("workflow_stage_model")
     assert isinstance(contract_stage_model, dict)
     assert contract_stage_model.get("schema_version") == "conversation_turn_stage_model.v1"

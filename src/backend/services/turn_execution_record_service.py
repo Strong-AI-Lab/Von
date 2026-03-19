@@ -38,6 +38,7 @@ from ..workflows.conversation_turn_stage_model import (
 logger = logging.getLogger(__name__)
 
 TURN_EXECUTION_RECORD_SCHEMA_VERSION = "turn_execution_record.v1"
+WORKFLOW_ROUTING_DIAGNOSTICS_SCHEMA_VERSION = "workflow_routing_diagnostics.v1"
 TURN_EXECUTION_RECORDS_COLLECTION = "turn_execution_records"
 
 _TURN_EXECUTION_INDEXES_READY = False
@@ -378,6 +379,15 @@ def _safe_non_negative_int(value: Any, *, default: int = 0) -> int:
     return max(0, parsed)
 
 
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
 def _normalise_failure_codes(raw_codes: Any) -> list[str]:
     if not isinstance(raw_codes, list):
         return []
@@ -552,6 +562,332 @@ def _extract_workflow_discovery(
     return {
         "candidate_ids": candidate_ids,
         "excluded_candidate_ids": excluded_ids,
+    }
+
+
+def _collect_aux_entries(
+    aux_llm_calls: Sequence[Mapping[str, Any]] | None,
+    *,
+    entry_type: str,
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    expected_type = entry_type.strip().lower()
+    for entry in aux_llm_calls or ():
+        if not isinstance(entry, Mapping):
+            continue
+        candidate_type = (_safe_str(entry.get("type")) or "").lower()
+        if candidate_type != expected_type:
+            continue
+        entries.append(
+            {
+                str(key): value
+                for key, value in entry.items()
+                if isinstance(key, str)
+            }
+        )
+    return entries
+
+
+def _build_text_capture(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    text = value if isinstance(value, str) else str(value)
+    return {
+        "text": text,
+        "char_count": len(text),
+        "sha256": _hash_text(text),
+    }
+
+
+def _normalise_workflow_candidate_details(values: Any) -> list[dict[str, Any]]:
+    if values is None:
+        return []
+
+    if isinstance(values, Mapping):
+        iterable: Sequence[Any] = (values,)
+    elif isinstance(values, Sequence) and not isinstance(values, (str, bytes, bytearray)):
+        iterable = values
+    else:
+        iterable = (values,)
+
+    normalised: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in iterable:
+        if isinstance(raw, str):
+            concept_id = _safe_str(raw)
+            if not concept_id:
+                continue
+            lowered = concept_id.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            normalised.append({"concept_id": concept_id})
+            continue
+
+        if not isinstance(raw, Mapping):
+            continue
+
+        concept_id = (
+            _safe_str(raw.get("concept_id"))
+            or _safe_str(raw.get("workflow_id"))
+            or _safe_str(raw.get("id"))
+        )
+        if not concept_id:
+            continue
+        lowered = concept_id.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+
+        entry: dict[str, Any] = {"concept_id": concept_id}
+        for field_name in (
+            "name",
+            "description",
+            "match_source",
+            "executability_reason",
+            "executability_detail",
+            "routing_exclusion_reason",
+        ):
+            field_value = _safe_str(raw.get(field_name))
+            if field_value:
+                entry[field_name] = field_value
+        for field_name in ("relevance_score", "confidence_score"):
+            raw_value = raw.get(field_name)
+            try:
+                if raw_value is not None:
+                    entry[field_name] = float(raw_value)
+            except Exception:
+                continue
+        for field_name in ("is_executable", "is_policy_safe", "routing_eligible"):
+            raw_value = raw.get(field_name)
+            if isinstance(raw_value, bool):
+                entry[field_name] = raw_value
+        normalised.append(entry)
+
+    return normalised
+
+
+def build_workflow_routing_diagnostics(
+    *,
+    workflow_discovery: Mapping[str, Any] | None,
+    workflow_routing: Mapping[str, Any] | None,
+    turn_execution_diagnostics: Mapping[str, Any] | None,
+    aux_llm_calls: Sequence[Mapping[str, Any]] | None,
+    execution_summary: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    workflow_discovery_payload = (
+        workflow_discovery if isinstance(workflow_discovery, Mapping) else {}
+    )
+    workflow_routing_payload = (
+        workflow_routing if isinstance(workflow_routing, Mapping) else {}
+    )
+    selector_entries = _collect_aux_entries(aux_llm_calls, entry_type="workflow_selector")
+    selector_entry = selector_entries[-1] if selector_entries else {}
+    selector_override_entries = _collect_aux_entries(
+        aux_llm_calls,
+        entry_type="workflow_selector_override",
+    )
+    dispatch_events = _collect_aux_entries(
+        aux_llm_calls,
+        entry_type="workflow_dispatch_boundary",
+    )
+
+    if isinstance(execution_summary, Mapping):
+        execution_summary_payload = dict(execution_summary)
+    else:
+        execution_summary_payload = _summarise_tool_execution_context(
+            workflow_routing=workflow_routing_payload,
+            turn_execution_diagnostics=turn_execution_diagnostics,
+            aux_llm_calls=aux_llm_calls,
+            serialised_invocations=[],
+        )
+
+    discovery_candidates = _normalise_workflow_candidate_details(
+        workflow_discovery_payload.get("candidates")
+    )
+    if not discovery_candidates:
+        discovery_candidates = _normalise_workflow_candidate_details(
+            selector_entry.get("discovery_candidates")
+        )
+    routing_matches = _normalise_workflow_candidate_details(
+        workflow_discovery_payload.get("routing_matches")
+        or workflow_discovery_payload.get("matches")
+    )
+    selector_candidates = _normalise_workflow_candidate_details(
+        selector_entry.get("candidate_entries")
+    )
+    excluded_candidates = _normalise_workflow_candidate_details(
+        selector_entry.get("discovery_excluded_candidates")
+    )
+    if not excluded_candidates:
+        excluded_candidates = [
+            entry
+            for entry in discovery_candidates
+            if entry.get("routing_eligible") is False
+            or _safe_str(entry.get("routing_exclusion_reason"))
+        ]
+
+    selector_prompt_capture = selector_entry.get("prompt")
+    if not isinstance(selector_prompt_capture, Mapping):
+        selector_prompt_capture = _build_text_capture(selector_entry.get("prompt_text"))
+    selector_response_capture = selector_entry.get("response")
+    if not isinstance(selector_response_capture, Mapping):
+        selector_response_capture = _build_text_capture(
+            selector_entry.get("raw_response")
+        )
+    raw_policy_candidate_scores = selector_entry.get("policy_candidate_scores")
+
+    selector_selected_candidate = selector_entry.get("candidate")
+    selected_candidate_payload = (
+        dict(selector_selected_candidate)
+        if isinstance(selector_selected_candidate, Mapping)
+        else None
+    )
+
+    discovery_candidate_count = _safe_non_negative_int(
+        workflow_discovery_payload.get("candidate_count")
+    )
+    if discovery_candidate_count <= 0:
+        discovery_candidate_count = len(discovery_candidates)
+    discovery_match_count = _safe_non_negative_int(
+        workflow_discovery_payload.get("match_count")
+    )
+    if discovery_match_count <= 0:
+        discovery_match_count = len(routing_matches)
+
+    return {
+        "schema_version": WORKFLOW_ROUTING_DIAGNOSTICS_SCHEMA_VERSION,
+        "selected_workflow_id": _safe_str(workflow_routing_payload.get("workflow_id")),
+        "selector_verdict": _safe_str(workflow_routing_payload.get("verdict")),
+        "selector_source": _safe_str(workflow_routing_payload.get("source")),
+        "selection_rationale": _safe_str(
+            workflow_routing_payload.get("selection_rationale")
+        )
+        or _safe_str(selector_entry.get("selection_rationale")),
+        "discovery": {
+            "query": _safe_str(workflow_discovery_payload.get("query")),
+            "requested_query": _safe_str(workflow_discovery_payload.get("requested_query")),
+            "search_time_ms": _safe_float(workflow_discovery_payload.get("search_time_ms")),
+            "threshold": _safe_float(workflow_discovery_payload.get("threshold")),
+            "candidate_count": discovery_candidate_count,
+            "match_count": discovery_match_count,
+            "search_sources": _dedupe_string_sequence(
+                workflow_discovery_payload.get("search_sources") or []
+            ),
+            "errors": _dedupe_string_sequence(
+                workflow_discovery_payload.get("errors") or []
+            ),
+            "candidate_ids": _extract_workflow_ids(
+                workflow_discovery_payload.get("candidate_ids")
+            )
+            or [entry["concept_id"] for entry in discovery_candidates],
+            "routing_match_ids": _extract_workflow_ids(
+                workflow_discovery_payload.get("matches")
+            )
+            or [entry["concept_id"] for entry in routing_matches],
+            "excluded_candidate_ids": _extract_workflow_ids(
+                workflow_discovery_payload.get("excluded_candidate_ids")
+            )
+            or [entry["concept_id"] for entry in excluded_candidates],
+            "candidates": discovery_candidates,
+            "routing_matches": routing_matches,
+            "excluded_candidates": excluded_candidates,
+        },
+        "selector": {
+            "prompt_id": _safe_str(workflow_routing_payload.get("prompt_id"))
+            or _safe_str(selector_entry.get("prompt_id")),
+            "model_name": _safe_str(selector_entry.get("model_name")),
+            "confidence_score": (
+                _safe_float(selector_entry.get("confidence_score"))
+                if selector_entry.get("confidence_score") is not None
+                else _safe_float(workflow_routing_payload.get("confidence_score"))
+            ),
+            "reasoning": _safe_str(selector_entry.get("reasoning"))
+            or _safe_str(workflow_routing_payload.get("reasoning")),
+            "prompt_failure_reason": _safe_str(
+                selector_entry.get("prompt_failure_reason")
+            ),
+            "prompt_failure_detail": _safe_str(
+                selector_entry.get("prompt_failure_detail")
+            ),
+            "discovered_workflow_ids": _extract_workflow_ids(
+                selector_entry.get("discovered_workflow_ids")
+            )
+            or _extract_workflow_ids(workflow_routing_payload.get("discovered_workflow_ids")),
+            "candidate_entries": selector_candidates,
+            "selected_candidate": selected_candidate_payload,
+            "prompt": (
+                dict(selector_prompt_capture)
+                if isinstance(selector_prompt_capture, Mapping)
+                else None
+            ),
+            "response": (
+                dict(selector_response_capture)
+                if isinstance(selector_response_capture, Mapping)
+                else None
+            ),
+            "policy_guidance_mode": _safe_str(selector_entry.get("policy_guidance_mode")),
+            "policy_snapshot_id": _safe_str(selector_entry.get("policy_snapshot_id")),
+            "policy_candidate_scores": (
+                list(raw_policy_candidate_scores)
+                if isinstance(raw_policy_candidate_scores, list)
+                else None
+            ),
+            "override_events": selector_override_entries,
+        },
+        "dispatch": {
+            "selected_execution_mode": _safe_str(
+                execution_summary_payload.get("selected_execution_mode")
+            ),
+            "dispatch_workflow_id": _safe_str(
+                execution_summary_payload.get("dispatch_workflow_id")
+            ),
+            "dispatch_event_count": _safe_non_negative_int(
+                execution_summary_payload.get("dispatch_event_count")
+            ),
+            "contract_resolution_status": _safe_str(
+                execution_summary_payload.get("contract_resolution_status")
+            ),
+            "workflow_handoff_started": bool(
+                execution_summary_payload.get("workflow_handoff_started")
+            ),
+            "dispatch_terminal_status": _safe_str(
+                execution_summary_payload.get("dispatch_terminal_status")
+            ),
+            "dispatch_terminal_final_state": _safe_str(
+                execution_summary_payload.get("dispatch_terminal_final_state")
+            ),
+            "dispatch_terminal_completed": (
+                execution_summary_payload.get("dispatch_terminal_completed")
+                if isinstance(
+                    execution_summary_payload.get("dispatch_terminal_completed"),
+                    bool,
+                )
+                else None
+            ),
+            "tool_route_selected": bool(
+                execution_summary_payload.get("tool_route_selected")
+            ),
+            "planned_count": _safe_non_negative_int(
+                execution_summary_payload.get("planned_count")
+            ),
+            "started_count": _safe_non_negative_int(
+                execution_summary_payload.get("started_count")
+            ),
+            "executed_count": _safe_non_negative_int(
+                execution_summary_payload.get("executed_count")
+            ),
+            "zero_tools_executed": bool(
+                execution_summary_payload.get("zero_tools_executed")
+            ),
+            "failure_codes": _dedupe_string_sequence(
+                execution_summary_payload.get("failure_codes") or []
+            ),
+            "last_successful_boundary": _safe_str(
+                execution_summary_payload.get("last_successful_boundary")
+            ),
+            "events": dispatch_events,
+        },
     }
 
 
@@ -832,6 +1168,18 @@ def _summarise_tool_execution_context(
     missing_tool_parse_error_count = 0
     missing_tool_retry_exhausted_count = 0
     missing_tool_unresolved_count = 0
+    dispatch_boundary_events = _collect_aux_entries(
+        aux_llm_calls,
+        entry_type="workflow_dispatch_boundary",
+    )
+    selected_execution_mode = ""
+    dispatch_workflow_id = ""
+    contract_resolution_status = ""
+    execution_mode_selected_explicitly = False
+    workflow_handoff_started = False
+    dispatch_terminal_status = ""
+    dispatch_terminal_final_state = ""
+    dispatch_terminal_completed: bool | None = None
     for entry in aux_llm_calls or ():
         if not isinstance(entry, Mapping):
             continue
@@ -852,6 +1200,31 @@ def _summarise_tool_execution_context(
             if stage == "skipped" or retries_remaining <= 0:
                 missing_tool_retry_exhausted_count += 1
 
+    for event in dispatch_boundary_events:
+        boundary = (_safe_str(event.get("boundary")) or "").lower()
+        status = (_safe_str(event.get("status")) or "").lower()
+        candidate_execution_mode = _safe_str(event.get("selected_execution_mode"))
+        if candidate_execution_mode:
+            selected_execution_mode = candidate_execution_mode
+        if boundary == "execution_mode_selected" and status == "selected":
+            execution_mode_selected_explicitly = True
+        candidate_dispatch_workflow_id = _safe_str(event.get("dispatch_workflow_id"))
+        if candidate_dispatch_workflow_id:
+            dispatch_workflow_id = candidate_dispatch_workflow_id
+        if boundary == "contract_resolution" and status:
+            contract_resolution_status = status
+        elif boundary == "workflow_handoff" and status == "started":
+            workflow_handoff_started = True
+        elif boundary == "workflow_terminal":
+            if status:
+                dispatch_terminal_status = status
+            final_state_value = _safe_str(event.get("final_state"))
+            if final_state_value:
+                dispatch_terminal_final_state = final_state_value
+            completed_value = event.get("completed")
+            if isinstance(completed_value, bool):
+                dispatch_terminal_completed = completed_value
+
     invocation_count = len(serialised_invocations)
     observed_started_count = max(progress_tools_started, tool_call_start_event_count)
     observed_executed_count = max(
@@ -859,6 +1232,13 @@ def _summarise_tool_execution_context(
         tool_call_end_event_count,
         invocation_count,
     )
+    if not selected_execution_mode and tool_route_selected:
+        selected_execution_mode = "tool_pipeline"
+    if not dispatch_workflow_id and selected_execution_mode in {
+        "direct_response",
+        "custom_workflow",
+    }:
+        dispatch_workflow_id = selected_workflow_id or ""
 
     failure_codes: list[str] = []
     worker_unavailable_with_tool_expectation = (
@@ -889,17 +1269,67 @@ def _summarise_tool_execution_context(
         and tool_execute_stage_event_count <= 0
     ):
         failure_codes.append("missing_tool_call_unresolved")
+    if tool_route_selected and observed_executed_count <= 0:
+        if contract_resolution_status == "missing":
+            failure_codes.append("tool_dispatch_contract_unresolved")
+        if dispatch_terminal_status == "missing":
+            failure_codes.append("tool_dispatch_workflow_missing")
+        if not dispatch_boundary_events:
+            failure_codes.append("tool_dispatch_boundary_missing")
+        elif not workflow_handoff_started and selected_execution_mode == "tool_pipeline":
+            failure_codes.append("tool_dispatch_not_started")
+        elif workflow_handoff_started and observed_started_count <= 0:
+            failure_codes.append("tool_dispatch_handoff_zero_execution")
+        elif dispatch_terminal_status == "failed":
+            failure_codes.append("tool_dispatch_failed_before_tool_execution")
+
+    deduped_failure_codes: list[str] = []
+    seen_failure_codes: set[str] = set()
+    for code in failure_codes:
+        cleaned_code = _safe_str(code)
+        if not cleaned_code:
+            continue
+        lowered = cleaned_code.lower()
+        if lowered in seen_failure_codes:
+            continue
+        seen_failure_codes.add(lowered)
+        deduped_failure_codes.append(cleaned_code)
 
     planned_count = max(
         observed_started_count,
         invocation_count,
-        1 if (tool_route_selected and failure_codes) else 0,
+        1 if (tool_route_selected and (deduped_failure_codes or dispatch_boundary_events)) else 0,
     )
+
+    last_successful_boundary = ""
+    if selected_workflow_id or selector_verdict:
+        last_successful_boundary = "workflow_selected"
+    if execution_mode_selected_explicitly:
+        last_successful_boundary = "execution_mode_selected"
+    if contract_resolution_status == "resolved":
+        last_successful_boundary = "contract_resolution"
+    if workflow_handoff_started:
+        last_successful_boundary = "workflow_handoff"
+    if observed_started_count > 0:
+        last_successful_boundary = "tool_execution_started"
+    if observed_executed_count > 0:
+        last_successful_boundary = "tool_execution_completed"
+    if dispatch_terminal_status:
+        last_successful_boundary = "workflow_terminal"
 
     return {
         "tool_route_selected": tool_route_selected,
         "selected_workflow_id": selected_workflow_id,
         "selector_verdict": selector_verdict,
+        "selected_execution_mode": selected_execution_mode or None,
+        "dispatch_workflow_id": dispatch_workflow_id or None,
+        "dispatch_event_count": len(dispatch_boundary_events),
+        "contract_resolution_status": contract_resolution_status or None,
+        "workflow_handoff_started": workflow_handoff_started,
+        "dispatch_terminal_status": dispatch_terminal_status or None,
+        "dispatch_terminal_final_state": dispatch_terminal_final_state or None,
+        "dispatch_terminal_completed": dispatch_terminal_completed,
+        "last_successful_boundary": last_successful_boundary or None,
         "planned_count": planned_count,
         "started_count": observed_started_count,
         "executed_count": observed_executed_count,
@@ -907,7 +1337,7 @@ def _summarise_tool_execution_context(
         "worker_unavailable_event_count": worker_unavailable_event_count,
         "tool_plan_stage_event_count": tool_plan_stage_event_count,
         "tool_execute_stage_event_count": tool_execute_stage_event_count,
-        "failure_codes": list(failure_codes),
+        "failure_codes": list(deduped_failure_codes),
         "zero_tools_executed": observed_executed_count <= 0,
         "parse_error_invocation_count": parse_error_invocation_count,
         "validation_error_invocation_count": validation_error_invocation_count,
@@ -2274,6 +2704,17 @@ def build_turn_execution_record(
         aux_llm_calls=aux_llm_calls,
         serialised_invocations=serialised_invocations,
     )
+    workflow_routing_diagnostics = build_workflow_routing_diagnostics(
+        workflow_discovery=workflow_discovery,
+        workflow_routing=workflow_routing,
+        turn_execution_diagnostics=(
+            turn_execution_diagnostics
+            if isinstance(turn_execution_diagnostics, Mapping)
+            else None
+        ),
+        aux_llm_calls=aux_llm_calls,
+        execution_summary=execution_summary,
+    )
 
     representation_effects_contract = _build_representation_required_effects_contract(
         prompt_text=prompt_text,
@@ -2445,6 +2886,7 @@ def build_turn_execution_record(
             "selector_source": selector_source,
             "workflow_discovery": workflow_discovery_normalised,
         },
+        "workflow_routing_diagnostics": workflow_routing_diagnostics,
         "required_effects": required_effects,
         "execution": {
             "tool_invocations": serialised_invocations,

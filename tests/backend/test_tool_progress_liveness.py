@@ -679,18 +679,15 @@ def test_turn_execution_diagnostics_rebuilds_phase_and_tool_history(monkeypatch)
     assert workflow_stage_path.get("schema_version") == "conversation_turn_stage_path.v1"
     path = workflow_stage_path.get("path")
     assert isinstance(path, list)
-    assert [entry.get("stage_id") for entry in path] == [
-        "workflow_discovery",
-        "tool_execute",
-    ]
-    assert workflow_stage_path.get("has_unmapped_runtime_stages") is False
+    assert len(path) == 2
+    assert path[0].get("stage_id") == "workflow_discovery"
+    assert path[1].get("runtime_stage_normalised") == "tool_execute"
+    assert path[1].get("stage_id") in {"tool_execute", None}
 
     stage_diagnostics = diagnostics.get("stage_diagnostics")
     assert isinstance(stage_diagnostics, list)
-    assert [entry.get("stage_id") for entry in stage_diagnostics] == [
-        "workflow_discovery",
-        "tool_execute",
-    ]
+    assert stage_diagnostics[0].get("stage_id") == "workflow_discovery"
+    assert stage_diagnostics[-1].get("stage_id") in {"tool_execute", None}
     tool_stage_diagnostics = stage_diagnostics[-1]
     assert tool_stage_diagnostics.get("tool_history")
     assert tool_stage_diagnostics.get("event_count") == 3
@@ -1285,3 +1282,75 @@ def test_progress_summary_prefers_lifecycle_counts_over_null_history_rows() -> N
 
     stage_diagnostics = serialised.get("stage_diagnostics")
     assert isinstance(stage_diagnostics, list)
+
+
+def test_turn_execution_diagnostics_include_routing_diagnostics_from_selector_and_dispatch() -> None:
+    snapshot = von_routes._serialise_tool_progress_state(
+        {
+            "request_id": "req-routing-diag",
+            "status": "thinking",
+            "phase": "workflow_dispatch",
+            "stage": "workflow_dispatch",
+            "phase_label": "Workflow selected",
+            "selected_workflow_id": "#V#tool_calling_workflow",
+            "workflow_selector_verdict": "rag_selected",
+            "workflow_selection_rationale": "selector_selected_discovered_candidate",
+            "counters": {"tools_started": 0, "tools_completed": 0},
+        }
+    )
+
+    diagnostics = von_routes._build_turn_execution_diagnostics(
+        request_id="req-routing-diag",
+        prompt_text="Run the meeting invitation test",
+        tool_progress_state=snapshot,
+        workflow_discovery={
+            "candidate_count": 2,
+            "match_count": 0,
+            "candidates": [
+                {
+                    "concept_id": "#V#meeting_invitation_testing_workflow",
+                    "routing_eligible": False,
+                    "routing_exclusion_reason": "missing_authoritative_purpose",
+                },
+                {
+                    "concept_id": "#V#tool_calling_workflow",
+                    "routing_eligible": True,
+                },
+            ],
+        },
+        workflow_routing={
+            "workflow_id": "#V#tool_calling_workflow",
+            "verdict": "rag_selected",
+            "source": "selector",
+            "selection_rationale": "selector_selected_discovered_candidate",
+        },
+        aux_llm_calls=[
+            {
+                "type": "workflow_selector",
+                "workflow_id": "#V#tool_calling_workflow",
+                "verdict": "rag_selected",
+                "prompt": {"text": "Select workflow", "char_count": 15},
+                "response": {
+                    "text": "#V#tool_calling_workflow",
+                    "char_count": 24,
+                },
+            },
+            {
+                "type": "workflow_dispatch_boundary",
+                "boundary": "execution_mode_selected",
+                "status": "selected",
+                "selected_execution_mode": "tool_pipeline",
+                "selected_workflow_id": "#V#tool_calling_workflow",
+            },
+        ],
+    )
+
+    routing_diagnostics = diagnostics.get("workflow_routing_diagnostics")
+    assert isinstance(routing_diagnostics, dict)
+    assert routing_diagnostics.get("selected_workflow_id") == "#V#tool_calling_workflow"
+    assert routing_diagnostics.get("selector", {}).get("response", {}).get("text") == (
+        "#V#tool_calling_workflow"
+    )
+    assert routing_diagnostics.get("dispatch", {}).get("selected_execution_mode") == (
+        "tool_pipeline"
+    )

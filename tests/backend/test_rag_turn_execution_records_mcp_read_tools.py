@@ -282,6 +282,13 @@ def test_rag_list_indexed_supports_turn_execution_records(monkeypatch):
                 "selected_workflow_id": "#V#tool_calling_workflow",
                 "selector_verdict": "tool_seeking",
             },
+            "workflow_routing_diagnostics": {
+                "schema_version": "workflow_routing_diagnostics.v1",
+                "dispatch": {
+                    "selected_execution_mode": "tool_pipeline",
+                    "failure_codes": ["tool_dispatch_handoff_zero_execution"],
+                },
+            },
             "prompt": {"preview": "Those relations were not added."},
             "critic": {"summary": {"not_verified_count": 1}},
         },
@@ -333,6 +340,9 @@ def test_rag_list_indexed_supports_turn_execution_records(monkeypatch):
     assert item["unresolved_effect_count"] == 1
     assert item["item_kind"] == "turn_execution_record"
     assert item["source_system"] == "mongo.turn_execution_records"
+    assert item["workflow_routing_diagnostics"]["dispatch"]["failure_codes"] == [
+        "tool_dispatch_handoff_zero_execution"
+    ]
 
 
 def test_rag_get_item_supports_turn_execution_records(monkeypatch):
@@ -354,6 +364,20 @@ def test_rag_get_item_supports_turn_execution_records(monkeypatch):
         "workflow_selection": {
             "selected_workflow_id": "#V#tool_calling_workflow",
             "selector_verdict": "tool_seeking",
+        },
+        "workflow_routing_diagnostics": {
+            "schema_version": "workflow_routing_diagnostics.v1",
+            "selector": {
+                "prompt": {"text": "Select workflow", "char_count": 15},
+                "response": {
+                    "text": "#V#tool_calling_workflow",
+                    "char_count": 24,
+                },
+            },
+            "dispatch": {
+                "selected_execution_mode": "tool_pipeline",
+                "last_successful_boundary": "workflow_handoff",
+            },
         },
         "prompt": {"preview": "Proceed with predicates"},
         "required_effects": [{"effect_id": "effect_2", "status": "satisfied"}],
@@ -381,6 +405,13 @@ def test_rag_get_item_supports_turn_execution_records(monkeypatch):
     assert result["requires_follow_up"] is True
     assert result["item_kind"] == "turn_execution_record"
     assert result["provenance"]["item_kind"] == "turn_execution_record_item"
+    assert result["workflow_routing_diagnostics"]["selector"]["response"]["text"] == (
+        "#V#tool_calling_workflow"
+    )
+    assert (
+        result["workflow_routing_diagnostics"]["dispatch"]["last_successful_boundary"]
+        == "workflow_handoff"
+    )
 
 
 def test_turn_execution_list_includes_rag_indexing_state_from_chat_history(monkeypatch):

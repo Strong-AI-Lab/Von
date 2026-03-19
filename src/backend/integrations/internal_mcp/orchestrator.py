@@ -9,7 +9,7 @@ import re
 import threading
 import time
 import requests
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from typing import (
     Any,
@@ -122,6 +122,7 @@ class WorkflowRoutingInfo:
     source: str = "selector"  # "selector" | "selector_override" | "default" | "presenter_mode"
     confidence_score: float = 0.0
     reasoning: str = ""
+    selection_rationale: str = ""
 
 
 @dataclass(frozen=True)
@@ -17767,6 +17768,17 @@ class InternalMCPChatOrchestrator:
             stage_path = _build_turn_execution_stage_path_snapshot(
                 workflow_data=workflow_data
             )
+            turn_record_payload = (
+                workflow_data.get("turn_execution_record")
+                if isinstance(workflow_data, Mapping)
+                and isinstance(workflow_data.get("turn_execution_record"), Mapping)
+                else None
+            )
+            routing_diagnostics = (
+                turn_record_payload.get("workflow_routing_diagnostics")
+                if isinstance(turn_record_payload, Mapping)
+                else None
+            )
             return {
                 "schema_version": "turn_execution_contract.v1",
                 "workflow_id": _safe_scalar_text(workflow_id),
@@ -17781,6 +17793,11 @@ class InternalMCPChatOrchestrator:
                 ),
                 "prompt_preview": prompt_preview,
                 "selection": selection,
+                "workflow_routing_diagnostics": (
+                    dict(cast(Mapping[str, Any], routing_diagnostics))
+                    if isinstance(routing_diagnostics, Mapping)
+                    else None
+                ),
                 # Canonical mapping of runtime stage tokens into one
                 # conversation-turn orchestration representation.
                 "workflow_stage_model": build_conversation_turn_stage_model_snapshot(),
@@ -19764,6 +19781,7 @@ class InternalMCPChatOrchestrator:
                 prompt_id=None,
                 discovered_workflow_ids=(),
                 source="selector_override",
+                selection_rationale="required_prompt_tools_missing_preselector",
             )
             override_payload = {
                 "type": "workflow_selector_override",
@@ -19898,6 +19916,29 @@ class InternalMCPChatOrchestrator:
                 )
                 _emit_progress_local(payload)
 
+            def _copy_mapping_sequence(values: Sequence[Any] | None) -> list[dict[str, Any]]:
+                copied: list[dict[str, Any]] = []
+                for item in values or ():
+                    if not isinstance(item, Mapping):
+                        continue
+                    copied.append(
+                        {
+                            str(key): value
+                            for key, value in item.items()
+                            if isinstance(key, str)
+                        }
+                    )
+                return copied
+
+            def _build_text_telemetry(value: Any) -> dict[str, Any] | None:
+                if value is None:
+                    return None
+                text = value if isinstance(value, str) else str(value)
+                return {
+                    "text": text,
+                    "char_count": len(text),
+                }
+
             try:
                 classifier_model = None
                 selector_candidate = None
@@ -19991,6 +20032,13 @@ class InternalMCPChatOrchestrator:
                 )
                 if selector_selection.workflow_id:
                     selected_workflow_id = selector_selection.workflow_id
+                selection_rationale = _derive_workflow_selection_rationale(
+                    selected_workflow_id=selector_selection.workflow_id,
+                    selector_verdict=selector_selection.verdict,
+                    selector_source=selection_source,
+                    candidate_workflow_ids=selector_selection.discovered_workflow_ids,
+                    explicit_reasoning=selector_selection.reasoning,
+                )
                 routing_info = WorkflowRoutingInfo(
                     workflow_id=selector_selection.workflow_id,
                     verdict=selector_selection.verdict,
@@ -20000,13 +20048,7 @@ class InternalMCPChatOrchestrator:
                     source=selection_source,
                     confidence_score=selector_selection.confidence_score,
                     reasoning=selector_selection.reasoning,
-                )
-                selection_rationale = _derive_workflow_selection_rationale(
-                    selected_workflow_id=selector_selection.workflow_id,
-                    selector_verdict=selector_selection.verdict,
-                    selector_source=selection_source,
-                    candidate_workflow_ids=selector_selection.discovered_workflow_ids,
-                    explicit_reasoning=selector_selection.reasoning,
+                    selection_rationale=selection_rationale,
                 )
                 _emit_progress_local(
                     {
@@ -20037,6 +20079,19 @@ class InternalMCPChatOrchestrator:
                         "candidate": dict(selector_candidate)
                         if isinstance(selector_candidate, Mapping)
                         else None,
+                        "prompt": _build_text_telemetry(selector_selection.prompt_used),
+                        "response": _build_text_telemetry(
+                            selector_selection.raw_response
+                        ),
+                        "candidate_entries": _copy_mapping_sequence(
+                            selector_prompt.candidate_entries
+                        ),
+                        "discovery_candidates": _copy_mapping_sequence(
+                            selector_candidate_matches
+                        ),
+                        "discovery_excluded_candidates": _copy_mapping_sequence(
+                            excluded_discovered_matches
+                        ),
                         "discovered_workflow_ids": list(
                             selector_selection.discovered_workflow_ids
                         ),
@@ -20081,6 +20136,19 @@ class InternalMCPChatOrchestrator:
                         "candidate": dict(selector_candidate)
                         if isinstance(selector_candidate, Mapping)
                         else None,
+                        "prompt": _build_text_telemetry(selector_selection.prompt_used),
+                        "response": _build_text_telemetry(
+                            selector_selection.raw_response
+                        ),
+                        "candidate_entries": _copy_mapping_sequence(
+                            selector_prompt.candidate_entries
+                        ),
+                        "discovery_candidates": _copy_mapping_sequence(
+                            selector_candidate_matches
+                        ),
+                        "discovery_excluded_candidates": _copy_mapping_sequence(
+                            excluded_discovered_matches
+                        ),
                         "discovered_workflow_ids": list(
                             selector_selection.discovered_workflow_ids
                         ),
@@ -20151,6 +20219,7 @@ class InternalMCPChatOrchestrator:
                     discovered_workflow_ids=(),
                     source="default",
                     reasoning="selector_exception",
+                    selection_rationale="selector_exception",
                 )
                 selection_rationale = _derive_workflow_selection_rationale(
                     selected_workflow_id=CHAT_ASSISTANT_WORKFLOW_ID,
@@ -24574,6 +24643,57 @@ class InternalMCPChatOrchestrator:
                 return None
             return dict(renderer_render_plan)
 
+        def _emit_dispatch_boundary(
+            *,
+            boundary: str,
+            status: str,
+            selected_execution_mode: str,
+            selected_workflow_id: Any = None,
+            dispatch_workflow_id: Any = None,
+            final_state: Any = None,
+            completed: Any = None,
+            extra: Mapping[str, Any] | None = None,
+        ) -> None:
+            payload: dict[str, Any] = {
+                "type": "workflow_dispatch_boundary",
+                "boundary": boundary,
+                "status": status,
+                "selected_execution_mode": selected_execution_mode,
+            }
+
+            def _clean_scalar_text(value: Any) -> str | None:
+                if isinstance(value, str):
+                    cleaned = value.strip()
+                    return cleaned or None
+                return None
+
+            cleaned_selected_workflow_id = _clean_scalar_text(selected_workflow_id)
+            if cleaned_selected_workflow_id:
+                payload["selected_workflow_id"] = cleaned_selected_workflow_id
+            cleaned_dispatch_workflow_id = _clean_scalar_text(dispatch_workflow_id)
+            if cleaned_dispatch_workflow_id:
+                payload["dispatch_workflow_id"] = cleaned_dispatch_workflow_id
+            cleaned_final_state = _clean_scalar_text(final_state)
+            if cleaned_final_state:
+                payload["final_state"] = cleaned_final_state
+            if isinstance(completed, bool):
+                payload["completed"] = completed
+            if isinstance(extra, Mapping):
+                for key, value in extra.items():
+                    if not isinstance(key, str):
+                        continue
+                    payload[key] = value
+            aux_llm_calls.append(payload)
+            if trace_enabled and trace is not None:
+                raw_boundaries = trace.metadata.get("workflow_dispatch_boundaries")
+                boundaries: list[dict[str, Any]]
+                if isinstance(raw_boundaries, list):
+                    boundaries = raw_boundaries
+                else:
+                    boundaries = []
+                    trace.metadata["workflow_dispatch_boundaries"] = boundaries
+                boundaries.append(dict(payload))
+
         # ----------------------------------------------------------------
         # JVNAUTOSCI-825: Route turns to the appropriate pathway.
         #
@@ -24634,6 +24754,7 @@ class InternalMCPChatOrchestrator:
                 routing_duration_ms=routing_duration_ms,
                 source="selector_override",
                 reasoning=reason,
+                selection_rationale=reason,
             )
 
             override_payload: dict[str, Any] = {
@@ -24766,6 +24887,23 @@ class InternalMCPChatOrchestrator:
             if not isinstance(value, (list, tuple)):
                 return ()
             return tuple(item for item in value if isinstance(item, Mapping))
+
+        def _refresh_result_runtime_snapshots(
+            base_result: OrchestratorResult,
+        ) -> OrchestratorResult:
+            """Return the latest append-only runtime telemetry with the result.
+
+            ``run()`` appends routing and dispatch telemetry after branch-local
+            response construction. Refreshing the frozen result here keeps the
+            user-visible return payload aligned with the authoritative aux log
+            and avoids stale snapshots in diagnostics/MCP read surfaces.
+            """
+
+            return replace(
+                base_result,
+                aux_llm_calls=tuple(aux_llm_calls),
+                orchestrator_duration_ms=_orchestrator_duration_ms(),
+            )
 
         def _maybe_apply_workflow_gap_recovery(
             base_result: OrchestratorResult,
@@ -24901,6 +25039,13 @@ class InternalMCPChatOrchestrator:
         # This is reserved for the chat assistant workflow and workflows that
         # explicitly request narration over a direct screen response.
         if selected_prefers_direct_response and not selected_uses_tool_pipeline_contract:
+            _emit_dispatch_boundary(
+                boundary="execution_mode_selected",
+                status="selected",
+                selected_execution_mode="direct_response",
+                selected_workflow_id=selected_workflow_id_text,
+                dispatch_workflow_id=selected_workflow_id_text,
+            )
             _emit_phase_transition_local(
                 self.PHASE_PLAIN_RESPONSE,
                 extra=workflow_dispatch_progress,
@@ -24970,6 +25115,16 @@ class InternalMCPChatOrchestrator:
                 final_state="plain_response",
                 completed=True,
             )
+            _emit_dispatch_boundary(
+                boundary="workflow_terminal",
+                status="completed",
+                selected_execution_mode="direct_response",
+                selected_workflow_id=selected_workflow_id_text,
+                dispatch_workflow_id=selected_workflow_id_text,
+                final_state="plain_response",
+                completed=True,
+            )
+            result = _refresh_result_runtime_snapshots(result)
             _persist_trace(status="completed")
             return result
 
@@ -24980,7 +25135,21 @@ class InternalMCPChatOrchestrator:
             and selected_workflow_id_text
             and not selected_uses_tool_pipeline_contract
         ):
+            _emit_dispatch_boundary(
+                boundary="execution_mode_selected",
+                status="selected",
+                selected_execution_mode="custom_workflow",
+                selected_workflow_id=selected_workflow_id_text,
+                dispatch_workflow_id=selected_workflow_id_text,
+            )
             try:
+                _emit_dispatch_boundary(
+                    boundary="workflow_handoff",
+                    status="started",
+                    selected_execution_mode="custom_workflow",
+                    selected_workflow_id=selected_workflow_id_text,
+                    dispatch_workflow_id=selected_workflow_id_text,
+                )
                 wf_result = self.execute_workflow(
                     selected_workflow_id_text,
                     data={
@@ -25053,14 +25222,45 @@ class InternalMCPChatOrchestrator:
                         final_state=wf_result.final_state,
                         completed=wf_result.completed,
                     )
+                    _emit_dispatch_boundary(
+                        boundary="workflow_terminal",
+                        status="completed" if wf_result.completed else "failed",
+                        selected_execution_mode="custom_workflow",
+                        selected_workflow_id=selected_workflow_id_text,
+                        dispatch_workflow_id=selected_workflow_id_text,
+                        final_state=wf_result.final_state,
+                        completed=wf_result.completed,
+                    )
+                    result = _refresh_result_runtime_snapshots(result)
                     _persist_trace(status="completed")
                     return result
+                _emit_dispatch_boundary(
+                    boundary="workflow_terminal",
+                    status="missing",
+                    selected_execution_mode="custom_workflow",
+                    selected_workflow_id=selected_workflow_id_text,
+                    dispatch_workflow_id=selected_workflow_id_text,
+                    completed=False,
+                    extra={"reason": "selected_workflow_missing"},
+                )
                 self._logger.warning(
                     "[mcp_orchestrator] Selected workflow %s not in registry; "
                     "falling through to tool-calling.",
                     selected_workflow_id_text,
                 )
             except Exception as exc:
+                _emit_dispatch_boundary(
+                    boundary="workflow_terminal",
+                    status="failed",
+                    selected_execution_mode="custom_workflow",
+                    selected_workflow_id=selected_workflow_id_text,
+                    dispatch_workflow_id=selected_workflow_id_text,
+                    completed=False,
+                    extra={
+                        "reason": "selected_workflow_exception",
+                        "error": str(exc),
+                    },
+                )
                 self._logger.warning(
                     "[mcp_orchestrator] Selected workflow %s failed: %s; "
                     "falling through to tool-calling.",
@@ -25072,11 +25272,36 @@ class InternalMCPChatOrchestrator:
         # JVNAUTOSCI-922 Phase 2: Route tool calling through the workflow
         # engine via a registry-discovered tool pipeline workflow.
         # ----------------------------------------------------------------
+        _emit_dispatch_boundary(
+            boundary="execution_mode_selected",
+            status="selected",
+            selected_execution_mode="tool_pipeline",
+            selected_workflow_id=selected_workflow_id_text,
+            dispatch_workflow_id=selected_workflow_id_text,
+        )
         tool_dispatch_workflow_id = _resolve_workflow_id_for_action_contract(
             required_action_ids=_TOOL_PIPELINE_ACTION_IDS,
             preferred_workflow_id=selected_workflow_id_text,
         )
         if tool_dispatch_workflow_id is None:
+            _emit_dispatch_boundary(
+                boundary="contract_resolution",
+                status="missing",
+                selected_execution_mode="tool_pipeline",
+                selected_workflow_id=selected_workflow_id_text,
+                extra={
+                    "required_action_ids": list(_TOOL_PIPELINE_ACTION_IDS),
+                    "preferred_workflow_id": selected_workflow_id_text,
+                },
+            )
+            _emit_dispatch_boundary(
+                boundary="workflow_terminal",
+                status="missing",
+                selected_execution_mode="tool_pipeline",
+                selected_workflow_id=selected_workflow_id_text,
+                completed=False,
+                extra={"reason": "tool_workflow_unavailable"},
+            )
             self._logger.error(
                 "[mcp_orchestrator] no registry workflow satisfies the "
                 "tool-calling action contract"
@@ -25107,6 +25332,17 @@ class InternalMCPChatOrchestrator:
             _persist_trace(status="completed")
             return result
 
+        _emit_dispatch_boundary(
+            boundary="contract_resolution",
+            status="resolved",
+            selected_execution_mode="tool_pipeline",
+            selected_workflow_id=selected_workflow_id_text,
+            dispatch_workflow_id=tool_dispatch_workflow_id,
+            extra={
+                "required_action_ids": list(_TOOL_PIPELINE_ACTION_IDS),
+                "preferred_workflow_id": selected_workflow_id_text,
+            },
+        )
         tc_env = WorkflowEnvironment(
             llm_client=llm_client,
             gateway=self._gateway,
@@ -25209,6 +25445,13 @@ class InternalMCPChatOrchestrator:
             "completion_gate_escalation_reason": None,
         }
 
+        _emit_dispatch_boundary(
+            boundary="workflow_handoff",
+            status="started",
+            selected_execution_mode="tool_pipeline",
+            selected_workflow_id=selected_workflow_id_text,
+            dispatch_workflow_id=tool_dispatch_workflow_id,
+        )
         tc_result = self.execute_workflow(
             tool_dispatch_workflow_id,
             data=tc_data,
@@ -25223,6 +25466,15 @@ class InternalMCPChatOrchestrator:
             episode_source="chat_turn_workflow",
         )
         if tc_result is None:
+            _emit_dispatch_boundary(
+                boundary="workflow_terminal",
+                status="missing",
+                selected_execution_mode="tool_pipeline",
+                selected_workflow_id=selected_workflow_id_text,
+                dispatch_workflow_id=tool_dispatch_workflow_id,
+                completed=False,
+                extra={"reason": "tool_workflow_missing"},
+            )
             result = OrchestratorResult(
                 response_text=(
                     "I attempted to use tools but the selected tool-calling "
@@ -25249,6 +25501,7 @@ class InternalMCPChatOrchestrator:
         if tc_result.data.get("orchestrator_result") is not None:
             # Handler produced a pre-built OrchestratorResult (error case).
             prebuilt_result = tc_result.data["orchestrator_result"]
+            result_with_dispatch_telemetry = prebuilt_result
             if isinstance(prebuilt_result, OrchestratorResult):
                 _finalise_selection_experience_record(
                     result=prebuilt_result,
@@ -25262,8 +25515,26 @@ class InternalMCPChatOrchestrator:
                         tc_result.data.get("completion_gate_loop_attempts", 0)
                     ),
                 )
+            _emit_dispatch_boundary(
+                boundary="workflow_terminal",
+                status="completed" if tc_result.completed else "failed",
+                selected_execution_mode="tool_pipeline",
+                selected_workflow_id=selected_workflow_id_text,
+                dispatch_workflow_id=tool_dispatch_workflow_id,
+                final_state=tc_result.final_state,
+                completed=tc_result.completed,
+                extra={"prebuilt_result": True},
+            )
+            if isinstance(prebuilt_result, OrchestratorResult):
+                result_with_dispatch_telemetry = _refresh_result_runtime_snapshots(
+                    replace(
+                        prebuilt_result,
+                        workflow_routing=prebuilt_result.workflow_routing
+                        or routing_info,
+                    )
+                )
             _persist_trace(status="completed")
-            return prebuilt_result
+            return result_with_dispatch_telemetry
 
         final_response = tc_result.data.get("final_response", "")
         if not isinstance(final_response, str):
@@ -25351,6 +25622,20 @@ class InternalMCPChatOrchestrator:
                 tc_result.data.get("completion_gate_loop_attempts", 0)
             ),
         )
+        _emit_dispatch_boundary(
+            boundary="workflow_terminal",
+            status=terminal_trace_status if tc_result.completed else "failed",
+            selected_execution_mode="tool_pipeline",
+            selected_workflow_id=selected_workflow_id_text,
+            dispatch_workflow_id=tool_dispatch_workflow_id,
+            final_state=tc_result.final_state,
+            completed=tc_result.completed,
+            extra={
+                "requires_follow_up": gate_requires_follow_up,
+                "safe_to_claim_completion": gate_safe_to_claim_completion,
+            },
+        )
+        result = _refresh_result_runtime_snapshots(result)
         _persist_trace(status=terminal_trace_status)
         return result
 

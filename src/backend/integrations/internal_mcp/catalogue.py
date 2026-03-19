@@ -12951,6 +12951,12 @@ def _rag_list_indexed(**kwargs):
                 if isinstance(workflow_selection_raw, dict)
                 else {}
             )
+            workflow_routing_diagnostics_raw = doc.get("workflow_routing_diagnostics")
+            workflow_routing_diagnostics: dict[str, Any] = (
+                workflow_routing_diagnostics_raw
+                if isinstance(workflow_routing_diagnostics_raw, dict)
+                else {}
+            )
             prompt_payload_raw = doc.get("prompt")
             prompt_payload: dict[str, Any] = (
                 prompt_payload_raw if isinstance(prompt_payload_raw, dict) else {}
@@ -13037,6 +13043,7 @@ def _rag_list_indexed(**kwargs):
                         "selected_workflow_id"
                     ),
                     "selector_verdict": workflow_selection.get("selector_verdict"),
+                    "workflow_routing_diagnostics": workflow_routing_diagnostics,
                     "prompt_preview": prompt_payload.get("preview"),
                     "completion_claim_detected": final_response_payload.get(
                         "completion_claim_detected"
@@ -13550,6 +13557,11 @@ def _rag_get_item(**kwargs):
             if isinstance(doc.get("workflow_selection"), dict)
             else {}
         )
+        workflow_routing_diagnostics = (
+            doc.get("workflow_routing_diagnostics")
+            if isinstance(doc.get("workflow_routing_diagnostics"), dict)
+            else {}
+        )
         prompt_payload = doc.get("prompt") if isinstance(doc.get("prompt"), dict) else {}
         required_effects = (
             doc.get("required_effects") if isinstance(doc.get("required_effects"), list) else []
@@ -13593,6 +13605,7 @@ def _rag_get_item(**kwargs):
             "blocking_effect_ids": completion_gate.get("blocking_effect_ids"),
             "selected_workflow_id": workflow_selection.get("selected_workflow_id"),
             "selector_verdict": workflow_selection.get("selector_verdict"),
+            "workflow_routing_diagnostics": workflow_routing_diagnostics,
             "prompt_preview": prompt_payload.get("preview"),
             "required_effects": required_effects,
             "postcondition_checks": postcondition_checks,

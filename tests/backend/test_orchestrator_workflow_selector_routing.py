@@ -3207,6 +3207,9 @@ def test_plain_response_skips_tool_calling(monkeypatch):
 
 def test_plain_response_has_routing_info(monkeypatch):
     """Plain response should include WorkflowRoutingInfo in the result."""
+    import src.backend.services.workflow_selection_policy_service as policy_module
+
+    monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
 
     llm = _CapturingLLM(
@@ -3229,6 +3232,14 @@ def test_plain_response_has_routing_info(monkeypatch):
     assert result.workflow_routing.verdict == "rag_selected"
     assert result.workflow_routing.workflow_id == CHAT_ASSISTANT_WORKFLOW_ID
     assert result.workflow_routing.source == "selector"
+
+    dispatch_boundaries = [
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict) and entry.get("type") == "workflow_dispatch_boundary"
+    ]
+    assert dispatch_boundaries[-1].get("boundary") == "workflow_terminal"
+    assert dispatch_boundaries[-1].get("selected_execution_mode") == "direct_response"
 
 
 def test_workflow_selector_uses_provider_aware_classifier_fallback(monkeypatch):
@@ -3912,6 +3923,9 @@ def test_preselected_tool_planner_receives_authoritative_workflow_continuation_c
 
 def test_tool_seeking_has_routing_info(monkeypatch):
     """Tool-calling path should also include WorkflowRoutingInfo."""
+    import src.backend.services.workflow_selection_policy_service as policy_module
+
+    monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
 
     llm = _CapturingLLM(
@@ -3933,6 +3947,40 @@ def test_tool_seeking_has_routing_info(monkeypatch):
     assert result.workflow_routing.verdict == "rag_selected"
     assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
     assert result.workflow_routing.source == "selector"
+    assert isinstance(result.workflow_routing.selection_rationale, str)
+
+    selector_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict) and entry.get("type") == "workflow_selector"
+        ),
+        None,
+    )
+    assert selector_entry is not None
+    assert selector_entry.get("prompt", {}).get("text")
+    assert TOOL_CALLING_WORKFLOW_ID in str(
+        selector_entry.get("response", {}).get("text") or ""
+    )
+    assert isinstance(selector_entry.get("candidate_entries"), list)
+    assert any(
+        isinstance(entry, dict) and entry.get("concept_id") == TOOL_CALLING_WORKFLOW_ID
+        for entry in selector_entry.get("candidate_entries", [])
+    )
+
+    dispatch_boundaries = [
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict) and entry.get("type") == "workflow_dispatch_boundary"
+    ]
+    assert [entry.get("boundary") for entry in dispatch_boundaries[:3]] == [
+        "execution_mode_selected",
+        "contract_resolution",
+        "workflow_handoff",
+    ]
+    assert dispatch_boundaries[-1].get("boundary") == "workflow_terminal"
+    assert dispatch_boundaries[-1].get("selected_execution_mode") == "tool_pipeline"
+    assert dispatch_boundaries[-1].get("dispatch_workflow_id")
 
 
 # ---------------------------------------------------------------------------
@@ -4204,3 +4252,12 @@ def test_custom_workflow_result_preserves_messages_and_invocations(monkeypatch):
     assert result.response_text == "Custom workflow response."
     assert result.extra_messages == ({"role": "tool", "content": "custom output"},)
     assert result.tool_invocations == ({"tool": "search_concepts"},)
+
+    dispatch_boundaries = [
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict) and entry.get("type") == "workflow_dispatch_boundary"
+    ]
+    assert dispatch_boundaries[-1].get("boundary") == "workflow_terminal"
+    assert dispatch_boundaries[-1].get("selected_execution_mode") == "custom_workflow"
+    assert dispatch_boundaries[-1].get("dispatch_workflow_id") == selected_workflow_id

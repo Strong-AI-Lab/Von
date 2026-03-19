@@ -164,6 +164,10 @@ class TestRagFirstPrompt:
         assert "Tool Calling" in prompt.prompt_text
         assert "Chat Assistant" in prompt.prompt_text
         assert len(prompt.discovered_workflow_ids) == 2
+        assert [entry["concept_id"] for entry in prompt.candidate_entries] == [
+            "#V#tool_calling_workflow",
+            "#V#chat_assistant_workflow",
+        ]
 
     def test_prompt_with_no_candidates_uses_default(self):
         selector = _build_selector(
@@ -176,6 +180,13 @@ class TestRagFirstPrompt:
         assert prompt.prompt_text is not None
         assert "#V#chat_assistant_workflow" in prompt.prompt_text
         assert len(prompt.discovered_workflow_ids) == 1
+        assert prompt.candidate_entries == (
+            {
+                "concept_id": "#V#chat_assistant_workflow",
+                "name": "Default workflow",
+                "description": "",
+            },
+        )
 
     def test_prompt_includes_turn_text(self):
         selector = _build_selector()
