@@ -55,14 +55,54 @@ _STOP_WORDS = frozenset({
     "of", "with", "by", "is", "was", "are", "were", "be", "been", "being",
     "it", "its", "this", "that", "from", "as", "not", "no", "do", "does",
 })
+_CAPABILITY_INDEX_REBUILD_MIN_INTERVAL_SECONDS = 30.0
+
+_INDEX_REBUILD_LOCK = Lock()
+_INDEX_REBUILD_STATE: Dict[str, float | int] = {
+    "last_attempt_monotonic": 0.0,
+    "last_success_monotonic": 0.0,
+    "last_built_size": 0,
+}
+
+
+def _normalise_token_variants(token: str) -> List[str]:
+    """Return stable lexical variants for simple singular/plural matching."""
+    cleaned = str(token or "").strip().lower()
+    if not cleaned:
+        return []
+
+    variants = [cleaned]
+    singular = cleaned
+    if cleaned.endswith("ies") and len(cleaned) > 4:
+        singular = cleaned[:-3] + "y"
+    elif (
+        (cleaned.endswith("es") and len(cleaned) > 4 and cleaned[-3:-2] in {"s", "x", "z"})
+        or cleaned.endswith(("ches", "shes"))
+    ):
+        singular = cleaned[:-2]
+    elif (
+        cleaned.endswith("s")
+        and len(cleaned) > 4
+        and not cleaned.endswith(("ss", "us", "is"))
+    ):
+        singular = cleaned[:-1]
+
+    singular = singular.strip()
+    if singular and singular not in variants:
+        variants.append(singular)
+
+    return variants
 
 
 def _tokenise(text: str) -> List[str]:
     """Tokenise text into lowercase terms, filtering stop words."""
-    return [
-        tok for tok in _TOKENISE_RE.findall(text.lower())
-        if tok not in _STOP_WORDS and len(tok) > 1
-    ]
+    tokens: list[str] = []
+    for raw_token in _TOKENISE_RE.findall(text.lower()):
+        for token in _normalise_token_variants(raw_token):
+            if token in _STOP_WORDS or len(token) <= 1:
+                continue
+            tokens.append(token)
+    return tokens
 
 
 @dataclass
@@ -428,8 +468,100 @@ def get_workflow_capability_index() -> WorkflowCapabilityIndex:
         return _global_index
 
 
+def ensure_workflow_capability_index_populated(
+    *,
+    force_refresh: bool = False,
+) -> WorkflowCapabilityIndex:
+    """Build the shared capability index on demand from authoritative workflows.
+
+    Workflow discovery can run before deferred registry background work has
+    populated the search substrate. Building on demand keeps routed turns from
+    silently degrading to builtin-only candidates.
+    """
+
+    index = get_workflow_capability_index()
+    if index.size > 0 and not force_refresh:
+        return index
+
+    now = time.monotonic()
+    with _INDEX_REBUILD_LOCK:
+        index = get_workflow_capability_index()
+        if index.size > 0 and not force_refresh:
+            return index
+
+        last_attempt = float(_INDEX_REBUILD_STATE.get("last_attempt_monotonic", 0.0))
+        if (
+            not force_refresh
+            and last_attempt > 0.0
+            and (now - last_attempt) < _CAPABILITY_INDEX_REBUILD_MIN_INTERVAL_SECONDS
+        ):
+            return index
+
+        _INDEX_REBUILD_STATE["last_attempt_monotonic"] = now
+
+        try:
+            from ..workflows.durable.registry_factory import (
+                build_durable_workflow_registry_read_only,
+            )
+            from ..workflows.vontology_loader import batch_fetch_workflow_purposes
+            from ..workflows.workflow_registry import LazyWorkflowRegistration
+
+            registry = build_durable_workflow_registry_read_only(defer_parity_work=True)
+            lazy_ids = list(registry.lazy_workflow_ids())
+            if lazy_ids:
+                purposes = batch_fetch_workflow_purposes(lazy_ids)
+                for workflow_id, purpose in purposes.items():
+                    registration = registry.peek_registration(workflow_id)
+                    if (
+                        isinstance(registration, LazyWorkflowRegistration)
+                        and not registration.purpose
+                        and isinstance(purpose, str)
+                        and purpose.strip()
+                    ):
+                        registration.purpose = purpose.strip()
+
+            if force_refresh:
+                reset_workflow_capability_index()
+                index = get_workflow_capability_index()
+
+            count = index.index_from_registry(registry)
+            _INDEX_REBUILD_STATE["last_success_monotonic"] = time.monotonic()
+            _INDEX_REBUILD_STATE["last_built_size"] = count
+            logger.info(
+                "[workflow_capability_index] On-demand build completed with %d entries.",
+                count,
+            )
+        except Exception as exc:
+            logger.warning("workflow_capability_index_on_demand_build_failed: %s", exc)
+
+        return get_workflow_capability_index()
+
+
+def search_workflow_capabilities(
+    query: str,
+    *,
+    max_results: int = 10,
+    min_score: float = 0.0,
+) -> List[WorkflowCapabilityMatch]:
+    """Search workflow capabilities, rebuilding the index on bounded misses."""
+
+    index = ensure_workflow_capability_index_populated()
+    results = index.search(query, max_results=max_results, min_score=min_score)
+    if results:
+        return results
+
+    refreshed = ensure_workflow_capability_index_populated(force_refresh=True)
+    if refreshed is index and refreshed.size == 0:
+        return []
+    return refreshed.search(query, max_results=max_results, min_score=min_score)
+
+
 def reset_workflow_capability_index() -> None:
     """Reset the global index.  Intended for tests."""
     global _global_index
     with _global_index_lock:
         _global_index = None
+    with _INDEX_REBUILD_LOCK:
+        _INDEX_REBUILD_STATE["last_attempt_monotonic"] = 0.0
+        _INDEX_REBUILD_STATE["last_success_monotonic"] = 0.0
+        _INDEX_REBUILD_STATE["last_built_size"] = 0

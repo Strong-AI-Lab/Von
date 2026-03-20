@@ -34,7 +34,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .file_copy_reference_service import extract_file_copy_concept_ids_from_text
 from .file_copy_typing_service import build_file_copy_typing_context
 from .arxiv_paper_link_service import extract_arxiv_id_candidates
-from .workflow_capability_service import get_workflow_capability_index
+from .workflow_capability_service import search_workflow_capabilities
 
 logger = logging.getLogger(__name__)
 
@@ -922,11 +922,11 @@ def _search_workflow_capabilities(
     fallback paths.
     """
     try:
-        index = get_workflow_capability_index()
-        if index.size == 0:
-            return []
-
-        cap_matches = index.search(query, max_results=limit, min_score=0.01)
+        cap_matches = search_workflow_capabilities(
+            query,
+            max_results=limit,
+            min_score=0.01,
+        )
         results: list[WorkflowMatch] = []
         for cap in cap_matches:
             results.append(
@@ -1122,7 +1122,7 @@ def discover_workflows_for_turn(
         max_results: Maximum workflows to return
 
     Returns:
-        Dict with workflow suggestions or None if no matches
+        Dict with workflow suggestions or None if the input is too short
     """
     if not user_input or len(user_input.strip()) < 5:
         # Skip very short inputs
@@ -1140,18 +1140,6 @@ def discover_workflows_for_turn(
             max_results=max_results,
             allow_non_executable=effective_allow_non_executable,
         )
-
-        # Return candidate payloads even when routing-eligible matches are empty.
-        # The caller needs visibility into near matches and exclusion reasons,
-        # not just the final dispatchable subset.
-        routing_matches = (
-            result.routing_matches
-            if isinstance(result.routing_matches, list)
-            else result.matches
-        )
-        if not routing_matches and not result.matches:
-            return None
-
         return result.to_dict()
 
     except Exception as e:

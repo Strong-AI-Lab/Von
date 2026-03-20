@@ -46,6 +46,15 @@ def _use_mock_db(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VON_USE_MOCK_DB", "1")
 
 
+@pytest.fixture(autouse=True)
+def _stub_capability_search(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep unit discovery tests focused on discovery logic, not registry rebuilds."""
+    monkeypatch.setattr(
+        "src.backend.services.workflow_discovery_service._search_workflow_capabilities",
+        lambda *args, **kwargs: [],
+    )
+
+
 class TestWorkflowMatch:
     """Unit tests for WorkflowMatch dataclass."""
 
@@ -488,11 +497,17 @@ class TestDiscoverWorkflowsForTurn:
         assert result is None
 
     @patch("src.backend.services.workflow_discovery_service.discover_workflows")
-    def test_returns_none_when_no_matches(self, mock_discover: MagicMock) -> None:
-        """Should return None when discover_workflows finds no matches."""
+    def test_returns_structured_empty_payload_when_no_matches(
+        self, mock_discover: MagicMock
+    ) -> None:
+        """Wrapper should preserve an attempted zero-match discovery result."""
         mock_discover.return_value = WorkflowDiscoveryResult(matches=[])
         result = discover_workflows_for_turn("test query input")
-        assert result is None
+        assert result is not None
+        assert result["match_count"] == 0
+        assert result["candidate_count"] == 0
+        assert result["matches"] == []
+        assert result["candidates"] == []
 
     @patch("src.backend.services.workflow_discovery_service.discover_workflows")
     def test_returns_candidate_payload_when_only_non_routing_candidates_exist(
