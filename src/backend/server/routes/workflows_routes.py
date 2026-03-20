@@ -96,6 +96,24 @@ def _is_transient_workflow_instances_error(exc: Exception) -> bool:
     return any(marker in message for marker in transient_markers)
 
 
+def _parse_workflow_instance_status_filters(
+    status_raw: str | None,
+) -> list[WorkflowInstanceStatus]:
+    """Parse and validate workflow instance status filters from query params."""
+    if not isinstance(status_raw, str) or not status_raw.strip():
+        return []
+
+    statuses: list[WorkflowInstanceStatus] = []
+    seen: set[str] = set()
+    for raw_status in status_raw.split(","):
+        value = raw_status.strip().lower()
+        if not value or value in seen:
+            continue
+        statuses.append(WorkflowInstanceStatus(value))
+        seen.add(value)
+    return statuses
+
+
 def _read_workflow_definitions_cache_ttl_seconds() -> float:
     raw = os.getenv(
         "VON_WORKFLOW_DEFINITIONS_CACHE_TTL_SECONDS",
@@ -759,7 +777,7 @@ def api_list_workflow_instances():
     - user_id: Filter by user
     - org_id: Filter by organisation
     - namespace: Filter by namespace
-    - status: Filter by status (pending, running, completed, failed, cancelled, paused)
+    - status: Comma-separated statuses (pending, running, completed, failed, cancelled, paused)
     - workflow_id: Filter by workflow definition
     - source_event_type: Filter by triggering event type
     - source_event_id: Filter by triggering event ID
@@ -776,20 +794,26 @@ def api_list_workflow_instances():
     source_event_id = request.args.get("source_event_id")
     limit = min(int(request.args.get("limit", "50")), 200)
 
-    status: WorkflowInstanceStatus | None = None
-    if status_str:
-        try:
-            status = WorkflowInstanceStatus(status_str.lower())
-        except ValueError:
-            return jsonify({"error": f"Invalid status: {status_str}"}), 400
+    try:
+        statuses = _parse_workflow_instance_status_filters(status_str)
+    except ValueError:
+        valid_statuses = ", ".join(status.value for status in WorkflowInstanceStatus)
+        return (
+            jsonify(
+                {
+                    "error": f"Invalid status: {status_str}. Valid values: {valid_statuses}"
+                }
+            ),
+            400,
+        )
 
     manager = _get_instance_manager()
     try:
-        instances = manager.list_instances(
+        items = manager.list_instance_status_dicts(
             user_id=user_id,
             org_id=org_id,
             namespace=namespace,
-            status=status,
+            status=statuses,
             workflow_id=workflow_id,
             source_event_type=source_event_type,
             source_event_id=source_event_id,
@@ -821,8 +845,8 @@ def api_list_workflow_instances():
 
     return jsonify(
         {
-            "items": [inst.to_status_dict() for inst in instances],
-            "count": len(instances),
+            "items": items,
+            "count": len(items),
         }
     )
 

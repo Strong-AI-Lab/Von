@@ -7,6 +7,7 @@ durable workflow instances.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -37,6 +38,29 @@ WORKFLOW_EVENT_BINDINGS_COLLECTION = "workflow_event_bindings"
 
 # Default lock TTL: 5 minutes
 DEFAULT_LOCK_TTL_SECONDS = 300
+
+_WORKFLOW_INSTANCE_STATUS_SUMMARY_PROJECTION: dict[str, Any] = {
+    "_id": 0,
+    "instance_id": 1,
+    "workflow_id": 1,
+    "status": 1,
+    "current_state": 1,
+    "step_index": 1,
+    "created_at": 1,
+    "started_at": 1,
+    "completed_at": 1,
+    "progress_current": 1,
+    "progress_total": 1,
+    "progress_message": 1,
+    "progress_updated_at": 1,
+    "error": 1,
+    "retry_count": 1,
+    "max_retries": 1,
+    "source_event_type": 1,
+    "source_event_id": 1,
+    "event_idempotency_key": 1,
+    "has_outputs": {"$ne": [{"$ifNull": ["$outputs", None]}, None]},
+}
 
 # Default completed instance TTL: 30 days
 DEFAULT_COMPLETED_TTL_SECONDS = 30 * 24 * 60 * 60
@@ -105,6 +129,16 @@ def _ensure_indexes() -> None:
             instances_coll.create_index(
                 [("org_id", ASCENDING), ("status", ASCENDING)],
                 name="org_status",
+            )
+
+        if "namespace_status_created" not in existing:
+            instances_coll.create_index(
+                [
+                    ("namespace", ASCENDING),
+                    ("status", ASCENDING),
+                    ("created_at", DESCENDING),
+                ],
+                name="namespace_status_created",
             )
 
         # Schedule association
@@ -226,6 +260,89 @@ class WorkflowInstanceManager:
         """Get the workflow_instances collection."""
         db = get_db()
         return db[WORKFLOW_INSTANCES_COLLECTION] if db is not None else None
+
+    @staticmethod
+    def _normalise_status_filter(
+        status: WorkflowInstanceStatus
+        | str
+        | Iterable[WorkflowInstanceStatus | str]
+        | None,
+    ) -> list[str]:
+        if status is None:
+            return []
+        if isinstance(status, WorkflowInstanceStatus):
+            return [status.value]
+        if isinstance(status, str):
+            value = status.strip().lower()
+            return [value] if value else []
+
+        values: list[str] = []
+        for raw_status in status:
+            if isinstance(raw_status, WorkflowInstanceStatus):
+                value = raw_status.value
+            else:
+                value = str(raw_status or "").strip().lower()
+            if value and value not in values:
+                values.append(value)
+        return values
+
+    def _build_instance_list_query(
+        self,
+        *,
+        user_id: str | None = None,
+        org_id: str | None = None,
+        namespace: str | None = None,
+        status: WorkflowInstanceStatus
+        | str
+        | Iterable[WorkflowInstanceStatus | str]
+        | None = None,
+        workflow_id: str | None = None,
+        source_event_type: str | None = None,
+        source_event_id: str | None = None,
+        conversation_session_id: str | None = None,
+        request_id: str | None = None,
+        from_utc: datetime | str | None = None,
+        to_utc: datetime | str | None = None,
+    ) -> dict[str, Any]:
+        """Build the shared query for workflow-instance list operations."""
+        query: dict[str, Any] = {}
+        if user_id:
+            query["user_id"] = user_id
+        if org_id:
+            query["org_id"] = org_id
+        if namespace:
+            query["namespace"] = namespace
+
+        status_values = self._normalise_status_filter(status)
+        if status_values:
+            query["status"] = (
+                status_values[0]
+                if len(status_values) == 1
+                else {"$in": status_values}
+            )
+
+        if workflow_id:
+            query["workflow_id"] = workflow_id
+        if source_event_type:
+            query["source_event_type"] = source_event_type
+        if source_event_id:
+            query["source_event_id"] = source_event_id
+        if conversation_session_id:
+            query["inputs.conversation_session_id"] = conversation_session_id
+        if request_id:
+            query["inputs.turn_id"] = request_id
+
+        created_range: dict[str, Any] = {}
+        from_dt = _parse_datetime_filter(from_utc)
+        to_dt = _parse_datetime_filter(to_utc)
+        if from_dt is not None:
+            created_range["$gte"] = from_dt
+        if to_dt is not None:
+            created_range["$lte"] = to_dt
+        if created_range:
+            query["created_at"] = created_range
+
+        return query
 
     def _get_schedules_collection(self) -> Collection | None:
         """Get the workflow_schedules collection."""
@@ -524,7 +641,10 @@ class WorkflowInstanceManager:
         user_id: str | None = None,
         org_id: str | None = None,
         namespace: str | None = None,
-        status: WorkflowInstanceStatus | str | None = None,
+        status: WorkflowInstanceStatus
+        | str
+        | Iterable[WorkflowInstanceStatus | str]
+        | None = None,
         workflow_id: str | None = None,
         source_event_type: str | None = None,
         source_event_id: str | None = None,
@@ -555,41 +675,68 @@ class WorkflowInstanceManager:
         if coll is None:
             return []
 
-        query: dict[str, Any] = {}
-        if user_id:
-            query["user_id"] = user_id
-        if org_id:
-            query["org_id"] = org_id
-        if namespace:
-            query["namespace"] = namespace
-        if status:
-            status_val = (
-                status.value if isinstance(status, WorkflowInstanceStatus) else status
-            )
-            query["status"] = status_val
-        if workflow_id:
-            query["workflow_id"] = workflow_id
-        if source_event_type:
-            query["source_event_type"] = source_event_type
-        if source_event_id:
-            query["source_event_id"] = source_event_id
-        if conversation_session_id:
-            query["inputs.conversation_session_id"] = conversation_session_id
-        if request_id:
-            query["inputs.turn_id"] = request_id
-
-        created_range: dict[str, Any] = {}
-        from_dt = _parse_datetime_filter(from_utc)
-        to_dt = _parse_datetime_filter(to_utc)
-        if from_dt is not None:
-            created_range["$gte"] = from_dt
-        if to_dt is not None:
-            created_range["$lte"] = to_dt
-        if created_range:
-            query["created_at"] = created_range
-
+        query = self._build_instance_list_query(
+            user_id=user_id,
+            org_id=org_id,
+            namespace=namespace,
+            status=status,
+            workflow_id=workflow_id,
+            source_event_type=source_event_type,
+            source_event_id=source_event_id,
+            conversation_session_id=conversation_session_id,
+            request_id=request_id,
+            from_utc=from_utc,
+            to_utc=to_utc,
+        )
         cursor = coll.find(query).sort("created_at", -1).limit(limit)
         return [WorkflowInstance.from_doc(doc) for doc in cursor]
+
+    def list_instance_status_dicts(
+        self,
+        *,
+        user_id: str | None = None,
+        org_id: str | None = None,
+        namespace: str | None = None,
+        status: WorkflowInstanceStatus
+        | str
+        | Iterable[WorkflowInstanceStatus | str]
+        | None = None,
+        workflow_id: str | None = None,
+        source_event_type: str | None = None,
+        source_event_id: str | None = None,
+        conversation_session_id: str | None = None,
+        request_id: str | None = None,
+        from_utc: datetime | str | None = None,
+        to_utc: datetime | str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """List workflow monitor status cards without hydrating full instances."""
+        coll = self._get_instances_collection()
+        if coll is None:
+            return []
+
+        query = self._build_instance_list_query(
+            user_id=user_id,
+            org_id=org_id,
+            namespace=namespace,
+            status=status,
+            workflow_id=workflow_id,
+            source_event_type=source_event_type,
+            source_event_id=source_event_id,
+            conversation_session_id=conversation_session_id,
+            request_id=request_id,
+            from_utc=from_utc,
+            to_utc=to_utc,
+        )
+        pipeline = [
+            {"$match": query},
+            {"$sort": {"created_at": -1}},
+            {"$limit": limit},
+            {"$project": dict(_WORKFLOW_INSTANCE_STATUS_SUMMARY_PROJECTION)},
+        ]
+        return [
+            WorkflowInstance.status_dict_from_doc(doc) for doc in coll.aggregate(pipeline)
+        ]
 
     # -------------------------------------------------------------------------
     # Locking for distributed workers
