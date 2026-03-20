@@ -936,6 +936,24 @@ describe('workflow monitor active snapshot degradation handling', () => {
         expect(payload.active_instances_snapshot.payload.retry_scheduled_in_ms).toBe(8000);
     });
 
+    test('refreshes the active snapshot with an active-status filter', async () => {
+        global.fetch = jest.fn().mockResolvedValue({
+            ok: true,
+            status: 200,
+            headers: { get: () => null },
+            json: async () => ({
+                items: [],
+                count: 0
+            })
+        });
+
+        await __testOnly_refreshWorkflowStatusSnapshot();
+
+        expect(global.fetch).toHaveBeenCalledTimes(1);
+        const requestUrl = new URL(global.fetch.mock.calls[0][0], 'http://localhost');
+        expect(requestUrl.searchParams.get('status')).toBe('pending,running,paused');
+    });
+
     test('shows visible refresh state while an active snapshot request is in flight', async () => {
         let resolveFetch;
         global.fetch = jest.fn(() => new Promise((resolve) => {

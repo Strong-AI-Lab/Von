@@ -17027,7 +17027,7 @@ function renderWorkflowEpisodesPopup() {
 async function fetchWorkflowEpisodesSnapshot(workflowId, { limit = 60 } = {}) {
     const cleanWorkflowId = typeof workflowId === 'string' ? workflowId.trim() : '';
     const safeLimit = Math.max(1, Math.min(Number(limit) || 60, 200));
-    const params = buildWorkflowStatusQuery();
+    const params = buildWorkflowStatusQuery({ includeStatusFilter: true });
     params.set('workflow_id', cleanWorkflowId);
     params.set('limit', String(safeLimit));
     const requestQuery = params.toString();
@@ -17846,7 +17846,7 @@ async function refreshWorkflowStatusSnapshot({ silent = false, preserveRetryAtte
     if (!panel) return;
     if (workflowStatusStreamState.loading) return;
 
-    const params = buildWorkflowStatusQuery();
+    const params = buildWorkflowStatusQuery({ includeStatusFilter: true });
     params.set('limit', '50');
 
     if (!preserveRetryAttempt) {

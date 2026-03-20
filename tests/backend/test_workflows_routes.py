@@ -4,6 +4,7 @@ import importlib
 import sys
 import time
 import types
+from typing import cast
 
 import pytest
 from pymongo.errors import PyMongoError
@@ -727,7 +728,7 @@ def test_list_workflow_instances_returns_retryable_degraded_payload_for_mongo_ti
     import src.backend.server.routes.workflows_routes as workflows_routes
 
     manager = types.SimpleNamespace(
-        list_instances=lambda **kwargs: (_ for _ in ()).throw(
+        list_instance_status_dicts=lambda **kwargs: (_ for _ in ()).throw(
             PyMongoError("server selection timeout while reading workflow_instances")
         )
     )
@@ -742,6 +743,78 @@ def test_list_workflow_instances_returns_retryable_degraded_payload_for_mongo_ti
     assert payload["items"] == []
     assert payload["count"] == 0
     assert payload["error"] == "Workflow monitor temporarily unavailable; please retry."
+
+
+def test_list_workflow_instances_accepts_comma_separated_status_filters(
+    monkeypatch, app_client
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    captured: dict[str, object] = {}
+
+    def _list_instance_status_dicts(**kwargs):
+        captured.update(kwargs)
+        return [
+            {
+                "instance_id": "inst-1",
+                "workflow_id": "#V#test_workflow",
+                "status": "running",
+                "current_state": "step_a",
+                "step_index": 1,
+                "created_at": "2026-03-20T00:00:00+00:00",
+                "started_at": "2026-03-20T00:00:01+00:00",
+                "completed_at": None,
+                "progress": {
+                    "current": 1,
+                    "total": 3,
+                    "message": "running",
+                    "updated_at": None,
+                },
+                "error": None,
+                "has_outputs": False,
+                "retry_count": 0,
+                "max_retries": 3,
+                "source_event_type": None,
+                "source_event_id": None,
+                "event_idempotency_key": None,
+            }
+        ]
+
+    manager = types.SimpleNamespace(list_instance_status_dicts=_list_instance_status_dicts)
+    monkeypatch.setattr(workflows_routes, "_get_instance_manager", lambda: manager)
+
+    response = app_client.get(
+        "/api/workflows/instances",
+        query_string={
+            "namespace": "#V#user_1@org_1",
+            "status": "pending,running,paused",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["count"] == 1
+    assert payload["items"][0]["instance_id"] == "inst-1"
+    assert captured["namespace"] == "#V#user_1@org_1"
+    statuses = cast(list[workflows_routes.WorkflowInstanceStatus], captured["status"])
+    assert [status.value for status in statuses] == [
+        "pending",
+        "running",
+        "paused",
+    ]
+
+
+def test_list_workflow_instances_rejects_invalid_comma_separated_status_filters(
+    app_client,
+):
+    response = app_client.get(
+        "/api/workflows/instances",
+        query_string={"status": "running,not_a_real_status"},
+    )
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert "Invalid status" in payload["error"]
 
 
 def test_workflow_definitions_list_uses_short_ttl_cache(monkeypatch, app_client):

@@ -40,6 +40,15 @@ class WorkflowInstanceStatus(str, Enum):
             WorkflowInstanceStatus.PAUSED,
         )
 
+    @classmethod
+    def active_values(cls) -> tuple[str, ...]:
+        """Return the active workflow statuses surfaced in the monitor."""
+        return (
+            cls.PENDING.value,
+            cls.RUNNING.value,
+            cls.PAUSED.value,
+        )
+
 
 class ScheduleType(str, Enum):
     """Type of workflow schedule."""
@@ -325,37 +334,79 @@ class WorkflowInstance:
             execution_trace_id=doc.get("execution_trace_id"),
         )
 
-    def to_status_dict(self) -> dict[str, Any]:
-        """Convert to a JSON-serialisable status dict for API responses."""
+    @staticmethod
+    def _status_datetime_to_iso(value: Any) -> str | None:
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, str):
+            cleaned = value.strip()
+            return cleaned or None
+        return None
+
+    @classmethod
+    def status_dict_from_doc(cls, doc: dict[str, Any]) -> dict[str, Any]:
+        """Convert a persisted document or projection into monitor payload shape."""
+        status_value = doc.get("status")
+        if isinstance(status_value, WorkflowInstanceStatus):
+            status = status_value.value
+        else:
+            status = str(status_value or "")
+
+        has_outputs = doc.get("has_outputs")
+        if not isinstance(has_outputs, bool):
+            has_outputs = doc.get("outputs") is not None
+
         return {
-            "instance_id": self.instance_id,
-            "workflow_id": self.workflow_id,
-            "status": self.status.value,
-            "current_state": self.current_state,
-            "step_index": self.step_index,
-            "created_at": self.created_at.isoformat(),
-            "started_at": self.started_at.isoformat() if self.started_at else None,
-            "completed_at": (
-                self.completed_at.isoformat() if self.completed_at else None
-            ),
+            "instance_id": doc.get("instance_id"),
+            "workflow_id": doc.get("workflow_id"),
+            "status": status,
+            "current_state": doc.get("current_state", ""),
+            "step_index": doc.get("step_index", 0),
+            "created_at": cls._status_datetime_to_iso(doc.get("created_at")),
+            "started_at": cls._status_datetime_to_iso(doc.get("started_at")),
+            "completed_at": cls._status_datetime_to_iso(doc.get("completed_at")),
             "progress": {
-                "current": self.progress_current,
-                "total": self.progress_total,
-                "message": self.progress_message,
-                "updated_at": (
-                    self.progress_updated_at.isoformat()
-                    if self.progress_updated_at
-                    else None
+                "current": doc.get("progress_current"),
+                "total": doc.get("progress_total"),
+                "message": doc.get("progress_message"),
+                "updated_at": cls._status_datetime_to_iso(
+                    doc.get("progress_updated_at")
                 ),
             },
-            "error": self.error,
-            "has_outputs": self.outputs is not None,
-            "retry_count": self.retry_count,
-            "max_retries": self.max_retries,
-            "source_event_type": self.source_event_type,
-            "source_event_id": self.source_event_id,
-            "event_idempotency_key": self.event_idempotency_key,
+            "error": doc.get("error"),
+            "has_outputs": has_outputs,
+            "retry_count": doc.get("retry_count", 0),
+            "max_retries": doc.get("max_retries", 3),
+            "source_event_type": doc.get("source_event_type"),
+            "source_event_id": doc.get("source_event_id"),
+            "event_idempotency_key": doc.get("event_idempotency_key"),
         }
+
+    def to_status_dict(self) -> dict[str, Any]:
+        """Convert to a JSON-serialisable status dict for API responses."""
+        return self.status_dict_from_doc(
+            {
+                "instance_id": self.instance_id,
+                "workflow_id": self.workflow_id,
+                "status": self.status,
+                "current_state": self.current_state,
+                "step_index": self.step_index,
+                "created_at": self.created_at,
+                "started_at": self.started_at,
+                "completed_at": self.completed_at,
+                "progress_current": self.progress_current,
+                "progress_total": self.progress_total,
+                "progress_message": self.progress_message,
+                "progress_updated_at": self.progress_updated_at,
+                "error": self.error,
+                "has_outputs": self.outputs is not None,
+                "retry_count": self.retry_count,
+                "max_retries": self.max_retries,
+                "source_event_type": self.source_event_type,
+                "source_event_id": self.source_event_id,
+                "event_idempotency_key": self.event_idempotency_key,
+            }
+        )
 
 
 @dataclass

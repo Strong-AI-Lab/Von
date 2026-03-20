@@ -657,6 +657,119 @@ class TestWorkflowInstanceManager:
         assert id1 in completed_ids
         assert id2 in pending_ids
 
+    def test_list_instances_accepts_multiple_status_filters(self) -> None:
+        """list_instances() should support multi-status queries."""
+        manager = WorkflowInstanceManager()
+
+        pending_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        running_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        paused_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+
+        collection = manager._get_instances_collection()
+        assert collection is not None
+        collection.update_one(
+            {"instance_id": running_id},
+            {
+                "$set": {
+                    "status": WorkflowInstanceStatus.RUNNING.value,
+                    "progress_message": "running",
+                }
+            },
+        )
+        collection.update_one(
+            {"instance_id": paused_id},
+            {
+                "$set": {
+                    "status": WorkflowInstanceStatus.PAUSED.value,
+                    "progress_message": "paused",
+                }
+            },
+        )
+
+        active_instances = manager.list_instances(
+            user_id="user-1",
+            status=[
+                WorkflowInstanceStatus.PENDING,
+                WorkflowInstanceStatus.RUNNING,
+            ],
+        )
+
+        active_ids = {instance.instance_id for instance in active_instances}
+        assert pending_id in active_ids
+        assert running_id in active_ids
+        assert paused_id not in active_ids
+
+    def test_list_instance_status_dicts_returns_summary_payload(self) -> None:
+        """list_instance_status_dicts() should return projected monitor payloads."""
+        manager = WorkflowInstanceManager()
+
+        completed_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        active_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+
+        manager.mark_completed(completed_id, outputs={"result": "done"})
+        collection = manager._get_instances_collection()
+        assert collection is not None
+        collection.update_one(
+            {"instance_id": active_id},
+            {
+                "$set": {
+                    "status": WorkflowInstanceStatus.RUNNING.value,
+                    "progress_message": "running",
+                }
+            },
+        )
+
+        summaries = manager.list_instance_status_dicts(
+            user_id="user-1",
+            status=[WorkflowInstanceStatus.COMPLETED],
+        )
+
+        assert [summary["instance_id"] for summary in summaries] == [completed_id]
+        assert summaries[0]["status"] == WorkflowInstanceStatus.COMPLETED.value
+        assert summaries[0]["has_outputs"] is True
+        assert "workflow_data" not in summaries[0]
+
+    def test_workflow_instance_indexes_include_namespace_status_created(self) -> None:
+        """Workflow instance indexes should cover the monitor namespace/status query."""
+        manager = WorkflowInstanceManager()
+        manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+
+        collection = manager._get_instances_collection()
+        assert collection is not None
+
+        index_names = {index["name"] for index in collection.list_indexes()}
+        assert "namespace_status_created" in index_names
+
     def test_create_instance_for_event_reuses_existing(self) -> None:
         """create_instance_for_event() should deduplicate by idempotency key."""
         manager = WorkflowInstanceManager()
