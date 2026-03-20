@@ -832,6 +832,11 @@ def test_turn_completion_gate_autotriggers_workflow_introspection(monkeypatch) -
     assert payload.get("workflow_id") == (
         "#V#workflow_introspection_maintenance_workflow"
     )
+    assert payload.get("source_event_type") == "turn_execution.completion_gate"
+    assert payload.get("source_event_id") == "req-introspection-1"
+    event_idempotency_key = payload.get("event_idempotency_key")
+    assert isinstance(event_idempotency_key, str)
+    assert "req-introspection-1" in event_idempotency_key
     inputs = payload.get("inputs")
     assert isinstance(inputs, dict)
     assert inputs.get("request_id") == "req-introspection-1"

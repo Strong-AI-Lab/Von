@@ -53,21 +53,49 @@ def _patch_submit_verified_instance_success(monkeypatch) -> None:
             max_retries = int(max_retries_raw)
         except (TypeError, ValueError):
             max_retries = 3
-
-        instance_id = manager.create_instance(
-            workflow_id,
-            user_id=user_id,
-            org_id=org_id,
-            namespace=namespace,
-            inputs=dict(inputs) if isinstance(inputs, dict) else {},
-            max_retries=max_retries,
-            schedule_id=kwargs.get("schedule_id"),
-        )
+        source_event_type = kwargs.get("source_event_type")
+        source_event_id = kwargs.get("source_event_id")
+        event_idempotency_key = kwargs.get("event_idempotency_key")
+        if (
+            isinstance(source_event_type, str)
+            and source_event_type.strip()
+            and isinstance(source_event_id, str)
+            and source_event_id.strip()
+            and isinstance(event_idempotency_key, str)
+            and event_idempotency_key.strip()
+        ):
+            instance_id, created_new = manager.create_instance_for_event(
+                workflow_id=workflow_id,
+                user_id=user_id,
+                org_id=org_id,
+                namespace=namespace,
+                event_idempotency_key=event_idempotency_key.strip(),
+                source_event_type=source_event_type.strip(),
+                source_event_id=source_event_id.strip(),
+                inputs=dict(inputs) if isinstance(inputs, dict) else {},
+                schedule_id=kwargs.get("schedule_id"),
+                max_retries=max_retries,
+            )
+            status = "created" if created_new else "reused"
+        else:
+            instance_id = manager.create_instance(
+                workflow_id,
+                user_id=user_id,
+                org_id=org_id,
+                namespace=namespace,
+                inputs=dict(inputs) if isinstance(inputs, dict) else {},
+                max_retries=max_retries,
+                schedule_id=kwargs.get("schedule_id"),
+                source_event_type=source_event_type,
+                source_event_id=source_event_id,
+                event_idempotency_key=event_idempotency_key,
+            )
+            status = "created"
 
         return WorkflowInstanceSubmissionResult(
             success=True,
             workflow_id=workflow_id,
-            status="created",
+            status=status,
             instance_id=instance_id,
             verification={
                 "preflight_passed": True,
@@ -129,6 +157,7 @@ class _StubInstance:
         self.max_retries = max_retries
         self.source_event_type: str | None = None
         self.source_event_id: str | None = None
+        self.event_idempotency_key: str | None = None
         self.created_at = datetime.now(timezone.utc)
 
     def to_status_dict(self) -> dict[str, object]:
@@ -145,6 +174,7 @@ class _StubInstance:
 class _StubWorkflowManager:
     def __init__(self) -> None:
         self.instances: dict[str, _StubInstance] = {}
+        self._event_index: dict[str, str] = {}
         self._counter = 0
         self.bindings: dict[tuple[str, str], EventWorkflowBinding] = {}
 
@@ -157,7 +187,7 @@ class _StubWorkflowManager:
         namespace: str,
         inputs: dict[str, object] | None = None,
         max_retries: int = 3,
-        **_kwargs,
+        **kwargs,
     ) -> str:
         self._counter += 1
         instance_id = f"#V#wf_instance_{self._counter}"
@@ -170,7 +200,53 @@ class _StubWorkflowManager:
             inputs=dict(inputs or {}),
             max_retries=max_retries,
         )
+        instance = self.instances[instance_id]
+        source_event_type = kwargs.get("source_event_type")
+        source_event_id = kwargs.get("source_event_id")
+        event_idempotency_key = kwargs.get("event_idempotency_key")
+        if isinstance(source_event_type, str) and source_event_type.strip():
+            instance.source_event_type = source_event_type.strip()
+        if isinstance(source_event_id, str) and source_event_id.strip():
+            instance.source_event_id = source_event_id.strip()
+        if (
+            isinstance(event_idempotency_key, str)
+            and event_idempotency_key.strip()
+        ):
+            instance.event_idempotency_key = event_idempotency_key.strip()
         return instance_id
+
+    def create_instance_for_event(
+        self,
+        workflow_id: str,
+        *,
+        user_id: str,
+        org_id: str,
+        namespace: str,
+        event_idempotency_key: str,
+        source_event_type: str,
+        source_event_id: str,
+        inputs: dict[str, object] | None = None,
+        schedule_id: str | None = None,
+        max_retries: int = 3,
+    ) -> tuple[str, bool]:
+        existing_instance_id = self._event_index.get(event_idempotency_key)
+        if isinstance(existing_instance_id, str):
+            return existing_instance_id, False
+
+        instance_id = self.create_instance(
+            workflow_id,
+            user_id=user_id,
+            org_id=org_id,
+            namespace=namespace,
+            inputs=inputs,
+            max_retries=max_retries,
+            schedule_id=schedule_id,
+            source_event_type=source_event_type,
+            source_event_id=source_event_id,
+            event_idempotency_key=event_idempotency_key,
+        )
+        self._event_index[event_idempotency_key] = instance_id
+        return instance_id, True
 
     def list_instances(
         self,
@@ -949,6 +1025,46 @@ def test_workflow_create_instance_normalises_inputs(monkeypatch):
     assert instance.namespace == "#V#explicit_ns"
     assert instance.inputs == {}
     assert instance.max_retries == 50
+
+
+def test_workflow_create_instance_preserves_event_idempotency_submission(monkeypatch):
+    manager = _StubWorkflowManager()
+    _patch_submit_verified_instance_success(monkeypatch)
+    workflow_id = "#V#enrichment_workflow"
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    gateway = _build_gateway()
+
+    payload = {
+        "workflow_id": workflow_id,
+        "user_id": "#V#user",
+        "org_id": "#V#org",
+        "namespace": "#V#user@org",
+        "source_event_type": "turn_execution.completion_gate",
+        "source_event_id": "req-1548",
+        "event_idempotency_key": "evt:turn_execution.completion_gate:req-1548",
+        "inputs": {"request_id": "req-1548"},
+    }
+
+    created = gateway.invoke("workflow_create_instance", payload).payload
+    reused = gateway.invoke("workflow_create_instance", payload).payload
+
+    assert created.get("success") is True
+    assert reused.get("success") is True
+    assert created.get("instance_id") == reused.get("instance_id")
+    assert reused.get("status") == "reused"
+
+    instance_id = created.get("instance_id")
+    assert isinstance(instance_id, str)
+    instance = manager.instances[instance_id]
+    assert instance.source_event_type == "turn_execution.completion_gate"
+    assert instance.source_event_id == "req-1548"
+    assert (
+        instance.event_idempotency_key
+        == "evt:turn_execution.completion_gate:req-1548"
+    )
 
 
 def test_workflow_create_instance_rejects_unrunnable_workflow(monkeypatch):

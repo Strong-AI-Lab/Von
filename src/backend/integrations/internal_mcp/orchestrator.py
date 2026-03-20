@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -5858,6 +5859,33 @@ class InternalMCPChatOrchestrator:
                 if prompt_text
                 else str(decision_reason or "")[:500]
             )
+            source_event_type = "turn_execution.completion_gate"
+            if request_id:
+                source_event_id = request_id
+            else:
+                identity_seed = "|".join(
+                    part
+                    for part in (
+                        conversation_session_id,
+                        selected_workflow_id,
+                        incident_text,
+                    )
+                    if isinstance(part, str) and part.strip()
+                )
+                identity_digest = hashlib.sha256(
+                    identity_seed.encode("utf-8")
+                ).hexdigest()[:16]
+                session_component = conversation_session_id or "sessionless"
+                source_event_id = f"{session_component}:{identity_digest}"
+            event_idempotency_key = (
+                "orchestrator.workflow_introspection_autotrigger:"
+                f"{self._WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID}:"
+                f"{source_event_type}:{source_event_id}"
+            )
+            if selected_workflow_id:
+                event_idempotency_key = (
+                    f"{event_idempotency_key}:workflow:{selected_workflow_id}"
+                )
             try:
                 create_payload = {
                     "workflow_id": self._WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
@@ -5865,6 +5893,9 @@ class InternalMCPChatOrchestrator:
                     "user_id": user_concept_id or "anonymous",
                     "org_id": org_concept_id or "default",
                     "max_retries": 1,
+                    "source_event_type": source_event_type,
+                    "source_event_id": source_event_id,
+                    "event_idempotency_key": event_idempotency_key,
                     "inputs": {
                         "namespace": namespace,
                         "request_id": request_id,
@@ -5886,6 +5917,9 @@ class InternalMCPChatOrchestrator:
                     "status": payload.get("status"),
                     "error": payload.get("error"),
                     "error_code": payload.get("error_code"),
+                    "source_event_type": source_event_type,
+                    "source_event_id": source_event_id,
+                    "event_idempotency_key": event_idempotency_key,
                     "workflow_id": self._WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
                 }
                 data["workflow_introspection_autotriggered"] = ok

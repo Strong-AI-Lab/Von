@@ -10230,6 +10230,9 @@ def _workflow_create_instance(**kwargs):
     namespace_raw = kwargs.get("namespace")
     inputs_raw = kwargs.get("inputs", {})
     max_retries_raw = kwargs.get("max_retries", 3)
+    source_event_type_raw = kwargs.get("source_event_type")
+    source_event_id_raw = kwargs.get("source_event_id")
+    event_idempotency_key_raw = kwargs.get("event_idempotency_key")
 
     user_id = (
         user_id_raw.strip()
@@ -10247,6 +10250,22 @@ def _workflow_create_instance(**kwargs):
             "invalid_namespace",
             "namespace must be canonical or derivable from user_id/org_id",
         )
+    source_event_type = (
+        source_event_type_raw.strip()
+        if isinstance(source_event_type_raw, str) and source_event_type_raw.strip()
+        else None
+    )
+    source_event_id = (
+        source_event_id_raw.strip()
+        if isinstance(source_event_id_raw, str) and source_event_id_raw.strip()
+        else None
+    )
+    event_idempotency_key = (
+        event_idempotency_key_raw.strip()
+        if isinstance(event_idempotency_key_raw, str)
+        and event_idempotency_key_raw.strip()
+        else None
+    )
     inputs = inputs_raw if isinstance(inputs_raw, dict) else {}
     try:
         max_retries = int(max_retries_raw)
@@ -10264,6 +10283,9 @@ def _workflow_create_instance(**kwargs):
             namespace=namespace,
             inputs=inputs if isinstance(inputs, dict) else {},
             max_retries=max_retries,
+            source_event_type=source_event_type,
+            source_event_id=source_event_id,
+            event_idempotency_key=event_idempotency_key,
         )
         return submission.to_dict()
     except Exception as e:
@@ -21697,6 +21719,9 @@ def build_default_catalogue() -> MethodCatalogue:
                     "namespace": (str, type(None)),
                     "inputs": (dict, type(None)),
                     "max_retries": int,
+                    "source_event_type": (str, type(None)),
+                    "source_event_id": (str, type(None)),
+                    "event_idempotency_key": (str, type(None)),
                 },
                 allow_unknown=True,
                 description="Create a durable workflow instance.",

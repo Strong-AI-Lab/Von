@@ -243,6 +243,34 @@ class DurableWorkflowWorker:
             instance.workflow_id,
         )
 
+        def _best_effort_mark_failed(
+            *,
+            error: str,
+            error_step: str | None = None,
+            increment_retry: bool = True,
+        ) -> None:
+            try:
+                self._instance_manager.mark_failed(
+                    instance_id,
+                    error=error,
+                    error_step=error_step,
+                    increment_retry=increment_retry,
+                )
+            except Exception:
+                logger.exception(
+                    "[durable_worker] Failed to persist FAILED status for %s",
+                    instance_id,
+                )
+
+        def _best_effort_release_lock() -> None:
+            try:
+                self._instance_manager.release_lock(instance_id, self._worker_id)
+            except Exception:
+                logger.exception(
+                    "[durable_worker] Failed to release lock for %s",
+                    instance_id,
+                )
+
         try:
             # Notify started
             if self._on_instance_started:
@@ -255,8 +283,7 @@ class DurableWorkflowWorker:
             definition = self._definition_loader(instance.workflow_id)
             if definition is None:
                 error = f"workflow_definition_not_found:{instance.workflow_id}"
-                self._instance_manager.mark_failed(
-                    instance_id,
+                _best_effort_mark_failed(
                     error=error,
                     increment_retry=False,
                 )
@@ -294,8 +321,7 @@ class DurableWorkflowWorker:
                 logger.info("[durable_worker] Instance %s was cancelled", instance_id)
 
             else:
-                self._instance_manager.mark_failed(
-                    instance_id,
+                _best_effort_mark_failed(
                     error=result.error or "unknown_error",
                     error_step=result.final_state,
                 )
@@ -314,8 +340,7 @@ class DurableWorkflowWorker:
             logger.exception(
                 "[durable_worker] Unexpected error processing %s", instance_id
             )
-            self._instance_manager.mark_failed(
-                instance_id,
+            _best_effort_mark_failed(
                 error=f"worker_exception:{e}",
             )
             if self._on_instance_failed:
@@ -325,10 +350,11 @@ class DurableWorkflowWorker:
                     pass
 
         finally:
-            # Release lock and remove from tracking
-            self._instance_manager.release_lock(instance_id, self._worker_id)
             with self._lock:
                 self._current_instances.pop(instance_id, None)
+            # Stop heartbeat extension before best-effort unlock so a dead worker
+            # thread cannot keep a stale RUNNING row alive after teardown starts.
+            _best_effort_release_lock()
 
     def _heartbeat_loop(self) -> None:
         """Periodically extend locks on active instances."""

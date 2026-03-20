@@ -181,7 +181,7 @@ def stop_worker_and_scheduler(timeout: float = 30.0) -> None:
 def recover_orphaned_instances(
     worker_id: str | None = None,
     *,
-    max_stale_hours: int = 24,
+    max_stale_hours: int | None = None,
 ) -> int:
     """Recover instances that were orphaned during previous shutdown.
 
@@ -190,7 +190,8 @@ def recover_orphaned_instances(
 
     Args:
         worker_id: Worker ID for logging (informational only).
-        max_stale_hours: Maximum age of instances to recover.
+        max_stale_hours: Optional maximum age of instances to recover. When
+            omitted, recover all expired running instances regardless of age.
 
     Returns:
         Number of instances recovered.
@@ -206,15 +207,17 @@ def recover_orphaned_instances(
 
     coll = db[WORKFLOW_INSTANCES_COLLECTION]
     now = datetime.now(timezone.utc)
-    stale_cutoff = now - timedelta(hours=max_stale_hours)
-
     # Find running instances with expired locks
+    query: dict[str, Any] = {
+        "status": WorkflowInstanceStatus.RUNNING.value,
+        "lock_expires_at": {"$lt": now},
+    }
+    if isinstance(max_stale_hours, int) and max_stale_hours > 0:
+        stale_cutoff = now - timedelta(hours=max_stale_hours)
+        query["started_at"] = {"$gt": stale_cutoff}
+
     result = coll.update_many(
-        {
-            "status": WorkflowInstanceStatus.RUNNING.value,
-            "lock_expires_at": {"$lt": now},
-            "started_at": {"$gt": stale_cutoff},  # Don't recover very old instances
-        },
+        query,
         {
             "$set": {
                 "status": WorkflowInstanceStatus.PAUSED.value,

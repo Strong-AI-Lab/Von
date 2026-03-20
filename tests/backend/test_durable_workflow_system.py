@@ -25,6 +25,7 @@ from src.backend.workflows.durable.scheduler import (
     _calculate_next_cron_run,
     WorkflowScheduler,
 )
+from src.backend.workflows.durable.startup import recover_orphaned_instances
 from src.backend.workflows.durable.vontology_schedule_repository import (
     CTX_ENABLED_BOOL,
     CTX_NEXT_RUN_EPOCH_MS,
@@ -1148,6 +1149,74 @@ class TestWorkflowInstanceManager:
         # So reset_for_retry should fail
         success = manager.reset_for_retry(instance_id)
         assert success is False  # 1 < 1 is False, can't retry
+
+    def test_recover_orphaned_instances_recovers_old_expired_running_rows(self) -> None:
+        """Startup recovery should pause expired running rows regardless of age."""
+        manager = WorkflowInstanceManager()
+        instance_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        claimed = manager.find_and_claim_instance("worker-1")
+        assert claimed is not None
+
+        collection = manager._get_instances_collection()
+        assert collection is not None
+        old_started_at = datetime.now(timezone.utc) - timedelta(days=14)
+        expired_lock_at = datetime.now(timezone.utc) - timedelta(hours=2)
+        collection.update_one(
+            {"instance_id": instance_id},
+            {
+                "$set": {
+                    "started_at": old_started_at,
+                    "lock_expires_at": expired_lock_at,
+                }
+            },
+        )
+
+        recovered = recover_orphaned_instances()
+
+        assert recovered == 1
+        instance = manager.get_instance(instance_id)
+        assert instance is not None
+        assert instance.status == WorkflowInstanceStatus.PAUSED
+        assert instance.locked_by is None
+        assert instance.lock_expires_at is None
+
+    def test_recover_orphaned_instances_honours_optional_stale_cutoff(self) -> None:
+        """Explicit stale-age limits should still support bounded recovery sweeps."""
+        manager = WorkflowInstanceManager()
+        instance_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        claimed = manager.find_and_claim_instance("worker-1")
+        assert claimed is not None
+
+        collection = manager._get_instances_collection()
+        assert collection is not None
+        old_started_at = datetime.now(timezone.utc) - timedelta(days=14)
+        expired_lock_at = datetime.now(timezone.utc) - timedelta(hours=2)
+        collection.update_one(
+            {"instance_id": instance_id},
+            {
+                "$set": {
+                    "started_at": old_started_at,
+                    "lock_expires_at": expired_lock_at,
+                }
+            },
+        )
+
+        recovered = recover_orphaned_instances(max_stale_hours=24)
+
+        assert recovered == 0
+        instance = manager.get_instance(instance_id)
+        assert instance is not None
+        assert instance.status == WorkflowInstanceStatus.RUNNING
 
 
 class TestScheduleManagement:
