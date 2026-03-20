@@ -25705,128 +25705,195 @@ class InternalMCPChatOrchestrator:
                 "preferred_workflow_id": selected_workflow_id_text,
             },
         )
-        tc_env = WorkflowEnvironment(
-            llm_client=llm_client,
-            gateway=self._gateway,
-            model=model,
-            user_namespace=user_namespace,
-            auxiliary_system_prompt=auxiliary_system_prompt,
-            max_tool_invocations=self._max_tool_invocations,
-            max_tool_result_chars=self._max_tool_result_chars,
-            max_tool_result_field_chars=self._max_tool_result_field_chars,
-            default_gmail_profile=gmail_profile or self._default_gmail_profile,
-        )
-        auto_proceed_minimal_imposition_enabled = (
-            self._get_auto_proceed_minimal_imposition_enabled()
-        )
+        tool_pipeline_handoff_started = False
         try:
-            aux_llm_calls.append(
-                {
-                    "type": "auto_proceed_minimal_imposition_setting",
-                    "enabled": bool(auto_proceed_minimal_imposition_enabled),
-                    "source": "settings",
-                }
+            tc_env = WorkflowEnvironment(
+                llm_client=llm_client,
+                gateway=self._gateway,
+                model=model,
+                user_namespace=user_namespace,
+                auxiliary_system_prompt=auxiliary_system_prompt,
+                max_tool_invocations=self._max_tool_invocations,
+                max_tool_result_chars=self._max_tool_result_chars,
+                max_tool_result_field_chars=self._max_tool_result_field_chars,
+                default_gmail_profile=gmail_profile or self._default_gmail_profile,
             )
-        except Exception:
-            pass
+            auto_proceed_minimal_imposition_enabled = (
+                self._get_auto_proceed_minimal_imposition_enabled()
+            )
+            try:
+                aux_llm_calls.append(
+                    {
+                        "type": "auto_proceed_minimal_imposition_setting",
+                        "enabled": bool(auto_proceed_minimal_imposition_enabled),
+                        "source": "settings",
+                    }
+                )
+            except Exception:
+                pass
 
-        routing_info_payload = asdict(routing_info) if routing_info is not None else None
-        tc_data: dict[str, Any] = {
-            # Inputs.
-            "prompt": prompt,
-            "prompt_for_requirements": effective_prompt_for_routing,
-            "prompt_requirement_url_policy": dict(routing_url_requirement),
-            "augmented_context": augmented_context,
-            "policy_state": policy_state,
-            "registry_snapshot": registry_snapshot,
-            "user_concept_id": user_concept_id,
-            "org_concept_id": org_concept_id,
-            "conversation_session_id": conversation_session_id,
-            "turn_id": turn_id,
-            "recent_user_prompts": recent_user_prompts,
-            "write_intent_context_reused": bool(
-                isinstance(write_intent_rehydrate_telemetry, Mapping)
-                and write_intent_rehydrate_telemetry.get("reused")
-            ),
-            "gmail_profile": gmail_profile or self._default_gmail_profile,
-            "workflow_discovery_result": workflow_discovery_result,
-            "workflow_routing": routing_info_payload,
-            "auto_proceed_minimal_imposition_enabled": bool(
-                auto_proceed_minimal_imposition_enabled
-            ),
-            "workflow_episode_source": "chat_turn_workflow",
-            "workflow_episode_stage": "tool_calling",
-            # Closures from run().
-            "model_for_stage": _model_for_stage,
-            "record_llm_call": _record_llm_call,
-            "emit_progress": _emit_progress_local,
-            "emit_phase_transition": _emit_phase_transition_local,
-            "check_cancellation": _check_cancellation_local,
-            "build_parse_error_result": _build_tool_call_parse_error_result,
-            "build_validation_error_result": _build_tool_call_validation_error_result,
-            # Shared mutable state.
-            "aux_llm_calls": aux_llm_calls,
-            "llm_calls": llm_calls,
-            "invocations": [],
-            "tool_messages": [],
-            # Inter-handler state initialised here; handlers override.
-            "iteration_count": 0,
-            "allowed_write_tools": set(),
-            # Shared missing-tool-call retry budget for the full turn across
-            # both planning and backfill recovery passes.
-            "missing_tool_call_retry_attempts": 0,
-            "missing_tool_call_retry_budget": int(
-                self._max_missing_tool_call_retries_per_turn
-            ),
-            # Completion-gate repeat-until-complete loop settings.
-            "completion_gate_repeat_iteration": False,
-            "completion_gate_loop_retry_reason": None,
-            "completion_gate_loop_stop_reason": None,
-            "completion_gate_loop_attempts": 0,
-            "completion_gate_loop_max_attempts": int(
-                self._completion_gate_loop_max_attempts
-            ),
-            "completion_gate_loop_started_monotonic": float(time.monotonic()),
-            "completion_gate_loop_elapsed_ms": 0,
-            "completion_gate_loop_max_elapsed_ms": int(
-                self._completion_gate_loop_max_elapsed_ms
-            ),
-            "completion_gate_loop_no_progress_streak": 0,
-            "completion_gate_loop_no_progress_limit": int(
-                self._completion_gate_loop_no_progress_limit
-            ),
-            "completion_gate_loop_stall_events": 0,
-            "completion_gate_loop_stall_elapsed_ms": 0,
-            "completion_gate_loop_stall_max_elapsed_ms": int(
-                self._completion_gate_loop_stall_max_elapsed_ms
-            ),
-            "completion_gate_loop_stall_started_monotonic": None,
-            "completion_gate_loop_last_invocation_count": 0,
-            "completion_gate_loop_last_blocking_signature": "",
-            "completion_gate_escalation_signal": False,
-            "completion_gate_escalation_reason": None,
-        }
+            routing_info_payload = (
+                asdict(routing_info) if routing_info is not None else None
+            )
+            tc_data: dict[str, Any] = {
+                # Inputs.
+                "prompt": prompt,
+                "prompt_for_requirements": effective_prompt_for_routing,
+                "prompt_requirement_url_policy": dict(routing_url_requirement),
+                "augmented_context": augmented_context,
+                "policy_state": policy_state,
+                "registry_snapshot": registry_snapshot,
+                "user_concept_id": user_concept_id,
+                "org_concept_id": org_concept_id,
+                "conversation_session_id": conversation_session_id,
+                "turn_id": turn_id,
+                "recent_user_prompts": recent_user_prompts,
+                "write_intent_context_reused": bool(
+                    isinstance(write_intent_rehydrate_telemetry, Mapping)
+                    and write_intent_rehydrate_telemetry.get("reused")
+                ),
+                "gmail_profile": gmail_profile or self._default_gmail_profile,
+                "workflow_discovery_result": workflow_discovery_result,
+                "workflow_routing": routing_info_payload,
+                "auto_proceed_minimal_imposition_enabled": bool(
+                    auto_proceed_minimal_imposition_enabled
+                ),
+                "workflow_episode_source": "chat_turn_workflow",
+                "workflow_episode_stage": "tool_calling",
+                # Closures from run().
+                "model_for_stage": _model_for_stage,
+                "record_llm_call": _record_llm_call,
+                "emit_progress": _emit_progress_local,
+                "emit_phase_transition": _emit_phase_transition_local,
+                "check_cancellation": _check_cancellation_local,
+                "build_parse_error_result": _build_tool_call_parse_error_result,
+                "build_validation_error_result": _build_tool_call_validation_error_result,
+                # Shared mutable state.
+                "aux_llm_calls": aux_llm_calls,
+                "llm_calls": llm_calls,
+                "invocations": [],
+                "tool_messages": [],
+                # Inter-handler state initialised here; handlers override.
+                "iteration_count": 0,
+                "allowed_write_tools": set(),
+                # Shared missing-tool-call retry budget for the full turn across
+                # both planning and backfill recovery passes.
+                "missing_tool_call_retry_attempts": 0,
+                "missing_tool_call_retry_budget": int(
+                    self._max_missing_tool_call_retries_per_turn
+                ),
+                # Completion-gate repeat-until-complete loop settings.
+                "completion_gate_repeat_iteration": False,
+                "completion_gate_loop_retry_reason": None,
+                "completion_gate_loop_stop_reason": None,
+                "completion_gate_loop_attempts": 0,
+                "completion_gate_loop_max_attempts": int(
+                    self._completion_gate_loop_max_attempts
+                ),
+                "completion_gate_loop_started_monotonic": float(time.monotonic()),
+                "completion_gate_loop_elapsed_ms": 0,
+                "completion_gate_loop_max_elapsed_ms": int(
+                    self._completion_gate_loop_max_elapsed_ms
+                ),
+                "completion_gate_loop_no_progress_streak": 0,
+                "completion_gate_loop_no_progress_limit": int(
+                    self._completion_gate_loop_no_progress_limit
+                ),
+                "completion_gate_loop_stall_events": 0,
+                "completion_gate_loop_stall_elapsed_ms": 0,
+                "completion_gate_loop_stall_max_elapsed_ms": int(
+                    self._completion_gate_loop_stall_max_elapsed_ms
+                ),
+                "completion_gate_loop_stall_started_monotonic": None,
+                "completion_gate_loop_last_invocation_count": 0,
+                "completion_gate_loop_last_blocking_signature": "",
+                "completion_gate_escalation_signal": False,
+                "completion_gate_escalation_reason": None,
+            }
 
-        _emit_dispatch_boundary(
-            boundary="workflow_handoff",
-            status="started",
-            selected_execution_mode="tool_pipeline",
-            selected_workflow_id=selected_workflow_id_text,
-            dispatch_workflow_id=tool_dispatch_workflow_id,
-        )
-        tc_result = self.execute_workflow(
-            tool_dispatch_workflow_id,
-            data=tc_data,
-            llm_client=llm_client,
-            model=model,
-            user_namespace=user_namespace,
-            auxiliary_system_prompt=auxiliary_system_prompt,
-            trace=trace if trace_enabled else None,
-            environment=tc_env,
-            conversation_session_id=conversation_session_id,
-            turn_id=turn_id,
-            episode_source="chat_turn_workflow",
-        )
+            _emit_dispatch_boundary(
+                boundary="workflow_handoff",
+                status="started",
+                selected_execution_mode="tool_pipeline",
+                selected_workflow_id=selected_workflow_id_text,
+                dispatch_workflow_id=tool_dispatch_workflow_id,
+            )
+            tool_pipeline_handoff_started = True
+            tc_result = self.execute_workflow(
+                tool_dispatch_workflow_id,
+                data=tc_data,
+                llm_client=llm_client,
+                model=model,
+                user_namespace=user_namespace,
+                auxiliary_system_prompt=auxiliary_system_prompt,
+                trace=trace if trace_enabled else None,
+                environment=tc_env,
+                conversation_session_id=conversation_session_id,
+                turn_id=turn_id,
+                episode_source="chat_turn_workflow",
+            )
+        except Exception as exc:
+            failure_reason = (
+                "tool_pipeline_execution_exception"
+                if tool_pipeline_handoff_started
+                else "tool_pipeline_setup_exception"
+            )
+            if not tool_pipeline_handoff_started:
+                _emit_dispatch_boundary(
+                    boundary="workflow_handoff",
+                    status="failed",
+                    selected_execution_mode="tool_pipeline",
+                    selected_workflow_id=selected_workflow_id_text,
+                    dispatch_workflow_id=tool_dispatch_workflow_id,
+                    extra={
+                        "reason": failure_reason,
+                        "error_class": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                )
+            _emit_dispatch_boundary(
+                boundary="workflow_terminal",
+                status="failed",
+                selected_execution_mode="tool_pipeline",
+                selected_workflow_id=selected_workflow_id_text,
+                dispatch_workflow_id=tool_dispatch_workflow_id,
+                completed=False,
+                extra={
+                    "reason": failure_reason,
+                    "error_class": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            self._logger.warning(
+                "[mcp_orchestrator] Tool-pipeline %s for %s failed: %s",
+                "execution" if tool_pipeline_handoff_started else "setup",
+                tool_dispatch_workflow_id,
+                exc,
+                exc_info=True,
+            )
+            result = OrchestratorResult(
+                response_text=(
+                    "I attempted to use tools but the tool-pipeline handoff failed "
+                    "before tool execution could begin. Please try again or report "
+                    "this issue."
+                ),
+                extra_messages=(),
+                tool_invocations=(),
+                aux_llm_calls=tuple(aux_llm_calls),
+                llm_calls=tuple(llm_calls),
+                llm_usage=_aggregate_usage_total(),
+                orchestrator_duration_ms=_orchestrator_duration_ms(),
+                workflow_routing=routing_info,
+                render_plan=_result_render_plan(),
+            )
+            _finalise_selection_experience_record(
+                result=result,
+                outcome="failed",
+                final_state=failure_reason,
+                completed=False,
+            )
+            _persist_trace(status="completed")
+            return result
         if tc_result is None:
             _emit_dispatch_boundary(
                 boundary="workflow_terminal",

@@ -242,6 +242,8 @@ _TOOL_EXECUTION_FAILURE_REASON_MAP = {
     "missing_tool_call_parse_error": "Tool call parsing failed before any tool execution occurred.",
     "missing_tool_call_retry_exhausted": "Tool-call recovery exhausted retries without executing a tool.",
     "missing_tool_call_unresolved": "Tool-calling was selected but no executable tool call was produced.",
+    "tool_pipeline_setup_exception": "Tool-pipeline setup failed before the first action could start.",
+    "tool_pipeline_execution_exception": "Tool-pipeline execution failed before the first tool action completed.",
 }
 
 _REPRESENTATION_CONTRACT_SCHEMA_VERSION = "required_effects_contract.v1"
@@ -1194,6 +1196,12 @@ def build_workflow_routing_diagnostics(
             "workflow_handoff_started": bool(
                 execution_summary_payload.get("workflow_handoff_started")
             ),
+            "workflow_handoff_failure_reason": _safe_str(
+                execution_summary_payload.get("workflow_handoff_failure_reason")
+            ),
+            "workflow_handoff_failure_error_class": _safe_str(
+                execution_summary_payload.get("workflow_handoff_failure_error_class")
+            ),
             "dispatch_terminal_status": _safe_str(
                 execution_summary_payload.get("dispatch_terminal_status")
             ),
@@ -1207,6 +1215,12 @@ def build_workflow_routing_diagnostics(
                     bool,
                 )
                 else None
+            ),
+            "dispatch_terminal_failure_reason": _safe_str(
+                execution_summary_payload.get("dispatch_terminal_failure_reason")
+            ),
+            "dispatch_terminal_failure_error_class": _safe_str(
+                execution_summary_payload.get("dispatch_terminal_failure_error_class")
             ),
             "tool_route_selected": bool(
                 execution_summary_payload.get("tool_route_selected")
@@ -1522,9 +1536,13 @@ def _summarise_tool_execution_context(
     contract_resolution_status = ""
     execution_mode_selected_explicitly = False
     workflow_handoff_started = False
+    workflow_handoff_failure_reason = ""
+    workflow_handoff_failure_error_class = ""
     dispatch_terminal_status = ""
     dispatch_terminal_final_state = ""
     dispatch_terminal_completed: bool | None = None
+    dispatch_terminal_failure_reason = ""
+    dispatch_terminal_failure_error_class = ""
     for entry in aux_llm_calls or ():
         if not isinstance(entry, Mapping):
             continue
@@ -1560,6 +1578,11 @@ def _summarise_tool_execution_context(
             contract_resolution_status = status
         elif boundary == "workflow_handoff" and status == "started":
             workflow_handoff_started = True
+        elif boundary == "workflow_handoff" and status == "failed":
+            workflow_handoff_failure_reason = _safe_str(event.get("reason")) or ""
+            workflow_handoff_failure_error_class = (
+                _safe_str(event.get("error_class")) or ""
+            )
         elif boundary == "workflow_terminal":
             if status:
                 dispatch_terminal_status = status
@@ -1569,6 +1592,13 @@ def _summarise_tool_execution_context(
             completed_value = event.get("completed")
             if isinstance(completed_value, bool):
                 dispatch_terminal_completed = completed_value
+            if status == "failed":
+                dispatch_terminal_failure_reason = (
+                    _safe_str(event.get("reason")) or ""
+                )
+                dispatch_terminal_failure_error_class = (
+                    _safe_str(event.get("error_class")) or ""
+                )
 
     invocation_count = len(serialised_invocations)
     observed_started_count = max(progress_tools_started, tool_call_start_event_count)
@@ -1615,6 +1645,8 @@ def _summarise_tool_execution_context(
     ):
         failure_codes.append("missing_tool_call_unresolved")
     if tool_route_selected and observed_executed_count <= 0:
+        if workflow_handoff_failure_reason:
+            failure_codes.append(workflow_handoff_failure_reason)
         if contract_resolution_status == "missing":
             failure_codes.append("tool_dispatch_contract_unresolved")
         if dispatch_terminal_status == "missing":
@@ -1624,8 +1656,12 @@ def _summarise_tool_execution_context(
         elif not workflow_handoff_started and selected_execution_mode == "tool_pipeline":
             failure_codes.append("tool_dispatch_not_started")
         elif workflow_handoff_started and observed_started_count <= 0:
+            if dispatch_terminal_failure_reason:
+                failure_codes.append(dispatch_terminal_failure_reason)
             failure_codes.append("tool_dispatch_handoff_zero_execution")
         elif dispatch_terminal_status == "failed":
+            if dispatch_terminal_failure_reason:
+                failure_codes.append(dispatch_terminal_failure_reason)
             failure_codes.append("tool_dispatch_failed_before_tool_execution")
 
     deduped_failure_codes: list[str] = []
@@ -1671,9 +1707,17 @@ def _summarise_tool_execution_context(
         "dispatch_event_count": len(dispatch_boundary_events),
         "contract_resolution_status": contract_resolution_status or None,
         "workflow_handoff_started": workflow_handoff_started,
+        "workflow_handoff_failure_reason": workflow_handoff_failure_reason or None,
+        "workflow_handoff_failure_error_class": (
+            workflow_handoff_failure_error_class or None
+        ),
         "dispatch_terminal_status": dispatch_terminal_status or None,
         "dispatch_terminal_final_state": dispatch_terminal_final_state or None,
         "dispatch_terminal_completed": dispatch_terminal_completed,
+        "dispatch_terminal_failure_reason": dispatch_terminal_failure_reason or None,
+        "dispatch_terminal_failure_error_class": (
+            dispatch_terminal_failure_error_class or None
+        ),
         "last_successful_boundary": last_successful_boundary or None,
         "planned_count": planned_count,
         "started_count": observed_started_count,

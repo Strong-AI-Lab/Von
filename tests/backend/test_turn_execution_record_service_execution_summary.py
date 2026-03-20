@@ -157,6 +157,69 @@ def test_tool_execution_summary_marks_missing_dispatch_boundary_after_tool_selec
     assert "tool_dispatch_boundary_missing" in list(summary.get("failure_codes") or [])
 
 
+def test_tool_execution_summary_preserves_local_handoff_failure_reason() -> None:
+    summary = _summarise_tool_execution_context(
+        workflow_routing={
+            "workflow_id": "#V#tool_calling_workflow",
+            "verdict": "rag_selected",
+        },
+        turn_execution_diagnostics={
+            "latest_progress": {
+                "counters": {"tools_started": 0, "tools_completed": 0},
+                "diagnostic_events": [],
+            }
+        },
+        aux_llm_calls=[
+            {
+                "type": "workflow_dispatch_boundary",
+                "boundary": "execution_mode_selected",
+                "status": "selected",
+                "selected_execution_mode": "tool_pipeline",
+                "selected_workflow_id": "#V#tool_calling_workflow",
+            },
+            {
+                "type": "workflow_dispatch_boundary",
+                "boundary": "contract_resolution",
+                "status": "resolved",
+                "selected_execution_mode": "tool_pipeline",
+                "selected_workflow_id": "#V#tool_calling_workflow",
+                "dispatch_workflow_id": "#V#tool_calling_workflow",
+            },
+            {
+                "type": "workflow_dispatch_boundary",
+                "boundary": "workflow_handoff",
+                "status": "failed",
+                "selected_execution_mode": "tool_pipeline",
+                "selected_workflow_id": "#V#tool_calling_workflow",
+                "dispatch_workflow_id": "#V#tool_calling_workflow",
+                "reason": "tool_pipeline_setup_exception",
+                "error_class": "RuntimeError",
+            },
+            {
+                "type": "workflow_dispatch_boundary",
+                "boundary": "workflow_terminal",
+                "status": "failed",
+                "selected_execution_mode": "tool_pipeline",
+                "selected_workflow_id": "#V#tool_calling_workflow",
+                "dispatch_workflow_id": "#V#tool_calling_workflow",
+                "reason": "tool_pipeline_setup_exception",
+                "error_class": "RuntimeError",
+                "completed": False,
+            },
+        ],
+        serialised_invocations=[],
+    )
+
+    assert summary["workflow_handoff_started"] is False
+    assert summary["workflow_handoff_failure_reason"] == "tool_pipeline_setup_exception"
+    assert summary["dispatch_terminal_failure_reason"] == "tool_pipeline_setup_exception"
+    assert summary["failure_codes"] == [
+        "tool_pipeline_setup_exception",
+        "tool_dispatch_not_started",
+    ]
+    assert summary["last_successful_boundary"] == "workflow_terminal"
+
+
 def test_build_workflow_routing_diagnostics_preserves_selector_exchange_and_dispatch_events() -> None:
     diagnostics = build_workflow_routing_diagnostics(
         workflow_discovery={
@@ -407,3 +470,95 @@ def test_build_workflow_routing_diagnostics_preserves_selector_exchange_and_disp
         "tool_dispatch_not_started"
     )
     assert diagnostics["dispatch"]["last_successful_boundary"] == "contract_resolution"
+
+
+def test_build_workflow_routing_diagnostics_preserves_local_handoff_failure_details() -> None:
+    diagnostics = build_workflow_routing_diagnostics(
+        workflow_discovery={"query": "Run the testing workflow", "matches": [], "candidates": []},
+        workflow_routing={
+            "workflow_id": "#V#tool_calling_workflow",
+            "verdict": "rag_selected",
+            "source": "selector",
+        },
+        turn_execution_diagnostics={
+            "latest_progress": {
+                "counters": {"tools_started": 0, "tools_completed": 0},
+                "diagnostic_events": [],
+            }
+        },
+        aux_llm_calls=[
+            {
+                "type": "workflow_dispatch_boundary",
+                "boundary": "execution_mode_selected",
+                "status": "selected",
+                "selected_execution_mode": "tool_pipeline",
+                "selected_workflow_id": "#V#tool_calling_workflow",
+            },
+            {
+                "type": "workflow_dispatch_boundary",
+                "boundary": "contract_resolution",
+                "status": "resolved",
+                "selected_execution_mode": "tool_pipeline",
+                "selected_workflow_id": "#V#tool_calling_workflow",
+                "dispatch_workflow_id": "#V#tool_calling_workflow",
+            },
+            {
+                "type": "workflow_dispatch_boundary",
+                "boundary": "workflow_handoff",
+                "status": "failed",
+                "selected_execution_mode": "tool_pipeline",
+                "selected_workflow_id": "#V#tool_calling_workflow",
+                "dispatch_workflow_id": "#V#tool_calling_workflow",
+                "reason": "tool_pipeline_setup_exception",
+                "error_class": "RuntimeError",
+            },
+            {
+                "type": "workflow_dispatch_boundary",
+                "boundary": "workflow_terminal",
+                "status": "failed",
+                "selected_execution_mode": "tool_pipeline",
+                "selected_workflow_id": "#V#tool_calling_workflow",
+                "dispatch_workflow_id": "#V#tool_calling_workflow",
+                "reason": "tool_pipeline_setup_exception",
+                "error_class": "RuntimeError",
+                "completed": False,
+            },
+        ],
+        execution_summary={
+            "tool_route_selected": True,
+            "selected_execution_mode": "tool_pipeline",
+            "dispatch_workflow_id": "#V#tool_calling_workflow",
+            "dispatch_event_count": 4,
+            "contract_resolution_status": "resolved",
+            "workflow_handoff_started": False,
+            "workflow_handoff_failure_reason": "tool_pipeline_setup_exception",
+            "workflow_handoff_failure_error_class": "RuntimeError",
+            "dispatch_terminal_status": "failed",
+            "dispatch_terminal_final_state": None,
+            "dispatch_terminal_completed": False,
+            "dispatch_terminal_failure_reason": "tool_pipeline_setup_exception",
+            "dispatch_terminal_failure_error_class": "RuntimeError",
+            "planned_count": 1,
+            "started_count": 0,
+            "executed_count": 0,
+            "zero_tools_executed": True,
+            "failure_codes": [
+                "tool_pipeline_setup_exception",
+                "tool_dispatch_not_started",
+            ],
+            "last_successful_boundary": "workflow_terminal",
+        },
+    )
+
+    assert diagnostics["dispatch"]["workflow_handoff_failure_reason"] == (
+        "tool_pipeline_setup_exception"
+    )
+    assert diagnostics["dispatch"]["workflow_handoff_failure_error_class"] == (
+        "RuntimeError"
+    )
+    assert diagnostics["dispatch"]["dispatch_terminal_failure_reason"] == (
+        "tool_pipeline_setup_exception"
+    )
+    assert diagnostics["dispatch"]["zero_execution_primary_failure_code"] == (
+        "tool_pipeline_setup_exception"
+    )

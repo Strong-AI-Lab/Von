@@ -20,6 +20,7 @@ from src.backend.services.workflow_capability_service import (
     build_workflow_capability_text,
     get_workflow_capability_index,
     reset_workflow_capability_index,
+    search_workflow_capabilities,
 )
 from workflow_test_support import build_test_conversation_turn_registry
 
@@ -49,6 +50,12 @@ class TestTokenise:
         # Single-char tokens should be excluded.
         assert "b" not in tokens
         assert "c" not in tokens
+
+    def test_simple_plural_forms_normalise_to_singular_variants(self):
+        tokens = _tokenise("testing workflows tools queries")
+        assert "workflow" in tokens
+        assert "tool" in tokens
+        assert "query" in tokens
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +261,22 @@ class TestPurposeDrivenCapabilities:
         top = results[0]
         assert top.workflow_id == "#V#tool_calling_workflow"
 
+    def test_plural_query_matches_singular_workflow_capability_text(self):
+        index = WorkflowCapabilityIndex()
+        index.index_workflow(
+            "#V#meeting_invitation_testing_workflow",
+            (
+                "Testing workflow for meeting invitation experiments that prepares "
+                "an experiment spec and executes the candidate workflow."
+            ),
+            metadata={"name": "Meeting invitation testing workflow"},
+        )
+
+        results = index.search("use Testing Workflows tools for experiments")
+
+        assert results
+        assert results[0].workflow_id == "#V#meeting_invitation_testing_workflow"
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -302,3 +325,29 @@ class TestSingleton:
         reset_workflow_capability_index()
         idx2 = get_workflow_capability_index()
         assert idx1 is not idx2
+
+
+def test_search_workflow_capabilities_populates_empty_index_from_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reset_workflow_capability_index()
+    registry = build_test_conversation_turn_registry()
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.registry_factory.build_durable_workflow_registry_read_only",
+        lambda defer_parity_work=False: registry,
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.vontology_loader.batch_fetch_workflow_purposes",
+        lambda workflow_ids: {},
+    )
+
+    results = search_workflow_capabilities(
+        "general tool-calling workflows for external APIs",
+        max_results=5,
+        min_score=0.01,
+    )
+
+    assert any(
+        result.workflow_id == "#V#tool_calling_workflow" for result in results
+    )

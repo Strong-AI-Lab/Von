@@ -16,6 +16,7 @@ from src.backend.services.text_value_service import (
 from src.backend.services.workflow_discovery_service import (
     EXECUTABILITY_EXECUTABLE_NOW,
     WORKFLOW_CREATION_WORKFLOW_ID as DISCOVERY_WORKFLOW_CREATION_WORKFLOW_ID,
+    WorkflowMatch,
     discover_workflows,
     discover_workflows_for_turn,
 )
@@ -84,6 +85,28 @@ PHD_STUDENT_WORKFLOW_REQUEST_PROMPT = (
 @pytest.fixture(autouse=True)
 def _reset_mock_db(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VON_USE_MOCK_DB", "1")
+
+    def _stub_capability_search(query: str, *args: Any, **kwargs: Any):
+        text = str(query or "").lower()
+        if "create a workflow from this description request" in text:
+            return [
+                WorkflowMatch(
+                    concept_id=DISCOVERY_WORKFLOW_CREATION_WORKFLOW_ID,
+                    name="Von Workflow Creation Workflow",
+                    description=(
+                        "Create and verify executable workflows from a workflow "
+                        "description/request."
+                    ),
+                    relevance_score=1.0,
+                    match_source="capability_index",
+                )
+            ]
+        return []
+
+    monkeypatch.setattr(
+        "src.backend.services.workflow_discovery_service._search_workflow_capabilities",
+        _stub_capability_search,
+    )
     authority_service.clear_workflow_type_resolution_cache()
 
     from src.backend.services.workflow_discovery_service import (
@@ -392,6 +415,10 @@ def test_workflow_creation_request_is_discoverable_for_turn_routing() -> None:
                 else (False, "graph_incomplete", "not_used")
             ),
         ),
+        patch(
+            "src.backend.services.workflow_discovery_service._has_authoritative_routing_text",
+            return_value=True,
+        ),
     ):
         query = (
             "Please create a workflow from this description request for scholarly "
@@ -449,6 +476,10 @@ def test_workflow_creation_request_routes_and_executes_end_to_end() -> None:
                 if concept_id == DISCOVERY_WORKFLOW_CREATION_WORKFLOW_ID
                 else (False, "graph_incomplete", "not_used")
             ),
+        ),
+        patch(
+            "src.backend.services.workflow_discovery_service._has_authoritative_routing_text",
+            return_value=True,
         ),
     ):
         wrapped = discover_workflows_for_turn(query, max_results=5)
@@ -683,6 +714,10 @@ def test_text_only_phd_student_request_routes_create_execute_end_to_end() -> Non
                 if concept_id == DISCOVERY_WORKFLOW_CREATION_WORKFLOW_ID
                 else (False, "graph_incomplete", "not_used")
             ),
+        ),
+        patch(
+            "src.backend.services.workflow_discovery_service._has_authoritative_routing_text",
+            return_value=True,
         ),
     ):
         wrapped = discover_workflows_for_turn(query, max_results=5)

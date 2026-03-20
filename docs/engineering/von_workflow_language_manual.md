@@ -358,6 +358,8 @@ For live chat progress payloads used by workflow-aware thinking-card rendering:
 - `workflow_stage_path.workflow_id` SHOULD represent the mapped execution-stage consensus when the observed stage path yields one unambiguous workflow, and SHOULD fall back to the selected-route hint only when the stage path itself carries no workflow membership;
 - `workflow_stage_path.observed_workflow_ids` SHOULD expose the workflow IDs actually observed in the mapped stage path so route selection (`selected_workflow_id`) and execution-stage membership can be compared without ambiguity;
 - workflow discovery SHOULD emit an explicit completion payload even when zero workflows match, so the UI can render a visible "no applicable workflow found" step rather than silently omitting discovery outcome;
+- workflow discovery payloads SHOULD remain explicit even when both routing matches and near-match candidates are empty, so selector fallback, gap-recovery, and turn-execution diagnostics can distinguish "discovery ran and found nothing" from "discovery did not run";
+- the authoritative workflow-capability search substrate SHOULD self-populate from Vontology-authored workflow descriptions when deferred startup indexing is not yet ready, rather than silently collapsing routed turns to builtin-only selector candidates;
 - live workflow-dispatch progress SHOULD expose `selected_workflow_id` and SHOULD expose a human-readable `selected_workflow_name` when available;
 - selector metadata such as `workflow_selector_verdict` and `workflow_selector_source` SHOULD be preserved in the live payload so the UI can explain why a workflow route was chosen;
 - selector fail-closed diagnostics such as `selector_prompt_unavailable` or
@@ -374,6 +376,7 @@ For workflow-governed conversation turns:
 - completion safety MUST be determined by completion-gate outputs, not by whether a response text was produced;
 - if `completion_gate_safe_to_claim_completion=false`, the orchestrator MUST NOT surface the turn as `completed`;
 - unresolved required effects or inconclusive mutation/representation verification MUST produce `follow_up_required` or `failed`, with explicit blocking effect IDs and failure codes preserved in diagnostics;
+- once tool-pipeline contract resolution succeeds, the runtime MUST either emit a `workflow_handoff` start boundary or emit a more local failed handoff boundary with blocker reason/error metadata; `tool_dispatch_not_started` alone is not a sufficient terminal explanation when a narrower root cause is available;
 - UI/progress surfaces MUST derive terminal state from authoritative completion status (`completed`, `follow_up_required`, `failed`, `cancelled`) rather than from liveness/heartbeat signals.
 
 ### 7.4 Workflow Episode Continuation and Repair Semantics (JVNAUTOSCI-1380)
