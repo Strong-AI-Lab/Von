@@ -185,7 +185,42 @@ class TestRagFirstPrompt:
                 "concept_id": "#V#chat_assistant_workflow",
                 "name": "Default workflow",
                 "description": "",
+                "candidate_source": "selector_default",
+                "candidate_reason": "default_workflow_fallback",
             },
+        )
+
+    def test_prompt_carries_candidate_list_and_prompt_provenance(self):
+        selector = _build_selector()
+        prompt = selector.prepare_selection_prompt(
+            turn_text="Run the meeting invitation test",
+            discovered_workflows=[
+                {
+                    "concept_id": "#V#meeting_invitation_testing_workflow",
+                    "name": "Meeting invitation testing workflow",
+                    "description": "Run meeting invitation experiments.",
+                    "candidate_source": "workflow_discovery",
+                    "candidate_reason": "discovered_workflow_candidate",
+                },
+                {
+                    "concept_id": "#V#tool_calling_workflow",
+                    "name": "Tool calling workflow",
+                    "description": "General tool pipeline.",
+                    "candidate_source": "selector_default",
+                    "candidate_reason": "builtin_selector_candidate",
+                },
+            ],
+        )
+
+        assert prompt.candidate_list_text is not None
+        assert "#V#meeting_invitation_testing_workflow" in prompt.candidate_list_text
+        assert prompt.requested_prompt_ids == ("#V#chat_turn_classifier_prompt",)
+        assert prompt.prompt_provenance["prompt_mode"] == "rag_first_candidate_selector"
+        assert prompt.prompt_provenance["resolved_prompt_id"] == (
+            "#V#chat_turn_classifier_prompt"
+        )
+        assert prompt.prompt_provenance["render_variables"]["turn_text"] == (
+            "Run the meeting invitation test"
         )
 
     def test_prompt_includes_turn_text(self):

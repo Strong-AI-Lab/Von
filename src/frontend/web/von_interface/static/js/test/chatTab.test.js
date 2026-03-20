@@ -1675,6 +1675,37 @@ describe('thinking activity history normalisation', () => {
         expect(diagnosticsPayload.phase_history[0]).toEqual(expect.objectContaining({ phase: 'phase_0' }));
     });
 
+    test('prefers backend elapsed time and preserves workflow routing diagnostics', () => {
+        const diagnosticsPayload = __testOnly_buildThinkingDiagnosticsPayload({
+            clientRequestId: 'req-routing',
+            promptRaw: 'Run the meeting invitation test',
+            thinkingStartedAtMs: Date.now() - 20000,
+            latestProgress: {
+                elapsed_ms: 85641,
+                workflow_routing_diagnostics: {
+                    schema_version: 'workflow_routing_diagnostics.v1',
+                    selector: {
+                        prompt: { text: 'Select workflow', char_count: 15 },
+                        response: { text: '#V#tool_calling_workflow', char_count: 24 },
+                        fallback_used: true,
+                        primary_fallback_failure_kind: 'provider_unreachable'
+                    }
+                }
+            }
+        });
+
+        expect(diagnosticsPayload.elapsed_ms).toBe(85641);
+        expect(diagnosticsPayload.workflow_routing_diagnostics).toEqual(
+            expect.objectContaining({
+                schema_version: 'workflow_routing_diagnostics.v1',
+                selector: expect.objectContaining({
+                    fallback_used: true,
+                    primary_fallback_failure_kind: 'provider_unreachable'
+                })
+            })
+        );
+    });
+
     test('renders preserved stage diagnostics when workflow stage path is absent', () => {
         const html = __testOnly_renderThinkingCardBodyHTML({
             latestProgress: {

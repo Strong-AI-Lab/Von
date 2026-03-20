@@ -2898,6 +2898,14 @@ def test_non_executable_discovered_workflow_can_be_overridden(monkeypatch):
 
 
 def test_workflow_selector_emits_dispatch_progress_events(monkeypatch):
+    monkeypatch.setattr(
+        "src.backend.workflows.workflow_selector.recommend_workflow_with_policy",
+        lambda **_kwargs: {
+            "guidance_mode": "none",
+            "recommended_workflow_id": None,
+            "candidate_scores": [],
+        },
+    )
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
     llm = _CapturingLLM([TOOL_CALLING_WORKFLOW_ID, "Fallback response."])
     captured_progress: list[dict[str, Any]] = []
@@ -3251,6 +3259,15 @@ def test_workflow_selector_uses_provider_aware_classifier_fallback(monkeypatch):
     OpenAI client.
     """
 
+    monkeypatch.setattr(
+        "src.backend.workflows.workflow_selector.recommend_workflow_with_policy",
+        lambda **_kwargs: {
+            "guidance_mode": "none",
+            "recommended_workflow_id": None,
+            "candidate_scores": [],
+        },
+    )
+
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
     llm = _CapturingLLM(["Hello! How can I help?"])
 
@@ -3398,6 +3415,32 @@ def test_workflow_selector_uses_provider_aware_classifier_fallback(monkeypatch):
     assert selector_entry["policy_stage"] == "classifier"
     assert selector_entry["candidate"]["provider"] == "openai"
     assert selector_entry["model_name"] == "gpt-5.2-chat-latest"
+    assert selector_entry["prompt_provenance"]["prompt_mode"] == (
+        "rag_first_candidate_selector"
+    )
+    assert selector_entry["requested_prompt_ids"] == [
+        "#V#chat_turn_classifier_prompt"
+    ]
+    assert selector_entry["candidate_list"]["text"]
+    assert selector_entry["selection_metadata"]["selection_resolution"] == (
+        "candidate_label_exact_match"
+    )
+    assert selector_entry["response"]["text"] == CHAT_ASSISTANT_WORKFLOW_ID
+
+    selector_prompt_entry = next(
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict) and entry.get("type") == "workflow_selector_prompt"
+    )
+    assert selector_prompt_entry["prompt"]["text"]
+    assert selector_prompt_entry["candidate_entries"]
+
+    assert stage_summary["fallback_attempts"][0]["failure_kind"] == (
+        "provider_unreachable"
+    )
+    assert stage_summary["fallback_attempts"][1]["response"]["text"] == (
+        CHAT_ASSISTANT_WORKFLOW_ID
+    )
 
 
 def test_plain_response_overridden_to_tool_pipeline_for_mutative_intent(monkeypatch):

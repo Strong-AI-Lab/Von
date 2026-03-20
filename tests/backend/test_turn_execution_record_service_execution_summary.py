@@ -193,11 +193,97 @@ def test_build_workflow_routing_diagnostics_preserves_selector_exchange_and_disp
         },
         aux_llm_calls=[
             {
+                "type": "workflow_selector_prompt",
+                "prompt_id": "#V#chat_turn_classifier_prompt",
+                "requested_prompt_ids": ["#V#chat_turn_classifier_prompt"],
+                "prompt_provenance": {
+                    "prompt_mode": "rag_first_candidate_selector",
+                    "resolved_prompt_id": "#V#chat_turn_classifier_prompt",
+                    "requested_prompt_ids": ["#V#chat_turn_classifier_prompt"],
+                    "render_variables": {
+                        "turn_text": "Run the meeting invitation test",
+                        "candidate_list": "- #V#meeting_invitation_testing_workflow",
+                    },
+                    "truncated": False,
+                },
+                "candidate_list": {
+                    "text": "- #V#meeting_invitation_testing_workflow",
+                    "char_count": 40,
+                },
+            },
+            {
+                "type": "workflow_model_policy_stage",
+                "stage": "workflow_dispatch",
+                "policy_stage": "classifier",
+                "request": {
+                    "prompt": {"text": "Select workflow", "char_count": 15},
+                    "context_messages": [
+                        {
+                            "role": "system",
+                            "content": {
+                                "text": "Selector system prompt",
+                                "char_count": 22,
+                            },
+                        }
+                    ],
+                    "context_message_count": 1,
+                },
+                "selected": {
+                    "provider": "openai",
+                    "model": "gpt-5-mini",
+                    "model_resolved": "gpt-5-mini",
+                },
+                "fallback_used": True,
+                "fallback_attempt_count": 2,
+                "failure_count": 1,
+                "fallback_attempts": [
+                    {
+                        "attempt_no": 1,
+                        "provider": "ollama",
+                        "model": "granite3.3:2b",
+                        "status": "failed",
+                        "failure_kind": "provider_unreachable",
+                        "error": "connection refused",
+                    },
+                    {
+                        "attempt_no": 2,
+                        "provider": "openai",
+                        "model": "gpt-5-mini",
+                        "status": "succeeded",
+                        "response": {
+                            "text": "#V#tool_calling_workflow",
+                            "char_count": 24,
+                        },
+                    },
+                ],
+                "errors": [
+                    {
+                        "model_resolved": "granite3.3:2b",
+                        "failure_kind": "provider_unreachable",
+                        "error": "connection refused",
+                    }
+                ],
+            },
+            {
                 "type": "workflow_selector",
                 "workflow_id": "#V#tool_calling_workflow",
                 "verdict": "rag_selected",
                 "model_name": "gpt-5-mini",
                 "prompt": {"text": "Select workflow", "char_count": 15},
+                "prompt_provenance": {
+                    "prompt_mode": "rag_first_candidate_selector",
+                    "resolved_prompt_id": "#V#chat_turn_classifier_prompt",
+                    "requested_prompt_ids": ["#V#chat_turn_classifier_prompt"],
+                    "render_variables": {
+                        "turn_text": "Run the meeting invitation test",
+                        "candidate_list": "- #V#meeting_invitation_testing_workflow",
+                    },
+                },
+                "requested_prompt_ids": ["#V#chat_turn_classifier_prompt"],
+                "candidate_list": {
+                    "text": "- #V#meeting_invitation_testing_workflow",
+                    "char_count": 40,
+                },
                 "response": {
                     "text": "#V#tool_calling_workflow",
                     "char_count": 24,
@@ -207,11 +293,15 @@ def test_build_workflow_routing_diagnostics_preserves_selector_exchange_and_disp
                         "concept_id": "#V#meeting_invitation_testing_workflow",
                         "name": "Meeting invitation testing workflow",
                         "description": "Materialise a meeting invitation test run.",
+                        "candidate_source": "workflow_discovery",
+                        "candidate_reason": "discovered_workflow_candidate",
                     },
                     {
                         "concept_id": "#V#tool_calling_workflow",
                         "name": "Tool calling workflow",
                         "description": "General-purpose tool workflow",
+                        "candidate_source": "selector_default",
+                        "candidate_reason": "builtin_selector_candidate",
                     },
                 ],
                 "discovery_excluded_candidates": [
@@ -221,6 +311,11 @@ def test_build_workflow_routing_diagnostics_preserves_selector_exchange_and_disp
                         "routing_exclusion_reason": "missing_authoritative_purpose",
                     }
                 ],
+                "selection_metadata": {
+                    "selection_resolution": "candidate_label_exact_match",
+                    "raw_candidate_label": "#V#tool_calling_workflow",
+                    "raw_response_format": "text",
+                },
                 "selection_rationale": "selector_selected_discovered_candidate",
             },
             {
@@ -262,13 +357,53 @@ def test_build_workflow_routing_diagnostics_preserves_selector_exchange_and_disp
     assert diagnostics["selector"]["prompt"]["text"] == "Select workflow"
     assert diagnostics["selector"]["response"]["text"] == "#V#tool_calling_workflow"
     assert diagnostics["selector"]["model_name"] == "gpt-5-mini"
+    assert diagnostics["selector"]["prompt_provenance"]["resolved_prompt_id"] == (
+        "#V#chat_turn_classifier_prompt"
+    )
+    assert diagnostics["selector"]["candidate_list"]["text"] == (
+        "- #V#meeting_invitation_testing_workflow"
+    )
+    assert diagnostics["selector"]["requested_prompt_ids"] == [
+        "#V#chat_turn_classifier_prompt"
+    ]
+    assert diagnostics["selector"]["candidate_source_counts"] == [
+        {"name": "selector_default", "count": 1},
+        {"name": "workflow_discovery", "count": 1},
+    ]
+    assert diagnostics["selector"]["model_request"]["prompt"]["text"] == (
+        "Select workflow"
+    )
+    assert diagnostics["selector"]["model_request"]["context_messages"][0]["role"] == (
+        "system"
+    )
+    assert diagnostics["selector"]["model_attempts"][0]["failure_kind"] == (
+        "provider_unreachable"
+    )
+    assert diagnostics["selector"]["primary_fallback_failure_kind"] == (
+        "provider_unreachable"
+    )
+    assert diagnostics["selector"]["fallback_failure_kind_counts"] == [
+        {"name": "provider_unreachable", "count": 1}
+    ]
+    assert diagnostics["selector"]["model_attempts"][1]["response"]["text"] == (
+        "#V#tool_calling_workflow"
+    )
+    assert diagnostics["selector"]["selection_resolution"] == (
+        "candidate_label_exact_match"
+    )
     assert diagnostics["selector"]["candidate_entries"][0]["concept_id"] == (
         "#V#meeting_invitation_testing_workflow"
     )
     assert diagnostics["discovery"]["excluded_candidates"][0]["concept_id"] == (
         "#V#meeting_invitation_testing_workflow"
     )
+    assert diagnostics["discovery"]["match_absence_reason"] == (
+        "no_routing_match_after_exclusions"
+    )
     assert diagnostics["dispatch"]["selected_execution_mode"] == "tool_pipeline"
     assert diagnostics["dispatch"]["contract_resolution_status"] == "resolved"
     assert diagnostics["dispatch"]["failure_codes"] == ["tool_dispatch_not_started"]
+    assert diagnostics["dispatch"]["zero_execution_primary_failure_code"] == (
+        "tool_dispatch_not_started"
+    )
     assert diagnostics["dispatch"]["last_successful_boundary"] == "contract_resolution"

@@ -9854,6 +9854,10 @@ class InternalMCPChatOrchestrator:
         fallback_attempts: list[Mapping[str, Any]] = []
         last_exception: Exception | None = None
         total_candidates = len(candidates)
+        request_telemetry = self._build_llm_request_telemetry(
+            prompt=prompt,
+            context=context,
+        )
 
         for attempt_no, candidate in enumerate(candidates, start=1):
             client, model_name, telemetry = self._create_client_for_candidate(
@@ -10016,6 +10020,10 @@ class InternalMCPChatOrchestrator:
                         "model": model_name,
                         "status": "succeeded",
                         "duration_ms": int(duration_ms),
+                        "response": {
+                            "text": str(response),
+                            "char_count": len(str(response)),
+                        },
                         "candidate": dict(telemetry)
                         if isinstance(telemetry, Mapping)
                         else None,
@@ -10026,6 +10034,7 @@ class InternalMCPChatOrchestrator:
                         "type": "workflow_model_policy_stage",
                         "stage": stage,
                         "policy_stage": candidate_stage,
+                        "request": request_telemetry,
                         "selected": {
                             **telemetry,
                             "model_resolved": model_name,
@@ -10100,6 +10109,7 @@ class InternalMCPChatOrchestrator:
                     "type": "workflow_model_policy_stage",
                     "stage": stage,
                     "policy_stage": candidate_stage,
+                    "request": request_telemetry,
                     "selected": None,
                     "fallback_used": True,
                     "fallback_attempt_count": len(fallback_attempts),
@@ -10112,6 +10122,65 @@ class InternalMCPChatOrchestrator:
         if last_exception:
             raise last_exception
         raise RuntimeError("No model candidates available for stage")
+
+    @staticmethod
+    def _build_llm_request_telemetry(
+        *,
+        prompt: str,
+        context: Optional[Sequence[Mapping[str, Any]]],
+        tool_definitions: Sequence[ToolDefinition] | None = None,
+        workflow_action_id: str | None = None,
+        required_prompt_tools: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        def _capture_text(value: Any) -> dict[str, Any] | None:
+            if value is None:
+                return None
+            text = value if isinstance(value, str) else str(value)
+            return {"text": text, "char_count": len(text)}
+
+        context_messages: list[dict[str, Any]] = []
+        for message in context or ():
+            if not isinstance(message, Mapping):
+                continue
+            entry: dict[str, Any] = {}
+            role = message.get("role")
+            if isinstance(role, str) and role.strip():
+                entry["role"] = role.strip()
+            content_capture = _capture_text(message.get("content"))
+            if content_capture is not None:
+                entry["content"] = content_capture
+            name = message.get("name")
+            if isinstance(name, str) and name.strip():
+                entry["name"] = name.strip()
+            tool_call_id = message.get("tool_call_id")
+            if isinstance(tool_call_id, str) and tool_call_id.strip():
+                entry["tool_call_id"] = tool_call_id.strip()
+            if entry:
+                context_messages.append(entry)
+
+        tool_names: list[str] = []
+        for definition in tool_definitions or ():
+            tool_name = getattr(definition, "name", None)
+            if isinstance(tool_name, str) and tool_name.strip():
+                tool_names.append(tool_name.strip())
+
+        payload: dict[str, Any] = {
+            "prompt": _capture_text(prompt),
+            "context_messages": context_messages or None,
+            "context_message_count": len(context_messages),
+            "tool_names": tool_names or None,
+            "tool_count": len(tool_names),
+        }
+        if isinstance(workflow_action_id, str) and workflow_action_id.strip():
+            payload["workflow_action_id"] = workflow_action_id.strip()
+        required_tools = [
+            tool_name.strip()
+            for tool_name in required_prompt_tools
+            if isinstance(tool_name, str) and tool_name.strip()
+        ]
+        if required_tools:
+            payload["required_prompt_tools"] = required_tools
+        return {key: value for key, value in payload.items() if value is not None}
 
     def _run_llm_with_tools_fallbacks(
         self,
@@ -10147,6 +10216,13 @@ class InternalMCPChatOrchestrator:
         fallback_attempts: list[Mapping[str, Any]] = []
         last_exception: Exception | None = None
         total_candidates = len(candidates)
+        request_telemetry = self._build_llm_request_telemetry(
+            prompt=prompt,
+            context=context,
+            tool_definitions=tool_definitions,
+            workflow_action_id=workflow_action_id,
+            required_prompt_tools=required_prompt_tools,
+        )
 
         for attempt_no, candidate in enumerate(candidates, start=1):
             client, model_name, telemetry = self._create_client_for_candidate(
@@ -10437,6 +10513,17 @@ class InternalMCPChatOrchestrator:
                         "model": model_name,
                         "status": "succeeded",
                         "duration_ms": int(duration_ms),
+                        "response": (
+                            {
+                                "text": str(llm_response.text_response or ""),
+                                "char_count": len(str(llm_response.text_response or "")),
+                            }
+                            if hasattr(llm_response, "text_response")
+                            else None
+                        ),
+                        "raw_response_present": bool(
+                            getattr(llm_response, "raw_response", None)
+                        ),
                         "candidate": dict(telemetry)
                         if isinstance(telemetry, Mapping)
                         else None,
@@ -10446,6 +10533,7 @@ class InternalMCPChatOrchestrator:
                     {
                         "type": "workflow_model_policy_stage",
                         "stage": stage,
+                        "request": request_telemetry,
                         "selected": {
                             **telemetry,
                             "model_resolved": model_name,
@@ -10520,6 +10608,7 @@ class InternalMCPChatOrchestrator:
                 {
                     "type": "workflow_model_policy_stage",
                     "stage": stage,
+                    "request": request_telemetry,
                     "selected": None,
                     "fallback_used": True,
                     "fallback_attempt_count": len(fallback_attempts),
@@ -18904,16 +18993,20 @@ class InternalMCPChatOrchestrator:
             item["is_executable"] = is_executable
             item["executability_reason"] = reason
             item["is_policy_safe"] = is_policy_safe
+            item["candidate_source"] = "workflow_discovery"
+            item["candidate_reason"] = "discovered_workflow_candidate"
             item["routing_eligible"] = True
             item["routing_exclusion_reason"] = None
 
             if not is_executable and not allow_non_executable:
                 item["routing_eligible"] = False
+                item["candidate_reason"] = "discovered_workflow_excluded"
                 item["routing_exclusion_reason"] = f"non_executable:{reason}"
                 excluded.append(item)
                 continue
             if not is_policy_safe and not allow_policy_unsafe:
                 item["routing_eligible"] = False
+                item["candidate_reason"] = "discovered_workflow_excluded"
                 item["routing_exclusion_reason"] = "policy_unsafe_not_registered"
                 excluded.append(item)
                 continue
@@ -19734,6 +19827,8 @@ class InternalMCPChatOrchestrator:
                         "concept_id": workflow_id,
                         "name": name,
                         "description": description,
+                        "candidate_source": "selector_default",
+                        "candidate_reason": "builtin_selector_candidate",
                         "is_executable": True,
                         "executability_reason": "executable_now",
                         "is_policy_safe": True,
@@ -19762,6 +19857,78 @@ class InternalMCPChatOrchestrator:
                     seen_ids.add(dedupe_key)
                     merged.append(dict(item))
             return merged
+
+        def _copy_mapping_sequence(values: Sequence[Any] | None) -> list[dict[str, Any]]:
+            copied: list[dict[str, Any]] = []
+            for item in values or ():
+                if not isinstance(item, Mapping):
+                    continue
+                copied.append(
+                    {
+                        str(key): value
+                        for key, value in item.items()
+                        if isinstance(key, str)
+                    }
+                )
+            return copied
+
+        def _build_text_telemetry(value: Any) -> dict[str, Any] | None:
+            if value is None:
+                return None
+            text = value if isinstance(value, str) else str(value)
+            return {
+                "text": text,
+                "char_count": len(text),
+            }
+
+        def _copy_workflow_routing_aux_entries() -> list[dict[str, Any]]:
+            relevant_types = {
+                "workflow_selector_prompt",
+                "workflow_selector",
+                "workflow_selector_override",
+                "workflow_model_policy_stage",
+                "workflow_dispatch_boundary",
+            }
+            copied: list[dict[str, Any]] = []
+            for entry in aux_llm_calls:
+                if not isinstance(entry, Mapping):
+                    continue
+                entry_type = str(entry.get("type") or "").strip().lower()
+                if entry_type not in relevant_types:
+                    continue
+                copied.append(
+                    {
+                        str(key): value
+                        for key, value in entry.items()
+                        if isinstance(key, str)
+                    }
+                )
+            return copied
+
+        def _build_live_workflow_routing_payload() -> dict[str, Any]:
+            payload: dict[str, Any] = {
+                "workflow_discovery": (
+                    dict(workflow_discovery_result)
+                    if isinstance(workflow_discovery_result, Mapping)
+                    else None
+                ),
+                "workflow_routing_aux": _copy_workflow_routing_aux_entries(),
+            }
+            if isinstance(routing_info, WorkflowRoutingInfo):
+                payload["workflow_routing"] = {
+                    "workflow_id": routing_info.workflow_id,
+                    "verdict": routing_info.verdict,
+                    "prompt_id": routing_info.prompt_id,
+                    "discovered_workflow_ids": list(routing_info.discovered_workflow_ids),
+                    "routing_duration_ms": routing_info.routing_duration_ms,
+                    "source": routing_info.source,
+                    "confidence_score": routing_info.confidence_score,
+                    "reasoning": routing_info.reasoning,
+                    "selection_rationale": routing_info.selection_rationale,
+                }
+            else:
+                payload["workflow_routing"] = None
+            return payload
 
         if isinstance(workflow_discovery_result, Mapping):
             discovered_matches, excluded_discovered_matches = (
@@ -19826,6 +19993,20 @@ class InternalMCPChatOrchestrator:
             aux_llm_calls.append(override_payload)
             if trace_enabled and trace is not None:
                 trace.metadata["workflow_selector_override"] = dict(override_payload)
+            _emit_progress_local(
+                {
+                    "status": "thinking",
+                    "stage": "workflow_dispatch",
+                    "phase": "workflow_dispatch",
+                    "phase_label": "Workflow routing overridden",
+                    "workflow_selector_verdict": "tool_contract_preselected",
+                    "selected_workflow_id": TOOL_CALLING_WORKFLOW_ID,
+                    "workflow_selection_rationale": (
+                        "required_prompt_tools_missing_preselector"
+                    ),
+                    **_build_live_workflow_routing_payload(),
+                }
+            )
 
         def _resolve_selected_workflow_name(workflow_id: str | None) -> str | None:
             clean_workflow_id = (
@@ -19885,6 +20066,61 @@ class InternalMCPChatOrchestrator:
                 if isinstance(selector_prompt.policy_recommendation, Mapping)
                 else {}
             )
+            selector_prompt_payload = {
+                "type": "workflow_selector_prompt",
+                "prompt_id": selector_prompt.prompt_id,
+                "requested_prompt_ids": list(selector_prompt.requested_prompt_ids),
+                "prompt_provenance": (
+                    dict(selector_prompt.prompt_provenance)
+                    if isinstance(selector_prompt.prompt_provenance, Mapping)
+                    else {}
+                ),
+                "prompt": _build_text_telemetry(selector_prompt.prompt_text),
+                "candidate_list": _build_text_telemetry(
+                    selector_prompt.candidate_list_text
+                ),
+                "candidate_entries": _copy_mapping_sequence(
+                    selector_prompt.candidate_entries
+                ),
+                "discovery_candidates": _copy_mapping_sequence(
+                    selector_candidate_matches
+                ),
+                "discovery_excluded_candidates": _copy_mapping_sequence(
+                    excluded_discovered_matches
+                ),
+                "discovered_workflow_ids": list(
+                    selector_prompt.discovered_workflow_ids
+                ),
+                "discovery_candidate_count": len(selector_candidate_matches)
+                + len(excluded_discovered_matches),
+                "discovery_excluded_count": len(excluded_discovered_matches),
+                "policy_guidance_mode": selector_policy.get("guidance_mode"),
+                "policy_snapshot_id": selector_policy.get("snapshot_id"),
+                "policy_candidate_scores": list(
+                    selector_policy.get("candidate_scores", ())
+                )
+                if isinstance(selector_policy.get("candidate_scores"), list)
+                else None,
+                "prompt_failure_reason": selector_prompt.prompt_failure_reason,
+                "prompt_failure_detail": selector_prompt.prompt_failure_detail,
+            }
+            aux_llm_calls.append(selector_prompt_payload)
+            if trace_enabled and trace is not None:
+                trace.metadata["workflow_selector_prompt"] = dict(
+                    selector_prompt_payload
+                )
+            _emit_progress_local(
+                {
+                    "status": "thinking",
+                    "stage": "workflow_dispatch",
+                    "phase": "workflow_dispatch",
+                    "phase_label": "Preparing workflow selector",
+                    "workflow_match_count": len(discovered_matches),
+                    "workflow_candidate_count": len(selector_candidate_matches)
+                    + len(excluded_discovered_matches),
+                    **_build_live_workflow_routing_payload(),
+                }
+            )
 
             def _emit_selector_progress(info: Mapping[str, Any]) -> None:
                 payload = dict(info)
@@ -19914,30 +20150,17 @@ class InternalMCPChatOrchestrator:
                     "workflow_candidate_count",
                     len(selector_candidate_matches) + len(excluded_discovered_matches),
                 )
+                payload.setdefault(
+                    "workflow_discovery",
+                    dict(workflow_discovery_result)
+                    if isinstance(workflow_discovery_result, Mapping)
+                    else None,
+                )
+                payload.setdefault(
+                    "workflow_routing_aux",
+                    _copy_workflow_routing_aux_entries(),
+                )
                 _emit_progress_local(payload)
-
-            def _copy_mapping_sequence(values: Sequence[Any] | None) -> list[dict[str, Any]]:
-                copied: list[dict[str, Any]] = []
-                for item in values or ():
-                    if not isinstance(item, Mapping):
-                        continue
-                    copied.append(
-                        {
-                            str(key): value
-                            for key, value in item.items()
-                            if isinstance(key, str)
-                        }
-                    )
-                return copied
-
-            def _build_text_telemetry(value: Any) -> dict[str, Any] | None:
-                if value is None:
-                    return None
-                text = value if isinstance(value, str) else str(value)
-                return {
-                    "text": text,
-                    "char_count": len(text),
-                }
 
             try:
                 classifier_model = None
@@ -19955,6 +20178,7 @@ class InternalMCPChatOrchestrator:
                             "workflow_match_count": len(discovered_matches),
                             "workflow_candidate_count": len(selector_candidate_matches)
                             + len(excluded_discovered_matches),
+                            **_build_live_workflow_routing_payload(),
                         }
                     )
                     selector_selection = self._workflow_selector.resolve_policy_selection(
@@ -19982,6 +20206,7 @@ class InternalMCPChatOrchestrator:
                             "workflow_match_count": len(discovered_matches),
                             "workflow_candidate_count": len(selector_candidate_matches)
                             + len(excluded_discovered_matches),
+                            **_build_live_workflow_routing_payload(),
                         }
                     )
                     selector_selection = (
@@ -20065,6 +20290,7 @@ class InternalMCPChatOrchestrator:
                         "workflow_candidate_count": len(selector_candidate_matches)
                         + len(excluded_discovered_matches),
                         "workflow_selection_rationale": selection_rationale,
+                        **_build_live_workflow_routing_payload(),
                     }
                 )
                 aux_llm_calls.append(
@@ -20080,6 +20306,17 @@ class InternalMCPChatOrchestrator:
                         if isinstance(selector_candidate, Mapping)
                         else None,
                         "prompt": _build_text_telemetry(selector_selection.prompt_used),
+                        "prompt_provenance": (
+                            dict(selector_prompt.prompt_provenance)
+                            if isinstance(selector_prompt.prompt_provenance, Mapping)
+                            else {}
+                        ),
+                        "requested_prompt_ids": list(
+                            selector_prompt.requested_prompt_ids
+                        ),
+                        "candidate_list": _build_text_telemetry(
+                            selector_prompt.candidate_list_text
+                        ),
                         "response": _build_text_telemetry(
                             selector_selection.raw_response
                         ),
@@ -20123,6 +20360,11 @@ class InternalMCPChatOrchestrator:
                         if isinstance(selector_policy.get("candidate_scores"), list)
                         else None,
                         "selection_rationale": selection_rationale,
+                        "selection_metadata": dict(
+                            selector_selection.selection_metadata
+                        )
+                        if isinstance(selector_selection.selection_metadata, Mapping)
+                        else None,
                     }
                 )
                 if trace_enabled and trace is not None:
@@ -20137,6 +20379,17 @@ class InternalMCPChatOrchestrator:
                         if isinstance(selector_candidate, Mapping)
                         else None,
                         "prompt": _build_text_telemetry(selector_selection.prompt_used),
+                        "prompt_provenance": (
+                            dict(selector_prompt.prompt_provenance)
+                            if isinstance(selector_prompt.prompt_provenance, Mapping)
+                            else {}
+                        ),
+                        "requested_prompt_ids": list(
+                            selector_prompt.requested_prompt_ids
+                        ),
+                        "candidate_list": _build_text_telemetry(
+                            selector_prompt.candidate_list_text
+                        ),
                         "response": _build_text_telemetry(
                             selector_selection.raw_response
                         ),
@@ -20185,7 +20438,24 @@ class InternalMCPChatOrchestrator:
                         if isinstance(selector_policy.get("candidate_scores"), list)
                         else None,
                         "selection_rationale": selection_rationale,
+                        "selection_metadata": dict(
+                            selector_selection.selection_metadata
+                        )
+                        if isinstance(selector_selection.selection_metadata, Mapping)
+                        else None,
                     }
+                _emit_progress_local(
+                    {
+                        "status": "thinking",
+                        "stage": "workflow_dispatch",
+                        "phase": "workflow_dispatch",
+                        "phase_label": "Workflow routing diagnostics updated",
+                        "workflow_match_count": len(discovered_matches),
+                        "workflow_candidate_count": len(selector_candidate_matches)
+                        + len(excluded_discovered_matches),
+                        **_build_live_workflow_routing_payload(),
+                    }
+                )
                 # Phase 4: record selection experience tuple for later outcome
                 # finalisation and policy training.
                 try:
@@ -20228,6 +20498,42 @@ class InternalMCPChatOrchestrator:
                     candidate_workflow_ids=(),
                     explicit_reasoning="selector_exception",
                 )
+                aux_llm_calls.append(
+                    {
+                        "type": "workflow_selector",
+                        "workflow_id": CHAT_ASSISTANT_WORKFLOW_ID,
+                        "verdict": "selector_exception",
+                        "selection_source": "default",
+                        "prompt_id": selector_prompt.prompt_id,
+                        "prompt": _build_text_telemetry(selector_prompt.prompt_text),
+                        "prompt_provenance": (
+                            dict(selector_prompt.prompt_provenance)
+                            if isinstance(selector_prompt.prompt_provenance, Mapping)
+                            else {}
+                        ),
+                        "requested_prompt_ids": list(
+                            selector_prompt.requested_prompt_ids
+                        ),
+                        "candidate_list": _build_text_telemetry(
+                            selector_prompt.candidate_list_text
+                        ),
+                        "candidate_entries": _copy_mapping_sequence(
+                            selector_prompt.candidate_entries
+                        ),
+                        "discovery_candidates": _copy_mapping_sequence(
+                            selector_candidate_matches
+                        ),
+                        "discovery_excluded_candidates": _copy_mapping_sequence(
+                            excluded_discovered_matches
+                        ),
+                        "discovered_workflow_ids": list(
+                            selector_prompt.discovered_workflow_ids
+                        ),
+                        "error": str(exc),
+                        "error_class": type(exc).__name__,
+                        "selection_rationale": selection_rationale,
+                    }
+                )
                 _emit_progress_local(
                     {
                         "status": "thinking",
@@ -20241,6 +20547,7 @@ class InternalMCPChatOrchestrator:
                         ),
                         "workflow_task": CHAT_ASSISTANT_WORKFLOW_ID,
                         "workflow_selection_rationale": selection_rationale,
+                        **_build_live_workflow_routing_payload(),
                     }
                 )
                 try:
@@ -24693,6 +25000,27 @@ class InternalMCPChatOrchestrator:
                     boundaries = []
                     trace.metadata["workflow_dispatch_boundaries"] = boundaries
                 boundaries.append(dict(payload))
+            progress_stage = "workflow_dispatch"
+            progress_phase_label = "Workflow dispatch"
+            if boundary == "workflow_handoff" and selected_execution_mode == "tool_pipeline":
+                progress_stage = "tool_plan"
+                progress_phase_label = "Tool dispatch handoff"
+            elif boundary == "workflow_terminal":
+                progress_phase_label = "Workflow terminal state"
+            _emit_progress_local(
+                {
+                    "status": "thinking",
+                    "stage": progress_stage,
+                    "phase": progress_stage,
+                    "phase_label": progress_phase_label,
+                    "result_summary": (
+                        f"{boundary}:{status}"
+                        if boundary and status
+                        else boundary or status or "workflow_dispatch_boundary"
+                    ),
+                    **_build_live_workflow_routing_payload(),
+                }
+            )
 
         # ----------------------------------------------------------------
         # JVNAUTOSCI-825: Route turns to the appropriate pathway.

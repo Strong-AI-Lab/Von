@@ -1354,3 +1354,144 @@ def test_turn_execution_diagnostics_include_routing_diagnostics_from_selector_an
     assert routing_diagnostics.get("dispatch", {}).get("selected_execution_mode") == (
         "tool_pipeline"
     )
+
+
+def test_serialised_tool_progress_state_includes_live_workflow_routing_diagnostics() -> None:
+    serialised = von_routes._serialise_tool_progress_state(
+        {
+            "request_id": "req-live-routing-diag",
+            "status": "thinking",
+            "phase": "workflow_dispatch",
+            "stage": "workflow_dispatch",
+            "phase_label": "Workflow selected",
+            "selected_workflow_id": "#V#tool_calling_workflow",
+            "workflow_discovery": {
+                "candidate_count": 3,
+                "match_count": 0,
+                "candidates": [
+                    {
+                        "concept_id": "#V#chat_assistant_workflow",
+                        "candidate_source": "selector_default",
+                        "routing_eligible": True,
+                    },
+                    {
+                        "concept_id": "#V#tool_calling_workflow",
+                        "candidate_source": "selector_default",
+                        "routing_eligible": True,
+                    },
+                    {
+                        "concept_id": "#V#meeting_invitation_testing_workflow",
+                        "candidate_source": "workflow_discovery",
+                        "routing_eligible": False,
+                        "routing_exclusion_reason": "missing_authoritative_purpose",
+                    },
+                ],
+            },
+            "workflow_routing": {
+                "workflow_id": "#V#tool_calling_workflow",
+                "verdict": "rag_selected",
+                "source": "selector",
+                "selection_rationale": "selector_selected_discovered_candidate",
+            },
+            "workflow_routing_aux": [
+                {
+                    "type": "workflow_selector_prompt",
+                    "prompt_id": "#V#chat_turn_classifier_prompt",
+                    "requested_prompt_ids": ["#V#chat_turn_classifier_prompt"],
+                    "prompt": {"text": "Select workflow", "char_count": 15},
+                    "candidate_list": {
+                        "text": "- #V#tool_calling_workflow",
+                        "char_count": 24,
+                    },
+                    "candidate_entries": [
+                        {
+                            "concept_id": "#V#chat_assistant_workflow",
+                            "candidate_source": "selector_default",
+                        },
+                        {
+                            "concept_id": "#V#tool_calling_workflow",
+                            "candidate_source": "selector_default",
+                        },
+                        {
+                            "concept_id": "#V#meeting_invitation_testing_workflow",
+                            "candidate_source": "workflow_discovery",
+                            "candidate_reason": "discovered_workflow_candidate",
+                        },
+                    ],
+                },
+                {
+                    "type": "workflow_model_policy_stage",
+                    "stage": "workflow_dispatch",
+                    "policy_stage": "classifier",
+                    "request": {
+                        "prompt": {"text": "Select workflow", "char_count": 15},
+                        "context_messages": [
+                            {
+                                "role": "system",
+                                "content": {
+                                    "text": "Workflow selector prompt",
+                                    "char_count": 24,
+                                },
+                            }
+                        ],
+                        "context_message_count": 1,
+                    },
+                    "fallback_used": True,
+                    "fallback_attempt_count": 2,
+                    "failure_count": 1,
+                    "fallback_attempts": [
+                        {
+                            "attempt_no": 1,
+                            "provider": "ollama",
+                            "model": "granite3.3:2b",
+                            "status": "failed",
+                            "failure_kind": "provider_unreachable",
+                        },
+                        {
+                            "attempt_no": 2,
+                            "provider": "openai",
+                            "model": "gpt-5-mini",
+                            "status": "succeeded",
+                            "response": {
+                                "text": "#V#tool_calling_workflow",
+                                "char_count": 24,
+                            },
+                        },
+                    ],
+                },
+                {
+                    "type": "workflow_selector",
+                    "workflow_id": "#V#tool_calling_workflow",
+                    "verdict": "rag_selected",
+                    "selection_source": "selector",
+                    "response": {
+                        "text": "#V#tool_calling_workflow",
+                        "char_count": 24,
+                    },
+                    "selection_metadata": {
+                        "selection_resolution": "candidate_label_exact_match",
+                    },
+                },
+            ],
+            "counters": {"tools_started": 0, "tools_completed": 0},
+        }
+    )
+
+    routing_diagnostics = serialised.get("workflow_routing_diagnostics")
+    assert isinstance(routing_diagnostics, dict)
+    assert routing_diagnostics["selector"]["candidate_source_counts"] == [
+        {"name": "selector_default", "count": 2},
+        {"name": "workflow_discovery", "count": 1},
+    ]
+    assert routing_diagnostics["selector"]["model_attempts"][0]["failure_kind"] == (
+        "provider_unreachable"
+    )
+    assert routing_diagnostics["selector"]["model_request"]["prompt"]["text"] == (
+        "Select workflow"
+    )
+    assert routing_diagnostics["selector"]["primary_fallback_failure_kind"] == (
+        "provider_unreachable"
+    )
+    assert routing_diagnostics["selector"]["selection_resolution"] == (
+        "candidate_label_exact_match"
+    )

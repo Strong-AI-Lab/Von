@@ -19307,16 +19307,24 @@ function buildThinkingDiagnosticsPayload(request) {
         return null;
     }
 
-    const elapsedMs = Number.isFinite(request.thinkingStartedAtMs)
-        ? Math.max(0, Date.now() - Number(request.thinkingStartedAtMs))
+    const latestProgress = (request.latestProgress && typeof request.latestProgress === 'object')
+        ? request.latestProgress
         : null;
+    const backendElapsedMs = (latestProgress && Number.isFinite(latestProgress.elapsed_ms))
+        ? Math.max(0, Math.round(Number(latestProgress.elapsed_ms)))
+        : null;
+    const elapsedMs = backendElapsedMs ?? (
+        Number.isFinite(request.thinkingStartedAtMs)
+        ? Math.max(0, Date.now() - Number(request.thinkingStartedAtMs))
+        : null
+    );
 
     return {
         generated_at_utc: new Date().toISOString(),
         request_id: request.clientRequestId || null,
         elapsed_ms: elapsedMs,
         prompt_preview: typeof request.promptRaw === 'string' ? request.promptRaw.slice(0, 1000) : null,
-        latest_progress: request.latestProgress || null,
+        latest_progress: latestProgress,
         activity_history: Array.isArray(request.activityHistory)
             ? request.activityHistory.slice(-THINKING_DIAGNOSTICS_EXPORT_EVENT_LIMIT)
             : [],
@@ -19328,6 +19336,13 @@ function buildThinkingDiagnosticsPayload(request) {
             : [],
         tool_history: getCanonicalThinkingToolHistory(request).slice(-THINKING_DIAGNOSTICS_EXPORT_EVENT_LIMIT),
         workflow_discovery: request.workflowDiscovery || null,
+        workflow_routing_diagnostics: (
+            latestProgress
+            && latestProgress.workflow_routing_diagnostics
+            && typeof latestProgress.workflow_routing_diagnostics === 'object'
+        )
+            ? latestProgress.workflow_routing_diagnostics
+            : null,
         workflow_stage_path: request.workflowStagePath || null,
         stage_diagnostics: buildThinkingStageDiagnosticsSnapshot(request)
     };

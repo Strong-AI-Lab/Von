@@ -507,6 +507,35 @@ def _serialise_tool_progress_state(
             workflow_discovery
         )
     tool_history = _derive_tool_history_from_diagnostic_events(diagnostic_events)
+    workflow_routing = payload.get("workflow_routing")
+    workflow_routing_aux = payload.get("workflow_routing_aux")
+    if isinstance(workflow_routing, Mapping) or isinstance(workflow_routing_aux, list):
+        payload["workflow_routing_diagnostics"] = build_workflow_routing_diagnostics(
+            workflow_discovery=(
+                cast(dict[str, Any], payload["workflow_discovery"])
+                if isinstance(payload.get("workflow_discovery"), Mapping)
+                else None
+            ),
+            workflow_routing=(
+                cast(dict[str, Any], workflow_routing)
+                if isinstance(workflow_routing, Mapping)
+                else None
+            ),
+            turn_execution_diagnostics={
+                "latest_progress": payload,
+                "phase_history": phase_history,
+                "workflow_stage_path": workflow_stage_path,
+            },
+            aux_llm_calls=(
+                [
+                    cast(dict[str, Any], entry)
+                    for entry in workflow_routing_aux
+                    if isinstance(entry, dict)
+                ]
+                if isinstance(workflow_routing_aux, list)
+                else None
+            ),
+        )
     stage_diagnostics = _build_turn_execution_stage_diagnostics(
         diagnostic_events=diagnostic_events,
         workflow_stage_path=workflow_stage_path,
@@ -1551,6 +1580,23 @@ def _build_turn_execution_diagnostics(
         progress_workflow = latest_progress.get("workflow_discovery")
         if isinstance(progress_workflow, dict):
             workflow_payload = dict(progress_workflow)
+    workflow_routing_payload = (
+        workflow_routing if isinstance(workflow_routing, dict) else None
+    )
+    if workflow_routing_payload is None and isinstance(latest_progress, dict):
+        progress_workflow_routing = latest_progress.get("workflow_routing")
+        if isinstance(progress_workflow_routing, dict):
+            workflow_routing_payload = dict(progress_workflow_routing)
+
+    routing_aux_llm_calls = aux_llm_calls if isinstance(aux_llm_calls, list) else None
+    if routing_aux_llm_calls is None and isinstance(latest_progress, dict):
+        progress_routing_aux = latest_progress.get("workflow_routing_aux")
+        if isinstance(progress_routing_aux, list):
+            routing_aux_llm_calls = [
+                cast(dict[str, Any], entry)
+                for entry in progress_routing_aux
+                if isinstance(entry, dict)
+            ]
 
     effective_request_id = _progress_str(request_id)
     if effective_request_id is None and isinstance(latest_progress, dict):
@@ -1616,13 +1662,13 @@ def _build_turn_execution_diagnostics(
     )
     workflow_routing_diagnostics = build_workflow_routing_diagnostics(
         workflow_discovery=workflow_payload,
-        workflow_routing=workflow_routing if isinstance(workflow_routing, dict) else None,
+        workflow_routing=workflow_routing_payload,
         turn_execution_diagnostics={
             "latest_progress": latest_progress,
             "phase_history": phase_history,
             "workflow_stage_path": workflow_stage_path,
         },
-        aux_llm_calls=aux_llm_calls if isinstance(aux_llm_calls, list) else None,
+        aux_llm_calls=routing_aux_llm_calls,
     )
 
     return {

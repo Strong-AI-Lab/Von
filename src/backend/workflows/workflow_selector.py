@@ -57,6 +57,9 @@ class WorkflowSelectionPrompt:
     prompt_text: str | None
     discovered_workflow_ids: tuple[str, ...] = ()
     candidate_entries: tuple[dict[str, Any], ...] = ()
+    candidate_list_text: str | None = None
+    requested_prompt_ids: tuple[str, ...] = ()
+    prompt_provenance: Mapping[str, Any] = field(default_factory=dict)
     policy_recommendation: Mapping[str, Any] = field(default_factory=dict)
     prompt_failure_reason: str | None = None
     prompt_failure_detail: str | None = None
@@ -196,20 +199,55 @@ class WorkflowSelector:
     ) -> WorkflowSelectionPrompt:
         """Build the RAG-first ranker prompt from candidate workflows."""
         candidate_ids: list[str] = []
-        candidate_entries: list[dict[str, str]] = []
+        candidate_entries: list[dict[str, Any]] = []
+        requested_prompt_ids = tuple(
+            concept_id
+            for concept_id in self._classifier_prompt_ids
+            if isinstance(concept_id, str) and concept_id.strip()
+        )
 
         if candidate_workflows:
             for wf in candidate_workflows:
                 cid = str(wf.get("concept_id") or "").strip()
                 if not cid:
                     continue
-                candidate_entries.append(
-                    {
-                        "concept_id": cid,
-                        "name": str(wf.get("name") or cid),
-                        "description": str(wf.get("description") or ""),
-                    }
-                )
+                entry: dict[str, Any] = {
+                    "concept_id": cid,
+                    "name": str(wf.get("name") or cid),
+                    "description": str(wf.get("description") or ""),
+                }
+                for field_name in (
+                    "match_source",
+                    "executability_reason",
+                    "executability_detail",
+                    "routing_exclusion_reason",
+                    "candidate_source",
+                    "candidate_reason",
+                ):
+                    value = wf.get(field_name)
+                    if isinstance(value, str) and value.strip():
+                        entry[field_name] = value.strip()
+                for field_name in (
+                    "relevance_score",
+                    "confidence_score",
+                    "policy_average_reward",
+                    "policy_exploration_bonus",
+                    "policy_attempts",
+                    "policy_rank",
+                ):
+                    value = wf.get(field_name)
+                    if value is None:
+                        continue
+                    entry[field_name] = value
+                for field_name in (
+                    "is_executable",
+                    "is_policy_safe",
+                    "routing_eligible",
+                ):
+                    value = wf.get(field_name)
+                    if isinstance(value, bool):
+                        entry[field_name] = value
+                candidate_entries.append(entry)
 
         policy_recommendation = recommend_workflow_with_policy(
             turn_text=turn_text,
@@ -224,11 +262,11 @@ class WorkflowSelector:
             entry_lookup = {
                 item["concept_id"]: item for item in candidate_entries if item.get("concept_id")
             }
-            reordered_entries: list[dict[str, str]] = []
+            reordered_entries: list[dict[str, Any]] = []
             for workflow_id in ranked_candidate_ids:
-                entry = entry_lookup.pop(workflow_id, None)
-                if entry is not None:
-                    reordered_entries.append(entry)
+                candidate_entry = entry_lookup.pop(workflow_id, None)
+                if candidate_entry is not None:
+                    reordered_entries.append(candidate_entry)
             reordered_entries.extend(entry_lookup.values())
             candidate_entries = reordered_entries
 
@@ -241,18 +279,18 @@ class WorkflowSelector:
         for entry_row in candidate_entries:
             cid = entry_row["concept_id"]
             candidate_ids.append(cid)
-            entry = f"- {cid}: {entry_row['name']}"
+            candidate_line = f"- {cid}: {entry_row['name']}"
             if entry_row["description"]:
-                entry += f" — {entry_row['description']}"
+                candidate_line += f" — {entry_row['description']}"
             policy_score = policy_score_lookup.get(cid)
             if policy_score is not None and policy_recommendation.get("policy_active"):
-                entry += (
+                candidate_line += (
                     " "
                     f"[policy prior {float(policy_score.get('average_reward', 0.0)):.2f}; "
                     f"exploration {float(policy_score.get('exploration_bonus', 0.0)):.2f}; "
                     f"evidence {int(policy_score.get('attempts', 0))}]"
                 )
-            candidate_lines.append(entry)
+            candidate_lines.append(candidate_line)
 
         # If no candidates were provided (e.g. empty capability index),
         # inject the default workflow as the sole candidate.
@@ -263,6 +301,8 @@ class WorkflowSelector:
                     "concept_id": self._default_workflow_id,
                     "name": "Default workflow",
                     "description": "",
+                    "candidate_source": "selector_default",
+                    "candidate_reason": "default_workflow_fallback",
                 }
             )
             candidate_lines.append(
@@ -272,16 +312,26 @@ class WorkflowSelector:
         candidate_list = "\n".join(candidate_lines)
         immutable_candidate_entries = tuple(
             {
-                "concept_id": str(entry.get("concept_id") or ""),
-                "name": str(entry.get("name") or ""),
-                "description": str(entry.get("description") or ""),
+                str(key): value
+                for key, value in entry.items()
+                if isinstance(key, str)
             }
             for entry in candidate_entries
         )
+        prompt_provenance_base = {
+            "prompt_mode": "rag_first_candidate_selector",
+            "requested_prompt_ids": list(requested_prompt_ids),
+            "resolved_prompt_id": None,
+            "render_variables": {
+                "turn_text": turn_text,
+                "candidate_list": candidate_list,
+            },
+            "truncated": False,
+        }
 
         try:
             prompt = self._prompt_service.render_prompt(
-                self._classifier_prompt_ids,
+                requested_prompt_ids,
                 variables={"turn_text": turn_text, "candidate_list": candidate_list},
                 fallback=None,
                 max_chars=6000,
@@ -292,6 +342,9 @@ class WorkflowSelector:
                 prompt_text=None,
                 discovered_workflow_ids=tuple(candidate_ids),
                 candidate_entries=immutable_candidate_entries,
+                candidate_list_text=candidate_list,
+                requested_prompt_ids=requested_prompt_ids,
+                prompt_provenance=prompt_provenance_base,
                 policy_recommendation=policy_recommendation,
                 prompt_failure_reason=SELECTOR_PROMPT_RENDER_ERROR_REASON,
                 prompt_failure_detail=str(exc),
@@ -303,17 +356,29 @@ class WorkflowSelector:
                 prompt_text=None,
                 discovered_workflow_ids=tuple(candidate_ids),
                 candidate_entries=immutable_candidate_entries,
+                candidate_list_text=candidate_list,
+                requested_prompt_ids=requested_prompt_ids,
+                prompt_provenance=prompt_provenance_base,
                 policy_recommendation=policy_recommendation,
                 prompt_failure_reason=SELECTOR_PROMPT_UNAVAILABLE_REASON,
             )
 
         prompt_text = prompt.text.strip()
+        prompt_provenance = {
+            **prompt_provenance_base,
+            "resolved_prompt_id": prompt.prompt_id,
+            "render_variables": dict(prompt.variables),
+            "truncated": bool(prompt.truncated),
+        }
         if candidate_list and candidate_list not in prompt_text:
             return WorkflowSelectionPrompt(
                 prompt_id=prompt.prompt_id,
                 prompt_text=prompt_text,
                 discovered_workflow_ids=tuple(candidate_ids),
                 candidate_entries=immutable_candidate_entries,
+                candidate_list_text=candidate_list,
+                requested_prompt_ids=requested_prompt_ids,
+                prompt_provenance=prompt_provenance,
                 policy_recommendation=policy_recommendation,
                 prompt_failure_reason=SELECTOR_PROMPT_MISSING_CANDIDATE_LIST_REASON,
             )
@@ -323,6 +388,9 @@ class WorkflowSelector:
                 prompt_text=prompt_text,
                 discovered_workflow_ids=tuple(candidate_ids),
                 candidate_entries=immutable_candidate_entries,
+                candidate_list_text=candidate_list,
+                requested_prompt_ids=requested_prompt_ids,
+                prompt_provenance=prompt_provenance,
                 policy_recommendation=policy_recommendation,
                 prompt_failure_reason=SELECTOR_PROMPT_MISSING_TURN_TEXT_REASON,
             )
@@ -332,6 +400,9 @@ class WorkflowSelector:
             prompt_text=prompt_text,
             discovered_workflow_ids=tuple(candidate_ids),
             candidate_entries=immutable_candidate_entries,
+            candidate_list_text=candidate_list,
+            requested_prompt_ids=requested_prompt_ids,
+            prompt_provenance=prompt_provenance,
             policy_recommendation=policy_recommendation,
         )
 
@@ -394,6 +465,13 @@ class WorkflowSelector:
             raw_response=raw_response,
             discovered_workflow_ids=candidate_ids,
         )
+        selection_metadata: dict[str, Any] = {
+            "raw_candidate_label": label,
+            "raw_response_format": structured.get("raw_response_format"),
+            "structured_selection_detected": structured.get(
+                "structured_selection_detected", False
+            ),
+        }
 
         # Match against candidate workflow IDs.
         label_lower = label.lower()
@@ -402,6 +480,7 @@ class WorkflowSelector:
         if matched_id:
             workflow_id = matched_id
             verdict = "rag_selected"
+            selection_metadata["selection_resolution"] = "candidate_label_exact_match"
         else:
             # Fallback: try to find a candidate in the raw text.
             raw_text = str(raw_response or "").lower()
@@ -409,14 +488,19 @@ class WorkflowSelector:
                 if cid.lower() in raw_text:
                     workflow_id = cid
                     verdict = "rag_selected"
+                    selection_metadata["selection_resolution"] = (
+                        "raw_response_contains_candidate_id"
+                    )
                     break
             else:
                 # Ultimate fallback to default workflow.
                 workflow_id = self._default_workflow_id
                 verdict = "rag_default"
+                selection_metadata["selection_resolution"] = "default_workflow_fallback"
                 # Lower confidence for fallback selections.
                 if confidence_score > 0.0:
                     confidence_score = min(confidence_score, 0.3)
+        selection_metadata["selected_workflow_id"] = workflow_id
 
         return WorkflowSelection(
             workflow_id=workflow_id,
@@ -428,6 +512,7 @@ class WorkflowSelector:
             confidence_score=confidence_score,
             reasoning=reasoning,
             selection_source="selector",
+            selection_metadata=selection_metadata,
         )
 
     def resolve_policy_selection(
@@ -463,7 +548,14 @@ class WorkflowSelector:
             confidence_score=max(0.0, min(1.0, float(confidence_score))),
             reasoning=str(reasoning or ""),
             selection_source="policy_direct",
-            selection_metadata=dict(selection_metadata or {}),
+            selection_metadata={
+                "selection_resolution": (
+                    "policy_recommended_candidate"
+                    if verdict == "policy_selected"
+                    else "default_workflow_fallback"
+                ),
+                **dict(selection_metadata or {}),
+            },
         )
 
     def resolve_prompt_unavailable_selection(
@@ -478,6 +570,7 @@ class WorkflowSelector:
         )
         selection_metadata: dict[str, Any] = {
             "prompt_failure_reason": failure_reason,
+            "selection_resolution": "selector_prompt_unavailable_fail_closed",
         }
         if (
             isinstance(selection_prompt.prompt_failure_detail, str)
@@ -522,10 +615,20 @@ class WorkflowSelector:
         try:
             parsed = json.loads(raw_text)
         except Exception:
-            return {"confidence": 0.0, "reasoning": ""}
+            return {
+                "confidence": 0.0,
+                "reasoning": "",
+                "structured_selection_detected": False,
+                "raw_response_format": "text",
+            }
 
         if not isinstance(parsed, Mapping):
-            return {"confidence": 0.0, "reasoning": ""}
+            return {
+                "confidence": 0.0,
+                "reasoning": "",
+                "structured_selection_detected": False,
+                "raw_response_format": type(parsed).__name__.lower(),
+            }
 
         confidence = 0.0
         for key in cls._JSON_CONFIDENCE_KEYS:
@@ -544,7 +647,12 @@ class WorkflowSelector:
                 reasoning = raw_reason.strip()
                 break
 
-        return {"confidence": confidence, "reasoning": reasoning}
+        return {
+            "confidence": confidence,
+            "reasoning": reasoning,
+            "structured_selection_detected": True,
+            "raw_response_format": "json_object",
+        }
 
     # ------------------------------------------------------------------
     # Label extraction (shared by both modes)
