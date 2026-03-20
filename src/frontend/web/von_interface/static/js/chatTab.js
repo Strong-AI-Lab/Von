@@ -160,7 +160,6 @@ const WORKFLOW_STATUS_RECONNECT_MAX_MS = 20000;
 const WORKFLOW_STATUS_SNAPSHOT_FETCH_TIMEOUT_MS = 15000;
 const WORKFLOW_STATUS_SNAPSHOT_RETRY_BASE_MS = 1200;
 const WORKFLOW_STATUS_SNAPSHOT_RETRY_MAX_MS = 8000;
-const WORKFLOW_STATUS_SNAPSHOT_RETRY_MAX_ATTEMPTS = 4;
 const WORKFLOW_STATUS_SNAPSHOT_RETRY_DEFAULT_SECONDS = 2;
 const WORKFLOW_STATUS_INSTANCE_ID_INLINE_MAX_CHARS = 24;
 const workflowStatusStreamState = {
@@ -18072,10 +18071,9 @@ function applyWorkflowStatusSnapshotRetryableState({ payload, response, detail =
         WORKFLOW_STATUS_SNAPSHOT_RETRY_MAX_MS
     );
     const retryDelayMs = Math.max(exponentialDelayMs, retryAfterMs);
-    const shouldRetry = (
-        attempt <= WORKFLOW_STATUS_SNAPSHOT_RETRY_MAX_ATTEMPTS
-        && shouldAutoRefreshWorkflowStatusSnapshot()
-    );
+    // Keep retrying while the monitor remains visible; the capped delay avoids
+    // aggressive polling during extended transient store contention.
+    const shouldRetry = shouldAutoRefreshWorkflowStatusSnapshot();
 
     workflowStatusStreamState.retryAttempt = attempt;
     workflowStatusStreamState.snapshotError = '';

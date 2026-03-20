@@ -901,6 +901,41 @@ describe('workflow monitor active snapshot degradation handling', () => {
         );
     });
 
+    test('keeps retrying retryable active snapshot failures while the monitor stays visible', async () => {
+        let fetchCount = 0;
+        global.fetch = jest.fn(() => {
+            fetchCount += 1;
+            return Promise.resolve({
+                ok: false,
+                status: 503,
+                headers: { get: () => null },
+                json: async () => ({
+                    items: [],
+                    count: 0,
+                    degraded: true,
+                    retryable: true,
+                    error: 'Workflow monitor temporarily unavailable; please retry.',
+                    detail: 'read circuit open'
+                })
+            });
+        });
+
+        await __testOnly_refreshWorkflowStatusSnapshot();
+        expect(fetchCount).toBe(1);
+
+        for (let attempt = 0; attempt < 4; attempt += 1) {
+            jest.runOnlyPendingTimers();
+            await flushMicrotasks();
+        }
+
+        expect(fetchCount).toBe(5);
+        const payload = __testOnly_buildWorkflowMonitorExportPayload();
+        expect(payload.monitor_state.active_notice).toContain('retrying in 8s');
+        expect(payload.monitor_state.active_notice).not.toContain('Press Refresh');
+        expect(payload.active_instances_snapshot.payload.retry_attempt).toBe(5);
+        expect(payload.active_instances_snapshot.payload.retry_scheduled_in_ms).toBe(8000);
+    });
+
     test('shows visible refresh state while an active snapshot request is in flight', async () => {
         let resolveFetch;
         global.fetch = jest.fn(() => new Promise((resolve) => {
