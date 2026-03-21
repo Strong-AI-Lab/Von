@@ -63,6 +63,73 @@ export async function postJson(url, data) {
   return res.json();
 }
 
+export async function fetchWithTimeout(url, options = {}) {
+  const { timeoutMs = 0, signal: parentSignal = null, ...fetchOptions } = options || {};
+
+  if (typeof AbortController !== 'function' || timeoutMs <= 0) {
+    return fetch(url, parentSignal ? { ...fetchOptions, signal: parentSignal } : fetchOptions);
+  }
+
+  const controller = new AbortController();
+  let timeoutId = null;
+  let releaseParentAbort = null;
+  let timedOut = false;
+
+  if (parentSignal?.aborted) {
+    controller.abort();
+  } else if (parentSignal && typeof parentSignal.addEventListener === 'function') {
+    const forwardAbort = () => {
+      try {
+        controller.abort();
+      } catch (_) {
+        // Ignore abort races.
+      }
+    };
+    parentSignal.addEventListener('abort', forwardAbort, { once: true });
+    releaseParentAbort = () => {
+      try {
+        parentSignal.removeEventListener('abort', forwardAbort);
+      } catch (_) {
+        // Ignore detach races.
+      }
+    };
+  }
+
+  timeoutId = setTimeout(() => {
+    timedOut = true;
+    try {
+      controller.abort();
+    } catch (_) {
+      // Ignore abort races.
+    }
+  }, timeoutMs);
+
+  try {
+    return await fetch(url, {
+      ...fetchOptions,
+      signal: controller.signal
+    });
+  } catch (err) {
+    if (timedOut && err && typeof err === 'object') {
+      try {
+        Object.defineProperty(err, 'vonTimeout', {
+          configurable: true,
+          enumerable: false,
+          value: true
+        });
+      } catch (_) {
+        err.vonTimeout = true;
+      }
+    }
+    throw err;
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+    if (typeof releaseParentAbort === 'function') {
+      releaseParentAbort();
+    }
+  }
+}
+
 export async function putJson(url, data, opts = {}) {
   const extraHeaders = opts.headers || {};
   const res = await fetch(url, {

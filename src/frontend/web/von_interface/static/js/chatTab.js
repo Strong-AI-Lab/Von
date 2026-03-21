@@ -1,5 +1,5 @@
 // Chat Tab Module
-import { annotateTurn, getUserContext, getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
+import { annotateTurn, fetchWithTimeout, getUserContext, getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
 import { initializeConceptAutocomplete } from './components/conceptAutocomplete.js';
 import { initializeMessagePanel, loadUnreadCount } from './components/messagePanel.js';
 import { loadMyOrganisations } from './components/orgSelector.js';
@@ -648,6 +648,7 @@ const THINKING_CARD_TOGGLE_ARIA_LABEL_EXPANDED = 'Collapse thinking details';
 const THINKING_CARD_TOGGLE_ARIA_LABEL_COLLAPSED = 'Expand thinking details';
 const THINKING_ACTIVITY_LOW_LEVEL_EVENT_KINDS = new Set(['llm_call_chunk', 'heartbeat']);
 const THINKING_DIAGNOSTIC_DETAILS_SELECTOR = 'details[data-thinking-diagnostic-key]';
+const THINKING_PROGRESS_POLL_FETCH_TIMEOUT_MS = 2_000;
 const THINKING_DIAGNOSTICS_EXPORT_EVENT_LIMIT = 40;
 const THINKING_DIAGNOSTICS_EXPORT_PHASE_HISTORY_LIMIT = 80;
 const THINKING_TERMINAL_PROGRESS_STATUSES = new Set([
@@ -3627,8 +3628,13 @@ function startToolUseProgressPolling(request) {
         updateThinkingCardMeta(request, request.latestProgress || null);
 
         try {
-            const resp = await fetch(`/von/progress/${encodeURIComponent(requestId)}`,
-                { method: 'GET', signal: abortController.signal, headers: buildChatFetchHeaders() });
+            const resp = await fetchWithTimeout(`/von/progress/${encodeURIComponent(requestId)}`,
+                {
+                    method: 'GET',
+                    signal: poll.abortController?.signal,
+                    headers: buildChatFetchHeaders(),
+                    timeoutMs: THINKING_PROGRESS_POLL_FETCH_TIMEOUT_MS
+                });
             if (!resp) {
                 scheduleNextPoll(Math.min(5000, poll.nextDelayMs * 1.7));
                 poll.nextDelayMs = Math.min(5000, poll.nextDelayMs * 1.7);
@@ -3754,6 +3760,34 @@ function startToolUseProgressPolling(request) {
             scheduleNextPoll(poll.nextDelayMs);
         } catch (err) {
             if (err && err.name === 'AbortError') {
+                if (err.vonTimeout) {
+                    request.latestProgress = buildPendingThinkingProgressFallback(
+                        202,
+                        requestId,
+                        {
+                            ...(request.latestProgress && typeof request.latestProgress === 'object'
+                                ? request.latestProgress
+                                : {}),
+                            status: 'pending',
+                            phase: 'context_build',
+                            stage: 'context_build',
+                            phase_label: 'Retrying live progress',
+                            liveness_state: THINKING_STATUS_WAITING,
+                            pending_reason: 'progress_poll_timeout',
+                            subtask: 'progress visibility',
+                            result_summary: `Live progress polling timed out after ${Math.round(THINKING_PROGRESS_POLL_FETCH_TIMEOUT_MS / 1000)}s; retrying in the background.`
+                        }
+                    );
+                    applyThinkingCardDisplayStateUpdate(request, {
+                        type: 'progress_update',
+                        progress: request.latestProgress
+                    });
+                    setLoadingIndicatorText(formatToolUseProgressText(request.latestProgress, request));
+                    setLoadingIndicatorDetailHtml(renderThinkingCardBodyHTML(request));
+                    updateThinkingCardMeta(request, request.latestProgress);
+                    poll.nextDelayMs = Math.min(5000, poll.nextDelayMs * 1.7);
+                    scheduleNextPoll(poll.nextDelayMs);
+                }
                 return;
             }
 
@@ -18082,21 +18116,15 @@ async function refreshWorkflowStatusSnapshot({ silent = false, preserveRetryAtte
     syncWorkflowStatusSnapshotNotice();
     renderWorkflowStatusBody();
 
-    let timeoutId = null;
-
     try {
-        const controller = new AbortController();
-        timeoutId = setTimeout(() => controller.abort(), WORKFLOW_STATUS_SNAPSHOT_FETCH_TIMEOUT_MS);
-        const resp = await fetch(
+        const resp = await fetchWithTimeout(
             `/api/workflows/instances?${params.toString()}`,
             {
                 method: 'GET',
                 headers: buildChatFetchHeaders(),
-                signal: controller.signal
+                timeoutMs: WORKFLOW_STATUS_SNAPSHOT_FETCH_TIMEOUT_MS
             }
         );
-        clearTimeout(timeoutId);
-        timeoutId = null;
         const data = await resp.json().catch(() => null);
         const payload = (data && typeof data === 'object') ? data : {};
         if (!resp.ok || payload?.degraded === true) {
@@ -18168,10 +18196,6 @@ async function refreshWorkflowStatusSnapshot({ silent = false, preserveRetryAtte
         renderWorkflowStatusBody();
         if (!silent) {
             console.warn('[workflowStatus] Snapshot fetch failed', err);
-        }
-    } finally {
-        if (timeoutId) {
-            clearTimeout(timeoutId);
         }
     }
 }
@@ -18411,16 +18435,15 @@ async function refreshAvailableWorkflowDefinitions({ silent = false } = {}) {
     params.set('limit', '200');
     workflowDefinitionsState.lastRequestQuery = params.toString();
 
-    let timeoutId = null;
     try {
-        const controller = new AbortController();
-        timeoutId = setTimeout(() => controller.abort(), WORKFLOW_DEFINITIONS_FETCH_TIMEOUT_MS);
-        const resp = await fetch(
+        const resp = await fetchWithTimeout(
             `/api/workflows/definitions?${params.toString()}`,
-            { method: 'GET', headers: buildChatFetchHeaders(), signal: controller.signal }
+            {
+                method: 'GET',
+                headers: buildChatFetchHeaders(),
+                timeoutMs: WORKFLOW_DEFINITIONS_FETCH_TIMEOUT_MS
+            }
         );
-        clearTimeout(timeoutId);
-        timeoutId = null;
         const responsePayload = await resp.json().catch(() => null);
         if (!resp.ok) {
             const responseError = typeof responsePayload?.error === 'string'
@@ -18551,9 +18574,6 @@ async function refreshAvailableWorkflowDefinitions({ silent = false } = {}) {
             console.warn('[workflowStatus] Available workflow fetch failed', err);
         }
     } finally {
-        if (timeoutId) {
-            clearTimeout(timeoutId);
-        }
         workflowDefinitionsState.loading = false;
         if (workflowDefinitionsState.visible) {
             renderWorkflowStatusBody();
@@ -20146,9 +20166,6 @@ async function handleSendPrompt(options = {}) {
 
         startThinkingTooltipTicker(request);
 
-        // Start polling immediately while the request is in flight.
-        startToolUseProgressPolling(request);
-
         // Get user context from localStorage to send to backend
         const userContext = getUserContext();
         // Presenter-mode controls whether the backend produces two-channel output
@@ -20156,7 +20173,9 @@ async function handleSendPrompt(options = {}) {
         // is enabled, so clicking Speak later never needs to read raw markdown.
         const presenterMode = true;
 
-        const response = await fetch('/von/generate', {
+        // Start the generate request before polling progress so the first
+        // /von/progress read is less likely to outrun request initialisation.
+        const responsePromise = fetch('/von/generate', {
             method: 'POST',
             headers: buildChatFetchHeaders({
                 'Content-Type': 'application/json',
@@ -20172,6 +20191,12 @@ async function handleSendPrompt(options = {}) {
                 presenter_mode: presenterMode
             })
         });
+        startToolUseProgressPolling(request);
+        // Give an already-available first progress response a chance to land
+        // before an immediate generate response tears down the active card.
+        await Promise.resolve();
+        await Promise.resolve();
+        const response = await responsePromise;
 
         // Defensive: some tests or environments may provide a non-standard fetch
         // mock that doesn't return a Response-like object. Guard before calling

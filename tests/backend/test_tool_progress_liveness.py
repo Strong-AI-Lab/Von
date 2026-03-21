@@ -125,6 +125,36 @@ def test_progress_endpoint_reads_persisted_state_after_local_cache_miss(
     assert body.get("goal_label") == "https://arxiv.org/abs/2602.20478"
 
 
+def test_get_tool_progress_prefers_live_memory_state_before_persisted_fetch(
+    monkeypatch,
+) -> None:
+    von_routes._set_tool_progress(
+        "scope-live",
+        "req-live",
+        {
+            "status": "thinking",
+            "phase": "tool_execute",
+            "phase_label": "Executing tools",
+            "request_id": "req-live",
+            "subtask": "workflow execution",
+        },
+    )
+
+    def _unexpected_fetch(*, scope_key: str, request_id: str):
+        raise AssertionError(
+            "persisted progress fetch should not run when live memory state exists"
+        )
+
+    monkeypatch.setattr(von_routes, "fetch_tool_progress_state", _unexpected_fetch)
+
+    state = von_routes._get_tool_progress("scope-live", "req-live")
+
+    assert state is not None
+    assert state["request_id"] == "req-live"
+    assert state["phase"] == "tool_execute"
+    assert state["subtask"] == "workflow execution"
+
+
 def test_progress_endpoint_pending_response_includes_explanatory_payload(
     monkeypatch,
 ) -> None:
