@@ -50,13 +50,17 @@ import {
 } from '../chatTab';
 
 // Mock dependencies to avoid import errors
-jest.mock('../apiService.js', () => ({
-    annotateTurn: jest.fn(),
-    getUserContext: jest.fn(),
-    getWindowSessionId: jest.fn(() => 'test-window-session'),
-    postJson: jest.fn(),
-    WINDOW_SESSION_HEADER: 'X-Window-Session-ID'
-}));
+jest.mock('../apiService.js', () => {
+    const actual = jest.requireActual('../apiService.js');
+    return {
+        ...actual,
+        annotateTurn: jest.fn(),
+        getUserContext: jest.fn(),
+        getWindowSessionId: jest.fn(() => 'test-window-session'),
+        postJson: jest.fn(),
+        WINDOW_SESSION_HEADER: 'X-Window-Session-ID'
+    };
+});
 jest.mock('../domUtils.js', () => ({
     elements: {},
     getCurrentUserConceptId: jest.fn(),
@@ -555,6 +559,8 @@ describe('workflow monitor definitions refresh contention handling', () => {
     async function flushMicrotasks() {
         await Promise.resolve();
         await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
     }
 
     beforeEach(() => {
@@ -789,6 +795,8 @@ describe('workflow monitor definitions refresh contention handling', () => {
 
 describe('workflow monitor active snapshot degradation handling', () => {
     async function flushMicrotasks() {
+        await Promise.resolve();
+        await Promise.resolve();
         await Promise.resolve();
         await Promise.resolve();
     }
@@ -2477,6 +2485,79 @@ describe('thinking card toggle accessibility', () => {
         document.getElementById('abortButton').click();
         await new Promise((r) => setTimeout(r, 0));
         await expect(sendPromise).resolves.toBeUndefined();
+    });
+
+    test('progress poll timeout falls back to retryable waiting state instead of freezing the card', async () => {
+        jest.useFakeTimers();
+        try {
+            const { getUserContext } = require('../apiService.js');
+            getUserContext.mockReturnValue({
+                user_id: 'user',
+                org_id: 'org',
+                language: 'en-NZ',
+                gmail_profile: null
+            });
+
+            document.getElementById('promptInput').value = 'slow progress prompt';
+
+            let generateSignal = null;
+            global.fetch = jest.fn((url, options = {}) => {
+                if (typeof url === 'string' && url.startsWith('/api/settings/')) {
+                    return Promise.resolve({
+                        ok: true,
+                        json: async () => ({ show_tool_use_during_thinking: true })
+                    });
+                }
+
+                if (typeof url === 'string' && url.startsWith('/von/progress/')) {
+                    return new Promise((resolve, reject) => {
+                        options.signal?.addEventListener('abort', () => {
+                            const err = new Error('progress timeout');
+                            err.name = 'AbortError';
+                            reject(err);
+                        });
+                    });
+                }
+
+                if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                    return Promise.resolve({
+                        ok: true,
+                        json: async () => ({ history_length: 0, authenticated: true })
+                    });
+                }
+
+                if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                    generateSignal = options.signal;
+                    return new Promise((resolve, reject) => {
+                        generateSignal?.addEventListener('abort', () => {
+                            const err = new Error('aborted');
+                            err.name = 'AbortError';
+                            reject(err);
+                        });
+                    });
+                }
+
+                return Promise.resolve({ ok: true, json: async () => ({}) });
+            });
+
+            const sendPromise = sendMessage();
+            await Promise.resolve();
+
+            jest.advanceTimersByTime(2_100);
+            await Promise.resolve();
+            await Promise.resolve();
+
+            const indicatorText = document.querySelector('.loading-indicator-text');
+            expect(indicatorText.textContent).toContain('Retrying live progress');
+            expect(document.getElementById('loadingIndicatorDetail').innerHTML)
+                .toContain('retrying in the background');
+
+            document.getElementById('abortButton').click();
+            await Promise.resolve();
+            await expect(sendPromise).resolves.toBeUndefined();
+        } finally {
+            jest.useRealTimers();
+        }
     });
 
     test('allows unfurl after terminal progress even while request is still active', async () => {

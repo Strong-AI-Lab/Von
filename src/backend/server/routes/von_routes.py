@@ -2912,15 +2912,17 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
 
 def _get_tool_progress(scope_key: str, request_id: str) -> dict[str, Any] | None:
     _prune_tool_progress()
+    with _TOOL_PROGRESS_LOCK:
+        value = _TOOL_PROGRESS.get((scope_key, request_id))
+        if isinstance(value, dict):
+            return dict(value)
     try:
         persisted = fetch_tool_progress_state(scope_key=scope_key, request_id=request_id)
     except Exception:
         persisted = None
     if isinstance(persisted, dict):
         return dict(_cache_tool_progress_state(scope_key, request_id, persisted))
-    with _TOOL_PROGRESS_LOCK:
-        value = _TOOL_PROGRESS.get((scope_key, request_id))
-        return dict(value) if isinstance(value, dict) else None
+    return None
 
 
 def _snapshot_tool_progress_for_request(
