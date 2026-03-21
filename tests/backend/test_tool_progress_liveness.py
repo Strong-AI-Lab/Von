@@ -1356,6 +1356,173 @@ def test_turn_execution_diagnostics_include_routing_diagnostics_from_selector_an
     )
 
 
+def test_turn_execution_diagnostics_clear_stale_selector_prompt_failure_after_success(
+    monkeypatch,
+) -> None:
+    clock = _set_clock(monkeypatch, start=5610.0)
+
+    selected_workflow_id = "#V#meeting_invitation_testing_workflow"
+    selector_prompt_entry = {
+        "type": "workflow_selector_prompt",
+        "prompt_id": "#V#chat_turn_classifier_prompt",
+        "requested_prompt_ids": ["#V#chat_turn_classifier_prompt"],
+        "prompt": {"text": "Select workflow", "char_count": 15},
+        "candidate_list": {"text": f"- {selected_workflow_id}", "char_count": 39},
+        "prompt_failure_reason": "selector_prompt_missing_candidate_list",
+        "prompt_failure_detail": "Selector template omitted the candidate list.",
+    }
+    selector_success_entry = {
+        "type": "workflow_selector",
+        "workflow_id": selected_workflow_id,
+        "verdict": "rag_selected",
+        "selection_source": "selector",
+        "response": {"text": selected_workflow_id, "char_count": 38},
+        "selection_rationale": "selector_selected_discovered_candidate",
+    }
+
+    von_routes._set_tool_progress(
+        "scope-custom-workflow",
+        "req-custom-workflow",
+        {
+            "status": "thinking",
+            "phase": "workflow_dispatch",
+            "phase_label": "Workflow selected",
+            "request_id": "req-custom-workflow",
+            "selected_workflow_id": selected_workflow_id,
+            "selected_workflow_name": "Meeting invitation testing workflow",
+            "workflow_selector_verdict": "rag_selected",
+            "workflow_selector_source": "selector",
+            "workflow_selection_rationale": "selector_selected_discovered_candidate",
+            "workflow_routing": {
+                "workflow_id": selected_workflow_id,
+                "verdict": "rag_selected",
+                "source": "selector",
+                "selection_rationale": "selector_selected_discovered_candidate",
+            },
+            "workflow_routing_aux": [selector_prompt_entry, selector_success_entry],
+            "counters": {"tools_started": 0, "tools_completed": 0},
+        },
+    )
+    clock["now"] += 0.1
+    von_routes._set_tool_progress(
+        "scope-custom-workflow",
+        "req-custom-workflow",
+        {
+            "status": "thinking",
+            "phase": "workflow_dispatch",
+            "phase_label": "Workflow terminal state",
+            "request_id": "req-custom-workflow",
+            "selected_workflow_id": selected_workflow_id,
+            "selected_workflow_name": "Meeting invitation testing workflow",
+            "workflow_selector_verdict": "rag_selected",
+            "workflow_selector_source": "selector",
+            "workflow_selection_rationale": "selector_selected_discovered_candidate",
+            "result_summary": "workflow_terminal:failed",
+            "workflow_routing": {
+                "workflow_id": selected_workflow_id,
+                "verdict": "rag_selected",
+                "source": "selector",
+                "selection_rationale": "selector_selected_discovered_candidate",
+            },
+            "workflow_routing_aux": [
+                selector_prompt_entry,
+                selector_success_entry,
+                {
+                    "type": "workflow_dispatch_boundary",
+                    "boundary": "execution_mode_selected",
+                    "status": "selected",
+                    "selected_execution_mode": "custom_workflow",
+                    "selected_workflow_id": selected_workflow_id,
+                    "dispatch_workflow_id": selected_workflow_id,
+                },
+                {
+                    "type": "workflow_dispatch_boundary",
+                    "boundary": "workflow_handoff",
+                    "status": "started",
+                    "selected_execution_mode": "custom_workflow",
+                    "selected_workflow_id": selected_workflow_id,
+                    "dispatch_workflow_id": selected_workflow_id,
+                },
+                {
+                    "type": "workflow_dispatch_boundary",
+                    "boundary": "workflow_terminal",
+                    "status": "failed",
+                    "selected_execution_mode": "custom_workflow",
+                    "selected_workflow_id": selected_workflow_id,
+                    "dispatch_workflow_id": selected_workflow_id,
+                    "final_state": "prepare_spec",
+                    "completed": False,
+                    "reason": "workflow_launch_input_resolution_failed",
+                    "detail": (
+                        "Workflow #V#meeting_invitation_testing_workflow could not "
+                        "start because required launch inputs were unresolved: "
+                        "invitation_text."
+                    ),
+                    "workflow_launch_input_resolution_status": "failed",
+                    "unresolved_required_inputs": ["invitation_text"],
+                    "failing_state_id": "prepare_spec",
+                    "failing_action_id": "tool.prepare_spec",
+                },
+            ],
+            "counters": {"tools_started": 0, "tools_completed": 0},
+        },
+    )
+
+    snapshot = von_routes._snapshot_tool_progress_for_request(
+        "scope-custom-workflow",
+        "req-custom-workflow",
+    )
+    assert snapshot is not None
+
+    diagnostics = von_routes._build_turn_execution_diagnostics(
+        request_id="req-custom-workflow",
+        prompt_text="Run the meeting invitation testing workflow",
+        tool_progress_state=snapshot,
+    )
+
+    stage_diagnostics = diagnostics.get("stage_diagnostics")
+    assert isinstance(stage_diagnostics, list)
+    workflow_dispatch = next(
+        (
+            entry
+            for entry in stage_diagnostics
+            if isinstance(entry, dict) and entry.get("stage_id") == "workflow_dispatch"
+        ),
+        None,
+    )
+    assert workflow_dispatch is not None
+    assert workflow_dispatch.get("selected_workflow_id") == selected_workflow_id
+    assert workflow_dispatch.get("selected_workflow_name") == (
+        "Meeting invitation testing workflow"
+    )
+    assert workflow_dispatch.get("workflow_selector_verdict") == "rag_selected"
+    assert workflow_dispatch.get("workflow_selector_source") == "selector"
+    assert workflow_dispatch.get("workflow_selection_rationale") == (
+        "selector_selected_discovered_candidate"
+    )
+
+    routing_diagnostics = diagnostics.get("workflow_routing_diagnostics")
+    assert isinstance(routing_diagnostics, dict)
+    assert routing_diagnostics.get("selected_workflow_id") == selected_workflow_id
+    assert routing_diagnostics.get("selector", {}).get("prompt_failure_reason") is None
+    assert routing_diagnostics.get("selector", {}).get("prompt_failure_detail") is None
+    assert routing_diagnostics.get("dispatch", {}).get("selected_execution_mode") == (
+        "custom_workflow"
+    )
+    assert routing_diagnostics.get("dispatch", {}).get(
+        "dispatch_terminal_failure_reason"
+    ) == "workflow_launch_input_resolution_failed"
+    assert routing_diagnostics.get("dispatch", {}).get(
+        "dispatch_terminal_failing_state_id"
+    ) == "prepare_spec"
+    assert routing_diagnostics.get("dispatch", {}).get(
+        "dispatch_terminal_failing_action_id"
+    ) == "tool.prepare_spec"
+    assert routing_diagnostics.get("dispatch", {}).get(
+        "dispatch_terminal_unresolved_required_inputs"
+    ) == ["invitation_text"]
+
+
 def test_serialised_tool_progress_state_includes_live_workflow_routing_diagnostics() -> None:
     serialised = von_routes._serialise_tool_progress_state(
         {

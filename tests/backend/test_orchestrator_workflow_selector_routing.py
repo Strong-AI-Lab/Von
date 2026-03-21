@@ -2987,6 +2987,9 @@ def test_workflow_selector_emits_dispatch_progress_events(monkeypatch):
 def test_non_standard_workflow_routes_via_execute_workflow(monkeypatch):
     """Workflows in the registry but not in the standard set should use execute_workflow."""
 
+    import src.backend.services.workflow_selection_policy_service as policy_module
+
+    monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
     execute_calls: list[dict[str, Any]] = []
 
@@ -3066,6 +3069,9 @@ def test_non_standard_workflow_routes_via_execute_workflow(monkeypatch):
 def test_custom_workflow_run_applies_launch_contract_without_workflow_specific_glue(
     monkeypatch,
 ):
+    import src.backend.services.workflow_selection_policy_service as policy_module
+
+    monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
     selected_workflow_id = "#V#launch_contract_custom_workflow"
     monkeypatch.setenv("VON_WORKFLOW_SELECTOR_ALLOW_POLICY_UNSAFE", "1")
@@ -3182,6 +3188,137 @@ def test_custom_workflow_run_applies_launch_contract_without_workflow_specific_g
         "candidate_workflow_ids",
         "invitation_text",
     ]
+
+
+def test_custom_workflow_first_step_failure_projects_terminal_locality(monkeypatch):
+    import src.backend.services.workflow_selection_policy_service as policy_module
+
+    monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = "#V#launch_contract_failure_custom_workflow"
+    monkeypatch.setenv("VON_WORKFLOW_SELECTOR_ALLOW_POLICY_UNSAFE", "1")
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=selected_workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=selected_workflow_id,
+                initial_state="prepare_spec",
+                states={
+                    "prepare_spec": WorkflowStateSpec(
+                        state_id="prepare_spec",
+                        actions=(
+                            WorkflowActionInvocation(action_id="tool.prepare_spec"),
+                        ),
+                        terminal=True,
+                    )
+                },
+            ),
+            purpose="Custom workflow failure locality projection test.",
+            source="test",
+        )
+    )
+
+    def _execute_workflow(workflow_id: str, **_kwargs: Any):
+        assert workflow_id == selected_workflow_id
+        return SimpleNamespace(
+            completed=False,
+            final_state="prepare_spec",
+            error="workflow_launch_input_resolution_failed:invitation_text",
+            data={
+                "response_text": (
+                    f"Workflow {selected_workflow_id} could not start because "
+                    "required launch inputs were unresolved: invitation_text."
+                ),
+                "workflow_launch_input_resolution": {
+                    "status": "failed",
+                    "unresolved_required_inputs": ["invitation_text"],
+                    "failing_state_id": "prepare_spec",
+                    "failing_action_id": "tool.prepare_spec",
+                },
+            },
+        )
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    progress_events: list[dict[str, Any]] = []
+    orchestrator.set_progress_callback(lambda info: progress_events.append(dict(info)))
+
+    result = orchestrator.run(
+        prompt=(
+            'Run the meeting invitation testing workflow on this invitation:\n\n'
+            '"Kia ora team, please join us on Tuesday at 2:00pm in Room 4."'
+        ),
+        context=[],
+        llm_client=_CapturingLLM([selected_workflow_id]),
+        model=None,
+        user_namespace="#V#user@org",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Launch contract failure custom workflow",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Launch contract failure custom workflow",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                }
+            ],
+            "match_count": 1,
+        },
+            conversation_session_id="chat-launch-failure",
+            turn_id="turn-launch-failure",
+        )
+
+    assert "required launch inputs were unresolved: invitation_text" in result.response_text
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.workflow_id == selected_workflow_id
+
+    dispatch_boundaries = [
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict) and entry.get("type") == "workflow_dispatch_boundary"
+    ]
+    assert [entry.get("boundary") for entry in dispatch_boundaries[-3:]] == [
+        "execution_mode_selected",
+        "workflow_handoff",
+        "workflow_terminal",
+    ]
+    assert dispatch_boundaries[-2].get("status") == "started"
+    terminal_boundary = dispatch_boundaries[-1]
+    assert terminal_boundary.get("status") == "failed"
+    assert terminal_boundary.get("selected_execution_mode") == "custom_workflow"
+    assert terminal_boundary.get("selected_workflow_id") == selected_workflow_id
+    assert terminal_boundary.get("dispatch_workflow_id") == selected_workflow_id
+    assert terminal_boundary.get("final_state") == "prepare_spec"
+    assert terminal_boundary.get("reason") == "workflow_launch_input_resolution_failed"
+    assert terminal_boundary.get("workflow_launch_input_resolution_status") == "failed"
+    assert terminal_boundary.get("unresolved_required_inputs") == ["invitation_text"]
+    assert terminal_boundary.get("failing_state_id") == "prepare_spec"
+    assert terminal_boundary.get("failing_action_id") == "tool.prepare_spec"
+
+    terminal_progress = next(
+        (
+            entry
+            for entry in reversed(progress_events)
+            if entry.get("phase_label") == "Workflow terminal state"
+        ),
+        None,
+    )
+    assert terminal_progress is not None
+    assert terminal_progress.get("selected_workflow_id") == selected_workflow_id
+    assert terminal_progress.get("selected_workflow_name") == (
+        "Launch contract failure custom workflow"
+    )
+    assert terminal_progress.get("workflow_selector_verdict") == "rag_selected"
+    assert terminal_progress.get("workflow_selector_source") == "selector"
+    assert isinstance(terminal_progress.get("workflow_selection_rationale"), str)
+    assert terminal_progress.get("workflow_selection_rationale")
 
 
 def test_custom_tool_pipeline_workflow_dispatches_without_id_special_casing(monkeypatch):

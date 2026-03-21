@@ -220,6 +220,81 @@ def test_tool_execution_summary_preserves_local_handoff_failure_reason() -> None
     assert summary["last_successful_boundary"] == "workflow_terminal"
 
 
+def test_tool_execution_summary_preserves_custom_workflow_first_step_failure_locality() -> None:
+    summary = _summarise_tool_execution_context(
+        workflow_routing={
+            "workflow_id": "#V#meeting_invitation_testing_workflow",
+            "verdict": "rag_selected",
+        },
+        turn_execution_diagnostics={
+            "latest_progress": {
+                "counters": {"tools_started": 0, "tools_completed": 0},
+                "diagnostic_events": [],
+            }
+        },
+        aux_llm_calls=[
+            {
+                "type": "workflow_dispatch_boundary",
+                "boundary": "execution_mode_selected",
+                "status": "selected",
+                "selected_execution_mode": "custom_workflow",
+                "selected_workflow_id": "#V#meeting_invitation_testing_workflow",
+                "dispatch_workflow_id": "#V#meeting_invitation_testing_workflow",
+            },
+            {
+                "type": "workflow_dispatch_boundary",
+                "boundary": "workflow_handoff",
+                "status": "started",
+                "selected_execution_mode": "custom_workflow",
+                "selected_workflow_id": "#V#meeting_invitation_testing_workflow",
+                "dispatch_workflow_id": "#V#meeting_invitation_testing_workflow",
+            },
+            {
+                "type": "workflow_dispatch_boundary",
+                "boundary": "workflow_terminal",
+                "status": "failed",
+                "selected_execution_mode": "custom_workflow",
+                "selected_workflow_id": "#V#meeting_invitation_testing_workflow",
+                "dispatch_workflow_id": "#V#meeting_invitation_testing_workflow",
+                "final_state": "prepare_spec",
+                "completed": False,
+                "reason": "workflow_launch_input_resolution_failed",
+                "detail": (
+                    "Workflow #V#meeting_invitation_testing_workflow could not start "
+                    "because required launch inputs were unresolved: invitation_text."
+                ),
+                "workflow_launch_input_resolution_status": "failed",
+                "unresolved_required_inputs": ["invitation_text"],
+                "failing_state_id": "prepare_spec",
+                "failing_action_id": "tool.prepare_spec",
+            },
+        ],
+        serialised_invocations=[],
+    )
+
+    assert summary["tool_route_selected"] is False
+    assert summary["selected_execution_mode"] == "custom_workflow"
+    assert summary["dispatch_workflow_id"] == "#V#meeting_invitation_testing_workflow"
+    assert summary["workflow_handoff_started"] is True
+    assert summary["dispatch_terminal_status"] == "failed"
+    assert summary["dispatch_terminal_final_state"] == "prepare_spec"
+    assert summary["dispatch_terminal_failure_reason"] == (
+        "workflow_launch_input_resolution_failed"
+    )
+    assert summary["dispatch_terminal_failure_detail"] == (
+        "Workflow #V#meeting_invitation_testing_workflow could not start "
+        "because required launch inputs were unresolved: invitation_text."
+    )
+    assert summary["dispatch_terminal_launch_input_resolution_status"] == "failed"
+    assert summary["dispatch_terminal_unresolved_required_inputs"] == [
+        "invitation_text"
+    ]
+    assert summary["dispatch_terminal_failing_state_id"] == "prepare_spec"
+    assert summary["dispatch_terminal_failing_action_id"] == "tool.prepare_spec"
+    assert summary["zero_tools_executed"] is True
+    assert summary["failure_codes"] == []
+
+
 def test_build_workflow_routing_diagnostics_preserves_selector_exchange_and_dispatch_events() -> None:
     diagnostics = build_workflow_routing_diagnostics(
         workflow_discovery={

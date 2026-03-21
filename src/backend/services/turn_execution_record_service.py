@@ -237,6 +237,14 @@ _NEGATED_MUTATION_PREFIX_PATTERN = re.compile(
 
 _TOOL_CALLING_SELECTOR_VERDICTS = {"tool_seeking", "tool_calling"}
 
+_SELECTOR_PROMPT_FAILURE_VERDICTS = {
+    "selector_exception",
+    "selector_prompt_missing_candidate_list",
+    "selector_prompt_missing_turn_text",
+    "selector_prompt_render_error",
+    "selector_prompt_unavailable",
+}
+
 _TOOL_EXECUTION_FAILURE_REASON_MAP = {
     "worker_unavailable_zero_execution": "Tool execution was blocked while workers were unavailable.",
     "missing_tool_call_parse_error": "Tool call parsing failed before any tool execution occurred.",
@@ -960,6 +968,24 @@ def build_workflow_routing_diagnostics(
         selector_response_capture = _build_text_capture(
             selector_entry.get("raw_response")
         )
+    selector_prompt_failure_reason = _safe_str(
+        _selector_context_value("prompt_failure_reason")
+    )
+    selector_prompt_failure_detail = _safe_str(
+        _selector_context_value("prompt_failure_detail")
+    )
+    selector_outcome_workflow_id = _safe_str(
+        workflow_routing_payload.get("workflow_id")
+    ) or _safe_str(selector_entry.get("workflow_id"))
+    selector_outcome_verdict = _safe_str(workflow_routing_payload.get("verdict")) or _safe_str(
+        selector_entry.get("verdict")
+    )
+    if selector_outcome_workflow_id and (
+        (selector_outcome_verdict or "").strip().lower()
+        not in _SELECTOR_PROMPT_FAILURE_VERDICTS
+    ):
+        selector_prompt_failure_reason = None
+        selector_prompt_failure_detail = None
     raw_policy_candidate_scores = (
         selector_entry.get("policy_candidate_scores")
         if selector_entry.get("policy_candidate_scores") is not None
@@ -1057,6 +1083,14 @@ def build_workflow_routing_diagnostics(
         if dispatch_primary_failure_code
         else None
     )
+    raw_dispatch_terminal_unresolved_required_inputs = execution_summary_payload.get(
+        "dispatch_terminal_unresolved_required_inputs"
+    )
+    dispatch_terminal_unresolved_required_inputs = (
+        list(raw_dispatch_terminal_unresolved_required_inputs)
+        if isinstance(raw_dispatch_terminal_unresolved_required_inputs, list)
+        else []
+    )
     first_dispatch_boundary = (
         _safe_str(dispatch_events[0].get("boundary")) if dispatch_events else None
     )
@@ -1116,12 +1150,8 @@ def build_workflow_routing_diagnostics(
             ),
             "reasoning": _safe_str(selector_entry.get("reasoning"))
             or _safe_str(workflow_routing_payload.get("reasoning")),
-            "prompt_failure_reason": _safe_str(
-                _selector_context_value("prompt_failure_reason")
-            ),
-            "prompt_failure_detail": _safe_str(
-                _selector_context_value("prompt_failure_detail")
-            ),
+            "prompt_failure_reason": selector_prompt_failure_reason,
+            "prompt_failure_detail": selector_prompt_failure_detail,
             "requested_prompt_ids": selector_requested_prompt_ids,
             "prompt_provenance": selector_prompt_provenance,
             "discovered_workflow_ids": _extract_workflow_ids(
@@ -1221,6 +1251,23 @@ def build_workflow_routing_diagnostics(
             ),
             "dispatch_terminal_failure_error_class": _safe_str(
                 execution_summary_payload.get("dispatch_terminal_failure_error_class")
+            ),
+            "dispatch_terminal_failure_detail": _safe_str(
+                execution_summary_payload.get("dispatch_terminal_failure_detail")
+            ),
+            "dispatch_terminal_failing_state_id": _safe_str(
+                execution_summary_payload.get("dispatch_terminal_failing_state_id")
+            ),
+            "dispatch_terminal_failing_action_id": _safe_str(
+                execution_summary_payload.get("dispatch_terminal_failing_action_id")
+            ),
+            "dispatch_terminal_unresolved_required_inputs": (
+                dispatch_terminal_unresolved_required_inputs
+            ),
+            "dispatch_terminal_launch_input_resolution_status": _safe_str(
+                execution_summary_payload.get(
+                    "dispatch_terminal_launch_input_resolution_status"
+                )
             ),
             "tool_route_selected": bool(
                 execution_summary_payload.get("tool_route_selected")
@@ -1543,6 +1590,11 @@ def _summarise_tool_execution_context(
     dispatch_terminal_completed: bool | None = None
     dispatch_terminal_failure_reason = ""
     dispatch_terminal_failure_error_class = ""
+    dispatch_terminal_failure_detail = ""
+    dispatch_terminal_failing_state_id = ""
+    dispatch_terminal_failing_action_id = ""
+    dispatch_terminal_unresolved_required_inputs: list[str] = []
+    dispatch_terminal_launch_input_resolution_status = ""
     for entry in aux_llm_calls or ():
         if not isinstance(entry, Mapping):
             continue
@@ -1592,6 +1644,29 @@ def _summarise_tool_execution_context(
             completed_value = event.get("completed")
             if isinstance(completed_value, bool):
                 dispatch_terminal_completed = completed_value
+            failure_detail_value = _safe_str(event.get("detail")) or _safe_str(
+                event.get("error")
+            )
+            if failure_detail_value:
+                dispatch_terminal_failure_detail = failure_detail_value
+            failing_state_id = _safe_str(event.get("failing_state_id"))
+            if failing_state_id:
+                dispatch_terminal_failing_state_id = failing_state_id
+            failing_action_id = _safe_str(event.get("failing_action_id"))
+            if failing_action_id:
+                dispatch_terminal_failing_action_id = failing_action_id
+            launch_input_resolution_status = _safe_str(
+                event.get("workflow_launch_input_resolution_status")
+            )
+            if launch_input_resolution_status:
+                dispatch_terminal_launch_input_resolution_status = (
+                    launch_input_resolution_status
+                )
+            unresolved_required_inputs = event.get("unresolved_required_inputs")
+            if isinstance(unresolved_required_inputs, list):
+                dispatch_terminal_unresolved_required_inputs = (
+                    _dedupe_string_sequence(unresolved_required_inputs)
+                )
             if status == "failed":
                 dispatch_terminal_failure_reason = (
                     _safe_str(event.get("reason")) or ""
@@ -1717,6 +1792,21 @@ def _summarise_tool_execution_context(
         "dispatch_terminal_failure_reason": dispatch_terminal_failure_reason or None,
         "dispatch_terminal_failure_error_class": (
             dispatch_terminal_failure_error_class or None
+        ),
+        "dispatch_terminal_failure_detail": dispatch_terminal_failure_detail or None,
+        "dispatch_terminal_failing_state_id": (
+            dispatch_terminal_failing_state_id or None
+        ),
+        "dispatch_terminal_failing_action_id": (
+            dispatch_terminal_failing_action_id or None
+        ),
+        "dispatch_terminal_unresolved_required_inputs": (
+            list(dispatch_terminal_unresolved_required_inputs)
+            if dispatch_terminal_unresolved_required_inputs
+            else []
+        ),
+        "dispatch_terminal_launch_input_resolution_status": (
+            dispatch_terminal_launch_input_resolution_status or None
         ),
         "last_successful_boundary": last_successful_boundary or None,
         "planned_count": planned_count,

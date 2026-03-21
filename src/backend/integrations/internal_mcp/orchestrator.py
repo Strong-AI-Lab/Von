@@ -25084,6 +25084,12 @@ class InternalMCPChatOrchestrator:
                 return None
             return dict(renderer_render_plan)
 
+        def _clean_boundary_scalar_text(value: Any) -> str | None:
+            if isinstance(value, str):
+                cleaned = value.strip()
+                return cleaned or None
+            return None
+
         def _emit_dispatch_boundary(
             *,
             boundary: str,
@@ -25102,19 +25108,17 @@ class InternalMCPChatOrchestrator:
                 "selected_execution_mode": selected_execution_mode,
             }
 
-            def _clean_scalar_text(value: Any) -> str | None:
-                if isinstance(value, str):
-                    cleaned = value.strip()
-                    return cleaned or None
-                return None
-
-            cleaned_selected_workflow_id = _clean_scalar_text(selected_workflow_id)
+            cleaned_selected_workflow_id = _clean_boundary_scalar_text(
+                selected_workflow_id
+            )
             if cleaned_selected_workflow_id:
                 payload["selected_workflow_id"] = cleaned_selected_workflow_id
-            cleaned_dispatch_workflow_id = _clean_scalar_text(dispatch_workflow_id)
+            cleaned_dispatch_workflow_id = _clean_boundary_scalar_text(
+                dispatch_workflow_id
+            )
             if cleaned_dispatch_workflow_id:
                 payload["dispatch_workflow_id"] = cleaned_dispatch_workflow_id
-            cleaned_final_state = _clean_scalar_text(final_state)
+            cleaned_final_state = _clean_boundary_scalar_text(final_state)
             if cleaned_final_state:
                 payload["final_state"] = cleaned_final_state
             if isinstance(completed, bool):
@@ -25141,20 +25145,130 @@ class InternalMCPChatOrchestrator:
                 progress_phase_label = "Tool dispatch handoff"
             elif boundary == "workflow_terminal":
                 progress_phase_label = "Workflow terminal state"
-            _emit_progress_local(
-                {
-                    "status": "thinking",
-                    "stage": progress_stage,
-                    "phase": progress_stage,
-                    "phase_label": progress_phase_label,
-                    "result_summary": (
-                        f"{boundary}:{status}"
-                        if boundary and status
-                        else boundary or status or "workflow_dispatch_boundary"
-                    ),
-                    **_build_live_workflow_routing_payload(),
-                }
+            progress_payload: dict[str, Any] = {
+                "status": "thinking",
+                "stage": progress_stage,
+                "phase": progress_stage,
+                "phase_label": progress_phase_label,
+                "result_summary": (
+                    f"{boundary}:{status}"
+                    if boundary and status
+                    else boundary or status or "workflow_dispatch_boundary"
+                ),
+                **_build_live_workflow_routing_payload(),
+            }
+            if cleaned_selected_workflow_id:
+                progress_payload["selected_workflow_id"] = cleaned_selected_workflow_id
+                selected_name = _resolve_selected_workflow_name(
+                    cleaned_selected_workflow_id
+                )
+                if selected_name:
+                    progress_payload["selected_workflow_name"] = selected_name
+                progress_payload.setdefault(
+                    "workflow_task",
+                    cleaned_dispatch_workflow_id or cleaned_selected_workflow_id,
+                )
+            if cleaned_dispatch_workflow_id:
+                progress_payload["dispatch_workflow_id"] = cleaned_dispatch_workflow_id
+            selector_verdict_value = _clean_boundary_scalar_text(selector_verdict)
+            if selector_verdict_value:
+                progress_payload["workflow_selector_verdict"] = selector_verdict_value
+            selector_source_value = (
+                _clean_boundary_scalar_text(routing_info.source)
+                if isinstance(routing_info, WorkflowRoutingInfo)
+                else None
             )
+            if selector_source_value:
+                progress_payload["workflow_selector_source"] = selector_source_value
+            selection_rationale_value = (
+                _clean_boundary_scalar_text(workflow_selection_rationale)
+                or (
+                    _clean_boundary_scalar_text(routing_info.selection_rationale)
+                    if isinstance(routing_info, WorkflowRoutingInfo)
+                    else None
+                )
+            )
+            if selection_rationale_value:
+                progress_payload["workflow_selection_rationale"] = (
+                    selection_rationale_value
+                )
+            _emit_progress_local(progress_payload)
+
+        def _clean_text_sequence(value: Any) -> list[str]:
+            if not isinstance(value, Sequence) or isinstance(
+                value, (str, bytes, bytearray)
+            ):
+                return []
+            cleaned_values: list[str] = []
+            seen_values: set[str] = set()
+            for item in value:
+                item_text = _clean_boundary_scalar_text(item)
+                if not item_text:
+                    continue
+                lowered = item_text.lower()
+                if lowered in seen_values:
+                    continue
+                seen_values.add(lowered)
+                cleaned_values.append(item_text)
+            return cleaned_values
+
+        def _build_workflow_terminal_failure_extra(result: Any) -> dict[str, Any]:
+            if bool(getattr(result, "completed", False)):
+                return {}
+
+            extra_payload: dict[str, Any] = {}
+            result_error = _clean_boundary_scalar_text(getattr(result, "error", None))
+            if result_error:
+                extra_payload["error"] = result_error
+                reason_code = result_error.split(":", 1)[0].strip()
+                if reason_code:
+                    extra_payload["reason"] = reason_code
+
+            result_data = getattr(result, "data", None)
+            if isinstance(result_data, Mapping):
+                failure_detail = _clean_boundary_scalar_text(
+                    result_data.get("summary")
+                ) or (
+                    _clean_boundary_scalar_text(result_data.get("response_text"))
+                )
+                if failure_detail:
+                    extra_payload["detail"] = failure_detail
+
+                launch_resolution = result_data.get("workflow_launch_input_resolution")
+                if isinstance(launch_resolution, Mapping):
+                    resolution_status = _clean_boundary_scalar_text(
+                        launch_resolution.get("status")
+                    )
+                    if resolution_status:
+                        extra_payload["workflow_launch_input_resolution_status"] = (
+                            resolution_status
+                        )
+                        if (
+                            resolution_status.lower() in {"failed", "missing"}
+                            and "reason" not in extra_payload
+                        ):
+                            extra_payload["reason"] = (
+                                "workflow_launch_input_resolution_failed"
+                            )
+                    unresolved_required_inputs = _clean_text_sequence(
+                        launch_resolution.get("unresolved_required_inputs")
+                    )
+                    if unresolved_required_inputs:
+                        extra_payload["unresolved_required_inputs"] = (
+                            unresolved_required_inputs
+                        )
+                    failing_state_id = _clean_boundary_scalar_text(
+                        launch_resolution.get("failing_state_id")
+                    )
+                    if failing_state_id:
+                        extra_payload["failing_state_id"] = failing_state_id
+                    failing_action_id = _clean_boundary_scalar_text(
+                        launch_resolution.get("failing_action_id")
+                    )
+                    if failing_action_id:
+                        extra_payload["failing_action_id"] = failing_action_id
+
+            return extra_payload
 
         # ----------------------------------------------------------------
         # JVNAUTOSCI-825: Route turns to the appropriate pathway.
@@ -25710,6 +25824,7 @@ class InternalMCPChatOrchestrator:
                         dispatch_workflow_id=selected_workflow_id_text,
                         final_state=wf_result.final_state,
                         completed=wf_result.completed,
+                        extra=_build_workflow_terminal_failure_extra(wf_result) or None,
                     )
                     result = _refresh_result_runtime_snapshots(result)
                     _persist_trace(status="completed")
@@ -26070,7 +26185,10 @@ class InternalMCPChatOrchestrator:
                 dispatch_workflow_id=tool_dispatch_workflow_id,
                 final_state=tc_result.final_state,
                 completed=tc_result.completed,
-                extra={"prebuilt_result": True},
+                extra={
+                    **_build_workflow_terminal_failure_extra(tc_result),
+                    "prebuilt_result": True,
+                },
             )
             if isinstance(prebuilt_result, OrchestratorResult):
                 result_with_dispatch_telemetry = _refresh_result_runtime_snapshots(
@@ -26178,6 +26296,7 @@ class InternalMCPChatOrchestrator:
             final_state=tc_result.final_state,
             completed=tc_result.completed,
             extra={
+                **_build_workflow_terminal_failure_extra(tc_result),
                 "requires_follow_up": gate_requires_follow_up,
                 "safe_to_claim_completion": gate_safe_to_claim_completion,
             },
