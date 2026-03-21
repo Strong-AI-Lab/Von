@@ -67,6 +67,7 @@ from ...workflows.conversation_turn_stage_model import (
     build_conversation_turn_stage_path,
 )
 from ...workflows.engine import WorkflowExecutor, WorkflowResult
+from ...workflows.metadata_validation import validate_state_metadata_pre_action
 from ...workflows.workflow_launch_input_contracts import (
     resolve_workflow_launch_inputs,
 )
@@ -25416,6 +25417,330 @@ class InternalMCPChatOrchestrator:
                 },
             )
 
+        def _build_custom_workflow_dispatch_data(
+            workflow_id_override: str | None = None,
+        ) -> dict[str, Any]:
+            effective_workflow_id = (
+                workflow_id_override.strip()
+                if isinstance(workflow_id_override, str)
+                and workflow_id_override.strip()
+                else selected_workflow_id_text
+            )
+            return {
+                "prompt": prompt,
+                "augmented_context": augmented_context,
+                "workflow_routing": (
+                    asdict(routing_info)
+                    if isinstance(routing_info, WorkflowRoutingInfo)
+                    else None
+                ),
+                "workflow_discovery_result": (
+                    dict(workflow_discovery_result)
+                    if isinstance(workflow_discovery_result, Mapping)
+                    else None
+                ),
+                "selected_workflow_id": effective_workflow_id,
+                "selected_workflow_name": _resolve_selected_workflow_name(
+                    effective_workflow_id
+                ),
+                "workflow_selector_verdict": selector_verdict or None,
+                "workflow_selector_source": (
+                    routing_info.source
+                    if isinstance(routing_info, WorkflowRoutingInfo)
+                    else None
+                ),
+                "user_concept_id": user_concept_id,
+                "org_concept_id": org_concept_id,
+                "gmail_profile": gmail_profile or self._default_gmail_profile,
+                "aux_llm_calls": aux_llm_calls,
+                "policy_state": policy_state,
+                "registry_snapshot": registry_snapshot,
+                "conversation_session_id": conversation_session_id,
+                "turn_id": turn_id,
+                "workflow_episode_source": "chat_turn_workflow",
+                "workflow_episode_stage": "workflow_dispatch",
+            }
+
+        def _probe_custom_workflow_launchability(
+            workflow_id: str | None,
+        ) -> dict[str, Any]:
+            clean_workflow_id = (
+                workflow_id.strip()
+                if isinstance(workflow_id, str) and workflow_id.strip()
+                else None
+            )
+            if not clean_workflow_id:
+                return {
+                    "workflow_id": None,
+                    "launchable": False,
+                    "launch_input_resolution": {"status": "workflow_id_missing"},
+                    "pre_action_validation": {
+                        "applied": False,
+                        "ok": False,
+                        "reason_code": "workflow_id_missing",
+                    },
+                }
+
+            workflow_def = self._workflow_registry.get(clean_workflow_id)
+            if workflow_def is None:
+                return {
+                    "workflow_id": clean_workflow_id,
+                    "launchable": False,
+                    "launch_input_resolution": {"status": "workflow_missing"},
+                    "pre_action_validation": {
+                        "applied": False,
+                        "ok": False,
+                        "reason_code": "workflow_missing",
+                    },
+                }
+
+            probe_data = _build_custom_workflow_dispatch_data(
+                workflow_id_override=clean_workflow_id
+            )
+            workflow_metadata = getattr(workflow_def, "metadata", None)
+            launch_contract = (
+                workflow_metadata.get("launch_input_contract")
+                if isinstance(workflow_metadata, Mapping)
+                else None
+            )
+            launch_contract_source = (
+                workflow_metadata.get("launch_input_contract_source")
+                if isinstance(workflow_metadata, Mapping)
+                else None
+            )
+            launch_resolution = resolve_workflow_launch_inputs(
+                workflow_id=clean_workflow_id,
+                contract=launch_contract if isinstance(launch_contract, Mapping) else None,
+                inputs=probe_data,
+                contract_source=(
+                    str(launch_contract_source).strip()
+                    if isinstance(launch_contract_source, str)
+                    and launch_contract_source.strip()
+                    else None
+                ),
+            )
+            for key, value in launch_resolution.resolved_inputs.items():
+                probe_data.setdefault(key, value)
+
+            initial_state_id = (
+                str(getattr(workflow_def, "initial_state", "") or "").strip() or None
+            )
+            state_spec = None
+            workflow_states = getattr(workflow_def, "states", None)
+            if initial_state_id and isinstance(workflow_states, Mapping):
+                state_spec = workflow_states.get(initial_state_id)
+
+            pre_action_summary: dict[str, Any]
+            pre_action_ok = False
+            if initial_state_id and state_spec is not None:
+                pre_validation = validate_state_metadata_pre_action(
+                    state_id=initial_state_id,
+                    metadata=getattr(state_spec, "metadata", None),
+                    context=probe_data,
+                )
+                pre_action_ok = bool(pre_validation.ok)
+                pre_action_failure = pre_validation.failure
+                pre_action_summary = {
+                    "applied": bool(pre_validation.applied),
+                    "ok": bool(pre_validation.ok),
+                    "reason_code": (
+                        str(pre_action_failure.reason_code)
+                        if pre_action_failure is not None
+                        and isinstance(pre_action_failure.reason_code, str)
+                        and pre_action_failure.reason_code
+                        else None
+                    ),
+                    "symbol": (
+                        str(pre_action_failure.details.get("symbol"))
+                        if pre_action_failure is not None
+                        and isinstance(pre_action_failure.details, Mapping)
+                        and isinstance(pre_action_failure.details.get("symbol"), str)
+                        and str(pre_action_failure.details.get("symbol")).strip()
+                        else None
+                    ),
+                    "message": (
+                        str(pre_action_failure.message)
+                        if pre_action_failure is not None
+                        and isinstance(pre_action_failure.message, str)
+                        and pre_action_failure.message
+                        else None
+                    ),
+                }
+            else:
+                pre_action_summary = {
+                    "applied": False,
+                    "ok": False,
+                    "reason_code": "initial_state_missing",
+                    "symbol": None,
+                    "message": None,
+                }
+
+            resolution_diagnostics = (
+                dict(launch_resolution.diagnostics)
+                if isinstance(launch_resolution.diagnostics, Mapping)
+                else {}
+            )
+            launch_input_summary = {
+                "status": resolution_diagnostics.get("status"),
+                "contract_source": resolution_diagnostics.get("contract_source"),
+                "resolved_inputs": list(
+                    resolution_diagnostics.get("resolved_inputs", [])
+                )
+                if isinstance(resolution_diagnostics.get("resolved_inputs"), list)
+                else [],
+                "unresolved_required_inputs": list(
+                    resolution_diagnostics.get("unresolved_required_inputs", [])
+                )
+                if isinstance(
+                    resolution_diagnostics.get("unresolved_required_inputs"), list
+                )
+                else [],
+            }
+            unresolved_required_inputs = tuple(
+                item
+                for item in launch_resolution.unresolved_required_inputs
+                if isinstance(item, str) and item.strip()
+            )
+            return {
+                "workflow_id": clean_workflow_id,
+                "initial_state_id": initial_state_id,
+                "launchable": not unresolved_required_inputs and pre_action_ok,
+                "launch_input_resolution": launch_input_summary,
+                "pre_action_validation": pre_action_summary,
+            }
+
+        def _maybe_override_selected_custom_workflow_for_launchability() -> None:
+            nonlocal selected_workflow_id
+            nonlocal selected_workflow_id_text
+            nonlocal selector_verdict
+            nonlocal routing_info
+
+            if not selected_workflow_id_text:
+                return
+            if selected_workflow_id_text in {
+                CHAT_ASSISTANT_WORKFLOW_ID,
+                CHAT_NARRATION_WORKFLOW_ID,
+                TOOL_CALLING_WORKFLOW_ID,
+            }:
+                return
+
+            selected_probe = _probe_custom_workflow_launchability(
+                selected_workflow_id_text
+            )
+            if bool(selected_probe.get("launchable")):
+                return
+
+            replacement_probe: dict[str, Any] | None = None
+            for match in discovered_matches:
+                if not isinstance(match, Mapping):
+                    continue
+                candidate_workflow_id = str(match.get("concept_id") or "").strip()
+                if (
+                    not candidate_workflow_id
+                    or candidate_workflow_id == selected_workflow_id_text
+                    or candidate_workflow_id
+                    in {
+                        CHAT_ASSISTANT_WORKFLOW_ID,
+                        CHAT_NARRATION_WORKFLOW_ID,
+                        TOOL_CALLING_WORKFLOW_ID,
+                    }
+                ):
+                    continue
+                candidate_probe = _probe_custom_workflow_launchability(
+                    candidate_workflow_id
+                )
+                if bool(candidate_probe.get("launchable")):
+                    replacement_probe = candidate_probe
+                    break
+
+            if replacement_probe is None:
+                return
+
+            prior_selected_workflow_id = selected_workflow_id_text
+            prior_selector_verdict = selector_verdict or None
+            replacement_workflow_id = str(replacement_probe.get("workflow_id") or "").strip()
+            if not replacement_workflow_id:
+                return
+
+            selected_workflow_id = replacement_workflow_id
+            selected_workflow_id_text = replacement_workflow_id
+            selector_verdict = "launch_contract_override"
+
+            discovered_workflow_ids: tuple[str, ...] = ()
+            prompt_id = None
+            routing_duration_ms = None
+            confidence_score = 0.0
+            if isinstance(routing_info, WorkflowRoutingInfo):
+                discovered_workflow_ids = routing_info.discovered_workflow_ids
+                prompt_id = routing_info.prompt_id
+                routing_duration_ms = routing_info.routing_duration_ms
+                confidence_score = routing_info.confidence_score
+            elif discovered_matches:
+                discovered_workflow_ids = tuple(
+                    str(item.get("concept_id"))
+                    for item in discovered_matches
+                    if isinstance(item, Mapping)
+                    and isinstance(item.get("concept_id"), str)
+                    and str(item.get("concept_id")).strip()
+                )
+
+            reason = "selected_custom_workflow_not_launchable_from_turn_inputs"
+            reasoning = (
+                "Selected custom workflow could not launch from the current turn "
+                "inputs after launch-contract resolution and initial-state metadata "
+                "validation, so the first discovered launchable custom workflow was used."
+            )
+            routing_info = WorkflowRoutingInfo(
+                workflow_id=replacement_workflow_id,
+                verdict="launch_contract_override",
+                prompt_id=prompt_id,
+                discovered_workflow_ids=discovered_workflow_ids,
+                routing_duration_ms=routing_duration_ms,
+                source="selector_override",
+                confidence_score=confidence_score,
+                reasoning=reasoning,
+                selection_rationale=reason,
+            )
+
+            override_payload = {
+                "type": "workflow_selector_override",
+                "reason": reason,
+                "selected_workflow_id": replacement_workflow_id,
+                "prior_selected_workflow_id": prior_selected_workflow_id,
+                "prior_selector_verdict": prior_selector_verdict,
+                "candidate_workflow_ids_considered": [
+                    str(item.get("concept_id"))
+                    for item in discovered_matches
+                    if isinstance(item, Mapping)
+                    and isinstance(item.get("concept_id"), str)
+                    and str(item.get("concept_id")).strip()
+                ],
+                "launch_viability_probe": {
+                    "prior_selected_workflow": selected_probe,
+                    "replacement_workflow": replacement_probe,
+                },
+            }
+            aux_llm_calls.append(override_payload)
+            if trace_enabled and trace is not None:
+                trace.metadata["workflow_selector_override"] = dict(override_payload)
+            _emit_progress_local(
+                {
+                    "status": "thinking",
+                    "stage": "workflow_dispatch",
+                    "phase": "workflow_dispatch",
+                    "phase_label": "Workflow routing overridden",
+                    "workflow_selector_verdict": "launch_contract_override",
+                    "selected_workflow_id": replacement_workflow_id,
+                    "selected_workflow_name": _resolve_selected_workflow_name(
+                        replacement_workflow_id
+                    ),
+                    "workflow_selection_rationale": reason,
+                    **_build_live_workflow_routing_payload(),
+                }
+            )
+
+        _maybe_override_selected_custom_workflow_for_launchability()
+
         selected_workflow_name = _resolve_selected_workflow_name(
             selected_workflow_id_text
         )
@@ -25728,38 +26053,7 @@ class InternalMCPChatOrchestrator:
                 )
                 wf_result = self.execute_workflow(
                     selected_workflow_id_text,
-                    data={
-                        "prompt": prompt,
-                        "augmented_context": augmented_context,
-                        "workflow_routing": (
-                            asdict(routing_info)
-                            if isinstance(routing_info, WorkflowRoutingInfo)
-                            else None
-                        ),
-                        "workflow_discovery_result": (
-                            dict(workflow_discovery_result)
-                            if isinstance(workflow_discovery_result, Mapping)
-                            else None
-                        ),
-                        "selected_workflow_id": selected_workflow_id_text,
-                        "selected_workflow_name": selected_workflow_name,
-                        "workflow_selector_verdict": selector_verdict or None,
-                        "workflow_selector_source": (
-                            routing_info.source
-                            if isinstance(routing_info, WorkflowRoutingInfo)
-                            else None
-                        ),
-                        "user_concept_id": user_concept_id,
-                        "org_concept_id": org_concept_id,
-                        "gmail_profile": gmail_profile or self._default_gmail_profile,
-                        "aux_llm_calls": aux_llm_calls,
-                        "policy_state": policy_state,
-                        "registry_snapshot": registry_snapshot,
-                        "conversation_session_id": conversation_session_id,
-                        "turn_id": turn_id,
-                        "workflow_episode_source": "chat_turn_workflow",
-                        "workflow_episode_stage": "workflow_dispatch",
-                    },
+                    data=_build_custom_workflow_dispatch_data(),
                     llm_client=llm_client,
                     model=model,
                     user_namespace=user_namespace,
