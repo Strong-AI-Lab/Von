@@ -32,7 +32,12 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     WorkflowRoutingInfo,
     _ModelCandidate,
 )
-from src.backend.workflows import WorkflowDefinition, WorkflowRegistration
+from src.backend.workflows import (
+    WorkflowActionInvocation,
+    WorkflowDefinition,
+    WorkflowRegistration,
+    WorkflowStateSpec,
+)
 from src.backend.workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
     CHAT_NARRATION_WORKFLOW_ID,
@@ -3056,6 +3061,127 @@ def test_non_standard_workflow_routes_via_execute_workflow(monkeypatch):
     assert execution_entry is not None
     assert execution_entry["workflow_id"] == TODO_REFRESH_WORKFLOW_ID
     assert execution_entry["completed"] is True
+
+
+def test_custom_workflow_run_applies_launch_contract_without_workflow_specific_glue(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = "#V#launch_contract_custom_workflow"
+    monkeypatch.setenv("VON_WORKFLOW_SELECTOR_ALLOW_POLICY_UNSAFE", "1")
+
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=selected_workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=selected_workflow_id,
+                initial_state="prepare",
+                states={
+                    "prepare": WorkflowStateSpec(
+                        state_id="prepare",
+                        actions=(WorkflowActionInvocation(action_id="tool.prepare"),),
+                        terminal=True,
+                    )
+                },
+                metadata={
+                    "launch_input_contract": {
+                        "schema_version": "workflow_launch_input_contract.v1",
+                        "required_inputs": ["invitation_text"],
+                        "input_mappings": [
+                            {
+                                "target_context_key": "invitation_text",
+                                "source_expression": "inputs.prompt",
+                                "extractor": "first_quoted_text",
+                                "required": True,
+                            },
+                            {
+                                "target_context_key": "candidate_workflow_ids",
+                                "source_expression": "inputs.workflow_discovery_result.matches",
+                                "extractor": "workflow_id_list",
+                            },
+                        ],
+                    },
+                    "launch_input_contract_source": "test_contract",
+                },
+            ),
+            purpose="Custom launch-contract workflow for selector dispatch tests.",
+            source="test",
+        )
+    )
+
+    captured_data: dict[str, Any] = {}
+
+    def _run_workflow(_workflow_def: Any, *, data: Mapping[str, Any], **_kwargs: Any):
+        captured_data.update(dict(data))
+        return SimpleNamespace(
+            completed=True,
+            final_state="prepare",
+            error=None,
+            data={"response_text": "Prepared."},
+        )
+
+    monkeypatch.setattr(orchestrator._workflow_executor, "run", _run_workflow)
+
+    prompt = (
+        'Run a meeting-invitation test on this invitation text:\n\n'
+        '"Kia ora team, please join us on Tuesday at 2:00pm in Room 4 '
+        'for a project planning meeting about the Q2 roadmap."'
+    )
+    discovery_result = {
+        "matches": [
+            {
+                "concept_id": selected_workflow_id,
+                "name": "Launch contract custom workflow",
+                "is_executable": True,
+                "executability_reason": "executable_now",
+            },
+            {
+                "concept_id": "#V#synthetic_workflow_regression_suite_workflow",
+                "name": "Synthetic workflow regression suite workflow",
+                "is_executable": True,
+                "executability_reason": "executable_now",
+            },
+        ],
+        "candidates": [
+            {
+                "concept_id": selected_workflow_id,
+                "name": "Launch contract custom workflow",
+                "is_executable": True,
+                "executability_reason": "executable_now",
+            }
+        ],
+        "match_count": 2,
+    }
+
+    result = orchestrator.run(
+        prompt=prompt,
+        context=[],
+        llm_client=_CapturingLLM([selected_workflow_id]),
+        model=None,
+        user_namespace="#V#user@org",
+        workflow_discovery_result=discovery_result,
+        conversation_session_id="chat-launch",
+        turn_id="turn-launch",
+    )
+
+    assert result.response_text == "Prepared."
+    assert captured_data["invitation_text"] == (
+        "Kia ora team, please join us on Tuesday at 2:00pm in Room 4 for a "
+        "project planning meeting about the Q2 roadmap."
+    )
+    assert captured_data["candidate_workflow_ids"] == [
+        selected_workflow_id,
+        "#V#synthetic_workflow_regression_suite_workflow",
+    ]
+    assert captured_data["selected_workflow_id"] == selected_workflow_id
+
+    launch_resolution = captured_data.get("workflow_launch_input_resolution")
+    assert isinstance(launch_resolution, dict)
+    assert launch_resolution.get("status") == "resolved"
+    assert launch_resolution.get("resolved_inputs") == [
+        "candidate_workflow_ids",
+        "invitation_text",
+    ]
 
 
 def test_custom_tool_pipeline_workflow_dispatches_without_id_special_casing(monkeypatch):
