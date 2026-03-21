@@ -96,10 +96,15 @@ _durable_action_registry = None
 
 
 def _build_durable_workflow_registry():
-    """Build the unified WorkflowRegistry with all workflow sources."""
-    from ..workflows.durable.registry_factory import build_workflow_registry
+    """Build the durable runtime registry without blocking on parity work."""
+    from ..workflows.durable.registry_factory import (
+        build_workflow_registry_read_only,
+    )
 
-    return build_workflow_registry()
+    # Durable startup only needs an authoritative workflow registry. Keep the
+    # parity/capability inventory path deferred so the worker can start even
+    # when Vontology-backed diagnostics are slow.
+    return build_workflow_registry_read_only(defer_parity_work=True)
 
 
 def _build_durable_action_registry():

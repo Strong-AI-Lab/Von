@@ -161,6 +161,7 @@ const WORKFLOW_STATUS_SNAPSHOT_FETCH_TIMEOUT_MS = 15000;
 const WORKFLOW_STATUS_SNAPSHOT_RETRY_BASE_MS = 1200;
 const WORKFLOW_STATUS_SNAPSHOT_RETRY_MAX_MS = 8000;
 const WORKFLOW_STATUS_SNAPSHOT_RETRY_DEFAULT_SECONDS = 2;
+const WORKFLOW_STATUS_LIVE_REFRESH_DEBOUNCE_MS = 750;
 const WORKFLOW_STATUS_INSTANCE_ID_INLINE_MAX_CHARS = 24;
 const workflowStatusStreamState = {
     eventSource: null,
@@ -173,7 +174,8 @@ const workflowStatusStreamState = {
     lastSnapshotPayload: null,
     loading: false,
     retryTimeoutId: null,
-    retryAttempt: 0
+    retryAttempt: 0,
+    liveRefreshTimeoutId: null
 };
 const workflowDefinitionsState = {
     visible: false,
@@ -188,6 +190,9 @@ const workflowDefinitionsState = {
     showDesigns: false,
     retryTimeoutId: null,
     retryAttempt: 0
+};
+const workflowStatusGroupUiState = {
+    collapsedByWorkflowId: new Map()
 };
 const WORKFLOW_DEFINITIONS_SILENT_REFRESH_COOLDOWN_MS = 15_000;
 const WORKFLOW_DEFINITIONS_FETCH_TIMEOUT_MS = 20_000;
@@ -17347,6 +17352,188 @@ function cssEscape(value) {
     return raw.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
+function getWorkflowStatusItemSortRank(status) {
+    if (status === 'running') return 0;
+    if (status === 'pending') return 1;
+    if (status === 'paused') return 2;
+    return 3;
+}
+
+function getWorkflowStatusItemUpdatedAt(item) {
+    const progressUpdatedAt = String(item?.progress?.updated_at || '').trim();
+    if (progressUpdatedAt) {
+        return progressUpdatedAt;
+    }
+    const eventUpdatedAt = String(item?.updated_at || '').trim();
+    if (eventUpdatedAt) {
+        return eventUpdatedAt;
+    }
+    const startedAt = String(item?.started_at || '').trim();
+    if (startedAt) {
+        return startedAt;
+    }
+    const createdAt = String(item?.created_at || '').trim();
+    return createdAt;
+}
+
+function sortWorkflowStatusItems(items) {
+    return (Array.isArray(items) ? items.slice() : []).sort((a, b) => {
+        const statusDelta = getWorkflowStatusItemSortRank(a?.status) - getWorkflowStatusItemSortRank(b?.status);
+        if (statusDelta !== 0) return statusDelta;
+        return getWorkflowStatusItemUpdatedAt(b).localeCompare(getWorkflowStatusItemUpdatedAt(a));
+    });
+}
+
+function normaliseWorkflowStatusGroupId(workflowId) {
+    const cleaned = typeof workflowId === 'string' ? workflowId.trim() : '';
+    return cleaned || '__unknown_workflow__';
+}
+
+function buildWorkflowStatusGroups(items) {
+    const groups = new Map();
+    const orderedItems = sortWorkflowStatusItems(items);
+
+    orderedItems.forEach((item) => {
+        const workflowId = normaliseWorkflowStatusGroupId(item?.workflow_id);
+        if (!groups.has(workflowId)) {
+            groups.set(workflowId, {
+                workflowId,
+                workflowLabel: workflowId === '__unknown_workflow__' ? 'Unknown workflow' : workflowId,
+                workflowNameText: formatWorkflowName(item?.workflow_id),
+                items: [],
+                statusCounts: new Map()
+            });
+        }
+        const group = groups.get(workflowId);
+        group.items.push(item);
+        const statusKey = String(item?.status || 'unknown').trim() || 'unknown';
+        group.statusCounts.set(statusKey, (group.statusCounts.get(statusKey) || 0) + 1);
+    });
+
+    return Array.from(groups.values()).sort((left, right) => {
+        const leftRepresentative = left.items[0] || {};
+        const rightRepresentative = right.items[0] || {};
+        const statusDelta = getWorkflowStatusItemSortRank(leftRepresentative.status) - getWorkflowStatusItemSortRank(rightRepresentative.status);
+        if (statusDelta !== 0) {
+            return statusDelta;
+        }
+        const updatedDelta = getWorkflowStatusItemUpdatedAt(rightRepresentative).localeCompare(
+            getWorkflowStatusItemUpdatedAt(leftRepresentative)
+        );
+        if (updatedDelta !== 0) {
+            return updatedDelta;
+        }
+        return left.workflowLabel.localeCompare(right.workflowLabel);
+    });
+}
+
+function buildWorkflowStatusGroupSummary(group) {
+    const statusSummary = Array.from(group.statusCounts.entries())
+        .sort((left, right) => {
+            const rankDelta = getWorkflowStatusItemSortRank(left[0]) - getWorkflowStatusItemSortRank(right[0]);
+            if (rankDelta !== 0) {
+                return rankDelta;
+            }
+            return String(left[0]).localeCompare(String(right[0]));
+        })
+        .map(([status, count]) => `${count} ${formatWorkflowStatusLabel(status)}`)
+        .join(' · ');
+    const latestItem = Array.isArray(group.items) ? group.items[0] : null;
+    const latestState = String(latestItem?.current_state || latestItem?.progress?.message || '').trim();
+    const latestUpdatedAt = getWorkflowStatusItemUpdatedAt(latestItem);
+    const bits = [];
+    if (statusSummary) {
+        bits.push(statusSummary);
+    }
+    if (latestState) {
+        bits.push(`Latest: ${latestState}`);
+    }
+    if (latestUpdatedAt) {
+        bits.push(`Updated: ${formatWorkflowEpisodeTimestamp(latestUpdatedAt)}`);
+    }
+    return bits.join(' · ');
+}
+
+function isWorkflowStatusGroupCollapsed(workflowId, options = {}) {
+    const itemCount = Number(options.itemCount) || 0;
+    const groupCount = Number(options.groupCount) || 0;
+    if (workflowStatusGroupUiState.collapsedByWorkflowId.has(workflowId)) {
+        return Boolean(workflowStatusGroupUiState.collapsedByWorkflowId.get(workflowId));
+    }
+    return !(groupCount === 1 && itemCount <= 1);
+}
+
+function pruneWorkflowStatusGroupState(groups) {
+    const activeIds = new Set(
+        (Array.isArray(groups) ? groups : [])
+            .map((group) => String(group?.workflowId || '').trim())
+            .filter(Boolean)
+    );
+    Array.from(workflowStatusGroupUiState.collapsedByWorkflowId.keys()).forEach((workflowId) => {
+        if (!activeIds.has(workflowId)) {
+            workflowStatusGroupUiState.collapsedByWorkflowId.delete(workflowId);
+        }
+    });
+}
+
+function renderWorkflowStatusItemCard(item) {
+    const instanceIdRaw = typeof item?.instance_id === 'string' ? item.instance_id.trim() : '';
+    const statusLabel = escapeHtml(formatWorkflowStatusLabel(item?.status));
+    const statusClass = escapeHtml(item?.status || 'unknown');
+    const currentState = escapeHtml(item?.current_state || '');
+    const progress = item?.progress || {};
+    const progressCurrent = Number.isFinite(progress.current) ? Number(progress.current) : null;
+    const progressTotal = Number.isFinite(progress.total) ? Number(progress.total) : null;
+    const progressMessage = escapeHtml(progress.message || '');
+    const instanceIdText = formatWorkflowStatusInstanceId(instanceIdRaw);
+    const cardTitle = instanceIdText || 'Active instance';
+    const updatedAt = getWorkflowStatusItemUpdatedAt(item);
+
+    let percent = null;
+    if (progressCurrent !== null && progressTotal && progressTotal > 0) {
+        percent = Math.min(100, Math.max(0, Math.round((progressCurrent / progressTotal) * 100)));
+    }
+
+    const progressLabelBits = [];
+    if (progressCurrent !== null && progressTotal) {
+        progressLabelBits.push(`Step ${progressCurrent}/${progressTotal}`);
+    } else if (Number.isFinite(item?.step_index)) {
+        progressLabelBits.push(`Step ${Number(item.step_index)}`);
+    }
+    if (progressMessage) {
+        progressLabelBits.push(progressMessage);
+    } else if (currentState) {
+        progressLabelBits.push(currentState);
+    }
+
+    const progressLabel = progressLabelBits.length
+        ? `<div class="workflow-status-progress-text">${escapeHtml(progressLabelBits.join(' · '))}</div>`
+        : '';
+    const progressBar = percent !== null
+        ? `<div class="workflow-status-progress-bar">
+                <span style="width: ${percent}%;"></span>
+              </div>`
+        : '';
+    const updatedMeta = updatedAt
+        ? `<div class="workflow-status-meta">Updated: ${escapeHtml(formatWorkflowEpisodeTimestamp(updatedAt))}</div>`
+        : '';
+
+    return `
+        <div class="workflow-status-item status-${statusClass}">
+          <div class="workflow-status-item-header">
+            <div class="workflow-status-instance-title" title="${escapeHtml(instanceIdRaw || cardTitle)}">${escapeHtml(cardTitle)}</div>
+            <span class="workflow-status-badge status-${statusClass}">${statusLabel}</span>
+          </div>
+          <div class="workflow-status-meta">State: ${currentState || '—'}</div>
+          ${updatedMeta}
+          <div class="workflow-status-progress">
+            ${progressBar}
+            ${progressLabel}
+          </div>
+        </div>
+    `;
+}
+
 function formatWorkflowDefinitionStatus(item) {
     if (!item || item.is_executable === true) {
         return 'available';
@@ -17500,6 +17687,7 @@ function buildWorkflowMonitorExportPayload() {
         .map((item) => (typeof item?.workflow_id === 'string' ? item.workflow_id.trim() : ''))
         .filter((workflowId) => workflowId && !renderedWorkflowIds.includes(workflowId));
     const activeItems = Array.from(workflowStatusStreamState.items.values());
+    const activeGroups = buildWorkflowStatusGroups(activeItems);
 
     return {
         schema_version: 1,
@@ -17537,6 +17725,14 @@ function buildWorkflowMonitorExportPayload() {
         },
         active_instances_snapshot: {
             count: activeItems.length,
+            group_count: activeGroups.length,
+            groups: activeGroups.map((group) => ({
+                workflow_id: group.workflowId === '__unknown_workflow__' ? null : group.workflowId,
+                workflow_name: group.workflowNameText || null,
+                count: group.items.length,
+                latest_updated_at: getWorkflowStatusItemUpdatedAt(group.items[0] || null) || null,
+                status_counts: Object.fromEntries(group.statusCounts)
+            })),
             items: activeItems,
             payload: workflowStatusStreamState.lastSnapshotPayload
         },
@@ -17592,79 +17788,51 @@ function renderWorkflowStatusList(items) {
         return;
     }
 
-    const ordered = items.slice().sort((a, b) => {
-        const rank = (status) => {
-            if (status === 'running') return 0;
-            if (status === 'pending') return 1;
-            if (status === 'paused') return 2;
-            return 3;
-        };
-        const statusDelta = rank(a.status) - rank(b.status);
-        if (statusDelta !== 0) return statusDelta;
-        return (b.updated_at || '').localeCompare(a.updated_at || '');
-    });
+    const groups = buildWorkflowStatusGroups(items);
+    pruneWorkflowStatusGroupState(groups);
 
-    const html = ordered.map((item) => {
-        const workflowIdRaw = typeof item?.workflow_id === 'string' ? item.workflow_id.trim() : '';
-        const instanceIdRaw = typeof item?.instance_id === 'string' ? item.instance_id.trim() : '';
-        const workflowNameText = formatWorkflowName(workflowIdRaw);
+    const html = groups.map((group, index) => {
+        const workflowIdRaw = group.workflowId === '__unknown_workflow__' ? '' : group.workflowId;
+        const workflowNameText = group.workflowNameText || formatWorkflowName(workflowIdRaw);
         const workflowConceptId = _normalisePotentialConceptId(workflowIdRaw);
-        const workflowName = renderConceptSelectionButtonHTML(workflowConceptId, workflowNameText, {
-            classNames: ['workflow-status-concept-link'],
-            title: 'Open concept tab'
+        const workflowName = workflowConceptId
+            ? renderConceptSelectionButtonHTML(workflowConceptId, workflowNameText, {
+                classNames: ['workflow-status-concept-link'],
+                title: 'Open concept tab'
+            })
+            : escapeHtml(workflowNameText);
+        const isCollapsed = isWorkflowStatusGroupCollapsed(group.workflowId, {
+            itemCount: group.items.length,
+            groupCount: groups.length
         });
-        const statusLabel = escapeHtml(formatWorkflowStatusLabel(item.status));
-        const statusClass = escapeHtml(item.status || 'unknown');
-        const currentState = escapeHtml(item.current_state || '');
-        const progress = item.progress || {};
-        const progressCurrent = Number.isFinite(progress.current) ? Number(progress.current) : null;
-        const progressTotal = Number.isFinite(progress.total) ? Number(progress.total) : null;
-        const progressMessage = escapeHtml(progress.message || '');
-        const instanceIdText = formatWorkflowStatusInstanceId(instanceIdRaw);
-        const instanceMeta = instanceIdRaw
-            ? `<div class="workflow-status-meta">Instance: <span class="workflow-status-instance-id" title="${escapeHtml(instanceIdRaw)}">${escapeHtml(instanceIdText)}</span></div>`
-            : '';
-
-        let percent = null;
-        if (progressCurrent !== null && progressTotal && progressTotal > 0) {
-            percent = Math.min(100, Math.max(0, Math.round((progressCurrent / progressTotal) * 100)));
-        }
-
-        const progressLabelBits = [];
-        if (progressCurrent !== null && progressTotal) {
-            progressLabelBits.push(`Step ${progressCurrent}/${progressTotal}`);
-        } else if (Number.isFinite(item.step_index)) {
-            progressLabelBits.push(`Step ${Number(item.step_index)}`);
-        }
-        if (progressMessage) {
-            progressLabelBits.push(progressMessage);
-        } else if (currentState) {
-            progressLabelBits.push(currentState);
-        }
-
-        const progressLabel = progressLabelBits.length
-            ? `<div class="workflow-status-progress-text">${escapeHtml(progressLabelBits.join(' · '))}</div>`
-            : '';
-
-        const progressBar = percent !== null
-            ? `<div class="workflow-status-progress-bar">
-                <span style="width: ${percent}%;"></span>
-              </div>`
-            : '';
+        const bodyId = `workflow-status-group-body-${index}`;
+        const groupSummary = buildWorkflowStatusGroupSummary(group);
+        const instanceCountLabel = `${group.items.length} ${group.items.length === 1 ? 'instance' : 'instances'}`;
 
         return `
-            <div class="workflow-status-item status-${statusClass}">
-              <div class="workflow-status-item-header">
-                <div class="workflow-status-name">${workflowName}</div>
-                <span class="workflow-status-badge status-${statusClass}">${statusLabel}</span>
+            <section class="workflow-status-group" data-workflow-id="${escapeHtml(group.workflowId)}" data-collapsed="${isCollapsed ? 'true' : 'false'}">
+              <div class="workflow-status-group-header">
+                <button
+                    type="button"
+                    class="workflow-status-group-toggle"
+                    data-workflow-id="${escapeHtml(group.workflowId)}"
+                    aria-expanded="${isCollapsed ? 'false' : 'true'}"
+                    aria-controls="${escapeHtml(bodyId)}"
+                    title="${isCollapsed ? 'Expand workflow group' : 'Collapse workflow group'}"
+                >
+                  <span class="workflow-status-group-chevron" aria-hidden="true"></span>
+                  <span class="visually-hidden">${isCollapsed ? 'Expand' : 'Collapse'} ${escapeHtml(workflowNameText)}</span>
+                </button>
+                <div class="workflow-status-group-title">
+                  <div class="workflow-status-name">${workflowName}</div>
+                  <div class="workflow-status-group-summary">${escapeHtml(groupSummary || instanceCountLabel)}</div>
+                </div>
+                <span class="workflow-status-badge workflow-status-count-badge">${escapeHtml(instanceCountLabel)}</span>
               </div>
-              <div class="workflow-status-meta">State: ${currentState || '—'}</div>
-              ${instanceMeta}
-              <div class="workflow-status-progress">
-                ${progressBar}
-                ${progressLabel}
+              <div id="${escapeHtml(bodyId)}" class="workflow-status-group-body${isCollapsed ? ' is-collapsed' : ''}">
+                ${group.items.map((item) => renderWorkflowStatusItemCard(item)).join('')}
               </div>
-            </div>
+            </section>
         `;
     }).join('');
 
@@ -17789,6 +17957,18 @@ function bindWorkflowStatusConceptLinks() {
         if (!target || !(target instanceof HTMLElement)) {
             return;
         }
+        const groupToggle = target.closest('.workflow-status-group-toggle');
+        if (groupToggle) {
+            event.preventDefault();
+            const workflowId = String(groupToggle.dataset.workflowId || '').trim();
+            if (!workflowId) {
+                return;
+            }
+            const currentlyExpanded = groupToggle.getAttribute('aria-expanded') === 'true';
+            workflowStatusGroupUiState.collapsedByWorkflowId.set(workflowId, currentlyExpanded);
+            renderWorkflowStatusBody();
+            return;
+        }
         const episodesButton = target.closest('.workflow-status-episodes-btn');
         if (episodesButton) {
             event.preventDefault();
@@ -17827,16 +18007,60 @@ function renderWorkflowStatusBody() {
     renderWorkflowStatusList(Array.from(workflowStatusStreamState.items.values()));
 }
 
+function mergeWorkflowStatusPayload(existingPayload, incomingPayload) {
+    const existing = (existingPayload && typeof existingPayload === 'object') ? existingPayload : {};
+    const incoming = (incomingPayload && typeof incomingPayload === 'object') ? incomingPayload : {};
+    const existingProgress = (existing.progress && typeof existing.progress === 'object') ? existing.progress : {};
+    const incomingProgress = (incoming.progress && typeof incoming.progress === 'object') ? incoming.progress : null;
+
+    return {
+        ...existing,
+        ...incoming,
+        progress: incomingProgress ? { ...existingProgress, ...incomingProgress } : { ...existingProgress }
+    };
+}
+
+function clearWorkflowStatusLiveRefreshTimer() {
+    if (!workflowStatusStreamState.liveRefreshTimeoutId) {
+        return;
+    }
+    clearTimeout(workflowStatusStreamState.liveRefreshTimeoutId);
+    workflowStatusStreamState.liveRefreshTimeoutId = null;
+}
+
+function scheduleWorkflowStatusLiveRefresh() {
+    const { panel } = getWorkflowStatusElements();
+    if (!panel) {
+        return;
+    }
+    clearWorkflowStatusLiveRefreshTimer();
+    workflowStatusStreamState.liveRefreshTimeoutId = setTimeout(() => {
+        workflowStatusStreamState.liveRefreshTimeoutId = null;
+        void refreshWorkflowStatusSnapshot({ silent: true, preserveRetryAttempt: true });
+    }, WORKFLOW_STATUS_LIVE_REFRESH_DEBOUNCE_MS);
+}
+
 function applyWorkflowStatusUpdate(payload) {
     if (!payload || !payload.instance_id) return;
-    const status = payload.status || '';
+    const existingItem = workflowStatusStreamState.items.get(payload.instance_id) || null;
+    const mergedPayload = mergeWorkflowStatusPayload(existingItem, payload);
+    const status = mergedPayload.status || '';
     if (!WORKFLOW_STATUS_ACTIVE.has(status)) {
         workflowStatusStreamState.items.delete(payload.instance_id);
         syncWorkflowStatusSnapshotNotice();
         renderWorkflowStatusBody();
+        scheduleWorkflowStatusLiveRefresh();
         return;
     }
-    workflowStatusStreamState.items.set(payload.instance_id, payload);
+    workflowStatusStreamState.items.set(payload.instance_id, mergedPayload);
+    if (
+        !existingItem
+        || existingItem.status !== mergedPayload.status
+        || existingItem.workflow_id !== mergedPayload.workflow_id
+        || !getWorkflowStatusItemUpdatedAt(mergedPayload)
+    ) {
+        scheduleWorkflowStatusLiveRefresh();
+    }
     syncWorkflowStatusSnapshotNotice();
     renderWorkflowStatusBody();
 }
@@ -18338,6 +18562,7 @@ async function refreshAvailableWorkflowDefinitions({ silent = false } = {}) {
 }
 
 function stopWorkflowStatusStream(source = 'workflow_stream_stopped') {
+    clearWorkflowStatusLiveRefreshTimer();
     if (workflowStatusStreamState.reconnectTimeoutId) {
         clearTimeout(workflowStatusStreamState.reconnectTimeoutId);
         workflowStatusStreamState.reconnectTimeoutId = null;
@@ -18384,6 +18609,7 @@ function startWorkflowStatusStream() {
 
     eventSource.onopen = () => {
         workflowStatusStreamState.reconnectAttempts = 0;
+        scheduleWorkflowStatusLiveRefresh();
         publishRealtimeConnectionTelemetry('workflow_stream_open');
     };
 
@@ -21540,6 +21766,7 @@ export async function __testOnly_refreshWorkflowStatusSnapshot(options = {}) {
     return refreshWorkflowStatusSnapshot(options);
 }
 export function __testOnly_resetWorkflowStatusState() {
+    clearWorkflowStatusLiveRefreshTimer();
     clearWorkflowStatusSnapshotRetryTimer();
     workflowStatusStreamState.items.clear();
     workflowStatusStreamState.lastSnapshotAt = 0;
@@ -21548,6 +21775,7 @@ export function __testOnly_resetWorkflowStatusState() {
     workflowStatusStreamState.snapshotError = '';
     workflowStatusStreamState.snapshotNotice = '';
     workflowStatusStreamState.lastSnapshotPayload = null;
+    workflowStatusGroupUiState.collapsedByWorkflowId.clear();
 }
 export function __testOnly_applyWorkflowStatusUpdate(payload) {
     applyWorkflowStatusUpdate(payload);

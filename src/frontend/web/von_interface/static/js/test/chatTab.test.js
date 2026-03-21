@@ -1019,7 +1019,154 @@ describe('workflow monitor active snapshot degradation handling', () => {
         expect(bodyText).toContain('showing live updates');
         expect(bodyText).toContain('wf-dup-1');
         expect(bodyText).toContain('wf-dup-2');
+        expect(document.querySelectorAll('.workflow-status-group').length).toBe(1);
+        const groupToggle = document.querySelector('.workflow-status-group-toggle');
+        expect(groupToggle).toBeTruthy();
+        expect(groupToggle.getAttribute('aria-expanded')).toBe('false');
         expect(document.querySelectorAll('.workflow-status-item').length).toBe(2);
+    });
+
+    test('expands a grouped workflow section when the fold toggle is clicked', async () => {
+        global.fetch = jest.fn(() => Promise.resolve({
+            ok: false,
+            status: 503,
+            headers: { get: () => null },
+            json: async () => ({
+                items: [],
+                count: 0,
+                degraded: true,
+                retryable: true,
+                error: 'Workflow monitor temporarily unavailable; please retry.',
+                detail: 'read circuit open'
+            })
+        }));
+
+        await __testOnly_refreshWorkflowStatusSnapshot();
+
+        __testOnly_applyWorkflowStatusUpdate({
+            instance_id: 'wf-group-1',
+            workflow_id: '#V#workflow_introspection_maintenance_workflow',
+            status: 'running',
+            current_state: 'diagnose',
+            progress: { current: 1, total: 7, updated_at: '2026-03-20T07:05:19.686Z' }
+        });
+        __testOnly_applyWorkflowStatusUpdate({
+            instance_id: 'wf-group-2',
+            workflow_id: '#V#workflow_introspection_maintenance_workflow',
+            status: 'running',
+            current_state: 'diagnose',
+            progress: { current: 1, total: 7, updated_at: '2026-03-20T07:06:19.686Z' }
+        });
+
+        const toggle = document.querySelector('.workflow-status-group-toggle');
+        const groupBody = document.querySelector('.workflow-status-group-body');
+        expect(toggle).toBeTruthy();
+        expect(groupBody).toBeTruthy();
+        expect(toggle.getAttribute('aria-expanded')).toBe('false');
+        expect(groupBody.classList.contains('is-collapsed')).toBe(true);
+
+        toggle.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+        const expandedToggle = document.querySelector('.workflow-status-group-toggle');
+        const expandedGroupBody = document.querySelector('.workflow-status-group-body');
+        expect(expandedToggle.getAttribute('aria-expanded')).toBe('true');
+        expect(expandedGroupBody.classList.contains('is-collapsed')).toBe(false);
+    });
+
+    test('preserves richer snapshot fields when a thinner live status event arrives', async () => {
+        global.fetch = jest.fn(() => Promise.resolve({
+            ok: true,
+            status: 200,
+            headers: { get: () => null },
+            json: async () => ({
+                items: [
+                    {
+                        instance_id: 'wf-merge-1',
+                        workflow_id: '#V#workflow_introspection_maintenance_workflow',
+                        status: 'running',
+                        current_state: 'diagnose',
+                        created_at: '2026-03-20T07:03:29.141Z',
+                        started_at: '2026-03-20T07:03:33.986Z',
+                        progress: {
+                            current: 1,
+                            total: 7,
+                            message: 'diagnose',
+                            updated_at: '2026-03-20T07:05:19.686Z'
+                        },
+                        max_retries: 5
+                    }
+                ],
+                count: 1
+            })
+        }));
+
+        await __testOnly_refreshWorkflowStatusSnapshot();
+
+        __testOnly_applyWorkflowStatusUpdate({
+            instance_id: 'wf-merge-1',
+            workflow_id: '#V#workflow_introspection_maintenance_workflow',
+            status: 'running',
+            current_state: 'ready_to_report',
+            progress: {
+                current: 2,
+                total: 7,
+                message: 'ready_to_report'
+            }
+        });
+
+        const payload = __testOnly_buildWorkflowMonitorExportPayload();
+        expect(payload.active_instances_snapshot.items).toHaveLength(1);
+        expect(payload.active_instances_snapshot.items[0].current_state).toBe('ready_to_report');
+        expect(payload.active_instances_snapshot.items[0].created_at).toBe('2026-03-20T07:03:29.141Z');
+        expect(payload.active_instances_snapshot.items[0].started_at).toBe('2026-03-20T07:03:33.986Z');
+        expect(payload.active_instances_snapshot.items[0].max_retries).toBe(5);
+        expect(payload.active_instances_snapshot.items[0].progress.updated_at).toBe('2026-03-20T07:05:19.686Z');
+    });
+
+    test('silently refreshes the monitor after a new live workflow event adds an active instance', async () => {
+        global.fetch = jest.fn(() => Promise.resolve({
+            ok: true,
+            status: 200,
+            headers: { get: () => null },
+            json: async () => ({
+                items: [
+                    {
+                        instance_id: 'wf-live-1',
+                        workflow_id: '#V#jira_task_full_reconciliation_workflow',
+                        status: 'running',
+                        current_state: 'refreshed_from_snapshot',
+                        created_at: '2026-03-22T10:00:00.000Z',
+                        progress: {
+                            current: 1,
+                            total: 5,
+                            message: 'refreshed_from_snapshot',
+                            updated_at: '2026-03-22T10:00:01.000Z'
+                        }
+                    }
+                ],
+                count: 1
+            })
+        }));
+
+        __testOnly_applyWorkflowStatusUpdate({
+            instance_id: 'wf-live-1',
+            workflow_id: '#V#jira_task_full_reconciliation_workflow',
+            status: 'running',
+            current_state: 'from_stream',
+            updated_at: '2026-03-22T10:00:00.500Z'
+        });
+
+        expect(global.fetch).not.toHaveBeenCalled();
+        expect(document.getElementById('workflowStatusBody').textContent).toContain('from_stream');
+
+        jest.advanceTimersByTime(800);
+        await flushMicrotasks();
+
+        expect(global.fetch).toHaveBeenCalledTimes(1);
+        expect(document.getElementById('workflowStatusBody').textContent).toContain('refreshed_from_snapshot');
+        const payload = __testOnly_buildWorkflowMonitorExportPayload();
+        expect(payload.active_instances_snapshot.items[0].created_at).toBe('2026-03-22T10:00:00.000Z');
+        expect(payload.active_instances_snapshot.items[0].progress.updated_at).toBe('2026-03-22T10:00:01.000Z');
     });
 });
 

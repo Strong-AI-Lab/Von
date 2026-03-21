@@ -96,6 +96,29 @@ def _is_transient_workflow_instances_error(exc: Exception) -> bool:
     return any(marker in message for marker in transient_markers)
 
 
+def _build_retryable_workflow_instances_response(
+    *,
+    error: str,
+    detail: str,
+    retry_after_seconds: int = 2,
+    payload: dict[str, Any] | None = None,
+):
+    body = dict(payload or {})
+    body.update(
+        {
+            "degraded": True,
+            "retryable": True,
+            "retry_after_seconds": retry_after_seconds,
+            "error": error,
+            "detail": detail[:300],
+        }
+    )
+    response = jsonify(body)
+    response.status_code = 503
+    response.headers["Retry-After"] = str(max(1, int(retry_after_seconds)))
+    return response
+
+
 def _parse_workflow_instance_status_filters(
     status_raw: str | None,
 ) -> list[WorkflowInstanceStatus]:
@@ -829,20 +852,14 @@ def api_list_workflow_instances():
                 exc,
                 exc_info=True,
             )
-            response = jsonify(
-                {
+            return _build_retryable_workflow_instances_response(
+                error="Workflow monitor temporarily unavailable; please retry.",
+                detail=str(exc),
+                payload={
                     "items": [],
                     "count": 0,
-                    "degraded": True,
-                    "retryable": True,
-                    "retry_after_seconds": 2,
-                    "error": "Workflow monitor temporarily unavailable; please retry.",
-                    "detail": str(exc)[:300],
-                }
+                },
             )
-            response.status_code = 503
-            response.headers["Retry-After"] = "2"
-            return response
         logger.exception("Failed to list workflow instances")
         return jsonify({"error": str(exc)}), 500
 
@@ -858,7 +875,24 @@ def api_list_workflow_instances():
 def api_get_workflow_instance(instance_id: str):
     """Get details of a specific workflow instance."""
     manager = _get_instance_manager()
-    instance = manager.get_instance(instance_id)
+    try:
+        instance = manager.get_instance(instance_id)
+    except Exception as exc:
+        if _is_transient_workflow_instances_error(exc):
+            logger.warning(
+                "Workflow instance status degraded due to transient store error: %s",
+                exc,
+                exc_info=True,
+            )
+            return _build_retryable_workflow_instances_response(
+                error="Workflow instance temporarily unavailable; please retry.",
+                detail=str(exc),
+                payload={
+                    "instance_id": instance_id,
+                },
+            )
+        logger.exception("Failed to get workflow instance")
+        return jsonify({"error": str(exc)}), 500
 
     if not instance:
         return (
@@ -890,8 +924,48 @@ def api_cancel_workflow_instance(instance_id: str):
     """Cancel a running or pending workflow instance."""
     manager = _get_instance_manager()
 
-    # Verify instance exists
-    instance = manager.get_instance(instance_id)
+    try:
+        success = manager.mark_cancelled(instance_id)
+    except Exception as exc:
+        if _is_transient_workflow_instances_error(exc):
+            logger.warning(
+                "Workflow cancel degraded due to transient store error: %s",
+                exc,
+                exc_info=True,
+            )
+            return _build_retryable_workflow_instances_response(
+                error="Workflow cancellation temporarily unavailable; please retry.",
+                detail=str(exc),
+                payload={
+                    "instance_id": instance_id,
+                    "operation": "cancel",
+                },
+            )
+        logger.exception("Failed to cancel workflow instance")
+        return jsonify({"error": str(exc)}), 500
+    if success:
+        return jsonify({"status": "cancelled", "instance_id": instance_id})
+
+    # Preserve existing diagnostics, but only after the cancel attempt fails.
+    try:
+        instance = manager.get_instance(instance_id)
+    except Exception as exc:
+        if _is_transient_workflow_instances_error(exc):
+            logger.warning(
+                "Workflow cancel status check degraded due to transient store error: %s",
+                exc,
+                exc_info=True,
+            )
+            return _build_retryable_workflow_instances_response(
+                error="Workflow cancellation status temporarily unavailable; please retry.",
+                detail=str(exc),
+                payload={
+                    "instance_id": instance_id,
+                    "operation": "cancel",
+                },
+            )
+        logger.exception("Failed to diagnose workflow cancellation failure")
+        return jsonify({"error": str(exc)}), 500
     if not instance:
         return (
             jsonify(
@@ -914,11 +988,7 @@ def api_cancel_workflow_instance(instance_id: str):
             400,
         )
 
-    success = manager.mark_cancelled(instance_id)
-    if success:
-        return jsonify({"status": "cancelled", "instance_id": instance_id})
-    else:
-        return jsonify({"error": "cancel_failed"}), 500
+    return jsonify({"error": "cancel_failed"}), 500
 
 
 @workflows_bp.post("/api/workflows/instances/<instance_id>/retry")

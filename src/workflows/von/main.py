@@ -119,6 +119,9 @@ _apply_dotenv_overrides(
         "VON_INTERNAL_MCP_ALLOW_USER_TOOL_CALLS",
         "VON_EXPERT_FOOTER_ENABLED",
         "VON_WORKFLOWS_TRACE_ENABLED",
+        # Durable workflow runtime control must resolve from .env because the
+        # local launcher and VS Code hosts do not reliably inherit it.
+        "VON_DURABLE_WORKFLOWS_ENABLE",
         "VON_DEBUG_USER_PROMPT_LOADING",
         "VON_DEFAULT_NAMESPACE",
         "VON_DETERMINISTIC_INTROSPECTION",

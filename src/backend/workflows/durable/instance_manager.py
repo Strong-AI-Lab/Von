@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -369,6 +370,24 @@ class WorkflowInstanceManager:
         instance = self.get_instance(instance_id)
         if instance is not None:
             self._broadcast_instance(instance)
+
+    def _find_one_and_update_instance(
+        self,
+        query: dict[str, Any],
+        update: dict[str, Any],
+        *,
+        return_document: bool = True,
+    ) -> WorkflowInstance | None:
+        """Apply an atomic instance update and decode the matched document."""
+        coll = self._get_instances_collection()
+        if coll is None:
+            return None
+        doc = coll.find_one_and_update(
+            query,
+            update,
+            return_document=return_document,
+        )
+        return WorkflowInstance.from_doc(doc) if doc is not None else None
 
     @staticmethod
     def _build_durable_episode_stable_key(
@@ -922,10 +941,6 @@ class WorkflowInstanceManager:
         Returns:
             True if checkpoint was saved.
         """
-        coll = self._get_instances_collection()
-        if coll is None:
-            return False
-
         update: dict[str, Any] = {
             "$set": {
                 "current_state": current_state,
@@ -957,15 +972,19 @@ class WorkflowInstanceManager:
         ):
             update["$set"]["progress_updated_at"] = datetime.now(timezone.utc)
 
-        result = coll.update_one({"instance_id": instance_id}, update)
-        if result.modified_count > 0:
+        updated_instance = self._find_one_and_update_instance(
+            {"instance_id": instance_id},
+            update,
+        )
+        if updated_instance is not None:
             logger.debug(
                 "[durable_workflow] Checkpointed instance %s at state %s",
                 instance_id,
                 current_state,
             )
-            self._broadcast_instance_status(instance_id)
-        return result.modified_count > 0
+            self._broadcast_instance(updated_instance)
+            return True
+        return False
 
     # -------------------------------------------------------------------------
     # Status transitions
@@ -989,11 +1008,6 @@ class WorkflowInstanceManager:
         Returns:
             True if status was updated.
         """
-        coll = self._get_instances_collection()
-        if coll is None:
-            return False
-        instance_before = self.get_instance(instance_id)
-
         now = datetime.now(timezone.utc)
         update: dict[str, Any] = {
             "$set": {
@@ -1012,20 +1026,41 @@ class WorkflowInstanceManager:
         if execution_trace_id is not None:
             update["$set"]["execution_trace_id"] = execution_trace_id
 
-        result = coll.update_one({"instance_id": instance_id}, update)
-        if result.modified_count > 0:
+        instance_before = self._find_one_and_update_instance(
+            {"instance_id": instance_id},
+            update,
+            return_document=False,
+        )
+        if instance_before is not None:
             logger.info("[durable_workflow] Instance %s completed", instance_id)
-            if instance_before is not None:
-                self._record_durable_episode_final(
-                    instance=instance_before,
-                    completed=True,
-                    terminal_stage=final_state or "completed",
-                    termination_code="completed",
-                    termination_detail=None,
-                    final_state=final_state or instance_before.current_state,
+            self._record_durable_episode_final(
+                instance=instance_before,
+                completed=True,
+                terminal_stage=final_state or "completed",
+                termination_code="completed",
+                termination_detail=None,
+                final_state=final_state or instance_before.current_state,
+            )
+            self._broadcast_instance(
+                replace(
+                    instance_before,
+                    status=WorkflowInstanceStatus.COMPLETED,
+                    completed_at=now,
+                    locked_by=None,
+                    lock_expires_at=None,
+                    progress_message="completed",
+                    progress_updated_at=now,
+                    current_state=final_state or instance_before.current_state,
+                    outputs=outputs if outputs is not None else instance_before.outputs,
+                    execution_trace_id=(
+                        execution_trace_id
+                        if execution_trace_id is not None
+                        else instance_before.execution_trace_id
+                    ),
                 )
-            self._broadcast_instance_status(instance_id)
-        return result.modified_count > 0
+            )
+            return True
+        return False
 
     def mark_failed(
         self,
@@ -1047,11 +1082,6 @@ class WorkflowInstanceManager:
         Returns:
             True if status was updated.
         """
-        coll = self._get_instances_collection()
-        if coll is None:
-            return False
-        instance_before = self.get_instance(instance_id)
-
         now = datetime.now(timezone.utc)
         update: dict[str, Any] = {
             "$set": {
@@ -1071,27 +1101,53 @@ class WorkflowInstanceManager:
         if increment_retry:
             update["$inc"] = {"retry_count": 1}
 
-        result = coll.update_one({"instance_id": instance_id}, update)
-        if result.modified_count > 0:
+        instance_before = self._find_one_and_update_instance(
+            {"instance_id": instance_id},
+            update,
+            return_document=False,
+        )
+        if instance_before is not None:
             logger.warning(
                 "[durable_workflow] Instance %s failed: %s", instance_id, error
             )
-            if instance_before is not None:
-                reason_code = (
-                    error.split(":", 1)[0].strip().lower()
-                    if isinstance(error, str) and ":" in error
-                    else "failed"
+            reason_code = (
+                error.split(":", 1)[0].strip().lower()
+                if isinstance(error, str) and ":" in error
+                else "failed"
+            )
+            self._record_durable_episode_final(
+                instance=instance_before,
+                completed=False,
+                terminal_stage=error_step or instance_before.current_state or "failed",
+                termination_code=reason_code or "failed",
+                termination_detail=error,
+                final_state=instance_before.current_state,
+            )
+            self._broadcast_instance(
+                replace(
+                    instance_before,
+                    status=WorkflowInstanceStatus.FAILED,
+                    completed_at=now,
+                    error=error,
+                    error_step=error_step or instance_before.error_step,
+                    locked_by=None,
+                    lock_expires_at=None,
+                    progress_message="failed",
+                    progress_updated_at=now,
+                    retry_count=(
+                        instance_before.retry_count + 1
+                        if increment_retry
+                        else instance_before.retry_count
+                    ),
+                    execution_trace_id=(
+                        execution_trace_id
+                        if execution_trace_id is not None
+                        else instance_before.execution_trace_id
+                    ),
                 )
-                self._record_durable_episode_final(
-                    instance=instance_before,
-                    completed=False,
-                    terminal_stage=error_step or instance_before.current_state or "failed",
-                    termination_code=reason_code or "failed",
-                    termination_detail=error,
-                    final_state=instance_before.current_state,
-                )
-            self._broadcast_instance_status(instance_id)
-        return result.modified_count > 0
+            )
+            return True
+        return False
 
     def mark_cancelled(self, instance_id: str) -> bool:
         """Mark an instance as cancelled.
@@ -1102,13 +1158,8 @@ class WorkflowInstanceManager:
         Returns:
             True if status was updated.
         """
-        coll = self._get_instances_collection()
-        if coll is None:
-            return False
-        instance_before = self.get_instance(instance_id)
-
         now = datetime.now(timezone.utc)
-        result = coll.update_one(
+        instance_before = self._find_one_and_update_instance(
             {
                 "instance_id": instance_id,
                 "status": {
@@ -1129,20 +1180,31 @@ class WorkflowInstanceManager:
                     "progress_updated_at": now,
                 }
             },
+            return_document=False,
         )
-        if result.modified_count > 0:
+        if instance_before is not None:
             logger.info("[durable_workflow] Instance %s cancelled", instance_id)
-            if instance_before is not None:
-                self._record_durable_episode_final(
-                    instance=instance_before,
-                    completed=False,
-                    terminal_stage=instance_before.current_state or "cancelled",
-                    termination_code="cancelled",
-                    termination_detail="Workflow instance cancelled",
-                    final_state=instance_before.current_state,
+            self._record_durable_episode_final(
+                instance=instance_before,
+                completed=False,
+                terminal_stage=instance_before.current_state or "cancelled",
+                termination_code="cancelled",
+                termination_detail="Workflow instance cancelled",
+                final_state=instance_before.current_state,
+            )
+            self._broadcast_instance(
+                replace(
+                    instance_before,
+                    status=WorkflowInstanceStatus.CANCELLED,
+                    completed_at=now,
+                    locked_by=None,
+                    lock_expires_at=None,
+                    progress_message="cancelled",
+                    progress_updated_at=now,
                 )
-            self._broadcast_instance_status(instance_id)
-        return result.modified_count > 0
+            )
+            return True
+        return False
 
     def pause_instance(self, instance_id: str) -> bool:
         """Pause a running instance for later resumption.
@@ -1153,11 +1215,7 @@ class WorkflowInstanceManager:
         Returns:
             True if status was updated.
         """
-        coll = self._get_instances_collection()
-        if coll is None:
-            return False
-
-        result = coll.update_one(
+        updated_instance = self._find_one_and_update_instance(
             {
                 "instance_id": instance_id,
                 "status": WorkflowInstanceStatus.RUNNING.value,
@@ -1172,10 +1230,11 @@ class WorkflowInstanceManager:
                 }
             },
         )
-        if result.modified_count > 0:
+        if updated_instance is not None:
             logger.info("[durable_workflow] Instance %s paused", instance_id)
-            self._broadcast_instance_status(instance_id)
-        return result.modified_count > 0
+            self._broadcast_instance(updated_instance)
+            return True
+        return False
 
     def is_cancelled(self, instance_id: str) -> bool:
         """Check if an instance has been cancelled.
@@ -1214,12 +1273,8 @@ class WorkflowInstanceManager:
         Returns:
             True if instance was reset for retry.
         """
-        coll = self._get_instances_collection()
-        if coll is None:
-            return False
-
         # Use $expr to compare retry_count < max_retries
-        result = coll.update_one(
+        updated_instance = self._find_one_and_update_instance(
             {
                 "instance_id": instance_id,
                 "status": WorkflowInstanceStatus.FAILED.value,
@@ -1237,10 +1292,11 @@ class WorkflowInstanceManager:
                 }
             },
         )
-        if result.modified_count > 0:
+        if updated_instance is not None:
             logger.info("[durable_workflow] Instance %s reset for retry", instance_id)
-            self._broadcast_instance_status(instance_id)
-        return result.modified_count > 0
+            self._broadcast_instance(updated_instance)
+            return True
+        return False
 
     # -------------------------------------------------------------------------
     # Event Binding CRUD

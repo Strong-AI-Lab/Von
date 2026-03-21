@@ -773,6 +773,28 @@ def test_list_workflow_instances_returns_retryable_degraded_payload_for_mongo_ti
     assert payload["error"] == "Workflow monitor temporarily unavailable; please retry."
 
 
+def test_get_workflow_instance_returns_retryable_degraded_payload_for_mongo_timeout(
+    monkeypatch, app_client
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    manager = types.SimpleNamespace(
+        get_instance=lambda _instance_id: (_ for _ in ()).throw(
+            PyMongoError("server selection timeout while reading workflow_instances")
+        )
+    )
+    monkeypatch.setattr(workflows_routes, "_get_instance_manager", lambda: manager)
+
+    response = app_client.get("/api/workflows/instances/inst-timeout")
+
+    assert response.status_code == 503
+    payload = response.get_json()
+    assert payload["degraded"] is True
+    assert payload["retryable"] is True
+    assert payload["instance_id"] == "inst-timeout"
+    assert payload["error"] == "Workflow instance temporarily unavailable; please retry."
+
+
 def test_list_workflow_instances_accepts_comma_separated_status_filters(
     monkeypatch, app_client
 ):
@@ -843,6 +865,51 @@ def test_list_workflow_instances_rejects_invalid_comma_separated_status_filters(
     assert response.status_code == 400
     payload = response.get_json()
     assert "Invalid status" in payload["error"]
+
+
+def test_cancel_workflow_instance_route_avoids_preflight_read_on_success(
+    monkeypatch, app_client
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    manager = types.SimpleNamespace(
+        mark_cancelled=lambda instance_id: instance_id == "inst-1",
+        get_instance=lambda _instance_id: (_ for _ in ()).throw(
+            AssertionError("cancel success path should not read instance first")
+        ),
+    )
+    monkeypatch.setattr(workflows_routes, "_get_instance_manager", lambda: manager)
+
+    response = app_client.post("/api/workflows/instances/inst-1/cancel")
+
+    assert response.status_code == 200
+    assert response.get_json() == {"status": "cancelled", "instance_id": "inst-1"}
+
+
+def test_cancel_workflow_instance_returns_retryable_degraded_payload_for_timeout(
+    monkeypatch, app_client
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    manager = types.SimpleNamespace(
+        mark_cancelled=lambda _instance_id: (_ for _ in ()).throw(
+            PyMongoError("timed out while waiting for majority write acknowledgement")
+        )
+    )
+    monkeypatch.setattr(workflows_routes, "_get_instance_manager", lambda: manager)
+
+    response = app_client.post("/api/workflows/instances/inst-timeout/cancel")
+
+    assert response.status_code == 503
+    payload = response.get_json()
+    assert payload["degraded"] is True
+    assert payload["retryable"] is True
+    assert payload["instance_id"] == "inst-timeout"
+    assert payload["operation"] == "cancel"
+    assert (
+        payload["error"]
+        == "Workflow cancellation temporarily unavailable; please retry."
+    )
 
 
 def test_workflow_definitions_list_uses_short_ttl_cache(monkeypatch, app_client):

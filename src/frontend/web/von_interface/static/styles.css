@@ -5502,6 +5502,88 @@ footer {
     gap: 10px;
 }
 
+.workflow-status-group {
+    border-radius: 14px;
+    padding: 10px 12px 12px;
+    background: rgba(255, 255, 255, 0.78);
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.7);
+}
+
+.workflow-status-group-header {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+}
+
+.workflow-status-group-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 10px;
+    border: 1px solid rgba(15, 23, 42, 0.1);
+    background: rgba(255, 255, 255, 0.92);
+    color: #0f172a;
+    cursor: pointer;
+    transition: background 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
+}
+
+.workflow-status-group-toggle:hover {
+    background: #eff6ff;
+    border-color: rgba(59, 130, 246, 0.35);
+}
+
+.workflow-status-group-toggle:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.18);
+    border-color: rgba(59, 130, 246, 0.45);
+}
+
+.workflow-status-group-chevron {
+    width: 9px;
+    height: 9px;
+    border-right: 2px solid currentColor;
+    border-bottom: 2px solid currentColor;
+    transform: rotate(-45deg);
+    transition: transform 0.16s ease;
+    margin-right: 2px;
+}
+
+.workflow-status-group-toggle[aria-expanded="true"] .workflow-status-group-chevron {
+    transform: rotate(45deg);
+}
+
+.workflow-status-group-title {
+    min-width: 0;
+    display: grid;
+    gap: 4px;
+}
+
+.workflow-status-group-summary {
+    color: #475569;
+    font-size: 12px;
+    line-height: 1.35;
+}
+
+.workflow-status-count-badge {
+    align-self: start;
+    background: rgba(226, 232, 240, 0.88);
+    color: #334155;
+}
+
+.workflow-status-group-body {
+    display: grid;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.workflow-status-group-body.is-collapsed {
+    display: none;
+}
+
 .workflow-status-empty {
     padding: 10px 12px;
     border-radius: 10px;
@@ -5516,6 +5598,12 @@ footer {
     background: rgba(255, 255, 255, 0.9);
     border: 1px solid rgba(15, 23, 42, 0.08);
     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.7);
+}
+
+.workflow-status-instance-title {
+    font-weight: 700;
+    color: #0f172a;
+    font-size: 13px;
 }
 
 .workflow-status-item-header {

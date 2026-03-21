@@ -37,26 +37,28 @@ class WorkflowStatusEvent:
     org_id: str | None = None
     namespace: str | None = None
     updated_at: str | None = None
+    status_payload: dict[str, Any] | None = None
     event_type: str = "workflow_status"
 
     def to_payload(self) -> dict[str, Any]:
-        return {
-            "instance_id": self.instance_id,
-            "workflow_id": self.workflow_id,
-            "status": self.status,
-            "current_state": self.current_state,
-            "step_index": self.step_index,
-            "progress": {
+        payload = dict(self.status_payload or {})
+        payload.setdefault("instance_id", self.instance_id)
+        payload.setdefault("workflow_id", self.workflow_id)
+        payload.setdefault("status", self.status)
+        payload.setdefault("current_state", self.current_state)
+        payload.setdefault("step_index", self.step_index)
+        if not isinstance(payload.get("progress"), dict):
+            payload["progress"] = {
                 "current": self.progress_current,
                 "total": self.progress_total,
                 "message": self.progress_message,
                 "updated_at": self.progress_updated_at,
-            },
-            "user_id": self.user_id,
-            "org_id": self.org_id,
-            "namespace": self.namespace,
-            "updated_at": self.updated_at,
-        }
+            }
+        payload["user_id"] = self.user_id
+        payload["org_id"] = self.org_id
+        payload["namespace"] = self.namespace
+        payload["updated_at"] = self.updated_at
+        return payload
 
 
 @dataclass
@@ -244,6 +246,7 @@ def _event_from_instance(instance: WorkflowInstance) -> WorkflowStatusEvent:
         org_id=instance.org_id,
         namespace=instance.namespace,
         updated_at=updated_at,
+        status_payload=instance.to_status_dict(),
     )
 
 
