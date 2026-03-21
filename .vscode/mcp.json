@@ -29,30 +29,9 @@
 			],
 			"cwd": "${workspaceFolder}"
 		},
-		"mongodb": {
-			"type": "stdio",
-			"command": "npx",
-			"args": [
-				"-y",
-				"mongodb-mcp-server"
-			],
-			"env": {
-				"MDB_MCP_CONNECTION_STRING": "${env:MONGO_URI}"
-			}
-		},
 		"github": {
 			"url": "https://api.githubcopilot.com/mcp/",
 			"type": "http"
-		},
-		"chrome-devtools": {
-			"type": "stdio",
-			"command": "npx",
-			"args": [
-				"-y",
-				"chrome-devtools-mcp@latest",
-				"--autoConnect",
-				"--channel=beta"
-			]
 		}
 	}
 }
