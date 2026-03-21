@@ -1129,6 +1129,239 @@ function Invoke-TestDbRefreshIfDue {
     } -ArgumentList $pdmExe, $Root, $refreshScript, $sentinel, $apply | Out-Null
 }
 
+function Get-ConfiguredPathList {
+    param([object]$Value)
+    $paths = @()
+    if ($null -eq $Value) { return $paths }
+    $text = $Value.ToString().Trim()
+    if (-not $text) { return $paths }
+    foreach ($item in ($text -split '[,;]')) {
+        $trimmed = $item.Trim().Trim('"')
+        if ($trimmed) { $paths += $trimmed }
+    }
+    return $paths
+}
+
+function Get-AiChatSessionSyncCodexRoot {
+    $configured = if ($env:VON_AI_CHAT_SESSION_SYNC_CODEX_ROOT -and $env:VON_AI_CHAT_SESSION_SYNC_CODEX_ROOT.ToString().Trim()) {
+        $env:VON_AI_CHAT_SESSION_SYNC_CODEX_ROOT.ToString().Trim()
+    }
+    else {
+        Join-Path $HOME '.codex\sessions'
+    }
+    $expanded = [Environment]::ExpandEnvironmentVariables($configured)
+    if (-not (Test-Path -LiteralPath $expanded)) {
+        Write-LauncherLog "[ai-chat-session-sync] WARN: Codex root missing: $expanded"
+        return $null
+    }
+    return (Get-NormalisedAbsolutePath -Path $expanded)
+}
+
+function Get-AiChatSessionSyncCopilotRoots {
+    $userRoots = Get-ConfiguredPathList -Value $env:VON_AI_CHAT_SESSION_SYNC_COPILOT_USER_ROOTS
+    if (-not $userRoots -or $userRoots.Count -eq 0) {
+        if ($env:APPDATA -and $env:APPDATA.ToString().Trim()) {
+            $appdata = $env:APPDATA.ToString().Trim()
+            $userRoots = @(
+                (Join-Path $appdata 'Code\User'),
+                (Join-Path $appdata 'Code - Insiders\User')
+            )
+        }
+    }
+
+    $roots = New-Object System.Collections.Generic.List[string]
+    foreach ($userRoot in @($userRoots)) {
+        $expandedUserRoot = [Environment]::ExpandEnvironmentVariables($userRoot)
+        if (-not (Test-Path -LiteralPath $expandedUserRoot)) {
+            Write-LauncherLog "[ai-chat-session-sync] WARN: Copilot user root missing: $expandedUserRoot"
+            continue
+        }
+
+        $workspaceStorage = Join-Path $expandedUserRoot 'workspaceStorage'
+        if (Test-Path -LiteralPath $workspaceStorage) {
+            Get-ChildItem -LiteralPath $workspaceStorage -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                $chatSessions = Join-Path $_.FullName 'chatSessions'
+                if (Test-Path -LiteralPath $chatSessions) {
+                    $roots.Add((Get-NormalisedAbsolutePath -Path $chatSessions))
+                }
+            }
+        }
+
+        $emptyWindowChatSessions = Join-Path $expandedUserRoot 'globalStorage\emptyWindowChatSessions'
+        if (Test-Path -LiteralPath $emptyWindowChatSessions) {
+            $roots.Add((Get-NormalisedAbsolutePath -Path $emptyWindowChatSessions))
+        }
+    }
+
+    foreach ($extraRoot in (Get-ConfiguredPathList -Value $env:VON_AI_CHAT_SESSION_SYNC_COPILOT_EXTRA_ROOTS)) {
+        $expandedExtraRoot = [Environment]::ExpandEnvironmentVariables($extraRoot)
+        if (-not (Test-Path -LiteralPath $expandedExtraRoot)) {
+            Write-LauncherLog "[ai-chat-session-sync] WARN: extra Copilot root missing: $expandedExtraRoot"
+            continue
+        }
+        $roots.Add((Get-NormalisedAbsolutePath -Path $expandedExtraRoot))
+    }
+
+    return @($roots | Sort-Object -Unique)
+}
+
+function Invoke-AiChatSessionSyncIfDue {
+    <#
+        Synchronise local AI programming chat-session exports into Von once per
+        configured interval after the launcher has started the server.
+        This is intentionally non-blocking and disabled by default.
+    #>
+    if (-not (Test-TruthySetting $env:VON_ENABLE_AI_CHAT_SESSION_SYNC)) { return }
+
+    $userConceptId = if ($env:VON_USER_CONCEPT_ID -and $env:VON_USER_CONCEPT_ID.ToString().Trim()) {
+        $env:VON_USER_CONCEPT_ID.ToString().Trim()
+    }
+    else {
+        $null
+    }
+    if (-not $userConceptId) {
+        Write-LauncherLog "[ai-chat-session-sync] WARN: VON_USER_CONCEPT_ID is not set; skipping."
+        return
+    }
+
+    $intervalHours = 24
+    try {
+        if ($env:VON_AI_CHAT_SESSION_SYNC_INTERVAL_HOURS) {
+            $intervalHours = [int]$env:VON_AI_CHAT_SESSION_SYNC_INTERVAL_HOURS
+        }
+    }
+    catch { }
+    if ($intervalHours -lt 1) { $intervalHours = 24 }
+
+    $sentinel = Join-Path $RunDir 'last_ai_chat_session_sync_utc.txt'
+    $last = $null
+    if (Test-Path $sentinel) {
+        try { $last = [DateTime]::Parse((Get-Content $sentinel -Raw).Trim()).ToUniversalTime() } catch { $last = $null }
+    }
+    $nowUtc = (Get-Date).ToUniversalTime()
+    if ($last) {
+        $hours = ($nowUtc - $last).TotalHours
+        if ($hours -lt $intervalHours) { return }
+    }
+
+    $existingJob = Get-Job -Name 'von_ai_chat_session_sync' -ErrorAction SilentlyContinue | Where-Object { $_.State -in 'Running', 'NotStarted' }
+    if ($existingJob) { return }
+
+    $syncScript = Join-Path $Root 'scripts/sync_ai_programming_chat_sessions.py'
+    if (-not (Test-Path $syncScript)) {
+        Write-LauncherLog "[ai-chat-session-sync] WARN: sync script missing: $syncScript"
+        return
+    }
+
+    $codexRoot = Get-AiChatSessionSyncCodexRoot
+    $copilotRoots = @(Get-AiChatSessionSyncCopilotRoots)
+    if (-not $codexRoot -and $copilotRoots.Count -eq 0) {
+        Write-LauncherLog "[ai-chat-session-sync] WARN: no configured chat-session roots are available; skipping."
+        return
+    }
+
+    $pdmExe = if (Test-Path (Join-Path $Root '.venv\Scripts\pdm.exe')) { Join-Path $Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
+    $outputJsonPath = Join-Path $Root 'data/sync_ai_programming_chat_sessions.latest.json'
+    $rawOutputPath = Join-Path $RunDir 'ai_chat_session_sync_last_output.log'
+    $liveLogPath = $CurrentLog
+    Write-LauncherLog "[ai-chat-session-sync] Launching background sync (interval ${intervalHours}h codex=$([bool]$codexRoot) copilot_roots=$($copilotRoots.Count) live_log=$liveLogPath raw_log=$rawOutputPath)..."
+
+    Start-Job -Name 'von_ai_chat_session_sync' -ScriptBlock {
+        param($pdmExe, $root, $syncScript, $sentinelPath, $userConceptId, $codexRoot, $copilotRoots, $outputJsonPath, $rawOutputPath, $liveLogPath)
+        function Write-AiChatSessionSyncProgress {
+            param([string]$Message, [string]$LiveLogPath)
+            if (-not $Message) { return }
+            $line = "[ai-chat-session-sync] $Message"
+            if ($LiveLogPath) {
+                try { Add-Content -Path $LiveLogPath -Value $line -Encoding UTF8 } catch { }
+            }
+            Write-Host $line
+        }
+
+        function Write-AiChatSessionSyncRawLine {
+            param([string]$Line, [string]$RawOutputPath)
+            if ($null -eq $Line) { return }
+            try { Add-Content -Path $RawOutputPath -Value $Line -Encoding UTF8 } catch { }
+        }
+
+        function Format-AiChatSessionSyncProgress {
+            param([string]$Line)
+            if (-not $Line) { return $null }
+            try {
+                $event = $Line | ConvertFrom-Json -ErrorAction Stop
+            }
+            catch {
+                return $null
+            }
+            if (-not $event.event) { return $null }
+
+            switch ($event.event) {
+                'discovery_complete' {
+                    return "discovered $($event.discovered) candidate chat-session file(s)."
+                }
+                'record_processed' {
+                    if ($event.storage_object_written) {
+                        $msg = "uploaded $($event.environment) session $($event.source_session_id) ($($event.index)/$($event.total))"
+                        if ($event.storage_uri) { $msg += " -> $($event.storage_uri)" }
+                        return $msg
+                    }
+                    if ($event.action -eq 'repair') {
+                        return "repaired $($event.environment) session $($event.source_session_id) ($($event.index)/$($event.total))."
+                    }
+                    if ($event.action -eq 'unchanged' -and $event.index -eq 1) {
+                        return "first discovered session is unchanged; sync is reusing existing ontology/file-copy state where possible."
+                    }
+                    return $null
+                }
+                'sync_completed' {
+                    return "completed status=$($event.status) created=$($event.counters.created) updated=$($event.counters.updated) skipped=$($event.counters.skipped) failed=$($event.counters.failed)."
+                }
+                default {
+                    return $null
+                }
+            }
+        }
+
+        try {
+            Set-Location $root
+            if (Test-Path $rawOutputPath) {
+                try { Remove-Item -Path $rawOutputPath -Force -ErrorAction Stop } catch { }
+            }
+            $syncArgs = @('run', 'python', '-u', $syncScript, '--apply', '--user-concept-id', $userConceptId, '--output-json', $outputJsonPath)
+            $syncArgs += '--emit-progress-ndjson'
+            if ($codexRoot) {
+                $syncArgs += @('--codex-root', $codexRoot)
+            }
+            foreach ($copilotRoot in @($copilotRoots)) {
+                if ($copilotRoot) {
+                    $syncArgs += @('--copilot-root', $copilotRoot)
+                }
+            }
+
+            & $pdmExe @syncArgs 2>&1 | ForEach-Object {
+                $line = $_.ToString()
+                Write-AiChatSessionSyncRawLine -Line $line -RawOutputPath $rawOutputPath
+                $progressLine = Format-AiChatSessionSyncProgress -Line $line
+                if ($progressLine) {
+                    Write-AiChatSessionSyncProgress -Message $progressLine -LiveLogPath $liveLogPath
+                }
+            }
+
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -eq 0) {
+                (Get-Date).ToUniversalTime().ToString('o') | Set-Content $sentinelPath
+                Write-AiChatSessionSyncProgress -Message 'background sync finished successfully.' -LiveLogPath $liveLogPath
+            }
+            else {
+                Write-AiChatSessionSyncProgress -Message ("ERROR exit={0} see {1}" -f $exitCode, $rawOutputPath) -LiveLogPath $liveLogPath
+            }
+        }
+        catch {
+            Write-AiChatSessionSyncProgress -Message ("ERROR: {0}" -f $_.Exception.Message) -LiveLogPath $liveLogPath
+        }
+    } -ArgumentList $pdmExe, $Root, $syncScript, $sentinel, $userConceptId, $codexRoot, $copilotRoots, $outputJsonPath, $rawOutputPath, $liveLogPath | Out-Null
+}
+
 function Test-VonHealthEndpoint($Port) {
     # was Health-Check
     $hosts = @('127.0.0.1')
@@ -1610,6 +1843,8 @@ function Start-VonServer {
     try { Invoke-DailyBackupIfDue } catch { Write-LauncherLog "[daily-backup] ERROR (scheduling failed): $($_.Exception.Message)" }
     # Trigger test DB refresh (non-blocking) if due
     try { Invoke-TestDbRefreshIfDue } catch { Write-LauncherLog "[test-db-refresh] ERROR (scheduling failed): $($_.Exception.Message)" }
+    # Trigger AI chat-session sync (non-blocking) if due
+    try { Invoke-AiChatSessionSyncIfDue } catch { Write-LauncherLog "[ai-chat-session-sync] ERROR (scheduling failed): $($_.Exception.Message)" }
 
     # Start RAG Worker
     try { Start-RagWorker } catch { Write-LauncherLog "[rag-worker] ERROR: $($_.Exception.Message)" }
@@ -2514,6 +2749,12 @@ Von Launcher Help
         VON_ENABLE_BACKUP_ACTION=1   Required to run on-demand ".\run.ps1 backup"
         VON_BACKUP_ROOT=<path>       Recommended explicit backup root outside this repo
         VON_ALLOW_BACKUP_IN_REPO=1   Override safety block for in-repo backup apply mode
+    AI chat-session sync environment variables:
+        VON_ENABLE_AI_CHAT_SESSION_SYNC=1
+        VON_AI_CHAT_SESSION_SYNC_INTERVAL_HOURS=<int>
+        VON_AI_CHAT_SESSION_SYNC_CODEX_ROOT=<path>
+        VON_AI_CHAT_SESSION_SYNC_COPILOT_USER_ROOTS=<comma-separated VS Code User roots>
+        VON_AI_CHAT_SESSION_SYNC_COPILOT_EXTRA_ROOTS=<comma-separated direct chat roots>
     Default backup root resolution order:
         VON_BACKUP_ROOT -> W:\von_backups -> %LOCALAPPDATA%\Von\backups -> .\backups (last resort)
         -UpdateIntervalMinutes <n>  Minutes between git update checks (autoupdate action; default 60)
