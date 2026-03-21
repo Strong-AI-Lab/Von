@@ -179,13 +179,20 @@ from src.backend.integrations.internal_mcp.catalogue import _upsert_renderer_pro
 from src.backend.integrations.internal_mcp.catalogue import _workflow_bind_event
 from src.backend.integrations.internal_mcp.catalogue import _workflow_cancel_instance
 from src.backend.integrations.internal_mcp.catalogue import _workflow_create_instance
+from src.backend.integrations.internal_mcp.catalogue import _workflow_execute
 from src.backend.integrations.internal_mcp.catalogue import _workflow_create_schedule
 from src.backend.integrations.internal_mcp.catalogue import _workflow_delete_event_binding
 from src.backend.integrations.internal_mcp.catalogue import _workflow_delete_schedule
+from src.backend.integrations.internal_mcp.catalogue import (
+    _workflow_get_execution_trace,
+)
 from src.backend.integrations.internal_mcp.catalogue import _workflow_get_instance
 from src.backend.integrations.internal_mcp.catalogue import _workflow_get_schedule
 from src.backend.integrations.internal_mcp.catalogue import _workflow_list_definitions
 from src.backend.integrations.internal_mcp.catalogue import _workflow_list_event_bindings
+from src.backend.integrations.internal_mcp.catalogue import (
+    _workflow_list_execution_traces,
+)
 from src.backend.integrations.internal_mcp.catalogue import _workflow_list_instances
 from src.backend.integrations.internal_mcp.catalogue import _workflow_list_schedules
 from src.backend.integrations.internal_mcp.catalogue import _workflow_mcp_health_check
@@ -242,6 +249,7 @@ _TOOL_CACHE_DEPENDENCY_PATHS: tuple[Path, ...] = (
     Path(__file__).resolve(),
     Path(tool_contract_registry_module.__file__).resolve(),
     Path(internal_mcp_catalogue_module.__file__).resolve(),
+    _TOOL_MANIFEST_PATH.resolve(),
 )
 
 
@@ -2748,6 +2756,14 @@ async def _handle_workflow_create_instance(
     )
 
 
+async def _handle_workflow_execute(arguments: dict[str, Any]) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _workflow_execute,
+        arguments,
+        tool_family_label="Workflow",
+    )
+
+
 async def _handle_workflow_list_instances(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
@@ -2758,9 +2774,29 @@ async def _handle_workflow_list_instances(
     )
 
 
+async def _handle_workflow_list_execution_traces(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _workflow_list_execution_traces,
+        arguments,
+        tool_family_label="Workflow",
+    )
+
+
 async def _handle_workflow_get_instance(arguments: dict[str, Any]) -> list[TextContent]:
     return _run_catalogue_proxy_handler(
         _workflow_get_instance,
+        arguments,
+        tool_family_label="Workflow",
+    )
+
+
+async def _handle_workflow_get_execution_trace(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _workflow_get_execution_trace,
         arguments,
         tool_family_label="Workflow",
     )
@@ -3276,8 +3312,11 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "workflow_delete_event_binding": _handle_workflow_delete_event_binding,
     "workflow_mcp_health_check": _handle_workflow_mcp_health_check,
     "workflow_create_instance": _handle_workflow_create_instance,
+    "workflow_execute": _handle_workflow_execute,
     "workflow_list_instances": _handle_workflow_list_instances,
+    "workflow_list_execution_traces": _handle_workflow_list_execution_traces,
     "workflow_get_instance": _handle_workflow_get_instance,
+    "workflow_get_execution_trace": _handle_workflow_get_execution_trace,
     "workflow_cancel_instance": _handle_workflow_cancel_instance,
     "workflow_retry_instance": _handle_workflow_retry_instance,
     "workflow_create_schedule": _handle_workflow_create_schedule,

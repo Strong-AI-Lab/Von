@@ -96,7 +96,10 @@ def get_workflow_execution_trace(execution_id: str) -> Optional[Dict[str, Any]]:
 
 
 def list_recent_workflow_execution_traces(
-    limit: int = 20, *, namespace: str | None = None
+    limit: int = 20,
+    *,
+    namespace: str | None = None,
+    workflow_id: str | None = None,
 ) -> List[Dict[str, Any]]:
     db = get_db()
     if db is None:
@@ -109,6 +112,8 @@ def list_recent_workflow_execution_traces(
         query: Dict[str, Any] = {}
         if isinstance(namespace, str) and namespace.strip():
             query["user_namespace"] = namespace.strip()
+        if isinstance(workflow_id, str) and workflow_id.strip():
+            query["workflow_id"] = workflow_id.strip()
         cursor = (
             coll.find(query, {"_id": 0})
             .sort("start_time", -1)

@@ -3452,6 +3452,24 @@
                     },
                     "max_retries": {
                         "type": "integer"
+                    },
+                    "source_event_type": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "source_event_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "event_idempotency_key": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
                     }
                 },
                 "required": [
@@ -3551,6 +3569,108 @@
             }
         },
         {
+            "name": "workflow_execute",
+            "description": "Create a durable workflow instance via the verified submission pathway and optionally wait for a bounded terminal result with structured telemetry and optional trace retrieval.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workflow_id": {
+                        "type": "string"
+                    },
+                    "user_id": {
+                        "type": "string"
+                    },
+                    "org_id": {
+                        "type": "string"
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "inputs": {
+                        "type": [
+                            "object",
+                            "null"
+                        ],
+                        "additionalProperties": true
+                    },
+                    "max_retries": {
+                        "type": "integer"
+                    },
+                    "source_event_type": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "source_event_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "event_idempotency_key": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "await_terminal": {
+                        "type": "boolean"
+                    },
+                    "timeout_seconds": {
+                        "type": [
+                            "integer",
+                            "number"
+                        ]
+                    },
+                    "poll_interval_seconds": {
+                        "type": [
+                            "integer",
+                            "number"
+                        ]
+                    },
+                    "include_step_result_envelopes": {
+                        "type": "boolean"
+                    },
+                    "include_trace": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [
+                    "workflow_id"
+                ],
+                "additionalProperties": true,
+                "description": "Launch a durable workflow instance and optionally await a terminal result."
+            }
+        },
+        {
+            "name": "workflow_get_execution_trace",
+            "description": "Get a persisted durable workflow execution trace by execution_id, or resolve it from an instance_id when a stable execution_trace_id link is available.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "execution_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "instance_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Get a workflow execution trace by execution or instance ID."
+            }
+        },
+        {
             "name": "workflow_get_instance",
             "description": "Get detailed status of a durable workflow instance including current state, inputs, outputs, and any errors.",
             "inputSchema": {
@@ -3621,6 +3741,33 @@
                 "required": [],
                 "additionalProperties": true,
                 "description": "List event->workflow bindings."
+            }
+        },
+        {
+            "name": "workflow_list_execution_traces",
+            "description": "List recent durable workflow execution traces with bounded/redacted summaries. Filter by namespace or workflow_id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "workflow_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "limit": {
+                        "type": "integer"
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "List recent execution traces with bounded summaries."
             }
         },
         {

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from time import monotonic, sleep
 from typing import Any
 
 from ...services.experiment_run_service import (
@@ -47,6 +46,10 @@ from ..action_registry import (
     ActionSpec,
     WorkflowActionRequest,
     WorkflowActionResult,
+)
+from .execution_observability import (
+    await_workflow_terminal_state,
+    build_workflow_execution_response,
 )
 
 
@@ -141,42 +144,6 @@ def _workflow_execution_verdict_for_status(
     if final_status in {"failed", "cancelled"}:
         return "fail"
     return "inconclusive"
-
-
-def _workflow_instance_payload(instance: Any) -> dict[str, Any]:
-    payload = (
-        instance.to_status_dict()
-        if hasattr(instance, "to_status_dict")
-        and callable(getattr(instance, "to_status_dict"))
-        else {}
-    )
-    if not isinstance(payload, dict):
-        payload = {}
-    for field in (
-        "instance_id",
-        "workflow_id",
-        "current_state",
-        "inputs",
-        "outputs",
-        "error",
-        "error_step",
-        "user_id",
-        "org_id",
-        "namespace",
-        "workflow_data",
-    ):
-        if field in payload:
-            continue
-        value = getattr(instance, field, None)
-        if value is not None:
-            payload[field] = value
-
-    status = payload.get("status")
-    if status is None:
-        status_value = getattr(getattr(instance, "status", None), "value", None)
-        if isinstance(status_value, str) and status_value.strip():
-            payload["status"] = status_value.strip()
-    return payload
 
 
 def _handle_theory_create_slice(request: WorkflowActionRequest) -> WorkflowActionResult:
@@ -351,7 +318,6 @@ def _handle_experiment_execute_target_workflow(
 ) -> WorkflowActionResult:
     from . import WorkflowInstanceManager
     from .workflow_instance_submission_service import (
-        build_verified_instance_launch_payload,
         submit_verified_workflow_instance,
     )
 
@@ -417,7 +383,7 @@ def _handle_experiment_execute_target_workflow(
         inputs=workflow_inputs,
         max_retries=int(inputs.get("max_retries", 1) or 1),
     )
-    payload = build_verified_instance_launch_payload(
+    payload = build_workflow_execution_response(
         submission,
         workflow_inputs=workflow_inputs,
     )
@@ -432,46 +398,27 @@ def _handle_experiment_execute_target_workflow(
     if not await_terminal:
         return WorkflowActionResult(status="success", outputs=payload)
 
-    poll_count = 0
-    latest_instance: Any | None = None
-    timed_out = False
-    deadline = monotonic() + timeout_seconds if timeout_seconds > 0 else monotonic()
-    while True:
-        latest_instance = manager.get_instance(instance_id)
-        poll_count += 1
-        latest_status = getattr(latest_instance, "status", None)
-        if latest_status is not None and bool(latest_status.is_terminal()):
-            break
-        if monotonic() >= deadline:
-            timed_out = True
-            break
-        sleep(poll_interval_seconds)
-
-    instance_payload = (
-        _workflow_instance_payload(latest_instance)
-        if latest_instance is not None
-        else {"instance_id": instance_id, "workflow_id": workflow_id}
+    wait_result = await_workflow_terminal_state(
+        manager,
+        instance_id,
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
     )
-    final_status = _safe_str(instance_payload.get("status"))
-    workflow_execution = dict(payload["workflow_execution"])
-    workflow_execution.update(
-        {
-            "await_terminal": True,
-            "timeout_seconds": timeout_seconds,
-            "poll_interval_seconds": poll_interval_seconds,
-            "poll_count": poll_count,
-            "timed_out": timed_out,
-            "final_status": final_status or None,
-            "current_state": _safe_str(instance_payload.get("current_state")) or None,
-            "outputs": instance_payload.get("outputs"),
-            "error": _safe_str(instance_payload.get("error")) or None,
-            "error_step": _safe_str(instance_payload.get("error_step")) or None,
-        }
+    payload = build_workflow_execution_response(
+        submission,
+        workflow_inputs=workflow_inputs,
+        instance=wait_result.instance,
+        await_terminal=True,
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+        poll_count=wait_result.poll_count,
+        timed_out=wait_result.timed_out,
+        include_step_result_envelopes=True,
     )
-    payload["workflow_instance"] = instance_payload
-    payload["workflow_execution"] = workflow_execution
-    payload["final_status"] = final_status or None
-    payload["timed_out"] = timed_out
+    final_status = _safe_str(payload.get("final_status"))
+    timed_out = bool(payload.get("timed_out"))
+    workflow_execution = dict(payload.get("workflow_execution") or {})
+    poll_count = int(workflow_execution.get("poll_count") or 0)
 
     if record_observation and run_id:
         verdict = _workflow_execution_verdict_for_status(

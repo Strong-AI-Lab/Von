@@ -10293,6 +10293,250 @@ def _workflow_create_instance(**kwargs):
         )
 
 
+def _workflow_execute(**kwargs):
+    """Launch a durable workflow instance and optionally await a terminal result."""
+    from ...services.namespace_service import resolve_canonical_namespace
+    from ...workflows.durable import WorkflowInstanceManager
+    from ...workflows.durable.execution_observability import (
+        await_workflow_terminal_state,
+        build_workflow_execution_response,
+    )
+    from ...workflows.durable.workflow_instance_submission_service import (
+        submit_verified_workflow_instance,
+    )
+
+    workflow_id = kwargs.get("workflow_id")
+    if not isinstance(workflow_id, str) or not workflow_id.strip():
+        return make_error_response(
+            "missing_parameter",
+            "workflow_id is required",
+            details={"missing": ["workflow_id"]},
+        )
+
+    user_id_raw = kwargs.get("user_id", "anonymous")
+    org_id_raw = kwargs.get("org_id", "default")
+    namespace_raw = kwargs.get("namespace")
+    inputs_raw = kwargs.get("inputs", {})
+    max_retries_raw = kwargs.get("max_retries", 3)
+    source_event_type_raw = kwargs.get("source_event_type")
+    source_event_id_raw = kwargs.get("source_event_id")
+    event_idempotency_key_raw = kwargs.get("event_idempotency_key")
+    await_terminal = _coerce_bool_input(kwargs.get("await_terminal"), default=False)
+    include_step_result_envelopes = _coerce_bool_input(
+        kwargs.get("include_step_result_envelopes"),
+        default=False,
+    )
+    include_trace = _coerce_bool_input(kwargs.get("include_trace"), default=False)
+
+    try:
+        timeout_seconds = float(
+            kwargs.get("timeout_seconds", 60.0 if await_terminal else 0.0)
+        )
+    except (TypeError, ValueError):
+        timeout_seconds = 60.0 if await_terminal else 0.0
+    timeout_seconds = max(0.0, timeout_seconds)
+
+    try:
+        poll_interval_seconds = float(kwargs.get("poll_interval_seconds", 1.0))
+    except (TypeError, ValueError):
+        poll_interval_seconds = 1.0
+    poll_interval_seconds = max(0.0, poll_interval_seconds)
+
+    user_id = (
+        user_id_raw.strip()
+        if isinstance(user_id_raw, str) and user_id_raw.strip()
+        else "anonymous"
+    )
+    org_id = (
+        org_id_raw.strip()
+        if isinstance(org_id_raw, str) and org_id_raw.strip()
+        else "default"
+    )
+    namespace = resolve_canonical_namespace(namespace_raw, user_id, org_id)
+    if not namespace:
+        return make_error_response(
+            "invalid_namespace",
+            "namespace must be canonical or derivable from user_id/org_id",
+        )
+    source_event_type = (
+        source_event_type_raw.strip()
+        if isinstance(source_event_type_raw, str) and source_event_type_raw.strip()
+        else None
+    )
+    source_event_id = (
+        source_event_id_raw.strip()
+        if isinstance(source_event_id_raw, str) and source_event_id_raw.strip()
+        else None
+    )
+    event_idempotency_key = (
+        event_idempotency_key_raw.strip()
+        if isinstance(event_idempotency_key_raw, str)
+        and event_idempotency_key_raw.strip()
+        else None
+    )
+    inputs = inputs_raw if isinstance(inputs_raw, dict) else {}
+    try:
+        max_retries = int(max_retries_raw)
+    except (TypeError, ValueError):
+        max_retries = 3
+    max_retries = max(0, min(max_retries, 50))
+
+    try:
+        manager = WorkflowInstanceManager()
+        submission = submit_verified_workflow_instance(
+            manager=manager,
+            workflow_id=workflow_id.strip(),
+            user_id=user_id,
+            org_id=org_id,
+            namespace=namespace,
+            inputs=inputs,
+            max_retries=max_retries,
+            source_event_type=source_event_type,
+            source_event_id=source_event_id,
+            event_idempotency_key=event_idempotency_key,
+        )
+        instance = None
+        poll_count: int | None = None
+        timed_out = False
+        instance_id = (
+            submission.instance_id
+            if isinstance(submission.instance_id, str) and submission.instance_id.strip()
+            else None
+        )
+        if instance_id:
+            if await_terminal:
+                wait_result = await_workflow_terminal_state(
+                    manager,
+                    instance_id,
+                    timeout_seconds=timeout_seconds,
+                    poll_interval_seconds=poll_interval_seconds,
+                )
+                instance = wait_result.instance
+                poll_count = wait_result.poll_count
+                timed_out = wait_result.timed_out
+            else:
+                instance = manager.get_instance(instance_id)
+        return build_workflow_execution_response(
+            submission,
+            workflow_inputs=inputs,
+            instance=instance,
+            await_terminal=await_terminal,
+            timeout_seconds=timeout_seconds if await_terminal else None,
+            poll_interval_seconds=poll_interval_seconds if await_terminal else None,
+            poll_count=poll_count,
+            timed_out=timed_out,
+            include_step_result_envelopes=include_step_result_envelopes,
+            include_trace=include_trace,
+        )
+    except Exception as e:
+        return make_error_response(
+            "workflow_execute_failed",
+            f"Failed to execute workflow: {e}",
+        )
+
+
+def _workflow_get_execution_trace(**kwargs):
+    """Get a persisted durable workflow execution trace by execution or instance ID."""
+    from ...workflows import get_workflow_execution_trace
+    from ...workflows.durable import WorkflowInstanceManager
+
+    execution_id_raw = kwargs.get("execution_id")
+    instance_id_raw = kwargs.get("instance_id")
+
+    execution_id = (
+        execution_id_raw.strip()
+        if isinstance(execution_id_raw, str) and execution_id_raw.strip()
+        else None
+    )
+    instance_id = (
+        instance_id_raw.strip()
+        if isinstance(instance_id_raw, str) and instance_id_raw.strip()
+        else None
+    )
+    if execution_id is None and instance_id is None:
+        return make_error_response(
+            "missing_parameter",
+            "execution_id or instance_id is required",
+            details={"missing_any_of": ["execution_id", "instance_id"]},
+        )
+
+    if execution_id is None and instance_id is not None:
+        manager = WorkflowInstanceManager()
+        instance = manager.get_instance(instance_id)
+        if instance is None:
+            return make_error_response(
+                "not_found",
+                f"Workflow instance not found: {instance_id}",
+            )
+        execution_id = (
+            instance.execution_trace_id.strip()
+            if isinstance(instance.execution_trace_id, str)
+            and instance.execution_trace_id.strip()
+            else None
+        )
+        if execution_id is None:
+            return make_error_response(
+                "not_found",
+                f"No execution trace is linked to instance: {instance_id}",
+            )
+
+    trace_doc = get_workflow_execution_trace(execution_id or "")
+    if not isinstance(trace_doc, dict):
+        return make_error_response(
+            "not_found",
+            f"Workflow execution trace not found: {execution_id}",
+        )
+
+    return {
+        "success": True,
+        "execution_id": execution_id,
+        "instance_id": instance_id,
+        "execution_trace": trace_doc,
+    }
+
+
+def _workflow_list_execution_traces(**kwargs):
+    """List recent persisted workflow execution traces with bounded summaries."""
+    from ...workflows import list_recent_workflow_execution_traces
+    from ...workflows.durable.execution_observability import (
+        build_workflow_execution_trace_summary,
+    )
+
+    try:
+        limit = int(kwargs.get("limit", 20))
+    except (TypeError, ValueError):
+        limit = 20
+    limit = max(1, min(limit, 100))
+
+    namespace = kwargs.get("namespace")
+    if not isinstance(namespace, str) or not namespace.strip():
+        namespace = None
+    else:
+        namespace = namespace.strip()
+
+    workflow_id = kwargs.get("workflow_id")
+    if not isinstance(workflow_id, str) or not workflow_id.strip():
+        workflow_id = None
+    else:
+        workflow_id = workflow_id.strip()
+
+    traces = list_recent_workflow_execution_traces(
+        limit=limit,
+        namespace=namespace,
+        workflow_id=workflow_id,
+    )
+    summaries = [
+        build_workflow_execution_trace_summary(trace)
+        for trace in traces
+        if isinstance(trace, Mapping)
+    ]
+    return {
+        "success": True,
+        "execution_traces": summaries,
+        "count": len(summaries),
+    }
+
+
 def _workflow_list_instances(**kwargs):
     """List workflow instances with filters."""
     from ...services.namespace_service import coerce_namespace
@@ -21742,6 +21986,53 @@ def build_default_catalogue() -> MethodCatalogue:
             ),
         ),
         MethodDefinition(
+            name="workflow_execute",
+            handler=_workflow_execute,
+            input_schema=Schema(
+                required={"workflow_id": str},
+                optional={
+                    "user_id": str,
+                    "org_id": str,
+                    "namespace": (str, type(None)),
+                    "inputs": (dict, type(None)),
+                    "max_retries": int,
+                    "source_event_type": (str, type(None)),
+                    "source_event_id": (str, type(None)),
+                    "event_idempotency_key": (str, type(None)),
+                    "await_terminal": bool,
+                    "timeout_seconds": (int, float),
+                    "poll_interval_seconds": (int, float),
+                    "include_step_result_envelopes": bool,
+                    "include_trace": bool,
+                },
+                allow_unknown=True,
+                description="Launch a durable workflow instance and optionally await a terminal result.",
+            ),
+            output_schema=Schema(
+                required={"success": bool},
+                optional={
+                    "instance_id": str,
+                    "workflow_id": str,
+                    "status": str,
+                    "verification": dict,
+                    "workflow_execution": dict,
+                    "workflow_instance": dict,
+                    "execution_trace": (dict, type(None)),
+                    "final_status": (str, type(None)),
+                    "timed_out": bool,
+                    "error": str,
+                    "error_code": str,
+                },
+                allow_unknown=True,
+                description="Structured awaited workflow execution result and telemetry.",
+            ),
+            category="write",
+            description=(
+                "Create a durable workflow instance via the verified submission pathway and optionally "
+                "wait for a bounded terminal result with structured telemetry and optional trace retrieval."
+            ),
+        ),
+        MethodDefinition(
             name="workflow_bind_event",
             handler=_workflow_bind_event,
             input_schema=Schema(
@@ -21896,6 +22187,31 @@ def build_default_catalogue() -> MethodCatalogue:
             ),
         ),
         MethodDefinition(
+            name="workflow_list_execution_traces",
+            handler=_workflow_list_execution_traces,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "namespace": (str, type(None)),
+                    "workflow_id": (str, type(None)),
+                    "limit": int,
+                },
+                allow_unknown=True,
+                description="List recent execution traces with bounded summaries.",
+            ),
+            output_schema=Schema(
+                required={"success": bool, "execution_traces": list, "count": int},
+                optional={"error": str, "error_code": str},
+                allow_unknown=True,
+                description="Recent workflow execution trace summaries.",
+            ),
+            category="read",
+            description=(
+                "List recent durable workflow execution traces with bounded/redacted summaries. "
+                "Filter by namespace or workflow_id."
+            ),
+        ),
+        MethodDefinition(
             name="workflow_get_instance",
             handler=_workflow_get_instance,
             input_schema=Schema(
@@ -21924,6 +22240,36 @@ def build_default_catalogue() -> MethodCatalogue:
             description=(
                 "Get detailed status of a durable workflow instance including current state, "
                 "inputs, outputs, and any errors."
+            ),
+        ),
+        MethodDefinition(
+            name="workflow_get_execution_trace",
+            handler=_workflow_get_execution_trace,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "execution_id": (str, type(None)),
+                    "instance_id": (str, type(None)),
+                },
+                allow_unknown=True,
+                description="Get a workflow execution trace by execution or instance ID.",
+            ),
+            output_schema=Schema(
+                required={"success": bool},
+                optional={
+                    "execution_id": str,
+                    "instance_id": (str, type(None)),
+                    "execution_trace": dict,
+                    "error": str,
+                    "error_code": str,
+                },
+                allow_unknown=True,
+                description="Full workflow execution trace document.",
+            ),
+            category="read",
+            description=(
+                "Get a persisted durable workflow execution trace by execution_id, or resolve it "
+                "from an instance_id when a stable execution_trace_id link is available."
             ),
         ),
         MethodDefinition(

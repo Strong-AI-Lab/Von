@@ -248,6 +248,7 @@ class DurableWorkflowWorker:
             error: str,
             error_step: str | None = None,
             increment_retry: bool = True,
+            execution_trace_id: str | None = None,
         ) -> None:
             try:
                 self._instance_manager.mark_failed(
@@ -255,6 +256,7 @@ class DurableWorkflowWorker:
                     error=error,
                     error_step=error_step,
                     increment_retry=increment_retry,
+                    execution_trace_id=execution_trace_id,
                 )
             except Exception:
                 logger.exception(
@@ -308,6 +310,7 @@ class DurableWorkflowWorker:
                     instance_id,
                     outputs=result.data,
                     final_state=result.final_state,
+                    execution_trace_id=result.execution_trace_id,
                 )
                 if self._on_instance_completed:
                     try:
@@ -324,6 +327,7 @@ class DurableWorkflowWorker:
                 _best_effort_mark_failed(
                     error=result.error or "unknown_error",
                     error_step=result.final_state,
+                    execution_trace_id=result.execution_trace_id,
                 )
                 if self._on_instance_failed:
                     try:

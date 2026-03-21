@@ -38,6 +38,58 @@ def _build_instance(workflow_id: str) -> WorkflowInstance:
     )
 
 
+def test_durable_executor_persists_trace_and_checkpoints_trace_link() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#durable_trace_persistence",
+        initial_state="done",
+        states={
+            "done": WorkflowStateSpec(
+                state_id="done",
+                terminal=True,
+            ),
+        },
+    )
+
+    manager = MagicMock()
+    manager.get_instance.return_value = _build_instance(definition.workflow_id)
+    manager.is_cancelled.return_value = False
+    manager.extend_lock.return_value = True
+    manager.checkpoint.return_value = True
+
+    executor = DurableWorkflowExecutor(registry=ActionRegistry(), instance_manager=manager)
+
+    with (
+        patch(
+            "src.backend.languagemodels.llm_interface.get_llm_client",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "src.backend.languagemodels.llm_interface.get_active_model_name",
+            return_value="test-model",
+        ),
+        patch(
+            "src.backend.workflows.durable.durable_executor.insert_workflow_execution_trace",
+            return_value="trace-1550",
+        ) as insert_trace,
+    ):
+        result = executor.run_durable(
+            "instance-1",
+            definition,
+            resume_from_checkpoint=False,
+        )
+
+    assert result.completed is True
+    assert result.execution_trace_id == "trace-1550"
+    insert_trace.assert_called_once()
+    stored_doc = insert_trace.call_args.args[0]
+    assert stored_doc["instance_id"] == "instance-1"
+    assert any(
+        isinstance(call.kwargs, dict)
+        and call.kwargs.get("execution_trace_id") == "trace-1550"
+        for call in manager.checkpoint.call_args_list
+    )
+
+
 def test_durable_executor_routes_to_on_failure_recovery() -> None:
     """Failed actions should transition via `on_failure` when defined."""
     definition = WorkflowDefinition(

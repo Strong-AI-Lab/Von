@@ -380,6 +380,7 @@ class WorkflowInstance:
             "source_event_type": doc.get("source_event_type"),
             "source_event_id": doc.get("source_event_id"),
             "event_idempotency_key": doc.get("event_idempotency_key"),
+            "execution_trace_id": doc.get("execution_trace_id"),
         }
 
     def to_status_dict(self) -> dict[str, Any]:
@@ -405,6 +406,7 @@ class WorkflowInstance:
                 "source_event_type": self.source_event_type,
                 "source_event_id": self.source_event_id,
                 "event_idempotency_key": self.event_idempotency_key,
+                "execution_trace_id": self.execution_trace_id,
             }
         )
 

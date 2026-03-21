@@ -112,7 +112,10 @@ def test_workflow_execution_routes_roundtrip(app_client):
     data = resp.get_json()
     assert data["execution_id"] == trace.execution_id
 
-    recent = app_client.get("/api/workflows/executions/recent?limit=5")
+    recent = app_client.get(
+        "/api/workflows/executions/recent",
+        query_string={"limit": 5, "workflow_id": "#V#chat_assistant_workflow"},
+    )
     assert recent.status_code == 200
     payload = recent.get_json()
     assert payload["count"] >= 1

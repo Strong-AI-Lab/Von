@@ -39,6 +39,9 @@ def sanitise_for_trace_storage(
     if _depth >= max_depth:
         return "[truncated: max depth reached]"
 
+    if value is None:
+        return None
+
     if isinstance(value, str):
         text = value
         # Redact obvious secrets by keyword presence.
@@ -148,6 +151,7 @@ class WorkflowExecutionTrace:
     start_time: datetime = field(default_factory=_utcnow)
     end_time: Optional[datetime] = None
     status: str = "running"  # running|completed|failed|timeout|cancelled
+    instance_id: Optional[str] = None
     user_namespace: Optional[str] = None
     org_id: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -249,6 +253,7 @@ class WorkflowExecutionTrace:
             "start_time": self.start_time,
             "end_time": self.end_time,
             "status": self.status,
+            "instance_id": self.instance_id,
             "user_namespace": self.user_namespace,
             "org_id": self.org_id,
             "metadata": self.metadata,

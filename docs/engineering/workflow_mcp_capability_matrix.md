@@ -23,8 +23,11 @@ available. It prevents ambiguous "missing tool" behaviour across MCP surfaces.
 | `workflow_set_event_binding_enabled` | Yes | Yes | No |
 | `workflow_delete_event_binding` | Yes | Yes | No |
 | `workflow_create_instance` | Yes | Yes | No |
+| `workflow_execute` | Yes | Yes | No |
 | `workflow_list_instances` | Yes | Yes | No |
+| `workflow_list_execution_traces` | Yes | Yes | No |
 | `workflow_get_instance` | Yes | Yes | No |
+| `workflow_get_execution_trace` | Yes | Yes | No |
 | `workflow_cancel_instance` | Yes | Yes | No |
 | `workflow_retry_instance` | Yes | Yes | No |
 | `workflow_create_schedule` | Yes | Yes | No |

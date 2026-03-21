@@ -207,6 +207,7 @@ class TestWorkflowInstance:
             org_id="org-1",
             namespace="user-1/org-1",
         )
+        instance.execution_trace_id = "trace-status-1"
 
         status_dict = instance.to_status_dict()
 
@@ -214,6 +215,7 @@ class TestWorkflowInstance:
         assert status_dict["status"] == "pending"
         assert "created_at" in status_dict
         assert status_dict["has_outputs"] is False
+        assert status_dict["execution_trace_id"] == "trace-status-1"
 
     def test_event_fields_roundtrip(self) -> None:
         """Event linkage fields should survive model serialisation."""
@@ -551,6 +553,7 @@ class TestWorkflowInstanceManager:
             instance_id,
             outputs={"result": "done"},
             final_state="end_state",
+            execution_trace_id="trace-1550",
         )
 
         assert success is True
@@ -559,6 +562,7 @@ class TestWorkflowInstanceManager:
         assert instance is not None
         assert instance.status == WorkflowInstanceStatus.COMPLETED
         assert instance.outputs == {"result": "done"}
+        assert instance.execution_trace_id == "trace-1550"
         assert instance.completed_at is not None
 
     def test_mark_failed_updates_status(self) -> None:
@@ -576,6 +580,7 @@ class TestWorkflowInstanceManager:
             instance_id,
             error="Something went wrong",
             error_step="action_3",
+            execution_trace_id="trace-failed-1",
         )
 
         assert success is True
@@ -585,6 +590,7 @@ class TestWorkflowInstanceManager:
         assert instance.status == WorkflowInstanceStatus.FAILED
         assert instance.error == "Something went wrong"
         assert instance.error_step == "action_3"
+        assert instance.execution_trace_id == "trace-failed-1"
         assert instance.retry_count == 1
 
     def test_mark_cancelled_updates_status(self) -> None:

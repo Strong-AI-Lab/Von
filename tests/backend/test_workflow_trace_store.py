@@ -64,3 +64,9 @@ def test_trace_store_roundtrip_and_redaction(mock_db_env):
 
     recent = list_recent_workflow_execution_traces(limit=10)
     assert any(item.get("execution_id") == trace.execution_id for item in recent)
+
+    filtered = list_recent_workflow_execution_traces(
+        limit=10,
+        workflow_id="#V#chat_assistant_workflow",
+    )
+    assert any(item.get("execution_id") == trace.execution_id for item in filtered)

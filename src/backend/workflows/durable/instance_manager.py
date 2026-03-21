@@ -59,6 +59,7 @@ _WORKFLOW_INSTANCE_STATUS_SUMMARY_PROJECTION: dict[str, Any] = {
     "source_event_type": 1,
     "source_event_id": 1,
     "event_idempotency_key": 1,
+    "execution_trace_id": 1,
     "has_outputs": {"$ne": [{"$ifNull": ["$outputs", None]}, None]},
 }
 
@@ -901,6 +902,7 @@ class WorkflowInstanceManager:
         progress_current: int | None = None,
         progress_total: int | None = None,
         progress_message: str | None = None,
+        execution_trace_id: str | None = None,
     ) -> bool:
         """Persist checkpoint data for an instance.
 
@@ -942,9 +944,16 @@ class WorkflowInstanceManager:
             update["$set"]["progress_total"] = progress_total
         if progress_message is not None:
             update["$set"]["progress_message"] = progress_message
+        if execution_trace_id is not None:
+            update["$set"]["execution_trace_id"] = execution_trace_id
         if any(
             field is not None
-            for field in (progress_current, progress_total, progress_message)
+            for field in (
+                progress_current,
+                progress_total,
+                progress_message,
+                execution_trace_id,
+            )
         ):
             update["$set"]["progress_updated_at"] = datetime.now(timezone.utc)
 
@@ -968,6 +977,7 @@ class WorkflowInstanceManager:
         *,
         outputs: dict[str, Any] | None = None,
         final_state: str | None = None,
+        execution_trace_id: str | None = None,
     ) -> bool:
         """Mark an instance as completed.
 
@@ -999,6 +1009,8 @@ class WorkflowInstanceManager:
             update["$set"]["outputs"] = outputs
         if final_state is not None:
             update["$set"]["current_state"] = final_state
+        if execution_trace_id is not None:
+            update["$set"]["execution_trace_id"] = execution_trace_id
 
         result = coll.update_one({"instance_id": instance_id}, update)
         if result.modified_count > 0:
@@ -1022,6 +1034,7 @@ class WorkflowInstanceManager:
         error: str,
         error_step: str | None = None,
         increment_retry: bool = True,
+        execution_trace_id: str | None = None,
     ) -> bool:
         """Mark an instance as failed.
 
@@ -1053,6 +1066,8 @@ class WorkflowInstanceManager:
         }
         if error_step:
             update["$set"]["error_step"] = error_step
+        if execution_trace_id is not None:
+            update["$set"]["execution_trace_id"] = execution_trace_id
         if increment_retry:
             update["$inc"] = {"retry_count": 1}
 

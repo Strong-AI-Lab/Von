@@ -158,6 +158,7 @@ class _StubInstance:
         self.source_event_type: str | None = None
         self.source_event_id: str | None = None
         self.event_idempotency_key: str | None = None
+        self.execution_trace_id: str | None = None
         self.created_at = datetime.now(timezone.utc)
 
     def to_status_dict(self) -> dict[str, object]:
@@ -168,6 +169,7 @@ class _StubInstance:
             "current_state": self.current_state,
             "step_index": self.step_index,
             "error": self.error,
+            "execution_trace_id": self.execution_trace_id,
         }
 
 
@@ -1069,6 +1071,183 @@ def test_experiment_execute_target_workflow_uses_verified_submission_path(monkey
     assert instance.namespace == "#V#user@org"
     assert instance.inputs == {"fixture_id": "fixture-1"}
     assert instance.max_retries == 2
+
+
+def test_workflow_execute_can_await_terminal_and_inline_trace(monkeypatch):
+    manager = _StubWorkflowManager()
+    _patch_submit_verified_instance_success(monkeypatch)
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+
+    trace_doc = {
+        "execution_id": "trace-1550",
+        "workflow_id": "#V#meeting_invitation_testing_workflow",
+        "instance_id": "#V#wf_instance_1",
+        "status": "completed",
+        "start_time": "2026-03-21T00:00:00+00:00",
+        "end_time": "2026-03-21T00:00:02+00:00",
+        "steps": [{"step_id": "dispatch", "status": "success"}],
+    }
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.execution_observability.get_workflow_execution_trace",
+        lambda execution_id: trace_doc if execution_id == "trace-1550" else None,
+    )
+
+    original_get_instance = manager.get_instance
+
+    def _get_instance(instance_id: str):
+        instance = original_get_instance(instance_id)
+        if instance is not None and instance.status == WorkflowInstanceStatus.PENDING:
+            instance.status = WorkflowInstanceStatus.COMPLETED
+            instance.current_state = "done"
+            instance.outputs = {"result": "ok"}
+            instance.execution_trace_id = "trace-1550"
+            instance.workflow_data = {
+                "workflow_result_envelope": {
+                    "workflow_id": "#V#meeting_invitation_testing_workflow",
+                    "completed": True,
+                    "final_state": "done",
+                },
+                "workflow_step_result_envelopes": [
+                    {
+                        "workflow_id": "#V#meeting_invitation_testing_workflow",
+                        "state_id": "done",
+                        "action_id": "dispatch",
+                    }
+                ],
+                "last_workflow_step_result_envelope": {
+                    "workflow_id": "#V#meeting_invitation_testing_workflow",
+                    "state_id": "done",
+                    "action_id": "dispatch",
+                },
+                "workflow_metadata_validation_events": [
+                    {
+                        "state_id": "done",
+                        "phase": "post_action",
+                        "ok": True,
+                        "applied": True,
+                    }
+                ],
+                "last_metadata_validation": {
+                    "state_id": "done",
+                    "phase": "post_action",
+                    "ok": True,
+                    "applied": True,
+                },
+            }
+        return instance
+
+    manager.get_instance = _get_instance
+    gateway = _build_gateway()
+
+    payload = gateway.invoke(
+        "workflow_execute",
+        {
+            "workflow_id": "#V#meeting_invitation_testing_workflow",
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "namespace": "#V#user@org",
+            "inputs": {"fixture_id": "fixture-1"},
+            "await_terminal": True,
+            "timeout_seconds": 5,
+            "poll_interval_seconds": 0,
+            "include_step_result_envelopes": True,
+            "include_trace": True,
+        },
+    ).payload
+
+    execution = payload.get("workflow_execution") or {}
+    assert payload.get("success") is True
+    assert execution.get("instance_id") == "#V#wf_instance_1"
+    assert execution.get("await_terminal") is True
+    assert execution.get("final_status") == "completed"
+    assert execution.get("poll_count") == 1
+    assert execution.get("timed_out") is False
+    assert execution.get("workflow_result_envelope", {}).get("final_state") == "done"
+    assert execution.get("step_result_envelope_count") == 1
+    assert execution.get("step_result_envelopes", [])[0]["action_id"] == "dispatch"
+    metadata = execution.get("metadata_validation") or {}
+    assert metadata.get("summary", {}).get("event_count") == 1
+    assert execution.get("execution_trace_id") == "trace-1550"
+    assert payload.get("execution_trace", {}).get("execution_id") == "trace-1550"
+
+
+def test_workflow_get_execution_trace_resolves_instance_link(monkeypatch):
+    manager = _StubWorkflowManager()
+    _patch_submit_verified_instance_success(monkeypatch)
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    gateway = _build_gateway()
+
+    created = gateway.invoke(
+        "workflow_create_instance",
+        {
+            "workflow_id": "#V#enrichment_workflow",
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "namespace": "#V#user@org",
+        },
+    ).payload
+    instance_id = created.get("instance_id")
+    assert isinstance(instance_id, str)
+    manager.instances[instance_id].execution_trace_id = "trace-lookup-1"
+
+    monkeypatch.setattr(
+        "src.backend.workflows.get_workflow_execution_trace",
+        lambda execution_id: {
+            "execution_id": execution_id,
+            "workflow_id": "#V#enrichment_workflow",
+            "status": "completed",
+        }
+        if execution_id == "trace-lookup-1"
+        else None,
+    )
+
+    payload = gateway.invoke(
+        "workflow_get_execution_trace",
+        {"instance_id": instance_id},
+    ).payload
+
+    assert payload.get("success") is True
+    assert payload.get("execution_id") == "trace-lookup-1"
+    assert payload.get("execution_trace", {}).get("status") == "completed"
+
+
+def test_workflow_list_execution_traces_returns_bounded_summaries(monkeypatch):
+    gateway = _build_gateway()
+    monkeypatch.setattr(
+        "src.backend.workflows.list_recent_workflow_execution_traces",
+        lambda **kwargs: [
+            {
+                "execution_id": "trace-1",
+                "workflow_id": "#V#workflow_a",
+                "instance_id": "wf-instance-1",
+                "status": "completed",
+                "start_time": "2026-03-21T00:00:00+00:00",
+                "end_time": "2026-03-21T00:00:02+00:00",
+                "state_transitions": [{"from": "a", "to": "b"}],
+                "actions": [{"action_id": "tool.call"}],
+                "steps": [{"step_id": "dispatch", "status": "success"}],
+            }
+        ],
+    )
+
+    payload = gateway.invoke(
+        "workflow_list_execution_traces",
+        {"namespace": "#V#user@org", "workflow_id": "#V#workflow_a", "limit": 5},
+    ).payload
+
+    assert payload.get("success") is True
+    assert payload.get("count") == 1
+    summary = payload.get("execution_traces", [])[0]
+    assert summary["execution_id"] == "trace-1"
+    assert summary["instance_id"] == "wf-instance-1"
+    assert summary["action_count"] == 1
+    assert summary["step_count"] == 1
 
 
 def test_workflow_create_instance_preserves_event_idempotency_submission(monkeypatch):

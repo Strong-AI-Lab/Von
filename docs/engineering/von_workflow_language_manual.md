@@ -960,8 +960,11 @@ Operator-facing discovery rule:
 ### 14.2 Instance Control
 
 - `workflow_create_instance`
+- `workflow_execute`
 - `workflow_list_instances`
+- `workflow_list_execution_traces`
 - `workflow_get_instance`
+- `workflow_get_execution_trace`
 - `workflow_cancel_instance`
 - `workflow_retry_instance`
 
@@ -987,6 +990,19 @@ Workflow instance and schedule creation paths canonicalise namespace context to
 namespace service. Legacy slash-form inputs may still be accepted on read/query
 surfaces or normalised at write boundaries for compatibility, but new
 authoritative workflow launches must not emit fresh `user/org` namespaces.
+
+Awaited durable execution contract:
+
+- `workflow_execute` MUST use the canonical verified submission pathway and MUST NOT introduce a parallel launch bypass.
+- When `await_terminal=true`, `workflow_execute` SHOULD poll the launched durable instance until a terminal status or timeout, then return bounded execution telemetry including:
+  - final/current status,
+  - progress snapshot,
+  - `workflow_result_envelope`,
+  - latest step-result envelope and optional full step-result envelope list,
+  - metadata-validation summary/events,
+  - `execution_trace_id` when available.
+- Durable runs SHOULD persist a workflow execution trace and attach the stable `execution_trace_id` link to the workflow instance row.
+- `workflow_get_execution_trace` and `workflow_list_execution_traces` are the canonical MCP read surfaces for persisted durable execution traces; inline trace expansion from `workflow_execute` is optional and MUST remain bounded/redacted.
 
 ### 14.5 Testing Workflow Theory and Experiment Library
 

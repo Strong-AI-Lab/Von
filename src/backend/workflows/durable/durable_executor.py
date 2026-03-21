@@ -63,6 +63,7 @@ from ..plan_state_runtime import (
     mark_workflow_plan_state_entry,
     mark_workflow_plan_state_resume,
 )
+from ..trace_store import insert_workflow_execution_trace
 from .instance_manager import WorkflowInstanceManager
 from .models import WorkflowInstance, WorkflowInstanceStatus
 
@@ -80,6 +81,7 @@ class DurableWorkflowResult:
     error: str | None = None
     step_count: int = 0
     result_envelope: dict[str, Any] | None = None
+    execution_trace_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to JSON-serialisable dict."""
@@ -91,6 +93,7 @@ class DurableWorkflowResult:
             "error": self.error,
             "step_count": self.step_count,
             "result_envelope": self.result_envelope,
+            "execution_trace_id": self.execution_trace_id,
         }
 
 
@@ -192,8 +195,11 @@ class DurableWorkflowExecutor:
         trace = WorkflowExecutionTrace(
             workflow_id=definition.workflow_id,
             execution_id=str(uuid.uuid4()),
+            instance_id=instance_id,
             user_namespace=instance.namespace,
+            org_id=instance.org_id,
         )
+        persisted_execution_trace_id: str | None = None
 
         # Compute terminal states
         termination_states = set(definition.termination_states) | {
@@ -215,6 +221,11 @@ class DurableWorkflowExecutor:
             checkpoint: bool = False,
             error_step: str | None = None,
         ) -> DurableWorkflowResult:
+            nonlocal persisted_execution_trace_id
+            if persisted_execution_trace_id is None:
+                persisted_execution_trace_id = insert_workflow_execution_trace(
+                    trace.to_storage_document()
+                )
             result_envelope = build_workflow_result_envelope(
                 workflow_id=definition.workflow_id,
                 completed=completed,
@@ -245,6 +256,7 @@ class DurableWorkflowExecutor:
                     progress_current=progress_current_value,
                     progress_total=progress_total_value,
                     progress_message=progress_message_value,
+                    execution_trace_id=persisted_execution_trace_id,
                 )
             return DurableWorkflowResult(
                 instance_id=instance_id,
@@ -254,6 +266,7 @@ class DurableWorkflowExecutor:
                 error=error,
                 step_count=step_index,
                 result_envelope=result_envelope,
+                execution_trace_id=persisted_execution_trace_id,
             )
 
         def _complete_with_gate(final_state: str) -> DurableWorkflowResult:
