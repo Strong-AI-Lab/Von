@@ -350,6 +350,10 @@ def _handle_experiment_execute_target_workflow(
     request: WorkflowActionRequest,
 ) -> WorkflowActionResult:
     from . import WorkflowInstanceManager
+    from .workflow_instance_submission_service import (
+        build_verified_instance_launch_payload,
+        submit_verified_workflow_instance,
+    )
 
     inputs = dict(request.inputs or {})
     actor = _derive_actor_context(request)
@@ -363,9 +367,14 @@ def _handle_experiment_execute_target_workflow(
             outputs={"success": False, "error": "workflow_id_required"},
         )
 
-    workflow_inputs = (
-        dict(inputs.get("workflow_inputs"))
-        if isinstance(inputs.get("workflow_inputs"), Mapping)
+    workflow_inputs_raw = inputs.get("workflow_inputs")
+    workflow_inputs: dict[str, Any] = (
+        {
+            str(key): value
+            for key, value in workflow_inputs_raw.items()
+            if isinstance(key, str) and key.strip()
+        }
+        if isinstance(workflow_inputs_raw, Mapping)
         else {}
     )
     run_id = _safe_str(inputs.get("run_id")) or None
@@ -399,25 +408,26 @@ def _handle_experiment_execute_target_workflow(
         workflow_inputs.setdefault("testing_theory_id", theory_id)
 
     manager = WorkflowInstanceManager()
-    instance_id = manager.create_instance(
-        workflow_id,
+    submission = submit_verified_workflow_instance(
+        manager=manager,
+        workflow_id=workflow_id,
         user_id=actor["user_id"] or "anonymous",
         org_id=actor["org_id"] or "default",
         namespace=actor["namespace"] or "#V#anonymous@default",
         inputs=workflow_inputs,
         max_retries=int(inputs.get("max_retries", 1) or 1),
     )
-    payload = {
-        "success": True,
-        "workflow_id": workflow_id,
-        "instance_id": instance_id,
-        "workflow_execution": {
-            "workflow_id": workflow_id,
-            "instance_id": instance_id,
-            "launch_mode": "durable_instance",
-            "workflow_inputs": workflow_inputs,
-        },
-    }
+    payload = build_verified_instance_launch_payload(
+        submission,
+        workflow_inputs=workflow_inputs,
+    )
+    instance_id = _safe_str(payload.get("instance_id"))
+    if not submission.success or not instance_id:
+        return WorkflowActionResult(
+            status="failed",
+            error=_safe_str(payload.get("error")) or "workflow_submission_failed",
+            outputs=payload,
+        )
 
     if not await_terminal:
         return WorkflowActionResult(status="success", outputs=payload)

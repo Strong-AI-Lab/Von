@@ -124,10 +124,10 @@ def test_verify_workflow_runnable_rejects_initial_vacuous_step() -> None:
         "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_process_graph",
         return_value=(graph, []),
     ), patch(
-        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_registry_read_only",
+        "src.backend.workflows.durable.registry_factory.build_workflow_registry_read_only",
         return_value=_make_registry(_make_definition(include_action=False)),
     ), patch(
-        "src.backend.workflows.durable.workflow_instance_submission_service.build_durable_action_registry",
+        "src.backend.workflows.durable.registry_factory.build_durable_action_registry",
         return_value=_make_action_registry(supports_action=True),
     ):
         verification = verify_workflow_runnable("#V#candidate_workflow")
@@ -195,10 +195,10 @@ def test_verify_workflow_runnable_reports_previous_step_context_for_middle_vacui
         "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_process_graph",
         return_value=(graph, []),
     ), patch(
-        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_registry_read_only",
+        "src.backend.workflows.durable.registry_factory.build_workflow_registry_read_only",
         return_value=_make_registry(definition),
     ), patch(
-        "src.backend.workflows.durable.workflow_instance_submission_service.build_durable_action_registry",
+        "src.backend.workflows.durable.registry_factory.build_durable_action_registry",
         return_value=_make_action_registry(supports_action=True),
     ):
         verification = verify_workflow_runnable("#V#candidate_workflow")
@@ -232,10 +232,10 @@ def test_verify_workflow_runnable_allows_workflows_with_contracts() -> None:
         "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_process_graph",
         return_value=(graph, []),
     ), patch(
-        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_registry_read_only",
+        "src.backend.workflows.durable.registry_factory.build_workflow_registry_read_only",
         return_value=_make_registry(_make_definition(include_action=True)),
     ), patch(
-        "src.backend.workflows.durable.workflow_instance_submission_service.build_durable_action_registry",
+        "src.backend.workflows.durable.registry_factory.build_durable_action_registry",
         return_value=_make_action_registry(supports_action=True),
     ):
         verification = verify_workflow_runnable("#V#candidate_workflow")
@@ -278,10 +278,10 @@ def test_verify_workflow_runnable_rejects_missing_transition_from_action_state()
         "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_process_graph",
         return_value=(graph, []),
     ), patch(
-        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_registry_read_only",
+        "src.backend.workflows.durable.registry_factory.build_workflow_registry_read_only",
         return_value=_make_registry(definition),
     ), patch(
-        "src.backend.workflows.durable.workflow_instance_submission_service.build_durable_action_registry",
+        "src.backend.workflows.durable.registry_factory.build_durable_action_registry",
         return_value=_make_action_registry(supports_action=True),
     ):
         verification = verify_workflow_runnable("#V#candidate_workflow")
@@ -331,10 +331,10 @@ def test_verify_workflow_runnable_accepts_shared_conversation_actions_via_fallba
         "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_process_graph",
         return_value=(graph, []),
     ), patch(
-        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_registry_read_only",
+        "src.backend.workflows.durable.registry_factory.build_workflow_registry_read_only",
         return_value=_make_registry(definition),
     ), patch(
-        "src.backend.workflows.durable.workflow_instance_submission_service.build_durable_action_registry",
+        "src.backend.workflows.durable.registry_factory.build_durable_action_registry",
         return_value=_make_action_registry(supports_action=False, fallback=True),
     ), patch(
         "src.backend.workflows.durable.workflow_instance_submission_service._internal_mcp_method_names",
@@ -371,10 +371,10 @@ def test_verify_workflow_runnable_caches_for_identical_definition() -> None:
         "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_process_graph",
         return_value=(graph, []),
     ) as mock_graph, patch(
-        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_registry_read_only",
+        "src.backend.workflows.durable.registry_factory.build_workflow_registry_read_only",
         return_value=registry,
     ), patch(
-        "src.backend.workflows.durable.workflow_instance_submission_service.build_durable_action_registry",
+        "src.backend.workflows.durable.registry_factory.build_durable_action_registry",
         return_value=action_registry,
     ), patch(
         "src.backend.workflows.durable.workflow_instance_submission_service._internal_mcp_method_names",
@@ -412,10 +412,10 @@ def test_verify_workflow_runnable_cache_invalidation_forces_recompute() -> None:
         "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_process_graph",
         return_value=(graph, []),
     ) as mock_graph, patch(
-        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_registry_read_only",
+        "src.backend.workflows.durable.registry_factory.build_workflow_registry_read_only",
         return_value=registry,
     ), patch(
-        "src.backend.workflows.durable.workflow_instance_submission_service.build_durable_action_registry",
+        "src.backend.workflows.durable.registry_factory.build_durable_action_registry",
         return_value=action_registry,
     ), patch(
         "src.backend.workflows.durable.workflow_instance_submission_service._internal_mcp_method_names",
@@ -438,7 +438,7 @@ def test_verify_workflow_runnable_fail_closed_on_registry_exception() -> None:
         workflow_id="#V#candidate_workflow",
     )
     with patch(
-        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_registry_read_only",
+        "src.backend.workflows.durable.registry_factory.build_workflow_registry_read_only",
         side_effect=RuntimeError("registry unavailable"),
     ):
         verification = verify_workflow_runnable("#V#candidate_workflow")
@@ -499,10 +499,10 @@ def test_verify_workflow_runnable_reports_unresolved_subworkflow_contract() -> N
         "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_process_graph",
         return_value=(graph, []),
     ), patch(
-        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_registry_read_only",
+        "src.backend.workflows.durable.registry_factory.build_workflow_registry_read_only",
         return_value=_make_registry(parent_definition),
     ), patch(
-        "src.backend.workflows.durable.workflow_instance_submission_service.build_durable_action_registry",
+        "src.backend.workflows.durable.registry_factory.build_durable_action_registry",
         return_value=_make_action_registry(supports_action=True),
     ), patch(
         "src.backend.workflows.durable.workflow_instance_submission_service.load_workflow_definition_from_vontology",
@@ -590,13 +590,13 @@ def test_verify_workflow_runnable_accepts_resolved_subworkflow_contract() -> Non
         "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_process_graph",
         return_value=(graph, []),
     ), patch(
-        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_registry_read_only",
+        "src.backend.workflows.durable.registry_factory.build_workflow_registry_read_only",
         return_value=_make_registry(
             parent_definition,
             extra_definitions={"#V#child_workflow": child_definition},
         ),
     ), patch(
-        "src.backend.workflows.durable.workflow_instance_submission_service.build_durable_action_registry",
+        "src.backend.workflows.durable.registry_factory.build_durable_action_registry",
         return_value=_make_action_registry(supports_action=True),
     ), patch(
         "src.backend.workflows.durable.workflow_instance_submission_service.load_workflow_definition_from_vontology",

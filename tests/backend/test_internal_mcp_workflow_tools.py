@@ -1027,6 +1027,46 @@ def test_workflow_create_instance_normalises_inputs(monkeypatch):
     assert instance.max_retries == 50
 
 
+def test_experiment_execute_target_workflow_uses_verified_submission_path(monkeypatch):
+    manager = _StubWorkflowManager()
+    _patch_submit_verified_instance_success(monkeypatch)
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    gateway = _build_gateway()
+
+    payload = gateway.invoke(
+        "experiment_execute_target_workflow",
+        {
+            "workflow_id": "#V#meeting_invitation_testing_workflow",
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "namespace": "#V#user@org",
+            "workflow_inputs": {"fixture_id": "fixture-1"},
+            "max_retries": 2,
+        },
+    ).payload
+
+    assert payload.get("success") is True
+    assert payload.get("workflow_id") == "#V#meeting_invitation_testing_workflow"
+    instance_id = payload.get("instance_id")
+    assert isinstance(instance_id, str)
+    assert payload.get("workflow_execution") == {
+        "workflow_id": "#V#meeting_invitation_testing_workflow",
+        "instance_id": instance_id,
+        "launch_mode": "durable_instance",
+        "workflow_inputs": {"fixture_id": "fixture-1"},
+    }
+
+    instance = manager.instances[instance_id]
+    assert instance.user_id == "#V#user"
+    assert instance.org_id == "#V#org"
+    assert instance.namespace == "#V#user@org"
+    assert instance.inputs == {"fixture_id": "fixture-1"}
+    assert instance.max_retries == 2
+
+
 def test_workflow_create_instance_preserves_event_idempotency_submission(monkeypatch):
     manager = _StubWorkflowManager()
     _patch_submit_verified_instance_success(monkeypatch)

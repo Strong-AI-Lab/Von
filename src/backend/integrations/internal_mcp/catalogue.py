@@ -9094,6 +9094,10 @@ def _experiment_emit_learning_signal(**kwargs):
 
 def _experiment_execute_target_workflow(**kwargs):
     from ...workflows.durable import WorkflowInstanceManager
+    from ...workflows.durable.workflow_instance_submission_service import (
+        build_verified_instance_launch_payload,
+        submit_verified_workflow_instance,
+    )
 
     workflow_id = str(kwargs.get("workflow_id") or "").strip()
     if not workflow_id:
@@ -9107,8 +9111,9 @@ def _experiment_execute_target_workflow(**kwargs):
     if not isinstance(workflow_inputs, Mapping):
         workflow_inputs = {}
     manager = WorkflowInstanceManager()
-    instance_id = manager.create_instance(
-        workflow_id,
+    submission = submit_verified_workflow_instance(
+        manager=manager,
+        workflow_id=workflow_id,
         user_id=str(kwargs.get("user_id") or "anonymous").strip() or "anonymous",
         org_id=str(kwargs.get("org_id") or "default").strip() or "default",
         namespace=str(kwargs.get("namespace") or "#V#anonymous@default").strip()
@@ -9116,17 +9121,10 @@ def _experiment_execute_target_workflow(**kwargs):
         inputs=dict(workflow_inputs),
         max_retries=int(kwargs.get("max_retries", 1)),
     )
-    return {
-        "success": True,
-        "workflow_id": workflow_id,
-        "instance_id": instance_id,
-        "workflow_execution": {
-            "workflow_id": workflow_id,
-            "instance_id": instance_id,
-            "launch_mode": "durable_instance",
-            "workflow_inputs": dict(workflow_inputs),
-        },
-    }
+    return build_verified_instance_launch_payload(
+        submission,
+        workflow_inputs=dict(workflow_inputs),
+    )
 
 
 def _experiment_execute_regression_suite(**kwargs):

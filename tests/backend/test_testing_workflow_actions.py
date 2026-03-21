@@ -31,6 +31,43 @@ from src.backend.workflows.durable.testing_workflow_actions import (
 )
 
 
+def _patch_submit_verified_instance_success(monkeypatch, manager: _StubWorkflowManager) -> None:
+    from src.backend.workflows.durable.workflow_instance_submission_service import (
+        WorkflowInstanceSubmissionResult,
+    )
+
+    def _fake_submit_verified_workflow_instance(**kwargs):
+        workflow_id = str(kwargs.get("workflow_id") or "").strip()
+        instance_id = manager.create_instance(
+            workflow_id,
+            user_id=str(kwargs.get("user_id") or "anonymous").strip() or "anonymous",
+            org_id=str(kwargs.get("org_id") or "default").strip() or "default",
+            namespace=str(kwargs.get("namespace") or "#V#anonymous@default").strip()
+            or "#V#anonymous@default",
+            inputs=dict(kwargs.get("inputs") or {}),
+            max_retries=int(kwargs.get("max_retries", 1) or 1),
+        )
+        return WorkflowInstanceSubmissionResult(
+            success=True,
+            workflow_id=workflow_id,
+            status="pending",
+            instance_id=instance_id,
+            verification={
+                "preflight_passed": True,
+                "postflight_passed": True,
+                "runnable_verification_success": True,
+                "preflight": {"errors": []},
+                "postflight": {"errors": []},
+            },
+            created_new=True,
+        )
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.workflow_instance_submission_service.submit_verified_workflow_instance",
+        _fake_submit_verified_workflow_instance,
+    )
+
+
 @dataclass
 class _StubWorkflowManager:
     last_call: dict[str, Any] | None = None
@@ -152,6 +189,7 @@ def test_execute_target_workflow_action_launches_durable_instance(monkeypatch):
         "src.backend.workflows.durable.WorkflowInstanceManager",
         lambda: manager,
     )
+    _patch_submit_verified_instance_success(monkeypatch, manager)
 
     registry = ActionRegistry()
     register_testing_workflow_actions(registry)
@@ -212,6 +250,7 @@ def test_execute_target_workflow_action_can_await_terminal_and_record_observatio
         "src.backend.workflows.durable.WorkflowInstanceManager",
         lambda: manager,
     )
+    _patch_submit_verified_instance_success(monkeypatch, manager)
     monkeypatch.setattr(
         mod,
         "record_experiment_observation",

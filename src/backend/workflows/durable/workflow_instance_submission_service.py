@@ -122,6 +122,38 @@ class WorkflowInstanceSubmissionResult:
         return payload
 
 
+def build_verified_instance_launch_payload(
+    submission: WorkflowInstanceSubmissionResult,
+    *,
+    workflow_inputs: Mapping[str, Any] | None = None,
+    launch_mode: str = "durable_instance",
+) -> Dict[str, Any]:
+    """Add stable workflow-execution payloads without direct instance launches.
+
+    Callers outside the durable submission layer should not need to construct
+    their own instance-launch envelopes, because that encourages bypassing the
+    verified submission pathway and regressing workflow-purity invariants.
+    """
+
+    payload = submission.to_dict()
+    instance_id = (
+        submission.instance_id
+        if isinstance(submission.instance_id, str) and submission.instance_id.strip()
+        else None
+    )
+    if not submission.success or not instance_id:
+        return payload
+
+    payload["workflow_execution"] = {
+        "workflow_id": submission.workflow_id,
+        "instance_id": instance_id,
+        "launch_mode": str(launch_mode or "durable_instance").strip()
+        or "durable_instance",
+        "workflow_inputs": dict(workflow_inputs or {}),
+    }
+    return payload
+
+
 @dataclass(frozen=True)
 class _RunnableVerificationCacheEntry:
     cache_key: str
@@ -989,6 +1021,7 @@ def submit_verified_workflow_instance(
 
 
 __all__ = [
+    "build_verified_instance_launch_payload",
     "WorkflowRunnableVerification",
     "WorkflowInstanceSubmissionResult",
     "verify_workflow_runnable",
