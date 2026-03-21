@@ -2983,6 +2983,22 @@ def test_non_standard_workflow_routes_via_execute_workflow(monkeypatch):
     """Workflows in the registry but not in the standard set should use execute_workflow."""
 
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    execute_calls: list[dict[str, Any]] = []
+
+    def _execute_workflow(workflow_id: str, **kwargs: Any):
+        execute_calls.append(
+            {
+                "workflow_id": workflow_id,
+                "data": dict(kwargs.get("data") or {}),
+            }
+        )
+        return SimpleNamespace(
+            completed=True,
+            final_state="completed",
+            data={"response_text": "Todo refresh complete."},
+        )
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
 
     # The selector returns #V#todo_refresh_workflow, which IS in the registry.
     # We pass it via workflow_discovery_result so the selector treats it as a
@@ -3021,6 +3037,12 @@ def test_non_standard_workflow_routes_via_execute_workflow(monkeypatch):
         entry.get("type") for entry in result.aux_llm_calls if isinstance(entry, dict)
     ]
     assert "workflow_selector" in aux_types
+    assert len(execute_calls) == 1
+    assert execute_calls[0]["workflow_id"] == TODO_REFRESH_WORKFLOW_ID
+    handoff_data = execute_calls[0]["data"]
+    assert isinstance(handoff_data.get("workflow_discovery_result"), dict)
+    assert isinstance(handoff_data.get("workflow_routing"), dict)
+    assert handoff_data.get("selected_workflow_id") == TODO_REFRESH_WORKFLOW_ID
 
     # Should have a workflow_execution entry (non-standard workflow dispatch).
     execution_entry = next(
