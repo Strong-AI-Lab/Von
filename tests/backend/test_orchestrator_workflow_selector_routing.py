@@ -3190,6 +3190,211 @@ def test_custom_workflow_run_applies_launch_contract_without_workflow_specific_g
     ]
 
 
+def test_custom_workflow_routing_prefers_launchable_discovered_candidate(monkeypatch):
+    import src.backend.services.workflow_selection_policy_service as policy_module
+
+    monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = "#V#non_launchable_custom_workflow"
+    launchable_workflow_id = "#V#launchable_custom_workflow"
+    monkeypatch.setenv("VON_WORKFLOW_SELECTOR_ALLOW_POLICY_UNSAFE", "1")
+
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=selected_workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=selected_workflow_id,
+                initial_state="prepare_spec",
+                states={
+                    "prepare_spec": WorkflowStateSpec(
+                        state_id="prepare_spec",
+                        actions=(
+                            WorkflowActionInvocation(action_id="tool.prepare_spec"),
+                        ),
+                        terminal=True,
+                        metadata={"reads_context_keys": ["target_workflow_ids"]},
+                    )
+                },
+            ),
+            purpose="Non-launchable custom workflow for selector override tests.",
+            source="test",
+        )
+    )
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=launchable_workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=launchable_workflow_id,
+                initial_state="prepare_spec",
+                states={
+                    "prepare_spec": WorkflowStateSpec(
+                        state_id="prepare_spec",
+                        actions=(
+                            WorkflowActionInvocation(action_id="tool.prepare_spec"),
+                        ),
+                        terminal=True,
+                        metadata={"reads_context_keys": ["invitation_text"]},
+                    )
+                },
+                metadata={
+                    "launch_input_contract": {
+                        "schema_version": "workflow_launch_input_contract.v1",
+                        "required_inputs": ["invitation_text"],
+                        "input_mappings": [
+                            {
+                                "target_context_key": "invitation_text",
+                                "source_expression": "inputs.prompt",
+                                "extractor": "first_quoted_text",
+                                "required": True,
+                            },
+                            {
+                                "target_context_key": "candidate_workflow_ids",
+                                "source_expression": "inputs.workflow_discovery_result.matches",
+                                "extractor": "workflow_id_list",
+                            },
+                        ],
+                    },
+                    "launch_input_contract_source": "test_contract",
+                },
+            ),
+            purpose="Launchable custom workflow for selector override tests.",
+            source="test",
+        )
+    )
+
+    captured_execution: dict[str, Any] = {}
+
+    def _run_workflow(
+        workflow_def: WorkflowDefinition,
+        *,
+        data: Mapping[str, Any],
+        **_kwargs: Any,
+    ):
+        captured_execution["workflow_id"] = workflow_def.workflow_id
+        captured_execution["data"] = dict(data)
+        return SimpleNamespace(
+            completed=True,
+            final_state="prepare_spec",
+            error=None,
+            data={"response_text": "Prepared via launchable workflow."},
+        )
+
+    monkeypatch.setattr(orchestrator._workflow_executor, "run", _run_workflow)
+
+    result = orchestrator.run(
+        prompt=(
+            'Run a meeting-invitation test on this invitation text:\n\n'
+            '"Kia ora team, please join us on Tuesday at 2:00pm in Room 4 '
+            'for a project planning meeting about the Q2 roadmap."'
+        ),
+        context=[],
+        llm_client=_CapturingLLM([selected_workflow_id]),
+        model=None,
+        user_namespace="#V#user@org",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Non-launchable custom workflow",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                },
+                {
+                    "concept_id": launchable_workflow_id,
+                    "name": "Launchable custom workflow",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                },
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Non-launchable custom workflow",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                },
+                {
+                    "concept_id": launchable_workflow_id,
+                    "name": "Launchable custom workflow",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                },
+            ],
+            "match_count": 2,
+        },
+        conversation_session_id="chat-launch-override",
+        turn_id="turn-launch-override",
+    )
+
+    assert result.response_text == "Prepared via launchable workflow."
+    assert captured_execution["workflow_id"] == launchable_workflow_id
+
+    captured_data = captured_execution["data"]
+    assert captured_data["selected_workflow_id"] == launchable_workflow_id
+    assert captured_data["invitation_text"] == (
+        "Kia ora team, please join us on Tuesday at 2:00pm in Room 4 for a "
+        "project planning meeting about the Q2 roadmap."
+    )
+
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.workflow_id == launchable_workflow_id
+    assert result.workflow_routing.verdict == "launch_contract_override"
+    assert result.workflow_routing.source == "selector_override"
+
+    override_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_selector_override"
+            and entry.get("reason")
+            == "selected_custom_workflow_not_launchable_from_turn_inputs"
+        ),
+        None,
+    )
+    assert override_entry is not None
+    assert override_entry.get("prior_selected_workflow_id") == selected_workflow_id
+    assert override_entry.get("selected_workflow_id") == launchable_workflow_id
+
+    launch_viability_probe = override_entry.get("launch_viability_probe")
+    assert isinstance(launch_viability_probe, dict)
+
+    prior_probe = launch_viability_probe.get("prior_selected_workflow")
+    assert isinstance(prior_probe, dict)
+    assert prior_probe.get("launchable") is False
+    assert prior_probe.get("launch_input_resolution", {}).get("status") == "no_contract"
+    assert (
+        prior_probe.get("pre_action_validation", {}).get("reason_code")
+        == "metadata_read_context_key_missing"
+    )
+    assert (
+        prior_probe.get("pre_action_validation", {}).get("symbol")
+        == "target_workflow_ids"
+    )
+
+    replacement_probe = launch_viability_probe.get("replacement_workflow")
+    assert isinstance(replacement_probe, dict)
+    assert replacement_probe.get("launchable") is True
+    assert (
+        replacement_probe.get("launch_input_resolution", {}).get("status")
+        == "resolved"
+    )
+
+    dispatch_boundaries = [
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict) and entry.get("type") == "workflow_dispatch_boundary"
+    ]
+    assert [entry.get("boundary") for entry in dispatch_boundaries[-3:]] == [
+        "execution_mode_selected",
+        "workflow_handoff",
+        "workflow_terminal",
+    ]
+    assert dispatch_boundaries[-3].get("selected_workflow_id") == launchable_workflow_id
+    assert dispatch_boundaries[-2].get("selected_workflow_id") == launchable_workflow_id
+    assert dispatch_boundaries[-1].get("selected_workflow_id") == launchable_workflow_id
+
+
 def test_custom_workflow_first_step_failure_projects_terminal_locality(monkeypatch):
     import src.backend.services.workflow_selection_policy_service as policy_module
 
