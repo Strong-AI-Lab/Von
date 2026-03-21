@@ -410,6 +410,7 @@ Per-state metadata keys currently used:
 - `writes_context_keys`
 - `context_input_mappings`
 - `tool_output_context_mappings`
+- `launch_input_contract`
 - `subworkflow_contract`
 - `invokes_workflow`
 - `retry_policy`
@@ -434,6 +435,7 @@ Workflow-level long-horizon policy payloads are stored as singleton text relatio
 
 - `#V#hasWorkflowPlanStatePolicyJson`
 - `#V#hasWorkflowCompletionGateJson`
+- `#V#hasWorkflowLaunchInputContractJson`
 
 Current schema versions:
 
@@ -443,6 +445,7 @@ Current schema versions:
 - `workflow_step_checkpoint_policy.v1`
 - `workflow_plan_state_policy.v1`
 - `workflow_completion_gate.v1`
+- `workflow_launch_input_contract.v1`
 
 Normative semantics:
 
@@ -452,7 +455,9 @@ Normative semantics:
 - destructive or otherwise high-risk approval-gated states SHOULD provide an explicit `on_approval_required` route to a blocked terminal or escalation state;
 - checkpoint policies update the shared runtime plan-state artefact rather than introducing workflow-specific Python persistence logic;
 - plan-state items support `pending|in_progress|blocked|done` statuses, bounded checkpoint history, periodic summary snapshots, resumable cursor snapshots, and resume telemetry;
-- completion gates MUST fail closed before terminal success when required plan items or required context keys are not satisfied.
+- completion gates MUST fail closed before terminal success when required plan items or required context keys are not satisfied;
+- launch input contracts MAY map invocation-context values into workflow context keys before the initial state executes;
+- launch input contracts MUST remain declarative, so reusable extractors such as quoted-text extraction or workflow-ID list extraction are configured in metadata rather than hard-coded for specific workflow IDs.
 
 Validation phases:
 

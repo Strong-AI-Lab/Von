@@ -26,6 +26,9 @@ from .subworkflow_contracts import (
     WORKFLOW_SUBWORKFLOW_ACTION_ID,
     build_subworkflow_contract,
 )
+from .workflow_launch_input_contracts import (
+    normalise_workflow_launch_input_contract,
+)
 from .workflow_action_contracts import resolve_workflow_action_target
 from .engine import (
     WorkflowDefinition,
@@ -297,6 +300,17 @@ WORKFLOW_COMPLETION_GATE_TEXT_PREDICATE_PRECEDENCE: Tuple[
         "hasWorkflowCompletionGateJson",
         "#V#has_workflow_completion_gate_json",
         "has_workflow_completion_gate_json",
+    ),
+)
+WORKFLOW_LAUNCH_INPUT_CONTRACT_SOURCE_NONE = "none"
+WORKFLOW_LAUNCH_INPUT_CONTRACT_TEXT_PREDICATE_PRECEDENCE: Tuple[
+    Tuple[str, ...], ...
+] = (
+    (
+        "#V#hasWorkflowLaunchInputContractJson",
+        "hasWorkflowLaunchInputContractJson",
+        "#V#has_workflow_launch_input_contract_json",
+        "has_workflow_launch_input_contract_json",
     ),
 )
 WORKFLOW_BACKGROUND_LAUNCH_INTERVAL_SECONDS_TEXT_PREDICATE_PRECEDENCE: Tuple[
@@ -1453,6 +1467,44 @@ def _parse_json_object_text_value(text_value: Any) -> dict[str, Any] | None:
     if isinstance(parsed, Mapping):
         return dict(parsed)
     return None
+
+
+def resolve_workflow_launch_input_contract(
+    workflow_id: str,
+) -> tuple[dict[str, Any] | None, str]:
+    """Resolve launch-time input mappings from workflow text relations."""
+
+    if not isinstance(workflow_id, str) or not workflow_id.strip():
+        return None, WORKFLOW_LAUNCH_INPUT_CONTRACT_SOURCE_NONE
+
+    texts: list[dict[str, Any]] = []
+    try:
+        raw_texts = get_texts_for_concept(workflow_id)
+    except Exception:
+        raw_texts = []
+    if isinstance(raw_texts, list):
+        texts = [item for item in raw_texts if isinstance(item, dict)]
+
+    invalid_sources: list[str] = []
+    for predicate_aliases in WORKFLOW_LAUNCH_INPUT_CONTRACT_TEXT_PREDICATE_PRECEDENCE:
+        for item in texts:
+            predicate = str(item.get("predicate") or "").strip()
+            if predicate not in predicate_aliases:
+                continue
+            raw_payload = _parse_json_object_text_value(item.get("text"))
+            if raw_payload is None:
+                invalid_sources.append(f"text_relation_invalid:{predicate}")
+                continue
+            contract, error = normalise_workflow_launch_input_contract(raw_payload)
+            if contract is not None:
+                return contract, f"text_relation:{predicate}"
+            invalid_sources.append(
+                f"text_relation_invalid:{predicate}:{error or 'invalid_contract'}"
+            )
+
+    if invalid_sources:
+        return None, invalid_sources[0]
+    return None, WORKFLOW_LAUNCH_INPUT_CONTRACT_SOURCE_NONE
 
 
 def _normalise_workflow_publication_lifecycle(
@@ -2826,6 +2878,9 @@ def load_workflow_definition_from_vontology(
     background_launch_policy, background_launch_policy_source = (
         resolve_workflow_background_launch_policy(workflow_id)
     )
+    launch_input_contract, launch_input_contract_source = (
+        resolve_workflow_launch_input_contract(workflow_id)
+    )
     workflow_metadata: Dict[str, Any] = {}
     graph_workflow_metadata = graph.get("workflow_metadata")
     if isinstance(graph_workflow_metadata, Mapping):
@@ -2839,6 +2894,16 @@ def load_workflow_definition_from_vontology(
     ):
         workflow_metadata["background_launch_policy_source"] = (
             background_launch_policy_source
+        )
+    if launch_input_contract is not None:
+        workflow_metadata["launch_input_contract"] = launch_input_contract
+    if (
+        isinstance(launch_input_contract_source, str)
+        and launch_input_contract_source
+        and launch_input_contract_source != WORKFLOW_LAUNCH_INPUT_CONTRACT_SOURCE_NONE
+    ):
+        workflow_metadata["launch_input_contract_source"] = (
+            launch_input_contract_source
         )
     graph_variable_declarations = graph.get("variable_declarations")
     if isinstance(graph_variable_declarations, list) and graph_variable_declarations:

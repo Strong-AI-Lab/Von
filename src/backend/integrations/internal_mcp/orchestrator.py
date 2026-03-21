@@ -66,7 +66,10 @@ from ...workflows.conversation_turn_stage_model import (
     build_conversation_turn_stage_model_snapshot,
     build_conversation_turn_stage_path,
 )
-from ...workflows.engine import WorkflowExecutor
+from ...workflows.engine import WorkflowExecutor, WorkflowResult
+from ...workflows.workflow_launch_input_contracts import (
+    resolve_workflow_launch_inputs,
+)
 from ...workflows.vontology_loader import load_workflow_definition_from_vontology
 from ...workflows.workflow_selector import WorkflowSelector
 from ...workflows.durable.registry_factory import (
@@ -17529,6 +17532,7 @@ class InternalMCPChatOrchestrator:
         workflow_registration = None
         workflow_definition_for_identity = None
         workflow_definition_identity: dict[str, Any] | None = None
+        workflow_def = None
         try:
             from ...workflows.workflow_definition_identity_service import (
                 build_workflow_definition_identity,
@@ -17540,6 +17544,7 @@ class InternalMCPChatOrchestrator:
                 if workflow_registration is not None
                 else self._workflow_registry.get(workflow_id)
             )
+            workflow_def = workflow_definition_for_identity
             workflow_source = (
                 str(getattr(workflow_registration, "source", "") or "").strip()
                 if workflow_registration is not None
@@ -17559,6 +17564,7 @@ class InternalMCPChatOrchestrator:
             workflow_registration = None
             workflow_definition_for_identity = None
             workflow_definition_identity = None
+            workflow_def = None
 
         def _safe_scalar_text(value: Any) -> str | None:
             if not isinstance(value, str):
@@ -18312,6 +18318,88 @@ class InternalMCPChatOrchestrator:
         durable_instance_id: str | None = None
         durable_instance_created_new: bool | None = None
 
+        if workflow_def is None:
+            try:
+                workflow_def = self._workflow_registry.get(workflow_id)
+            except Exception:
+                workflow_def = None
+
+        if workflow_def is not None:
+            workflow_metadata = getattr(workflow_def, "metadata", None)
+            launch_contract = (
+                workflow_metadata.get("launch_input_contract")
+                if isinstance(workflow_metadata, Mapping)
+                else None
+            )
+            launch_contract_source = (
+                workflow_metadata.get("launch_input_contract_source")
+                if isinstance(workflow_metadata, Mapping)
+                else None
+            )
+            launch_resolution = resolve_workflow_launch_inputs(
+                workflow_id=workflow_id,
+                contract=launch_contract if isinstance(launch_contract, Mapping) else None,
+                inputs=data,
+                contract_source=(
+                    str(launch_contract_source).strip()
+                    if isinstance(launch_contract_source, str)
+                    and launch_contract_source.strip()
+                    else None
+                ),
+            )
+            for key, value in launch_resolution.resolved_inputs.items():
+                if key not in data:
+                    data[key] = value
+            data["workflow_launch_input_resolution"] = dict(
+                launch_resolution.diagnostics
+            )
+
+            unresolved_required_inputs = tuple(
+                item
+                for item in launch_resolution.unresolved_required_inputs
+                if isinstance(item, str) and item.strip()
+            )
+            if unresolved_required_inputs:
+                initial_state = (
+                    str(getattr(workflow_def, "initial_state", "") or "").strip() or None
+                )
+                failing_action_id: str | None = None
+                initial_states = getattr(workflow_def, "states", None)
+                if initial_state and isinstance(initial_states, Mapping):
+                    initial_state_spec = initial_states.get(initial_state)
+                    actions = getattr(initial_state_spec, "actions", None)
+                    if isinstance(actions, Sequence) and actions:
+                        first_action = actions[0]
+                        failing_action_id = _safe_scalar_text(
+                            getattr(first_action, "action_id", None)
+                            or getattr(first_action, "target_id", None)
+                        )
+                diagnostics_payload = dict(launch_resolution.diagnostics)
+                diagnostics_payload["failing_state_id"] = initial_state
+                diagnostics_payload["failing_action_id"] = failing_action_id
+                data["workflow_launch_input_resolution"] = diagnostics_payload
+                message = (
+                    f"Workflow {workflow_id} could not start because required launch "
+                    "inputs were unresolved: "
+                    + ", ".join(unresolved_required_inputs)
+                    + "."
+                )
+                if failing_action_id:
+                    message += f" Initial action: {failing_action_id}."
+                return WorkflowResult(
+                    data={
+                        "response_text": message,
+                        "summary": message,
+                        "workflow_launch_input_resolution": diagnostics_payload,
+                    },
+                    completed=False,
+                    final_state=initial_state or "workflow_launch_input_resolution",
+                    error=(
+                        "workflow_launch_input_resolution_failed:"
+                        + ",".join(unresolved_required_inputs)
+                    ),
+                )
+
         def _build_durable_inputs_snapshot() -> dict[str, Any]:
             prompt = data.get("prompt")
             prompt_preview = prompt[:1000] if isinstance(prompt, str) else None
@@ -18330,6 +18418,9 @@ class InternalMCPChatOrchestrator:
                     data.get("workflow_discovery_result")
                 ),
                 "workflow_definition_identity": workflow_definition_identity,
+                "workflow_launch_input_resolution": _safe_mapping_snapshot(
+                    data.get("workflow_launch_input_resolution")
+                ),
                 # Canonical per-turn contract persisted at workflow start.
                 "turn_execution_contract": _build_turn_execution_contract_snapshot(data),
             }
@@ -18398,6 +18489,13 @@ class InternalMCPChatOrchestrator:
             if isinstance(workflow_discovery, Mapping):
                 payload["workflow_discovery_result"] = _safe_mapping_snapshot(
                     workflow_discovery
+                )
+            workflow_launch_input_resolution = workflow_data.get(
+                "workflow_launch_input_resolution"
+            )
+            if isinstance(workflow_launch_input_resolution, Mapping):
+                payload["workflow_launch_input_resolution"] = _safe_mapping_snapshot(
+                    workflow_launch_input_resolution
                 )
 
             turn_execution_outcome = _build_turn_execution_outcome(
@@ -18687,6 +18785,8 @@ class InternalMCPChatOrchestrator:
         workflow_def = (
             workflow_definition_for_identity
             if workflow_definition_for_identity is not None
+            else workflow_def
+            if workflow_def is not None
             else self._workflow_registry.get(workflow_id)
         )
         if workflow_def is None:
@@ -25517,6 +25617,24 @@ class InternalMCPChatOrchestrator:
                     data={
                         "prompt": prompt,
                         "augmented_context": augmented_context,
+                        "workflow_routing": (
+                            asdict(routing_info)
+                            if isinstance(routing_info, WorkflowRoutingInfo)
+                            else None
+                        ),
+                        "workflow_discovery_result": (
+                            dict(workflow_discovery_result)
+                            if isinstance(workflow_discovery_result, Mapping)
+                            else None
+                        ),
+                        "selected_workflow_id": selected_workflow_id_text,
+                        "selected_workflow_name": selected_workflow_name,
+                        "workflow_selector_verdict": selector_verdict or None,
+                        "workflow_selector_source": (
+                            routing_info.source
+                            if isinstance(routing_info, WorkflowRoutingInfo)
+                            else None
+                        ),
                         "user_concept_id": user_concept_id,
                         "org_concept_id": org_concept_id,
                         "gmail_profile": gmail_profile or self._default_gmail_profile,

@@ -65,6 +65,26 @@ def test_bootstrap_materialises_testing_workflow_family(
         definition = load_workflow_definition_from_vontology(workflow_id)
         assert definition is not None
 
+    meeting_definition = load_workflow_definition_from_vontology(
+        MEETING_INVITATION_TESTING_WORKFLOW_ID
+    )
+    assert meeting_definition is not None
+    meeting_launch_contract = meeting_definition.metadata.get("launch_input_contract")
+    assert isinstance(meeting_launch_contract, dict)
+    assert meeting_launch_contract.get("schema_version") == (
+        "workflow_launch_input_contract.v1"
+    )
+    assert meeting_launch_contract.get("required_inputs") == ["invitation_text"]
+    input_mappings = meeting_launch_contract.get("input_mappings")
+    assert isinstance(input_mappings, list)
+    assert any(
+        isinstance(item, dict)
+        and item.get("target_context_key") == "invitation_text"
+        and item.get("source_expression") == "inputs.prompt"
+        and item.get("extractor") == "first_quoted_text"
+        for item in input_mappings
+    )
+
     meeting_concept = concept_service.get_concept_by_concept_id(
         MEETING_INVITATION_TESTING_WORKFLOW_ID
     )

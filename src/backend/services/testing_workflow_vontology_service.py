@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from collections.abc import Sequence
 from typing import Any
 
@@ -821,6 +822,55 @@ def _ensure_workflow_texts(workflow_id: str) -> None:
     )
 
 
+def _workflow_launch_input_contract(workflow_id: str) -> dict[str, Any] | None:
+    if workflow_id != MEETING_INVITATION_TESTING_WORKFLOW_ID:
+        return None
+    return {
+        "schema_version": "workflow_launch_input_contract.v1",
+        "required_inputs": ["invitation_text"],
+        "input_mappings": [
+            {
+                "target_context_key": "invitation_text",
+                "source_expression": "inputs.prompt",
+                "extractor": "first_quoted_text",
+                "required": True,
+                "description": (
+                    "Extract the invitation specimen from the quoted user prompt "
+                    "before preparing the experiment spec."
+                ),
+            },
+            {
+                "target_context_key": "candidate_workflow_ids",
+                "source_expression": "inputs.workflow_discovery_result.matches",
+                "extractor": "workflow_id_list",
+                "required": False,
+                "description": (
+                    "Carry discovered candidate workflow IDs into the experiment "
+                    "context when they are available."
+                ),
+            },
+        ],
+    }
+
+
+def _ensure_workflow_launch_contract(workflow_id: str) -> None:
+    contract = _workflow_launch_input_contract(workflow_id)
+    if contract is None:
+        return
+    upsert_singleton_text_relation(
+        subject_concept_id=workflow_id,
+        predicate="#V#hasWorkflowLaunchInputContractJson",
+        text=json.dumps(contract, ensure_ascii=True, sort_keys=True),
+        lang="en-NZ",
+        context={
+            "source": "JVNAUTOSCI-1556",
+            "workflow_id": workflow_id,
+            "managed_by": _MANAGED_BY,
+        },
+        garbage_collect=True,
+    )
+
+
 def _ensure_step_notes(
     *,
     workflow_id: str,
@@ -916,6 +966,7 @@ def bootstrap_canonical_testing_workflows() -> dict[str, Any]:
             ):
                 typed_workflow_ids.append(workflow_id)
             _ensure_workflow_texts(workflow_id)
+            _ensure_workflow_launch_contract(workflow_id)
             _ensure_step_notes(workflow_id=workflow_id, spec=spec)
 
             for step_concept_id in _step_concept_ids_for_spec(

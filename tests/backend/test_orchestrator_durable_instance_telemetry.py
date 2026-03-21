@@ -12,6 +12,7 @@ from src.backend.workflows.durable.workflow_instance_submission_service import (
     WorkflowInstanceSubmissionResult,
 )
 from src.backend.workflows import (
+    WorkflowActionInvocation,
     WorkflowDefinition,
     WorkflowStateSpec,
 )
@@ -65,6 +66,39 @@ class _FakeWorkflowInstanceManager:
 
 def _build_orchestrator() -> InternalMCPChatOrchestrator:
     return InternalMCPChatOrchestrator(gateway=cast(Any, _DummyGateway()))
+
+
+def _register_test_workflow(
+    orchestrator: InternalMCPChatOrchestrator,
+    *,
+    workflow_id: str,
+    initial_state: str = "ready",
+    terminal: bool = False,
+    metadata: dict[str, Any] | None = None,
+    actions: tuple[WorkflowActionInvocation, ...] = (),
+) -> WorkflowDefinition:
+    workflow_metadata = dict(metadata or {})
+    definition = WorkflowDefinition(
+        workflow_id=workflow_id,
+        initial_state=initial_state,
+        states={
+            initial_state: WorkflowStateSpec(
+                state_id=initial_state,
+                actions=actions,
+                terminal=terminal,
+                metadata=workflow_metadata,
+            )
+        },
+        metadata=workflow_metadata,
+    )
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=workflow_id,
+            definition=definition,
+            source="test",
+        )
+    )
+    return definition
 
 
 def _patch_submit_verified_instance(monkeypatch) -> None:
@@ -130,6 +164,7 @@ def test_execute_workflow_persists_completed_durable_instance_with_turn_summary(
     monkeypatch,
 ) -> None:
     orchestrator = _build_orchestrator()
+    _register_test_workflow(orchestrator, workflow_id="#V#tool_calling_workflow")
     fake_manager = _FakeWorkflowInstanceManager()
     _patch_submit_verified_instance(monkeypatch)
 
@@ -202,6 +237,20 @@ def test_execute_workflow_persists_completed_durable_instance_with_turn_summary(
             "org_concept_id": "#V#org",
             "conversation_session_id": "chat-1",
             "turn_id": "turn-1",
+            "turn_execution_record": {
+                "workflow_selection": {
+                    "selected_workflow_id": "#V#tool_calling_workflow",
+                    "selector_verdict": "tool_seeking",
+                },
+                "workflow_routing_diagnostics": {
+                    "schema_version": "workflow_routing_diagnostics.v1",
+                    "selected_workflow_id": "#V#tool_calling_workflow",
+                    "dispatch": {
+                        "selected_execution_mode": "tool_pipeline",
+                        "last_successful_boundary": "workflow_terminal",
+                    },
+                },
+            },
             "workflow_routing": {
                 "workflow_id": "#V#tool_calling_workflow",
                 "verdict": "tool_seeking",
@@ -310,6 +359,7 @@ def test_execute_workflow_marks_durable_instance_failed_on_exception(
     monkeypatch,
 ) -> None:
     orchestrator = _build_orchestrator()
+    _register_test_workflow(orchestrator, workflow_id="#V#tool_calling_workflow")
     fake_manager = _FakeWorkflowInstanceManager()
     _patch_submit_verified_instance(monkeypatch)
 
@@ -383,23 +433,12 @@ def test_execute_workflow_materialises_terminal_effect_evidence_on_gateway_path(
     terminal_effect_id = (
         "#V#workflow_effect_terminal_effect_gateway_workflow_done_terminal"
     )
-    definition = WorkflowDefinition(
+    _register_test_workflow(
+        orchestrator,
         workflow_id=workflow_id,
         initial_state="done",
-        states={
-            "done": WorkflowStateSpec(
-                state_id="done",
-                terminal=True,
-                metadata={"effects": [terminal_effect_id]},
-            )
-        },
-    )
-    orchestrator._workflow_registry.register_or_replace(
-        WorkflowRegistration(
-            workflow_id=workflow_id,
-            definition=definition,
-            source="test",
-        )
+        terminal=True,
+        metadata={"effects": [terminal_effect_id]},
     )
 
     result = orchestrator.execute_workflow(
@@ -429,3 +468,183 @@ def test_execute_workflow_materialises_terminal_effect_evidence_on_gateway_path(
     outputs = fake_manager.mark_completed_calls[0].get("outputs")
     assert isinstance(outputs, dict)
     assert outputs.get("completed") is True
+
+
+def test_execute_workflow_applies_launch_input_contract_before_run(
+    monkeypatch,
+) -> None:
+    orchestrator = _build_orchestrator()
+    fake_manager = _FakeWorkflowInstanceManager()
+    _patch_submit_verified_instance(monkeypatch)
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: fake_manager,
+    )
+
+    workflow_id = "#V#launch_input_contract_workflow"
+    _register_test_workflow(
+        orchestrator,
+        workflow_id=workflow_id,
+        initial_state="prepare",
+        terminal=True,
+        actions=(WorkflowActionInvocation(action_id="tool.prepare"),),
+        metadata={
+            "launch_input_contract": {
+                "schema_version": "workflow_launch_input_contract.v1",
+                "required_inputs": ["invitation_text"],
+                "input_mappings": [
+                    {
+                        "target_context_key": "invitation_text",
+                        "source_expression": "inputs.prompt",
+                        "extractor": "first_quoted_text",
+                        "required": True,
+                    },
+                    {
+                        "target_context_key": "candidate_workflow_ids",
+                        "source_expression": "inputs.workflow_discovery_result.matches",
+                        "extractor": "workflow_id_list",
+                    },
+                ],
+            },
+            "launch_input_contract_source": "test_contract",
+        },
+    )
+
+    captured_data: dict[str, Any] = {}
+
+    def _run(*_args: Any, **kwargs: Any):
+        captured_data.update(dict(kwargs.get("data") or {}))
+        return SimpleNamespace(
+            completed=True,
+            final_state="prepare",
+            error=None,
+            data={"response_text": "Prepared."},
+        )
+
+    monkeypatch.setattr(orchestrator._workflow_executor, "run", _run)
+
+    result = orchestrator.execute_workflow(
+        workflow_id,
+        data={
+            "prompt": (
+                'Run a meeting-invitation test on this invitation text:\n\n'
+                '"Kia ora team, please join us on Tuesday at 2:00pm in Room 4 '
+                'for a project planning meeting about the Q2 roadmap."'
+            ),
+            "workflow_discovery_result": {
+                "matches": [
+                    {"concept_id": "#V#meeting_invitation_testing_workflow"},
+                    {"concept_id": "#V#synthetic_workflow_regression_suite_workflow"},
+                ]
+            },
+            "user_concept_id": "#V#user",
+            "org_concept_id": "#V#org",
+            "conversation_session_id": "chat-launch",
+            "turn_id": "turn-launch",
+        },
+        llm_client=object(),
+        model="test-model",
+        user_namespace="#V#user@org",
+        conversation_session_id="chat-launch",
+        turn_id="turn-launch",
+        episode_source="chat_turn_workflow",
+    )
+
+    assert result is not None
+    assert result.completed is True
+    assert captured_data["invitation_text"] == (
+        "Kia ora team, please join us on Tuesday at 2:00pm in Room 4 for a "
+        "project planning meeting about the Q2 roadmap."
+    )
+    assert captured_data["candidate_workflow_ids"] == [
+        "#V#meeting_invitation_testing_workflow",
+        "#V#synthetic_workflow_regression_suite_workflow",
+    ]
+    launch_resolution = captured_data.get("workflow_launch_input_resolution")
+    assert isinstance(launch_resolution, dict)
+    assert launch_resolution.get("status") == "resolved"
+    assert launch_resolution.get("resolved_inputs") == [
+        "candidate_workflow_ids",
+        "invitation_text",
+    ]
+    assert len(fake_manager.create_for_event_calls) == 1
+    create_inputs = fake_manager.create_for_event_calls[0].get("inputs")
+    assert isinstance(create_inputs, dict)
+    persisted_resolution = create_inputs.get("workflow_launch_input_resolution")
+    assert isinstance(persisted_resolution, dict)
+    assert persisted_resolution.get("status") == "resolved"
+
+
+def test_execute_workflow_fails_closed_when_required_launch_input_unresolved(
+    monkeypatch,
+) -> None:
+    orchestrator = _build_orchestrator()
+    fake_manager = _FakeWorkflowInstanceManager()
+    _patch_submit_verified_instance(monkeypatch)
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: fake_manager,
+    )
+
+    workflow_id = "#V#launch_input_failure_workflow"
+    _register_test_workflow(
+        orchestrator,
+        workflow_id=workflow_id,
+        initial_state="prepare",
+        terminal=True,
+        actions=(WorkflowActionInvocation(action_id="tool.prepare"),),
+        metadata={
+            "launch_input_contract": {
+                "schema_version": "workflow_launch_input_contract.v1",
+                "required_inputs": ["invitation_text"],
+                "input_mappings": [
+                    {
+                        "target_context_key": "invitation_text",
+                        "source_expression": "inputs.prompt",
+                        "extractor": "first_quoted_text",
+                        "required": True,
+                    }
+                ],
+            },
+            "launch_input_contract_source": "test_contract",
+        },
+    )
+
+    def _unexpected_run(*_args: Any, **_kwargs: Any):
+        raise AssertionError(
+            "workflow executor should not run when launch inputs are unresolved"
+        )
+
+    monkeypatch.setattr(orchestrator._workflow_executor, "run", _unexpected_run)
+
+    result = orchestrator.execute_workflow(
+        workflow_id,
+        data={
+            "prompt": "Run the meeting invitation test without a quoted specimen.",
+            "user_concept_id": "#V#user",
+            "org_concept_id": "#V#org",
+            "conversation_session_id": "chat-fail",
+            "turn_id": "turn-fail",
+        },
+        llm_client=object(),
+        model="test-model",
+        user_namespace="#V#user@org",
+        conversation_session_id="chat-fail",
+        turn_id="turn-fail",
+        episode_source="chat_turn_workflow",
+    )
+
+    assert result is not None
+    assert result.completed is False
+    assert result.final_state == "prepare"
+    assert "workflow_launch_input_resolution_failed" in str(result.error)
+    resolution = result.data.get("workflow_launch_input_resolution")
+    assert isinstance(resolution, dict)
+    assert resolution.get("status") == "failed"
+    assert resolution.get("unresolved_required_inputs") == ["invitation_text"]
+    assert resolution.get("failing_state_id") == "prepare"
+    assert resolution.get("failing_action_id") == "tool.prepare"
+    assert "required launch inputs were unresolved" in str(
+        result.data.get("response_text")
+    )
+    assert fake_manager.create_for_event_calls == []
