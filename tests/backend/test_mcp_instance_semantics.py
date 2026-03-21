@@ -312,7 +312,7 @@ class TestSearchDeduplication:
             {"concept_id": cid},
             {
                 "$set": {
-                    "metadata.description": f"This concept is about {unique_term} testing",
+                    "description": f"This concept is about {unique_term} testing",
                     "attributes.description": f"Also mentions {unique_term} here",
                 }
             },

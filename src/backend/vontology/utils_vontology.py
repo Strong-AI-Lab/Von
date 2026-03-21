@@ -416,7 +416,7 @@ def is_pure_instance(node: dict) -> bool:
 def is_thing_concept(node: dict) -> bool:
     """Return True if the node represents the ontology root Thing.
 
-    Checks common identifiers and title/name for an exact 'Thing'.
+    Checks common identifiers and the resolved display name for an exact 'Thing'.
     """
     if not isinstance(node, dict):
         return False
@@ -426,14 +426,6 @@ def is_thing_concept(node: dict) -> bool:
         return True
     title = node.get("name")
     if isinstance(title, str) and title == "Thing":
-        return True
-    # Backward-compat: accept legacy metadata.title strictly equal to 'Thing'
-    meta_title = (node.get("metadata") or {}).get("title")
-    if isinstance(meta_title, str) and meta_title == "Thing":
-        logger.warning(
-            "DEPRECATION: Thing recognized via legacy metadata.title == 'Thing'. "
-            "Please migrate to names[] or concept_id-based detection."
-        )
         return True
     return False
 
@@ -3446,10 +3438,94 @@ def break_cycles_in_import_nodes(nodes: list[dict]) -> dict:
 # that may be stored in different locations (legacy vs. new schema)
 
 
+def _get_attached_preferred_text(
+    concept: Dict[str, Any],
+    *,
+    predicate_precedence: tuple[tuple[str, ...], ...],
+    preferred_languages: tuple[str, ...] = ("en-NZ", "en"),
+) -> Optional[str]:
+    """Resolve preferred text from already-attached text_relations rows."""
+    text_relations = concept.get("text_relations")
+    if not isinstance(text_relations, list):
+        return None
+
+    language_rank = {
+        language.strip().lower(): index
+        for index, language in enumerate(preferred_languages)
+        if isinstance(language, str) and language.strip()
+    }
+    default_language_rank = len(language_rank) + 1
+    candidate_rows: list[dict[str, Any]] = []
+    for row in text_relations:
+        if not isinstance(row, dict):
+            continue
+        text = row.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        language = row.get("lang") or row.get("language")
+        context = row.get("context")
+        if not isinstance(language, str) and isinstance(context, dict):
+            context_language = context.get("language") or context.get("lang")
+            if isinstance(context_language, str):
+                language = context_language
+        candidate_rows.append(
+            {
+                "predicate": str(row.get("predicate") or "").strip(),
+                "text": text.strip(),
+                "language": language.strip().lower()
+                if isinstance(language, str) and language.strip()
+                else "",
+                "relation_id": str(
+                    row.get("relation_id") or row.get("_id") or ""
+                ).strip(),
+            }
+        )
+
+    if not candidate_rows:
+        return None
+
+    def _sort_key(row: dict[str, Any]) -> tuple[int, str, str]:
+        return (
+            language_rank.get(row.get("language") or "", default_language_rank),
+            str(row.get("predicate") or ""),
+            str(row.get("relation_id") or ""),
+        )
+
+    for predicate_group in predicate_precedence:
+        matching_rows = [
+            row
+            for row in candidate_rows
+            if str(row.get("predicate") or "") in predicate_group
+        ]
+        if not matching_rows:
+            continue
+        matching_rows.sort(key=_sort_key)
+        return str(matching_rows[0].get("text") or "").strip() or None
+
+    return None
+
+
 def get_concept_description(concept: Dict[str, Any]) -> Optional[str]:
-    """Get concept description from canonical text relations (fallback legacy fields)."""
+    """Get concept description with explicit relation-first precedence.
+
+    Precedence:
+    1. Attached text_relations rows already loaded with the concept
+    2. Persisted preferred text relations for the concept_id
+    3. Top-level convenience field ``description``
+    4. ``attributes.description``
+    """
     if not concept or not isinstance(concept, dict):
         return None
+
+    attached_description = _get_attached_preferred_text(
+        concept,
+        predicate_precedence=(
+            ("hasDescription", "#V#hasDescription"),
+            ("hasContent", "#V#hasContent"),
+        ),
+    )
+    if attached_description:
+        return attached_description
 
     concept_id = concept.get("concept_id")
     if isinstance(concept_id, str) and concept_id.strip():
@@ -3508,9 +3584,23 @@ def resolve_description_text_for_import(node: Dict[str, Any]) -> Optional[str]:
 
 
 def get_concept_notes(concept: Dict[str, Any]) -> Optional[str]:
-    """Get concept notes from canonical text relations (fallback legacy fields)."""
+    """Get concept notes with explicit relation-first precedence.
+
+    Precedence:
+    1. Attached text_relations rows already loaded with the concept
+    2. Persisted preferred text relations for the concept_id
+    3. Top-level convenience field ``notes``
+    4. ``attributes.notes``
+    """
     if not concept or not isinstance(concept, dict):
         return None
+
+    attached_notes = _get_attached_preferred_text(
+        concept,
+        predicate_precedence=(("hasNote", "#V#hasNote"),),
+    )
+    if attached_notes:
+        return attached_notes
 
     concept_id = concept.get("concept_id")
     if isinstance(concept_id, str) and concept_id.strip():

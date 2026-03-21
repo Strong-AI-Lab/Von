@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
+from ..vontology.utils_vontology import get_concept_description
 from .file_copy_reference_service import extract_file_copy_concept_ids_from_text
 from .file_copy_typing_service import build_file_copy_typing_context
 from .arxiv_paper_link_service import extract_arxiv_id_candidates
@@ -242,41 +243,8 @@ class WorkflowDiscoveryResult:
 
 
 def _get_workflow_description(concept_doc: Dict[str, Any]) -> Optional[str]:
-    """Extract a best-effort description from an already-loaded concept document.
-
-    This helper is only a local fallback for callers that already hold a concept
-    payload. Authoritative workflow discovery should use Vontology text-relation
-    resolvers instead of relying on repository projections. Deprecated
-    ``metadata.description`` remains a last-resort compatibility fallback.
-    """
-    text_relations = concept_doc.get("text_relations", [])
-    if isinstance(text_relations, list):
-        for row in text_relations:
-            if not isinstance(row, dict):
-                continue
-            predicate = str(row.get("predicate") or "").strip()
-            if predicate not in {"#V#hasDescription", "hasDescription"}:
-                continue
-            text = row.get("text")
-            if isinstance(text, str) and text.strip():
-                return text.strip()
-
-    metadata = concept_doc.get("metadata", {})
-    if isinstance(metadata, dict):
-        desc = metadata.get("description")
-        if isinstance(desc, str) and desc.strip():
-            return desc.strip()
-
-    # Try names array text field (legacy)
-    names = concept_doc.get("names", [])
-    if isinstance(names, list):
-        for name_obj in names:
-            if isinstance(name_obj, dict):
-                text = name_obj.get("text")
-                if isinstance(text, str) and text.strip():
-                    return text.strip()
-
-    return None
+    """Resolve workflow description via the shared relation-first accessor."""
+    return get_concept_description(concept_doc)
 
 
 def _get_workflow_name(concept_doc: Dict[str, Any]) -> str:

@@ -155,34 +155,39 @@ class TestWorkflowDiscoveryResult:
 class TestGetWorkflowDescription:
     """Unit tests for _get_workflow_description helper."""
 
-    def test_prefers_text_relations_over_deprecated_metadata_description(self) -> None:
-        """Canonical relation text should outrank deprecated metadata.description."""
+    def test_prefers_text_relations_over_top_level_description(self) -> None:
+        """Canonical relation text should outrank convenience fallback fields."""
         concept_doc = {
             "text_relations": [
                 {"predicate": "hasDescription", "text": "Authoritative description"}
             ],
-            "metadata": {"description": "Deprecated description"},
+            "description": "Fallback description",
         }
         assert _get_workflow_description(concept_doc) == "Authoritative description"
 
-    def test_extracts_from_metadata(self) -> None:
-        """Should extract description from metadata.description field."""
-        concept_doc = {"metadata": {"description": "Workflow description"}}
+    def test_extracts_from_top_level_description(self) -> None:
+        """Should extract description from the convenience description field."""
+        concept_doc = {"description": "Workflow description"}
         assert _get_workflow_description(concept_doc) == "Workflow description"
 
-    def test_extracts_from_names_text(self) -> None:
-        """Should extract from names array text field as fallback."""
-        concept_doc = {"names": [{"text": "Workflow text description"}]}
-        assert _get_workflow_description(concept_doc) == "Workflow text description"
+    def test_extracts_from_attributes_description(self) -> None:
+        """Should extract from attributes.description when needed."""
+        concept_doc = {"attributes": {"description": "Workflow attributes description"}}
+        assert _get_workflow_description(concept_doc) == "Workflow attributes description"
 
     def test_returns_none_when_no_description(self) -> None:
         """Should return None when no description found."""
         concept_doc = {"concept_id": "#V#test"}
         assert _get_workflow_description(concept_doc) is None
 
+    def test_ignores_metadata_description_only_payload(self) -> None:
+        """Deprecated metadata.description should not drive workflow discovery."""
+        concept_doc = {"metadata": {"description": "Deprecated description"}}
+        assert _get_workflow_description(concept_doc) is None
+
     def test_strips_whitespace(self) -> None:
         """Should strip whitespace from description."""
-        concept_doc = {"metadata": {"description": "  trimmed  "}}
+        concept_doc = {"description": "  trimmed  "}
         assert _get_workflow_description(concept_doc) == "trimmed"
 
 

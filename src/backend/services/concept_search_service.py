@@ -12,7 +12,7 @@ Current Features:
 - Kind filtering (type, individual, predicate)
 - Scope filtering (restrict to subtree)
 - Instance filtering (instances of type with descendants)
-- Description search (metadata.description, names.text)
+- Description search (canonical text relations plus compatibility fallbacks)
 - Tag filtering (system_tags, user_tags)
 - Pagination support (page/per_page)
 - Result ranking by relevance
@@ -38,6 +38,7 @@ from ..db.repositories.text_value_repository import (
     TextRelationsRepository,
     TextValuesRepository,
 )
+from .text_value_service import get_preferred_texts_for_concepts
 from ..vontology.utils_vontology import (
     get_vontology_node_and_descendant_ids,
     get_concept_display_name_with_names_fallback,
@@ -47,6 +48,21 @@ from ..vontology.utils_vontology import (
 )
 
 logger = logging.getLogger(__name__)
+
+SEARCH_RESULT_PROJECTION: Dict[str, int] = {
+    "concept_id": 1,
+    "names": 1,
+    "name": 1,
+    "description": 1,
+    "relationships": 1,
+    "attributes": 1,
+    "system_tags": 1,
+    "user_tags": 1,
+}
+DESCRIPTION_TEXT_PREDICATE_PRECEDENCE = (
+    ("hasDescription", "#V#hasDescription"),
+    ("hasContent", "#V#hasContent"),
+)
 
 
 class ConceptSearchError(Exception):
@@ -94,8 +110,9 @@ def _build_name_query(
 ) -> Dict[str, Any]:
     """Build MongoDB query for name/description matching.
 
-    Searches LEGACY fields (names[], metadata.description).
-    For modern text_relations search, use _search_text_relations().
+    Searches convenience fields already present on concept documents.
+    Canonical text-relations search is layered on separately via
+    ``_search_text_relations()``.
 
     Args:
         query: The search string
@@ -135,12 +152,86 @@ def _build_name_query(
         regex = {"$regex": re.escape(query), "$options": "i"}
         base_or.extend(
             [  # type: ignore[arg-type]
-                {"metadata.description": regex},
+                {"description": regex},
+                {"attributes.description": regex},
                 {"names.text": regex},  # Legacy field in names array
             ]
         )
 
     return {"$or": base_or}
+
+
+def _extract_loaded_description_fallback(concept_doc: Dict[str, Any]) -> Optional[str]:
+    """Return non-relation description text already present on a loaded document."""
+    description = concept_doc.get("description")
+    if isinstance(description, str) and description.strip():
+        return description.strip()
+
+    attributes = concept_doc.get("attributes")
+    if isinstance(attributes, dict):
+        attribute_description = attributes.get("description")
+        if (
+            isinstance(attribute_description, str)
+            and attribute_description.strip()
+        ):
+            return attribute_description.strip()
+
+    names = concept_doc.get("names")
+    if isinstance(names, list):
+        for name_obj in names:
+            if not isinstance(name_obj, dict):
+                continue
+            text = name_obj.get("text")
+            if isinstance(text, str) and text.strip():
+                return text.strip()
+
+    return None
+
+
+def _build_preferred_description_lookup(
+    concept_docs: List[Dict[str, Any]],
+) -> Dict[str, str]:
+    """Resolve canonical description text for a batch of concept docs."""
+    description_lookup: Dict[str, str] = {}
+    concept_ids = [
+        concept_id
+        for concept_doc in concept_docs
+        if isinstance(concept_doc, dict)
+        for concept_id in [concept_doc.get("concept_id")]
+        if isinstance(concept_id, str) and concept_id.strip()
+    ]
+    if concept_ids:
+        try:
+            preferred_rows = get_preferred_texts_for_concepts(
+                concept_ids,
+                predicate_precedence=DESCRIPTION_TEXT_PREDICATE_PRECEDENCE,
+                preferred_languages=("en-NZ", "en"),
+                limit_per_concept=20,
+            )
+            for concept_id, row in preferred_rows.items():
+                text = row.get("text")
+                if isinstance(text, str) and text.strip():
+                    description_lookup[concept_id] = text.strip()
+        except Exception as exc:
+            logger.warning(
+                "Failed to fetch preferred concept descriptions: %s",
+                exc,
+                exc_info=True,
+            )
+
+    for concept_doc in concept_docs:
+        concept_id = concept_doc.get("concept_id")
+        if (
+            not isinstance(concept_id, str)
+            or not concept_id.strip()
+            or concept_id in description_lookup
+        ):
+            continue
+        fallback_description = _extract_loaded_description_fallback(concept_doc)
+        if fallback_description:
+            description_lookup[concept_id] = fallback_description
+
+    return description_lookup
 
 
 def _normalize_text_for_match(text: str) -> str:
@@ -272,7 +363,7 @@ def _search_text_relations(
     # Build predicates list FIRST - only search text_values linked via these predicates
     predicates = ["hasName"]
     if include_description:
-        predicates.append("hasDescription")
+        predicates.extend(["hasDescription", "hasContent"])
 
     # Strategy: search text_values directly, then join to text_relations by predicate.
     matching_texts: list[dict] = []
@@ -383,6 +474,7 @@ def _similarity_match(
     candidates: List[Dict[str, Any]],
     min_similarity: float = 0.6,
     include_description: bool = False,
+    description_lookup: Optional[Dict[str, str]] = None,
 ) -> List[tuple[str, float, Dict[str, Any]]]:
     """Find concepts with similarity score above threshold.
 
@@ -391,6 +483,7 @@ def _similarity_match(
         candidates: List of concept documents to score
         min_similarity: Minimum similarity threshold (0.0-1.0)
         include_description: If True, also score against descriptions
+        description_lookup: Optional canonical description text by concept_id
 
     Returns:
         List of tuples: (concept_id, best_score, concept_doc)
@@ -423,7 +516,11 @@ def _similarity_match(
 
         # Check description if requested
         if include_description:
-            description = concept_doc.get("metadata", {}).get("description", "")
+            description = (
+                description_lookup.get(concept_id)
+                if description_lookup is not None
+                else None
+            ) or _extract_loaded_description_fallback(concept_doc)
             if description:
                 score = _compute_similarity(query, description)
                 best_score = max(best_score, score)
@@ -499,16 +596,7 @@ def _semantic_search(
         # Fetch full concept documents
         concepts_cursor = ConceptsRepository.find(
             {"concept_id": {"$in": concept_ids}},
-            projection={
-                "concept_id": 1,
-                "names": 1,
-                "name": 1,
-                "metadata.description": 1,
-                "relationships": 1,
-                "attributes": 1,
-                "system_tags": 1,
-                "user_tags": 1,
-            },
+            projection=SEARCH_RESULT_PROJECTION,
         )
 
         # Post-filter and build results
@@ -715,16 +803,7 @@ def search_concepts(
             # Just fetch all concepts matching base_query (which has instance_of filter)
             all_instances_cursor = ConceptsRepository.find(
                 base_query,
-                projection={
-                    "concept_id": 1,
-                    "names": 1,
-                    "name": 1,
-                    "metadata.description": 1,
-                    "relationships": 1,
-                    "attributes": 1,
-                    "system_tags": 1,
-                    "user_tags": 1,
-                },
+                projection=SEARCH_RESULT_PROJECTION,
                 limit=limit,
             )
 
@@ -771,22 +850,22 @@ def search_concepts(
             # We'll score them all with similarity algorithm
             candidates_cursor = ConceptsRepository.find(
                 base_query,
-                projection={
-                    "concept_id": 1,
-                    "names": 1,
-                    "name": 1,
-                    "metadata.description": 1,
-                    "relationships": 1,
-                    "attributes": 1,
-                    "system_tags": 1,
-                    "user_tags": 1,
-                },
+                projection=SEARCH_RESULT_PROJECTION,
                 limit=1000,  # Broader fetch for similarity scoring
             )
 
             candidates = list(candidates_cursor)
+            description_lookup = (
+                _build_preferred_description_lookup(candidates)
+                if include_description
+                else None
+            )
             similarity_results = _similarity_match(
-                query, candidates, min_similarity, include_description
+                query,
+                candidates,
+                min_similarity,
+                include_description,
+                description_lookup,
             )
 
             for concept_id, score, concept_doc in similarity_results:
@@ -814,16 +893,7 @@ def search_concepts(
 
                 substring_cursor = ConceptsRepository.find(
                     combined_query,
-                    projection={
-                        "concept_id": 1,
-                        "names": 1,
-                        "name": 1,
-                        "metadata.description": 1,
-                        "relationships": 1,
-                        "attributes": 1,
-                        "system_tags": 1,
-                        "user_tags": 1,
-                    },
+                    projection=SEARCH_RESULT_PROJECTION,
                     limit=limit,
                 )
 
@@ -875,16 +945,7 @@ def search_concepts(
 
                 prefix_cursor = ConceptsRepository.find(
                     combined_query,
-                    projection={
-                        "concept_id": 1,
-                        "names": 1,
-                        "name": 1,
-                        "metadata.description": 1,
-                        "relationships": 1,
-                        "attributes": 1,
-                        "system_tags": 1,
-                        "user_tags": 1,
-                    },
+                    projection=SEARCH_RESULT_PROJECTION,
                     limit=limit * 2,
                 )
 
@@ -915,16 +976,7 @@ def search_concepts(
 
                     substring_cursor = ConceptsRepository.find(
                         combined_query,
-                        projection={
-                            "concept_id": 1,
-                            "names": 1,
-                            "name": 1,
-                            "metadata.description": 1,
-                            "relationships": 1,
-                            "attributes": 1,
-                            "system_tags": 1,
-                            "user_tags": 1,
-                        },
+                        projection=SEARCH_RESULT_PROJECTION,
                         limit=remaining,
                     )
 
@@ -946,16 +998,7 @@ def search_concepts(
 
                 substring_cursor = ConceptsRepository.find(
                     combined_query,
-                    projection={
-                        "concept_id": 1,
-                        "names": 1,
-                        "name": 1,
-                        "metadata.description": 1,
-                        "relationships": 1,
-                        "attributes": 1,
-                        "system_tags": 1,
-                        "user_tags": 1,
-                    },
+                    projection=SEARCH_RESULT_PROJECTION,
                     limit=limit * 2,
                 )
 
@@ -977,16 +1020,7 @@ def search_concepts(
 
             concepts_cursor = ConceptsRepository.find(
                 combined_query,
-                projection={
-                    "concept_id": 1,
-                    "names": 1,
-                    "name": 1,
-                    "metadata.description": 1,
-                    "relationships": 1,
-                    "attributes": 1,
-                    "system_tags": 1,
-                    "user_tags": 1,
-                },
+                projection=SEARCH_RESULT_PROJECTION,
                 limit=limit * 2,
             )
 
@@ -1014,16 +1048,7 @@ def search_concepts(
 
                 additional_cursor = ConceptsRepository.find(
                     additional_query,
-                    projection={
-                        "concept_id": 1,
-                        "names": 1,
-                        "name": 1,
-                        "metadata.description": 1,
-                        "relationships": 1,
-                        "attributes": 1,
-                        "system_tags": 1,
-                        "user_tags": 1,
-                    },
+                    projection=SEARCH_RESULT_PROJECTION,
                     limit=limit * 2,
                 )
 
@@ -1100,6 +1125,13 @@ def search_concepts(
         # MODERN SCHEMA: Fetch ALL names from text_relations for ALL concepts
         # This is the primary source of names; concept document names/name fields are legacy only
         concept_ids = [concept_id for concept_id, _, _ in paginated_results]
+        description_lookup = (
+            _build_preferred_description_lookup(
+                [concept_doc for _, _, concept_doc in paginated_results]
+            )
+            if include_description
+            else {}
+        )
         text_relations_names = {}  # concept_id -> primary_name (first name)
         text_relations_all_names = {}  # concept_id -> list of (name, name_type) tuples
 
@@ -1291,7 +1323,9 @@ def search_concepts(
 
                 # If no good name match, check description
                 if score < 60.0:
-                    description = concept_doc.get("metadata", {}).get("description", "")
+                    description = description_lookup.get(
+                        concept_id
+                    ) or _extract_loaded_description_fallback(concept_doc)
                     if description and query_lower in description.lower():
                         score = 60.0  # Description match
                     elif score == 0.0:
