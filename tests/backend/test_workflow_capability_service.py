@@ -25,6 +25,30 @@ from src.backend.services.workflow_capability_service import (
 from workflow_test_support import build_test_conversation_turn_registry
 
 
+@pytest.fixture(autouse=True)
+def _stub_authoritative_workflow_description_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep capability-index tests focused on indexing/ranking behaviour.
+
+    These unit tests use synthetic registries whose `purpose` values stand in
+    for already-resolved authoritative workflow descriptions. Make that explicit
+    so the tests do not depend on live Vontology text relations.
+    """
+
+    monkeypatch.setattr(
+        "src.backend.workflows.vontology_loader.resolve_workflow_description",
+        lambda _workflow_id, **kwargs: (
+            str(
+                kwargs.get("registration_purpose")
+                or kwargs.get("definition_purpose")
+                or ""
+            ).strip(),
+            "text_relation:#V#hasDescription",
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tokeniser
 # ---------------------------------------------------------------------------

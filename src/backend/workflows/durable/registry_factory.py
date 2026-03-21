@@ -29,9 +29,14 @@ from ..vontology_loader import (
     discover_workflow_ids,
     load_workflow_definition_from_vontology,
     batch_fetch_workflow_purposes,
+    resolve_workflow_description,
 )
 from ..workflow_concept_authority_service import (
     build_workflow_concept_authority_report,
+)
+from ..workflow_description_quality_service import (
+    assess_workflow_description_quality,
+    summarise_workflow_description_quality,
 )
 from ..workflow_purity_report import build_workflow_purity_report
 
@@ -266,8 +271,10 @@ def _build_workflow_parity_inventory(
 
     source_counts: dict[str, int] = {}
     source_by_workflow_id: dict[str, str] = {}
+    description_records: list[dict[str, Any]] = []
     for workflow_id in registry_ids:
         source = "unknown"
+        registration = None
         try:
             registration = registry.get_registration(workflow_id)
             if registration and isinstance(registration.source, str) and registration.source:
@@ -276,6 +283,26 @@ def _build_workflow_parity_inventory(
             source = "unknown"
         source_by_workflow_id[workflow_id] = source
         source_counts[source] = source_counts.get(source, 0) + 1
+        registration_purpose = getattr(registration, "purpose", None)
+        definition = getattr(registration, "definition", None)
+        definition_purpose = getattr(definition, "purpose", None)
+        description, description_source = resolve_workflow_description(
+            workflow_id,
+            workflow_source=source,
+            registration_purpose=registration_purpose,
+            definition_purpose=definition_purpose,
+        )
+        description_records.append(
+            {
+                "workflow_id": workflow_id,
+                "description": description,
+                "description_source": description_source,
+                "description_quality": assess_workflow_description_quality(
+                    description=description,
+                    description_source=description_source,
+                ),
+            }
+        )
 
     summary_lines = [
         (
@@ -319,6 +346,9 @@ def _build_workflow_parity_inventory(
     )
 
     workflow_purity = build_workflow_purity_report(registry=registry)
+    workflow_description_quality = summarise_workflow_description_quality(
+        description_records
+    )
     workflow_purity_counters = workflow_purity.get("counters", {})
     workflow_purity_baseline = workflow_purity.get("baseline", {})
     workflow_purity_comparison = (
@@ -339,6 +369,21 @@ def _build_workflow_parity_inventory(
                 f"non_vontology_discoverable_workflow_count={int(workflow_purity_counters.get('non_vontology_discoverable_workflow_count', 0))}"
             )
         )
+    quality_counts = (
+        workflow_description_quality.get("counts", {})
+        if isinstance(workflow_description_quality, dict)
+        else {}
+    )
+    summary_lines.append(
+        (
+            "Workflow description quality: "
+            f"retrieval_ready={int(quality_counts.get('retrieval_ready', 0))} "
+            f"developing={int(quality_counts.get('developing', 0))} "
+            f"minimal={int(quality_counts.get('minimal', 0))} "
+            f"stub={int(quality_counts.get('stub', 0))} "
+            f"under_specified={int(quality_counts.get('under_specified', 0))}"
+        )
+    )
 
     diagnostics_reason_codes: list[str] = []
     if registry_only_ids:
@@ -383,6 +428,7 @@ def _build_workflow_parity_inventory(
             "counts": source_counts,
             "source_by_workflow_id": source_by_workflow_id,
         },
+        "workflow_description_quality": workflow_description_quality,
         "workflow_authority": workflow_authority,
         "workflow_purity": workflow_purity,
         "summary_lines": summary_lines,
@@ -533,6 +579,22 @@ def _build_pending_workflow_inventory_snapshot(
             "graph_warnings_by_workflow_id": {},
         },
         "registry_sources": {"counts": {}, "source_by_workflow_id": {}},
+        "workflow_description_quality": {
+            "build_state": "pending_background_build",
+            "counts": {
+                "total": len(registry_ids),
+                "stub": 0,
+                "minimal": 0,
+                "developing": 0,
+                "retrieval_ready": 0,
+                "under_specified": 0,
+                "missing": 0,
+            },
+            "counts_by_label": {},
+            "counts_by_source": {},
+            "under_specified_workflow_ids": [],
+            "missing_workflow_ids": [],
+        },
         "workflow_authority": {
             "build_state": "pending_background_build",
             "drift_detected": False,

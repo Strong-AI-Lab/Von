@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from ..prompt.annotation_prompt import AnnotationPromptBuilder
 from .description_metadata_service import extract_inline_description_metadata
+from .workflow_description_vontology_service import DESCRIPTION_PROMPT_CONCEPT_ID
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +27,6 @@ def _get_llm_client(*args, **kwargs):
     return get_llm_client(*args, **kwargs)
 
 
-# Prompt concept for description generation
-DESCRIPTION_PROMPT_CONCEPT_ID = "#V#generate_concept_description_prompt"
 _PROMPT_CACHE: Dict[str, Any] = {"text": None, "ts": 0.0, "source_predicate": None}
 _PROMPT_TTL = 300  # seconds
 

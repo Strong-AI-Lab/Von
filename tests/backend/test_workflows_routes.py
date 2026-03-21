@@ -264,10 +264,17 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
         def get_registration(self, workflow_id):
             return self._registrations.get(workflow_id)
 
+        def peek_registration(self, workflow_id):
+            return self.get_registration(workflow_id)
+
+        def get_registration_source(self, workflow_id, *, resolve_lazy: bool = False):
+            registration = self.get_registration(workflow_id)
+            return getattr(registration, "source", None)
+
     monkeypatch.setattr(
         registry_factory,
         "build_durable_workflow_registry_read_only",
-        lambda: _FakeRegistry(),
+        lambda **_kwargs: _FakeRegistry(),
     )
     monkeypatch.setattr(
         registry_factory,
@@ -430,10 +437,17 @@ def test_workflow_definitions_list_includes_relation_description_source(monkeypa
         def get_registration(self, workflow_id):
             return self._registrations.get(workflow_id)
 
+        def peek_registration(self, workflow_id):
+            return self.get_registration(workflow_id)
+
+        def get_registration_source(self, workflow_id, *, resolve_lazy: bool = False):
+            registration = self.get_registration(workflow_id)
+            return getattr(registration, "source", None)
+
     monkeypatch.setattr(
         registry_factory,
         "build_durable_workflow_registry_read_only",
-        lambda: _FakeRegistry(),
+        lambda **_kwargs: _FakeRegistry(),
     )
     monkeypatch.setattr(
         registry_factory,
@@ -459,11 +473,22 @@ def test_workflow_definitions_list_includes_relation_description_source(monkeypa
     )
     monkeypatch.setattr(
         workflows_routes,
-        "resolve_workflow_description",
-        lambda workflow_id, **kwargs: (
-            "Workflow description from relation",
-            "text_relation:hasDescription",
-        ),
+        "build_workflow_listing_entry",
+        lambda **_kwargs: {
+            "workflow_id": "#V#legacy_workflow",
+            "description": "Workflow description from relation",
+            "description_source": "text_relation:hasDescription",
+            "description_quality": {
+                "quality_label": "retrieval_ready",
+                "score": 7,
+            },
+            "initial_state": "legacy_start",
+            "source": "vontology",
+            "background_launch_policy": None,
+            "background_launch_policy_source": "none",
+            "definition_identity": {"source": "vontology"},
+            "definition_loaded": True,
+        },
     )
 
     resp = app_client.get("/api/workflows/definitions?limit=10")
@@ -842,9 +867,15 @@ def test_workflow_definitions_list_uses_short_ttl_cache(monkeypatch, app_client)
         def get_registration(self, workflow_id):
             return _FakeRegistration()
 
+        def peek_registration(self, workflow_id):
+            return self.get_registration(workflow_id)
+
+        def get_registration_source(self, workflow_id, *, resolve_lazy: bool = False):
+            return "built_in"
+
     calls = {"build_registry": 0}
 
-    def _fake_build_registry():
+    def _fake_build_registry(**_kwargs):
         calls["build_registry"] += 1
         return _FakeRegistry()
 
@@ -916,9 +947,15 @@ def test_workflow_definitions_list_nocache_bypasses_cache(monkeypatch, app_clien
         def get_registration(self, workflow_id):
             return _FakeRegistration()
 
+        def peek_registration(self, workflow_id):
+            return self.get_registration(workflow_id)
+
+        def get_registration_source(self, workflow_id, *, resolve_lazy: bool = False):
+            return "built_in"
+
     calls = {"build_registry": 0}
 
-    def _fake_build_registry():
+    def _fake_build_registry(**_kwargs):
         calls["build_registry"] += 1
         return _FakeRegistry()
 

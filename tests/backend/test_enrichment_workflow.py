@@ -340,6 +340,136 @@ class TestEnrichmentActionHandlers:
             assert result.ok
             assert result.outputs["skipped_count"] == 1
 
+    def test_process_batch_uses_deterministic_workflow_description_fallback(self) -> None:
+        from src.backend.workflows.action_registry import (
+            WorkflowActionRequest,
+            WorkflowEnvironment,
+        )
+        from src.backend.workflows.durable.enrichment_workflow import (
+            _handle_process_batch,
+        )
+
+        mock_llm = MagicMock()
+        mock_llm.generate.side_effect = RuntimeError("llm unavailable")
+
+        with (
+            patch(
+                "src.backend.languagemodels.llm_interface.get_llm_client",
+                return_value=mock_llm,
+            ),
+            patch(
+                "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one"
+            ) as mock_find,
+            patch(
+                "src.backend.workflows.durable.enrichment_workflow."
+                "_upsert_text_value_internal"
+            ) as mock_upsert,
+            patch(
+                "src.backend.workflows.durable.enrichment_workflow."
+                "_build_concept_context",
+                return_value={
+                    "concept_name": "Planning Workflow",
+                    "concept_id": "#V#planning_workflow",
+                    "type_hierarchy": "is an instance of: #V#durable_workflow",
+                    "relationships": "invokesAction: planning.collect_context",
+                    "description": "Forward inference workflow that proposes concrete next actions.",
+                    "workflow_step_count": "6",
+                    "workflow_action_ids": "planning.collect_context, planning.rank_actions",
+                    "workflow_subworkflow_ids": "#V#tool_calling_workflow",
+                    "workflow_transition_reasons": "context_ready, actions_ranked",
+                    "workflow_output_context_keys": "planned_actions, rationale",
+                    "workflow_graph_warnings": "None",
+                },
+            ),
+        ):
+            mock_find.return_value = {"concept_id": "#V#planning_workflow"}
+
+            env = WorkflowEnvironment(llm_client=mock_llm)
+            req = WorkflowActionRequest(
+                action_id="enrichment.process_batch",
+                inputs={},
+                environment=env,
+                data={
+                    "predicate": "hasDescription",
+                    "current_batch": ["#V#planning_workflow"],
+                },
+            )
+
+            result = _handle_process_batch(req)
+            assert result.ok
+            assert result.outputs["processed_count"] == 1
+            assert result.outputs["failed_count"] == 0
+            assert result.outputs["deterministic_fallback_count"] == 1
+
+            stored_text = mock_upsert.call_args.args[2]
+            assert "Domain:" in stored_text
+            assert "Input types:" in stored_text
+            assert "Estimated success likelihood:" in stored_text
+
+    def test_process_batch_can_prefer_deterministic_workflow_description_mode(self) -> None:
+        from src.backend.workflows.action_registry import (
+            WorkflowActionRequest,
+            WorkflowEnvironment,
+        )
+        from src.backend.workflows.durable.enrichment_workflow import (
+            _handle_process_batch,
+        )
+
+        mock_llm = MagicMock()
+
+        with (
+            patch(
+                "src.backend.languagemodels.llm_interface.get_llm_client",
+                return_value=mock_llm,
+            ),
+            patch(
+                "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
+                return_value={"concept_id": "#V#planning_workflow"},
+            ),
+            patch(
+                "src.backend.workflows.durable.enrichment_workflow."
+                "_upsert_text_value_internal"
+            ) as mock_upsert,
+            patch(
+                "src.backend.workflows.durable.enrichment_workflow."
+                "_build_concept_context",
+                return_value={
+                    "concept_name": "Planning Workflow",
+                    "concept_id": "#V#planning_workflow",
+                    "type_hierarchy": "is an instance of: #V#durable_workflow",
+                    "relationships": "invokesAction: planning.collect_context",
+                    "description": "Forward inference workflow that proposes concrete next actions.",
+                    "workflow_step_count": "6",
+                    "workflow_action_ids": "planning.collect_context, planning.rank_actions",
+                    "workflow_subworkflow_ids": "#V#tool_calling_workflow",
+                    "workflow_transition_reasons": "context_ready, actions_ranked",
+                    "workflow_output_context_keys": "planned_actions, rationale",
+                    "workflow_graph_warnings": "None",
+                },
+            ),
+        ):
+            env = WorkflowEnvironment(llm_client=mock_llm)
+            req = WorkflowActionRequest(
+                action_id="enrichment.process_batch",
+                inputs={},
+                environment=env,
+                data={
+                    "predicate": "hasDescription",
+                    "current_batch": ["#V#planning_workflow"],
+                    "prefer_deterministic_workflow_description": True,
+                },
+            )
+
+            result = _handle_process_batch(req)
+            assert result.ok
+            assert result.outputs["processed_count"] == 1
+            assert result.outputs["deterministic_fallback_count"] == 1
+            mock_llm.generate.assert_not_called()
+            stored_text = mock_upsert.call_args.args[2]
+            assert stored_text.startswith(
+                "Forward inference workflow that proposes concrete next actions."
+            )
+
     def test_finalise_produces_summary(self) -> None:
         from src.backend.workflows.action_registry import (
             WorkflowActionRequest,

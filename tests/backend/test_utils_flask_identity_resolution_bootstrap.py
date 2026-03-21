@@ -12,6 +12,7 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         identity_resolution_schedule_bootstrap_service as schedule_bootstrap,
         parent_specificity_schedule_bootstrap_service as parent_specificity_schedule_bootstrap,
         parent_specificity_vontology_service as parent_specificity_prompt_bootstrap,
+        workflow_description_vontology_service as workflow_description_prompt_bootstrap,
         workflow_gap_vontology_service as workflow_gap_prompt_bootstrap,
     )
 
@@ -67,6 +68,14 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
             ],
         },
     )
+    monkeypatch.setattr(
+        workflow_description_prompt_bootstrap,
+        "ensure_workflow_description_prompt_support",
+        lambda: {
+            "success": True,
+            "linked_workflow_ids": ["#V#enrichment_workflow"],
+        },
+    )
 
     app_logger = MagicMock()
     result = utils_flask._start_durable_workflow_system(app_logger)
@@ -82,6 +91,11 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     workflow_gap_prompt_report = result.get("workflow_gap_prompt_bootstrap")
     assert isinstance(workflow_gap_prompt_report, dict)
     assert workflow_gap_prompt_report.get("success") is True
+    workflow_description_prompt_report = result.get(
+        "workflow_description_prompt_bootstrap"
+    )
+    assert isinstance(workflow_description_prompt_report, dict)
+    assert workflow_description_prompt_report.get("success") is True
     parent_schedule_report = result.get("parent_specificity_schedule_bootstrap")
     assert isinstance(parent_schedule_report, dict)
     assert parent_schedule_report.get("success") is True

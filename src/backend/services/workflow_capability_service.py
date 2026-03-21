@@ -219,6 +219,7 @@ class WorkflowCapabilityIndex:
                 metadata={
                     "name": _workflow_id_to_name(workflow_id),
                     "source": str(source or "unknown"),
+                    "description_source": reason,
                     "purpose": _normalise_capability_text(purpose),
                 },
             )
@@ -396,16 +397,28 @@ def _resolve_authoritative_capability_text(
 ) -> tuple[str | None, str]:
     """Return authoritative routing text or a deterministic skip reason."""
 
-    _ = workflow_id
     source_token = str(source or "").strip().lower()
     if source_token != "vontology":
         return None, "non_authoritative_source"
+
+    try:
+        from ..workflows.vontology_loader import resolve_workflow_description
+
+        relation_text, relation_source = resolve_workflow_description(
+            workflow_id,
+            workflow_source="vontology",
+            registration_purpose=purpose,
+        )
+        if relation_text and relation_source.startswith("text_relation:"):
+            return relation_text, relation_source
+    except Exception:
+        pass
 
     purpose_text = _normalise_capability_text(purpose)
     if not purpose_text:
         return None, "missing_authoritative_purpose"
 
-    return purpose_text, "authoritative_purpose"
+    return purpose_text, "authoritative_registration_purpose"
 
 
 def build_workflow_capability_text(

@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from ..engine import (
     WorkflowActionInvocation,
@@ -42,6 +42,11 @@ from ..action_registry import (
     WorkflowActionResult,
 )
 from ..workflow_registry import WorkflowRegistration
+from ...services.workflow_description_vontology_service import (
+    build_deterministic_workflow_description,
+    build_workflow_description_prompt_context,
+    resolve_workflow_description_prompt_concept_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +55,7 @@ ENRICHMENT_WORKFLOW_ID = "#V#enrichment_workflow"
 
 DEFAULT_BATCH_SIZE = 5
 DEFAULT_CANDIDATE_LIMIT = 50
+_WORKFLOW_DESCRIPTION_PREDICATES = {"hasDescription", "#V#hasDescription"}
 
 # Fallback prompt when neither prompt_concept_id nor prompt_template is given.
 _DEFAULT_ENRICHMENT_PROMPT = """You are a knowledge engineer helping to document an ontology.
@@ -260,16 +266,24 @@ def _build_concept_context(concept: Dict[str, Any]) -> Dict[str, str]:
 
     description = get_concept_description(concept) or ""
 
-    return {
+    context = {
         "concept_name": concept_name,
         "concept_id": concept_id,
         "type_hierarchy": type_hierarchy,
         "relationships": relationships_str,
         "description": description,
     }
+    workflow_context = build_workflow_description_prompt_context(concept_id)
+    if workflow_context:
+        context.update(workflow_context)
+    return context
 
 
-def _resolve_prompt_template(ctx: Dict[str, Any]) -> str:
+def _resolve_prompt_template(
+    ctx: Dict[str, Any],
+    *,
+    concept_id: str | None = None,
+) -> str:
     """Resolve the prompt template from context (prompt_concept_id, prompt_template, or default)."""
     # 1. Explicit inline template
     if ctx.get("prompt_template"):
@@ -277,6 +291,17 @@ def _resolve_prompt_template(ctx: Dict[str, Any]) -> str:
 
     # 2. Vontology-stored prompt
     prompt_concept_id = ctx.get("prompt_concept_id")
+    predicate = str(ctx.get("predicate") or "").strip()
+    if not prompt_concept_id and predicate in _WORKFLOW_DESCRIPTION_PREDICATES:
+        workflow_context = (
+            build_workflow_description_prompt_context(concept_id)
+            if isinstance(concept_id, str) and concept_id.strip()
+            else {}
+        )
+        if workflow_context:
+            prompt_concept_id = resolve_workflow_description_prompt_concept_id(
+                workflow_id=ENRICHMENT_WORKFLOW_ID
+            )
     if prompt_concept_id:
         try:
             from ...prompt.annotation_prompt import AnnotationPromptBuilder
@@ -292,6 +317,20 @@ def _resolve_prompt_template(ctx: Dict[str, Any]) -> str:
 
     # 3. Default
     return _DEFAULT_ENRICHMENT_PROMPT
+
+
+class _DefaultEmptyTemplateDict(dict[str, str]):
+    def __missing__(self, key: str) -> str:
+        return ""
+
+
+def _format_prompt_template(
+    prompt_template: str,
+    template_context: Mapping[str, str],
+) -> str:
+    """Format enrichment prompts while tolerating schema evolution."""
+
+    return prompt_template.format_map(_DefaultEmptyTemplateDict(template_context))
 
 
 def _upsert_text_value_internal(concept_id: str, predicate: str, text: str) -> None:
@@ -491,9 +530,13 @@ def _handle_process_batch(request: WorkflowActionRequest) -> WorkflowActionResul
         ctx = request.data
         predicate = ctx.get("predicate", "hasDescription")
         batch = ctx.get("current_batch", [])
+        prefer_deterministic_workflow_description = bool(
+            ctx.get("prefer_deterministic_workflow_description")
+        )
         processed = ctx.get("processed_count", 0)
         failed = ctx.get("failed_count", 0)
         skipped = ctx.get("skipped_count", 0)
+        deterministic_fallback_count = ctx.get("deterministic_fallback_count", 0)
 
         if not batch:
             return WorkflowActionResult(
@@ -501,15 +544,16 @@ def _handle_process_batch(request: WorkflowActionRequest) -> WorkflowActionResul
                     "processed_count": processed,
                     "failed_count": failed,
                     "skipped_count": skipped,
+                    "deterministic_fallback_count": deterministic_fallback_count,
                 }
             )
 
-        prompt_template = _resolve_prompt_template(ctx)
         llm = get_llm_client()
 
         newly_processed = 0
         newly_failed = 0
         newly_skipped = 0
+        newly_deterministic_fallback = 0
 
         for concept_id in batch:
             try:
@@ -521,38 +565,71 @@ def _handle_process_batch(request: WorkflowActionRequest) -> WorkflowActionResul
                 # Build context and format prompt
                 tmpl_ctx = _build_concept_context(concept)
                 tmpl_ctx["predicate"] = predicate
+                prompt_template = _resolve_prompt_template(ctx, concept_id=concept_id)
 
-                try:
-                    prompt = prompt_template.format(**tmpl_ctx)
-                except KeyError:
-                    # Template uses keys we don't have — pass what we can
-                    prompt = prompt_template.format_map(
-                        {
-                            **tmpl_ctx,
-                            **{
-                                k: ""
-                                for k in [
-                                    "concept_name",
-                                    "concept_id",
-                                    "type_hierarchy",
-                                    "relationships",
-                                    "description",
-                                    "predicate",
-                                ]
-                            },
-                        }
+                prompt = _format_prompt_template(prompt_template, tmpl_ctx)
+                text = ""
+                used_deterministic_fallback = False
+                if (
+                    predicate in _WORKFLOW_DESCRIPTION_PREDICATES
+                    and prefer_deterministic_workflow_description
+                ):
+                    text = build_deterministic_workflow_description(
+                        concept_id=concept_id,
+                        concept_name=tmpl_ctx.get("concept_name"),
+                        existing_description=tmpl_ctx.get("description"),
+                        workflow_context=tmpl_ctx,
+                    ) or ""
+                    used_deterministic_fallback = bool(text)
+                else:
+                    try:
+                        response = llm.generate(prompt, llm_params={"max_tokens": 400})
+                        text = (
+                            response.strip()
+                            if isinstance(response, str)
+                            else str(response).strip()
+                        )
+                    except Exception as llm_exc:
+                        if predicate in _WORKFLOW_DESCRIPTION_PREDICATES:
+                            fallback_text = build_deterministic_workflow_description(
+                                concept_id=concept_id,
+                                concept_name=tmpl_ctx.get("concept_name"),
+                                existing_description=tmpl_ctx.get("description"),
+                                workflow_context=tmpl_ctx,
+                            )
+                            if fallback_text:
+                                text = fallback_text
+                                used_deterministic_fallback = True
+                                logger.warning(
+                                    "[enrichment_workflow] Using deterministic workflow-description fallback for %s after LLM failure: %s",
+                                    concept_id,
+                                    llm_exc,
+                                )
+                            else:
+                                raise
+                        else:
+                            raise
+
+                if (
+                    predicate in _WORKFLOW_DESCRIPTION_PREDICATES
+                    and prefer_deterministic_workflow_description
+                    and not text
+                ):
+                    logger.warning(
+                        "[enrichment_workflow] Deterministic workflow-description mode produced no text for %s",
+                        concept_id,
                     )
-
-                response = llm.generate(prompt, llm_params={"max_tokens": 400})
-                text = (
-                    response.strip()
-                    if isinstance(response, str)
-                    else str(response).strip()
-                )
+                elif used_deterministic_fallback and prefer_deterministic_workflow_description:
+                    logger.info(
+                        "[enrichment_workflow] Using deterministic workflow-description mode for %s",
+                        concept_id,
+                    )
 
                 if text and len(text) >= 10:
                     _upsert_text_value_internal(concept_id, predicate, text)
                     newly_processed += 1
+                    if used_deterministic_fallback:
+                        newly_deterministic_fallback += 1
                     logger.debug(
                         "[enrichment_workflow] Generated '%s' for %s (%d chars)",
                         predicate,
@@ -578,6 +655,9 @@ def _handle_process_batch(request: WorkflowActionRequest) -> WorkflowActionResul
                 "processed_count": processed + newly_processed,
                 "failed_count": failed + newly_failed,
                 "skipped_count": skipped + newly_skipped,
+                "deterministic_fallback_count": (
+                    deterministic_fallback_count + newly_deterministic_fallback
+                ),
             }
         )
     except Exception as e:
@@ -593,6 +673,7 @@ def _handle_finalise(request: WorkflowActionRequest) -> WorkflowActionResult:
     processed = ctx.get("processed_count", 0)
     failed = ctx.get("failed_count", 0)
     skipped = ctx.get("skipped_count", 0)
+    deterministic_fallback_count = ctx.get("deterministic_fallback_count", 0)
 
     enrichment_result = {
         "success": failed == 0,
@@ -601,15 +682,17 @@ def _handle_finalise(request: WorkflowActionRequest) -> WorkflowActionResult:
         "processed": processed,
         "failed": failed,
         "skipped": skipped,
+        "deterministic_fallback_count": deterministic_fallback_count,
     }
 
     logger.info(
-        "[enrichment_workflow] Complete: predicate=%s candidates=%d processed=%d failed=%d skipped=%d",
+        "[enrichment_workflow] Complete: predicate=%s candidates=%d processed=%d failed=%d skipped=%d deterministic_fallback=%d",
         predicate,
         total,
         processed,
         failed,
         skipped,
+        deterministic_fallback_count,
     )
 
     return WorkflowActionResult(outputs={"enrichment_result": enrichment_result})

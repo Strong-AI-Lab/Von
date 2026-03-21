@@ -352,12 +352,8 @@ class TestFetchConceptProjection:
 class TestWorkflowDescriptionResolution:
     def test_resolve_narrative_prefers_has_definition_precedence(self):
         with patch(
-            "src.backend.workflows.vontology_loader.get_texts_for_concept",
-            return_value=[
-                {"predicate": "hasContent", "text": "Content text"},
-                {"predicate": "hasDefinition", "text": "Definition text"},
-                {"predicate": "hasDescription", "text": "Description text"},
-            ],
+            "src.backend.workflows.vontology_loader.get_preferred_text_for_concept",
+            return_value={"predicate": "hasDefinition", "text": "Definition text"},
         ):
             with patch(
                 "src.backend.workflows.vontology_loader.ConceptsRepository.find_one",
@@ -372,10 +368,11 @@ class TestWorkflowDescriptionResolution:
 
     def test_resolve_narrative_supports_v_prefixed_has_description(self):
         with patch(
-            "src.backend.workflows.vontology_loader.get_texts_for_concept",
-            return_value=[
-                {"predicate": "#V#hasDescription", "text": "Canonical V description"}
-            ],
+            "src.backend.workflows.vontology_loader.get_preferred_text_for_concept",
+            return_value={
+                "predicate": "#V#hasDescription",
+                "text": "Canonical V description",
+            },
         ):
             text, source = resolve_workflow_narrative_text("#V#demo_workflow")
 
@@ -384,17 +381,15 @@ class TestWorkflowDescriptionResolution:
 
     def test_resolve_narrative_extracts_purpose_from_structured_workflow_json(self):
         with patch(
-            "src.backend.workflows.vontology_loader.get_texts_for_concept",
-            return_value=[
-                {
-                    "predicate": "hasContent",
-                    "text": (
-                        '{"workflow_id":"#V#demo_workflow",'
-                        '"purpose":"Structured workflow purpose text.",'
-                        '"steps":[{"step_id":"demo"}]}'
-                    ),
-                }
-            ],
+            "src.backend.workflows.vontology_loader.get_preferred_text_for_concept",
+            return_value={
+                "predicate": "hasContent",
+                "text": (
+                    '{"workflow_id":"#V#demo_workflow",'
+                    '"purpose":"Structured workflow purpose text.",'
+                    '"steps":[{"step_id":"demo"}]}'
+                ),
+            },
         ):
             text, source = resolve_workflow_narrative_text("#V#demo_workflow")
 
@@ -403,8 +398,8 @@ class TestWorkflowDescriptionResolution:
 
     def test_resolve_narrative_returns_none_when_canonical_text_missing(self):
         with patch(
-            "src.backend.workflows.vontology_loader.get_texts_for_concept",
-            return_value=[],
+            "src.backend.workflows.vontology_loader.get_preferred_text_for_concept",
+            return_value=None,
         ):
             text, source = resolve_workflow_narrative_text("#V#legacy_workflow")
 
@@ -413,8 +408,11 @@ class TestWorkflowDescriptionResolution:
 
     def test_resolve_workflow_description_prefers_canonical_vontology_source(self):
         with patch(
-            "src.backend.workflows.vontology_loader.resolve_workflow_narrative_text",
-            return_value=("Narrative from relation", "text_relation:hasContent"),
+            "src.backend.workflows.vontology_loader.get_preferred_text_for_concept",
+            return_value={
+                "predicate": "#V#hasDescription",
+                "text": "Workflow description from relation",
+            },
         ):
             description, source = resolve_workflow_description(
                 "#V#workflow",
@@ -423,8 +421,8 @@ class TestWorkflowDescriptionResolution:
                 definition_purpose="Definition purpose",
             )
 
-        assert description == "Narrative from relation"
-        assert source == "text_relation:hasContent"
+        assert description == "Workflow description from relation"
+        assert source == "text_relation:#V#hasDescription"
 
 
 class TestWorkflowStepRuntimePolicyResolution:

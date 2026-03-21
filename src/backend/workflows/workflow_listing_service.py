@@ -13,7 +13,10 @@ from .workflow_definition_identity_service import (
     WORKFLOW_DEFINITION_IDENTITY_VERSION,
     build_workflow_definition_identity,
 )
-from .workflow_registry import WorkflowRegistration, WorkflowRegistry
+from .workflow_description_quality_service import (
+    assess_workflow_description_quality,
+)
+from .workflow_registry import WorkflowRegistry
 
 _PENDING_DEFINITION_IDENTITY_REASON = "lazy_definition_not_loaded"
 _PENDING_DEFINITION_IDENTITY_BUILD_STATE = "pending_lazy_definition"
@@ -50,7 +53,7 @@ def build_workflow_listing_entry(
     """Build a workflow-listing summary without forcing lazy definition loads."""
 
     registration = registry.peek_registration(workflow_id)
-    definition = registration.definition if isinstance(registration, WorkflowRegistration) else None
+    definition = getattr(registration, "definition", None)
 
     source = registry.get_registration_source(
         workflow_id,
@@ -64,6 +67,10 @@ def build_workflow_listing_entry(
         workflow_source=source,
         registration_purpose=registration_purpose,
         definition_purpose=definition_purpose,
+    )
+    description_quality = assess_workflow_description_quality(
+        description=description,
+        description_source=description_source,
     )
 
     initial_state = ""
@@ -106,6 +113,7 @@ def build_workflow_listing_entry(
         "workflow_id": workflow_id,
         "description": description,
         "description_source": description_source,
+        "description_quality": description_quality,
         "initial_state": initial_state,
         "source": source,
         "background_launch_policy": background_launch_policy,

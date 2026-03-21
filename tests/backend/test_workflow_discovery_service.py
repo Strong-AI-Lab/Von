@@ -31,6 +31,7 @@ from src.backend.services.workflow_discovery_service import (
     _build_keyword_fallback_queries,
     _classify_workflow_concept_executability,
     _deduplicate_and_rank,
+    _enrich_workflow_matches,
     _get_workflow_description,
     _get_workflow_name,
     _is_executable_workflow_concept,
@@ -153,6 +154,16 @@ class TestWorkflowDiscoveryResult:
 
 class TestGetWorkflowDescription:
     """Unit tests for _get_workflow_description helper."""
+
+    def test_prefers_text_relations_over_deprecated_metadata_description(self) -> None:
+        """Canonical relation text should outrank deprecated metadata.description."""
+        concept_doc = {
+            "text_relations": [
+                {"predicate": "hasDescription", "text": "Authoritative description"}
+            ],
+            "metadata": {"description": "Deprecated description"},
+        }
+        assert _get_workflow_description(concept_doc) == "Authoritative description"
 
     def test_extracts_from_metadata(self) -> None:
         """Should extract description from metadata.description field."""
@@ -281,6 +292,31 @@ class TestKeywordFallbackQueries:
         assert "technical scientific talk representation workflow" in queries
         assert "academic presentation workflow" in queries
         assert "seminar representation workflow" in queries
+
+
+def test_enrich_workflow_matches_prefers_authoritative_vontology_description() -> None:
+    matches = [WorkflowMatch("#V#demo_workflow", "Unknown", relevance_score=0.8)]
+
+    with (
+        patch(
+            "src.backend.workflows.vontology_loader.batch_fetch_workflow_purposes",
+            return_value={"#V#demo_workflow": "Authoritative workflow description"},
+        ),
+        patch(
+            "src.backend.db.repositories.concepts_repository.ConceptsRepository.find",
+            return_value=[
+                {
+                    "concept_id": "#V#demo_workflow",
+                    "name": "Demo Workflow",
+                    "names": [],
+                }
+            ],
+        ),
+    ):
+        enriched = _enrich_workflow_matches(matches)
+
+    assert enriched[0].description == "Authoritative workflow description"
+    assert enriched[0].name == "Demo Workflow"
 
 
 class TestDiscoverWorkflows:

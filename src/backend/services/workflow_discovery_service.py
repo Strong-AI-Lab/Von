@@ -242,11 +242,25 @@ class WorkflowDiscoveryResult:
 
 
 def _get_workflow_description(concept_doc: Dict[str, Any]) -> Optional[str]:
-    """Extract description from concept document.
+    """Extract a best-effort description from an already-loaded concept document.
 
-    Checks modern text_relations first (hasDescription), then legacy fields.
+    This helper is only a local fallback for callers that already hold a concept
+    payload. Authoritative workflow discovery should use Vontology text-relation
+    resolvers instead of relying on repository projections. Deprecated
+    ``metadata.description`` remains a last-resort compatibility fallback.
     """
-    # Try legacy fields first (faster)
+    text_relations = concept_doc.get("text_relations", [])
+    if isinstance(text_relations, list):
+        for row in text_relations:
+            if not isinstance(row, dict):
+                continue
+            predicate = str(row.get("predicate") or "").strip()
+            if predicate not in {"#V#hasDescription", "hasDescription"}:
+                continue
+            text = row.get("text")
+            if isinstance(text, str) and text.strip():
+                return text.strip()
+
     metadata = concept_doc.get("metadata", {})
     if isinstance(metadata, dict):
         desc = metadata.get("description")
@@ -580,8 +594,10 @@ def _enrich_workflow_matches(matches: List[WorkflowMatch]) -> List[WorkflowMatch
 
     try:
         from ..db.repositories.concepts_repository import ConceptsRepository
+        from ..workflows.vontology_loader import batch_fetch_workflow_purposes
 
         concept_ids = [m.concept_id for m in matches]
+        authoritative_descriptions = batch_fetch_workflow_purposes(concept_ids)
         concepts = list(
             ConceptsRepository.find(
                 {"concept_id": {"$in": concept_ids}},
@@ -589,7 +605,6 @@ def _enrich_workflow_matches(matches: List[WorkflowMatch]) -> List[WorkflowMatch
                     "concept_id": 1,
                     "names": 1,
                     "name": 1,
-                    "metadata.description": 1,
                 },
             )
         )
@@ -598,11 +613,16 @@ def _enrich_workflow_matches(matches: List[WorkflowMatch]) -> List[WorkflowMatch
 
         for match in matches:
             concept_doc = concept_map.get(match.concept_id)
+            authoritative_description = authoritative_descriptions.get(match.concept_id)
             if concept_doc:
                 if not match.description:
-                    match.description = _get_workflow_description(concept_doc)
+                    match.description = authoritative_description or _get_workflow_description(
+                        concept_doc
+                    )
                 if match.name == "Unknown":
                     match.name = _get_workflow_name(concept_doc)
+            elif authoritative_description and not match.description:
+                match.description = authoritative_description
 
     except Exception as e:
         logger.warning(f"Failed to enrich workflow matches: {e}")
@@ -779,19 +799,27 @@ def _compute_candidate_confidence(match: WorkflowMatch) -> float:
 
 
 def _has_authoritative_routing_text(concept_id: str) -> bool:
-    """Return whether the workflow exposes authoritative Vontology narrative text."""
+    """Return whether the workflow exposes authoritative Vontology description text."""
 
     if not isinstance(concept_id, str) or not concept_id.strip():
         return False
 
     try:
-        from ..workflows.vontology_loader import resolve_workflow_narrative_text
+        from ..workflows.vontology_loader import resolve_workflow_description
 
-        narrative_text, _source = resolve_workflow_narrative_text(concept_id)
+        description_text, description_source = resolve_workflow_description(
+            concept_id,
+            workflow_source="vontology",
+        )
     except Exception:
         return False
 
-    return isinstance(narrative_text, str) and bool(narrative_text.strip())
+    return (
+        isinstance(description_text, str)
+        and bool(description_text.strip())
+        and isinstance(description_source, str)
+        and description_source.startswith("text_relation:")
+    )
 
 
 def _annotate_and_rank_candidates(

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..services.text_value_service import (
@@ -190,6 +190,16 @@ WORKFLOW_DESCRIPTION_TEXT_PREDICATE_PRECEDENCE: Tuple[Tuple[str, ...], ...] = (
     ("hasDefinition", "#V#hasDefinition"),
     ("hasContent", "#V#hasContent"),
     ("hasDescription", "#V#hasDescription"),
+)
+# Retrieval/routing should prefer explicit descriptions over longer-form
+# narrative/content text so capability matching consumes the most targeted
+# workflow summary available in Vontology.
+WORKFLOW_ROUTING_DESCRIPTION_TEXT_PREDICATE_PRECEDENCE: Tuple[
+    Tuple[str, ...], ...
+] = (
+    ("#V#hasDescription", "hasDescription"),
+    ("#V#hasContent", "hasContent"),
+    ("#V#hasDefinition", "hasDefinition"),
 )
 WORKFLOW_DESCRIPTION_SOURCE_NONE = "none"
 WORKFLOW_DESCRIPTION_SOURCE_REGISTRATION = "registration.purpose"
@@ -621,7 +631,7 @@ def detect_vacuous_workflow_steps(
 
 
 def _first_relationship_target(
-    relationships: Dict[str, Any], candidate_predicates: Iterable[str]
+    relationships: Mapping[str, Any], candidate_predicates: Iterable[str]
 ) -> Optional[str]:
     target, _ = _first_relationship_target_with_predicate(
         relationships, candidate_predicates
@@ -630,7 +640,7 @@ def _first_relationship_target(
 
 
 def _all_relationship_targets(
-    relationships: Dict[str, Any], candidate_predicates: Iterable[str]
+    relationships: Mapping[str, Any], candidate_predicates: Iterable[str]
 ) -> List[str]:
     targets, _ = _all_relationship_targets_with_predicates(
         relationships, candidate_predicates
@@ -639,7 +649,7 @@ def _all_relationship_targets(
 
 
 def _first_relationship_target_with_predicate(
-    relationships: Dict[str, Any], candidate_predicates: Iterable[str]
+    relationships: Mapping[str, Any], candidate_predicates: Iterable[str]
 ) -> Tuple[Optional[str], Optional[str]]:
     for predicate in candidate_predicates:
         targets = _normalise_relationship_targets(relationships.get(predicate))
@@ -649,7 +659,7 @@ def _first_relationship_target_with_predicate(
 
 
 def _all_relationship_targets_with_predicates(
-    relationships: Dict[str, Any], candidate_predicates: Iterable[str]
+    relationships: Mapping[str, Any], candidate_predicates: Iterable[str]
 ) -> Tuple[List[str], List[str]]:
     results: List[str] = []
     matched_predicates: List[str] = []
@@ -1123,6 +1133,36 @@ def _extract_structured_workflow_purpose(text: str) -> str | None:
     return _normalise_non_empty_text(payload.get("purpose"))
 
 
+def _resolve_workflow_relation_text(
+    workflow_id: str,
+    *,
+    predicate_precedence: Sequence[str | Sequence[str]],
+) -> tuple[str | None, str]:
+    """Resolve workflow text from canonical text relations with source telemetry."""
+
+    if not isinstance(workflow_id, str) or not workflow_id.strip():
+        return None, WORKFLOW_DESCRIPTION_SOURCE_NONE
+
+    preferred_text = get_preferred_text_for_concept(
+        workflow_id.strip(),
+        predicate_precedence=predicate_precedence,
+        preferred_languages=("en-NZ", "en"),
+        limit=200,
+    )
+    if not isinstance(preferred_text, Mapping):
+        return None, WORKFLOW_DESCRIPTION_SOURCE_NONE
+
+    predicate = str(preferred_text.get("predicate") or "").strip()
+    text = _normalise_non_empty_text(preferred_text.get("text"))
+    if not predicate or not text:
+        return None, WORKFLOW_DESCRIPTION_SOURCE_NONE
+
+    structured_purpose = _extract_structured_workflow_purpose(text)
+    if structured_purpose:
+        return structured_purpose, f"text_relation:{predicate}:purpose"
+    return text, f"text_relation:{predicate}"
+
+
 def resolve_workflow_narrative_text(workflow_id: str) -> tuple[str | None, str]:
     """Resolve workflow narrative text from canonical text relations.
 
@@ -1131,32 +1171,10 @@ def resolve_workflow_narrative_text(workflow_id: str) -> tuple[str | None, str]:
       2. hasContent
       3. hasDescription (including #V#hasDescription)
     """
-
-    if not isinstance(workflow_id, str) or not workflow_id.strip():
-        return None, WORKFLOW_DESCRIPTION_SOURCE_NONE
-
-    texts: list[dict[str, Any]] = []
-    try:
-        raw_texts = get_texts_for_concept(workflow_id)
-    except Exception:
-        raw_texts = []
-
-    if isinstance(raw_texts, list):
-        texts = [item for item in raw_texts if isinstance(item, dict)]
-
-    for predicate_aliases in WORKFLOW_DESCRIPTION_TEXT_PREDICATE_PRECEDENCE:
-        for item in texts:
-            predicate = str(item.get("predicate") or "").strip()
-            if predicate not in predicate_aliases:
-                continue
-            text = _normalise_non_empty_text(item.get("text"))
-            if text:
-                structured_purpose = _extract_structured_workflow_purpose(text)
-                if structured_purpose:
-                    return structured_purpose, f"text_relation:{predicate}:purpose"
-                return text, f"text_relation:{predicate}"
-
-    return None, WORKFLOW_DESCRIPTION_SOURCE_NONE
+    return _resolve_workflow_relation_text(
+        workflow_id,
+        predicate_precedence=WORKFLOW_DESCRIPTION_TEXT_PREDICATE_PRECEDENCE,
+    )
 
 
 def resolve_workflow_initial_step(
@@ -1666,10 +1684,11 @@ def resolve_workflow_description(
     registration_purpose: Any = None,
     definition_purpose: Any = None,
 ) -> tuple[str, str]:
-    """Resolve monitor/introspection description text with explicit source telemetry.
+    """Resolve the best workflow description for routing/listing surfaces.
 
-    For Vontology-sourced registrations, prefer the canonical Vontology resolver
-    so source telemetry reflects where description text actually came from.
+    Routing and discoverability should prefer explicit ``hasDescription`` text
+    over longer-form narrative/content relations, with registration/definition
+    purpose as the non-Vontology fallback.
     """
 
     registration_text = _normalise_non_empty_text(registration_purpose)
@@ -1677,24 +1696,30 @@ def resolve_workflow_description(
     source_token = str(workflow_source or "").strip().lower()
 
     if source_token == "vontology":
-        narrative_text, narrative_source = resolve_workflow_narrative_text(workflow_id)
-        if narrative_text:
-            return narrative_text, narrative_source
+        relation_text, relation_source = _resolve_workflow_relation_text(
+            workflow_id,
+            predicate_precedence=WORKFLOW_ROUTING_DESCRIPTION_TEXT_PREDICATE_PRECEDENCE,
+        )
+        if relation_text:
+            return relation_text, relation_source
         if registration_text:
             return registration_text, WORKFLOW_DESCRIPTION_SOURCE_REGISTRATION
         if definition_text:
             return definition_text, WORKFLOW_DESCRIPTION_SOURCE_DEFINITION
-        return "", narrative_source
+        return "", relation_source
 
     if registration_text:
         return registration_text, WORKFLOW_DESCRIPTION_SOURCE_REGISTRATION
     if definition_text:
         return definition_text, WORKFLOW_DESCRIPTION_SOURCE_DEFINITION
 
-    narrative_text, narrative_source = resolve_workflow_narrative_text(workflow_id)
-    if narrative_text:
-        return narrative_text, narrative_source
-    return "", narrative_source
+    relation_text, relation_source = _resolve_workflow_relation_text(
+        workflow_id,
+        predicate_precedence=WORKFLOW_ROUTING_DESCRIPTION_TEXT_PREDICATE_PRECEDENCE,
+    )
+    if relation_text:
+        return relation_text, relation_source
+    return "", relation_source
 
 
 def best_effort_workflow_narrative_text(workflow_id: str) -> Optional[str]:
@@ -2978,11 +3003,13 @@ def discover_workflow_ids() -> List[str]:
 def batch_fetch_workflow_purposes(
     workflow_ids: Iterable[str],
 ) -> Dict[str, str]:
-    """Batch-fetch short descriptions for workflow concept IDs.
+    """Batch-fetch routing descriptions for workflow concept IDs.
 
     Returns {workflow_id: purpose_text} for IDs where a description is
-    available.  Uses ``resolve_workflow_narrative_text`` but caps the
-    result to the first 300 characters to keep the registry lightweight.
+    available. Uses ``resolve_workflow_description`` so lazy registrations and
+    capability indexing consume the same workflow-description authority as
+    routing/listing surfaces, then caps the result to the first 300 characters
+    to keep the registry lightweight.
 
     JVNAUTOSCI-1424 Phase 2: Provides purpose metadata for lazy
     registrations so the workflow capability index has searchable text
@@ -2993,7 +3020,10 @@ def batch_fetch_workflow_purposes(
         if not isinstance(wf_id, str) or not wf_id.strip():
             continue
         try:
-            text, _source = resolve_workflow_narrative_text(wf_id.strip())
+            text, _source = resolve_workflow_description(
+                wf_id.strip(),
+                workflow_source="vontology",
+            )
             if text:
                 purposes[wf_id.strip()] = text[:300]
         except Exception:
