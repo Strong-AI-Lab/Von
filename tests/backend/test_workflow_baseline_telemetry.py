@@ -1,6 +1,7 @@
 from src.backend.workflows.workflow_baseline_telemetry import (
     get_workflow_baseline_telemetry_snapshot,
     record_generic_fallback_mcp_invocation,
+    record_mutation_guardrail_event,
     record_workflow_discovery_observation,
     record_write_policy_decision,
 )
@@ -47,3 +48,30 @@ def test_fallback_and_write_policy_counters_increment():
 
     stage_counts = after.get("write_policy_stage_counts", {})
     assert "write_policy.decide" in stage_counts
+
+
+def test_mutation_guardrail_event_updates_counters_and_recent_history():
+    before = get_workflow_baseline_telemetry_snapshot()
+    before_total = int(before.get("mutation_guardrail_events_total", 0))
+
+    record_mutation_guardrail_event(
+        {
+            "type": "mutation_guardrail",
+            "guardrail_surface": "execution",
+            "stage": "tool_execute",
+            "tool_name": "delete_concept",
+            "risk_class": "destructive",
+            "decision": "approval_required",
+        }
+    )
+
+    after = get_workflow_baseline_telemetry_snapshot()
+    assert int(after.get("mutation_guardrail_events_total", 0)) == before_total + 1
+    assert after.get("mutation_guardrail_decision_counts", {}).get(
+        "approval_required", 0
+    ) >= 1
+    assert after.get("mutation_guardrail_surface_counts", {}).get("execution", 0) >= 1
+    assert after.get("mutation_guardrail_risk_counts", {}).get("destructive", 0) >= 1
+    recent = after.get("recent_mutation_guardrail_events", [])
+    assert isinstance(recent, list)
+    assert recent

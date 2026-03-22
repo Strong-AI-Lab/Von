@@ -73,6 +73,9 @@ class WorkflowActionRequest:
     prompt_contract: Mapping[str, Any] | None = None
     llm_policy: Mapping[str, Any] | None = None
     validation_policy: Mapping[str, Any] | None = None
+    workflow_id: str | None = None
+    workflow_state_id: str | None = None
+    workflow_state_metadata: Mapping[str, Any] | None = None
 
 
 @dataclass
@@ -278,6 +281,9 @@ class ActionRegistry:
         context: Dict[str, Any],
         env: WorkflowEnvironment,
         trace: Any | None = None,
+        workflow_id: str | None = None,
+        workflow_state_id: str | None = None,
+        workflow_state_metadata: Mapping[str, Any] | None = None,
     ) -> WorkflowActionResult:
         action_target_id = str(action_id or "").strip()
         spec = self.resolve_action_spec(action_target_id)
@@ -311,6 +317,13 @@ class ActionRegistry:
                 trace=trace,
                 action_target_id=action_target_id or None,
                 contract_concept_id=contract_concept_id,
+                workflow_id=workflow_id,
+                workflow_state_id=workflow_state_id,
+                workflow_state_metadata=(
+                    dict(workflow_state_metadata)
+                    if isinstance(workflow_state_metadata, Mapping)
+                    else None
+                ),
             )
             raw_result = handler(request)
             if isinstance(raw_result, WorkflowActionResult):

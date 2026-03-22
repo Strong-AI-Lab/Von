@@ -42,8 +42,11 @@ from ...services.settings_service import (
     set_internal_mcp_tool_batch_cap,
     get_disable_write_tool_conservatism,
     set_disable_write_tool_conservatism,
+    get_global_mutation_authority_level,
     get_require_human_review_for_high_impact_kb_writes,
+    get_user_mutation_authority_level,
     set_require_human_review_for_high_impact_kb_writes,
+    set_user_mutation_authority_level,
     get_buttonify_model_enabled,
     set_buttonify_model_enabled,
     set_auto_proceed_minimal_imposition_enabled,
@@ -67,6 +70,13 @@ from ...db.mongo_client import (
     get_effective_mongo_uri,
     is_using_fallback_uri,
     assert_destructive_db_operation_allowed,
+)
+from ...workflows.write_tool_policy import (
+    MUTATION_AUTHORITY_LEVEL_ADDITIVE_VONTOLOGY,
+    MUTATION_AUTHORITY_LEVEL_DESTRUCTIVE_VONTOLOGY_WITH_CONFIRMATION,
+    MUTATION_AUTHORITY_LEVEL_EXTERNAL_SYSTEM_GUARDED,
+    MUTATION_AUTHORITY_LEVEL_MUTATIVE_VONTOLOGY_NON_DESTRUCTIVE,
+    MUTATION_AUTHORITY_LEVEL_READ_ONLY,
 )
 import re
 
@@ -682,6 +692,25 @@ def get_all_settings():
             user_concept_id=user_concept_id,
             org_concept_id=org_concept_id,
         )
+        settings["available_mutation_authority_levels"] = [
+            MUTATION_AUTHORITY_LEVEL_READ_ONLY,
+            MUTATION_AUTHORITY_LEVEL_ADDITIVE_VONTOLOGY,
+            MUTATION_AUTHORITY_LEVEL_MUTATIVE_VONTOLOGY_NON_DESTRUCTIVE,
+            MUTATION_AUTHORITY_LEVEL_DESTRUCTIVE_VONTOLOGY_WITH_CONFIRMATION,
+            MUTATION_AUTHORITY_LEVEL_EXTERNAL_SYSTEM_GUARDED,
+        ]
+        settings["global_mutation_authority_level"] = (
+            get_global_mutation_authority_level()
+        )
+        if user_concept_id:
+            settings["resolved_mutation_authority"] = {
+                "scope": "user",
+                "concept_id": user_concept_id,
+                "level": (
+                    get_user_mutation_authority_level(user_concept_id)
+                    or MUTATION_AUTHORITY_LEVEL_EXTERNAL_SYSTEM_GUARDED
+                ),
+            }
         return jsonify(settings), 200
     except Exception as e:
         current_app.logger.error(f"Error retrieving all settings: {e}", exc_info=True)
@@ -703,6 +732,7 @@ def save_all_settings():
     try:
         resolved_llm = None
         resolved_enabled_llms = None
+        resolved_mutation_authority = None
         llm_scope = None
         llm_scope_concept_id = None
         if "disable_write_tool_conservatism" in data:
@@ -846,12 +876,51 @@ def save_all_settings():
                     ),
                     500,
                 )
-            resolved_enabled_llms = resolve_enabled_llm_settings(
-                user_concept_id=llm_scope_concept_id if llm_scope == "user" else None,
-                org_concept_id=(
-                    llm_scope_concept_id if llm_scope == "organisation" else None
-                ),
-            )
+
+        if "mutation_authority" in data and data["mutation_authority"]:
+            authority_data = data["mutation_authority"]
+            if not isinstance(authority_data, dict):
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": "mutation_authority must be an object payload.",
+                        }
+                    ),
+                    400,
+                )
+            scope = authority_data.get("scope")
+            concept_id = authority_data.get("concept_id")
+            level = authority_data.get("level")
+            if scope != "user" or not concept_id or not level:
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": (
+                                "Saving mutation_authority requires user scope, "
+                                "concept_id, and level."
+                            ),
+                        }
+                    ),
+                    400,
+                )
+            ok = set_user_mutation_authority_level(str(concept_id), str(level))
+            if not ok:
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": "Failed to save mutation_authority setting.",
+                        }
+                    ),
+                    500,
+                )
+            resolved_mutation_authority = {
+                "scope": "user",
+                "concept_id": str(concept_id),
+                "level": get_user_mutation_authority_level(str(concept_id)),
+            }
 
         if "openai_api_key_env_var" in data and data["openai_api_key_env_var"]:
             env_var = data["openai_api_key_env_var"]
@@ -933,6 +1002,7 @@ def save_all_settings():
                     "message": "Settings updated successfully.",
                     "resolved_llm": resolved_llm,
                     "enabled_llms": resolved_enabled_llms,
+                    "resolved_mutation_authority": resolved_mutation_authority,
                 }
             ),
             200,

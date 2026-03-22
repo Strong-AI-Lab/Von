@@ -469,6 +469,7 @@ def _comparable_state_metadata(state: Any) -> dict[str, Any]:
         "writes_context_keys",
         "tool_output_context_mappings",
         "subworkflow_contract",
+        "mutation_authority",
     ):
         value = metadata.get(key)
         if value:

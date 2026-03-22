@@ -130,6 +130,34 @@ class TestFallbackHandler:
         assert req.data is ctx
         assert req.environment is env
 
+    def test_fallback_receives_workflow_context(self):
+        captured: list[WorkflowActionRequest] = []
+
+        def capture(request: WorkflowActionRequest) -> WorkflowActionResult:
+            captured.append(request)
+            return WorkflowActionResult()
+
+        registry = ActionRegistry()
+        registry.set_fallback_handler(capture)
+
+        registry.execute(
+            "tool_x",
+            inputs={"a": 1},
+            context={},
+            env=WorkflowEnvironment(llm_client=None),
+            workflow_id="#V#workflow",
+            workflow_state_id="write_step",
+            workflow_state_metadata={"mutation_authority": {"maximum_level": "read_only"}},
+        )
+
+        assert len(captured) == 1
+        req = captured[0]
+        assert req.workflow_id == "#V#workflow"
+        assert req.workflow_state_id == "write_step"
+        assert req.workflow_state_metadata == {
+            "mutation_authority": {"maximum_level": "read_only"}
+        }
+
 
 class TestActionOutcomeEnvelope:
     """WS2 safety envelope: action outcomes should always stamp context flags."""
@@ -301,6 +329,80 @@ class TestMCPToolInvoke:
         gw.invoke.assert_called_once()
         call_args = gw.invoke.call_args
         assert call_args[0][0] == "search_concepts"
+
+    def test_write_tools_in_fallback_path_are_blocked_by_guardrail(self):
+        from src.backend.integrations.internal_mcp.orchestrator import (
+            _ResolvedWritePolicyDecision,
+        )
+
+        orch, gw = _build_mock_orchestrator(
+            describe_methods_result={"delete_concept": {"category": "write"}}
+        )
+        orch._resolve_allowed_write_tools = MagicMock(
+            return_value=_ResolvedWritePolicyDecision(
+                allowed_tools=frozenset(),
+                reason="destructive_confirmation_required",
+                decision_basis="destructive_confirmation_required",
+                outcome="approval_required",
+                user_denial_detected=False,
+                risk_classes={"delete_concept": "destructive"},
+                tool_outcomes={"delete_concept": "approval_required"},
+                blocked_reasons={
+                    "delete_concept": "destructive_confirmation_required"
+                },
+                authority_block_sources={},
+                confirmation_required_tools=frozenset({"delete_concept"}),
+                confirmation_prompts={},
+                effective_mutation_authority=(
+                    "destructive_vontology_with_confirmation"
+                ),
+                authority_sources={
+                    "user": "external_system_guarded",
+                    "workflow": "external_system_guarded",
+                    "global": "external_system_guarded",
+                    "environment": "external_system_guarded",
+                },
+                guardrail_events=(
+                    {
+                        "type": "mutation_guardrail",
+                        "guardrail_surface": "workflow_action_fallback",
+                        "stage": "workflow_action",
+                        "tool_name": "delete_concept",
+                        "decision": "approval_required",
+                    },
+                ),
+            )
+        )
+
+        context: dict[str, Any] = {
+            "prompt": "Tell me about this concept.",
+            "recent_user_prompts": [],
+            "aux_llm_calls": [],
+        }
+        request = WorkflowActionRequest(
+            action_id="delete_concept",
+            inputs={"concept_id": "#V#example"},
+            environment=WorkflowEnvironment(
+                llm_client=None,
+                user_namespace="#V#test_user",
+            ),
+            data=context,
+            workflow_id="#V#custom_workflow",
+            workflow_state_id="write_step",
+            workflow_state_metadata={
+                "mutation_authority": {
+                    "schema_version": "workflow_step_mutation_authority.v1",
+                    "maximum_level": "destructive_vontology_with_confirmation",
+                }
+            },
+        )
+
+        result = orch._action_mcp_tool_invoke(request)
+
+        assert not result.ok
+        gw.invoke.assert_not_called()
+        assert result.outputs["mutation_guardrail_blocked"] is True
+        assert context["mutation_guardrail_events"][0]["tool_name"] == "delete_concept"
 
     def test_inputs_passed_as_payload(self):
         orch, gw = _build_mock_orchestrator()

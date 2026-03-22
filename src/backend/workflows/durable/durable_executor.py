@@ -403,6 +403,9 @@ class DurableWorkflowExecutor:
                 )
                 result = execute_workflow_step_invocation(
                     registry=self._registry,
+                    workflow_id=definition.workflow_id,
+                    workflow_state_id=current_state,
+                    workflow_state_metadata=state_spec.metadata,
                     action=action,
                     resolved_inputs=resolved_inputs,
                     context=context,

@@ -29,6 +29,9 @@ from .execution_contracts import (
     WORKFLOW_CONTROL_JOIN_ACTION_IDS,
     WORKFLOW_FOR_EACH_ALLOWED_SUCCESS_POLICIES,
 )
+from .write_tool_policy import (
+    normalise_workflow_step_mutation_authority_spec,
+)
 
 WORKFLOW_DEFINITION_IDENTITY_SCHEMA_VERSION = "workflow_definition_identity.v1"
 WORKFLOW_DEFINITION_IDENTITY_VERSION = 1
@@ -52,6 +55,7 @@ _STATE_METADATA_CONTRACT_KEYS: tuple[str, ...] = (
     "approval_gate",
     "idempotency_policy",
     "checkpoint_policy",
+    "mutation_authority",
     "prompt_contract",
 )
 
@@ -844,6 +848,19 @@ def validate_workflow_definition_contract(
                     "reason_code": str(exc),
                 }
             )
+        if metadata.get("mutation_authority") is not None:
+            if (
+                normalise_workflow_step_mutation_authority_spec(
+                    metadata.get("mutation_authority")
+                )
+                is None
+            ):
+                runtime_policy_issues.append(
+                    {
+                        "state_id": state_id,
+                        "reason_code": "mutation_authority_invalid",
+                    }
+                )
         requested_prompt_concept_ids = _normalise_symbol_list(
             prompt_contract.get("requested_prompt_concept_ids")
         )

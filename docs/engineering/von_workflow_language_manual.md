@@ -415,6 +415,7 @@ Per-state metadata keys currently used:
 - `invokes_workflow`
 - `retry_policy`
 - `approval_gate`
+- `mutation_authority`
 - `idempotency_policy`
 - `checkpoint_policy`
 - `loop_scope_id`
@@ -428,6 +429,7 @@ Canonical workflow-step runtime policy payloads are stored as singleton text rel
 
 - `#V#hasWorkflowStepRetryPolicyJson`
 - `#V#hasWorkflowStepApprovalGateJson`
+- `#V#hasWorkflowStepMutationAuthorityJson`
 - `#V#hasWorkflowStepIdempotencyPolicyJson`
 - `#V#hasWorkflowStepCheckpointPolicyJson`
 
@@ -441,6 +443,7 @@ Current schema versions:
 
 - `workflow_step_retry_policy.v1`
 - `workflow_step_approval_gate.v1`
+- `workflow_step_mutation_authority.v1`
 - `workflow_step_idempotency_policy.v1`
 - `workflow_step_checkpoint_policy.v1`
 - `workflow_plan_state_policy.v1`
@@ -453,6 +456,10 @@ Normative semantics:
 - retry and idempotency policies currently apply only to single-action states;
 - approval gates MUST fail closed when the required approval context key is absent or falsey;
 - destructive or otherwise high-risk approval-gated states SHOULD provide an explicit `on_approval_required` route to a blocked terminal or escalation state;
+- mutation-authority policies cap the strongest mutation class a step may exercise, using `maximum_level` from `workflow_step_mutation_authority.v1`;
+- effective mutation authority is the intersection of user grant, workflow-step cap, global runtime policy, and environment hard stops, and MUST fail closed when any input is invalid;
+- mutation guardrail decisions use stable outcomes `allowed|blocked|approval_required|deferred`;
+- every mutation guardrail evaluation and every tool-surface guardrail hit MUST emit explicit `mutation_guardrail` telemetry with workflow/step IDs when available, risk class, required/effective authority, decision basis, and block source;
 - checkpoint policies update the shared runtime plan-state artefact rather than introducing workflow-specific Python persistence logic;
 - plan-state items support `pending|in_progress|blocked|done` statuses, bounded checkpoint history, periodic summary snapshots, resumable cursor snapshots, and resume telemetry;
 - completion gates MUST fail closed before terminal success when required plan items or required context keys are not satisfied;

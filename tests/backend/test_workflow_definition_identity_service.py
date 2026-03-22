@@ -526,6 +526,37 @@ def test_validate_contract_reports_invalid_checkpoint_policy() -> None:
     )
 
 
+def test_validate_contract_reports_invalid_mutation_authority() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#mutation_authority_invalid_workflow",
+        initial_state="write",
+        states={
+            "write": WorkflowStateSpec(
+                state_id="write",
+                actions=(WorkflowActionInvocation(action_id="write.action"),),
+                terminal=True,
+                metadata={
+                    "mutation_authority": {
+                        "schema_version": "workflow_step_mutation_authority.v1",
+                        "maximum_level": "unguarded_everything",
+                    }
+                },
+            ),
+        },
+        termination_states=("write",),
+    )
+
+    validation = validate_workflow_definition_contract(definition=definition)
+
+    assert validation["valid"] is False
+    assert "workflow_runtime_policy_invalid" in (validation.get("errors") or [])
+    assert any(
+        issue.get("state_id") == "write"
+        and issue.get("reason_code") == "mutation_authority_invalid"
+        for issue in validation.get("runtime_policy_issues", [])
+    )
+
+
 def test_validate_contract_accepts_context_only_completion_gate() -> None:
     definition = WorkflowDefinition(
         workflow_id="#V#completion_gate_context_only_workflow",

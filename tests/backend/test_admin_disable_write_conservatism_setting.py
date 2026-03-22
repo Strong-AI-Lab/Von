@@ -1,33 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from flask import Flask
 
-from src.backend.integrations.internal_mcp.orchestrator import (
-    InternalMCPChatOrchestrator,
-)
 from src.backend.server.routes.settings_routes import settings_bp
 from src.backend.services import settings_service
-
-
-class _StubGateway:
-    enabled = True
-
-    def describe_methods(self):
-        return {}
-
-    def invoke(self, tool_name, payload=None):
-        raise RuntimeError("not used")
-
-
-class _StubRequest:
-    def __init__(self, data: dict[str, Any]):
-        self.data = data
-        self.trace = None
-        self.environment = None
-
 
 @pytest.mark.parametrize(
     "raw, expected",
@@ -50,31 +29,23 @@ def test_get_disable_write_tool_conservatism_coerces(
     assert settings_service.get_disable_write_tool_conservatism() is expected
 
 
-def test_orchestrator_write_policy_bypasses_when_setting_enabled(monkeypatch):
+def test_get_global_mutation_authority_level_reflects_legacy_admin_setting(
+    monkeypatch,
+):
     monkeypatch.setattr(
         settings_service, "get_disable_write_tool_conservatism", lambda: True
     )
-
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=cast(Any, _StubGateway()),
-        max_tool_invocations=30,
-        tool_batch_cap=10,
-    )
-
-    result = orchestrator._action_write_policy_decide(
-        _StubRequest(
-            {
-                "prompt": "please do something",
-                "requested_write_tools": ["download_paper", "upsert_concept"],
-                "recent_user_prompts": [],
-            }
-        )
-    )
-
-    assert result.outputs["allowed_write_tools"] == ["download_paper", "upsert_concept"]
     assert (
-        result.outputs["write_policy_reason"]
-        == "write_conservatism_disabled_by_admin_setting"
+        settings_service.get_global_mutation_authority_level()
+        == "external_system_guarded"
+    )
+
+    monkeypatch.setattr(
+        settings_service, "get_disable_write_tool_conservatism", lambda: False
+    )
+    assert (
+        settings_service.get_global_mutation_authority_level()
+        == "external_system_guarded"
     )
 
 
@@ -281,6 +252,63 @@ def test_settings_endpoint_returns_resolved_llm_after_scoped_save(monkeypatch):
         "provider": "openai",
         "model": "gpt-5-mini",
     }
+
+
+def test_settings_endpoint_saves_user_mutation_authority(monkeypatch):
+    app = _make_settings_app()
+
+    captured: dict[str, Any] = {}
+
+    def _setter(concept_id: str, level: str) -> bool:
+        captured["concept_id"] = concept_id
+        captured["level"] = level
+        return True
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.set_user_mutation_authority_level",
+        _setter,
+    )
+
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/settings/",
+            json={
+                "mutation_authority": {
+                    "scope": "user",
+                    "concept_id": "#V#michael_witbrock",
+                    "level": "mutative_vontology_non_destructive",
+                }
+            },
+        )
+
+    assert resp.status_code == 200
+    assert captured == {
+        "concept_id": "#V#michael_witbrock",
+        "level": "mutative_vontology_non_destructive",
+    }
+
+
+def test_settings_endpoint_returns_resolved_mutation_authority(monkeypatch):
+    app = _make_settings_app()
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.get_global_mutation_authority_level",
+        lambda: "external_system_guarded",
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.get_user_mutation_authority_level",
+        lambda _concept_id: "additive_vontology",
+    )
+
+    with app.test_client() as client:
+        resp = client.get("/api/settings/?user_concept_id=%23V%23michael_witbrock")
+
+    assert resp.status_code == 200
+    payload = resp.get_json() or {}
+    resolved = payload.get("resolved_mutation_authority") or {}
+    assert resolved.get("scope") == "user"
+    assert resolved.get("concept_id") == "#V#michael_witbrock"
+    assert resolved.get("level") == "additive_vontology"
 
 
 @pytest.mark.parametrize(

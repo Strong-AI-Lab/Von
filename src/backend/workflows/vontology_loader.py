@@ -30,6 +30,9 @@ from .workflow_launch_input_contracts import (
     normalise_workflow_launch_input_contract,
 )
 from .workflow_action_contracts import resolve_workflow_action_target
+from .write_tool_policy import (
+    normalise_workflow_step_mutation_authority_spec,
+)
 from .engine import (
     WorkflowDefinition,
     WorkflowStateSpec,
@@ -260,6 +263,16 @@ WORKFLOW_STEP_CHECKPOINT_POLICY_TEXT_PREDICATE_PRECEDENCE: Tuple[
         "hasWorkflowStepCheckpointPolicyJson",
         "#V#has_workflow_step_checkpoint_policy_json",
         "has_workflow_step_checkpoint_policy_json",
+    ),
+)
+WORKFLOW_STEP_MUTATION_AUTHORITY_TEXT_PREDICATE_PRECEDENCE: Tuple[
+    Tuple[str, ...], ...
+] = (
+    (
+        "#V#hasWorkflowStepMutationAuthorityJson",
+        "hasWorkflowStepMutationAuthorityJson",
+        "#V#has_workflow_step_mutation_authority_json",
+        "has_workflow_step_mutation_authority_json",
     ),
 )
 WORKFLOW_BACKGROUND_LAUNCH_POLICY_TEXT_PREDICATE_PRECEDENCE: Tuple[
@@ -1690,6 +1703,19 @@ def resolve_workflow_step_runtime_policies(
             f"{step_id}:{checkpoint_source}"
         )
 
+    mutation_authority, mutation_authority_source = _resolve_policy_from_text_relations(
+        concept_id=step_id,
+        predicate_precedence=WORKFLOW_STEP_MUTATION_AUTHORITY_TEXT_PREDICATE_PRECEDENCE,
+        normaliser=normalise_workflow_step_mutation_authority_spec,
+    )
+    if mutation_authority is not None:
+        policies["mutation_authority"] = mutation_authority
+    elif isinstance(mutation_authority_source, str) and mutation_authority_source:
+        warnings.append(
+            "workflow_step_mutation_authority_invalid:"
+            f"{step_id}:{mutation_authority_source}"
+        )
+
     return policies, warnings
 
 
@@ -2338,6 +2364,7 @@ def load_workflow_definition_from_vontology(
         "workflow_step_approval_gate_invalid:",
         "workflow_step_idempotency_policy_invalid:",
         "workflow_step_checkpoint_policy_invalid:",
+        "workflow_step_mutation_authority_invalid:",
         "workflow_plan_state_policy_invalid:",
         "workflow_completion_gate_invalid:",
     )
@@ -2774,6 +2801,7 @@ def load_workflow_definition_from_vontology(
         approval_gate = step.get("approval_gate")
         idempotency_policy = step.get("idempotency_policy")
         checkpoint_policy = step.get("checkpoint_policy")
+        mutation_authority = step.get("mutation_authority")
         prompt_contract = step.get("prompt_contract")
         if preconditions:
             step_metadata["preconditions"] = preconditions
@@ -2795,6 +2823,8 @@ def load_workflow_definition_from_vontology(
             step_metadata["idempotency_policy"] = idempotency_policy
         if checkpoint_policy:
             step_metadata["checkpoint_policy"] = checkpoint_policy
+        if mutation_authority:
+            step_metadata["mutation_authority"] = mutation_authority
         if prompt_contract:
             step_metadata["prompt_contract"] = prompt_contract
         action_execution_modes = [

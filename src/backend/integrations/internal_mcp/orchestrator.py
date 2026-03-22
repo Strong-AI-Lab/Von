@@ -82,12 +82,14 @@ from ...workflows.workflow_gap_workflow_contracts import (
 )
 
 from src.backend.workflows.write_tool_policy import (
+    build_mutation_guardrail_events,
     classify_write_tool_risk,
     compute_allowed_write_tools,
     prompt_has_low_risk_additive_write_evidence,
     prompt_grants_high_impact_kb_write_approval,
     prompt_explicitly_denies_write,
     REASON_DEFAULT_ALLOW_ADDITIVE_LOW_RISK,
+    required_mutation_authority_level_for_risk,
     tool_requires_confirmation,
     write_policy_reason_is_session_memory_eligible,
 )
@@ -334,11 +336,17 @@ class _ResolvedWritePolicyDecision:
     allowed_tools: frozenset[str]
     reason: str
     decision_basis: str
+    outcome: str
     user_denial_detected: bool
     risk_classes: Mapping[str, str]
+    tool_outcomes: Mapping[str, str]
     blocked_reasons: Mapping[str, str]
+    authority_block_sources: Mapping[str, str]
     confirmation_required_tools: frozenset[str]
     confirmation_prompts: Mapping[str, str]
+    effective_mutation_authority: str
+    authority_sources: Mapping[str, str]
+    guardrail_events: tuple[Mapping[str, Any], ...]
 
 
 class ProgressTracker:
@@ -1525,7 +1533,14 @@ class InternalMCPChatOrchestrator:
             method_catalogue = gateway.describe_methods()
             schema = self._tool_schema_for_name(tool_name, method_catalogue)
         except Exception:
+            method_catalogue = {}
             schema = None
+
+        tool_category = ""
+        if isinstance(method_catalogue, Mapping):
+            tool_meta = method_catalogue.get(tool_name)
+            if isinstance(tool_meta, Mapping):
+                tool_category = str(tool_meta.get("category") or "").strip().lower()
 
         self._apply_payload_defaults(
             tool_name,
@@ -1537,6 +1552,68 @@ class InternalMCPChatOrchestrator:
             turn_id=request.data.get("turn_id"),
         )
 
+        if tool_category == "write":
+            resolved_write_policy = self._resolve_allowed_write_tools(
+                prompt=(
+                    str(request.data.get("prompt") or "").strip()
+                    if isinstance(request.data, Mapping)
+                    else ""
+                ),
+                requested_write_tools=[tool_name],
+                recent_user_prompts=(
+                    [
+                        str(item).strip()
+                        for item in (request.data.get("recent_user_prompts") or [])
+                        if isinstance(item, str) and str(item).strip()
+                    ]
+                    if isinstance(request.data, Mapping)
+                    else []
+                ),
+                llm_client=env.llm_client,
+                model=env.model,
+                user_namespace=env.user_namespace,
+                auxiliary_system_prompt=env.auxiliary_system_prompt,
+                trace=request.trace,
+                conversation_session_id=request.data.get("conversation_session_id"),
+                turn_id=request.data.get("turn_id"),
+                aux_llm_calls=request.data.get("aux_llm_calls"),
+                caller_workflow_id=request.workflow_id,
+                caller_workflow_step_id=request.workflow_state_id,
+                caller_workflow_step_metadata=request.workflow_state_metadata,
+                guardrail_surface="workflow_action_fallback",
+                guardrail_stage="workflow_action",
+            )
+            self._record_mutation_guardrail_events(
+                events=resolved_write_policy.guardrail_events,
+                context=(
+                    request.data
+                    if isinstance(request.data, MutableMapping)
+                    else None
+                ),
+                aux_llm_calls=request.data.get("aux_llm_calls"),
+            )
+            if tool_name not in resolved_write_policy.allowed_tools:
+                message = self._build_blocked_write_message(
+                    tool_name=tool_name,
+                    reason=resolved_write_policy.blocked_reasons.get(tool_name),
+                    payload=payload,
+                )
+                return WorkflowActionResult(
+                    status="failed",
+                    error=message,
+                    outputs={
+                        "mutation_guardrail_blocked": True,
+                        "write_policy_reason": resolved_write_policy.reason,
+                        "write_policy_decision_basis": (
+                            resolved_write_policy.decision_basis
+                        ),
+                        "write_policy_outcome": resolved_write_policy.outcome,
+                        "write_policy_blocked_reason": (
+                            resolved_write_policy.blocked_reasons.get(tool_name)
+                        ),
+                    },
+                )
+
         try:
             result = gateway.invoke(tool_name, payload)
             try:
@@ -1547,6 +1624,37 @@ class InternalMCPChatOrchestrator:
                 record_generic_fallback_mcp_invocation(success=True)
             except Exception:
                 pass
+            if tool_category == "write" and isinstance(result.payload, Mapping):
+                tool_surface_guardrail_event = self._build_tool_surface_guardrail_event(
+                    tool_name=tool_name,
+                    payload=cast(Mapping[str, Any], result.payload),
+                    stage="workflow_action",
+                    workflow_id=request.workflow_id,
+                    workflow_step_id=request.workflow_state_id,
+                    action_id=request.action_id,
+                    conversation_session_id=request.data.get("conversation_session_id"),
+                    turn_id=request.data.get("turn_id"),
+                    effective_mutation_authority=(
+                        resolved_write_policy.effective_mutation_authority
+                        if "resolved_write_policy" in locals()
+                        else None
+                    ),
+                    authority_sources=(
+                        resolved_write_policy.authority_sources
+                        if "resolved_write_policy" in locals()
+                        else {}
+                    ),
+                )
+                if isinstance(tool_surface_guardrail_event, Mapping):
+                    self._record_mutation_guardrail_events(
+                        events=(tool_surface_guardrail_event,),
+                        context=(
+                            request.data
+                            if isinstance(request.data, MutableMapping)
+                            else None
+                        ),
+                        aux_llm_calls=request.data.get("aux_llm_calls"),
+                    )
             return workflow_action_result_from_mcp_payload(
                 tool_name=tool_name,
                 payload=result.payload,
@@ -1808,46 +1916,19 @@ class InternalMCPChatOrchestrator:
             requested_tools = []
         if not isinstance(recent_user_prompts, list):
             recent_user_prompts = []
-
-        # Admin override: allow all requested write tools.
-        try:
-            from src.backend.services.settings_service import (
-                get_disable_write_tool_conservatism,
-            )
-
-            if get_disable_write_tool_conservatism():
-                if not prompt_explicitly_denies_write(prompt):
-                    allowed = sorted({str(tool) for tool in requested_tools if tool})
-                    risk_classes = {
-                        tool_name: classify_write_tool_risk(tool_name)
-                        for tool_name in allowed
-                    }
-                    try:
-                        from ...workflows.workflow_baseline_telemetry import (
-                            record_write_policy_decision,
-                        )
-
-                        record_write_policy_decision(
-                            stage="write_policy.decide",
-                            allowed_tools_count=len(allowed),
-                        )
-                    except Exception:
-                        pass
-                    return WorkflowActionResult(
-                        outputs={
-                            "allowed_write_tools": allowed,
-                            "write_policy_reason": "write_conservatism_disabled_by_admin_setting",
-                            "write_policy_decision_basis": "write_conservatism_disabled_by_admin_setting",
-                            "write_policy_user_denial_detected": False,
-                            "write_policy_risk_classes": risk_classes,
-                            "write_policy_blocked_reasons": {},
-                            "write_policy_requires_confirmation": [],
-                            "approval_required": False,
-                        }
-                    )
-        except Exception:
-            # Defensive: do not fail policy evaluation if Settings storage is unavailable.
-            pass
+        caller_workflow_id = request.data.get("caller_workflow_id")
+        caller_workflow_step_id = request.data.get("caller_workflow_step_id")
+        caller_workflow_step_metadata = request.data.get(
+            "caller_workflow_step_metadata"
+        )
+        guardrail_surface = str(
+            request.data.get("write_policy_guardrail_surface") or "write_policy"
+        ).strip() or "write_policy"
+        guardrail_stage = str(
+            request.data.get("write_policy_guardrail_stage") or "write_policy.decide"
+        ).strip() or "write_policy.decide"
+        conversation_session_id = request.data.get("conversation_session_id")
+        turn_id = request.data.get("turn_id")
 
         decision = compute_allowed_write_tools(
             prompt=prompt,
@@ -1855,6 +1936,15 @@ class InternalMCPChatOrchestrator:
             recent_user_prompts=[
                 str(item) for item in recent_user_prompts if isinstance(item, str)
             ],
+            user_mutation_authority=self._resolve_user_mutation_authority_level(
+                user_namespace=request.environment.user_namespace
+            ),
+            workflow_mutation_authority=(
+                caller_workflow_step_metadata.get("mutation_authority")
+                if isinstance(caller_workflow_step_metadata, Mapping)
+                else None
+            ),
+            global_mutation_authority=self._resolve_global_mutation_authority_level(),
         )
         try:
             from ...workflows.workflow_baseline_telemetry import (
@@ -1868,25 +1958,73 @@ class InternalMCPChatOrchestrator:
         except Exception:
             pass
 
+        mutation_guardrail_events = build_mutation_guardrail_events(
+            policy_decision=decision,
+            guardrail_surface=guardrail_surface,
+            stage=guardrail_stage,
+            workflow_id=(
+                str(caller_workflow_id).strip()
+                if isinstance(caller_workflow_id, str) and caller_workflow_id.strip()
+                else None
+            ),
+            workflow_step_id=(
+                str(caller_workflow_step_id).strip()
+                if isinstance(caller_workflow_step_id, str)
+                and caller_workflow_step_id.strip()
+                else None
+            ),
+            action_id=(
+                str(request.action_id).strip()
+                if isinstance(request.action_id, str) and request.action_id.strip()
+                else None
+            ),
+            conversation_session_id=(
+                str(conversation_session_id).strip()
+                if isinstance(conversation_session_id, str)
+                and conversation_session_id.strip()
+                else None
+            ),
+            turn_id=(
+                str(turn_id).strip()
+                if isinstance(turn_id, str) and turn_id.strip()
+                else None
+            ),
+        )
+
         return WorkflowActionResult(
             outputs={
                 "allowed_write_tools": sorted(decision.allowed_tools),
                 "write_policy_reason": decision.reason,
                 "write_policy_decision_basis": decision.decision_basis,
+                "write_policy_outcome": decision.outcome,
                 "write_policy_user_denial_detected": decision.user_denial_detected,
+                "write_policy_effective_mutation_authority": (
+                    decision.effective_mutation_authority
+                ),
+                "write_policy_authority_sources": dict(decision.authority_sources),
                 "write_policy_risk_classes": {
                     item.tool_name: item.risk_class for item in decision.tool_decisions
+                },
+                "write_policy_tool_outcomes": {
+                    item.tool_name: item.outcome for item in decision.tool_decisions
                 },
                 "write_policy_blocked_reasons": {
                     item.tool_name: item.blocked_reason
                     for item in decision.tool_decisions
                     if isinstance(item.blocked_reason, str) and item.blocked_reason
                 },
+                "write_policy_authority_block_sources": {
+                    item.tool_name: item.authority_block_source
+                    for item in decision.tool_decisions
+                    if isinstance(item.authority_block_source, str)
+                    and item.authority_block_source
+                },
                 "write_policy_requires_confirmation": [
                     item.tool_name
                     for item in decision.tool_decisions
                     if item.requires_confirmation
                 ],
+                "mutation_guardrail_events": list(mutation_guardrail_events),
                 "approval_required": any(
                     item.requires_confirmation and not item.allowed
                     for item in decision.tool_decisions
@@ -4486,17 +4624,36 @@ class InternalMCPChatOrchestrator:
         write_policy_decision_basis = data.get(
             "write_policy_decision_basis", write_policy_reason
         )
+        write_policy_outcome = str(data.get("write_policy_outcome") or "").strip()
         write_policy_user_denial_detected = bool(
             data.get("write_policy_user_denial_detected")
+        )
+        write_policy_effective_mutation_authority = str(
+            data.get("write_policy_effective_mutation_authority") or ""
+        ).strip()
+        write_policy_authority_sources = (
+            dict(data.get("write_policy_authority_sources"))
+            if isinstance(data.get("write_policy_authority_sources"), Mapping)
+            else {}
         )
         write_policy_risk_classes = (
             dict(data.get("write_policy_risk_classes"))
             if isinstance(data.get("write_policy_risk_classes"), Mapping)
             else {}
         )
+        write_policy_tool_outcomes = (
+            dict(data.get("write_policy_tool_outcomes"))
+            if isinstance(data.get("write_policy_tool_outcomes"), Mapping)
+            else {}
+        )
         write_policy_blocked_reasons = (
             dict(data.get("write_policy_blocked_reasons"))
             if isinstance(data.get("write_policy_blocked_reasons"), Mapping)
+            else {}
+        )
+        write_policy_authority_block_sources = (
+            dict(data.get("write_policy_authority_block_sources"))
+            if isinstance(data.get("write_policy_authority_block_sources"), Mapping)
             else {}
         )
         write_policy_requires_confirmation = {
@@ -4589,7 +4746,7 @@ class InternalMCPChatOrchestrator:
                     conversation_session_id=conversation_session_id,
                     turn_id=turn_id if isinstance(turn_id, str) else None,
                 )
-            if tool_category == "write" and tool_name not in allowed_write_tools:
+            if tool_category == "write":
                 resolved_write_policy = self._resolve_allowed_write_tools(
                     prompt=prompt,
                     requested_write_tools=[tool_name],
@@ -4602,16 +4759,39 @@ class InternalMCPChatOrchestrator:
                     conversation_session_id=conversation_session_id,
                     turn_id=data.get("turn_id"),
                     aux_llm_calls=data.get("aux_llm_calls"),
+                    caller_workflow_id=request.workflow_id,
+                    caller_workflow_step_id=request.workflow_state_id,
+                    caller_workflow_step_metadata=request.workflow_state_metadata,
+                    guardrail_surface="execution",
+                    guardrail_stage="tool_execute",
+                )
+                self._record_mutation_guardrail_events(
+                    events=resolved_write_policy.guardrail_events,
+                    context=data,
+                    aux_llm_calls=aux_llm_calls,
                 )
                 allowed_write_tools = set(resolved_write_policy.allowed_tools)
                 write_policy_reason = resolved_write_policy.reason
                 write_policy_decision_basis = resolved_write_policy.decision_basis
+                write_policy_outcome = resolved_write_policy.outcome
                 write_policy_user_denial_detected = (
                     resolved_write_policy.user_denial_detected
                 )
+                write_policy_effective_mutation_authority = str(
+                    resolved_write_policy.effective_mutation_authority or ""
+                ).strip()
+                write_policy_authority_sources = dict(
+                    resolved_write_policy.authority_sources
+                )
                 write_policy_risk_classes = dict(resolved_write_policy.risk_classes)
+                write_policy_tool_outcomes = dict(
+                    resolved_write_policy.tool_outcomes
+                )
                 write_policy_blocked_reasons = dict(
                     resolved_write_policy.blocked_reasons
+                )
+                write_policy_authority_block_sources = dict(
+                    resolved_write_policy.authority_block_sources
                 )
                 write_policy_requires_confirmation = set(
                     resolved_write_policy.confirmation_required_tools
@@ -4621,6 +4801,9 @@ class InternalMCPChatOrchestrator:
                 write_policy_risk_classes.get(tool_name)
                 or classify_write_tool_risk(tool_name)
             )
+            tool_write_outcome = str(
+                write_policy_tool_outcomes.get(tool_name) or write_policy_outcome or ""
+            ).strip()
             tool_blocked_reason = str(
                 write_policy_blocked_reasons.get(tool_name) or write_policy_reason or ""
             ).strip()
@@ -4646,7 +4829,19 @@ class InternalMCPChatOrchestrator:
                     "error": message,
                     "blocked": True,
                     "write_policy_risk_class": tool_write_risk_class,
+                    "write_policy_outcome": tool_write_outcome or None,
                     "write_policy_decision_basis": write_policy_decision_basis,
+                    "write_policy_effective_mutation_authority": (
+                        write_policy_effective_mutation_authority or None
+                    ),
+                    "write_policy_authority_sources": (
+                        dict(write_policy_authority_sources)
+                        if write_policy_authority_sources
+                        else {}
+                    ),
+                    "write_policy_authority_block_source": (
+                        write_policy_authority_block_sources.get(tool_name)
+                    ),
                     "write_policy_requires_confirmation": tool_requires_confirmation,
                     "write_policy_blocked_reason": tool_blocked_reason or None,
                     "write_policy_user_denial_detected": write_policy_user_denial_detected,
@@ -4772,8 +4967,19 @@ class InternalMCPChatOrchestrator:
                     invocation_record["knowledge_interaction"] = write_interaction_metadata
                 if tool_category == "write":
                     invocation_record["write_policy_risk_class"] = tool_write_risk_class
+                    invocation_record["write_policy_outcome"] = (
+                        tool_write_outcome or None
+                    )
                     invocation_record["write_policy_decision_basis"] = (
                         write_policy_decision_basis
+                    )
+                    invocation_record["write_policy_effective_mutation_authority"] = (
+                        write_policy_effective_mutation_authority or None
+                    )
+                    invocation_record["write_policy_authority_sources"] = (
+                        dict(write_policy_authority_sources)
+                        if write_policy_authority_sources
+                        else {}
                     )
                 if call_id:
                     invocation_record["call_id"] = call_id
@@ -4782,6 +4988,33 @@ class InternalMCPChatOrchestrator:
                     invocation_record["error"] = logical_error
                     if logical_error_code:
                         invocation_record["error_code"] = logical_error_code
+                        if tool_category == "write" and isinstance(result.payload, Mapping):
+                            tool_surface_guardrail_event = (
+                                self._build_tool_surface_guardrail_event(
+                                    tool_name=tool_name,
+                                    payload=cast(Mapping[str, Any], result.payload),
+                                    stage="tool_execute",
+                                    workflow_id=request.workflow_id,
+                                    workflow_step_id=request.workflow_state_id,
+                                    action_id=request.action_id,
+                                    conversation_session_id=conversation_session_id,
+                                    turn_id=(
+                                        str(turn_id).strip()
+                                        if isinstance(turn_id, str) and turn_id.strip()
+                                        else None
+                                    ),
+                                    effective_mutation_authority=(
+                                        write_policy_effective_mutation_authority
+                                    ),
+                                    authority_sources=write_policy_authority_sources,
+                                )
+                            )
+                            if isinstance(tool_surface_guardrail_event, Mapping):
+                                self._record_mutation_guardrail_events(
+                                    events=(tool_surface_guardrail_event,),
+                                    context=data,
+                                    aux_llm_calls=aux_llm_calls,
+                                )
                 else:
                     invocation_record["status"] = "ok"
                 if result_summary:
@@ -11891,6 +12124,121 @@ class InternalMCPChatOrchestrator:
             metadata["guard_reason"] = guard_reason
         return metadata
 
+    def _resolve_user_mutation_authority_level(
+        self,
+        *,
+        user_namespace: str | None,
+    ) -> str | None:
+        actor_concept_id = self._derive_actor_concept_id_from_namespace(user_namespace)
+        if not actor_concept_id:
+            return None
+        try:
+            from src.backend.services.settings_service import (
+                get_user_mutation_authority_level,
+            )
+
+            return get_user_mutation_authority_level(actor_concept_id)
+        except Exception:
+            return None
+
+    def _resolve_global_mutation_authority_level(self) -> str | None:
+        try:
+            from src.backend.services.settings_service import (
+                get_global_mutation_authority_level,
+            )
+
+            return get_global_mutation_authority_level()
+        except Exception:
+            return None
+
+    def _record_mutation_guardrail_events(
+        self,
+        *,
+        events: Sequence[Mapping[str, Any]] | None,
+        context: MutableMapping[str, Any] | None = None,
+        aux_llm_calls: list[Mapping[str, Any]] | None = None,
+    ) -> None:
+        if not isinstance(events, Sequence):
+            return
+        context_events = None
+        if isinstance(context, MutableMapping):
+            existing = context.get("mutation_guardrail_events")
+            if isinstance(existing, list):
+                context_events = existing
+            else:
+                context_events = []
+                context["mutation_guardrail_events"] = context_events
+        for event in events:
+            if not isinstance(event, Mapping):
+                continue
+            event_payload = {
+                str(key): value for key, value in event.items() if isinstance(key, str)
+            }
+            if isinstance(context_events, list):
+                context_events.append(dict(event_payload))
+            if isinstance(aux_llm_calls, list):
+                aux_llm_calls.append(dict(event_payload))
+            try:
+                from ...workflows.workflow_baseline_telemetry import (
+                    record_mutation_guardrail_event,
+                )
+
+                record_mutation_guardrail_event(event_payload)
+            except Exception:
+                pass
+
+    def _build_tool_surface_guardrail_event(
+        self,
+        *,
+        tool_name: str,
+        payload: Mapping[str, Any],
+        stage: str,
+        workflow_id: str | None,
+        workflow_step_id: str | None,
+        action_id: str | None,
+        conversation_session_id: str | None,
+        turn_id: str | None,
+        effective_mutation_authority: str | None,
+        authority_sources: Mapping[str, str] | None,
+    ) -> Mapping[str, Any] | None:
+        error_code = str(payload.get("error_code") or "").strip()
+        if not error_code:
+            return None
+        risk_class = classify_write_tool_risk(tool_name)
+        event: dict[str, Any] = {
+            "type": "mutation_guardrail",
+            "guardrail_surface": "tool_surface",
+            "stage": stage,
+            "tool_name": tool_name,
+            "risk_class": risk_class,
+            "required_mutation_authority": required_mutation_authority_level_for_risk(
+                risk_class
+            ),
+            "effective_mutation_authority": str(
+                effective_mutation_authority or ""
+            ).strip(),
+            "authority_sources": dict(authority_sources or {}),
+            "decision": (
+                "approval_required"
+                if error_code == "approval_required"
+                else "blocked"
+            ),
+            "decision_basis": f"tool_surface:{error_code}",
+            "blocked_reason": error_code,
+            "tool_surface_error_code": error_code,
+        }
+        if workflow_id:
+            event["workflow_id"] = workflow_id
+        if workflow_step_id:
+            event["workflow_step_id"] = workflow_step_id
+        if action_id:
+            event["action_id"] = action_id
+        if conversation_session_id:
+            event["conversation_session_id"] = conversation_session_id
+        if turn_id:
+            event["turn_id"] = turn_id
+        return event
+
     def _tool_call_repair_enabled(self) -> bool:
         return os.getenv("VON_TOOL_CALL_REPAIR_ENABLE", "1").lower() in {
             "1",
@@ -17406,6 +17754,11 @@ class InternalMCPChatOrchestrator:
         conversation_session_id: str | None = None,
         turn_id: str | None = None,
         aux_llm_calls: list[Mapping[str, Any]] | None = None,
+        caller_workflow_id: str | None = None,
+        caller_workflow_step_id: str | None = None,
+        caller_workflow_step_metadata: Mapping[str, Any] | None = None,
+        guardrail_surface: str = "write_policy",
+        guardrail_stage: str = "write_policy.decide",
     ) -> _ResolvedWritePolicyDecision:
         workflow_result = self.execute_workflow(
             WRITE_TOOL_POLICY_WORKFLOW_ID,
@@ -17416,6 +17769,15 @@ class InternalMCPChatOrchestrator:
                 "conversation_session_id": conversation_session_id,
                 "turn_id": turn_id,
                 "aux_llm_calls": aux_llm_calls or [],
+                "caller_workflow_id": caller_workflow_id,
+                "caller_workflow_step_id": caller_workflow_step_id,
+                "caller_workflow_step_metadata": (
+                    dict(caller_workflow_step_metadata)
+                    if isinstance(caller_workflow_step_metadata, Mapping)
+                    else None
+                ),
+                "write_policy_guardrail_surface": guardrail_surface,
+                "write_policy_guardrail_stage": guardrail_stage,
                 "workflow_episode_source": "chat_turn_workflow",
                 "workflow_episode_stage": "write_policy",
             },
@@ -17438,27 +17800,43 @@ class InternalMCPChatOrchestrator:
                 allowed_tools=frozenset(),
                 reason="workflow_unavailable",
                 decision_basis="workflow_unavailable",
+                outcome="blocked",
                 user_denial_detected=False,
+                tool_outcomes={},
                 risk_classes={
                     str(tool_name): classify_write_tool_risk(str(tool_name))
                     for tool_name in requested_write_tools
                     if isinstance(tool_name, str) and str(tool_name).strip()
                 },
                 blocked_reasons=blocked_reasons,
+                authority_block_sources={},
                 confirmation_required_tools=frozenset(),
                 confirmation_prompts={},
+                effective_mutation_authority="",
+                authority_sources={},
+                guardrail_events=(),
             )
         allowed = workflow_result.data.get("allowed_write_tools")
         reason = workflow_result.data.get("write_policy_reason")
         decision_basis = workflow_result.data.get("write_policy_decision_basis")
+        outcome = workflow_result.data.get("write_policy_outcome")
         user_denial_detected = workflow_result.data.get(
             "write_policy_user_denial_detected"
         )
+        effective_mutation_authority = workflow_result.data.get(
+            "write_policy_effective_mutation_authority"
+        )
+        authority_sources = workflow_result.data.get("write_policy_authority_sources")
         risk_classes = workflow_result.data.get("write_policy_risk_classes")
+        tool_outcomes = workflow_result.data.get("write_policy_tool_outcomes")
         blocked_reasons = workflow_result.data.get("write_policy_blocked_reasons")
+        authority_block_sources = workflow_result.data.get(
+            "write_policy_authority_block_sources"
+        )
         confirmation_required = workflow_result.data.get(
             "write_policy_requires_confirmation"
         )
+        guardrail_events_raw = workflow_result.data.get("mutation_guardrail_events")
         allowed_set: set[str] = set()
         if isinstance(allowed, list):
             allowed_set = {
@@ -17480,7 +17858,11 @@ class InternalMCPChatOrchestrator:
             allowed_tools=frozenset(allowed_set),
             reason=str(reason or ""),
             decision_basis=str(decision_basis or reason or ""),
+            outcome=str(outcome or ""),
             user_denial_detected=bool(user_denial_detected),
+            tool_outcomes=(
+                dict(tool_outcomes) if isinstance(tool_outcomes, Mapping) else {}
+            ),
             risk_classes=(
                 dict(risk_classes)
                 if isinstance(risk_classes, Mapping)
@@ -17495,8 +17877,24 @@ class InternalMCPChatOrchestrator:
                 if isinstance(blocked_reasons, Mapping)
                 else {}
             ),
+            authority_block_sources=(
+                dict(authority_block_sources)
+                if isinstance(authority_block_sources, Mapping)
+                else {}
+            ),
             confirmation_required_tools=confirmation_required_tools,
             confirmation_prompts=confirmation_prompts,
+            effective_mutation_authority=str(effective_mutation_authority or ""),
+            authority_sources=(
+                dict(authority_sources)
+                if isinstance(authority_sources, Mapping)
+                else {}
+            ),
+            guardrail_events=tuple(
+                item
+                for item in (guardrail_events_raw or [])
+                if isinstance(item, Mapping)
+            ),
         )
 
     def execute_workflow(
@@ -20855,15 +21253,29 @@ class InternalMCPChatOrchestrator:
                 prompt=prompt,
                 requested_tools=write_tool_candidates_for_routing,
                 recent_user_prompts=recent_user_prompts_for_write or None,
+                user_mutation_authority=self._resolve_user_mutation_authority_level(
+                    user_namespace=user_namespace
+                ),
+                global_mutation_authority=self._resolve_global_mutation_authority_level(),
             )
             write_routing_policy_reason = str(
                 write_routing_policy_decision.reason or ""
             ).strip()
+            self._record_mutation_guardrail_events(
+                events=build_mutation_guardrail_events(
+                    policy_decision=write_routing_policy_decision,
+                    guardrail_surface="routing",
+                    stage="routing",
+                    conversation_session_id=conversation_session_id,
+                    turn_id=turn_id,
+                ),
+                aux_llm_calls=aux_llm_calls,
+            )
             low_risk_additive_routing_evidence = (
                 prompt_has_low_risk_additive_write_evidence(prompt)
                 or bool(
                     isinstance(write_intent_rehydrate_telemetry, Mapping)
-                    and write_intent_rehydrate_telemetry.get("reused")
+                        and write_intent_rehydrate_telemetry.get("reused")
                 )
             )
             routing_gate_allowed = any(
@@ -26322,6 +26734,7 @@ class InternalMCPChatOrchestrator:
             },
         )
         tool_pipeline_handoff_started = False
+        tc_data: dict[str, Any] = {}
         try:
             tc_env = WorkflowEnvironment(
                 llm_client=llm_client,
@@ -26351,7 +26764,7 @@ class InternalMCPChatOrchestrator:
             routing_info_payload = (
                 asdict(routing_info) if routing_info is not None else None
             )
-            tc_data: dict[str, Any] = {
+            tc_data = {
                 # Inputs.
                 "prompt": prompt,
                 "prompt_for_requirements": effective_prompt_for_routing,
@@ -26454,6 +26867,12 @@ class InternalMCPChatOrchestrator:
                 if tool_pipeline_handoff_started
                 else "tool_pipeline_setup_exception"
             )
+            partial_tool_messages = _coerce_message_sequence(
+                tc_data.get("tool_messages") if isinstance(tc_data, Mapping) else ()
+            )
+            partial_tool_invocations = _coerce_message_sequence(
+                tc_data.get("invocations") if isinstance(tc_data, Mapping) else ()
+            )
             if not tool_pipeline_handoff_started:
                 _emit_dispatch_boundary(
                     boundary="workflow_handoff",
@@ -26493,8 +26912,8 @@ class InternalMCPChatOrchestrator:
                     "before tool execution could begin. Please try again or report "
                     "this issue."
                 ),
-                extra_messages=(),
-                tool_invocations=(),
+                extra_messages=partial_tool_messages,
+                tool_invocations=partial_tool_invocations,
                 aux_llm_calls=tuple(aux_llm_calls),
                 llm_calls=tuple(llm_calls),
                 llm_usage=_aggregate_usage_total(),
@@ -26502,6 +26921,7 @@ class InternalMCPChatOrchestrator:
                 workflow_routing=routing_info,
                 render_plan=_result_render_plan(),
             )
+            result = _refresh_result_runtime_snapshots(result)
             _finalise_selection_experience_record(
                 result=result,
                 outcome="failed",

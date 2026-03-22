@@ -446,6 +446,9 @@ def _apply_action_result_context(
 def execute_workflow_step_invocation(
     *,
     registry: ActionRegistry,
+    workflow_id: str,
+    workflow_state_id: str,
+    workflow_state_metadata: Mapping[str, Any] | None,
     action: WorkflowActionInvocation,
     resolved_inputs: MutableMapping[str, Any],
     context: Dict[str, Any],
@@ -480,6 +483,13 @@ def execute_workflow_step_invocation(
                 if isinstance(action.validation_policy, Mapping)
                 else None
             ),
+            workflow_id=workflow_id,
+            workflow_state_id=workflow_state_id,
+            workflow_state_metadata=(
+                dict(workflow_state_metadata)
+                if isinstance(workflow_state_metadata, Mapping)
+                else None
+            ),
         )
         return execute_llm_step(request)
 
@@ -489,6 +499,9 @@ def execute_workflow_step_invocation(
         context=context,
         env=env,
         trace=trace,
+        workflow_id=workflow_id,
+        workflow_state_id=workflow_state_id,
+        workflow_state_metadata=workflow_state_metadata,
     )
 
 
@@ -1545,6 +1558,9 @@ class WorkflowExecutor:
                             )
                     else:
                         if approval_gate is not None:
+                            prior_approval_state = str(
+                                context.get("approval_state") or ""
+                            ).strip()
                             found, approval_value = resolve_context_path(
                                 context=context,
                                 path=str(
@@ -1556,8 +1572,15 @@ class WorkflowExecutor:
                                 is bool(approval_gate.get("expected", True))
                             )
                             approval_event = {
+                                "type": "mutation_guardrail",
                                 "status": "approval_gate_checked",
+                                "guardrail_surface": "workflow_approval_gate",
+                                "decision": (
+                                    "allowed" if approved else "approval_required"
+                                ),
+                                "stage": current_state,
                                 "workflow_id": definition.workflow_id,
+                                "workflow_step_id": current_state,
                                 "state_id": current_state,
                                 "action_id": action_target_id,
                                 "approval_context_key": approval_gate.get(
@@ -1568,6 +1591,15 @@ class WorkflowExecutor:
                                 if approved
                                 else "blocked",
                                 "approval_required": not approved,
+                                "approval_transition": (
+                                    "entered_approval_required"
+                                    if (not approved and prior_approval_state != "blocked")
+                                    else (
+                                        "exited_approval_required"
+                                        if (approved and prior_approval_state == "blocked")
+                                        else "approval_state_unchanged"
+                                    )
+                                ),
                             }
                             _append_context_event(
                                 context=context,
@@ -1579,6 +1611,14 @@ class WorkflowExecutor:
                                 context=context,
                                 event=approval_event,
                             )
+                            try:
+                                from .workflow_baseline_telemetry import (
+                                    record_mutation_guardrail_event,
+                                )
+
+                                record_mutation_guardrail_event(approval_event)
+                            except Exception:
+                                pass
                             if trace is not None:
                                 trace.record_state_transition(
                                     current_state,
@@ -1595,6 +1635,9 @@ class WorkflowExecutor:
 
                         result = execute_workflow_step_invocation(
                             registry=self._registry,
+                            workflow_id=definition.workflow_id,
+                            workflow_state_id=current_state,
+                            workflow_state_metadata=state_spec.metadata,
                             action=action,
                             resolved_inputs=resolved_inputs,
                             context=context,

@@ -81,6 +81,12 @@ def test_approval_gate_routes_to_blocked_state_without_running_action() -> None:
     assert calls["count"] == 0
     assert result.data.get("approval_required") is True
     assert result.data.get("approval_state") == "blocked"
+    approval_events = result.data.get("workflow_approval_gate_events")
+    assert isinstance(approval_events, list)
+    assert approval_events
+    assert approval_events[0]["type"] == "mutation_guardrail"
+    assert approval_events[0]["guardrail_surface"] == "workflow_approval_gate"
+    assert approval_events[0]["decision"] == "approval_required"
 
 
 def test_retry_policy_retries_until_success(monkeypatch) -> None:

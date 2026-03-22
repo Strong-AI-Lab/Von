@@ -459,6 +459,13 @@ class TestWorkflowStepRuntimePolicyResolution:
                         '"summary_context_keys":["dispatch.summary"]}'
                     ),
                 },
+                {
+                    "predicate": "#V#hasWorkflowStepMutationAuthorityJson",
+                    "text": (
+                        '{"schema_version":"workflow_step_mutation_authority.v1",'
+                        '"maximum_level":"mutative_vontology_non_destructive"}'
+                    ),
+                },
             ],
         ):
             policies, warnings = resolve_workflow_step_runtime_policies("#V#step")
@@ -473,6 +480,9 @@ class TestWorkflowStepRuntimePolicyResolution:
         assert policies["checkpoint_policy"]["summary_context_keys"] == [
             "dispatch.summary"
         ]
+        assert policies["mutation_authority"]["maximum_level"] == (
+            "mutative_vontology_non_destructive"
+        )
 
 
 class TestWorkflowLongHorizonPolicyResolution:

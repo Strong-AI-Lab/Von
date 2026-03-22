@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import copy
 from threading import Lock
-from typing import Any, Dict
+from typing import Any, Dict, Mapping
 
 _lock = Lock()
 _state: Dict[str, Any] = {
@@ -24,6 +24,12 @@ _state: Dict[str, Any] = {
     "write_policy_allow_total": 0,
     "write_policy_deny_total": 0,
     "write_policy_stage_counts": {},
+    "mutation_guardrail_events_total": 0,
+    "mutation_guardrail_decision_counts": {},
+    "mutation_guardrail_surface_counts": {},
+    "mutation_guardrail_risk_counts": {},
+    "mutation_guardrail_stage_counts": {},
+    "recent_mutation_guardrail_events": [],
 }
 
 
@@ -37,6 +43,15 @@ def _get_stage_bucket(stage: str) -> Dict[str, int]:
         bucket = {"allow": 0, "deny": 0}
         stage_counts[stage] = bucket
     return bucket
+
+
+def _increment_bucket(name: str, key: str) -> None:
+    bucket = _state.get(name)
+    if not isinstance(bucket, dict):
+        bucket = {}
+        _state[name] = bucket
+    cleaned = key.strip() if isinstance(key, str) and key.strip() else "unknown"
+    bucket[cleaned] = int(bucket.get(cleaned, 0)) + 1
 
 
 def record_workflow_discovery_observation(
@@ -86,6 +101,38 @@ def record_write_policy_decision(
             bucket["allow"] = int(bucket.get("allow", 0)) + 1
         else:
             bucket["deny"] = int(bucket.get("deny", 0)) + 1
+
+
+def record_mutation_guardrail_event(event: Mapping[str, Any]) -> None:
+    """Record one structured mutation-guardrail encounter."""
+
+    if not isinstance(event, Mapping):
+        return
+
+    decision = str(event.get("decision") or "").strip() or "unknown"
+    surface = str(event.get("guardrail_surface") or "").strip() or "unknown"
+    risk_class = str(event.get("risk_class") or "").strip() or "unknown"
+    stage = str(event.get("stage") or "").strip() or "unknown"
+    event_copy = {
+        str(key): value
+        for key, value in event.items()
+        if isinstance(key, str)
+    }
+
+    with _lock:
+        _state["mutation_guardrail_events_total"] += 1
+        _increment_bucket("mutation_guardrail_decision_counts", decision)
+        _increment_bucket("mutation_guardrail_surface_counts", surface)
+        _increment_bucket("mutation_guardrail_risk_counts", risk_class)
+        _increment_bucket("mutation_guardrail_stage_counts", stage)
+
+        recent = _state.get("recent_mutation_guardrail_events")
+        if not isinstance(recent, list):
+            recent = []
+            _state["recent_mutation_guardrail_events"] = recent
+        recent.append(event_copy)
+        if len(recent) > 100:
+            del recent[:-100]
 
 
 def get_workflow_baseline_telemetry_snapshot() -> Dict[str, Any]:

@@ -62,12 +62,16 @@ DISABLE_WRITE_TOOL_CONSERVATISM_SETTING_NAME = "disable_write_tool_conservatism"
 REQUIRE_HUMAN_REVIEW_FOR_HIGH_IMPACT_KB_WRITES_SETTING_NAME = (
     "require_human_review_for_high_impact_kb_writes"
 )
+MUTATION_AUTHORITY_LEVEL_SETTING_NAME = "mutation_authority_level"
 
 # Prefixes for contextual (scoped) LLM settings (Phase 2 scaffold)
 _ACTIVE_LLM_USER_PREFIX = f"{ACTIVE_LLM_SETTING_NAME}:user:"
 _ACTIVE_LLM_ORG_PREFIX = f"{ACTIVE_LLM_SETTING_NAME}:org:"
 _ENABLED_LLMS_USER_PREFIX = f"{ENABLED_LLMS_SETTING_NAME}:user:"
 _ENABLED_LLMS_ORG_PREFIX = f"{ENABLED_LLMS_SETTING_NAME}:org:"
+_MUTATION_AUTHORITY_LEVEL_USER_PREFIX = (
+    f"{MUTATION_AUTHORITY_LEVEL_SETTING_NAME}:user:"
+)
 
 
 def _normalise_llm_setting_entry(raw: Any) -> dict[str, str] | None:
@@ -405,6 +409,10 @@ def _build_user_llm_setting_name(user_concept_id: str) -> str:
     return f"{_ACTIVE_LLM_USER_PREFIX}{user_concept_id}"
 
 
+def _build_user_mutation_authority_setting_name(user_concept_id: str) -> str:
+    return f"{_MUTATION_AUTHORITY_LEVEL_USER_PREFIX}{user_concept_id}"
+
+
 def _build_org_llm_setting_name(org_concept_id: str) -> str:
     return f"{_ACTIVE_LLM_ORG_PREFIX}{org_concept_id}"
 
@@ -493,6 +501,36 @@ def get_user_llm_setting(user_concept_id: str):
         logger.warning("User LLM setting malformed (not dict); ignoring")
         return None
     return raw
+
+
+def set_user_mutation_authority_level(user_concept_id: str, level: str) -> bool:
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        logger.error(
+            "set_user_mutation_authority_level requires a non-empty user_concept_id"
+        )
+        return False
+    from ..workflows.write_tool_policy import (
+        normalise_mutation_authority_level,
+    )
+
+    normalised = normalise_mutation_authority_level(level)
+    return update_setting(
+        _build_user_mutation_authority_setting_name(user_concept_id),
+        normalised,
+    )
+
+
+def get_user_mutation_authority_level(user_concept_id: str) -> str | None:
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        return None
+    raw = get_setting(_build_user_mutation_authority_setting_name(user_concept_id))
+    if raw is None:
+        return None
+    from ..workflows.write_tool_policy import (
+        normalise_mutation_authority_level,
+    )
+
+    return normalise_mutation_authority_level(raw)
 
 
 def set_org_llm_setting(org_concept_id: str, provider: str, model_name: str) -> bool:
@@ -1154,6 +1192,19 @@ def get_disable_write_tool_conservatism() -> bool:
 
 def set_disable_write_tool_conservatism(disabled: bool) -> bool:
     return update_setting(DISABLE_WRITE_TOOL_CONSERVATISM_SETTING_NAME, bool(disabled))
+
+
+def get_global_mutation_authority_level() -> str:
+    from ..workflows.write_tool_policy import (
+        MUTATION_AUTHORITY_LEVEL_EXTERNAL_SYSTEM_GUARDED,
+    )
+
+    # The legacy admin flag no longer acts as a coarse "full access" or
+    # "reduced access" ceiling. Mutation authority is now modelled primarily
+    # through user grants, workflow step contracts, and tool-surface guardrails.
+    # Keep the global source explicit and stable until a dedicated global
+    # authority setting is introduced.
+    return MUTATION_AUTHORITY_LEVEL_EXTERNAL_SYSTEM_GUARDED
 
 
 def get_require_human_review_for_high_impact_kb_writes() -> bool:

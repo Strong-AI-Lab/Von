@@ -14,7 +14,32 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
-from typing import Sequence
+from typing import Any, Mapping, Sequence
+
+
+MUTATION_AUTHORITY_LEVEL_READ_ONLY = "read_only"
+MUTATION_AUTHORITY_LEVEL_ADDITIVE_VONTOLOGY = "additive_vontology"
+MUTATION_AUTHORITY_LEVEL_MUTATIVE_VONTOLOGY_NON_DESTRUCTIVE = (
+    "mutative_vontology_non_destructive"
+)
+MUTATION_AUTHORITY_LEVEL_DESTRUCTIVE_VONTOLOGY_WITH_CONFIRMATION = (
+    "destructive_vontology_with_confirmation"
+)
+MUTATION_AUTHORITY_LEVEL_EXTERNAL_SYSTEM_GUARDED = "external_system_guarded"
+
+WORKFLOW_STEP_MUTATION_AUTHORITY_SCHEMA_VERSION = (
+    "workflow_step_mutation_authority.v1"
+)
+
+MUTATION_GUARDRAIL_DECISION_ALLOWED = "allowed"
+MUTATION_GUARDRAIL_DECISION_BLOCKED = "blocked"
+MUTATION_GUARDRAIL_DECISION_APPROVAL_REQUIRED = "approval_required"
+MUTATION_GUARDRAIL_DECISION_DEFERRED = "deferred"
+
+REASON_NO_REQUESTED_WRITE_TOOLS = "no_requested_write_tools"
+REASON_MUTATION_AUTHORITY_DEFAULT = "mutation_authority_default"
+REASON_INSUFFICIENT_MUTATION_AUTHORITY = "insufficient_mutation_authority"
+REASON_WORKFLOW_MUTATION_AUTHORITY_INVALID = "workflow_mutation_authority_invalid"
 
 WRITE_RISK_ADDITIVE_LOW_RISK = "additive_low_risk"
 WRITE_RISK_MUTATIVE_NON_DESTRUCTIVE = "mutative_non_destructive"
@@ -40,6 +65,17 @@ REASON_EXTERNAL_WRITE_REQUIRES_EXPLICIT_REQUEST = (
     "external_write_requires_explicit_request"
 )
 REASON_EXPLICIT_WRITE_DENIAL_DETECTED = "explicit_write_denial_detected"
+
+_MUTATION_AUTHORITY_LEVEL_ORDER: tuple[str, ...] = (
+    MUTATION_AUTHORITY_LEVEL_READ_ONLY,
+    MUTATION_AUTHORITY_LEVEL_ADDITIVE_VONTOLOGY,
+    MUTATION_AUTHORITY_LEVEL_MUTATIVE_VONTOLOGY_NON_DESTRUCTIVE,
+    MUTATION_AUTHORITY_LEVEL_DESTRUCTIVE_VONTOLOGY_WITH_CONFIRMATION,
+    MUTATION_AUTHORITY_LEVEL_EXTERNAL_SYSTEM_GUARDED,
+)
+_MUTATION_AUTHORITY_LEVEL_RANKS: dict[str, int] = {
+    level: index for index, level in enumerate(_MUTATION_AUTHORITY_LEVEL_ORDER)
+}
 
 _EXTERNAL_WRITE_PREFIXES: tuple[str, ...] = (
     "jira_",
@@ -165,10 +201,16 @@ _ARXIV_ID_OR_URL_PATTERN = re.compile(
 class WriteToolDecision:
     tool_name: str
     risk_class: str
+    required_mutation_authority: str
+    effective_mutation_authority: str
+    authority_sources: Mapping[str, str]
     allowed: bool
+    outcome: str
     decision_basis: str
     requires_confirmation: bool = False
     blocked_reason: str | None = None
+    authority_block_source: str | None = None
+    continuation_context_used: bool = False
 
 
 @dataclass(frozen=True)
@@ -176,6 +218,9 @@ class WriteToolPolicyDecision:
     allowed_tools: frozenset[str]
     reason: str
     decision_basis: str
+    outcome: str
+    effective_mutation_authority: str
+    authority_sources: Mapping[str, str]
     user_denial_detected: bool
     tool_decisions: tuple[WriteToolDecision, ...]
 
@@ -187,6 +232,88 @@ class WriteToolPolicyDecision:
             if decision.tool_name.lower() == lowered:
                 return decision
         return None
+
+
+def normalise_mutation_authority_level(
+    value: Any,
+    *,
+    default: str = MUTATION_AUTHORITY_LEVEL_EXTERNAL_SYSTEM_GUARDED,
+) -> str:
+    cleaned = str(value or "").strip().lower()
+    if cleaned in _MUTATION_AUTHORITY_LEVEL_RANKS:
+        return cleaned
+    return default
+
+
+def mutation_authority_level_rank(level: Any) -> int:
+    return int(
+        _MUTATION_AUTHORITY_LEVEL_RANKS.get(
+            normalise_mutation_authority_level(level),
+            _MUTATION_AUTHORITY_LEVEL_RANKS[
+                MUTATION_AUTHORITY_LEVEL_EXTERNAL_SYSTEM_GUARDED
+            ],
+        )
+    )
+
+
+def intersect_mutation_authority_levels(
+    *levels: Any,
+    default: str = MUTATION_AUTHORITY_LEVEL_EXTERNAL_SYSTEM_GUARDED,
+) -> str:
+    resolved = [normalise_mutation_authority_level(item, default=default) for item in levels]
+    if not resolved:
+        return normalise_mutation_authority_level(default)
+    return min(resolved, key=mutation_authority_level_rank)
+
+
+def required_mutation_authority_level_for_risk(risk_class: str) -> str:
+    if risk_class == WRITE_RISK_ADDITIVE_LOW_RISK:
+        return MUTATION_AUTHORITY_LEVEL_ADDITIVE_VONTOLOGY
+    if risk_class == WRITE_RISK_MUTATIVE_NON_DESTRUCTIVE:
+        return MUTATION_AUTHORITY_LEVEL_MUTATIVE_VONTOLOGY_NON_DESTRUCTIVE
+    if risk_class == WRITE_RISK_DESTRUCTIVE:
+        return MUTATION_AUTHORITY_LEVEL_DESTRUCTIVE_VONTOLOGY_WITH_CONFIRMATION
+    return MUTATION_AUTHORITY_LEVEL_EXTERNAL_SYSTEM_GUARDED
+
+
+def normalise_workflow_step_mutation_authority_spec(
+    value: Any,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        maximum_level = normalise_mutation_authority_level(value, default="")
+        if maximum_level:
+            return {
+                "schema_version": WORKFLOW_STEP_MUTATION_AUTHORITY_SCHEMA_VERSION,
+                "maximum_level": maximum_level,
+            }
+        return None
+    if not isinstance(value, Mapping):
+        return None
+
+    schema_version = str(value.get("schema_version") or "").strip()
+    if schema_version and schema_version != WORKFLOW_STEP_MUTATION_AUTHORITY_SCHEMA_VERSION:
+        return None
+
+    maximum_level_raw = (
+        value.get("maximum_level")
+        or value.get("max_level")
+        or value.get("level")
+        or value.get("mutation_authority_level")
+    )
+    maximum_level = normalise_mutation_authority_level(maximum_level_raw, default="")
+    if not maximum_level:
+        return None
+
+    normalised = {
+        "schema_version": WORKFLOW_STEP_MUTATION_AUTHORITY_SCHEMA_VERSION,
+        "maximum_level": maximum_level,
+    }
+    reason_code = str(value.get("reason_code") or "").strip()
+    if reason_code:
+        normalised["reason_code"] = reason_code
+    return normalised
 
 
 def classify_write_tool_risk(tool_name: str) -> str:
@@ -249,16 +376,52 @@ def compute_allowed_write_tools(
     prompt: str,
     requested_tools: list[str],
     recent_user_prompts: list[str] | None = None,
+    user_mutation_authority: str | None = None,
+    workflow_mutation_authority: Mapping[str, Any] | str | None = None,
+    global_mutation_authority: str | None = None,
+    environment_mutation_authority: str | None = None,
 ) -> WriteToolPolicyDecision:
     """Compute which write tools are allowed for this user prompt."""
 
     requested = _normalise_tool_names(requested_tools)
     recent_prompts = _clean_prompt_list(recent_user_prompts)
+    workflow_mutation_authority_spec = normalise_workflow_step_mutation_authority_spec(
+        workflow_mutation_authority
+    )
+    workflow_authority_invalid = (
+        workflow_mutation_authority is not None
+        and workflow_mutation_authority_spec is None
+    )
+    authority_sources = {
+        "user": normalise_mutation_authority_level(user_mutation_authority),
+        "workflow": (
+            str(workflow_mutation_authority_spec.get("maximum_level") or "").strip()
+            if isinstance(workflow_mutation_authority_spec, Mapping)
+            else (
+                MUTATION_AUTHORITY_LEVEL_READ_ONLY
+                if workflow_authority_invalid
+                else MUTATION_AUTHORITY_LEVEL_EXTERNAL_SYSTEM_GUARDED
+            )
+        ),
+        "global": normalise_mutation_authority_level(global_mutation_authority),
+        "environment": normalise_mutation_authority_level(
+            environment_mutation_authority
+        ),
+    }
+    effective_mutation_authority = intersect_mutation_authority_levels(
+        authority_sources["user"],
+        authority_sources["workflow"],
+        authority_sources["global"],
+        authority_sources["environment"],
+    )
     if not requested:
         return WriteToolPolicyDecision(
             allowed_tools=frozenset(),
-            reason="no_requested_write_tools",
-            decision_basis="no_requested_write_tools",
+            reason=REASON_NO_REQUESTED_WRITE_TOOLS,
+            decision_basis=REASON_NO_REQUESTED_WRITE_TOOLS,
+            outcome=MUTATION_GUARDRAIL_DECISION_ALLOWED,
+            effective_mutation_authority=effective_mutation_authority,
+            authority_sources=authority_sources,
             user_denial_detected=False,
             tool_decisions=(),
         )
@@ -268,7 +431,13 @@ def compute_allowed_write_tools(
             WriteToolDecision(
                 tool_name=tool_name,
                 risk_class=classify_write_tool_risk(tool_name),
+                required_mutation_authority=required_mutation_authority_level_for_risk(
+                    classify_write_tool_risk(tool_name)
+                ),
+                effective_mutation_authority=effective_mutation_authority,
+                authority_sources=authority_sources,
                 allowed=False,
+                outcome=MUTATION_GUARDRAIL_DECISION_BLOCKED,
                 decision_basis=REASON_EXPLICIT_WRITE_DENIAL_DETECTED,
                 requires_confirmation=False,
                 blocked_reason=REASON_EXPLICIT_WRITE_DENIAL_DETECTED,
@@ -279,6 +448,9 @@ def compute_allowed_write_tools(
             allowed_tools=frozenset(),
             reason=REASON_EXPLICIT_WRITE_DENIAL_DETECTED,
             decision_basis=REASON_EXPLICIT_WRITE_DENIAL_DETECTED,
+            outcome=MUTATION_GUARDRAIL_DECISION_BLOCKED,
+            effective_mutation_authority=effective_mutation_authority,
+            authority_sources=authority_sources,
             user_denial_detected=True,
             tool_decisions=tool_decisions,
         )
@@ -292,23 +464,86 @@ def compute_allowed_write_tools(
             tool_name=tool_name,
             prompt=prompt,
             recent_user_prompts=recent_prompts,
+            effective_mutation_authority=effective_mutation_authority,
+            authority_sources=authority_sources,
+            workflow_authority_invalid=workflow_authority_invalid,
         )
         decisions.append(decision)
         if decision.allowed:
             allowed_tools.add(tool_name)
-        if not overall_reason or not decision.allowed:
+        if (
+            not overall_reason
+            or decision.outcome != MUTATION_GUARDRAIL_DECISION_ALLOWED
+        ):
             overall_reason = decision.blocked_reason or decision.decision_basis
 
     if not overall_reason and decisions:
         overall_reason = decisions[0].decision_basis
 
+    overall_decision = min(
+        decisions,
+        key=lambda item: {
+            MUTATION_GUARDRAIL_DECISION_BLOCKED: 0,
+            MUTATION_GUARDRAIL_DECISION_APPROVAL_REQUIRED: 1,
+            MUTATION_GUARDRAIL_DECISION_DEFERRED: 2,
+            MUTATION_GUARDRAIL_DECISION_ALLOWED: 3,
+        }.get(item.outcome, 99),
+    )
+
     return WriteToolPolicyDecision(
         allowed_tools=frozenset(allowed_tools),
-        reason=overall_reason or "write_policy_evaluated",
-        decision_basis=overall_reason or "write_policy_evaluated",
+        reason=overall_reason or REASON_MUTATION_AUTHORITY_DEFAULT,
+        decision_basis=overall_reason or REASON_MUTATION_AUTHORITY_DEFAULT,
+        outcome=overall_decision.outcome,
+        effective_mutation_authority=effective_mutation_authority,
+        authority_sources=authority_sources,
         user_denial_detected=False,
         tool_decisions=tuple(decisions),
     )
+
+
+def build_mutation_guardrail_events(
+    *,
+    policy_decision: WriteToolPolicyDecision,
+    guardrail_surface: str,
+    stage: str | None,
+    workflow_id: str | None = None,
+    workflow_step_id: str | None = None,
+    action_id: str | None = None,
+    conversation_session_id: str | None = None,
+    turn_id: str | None = None,
+) -> tuple[dict[str, Any], ...]:
+    events: list[dict[str, Any]] = []
+    for decision in policy_decision.tool_decisions:
+        event: dict[str, Any] = {
+            "type": "mutation_guardrail",
+            "guardrail_surface": str(guardrail_surface or "").strip() or "unknown",
+            "stage": str(stage or "").strip() or None,
+            "tool_name": decision.tool_name,
+            "risk_class": decision.risk_class,
+            "required_mutation_authority": decision.required_mutation_authority,
+            "effective_mutation_authority": decision.effective_mutation_authority,
+            "authority_sources": dict(decision.authority_sources),
+            "decision": decision.outcome,
+            "decision_basis": decision.decision_basis,
+            "blocked_reason": decision.blocked_reason,
+            "authority_block_source": decision.authority_block_source,
+            "requires_confirmation": decision.requires_confirmation,
+            "continuation_context_used": decision.continuation_context_used,
+            "user_denial_detected": policy_decision.user_denial_detected,
+        }
+        if workflow_id:
+            event["workflow_id"] = workflow_id
+        if workflow_step_id:
+            event["workflow_step_id"] = workflow_step_id
+        if action_id:
+            event["action_id"] = action_id
+        if conversation_session_id:
+            event["conversation_session_id"] = conversation_session_id
+        if turn_id:
+            event["turn_id"] = turn_id
+        events.append(event)
+    return tuple(events)
 
 
 def write_policy_reason_is_session_memory_eligible(reason: str | None) -> bool:
@@ -462,14 +697,50 @@ def _decide_single_tool(
     tool_name: str,
     prompt: str,
     recent_user_prompts: Sequence[str],
+    effective_mutation_authority: str,
+    authority_sources: Mapping[str, str],
+    workflow_authority_invalid: bool,
 ) -> WriteToolDecision:
     risk_class = classify_write_tool_risk(tool_name)
+    required_mutation_authority = required_mutation_authority_level_for_risk(risk_class)
+    authority_block_source = _resolve_authority_block_source(
+        required_mutation_authority=required_mutation_authority,
+        authority_sources=authority_sources,
+    )
+    if workflow_authority_invalid:
+        authority_block_source = "workflow"
+
+    if (
+        mutation_authority_level_rank(effective_mutation_authority)
+        < mutation_authority_level_rank(required_mutation_authority)
+    ):
+        blocked_reason = (
+            REASON_WORKFLOW_MUTATION_AUTHORITY_INVALID
+            if workflow_authority_invalid
+            else REASON_INSUFFICIENT_MUTATION_AUTHORITY
+        )
+        return WriteToolDecision(
+            tool_name=tool_name,
+            risk_class=risk_class,
+            required_mutation_authority=required_mutation_authority,
+            effective_mutation_authority=effective_mutation_authority,
+            authority_sources=authority_sources,
+            allowed=False,
+            outcome=MUTATION_GUARDRAIL_DECISION_BLOCKED,
+            decision_basis=blocked_reason,
+            blocked_reason=blocked_reason,
+            authority_block_source=authority_block_source,
+        )
 
     if risk_class == WRITE_RISK_ADDITIVE_LOW_RISK:
         return WriteToolDecision(
             tool_name=tool_name,
             risk_class=risk_class,
+            required_mutation_authority=required_mutation_authority,
+            effective_mutation_authority=effective_mutation_authority,
+            authority_sources=authority_sources,
             allowed=True,
+            outcome=MUTATION_GUARDRAIL_DECISION_ALLOWED,
             decision_basis=REASON_DEFAULT_ALLOW_ADDITIVE_LOW_RISK,
         )
 
@@ -488,13 +759,22 @@ def _decide_single_tool(
             return WriteToolDecision(
                 tool_name=tool_name,
                 risk_class=risk_class,
+                required_mutation_authority=required_mutation_authority,
+                effective_mutation_authority=effective_mutation_authority,
+                authority_sources=authority_sources,
                 allowed=True,
+                outcome=MUTATION_GUARDRAIL_DECISION_ALLOWED,
                 decision_basis=reason,
+                continuation_context_used=recent and not explicit,
             )
         return WriteToolDecision(
             tool_name=tool_name,
             risk_class=risk_class,
+            required_mutation_authority=required_mutation_authority,
+            effective_mutation_authority=effective_mutation_authority,
+            authority_sources=authority_sources,
             allowed=False,
+            outcome=MUTATION_GUARDRAIL_DECISION_DEFERRED,
             decision_basis=REASON_MUTATIVE_NON_DESTRUCTIVE_REQUEST_REQUIRED,
             blocked_reason=REASON_MUTATIVE_NON_DESTRUCTIVE_REQUEST_REQUIRED,
         )
@@ -520,14 +800,23 @@ def _decide_single_tool(
             return WriteToolDecision(
                 tool_name=tool_name,
                 risk_class=risk_class,
+                required_mutation_authority=required_mutation_authority,
+                effective_mutation_authority=effective_mutation_authority,
+                authority_sources=authority_sources,
                 allowed=True,
+                outcome=MUTATION_GUARDRAIL_DECISION_ALLOWED,
                 decision_basis=reason,
                 requires_confirmation=True,
+                continuation_context_used=recent_confirmation,
             )
         return WriteToolDecision(
             tool_name=tool_name,
             risk_class=risk_class,
+            required_mutation_authority=required_mutation_authority,
+            effective_mutation_authority=effective_mutation_authority,
+            authority_sources=authority_sources,
             allowed=False,
+            outcome=MUTATION_GUARDRAIL_DECISION_APPROVAL_REQUIRED,
             decision_basis=REASON_DESTRUCTIVE_CONFIRMATION_REQUIRED,
             requires_confirmation=True,
             blocked_reason=REASON_DESTRUCTIVE_CONFIRMATION_REQUIRED,
@@ -550,17 +839,39 @@ def _decide_single_tool(
         return WriteToolDecision(
             tool_name=tool_name,
             risk_class=risk_class,
+            required_mutation_authority=required_mutation_authority,
+            effective_mutation_authority=effective_mutation_authority,
+            authority_sources=authority_sources,
             allowed=True,
+            outcome=MUTATION_GUARDRAIL_DECISION_ALLOWED,
             decision_basis=reason,
+            continuation_context_used=recent_external and not explicit_external,
         )
 
     return WriteToolDecision(
         tool_name=tool_name,
         risk_class=risk_class,
+        required_mutation_authority=required_mutation_authority,
+        effective_mutation_authority=effective_mutation_authority,
+        authority_sources=authority_sources,
         allowed=False,
+        outcome=MUTATION_GUARDRAIL_DECISION_DEFERRED,
         decision_basis=REASON_EXTERNAL_WRITE_REQUIRES_EXPLICIT_REQUEST,
         blocked_reason=REASON_EXTERNAL_WRITE_REQUIRES_EXPLICIT_REQUEST,
     )
+
+
+def _resolve_authority_block_source(
+    *,
+    required_mutation_authority: str,
+    authority_sources: Mapping[str, str],
+) -> str | None:
+    required_rank = mutation_authority_level_rank(required_mutation_authority)
+    for source_name in ("workflow", "user", "global", "environment"):
+        level = authority_sources.get(source_name)
+        if mutation_authority_level_rank(level) < required_rank:
+            return source_name
+    return None
 
 
 def _prompt_requests_non_destructive_mutation(prompt: str) -> bool:

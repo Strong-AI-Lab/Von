@@ -44,6 +44,8 @@ def test_workflow_runtime_policy_predicates_are_registered():
     assert "#V#has_workflow_step_idempotency_policy_json" in ids
     assert "#V#hasWorkflowStepCheckpointPolicyJson" in ids
     assert "#V#has_workflow_step_checkpoint_policy_json" in ids
+    assert "#V#hasWorkflowStepMutationAuthorityJson" in ids
+    assert "#V#has_workflow_step_mutation_authority_json" in ids
     assert "#V#hasWorkflowPlanStatePolicyJson" in ids
     assert "#V#has_workflow_plan_state_policy_json" in ids
     assert "#V#hasWorkflowCompletionGateJson" in ids

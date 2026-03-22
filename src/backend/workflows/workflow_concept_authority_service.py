@@ -19,7 +19,10 @@ from ..db.repositories.concepts_repository import ConceptsRepository
 from ..services import concept_service
 from ..services.concept_service import ConceptNotFoundError
 from ..services.effort_unit_ontology_service import ensure_effort_unit_ontology
-from ..services.text_value_service import upsert_text_for_concept
+from ..services.text_value_service import (
+    upsert_singleton_text_relation,
+    upsert_text_for_concept,
+)
 from .definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
     CHAT_BUTTONIFY_WORKFLOW_ID,
@@ -121,6 +124,9 @@ from .subworkflow_contracts import (
     normalise_subworkflow_contract,
 )
 from .workflow_registry import WorkflowRegistry
+from .write_tool_policy import (
+    WORKFLOW_STEP_MUTATION_AUTHORITY_SCHEMA_VERSION,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +279,7 @@ class _CanonicalStepPublicationSpec:
     execution_mode: str | None = None
     llm_policy: Mapping[str, Any] | None = None
     validation_policy: Mapping[str, Any] | None = None
+    mutation_authority: Mapping[str, Any] | None = None
     invoked_workflow_id: str | None = None
     static_input_bindings: tuple[tuple[str, str], ...] = ()
     context_input_mappings: tuple[str, ...] = ()
@@ -311,6 +318,7 @@ class _RuntimeStepPublicationDetails:
     execution_mode: str | None = None
     llm_policy: Mapping[str, Any] | None = None
     validation_policy: Mapping[str, Any] | None = None
+    mutation_authority: Mapping[str, Any] | None = None
     invoked_workflow_id: str | None = None
     static_input_bindings: tuple[tuple[str, str], ...] = ()
     context_input_mapping_specs: tuple[_CanonicalContextInputMappingSpec, ...] = ()
@@ -664,6 +672,10 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
                     "tool_mode": "allowed",
                     "policy_stage": "tool_call",
                     "prompt_text_context_key": "prompt",
+                },
+                mutation_authority={
+                    "schema_version": WORKFLOW_STEP_MUTATION_AUTHORITY_SCHEMA_VERSION,
+                    "maximum_level": "external_system_guarded",
                 },
                 conditional_transitions=(
                     _CanonicalConditionalTransitionPublicationSpec(
@@ -2050,11 +2062,15 @@ def _build_definition_from_publication_spec(
         is_terminal = not transitions
         if is_terminal:
             termination_states.append(step.state_id)
+        state_metadata: dict[str, Any] = {}
+        if isinstance(step.mutation_authority, Mapping):
+            state_metadata["mutation_authority"] = dict(step.mutation_authority)
         states[step.state_id] = WorkflowStateSpec(
             state_id=step.state_id,
             actions=actions,
             transitions=tuple(transitions),
             terminal=is_terminal,
+            metadata=state_metadata,
         )
     return WorkflowDefinition(
         workflow_id=workflow_id,
@@ -2232,6 +2248,7 @@ def _extract_runtime_step_publication_details(
     execution_mode: str | None = None
     llm_policy: Mapping[str, Any] | None = None
     validation_policy: Mapping[str, Any] | None = None
+    mutation_authority: Mapping[str, Any] | None = None
 
     for action in actions:
         execution_mode = str(getattr(action, "execution_mode", "") or "").strip() or execution_mode
@@ -2286,6 +2303,9 @@ def _extract_runtime_step_publication_details(
     tool_output_mapping_specs: list[_CanonicalToolOutputMappingSpec] = []
     writes_context_keys: list[str] = []
     if isinstance(metadata, Mapping):
+        raw_mutation_authority = metadata.get("mutation_authority")
+        if isinstance(raw_mutation_authority, Mapping):
+            mutation_authority = dict(raw_mutation_authority)
         raw_tool_output_mappings = metadata.get("tool_output_context_mappings")
         if isinstance(raw_tool_output_mappings, list):
             for item in raw_tool_output_mappings:
@@ -2324,6 +2344,11 @@ def _extract_runtime_step_publication_details(
         validation_policy=(
             dict(validation_policy)
             if isinstance(validation_policy, Mapping)
+            else None
+        ),
+        mutation_authority=(
+            dict(mutation_authority)
+            if isinstance(mutation_authority, Mapping)
             else None
         ),
         invoked_workflow_id=invoked_workflow_id or None,
@@ -2980,6 +3005,15 @@ def publish_canonical_chat_workflow_graphs(
                     else None
                 )
             )
+            mutation_authority = (
+                dict(step.mutation_authority)
+                if isinstance(step.mutation_authority, Mapping)
+                else (
+                    dict(runtime_details.mutation_authority)
+                    if isinstance(runtime_details.mutation_authority, Mapping)
+                    else None
+                )
+            )
             static_input_bindings = (
                 step.static_input_bindings
                 if step.static_input_bindings
@@ -3234,6 +3268,22 @@ def publish_canonical_chat_workflow_graphs(
                     resolve_to_state=lambda state_id: step_id_by_state[state_id],
                 ),
             }
+
+            if isinstance(mutation_authority, Mapping):
+                try:
+                    upsert_singleton_text_relation(
+                        subject_concept_id=step_concept_id,
+                        predicate="#V#hasWorkflowStepMutationAuthorityJson",
+                        text=json.dumps(mutation_authority, sort_keys=True),
+                        lang="en-NZ",
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    errors_by_workflow_id[workflow_id] = (
+                        "step_mutation_authority_upsert_failed:"
+                        f"{step_concept_id}:{exc}"
+                    )
+                    step_update_failed = True
+                    break
 
             try:
                 concept_service.update_concept(
