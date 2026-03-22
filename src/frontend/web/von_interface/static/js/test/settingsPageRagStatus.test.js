@@ -15,6 +15,24 @@ describe('settingsPage RAG status summary', () => {
         expect(__testOnly_getPreferredRagNamespace()).toBe('#V#user@org');
     });
 
+    test('derives namespace from stored user and organisation context when storage key is missing', () => {
+        localStorage.setItem(
+            'von_current_user',
+            JSON.stringify({ concept_id: '#V#michael_witbrock', name: 'Michael Witbrock' }),
+        );
+        localStorage.setItem(
+            'von_current_org',
+            JSON.stringify({
+                concept_id: '#V#university_of_auckland_strong_ai_lab',
+                name: 'University Of Auckland Strong AI Lab',
+            }),
+        );
+
+        expect(__testOnly_getPreferredRagNamespace()).toBe(
+            '#V#michael_witbrock@university_of_auckland_strong_ai_lab',
+        );
+    });
+
     test('formats KA + Conversation summary when chat counts available', () => {
         const ragData = {
             indexed: 10,

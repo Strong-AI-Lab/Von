@@ -294,7 +294,10 @@ async function getSettings() {
     if (orgConceptId) params.set('organisation_concept_id', orgConceptId);
 
     const url = '/api/settings/' + (params.toString() ? '?' + params.toString() : '');
-    const settings = await fetchJsonWithTimeout(url, { timeoutMs: 6000 });
+    const settings = await fetchJsonWithTimeout(url, {
+      cache: 'no-store',
+      timeoutMs: 6000,
+    });
     if (settings) {
       // Use resolved_llm as the active_llm (no global fallback)
       settings.active_llm = settings.resolved_llm || null;
@@ -766,7 +769,10 @@ export async function setModelInfoFooterText() {
     if (userInfo.conceptId) llmParams.set('user_concept_id', userInfo.conceptId);
     if (orgInfo.conceptId) llmParams.set('organisation_concept_id', orgInfo.conceptId);
     const llmUrl = '/api/settings/llm/info' + (llmParams.toString() ? '?' + llmParams.toString() : '');
-    llmInfo = await fetchJsonWithTimeout(llmUrl, { timeoutMs: 6000 });
+    llmInfo = await fetchJsonWithTimeout(llmUrl, {
+      cache: 'no-store',
+      timeoutMs: 6000,
+    });
   } catch (_) { }
   if (!llmInfo) {
     readinessIssues.add('llm');

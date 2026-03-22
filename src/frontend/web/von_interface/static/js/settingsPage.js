@@ -32,6 +32,10 @@ import {
   clampConversationHistoryRecentWindowDays,
   loadConversationHistorySettings
 } from './utils/conversationHistoryPreferences.js';
+import {
+  getSessionScopedNamespace,
+  setSessionScopedNamespace,
+} from './utils/sessionScopedStorage.js';
 
 // Helper to build fetch headers with window session context (JVNAUTOSCI-1011)
 function buildSettingsFetchHeaders(extraHeaders = {}) {
@@ -1214,23 +1218,7 @@ function formatRagSummaryForSettings(ragData, pendingFallback) {
 }
 
 function getPreferredRagNamespace() {
-  // JVNAUTOSCI-1015: Check sessionStorage first (window-scoped, set by main.js after org sync),
-  // then fall back to localStorage for backward compatibility
-  return (
-    safeSessionStorageGet('current_user_namespace') ||
-    safeLocalStorageGet('current_user_namespace') ||
-    safeLocalStorageGet('von_namespace') ||
-    ''
-  );
-}
-
-function safeSessionStorageGet(key) {
-  try {
-    if (typeof sessionStorage === 'undefined') return null;
-    return sessionStorage.getItem(key);
-  } catch {
-    return null;
-  }
+  return getSessionScopedNamespace();
 }
 
 function renderActiveNamespace() {
@@ -1518,7 +1506,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Keep the authenticated server session aligned with the selected user concept.
       if (opt.dataset.conceptId) {
         try {
-          await postJson('/von/api/session/set_user_concept', { user_concept_id: opt.dataset.conceptId });
+          const resp = await postJson('/von/api/session/set_user_concept', {
+            user_concept_id: opt.dataset.conceptId
+          });
+          setSessionScopedNamespace(resp?.namespace || null);
+          renderActiveNamespace();
+          void loadRagStatus(null);
         } catch (e) {
           console.warn('Failed to update server session user concept', e);
         }
@@ -1805,7 +1798,7 @@ async function loadAndDisplaySettings() {
     if (storedOrg?.concept_id) params.set('organisation_concept_id', storedOrg.concept_id);
     const settingsUrl = '/api/settings/' + (params.toString() ? '?' + params.toString() : '');
 
-    const response = await fetch(settingsUrl);
+    const response = await fetch(settingsUrl, { cache: 'no-store' });
     if (!response.ok) throw new Error(`Failed to fetch settings: ${response.statusText}`);
     const settings = await response.json();
 
@@ -1896,9 +1889,9 @@ async function loadAndDisplaySettings() {
       const selectedConceptId = selected?.dataset?.conceptId;
       if (selectedConceptId) {
         const resp = await postJson('/von/api/session/set_user_concept', { user_concept_id: selectedConceptId });
-        if (resp?.namespace) {
-          try { localStorage.setItem('current_user_namespace', resp.namespace); } catch { }
-        }
+        setSessionScopedNamespace(resp?.namespace || null);
+        renderActiveNamespace();
+        void loadRagStatus(null);
       }
     } catch (e) {
       console.warn('Failed to sync server session user concept (initial load)', e);
@@ -2525,7 +2518,7 @@ async function verifyOpenAiApiKey(savedModel = null) {
 
 export async function loadSettings() {
   try {
-    const response = await fetch('/api/settings/');
+    const response = await fetch('/api/settings/', { cache: 'no-store' });
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);
     }

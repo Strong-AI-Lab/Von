@@ -16,6 +16,38 @@ const KEYS = {
     ORG_SWITCHING: 'von_org_switching',
 };
 
+function readJsonFromStorage(storage, key) {
+    try {
+        const raw = storage?.getItem(key);
+        return raw ? JSON.parse(raw) : null;
+    } catch {
+        return null;
+    }
+}
+
+function conceptIdToNamespaceSlug(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    return raw.startsWith('#V#') ? raw.slice(3) : raw;
+}
+
+export function deriveNamespaceFromStoredContext() {
+    const local = typeof localStorage !== 'undefined' ? localStorage : null;
+    const session = typeof sessionStorage !== 'undefined' ? sessionStorage : null;
+    const storedUser = readJsonFromStorage(local, 'von_current_user');
+    const userSlug = conceptIdToNamespaceSlug(storedUser?.concept_id);
+    if (!userSlug) return '';
+
+    const storedOrg =
+        readJsonFromStorage(session, KEYS.CURRENT_ORG)
+        || readJsonFromStorage(local, KEYS.CURRENT_ORG)
+        || readJsonFromStorage(session, KEYS.ORG_CONTEXT)
+        || readJsonFromStorage(local, KEYS.ORG_CONTEXT);
+    const orgSlug = conceptIdToNamespaceSlug(storedOrg?.concept_id);
+
+    return orgSlug ? `#V#${userSlug}@${orgSlug}` : `#V#${userSlug}`;
+}
+
 /**
  * Get the current organisation context (session-scoped).
  * Tries sessionStorage first (per-window), then localStorage (shared).
@@ -88,7 +120,7 @@ export function getSessionScopedNamespace() {
         if (localLegacy) return localLegacy.trim();
     } catch { /* ignore */ }
 
-    return '';
+    return deriveNamespaceFromStoredContext();
 }
 
 /**

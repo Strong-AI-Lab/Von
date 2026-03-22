@@ -254,6 +254,44 @@ def test_settings_endpoint_returns_resolved_llm_after_scoped_save(monkeypatch):
     }
 
 
+def test_settings_get_marks_response_no_store(monkeypatch):
+    app = _make_settings_app()
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.get_all_settings_data",
+        lambda: {"openai_api_key_env_var": "OPENAI_API_KEY"},
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.resolve_llm_setting",
+        lambda user_concept_id=None, org_concept_id=None: None,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.resolve_enabled_llm_settings",
+        lambda user_concept_id=None, org_concept_id=None: [],
+    )
+
+    with app.test_client() as client:
+        resp = client.get("/api/settings/")
+
+    assert resp.status_code == 200
+    assert resp.headers.get("Cache-Control") == "no-store"
+
+
+def test_llm_info_marks_response_no_store(monkeypatch):
+    app = _make_settings_app()
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.resolve_llm_setting",
+        lambda user_concept_id=None, org_concept_id=None: None,
+    )
+
+    with app.test_client() as client:
+        resp = client.get("/api/settings/llm/info")
+
+    assert resp.status_code == 200
+    assert resp.headers.get("Cache-Control") == "no-store"
+
+
 def test_settings_endpoint_saves_user_mutation_authority(monkeypatch):
     app = _make_settings_app()
 

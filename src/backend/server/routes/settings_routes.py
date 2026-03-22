@@ -166,6 +166,14 @@ settings_bp = Blueprint(
     "settings", __name__
 )  # REMOVED url_prefix, as it's set during registration
 
+
+def _jsonify_no_store(payload: dict[str, Any], status_code: int = 200):
+    response = jsonify(payload)
+    response.status_code = status_code
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 def _is_admin_or_owner_session() -> bool:
     """Best-effort check for admin/owner privileges.
 
@@ -539,17 +547,15 @@ def get_llm_info():
                 status = "error"
                 error_message = str(e)
 
-        return (
-            jsonify(
-                {
-                    "provider": provider,
-                    "model": model,
-                    "status": status,
-                    "ping_ok": ping_ok,
-                    "error": error_message,
-                    "details": details,
-                }
-            ),
+        return _jsonify_no_store(
+            {
+                "provider": provider,
+                "model": model,
+                "status": status,
+                "ping_ok": ping_ok,
+                "error": error_message,
+                "details": details,
+            },
             200,
         )
     except Exception as e:
@@ -711,7 +717,7 @@ def get_all_settings():
                     or MUTATION_AUTHORITY_LEVEL_EXTERNAL_SYSTEM_GUARDED
                 ),
             }
-        return jsonify(settings), 200
+        return _jsonify_no_store(settings, 200)
     except Exception as e:
         current_app.logger.error(f"Error retrieving all settings: {e}", exc_info=True)
         return (
