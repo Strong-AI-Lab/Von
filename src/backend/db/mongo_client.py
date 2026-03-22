@@ -639,10 +639,15 @@ def get_concepts_collection() -> Collection | None:
             if "relationships.related_to_1" not in existing_indexes:
                 concepts_coll.create_index([("relationships.related_to", ASCENDING)])
 
-            # Metadata/name indexes
-            if "metadata.concept_type_1" not in existing_indexes:
-                concepts_coll.create_index([("metadata.concept_type", ASCENDING)])
-            # Migrate away from metadata.title text index to name text index
+            # Remove retired runtime-classification index once structural routes are in use.
+            if "metadata.concept_type_1" in existing_indexes:
+                try:
+                    concepts_coll.drop_index("metadata.concept_type_1")
+                except Exception as _e:
+                    logger.warning(
+                        f"Unable to drop retired metadata.concept_type index: {_e}"
+                    )
+            # Migrate away from the legacy title text index to name text index
             if "name_text" not in existing_indexes:
                 try:
                     concepts_coll.create_index(

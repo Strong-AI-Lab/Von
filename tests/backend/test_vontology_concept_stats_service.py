@@ -29,6 +29,11 @@ def _seed_docs():
         _concept_doc("#V#animal", is_a_type_of=["#V#thing"]),
         _concept_doc("#V#mammal", is_a_type_of=["#V#animal"]),
         _concept_doc("#V#bird", is_a_type_of=["#V#animal"]),
+        _concept_doc(
+            "#V#domesticated_mammal",
+            is_a_type_of=["#V#mammal"],
+            is_an_instance_of=["#V#animal"],
+        ),
         _concept_doc("#V#predicate", is_a_type_of=["#V#thing"]),
         _concept_doc("#V#has_pet", is_an_instance_of=["#V#predicate"]),
         _concept_doc(
@@ -67,31 +72,40 @@ def test_stats_snapshot_counts_types_and_predicate_extent(monkeypatch):
     assert rebuilt["stats_status"] == stats_service.STATS_STATUS_AVAILABLE
 
     payload = stats_service.get_vontology_concept_stats(
-        ["#V#animal", "#V#mammal", "#V#has_pet"],
+        ["#V#animal", "#V#mammal", "#V#has_pet", "#V#predicate"],
         scope_key="test-scope",
     )
     assert payload["stats_status"] == stats_service.STATS_STATUS_AVAILABLE
 
     animal = payload["concept_stats"]["#V#animal"]
     assert animal["kind"] == "type"
-    assert animal["direct_instance_count"] == 0
-    assert animal["total_instance_count_in_subtree"] == 3
+    assert animal["direct_instance_count"] == 1
+    assert animal["direct_pure_instance_count"] == 0
+    assert animal["has_direct_pure_instances"] is False
+    assert animal["total_instance_count_in_subtree"] == 4
     assert animal["has_any_instances_in_subtree"] is True
     assert animal["direct_subtype_count"] == 2
-    assert animal["total_subtype_count_in_subtree"] == 2
+    assert animal["total_subtype_count_in_subtree"] == 3
 
     mammal = payload["concept_stats"]["#V#mammal"]
     assert mammal["kind"] == "type"
     assert mammal["direct_instance_count"] == 2
+    assert mammal["direct_pure_instance_count"] == 2
+    assert mammal["has_direct_pure_instances"] is True
     assert mammal["total_instance_count_in_subtree"] == 2
-    assert mammal["direct_subtype_count"] == 0
-    assert mammal["total_subtype_count_in_subtree"] == 0
+    assert mammal["direct_subtype_count"] == 1
+    assert mammal["total_subtype_count_in_subtree"] == 1
 
     has_pet = payload["concept_stats"]["#V#has_pet"]
     assert has_pet["kind"] == "predicate"
     assert has_pet["extent_count"] == 5
     assert has_pet["extent_count_is_exact"] is True
     assert has_pet["extent_count_unavailable"] is False
+
+    predicate = payload["concept_stats"]["#V#predicate"]
+    assert predicate["kind"] == "type"
+    assert predicate["direct_instance_count"] == 1
+    assert predicate["direct_pure_instance_count"] == 1
 
 
 def test_stats_invalidation_marks_snapshot_stale_until_rebuilt(monkeypatch):
@@ -131,6 +145,10 @@ def test_stats_invalidation_marks_snapshot_stale_until_rebuilt(monkeypatch):
     )
     assert refreshed_payload["stats_status"] == stats_service.STATS_STATUS_AVAILABLE
     assert refreshed_payload["concept_stats"]["#V#mammal"]["direct_instance_count"] == 2
+    assert (
+        refreshed_payload["concept_stats"]["#V#mammal"]["direct_pure_instance_count"]
+        == 2
+    )
 
 
 def test_stats_without_snapshot_fast_fail_as_failed_status():

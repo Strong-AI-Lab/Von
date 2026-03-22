@@ -30,6 +30,18 @@ See `src/backend/vontology/utils_vontology.py`:
 - `is_type()` - checks for is_a_type_of
 - `is_predicate()` - checks for predicate-type instance_of
 - `is_pure_instance()` - checks for instance_of without type_of
+- `build_pure_instance_query()` - builds the matching Mongo filter for runtime reads
+
+### Pure-instance runtime reads
+
+For tree/entity listing behaviour (JVNAUTOSCI-1552, aligned with earlier
+instance-count work in JVNAUTOSCI-338 and JVNAUTOSCI-568), runtime "entity"
+reads must use the same pure-instance rule in both in-memory and Mongo-backed
+paths:
+
+- Count or list docs only when `relationships.is_an_instance_of` is non-empty.
+- Exclude docs with any non-empty `relationships.is_a_type_of`.
+- Do not rely on `metadata.concept_type` for runtime classification.
 
 ### Canonical Predicate Concepts
 

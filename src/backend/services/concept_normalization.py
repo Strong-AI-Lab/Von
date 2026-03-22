@@ -9,7 +9,6 @@ LEGACY_FIELDS = [
     "notes",
     "description",
     "metadata.description",
-    "metadata.title",
     "entities",
 ]
 STRICT_ENV_VAR = "CONCEPT_IMPORT_STRICT"
@@ -33,8 +32,6 @@ def _flatten_legacy_presence(concept: Dict[str, Any]) -> List[str]:
     if isinstance(metadata, dict):
         if "description" in metadata:
             present.append("metadata.description")
-        if "title" in metadata:
-            present.append("metadata.title")
     if "entities" in concept:
         present.append("entities")
     return present
@@ -108,8 +105,6 @@ def summarize_legacy_usage(concepts: List[Dict[str, Any]]) -> Dict[str, Any]:
         if isinstance(md, dict):
             if "description" in md:
                 counts["metadata.description"] += 1
-            if "title" in md:
-                counts["metadata.title"] += 1
         if "entities" in c:
             counts["entities"] += 1
     total = len(concepts) or 1

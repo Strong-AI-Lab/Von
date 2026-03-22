@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from src.backend.vontology.utils_vontology import (
+    build_pure_instance_query,
     is_predicate,
     is_type,
     is_pure_instance,
@@ -69,6 +70,55 @@ class TestKindDerivationConsistency:
         assert is_type(node) is True
         # Has is_an_instance_of but also is_a_type_of, so not a "pure" instance
         assert is_pure_instance(node) is False
+
+    def test_scalar_instance_of_value_is_treated_as_pure_instance(self):
+        """Scalar relationship storage still counts as a pure instance."""
+        node = {
+            "concept_id": "#V#legacy_scalar_individual",
+            "relationships": {
+                "is_an_instance_of": "#V#person",
+            },
+        }
+        assert is_pure_instance(node) is True
+
+    def test_missing_or_empty_relationships_are_not_pure_instances(self):
+        """Missing or empty structural fields must not classify as pure instances."""
+        assert is_pure_instance({"concept_id": "#V#blank"}) is False
+        assert (
+            is_pure_instance(
+                {
+                    "concept_id": "#V#empty",
+                    "relationships": {
+                        "is_an_instance_of": [],
+                        "is_a_type_of": [],
+                    },
+                }
+            )
+            is False
+        )
+
+
+class TestPureInstanceQueryBuilder:
+    """Test Mongo filter construction for pure-instance runtime reads."""
+
+    def test_query_builder_uses_structural_fields_only(self):
+        query = build_pure_instance_query(
+            instance_of_any=["#V#mammal", "#V#primate", "#V#mammal"]
+        )
+
+        assert query == {
+            "$and": [
+                {
+                    "$or": [
+                        {"relationships.is_a_type_of": {"$exists": False}},
+                        {"relationships.is_a_type_of": []},
+                        {"relationships.is_a_type_of": ""},
+                    ]
+                },
+                {"relationships.is_an_instance_of": {"$in": ["#V#mammal", "#V#primate"]}},
+            ]
+        }
+        assert "metadata.concept_type" not in repr(query)
 
 
 class TestStructuralFieldNormalisation:

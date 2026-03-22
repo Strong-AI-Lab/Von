@@ -43,6 +43,7 @@ from ...vontology.utils_vontology import (
     record_frontend_tree_load,
     extract_salient_scope_lists,
     SALIENT_SCOPE_FIELD,
+    build_pure_instance_query,
     is_type,
     is_predicate,
 )
@@ -2401,11 +2402,9 @@ def get_entity_counts():
     """
     Get entity counts for all vontology nodes to support filtering.
 
-    CRITICAL: This function distinguishes between TYPES and ENTITIES in the unified concepts collection:
-    - TYPES: Have is_a_type_of relationships (part of ontology hierarchy)
-    - ENTITIES: Have is_an_instance_of relationships and NO subtype relationships
-
-    See docs/design/ENTITY_TYPE_DISTINCTION.md for detailed explanation.
+    Runtime entity semantics use the canonical structural pure-instance pathway:
+    direct entity counts come from docs with non-empty ``is_an_instance_of`` and
+    no ``is_a_type_of``. See docs/vontology/relationship_authoritative_pathway.md.
     """
     current_app.logger.info("Received request for /api/vontology/entity_counts")
     start_time = time.time()
@@ -2413,55 +2412,48 @@ def get_entity_counts():
     try:
         repo = ConceptsRepository
 
-        # Get all vontology concepts (types in the tree structure)
-        # These are concepts that appear in the vontology tree and can have instances
-        # Note: We identify tree nodes by #V# prefix; subtype linkage uses relationships.is_a_type_of
         vontology_concepts = list(
-            repo.find({"concept_id": {"$regex": "^#V#"}}, {"concept_id": 1, "name": 1})
+            repo.find(
+                {"concept_id": {"$regex": "^#V#"}},
+                {"concept_id": 1, "name": 1, "names": 1},
+            )
         )
 
-        # Build a mapping of concept_id to entity count
+        from ...services.vontology_concept_stats_service import (
+            STATS_STATUS_FAILED,
+            get_vontology_concept_stats,
+        )
+
+        concept_ids: list[str] = []
+        for concept in vontology_concepts:
+            if not isinstance(concept, dict):
+                continue
+            concept_id = concept.get("concept_id")
+            if isinstance(concept_id, str) and concept_id.startswith("#V#"):
+                concept_ids.append(concept_id)
+        stats_payload = get_vontology_concept_stats(
+            concept_ids,
+            rebuild_if_needed=True,
+            include_stale_values=True,
+        )
+        concept_stats = stats_payload.get("concept_stats")
+        if (
+            stats_payload.get("stats_status") == STATS_STATUS_FAILED
+            or not isinstance(concept_stats, dict)
+            or (concept_ids and not concept_stats)
+        ):
+            raise RuntimeError("entity_counts_stats_unavailable")
+
         entity_counts = {}
 
         for concept in vontology_concepts:
             concept_id = concept["concept_id"]
-
-            # Count actual entities (instances) that have this concept_id in their is_an_instance_of relationship
-            # Entities are identified as documents with NO subtype relationship (is_a_type_of missing or empty)
-            # Handle both string and array formats for is_an_instance_of
-            count = repo.count_documents(
-                {
-                    "$and": [
-                        {
-                            "$or": [
-                                {"relationships.is_an_instance_of": concept_id},
-                                {
-                                    "relationships.is_an_instance_of": {
-                                        "$in": [concept_id]
-                                    }
-                                },
-                            ]
-                        },
-                        # Exclude type/collection documents
-                        {
-                            "$or": [
-                                {"metadata.concept_type": {"$exists": False}},
-                                {"metadata.concept_type": {"$ne": "collection"}},
-                            ]
-                        },
-                        # Individuals should not have subtype relationships
-                        {
-                            "$or": [
-                                {"relationships.is_a_type_of": {"$exists": False}},
-                                {"relationships.is_a_type_of": []},
-                            ]
-                        },
-                    ]
-                }
-            )
+            stat = concept_stats.get(concept_id) if isinstance(concept_id, str) else None
+            count_raw = stat.get("direct_pure_instance_count") if isinstance(stat, dict) else None
+            count = int(count_raw) if isinstance(count_raw, int) else 0
 
             entity_counts[concept_id] = {
-                "name": concept.get("name", concept_id),
+                "name": get_concept_display_name_with_names_fallback(concept),
                 "entity_count": count,
                 "has_entities": count > 0,
             }
@@ -2854,33 +2846,9 @@ def get_node_instances():
                 exc_info=True,
             )
 
-        # Find all nodes that are instances of this concept (or any subtype if requested)
+        # Find all structurally pure instances of this concept (or any subtype if requested).
         instances_cursor = repo.find(
-            {
-                "$and": [
-                    {
-                        "$or": [
-                            {"relationships.is_an_instance_of": {"$in": type_ids}},
-                            # Back-compat: handle scalar value too
-                            {"relationships.is_an_instance_of": node_id},
-                        ]
-                    },
-                    # Exclude type/collection documents
-                    {
-                        "$or": [
-                            {"metadata.concept_type": {"$exists": False}},
-                            {"metadata.concept_type": {"$ne": "collection"}},
-                        ]
-                    },
-                    # Individuals should not have subtype relationships
-                    {
-                        "$or": [
-                            {"relationships.is_a_type_of": {"$exists": False}},
-                            {"relationships.is_a_type_of": []},
-                        ]
-                    },
-                ]
-            },
+            build_pure_instance_query(instance_of_any=type_ids),
             {
                 "concept_id": 1,
                 "name": 1,

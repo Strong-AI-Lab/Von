@@ -402,6 +402,28 @@ def is_nonempty_relationship(value) -> bool:
     return False
 
 
+def normalise_relationship_concept_ids(value: Any) -> List[str]:
+    """Return ordered non-empty relationship concept IDs from scalar/list storage."""
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, list):
+        values = value
+    else:
+        return []
+
+    out: List[str] = []
+    seen: set[str] = set()
+    for item in values:
+        if not isinstance(item, str):
+            continue
+        concept_id = item.strip()
+        if not concept_id or concept_id in seen:
+            continue
+        seen.add(concept_id)
+        out.append(concept_id)
+    return out
+
+
 def is_pure_instance(node: dict) -> bool:
     """A node is a pure instance if it has instance-of but no type-of relationships.
 
@@ -411,6 +433,44 @@ def is_pure_instance(node: dict) -> bool:
     has_instance_of = is_nonempty_relationship(rel.get("is_an_instance_of"))
     has_type_of = is_nonempty_relationship(rel.get("is_a_type_of"))
     return has_instance_of and not has_type_of
+
+
+def build_pure_instance_query(*, instance_of_any: Any | None = None) -> Dict[str, Any]:
+    """Build a Mongo filter for structurally pure instances.
+
+    Pure-instance route/count semantics are defined structurally:
+    - non-empty ``relationships.is_an_instance_of``
+    - empty or missing ``relationships.is_a_type_of``
+
+    ``instance_of_any`` optionally constrains the direct instance-of targets while
+    remaining compatible with both scalar and list relationship storage.
+    """
+    clauses: List[Dict[str, Any]] = [
+        {
+            "$or": [
+                {"relationships.is_a_type_of": {"$exists": False}},
+                {"relationships.is_a_type_of": []},
+                {"relationships.is_a_type_of": ""},
+            ]
+        }
+    ]
+
+    type_ids = normalise_relationship_concept_ids(instance_of_any)
+    if type_ids:
+        clauses.append({"relationships.is_an_instance_of": {"$in": type_ids}})
+    else:
+        clauses.append(
+            {
+                "$or": [
+                    {"relationships.is_an_instance_of.0": {"$exists": True}},
+                    {"relationships.is_an_instance_of": {"$regex": r"\S"}},
+                ]
+            }
+        )
+
+    if len(clauses) == 1:
+        return clauses[0]
+    return {"$and": clauses}
 
 
 def is_thing_concept(node: dict) -> bool:
@@ -478,7 +538,7 @@ def get_concept_display_name_with_names_fallback(concept: dict) -> str:
     7. "Unnamed Concept"
 
     Note: This supports both natural language names and abbreviations/acronyms for better
-    search and display functionality. metadata.title is no longer considered.
+    search and display functionality.
     """
     if not isinstance(concept, dict):
         return "Unnamed Concept"
@@ -1430,7 +1490,7 @@ def get_vontology_node_content(identifier: str, *, reconstruct_md: bool = True) 
             identifier,
         )
         # Try to get name from multiple possible locations, with human-readable fallback
-        # Prefer names[] "NL" entry; do not use metadata.title anymore
+        # Prefer names[] "NL" entry only.
         name = get_concept_display_name_with_names_fallback(doc)
         # Use accessor functions for description and notes
         description = get_concept_description(doc)
@@ -2835,7 +2895,6 @@ def convert_opencyc_to_von_format(cyc_data: Dict[str, Any]) -> List[Dict[str, An
             },
             "metadata": {
                 "description": comment if comment else f"Concept representing {label}",
-                "concept_type": "collection",
                 "tags": [],
                 "classifications": [],
             },
@@ -2911,7 +2970,6 @@ def normalize_node_to_unified_format(node: dict) -> dict:
     if "metadata" not in unified_node:
         unified_node["metadata"] = {
             "description": unified_node.get("description", ""),
-            "concept_type": "collection",  # Default type
             "tags": [],
             "classifications": [],
         }

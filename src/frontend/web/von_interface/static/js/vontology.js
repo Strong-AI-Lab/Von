@@ -4435,7 +4435,7 @@ function selectConcept(concept) {
 // CRITICAL: This function relies on entity count data that distinguishes between:
 // - TYPES (concepts that form the ontology hierarchy)
 // - ENTITIES (actual instances of those types)
-// See docs/design/ENTITY_TYPE_DISTINCTION.md for details.
+// See docs/vontology/relationship_authoritative_pathway.md for details.
 //
 // The filtering removes nodes that have no entity instances associated with them,
 // keeping only nodes that either have entities or lead to nodes with entities.

@@ -2204,7 +2204,7 @@ search_concepts = suggest_concepts_for_text
 
 def get_concept_name_by_id(concept_id: str) -> Optional[str]:
     """Look up a display name for a concept by its concept_id.
-    Prefers names[] NL entry, then legacy 'name', then concept_id-derived (metadata.title deprecated).
+    Prefers names[] NL entry, then legacy 'name', then concept_id-derived.
     """
     try:
         concepts_coll = ConceptsRepository.collection()
@@ -2223,7 +2223,7 @@ def get_concept_name_by_id(concept_id: str) -> Optional[str]:
                 if nm:
                     return nm
             except Exception:
-                # Legacy fallback to top-level name only; metadata.title is deprecated
+                # Legacy fallback to top-level name only.
                 nm = concept.get("name")
                 if isinstance(nm, str) and nm.strip():
                     return nm.strip()
@@ -3876,8 +3876,33 @@ def import_concepts(
             except Exception as norm_err:  # non-fatal; proceed with raw item
                 logger.warning(f"Normalization failed for item {idx}: {norm_err}")
 
-            # Extract name
-            name = item.get("name") or (item.get("metadata") or {}).get("title")
+            # Resolve an explicit display name from canonical names[] or legacy top-level name.
+            name = None
+            try:
+                from ..vontology.utils_vontology import (
+                    get_concept_display_name_with_names_fallback,
+                )
+
+                if isinstance(item.get("names"), list) and item.get("names"):
+                    resolved_name = get_concept_display_name_with_names_fallback(item)
+                    if (
+                        isinstance(resolved_name, str)
+                        and resolved_name.strip()
+                        and resolved_name != "Unnamed Concept"
+                    ):
+                        name = resolved_name.strip()
+            except Exception:
+                logger.debug(
+                    "Failed resolving import name from names[] for item %s",
+                    idx,
+                    exc_info=True,
+                )
+
+            if name is None:
+                raw_name = item.get("name")
+                if isinstance(raw_name, str) and raw_name.strip():
+                    name = raw_name.strip()
+
             if not name or not isinstance(name, str) or not name.strip():
                 errors.append(f"Item {idx}: missing required 'name'")
                 skipped += 1
@@ -3898,7 +3923,7 @@ def import_concepts(
                 continue
 
             # Build an existence filter based on name+concept_id if available
-            exist_filter: Dict[str, Any] = {"name": name}
+            exist_filter: Dict[str, Any] = {"$or": [{"name": name}, {"names.name": name}]}
             if type_concept_id:
                 exist_filter["concept_id"] = type_concept_id
 
@@ -3917,6 +3942,7 @@ def import_concepts(
                 "system_tags",
                 "user_tags",
                 "linked_concepts",
+                "names",
                 "relationships",
                 "metadata",
             ]:

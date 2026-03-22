@@ -25,7 +25,7 @@ from ..db.repositories.concepts_repository import ConceptsRepository
 from ..db.repositories.text_value_repository import TextRelationsRepository
 from ..security.access_control import cache_scope_key
 from ..utils.time_utils import utc_iso_now
-from ..vontology.utils_vontology import is_predicate, is_type
+from ..vontology.utils_vontology import is_predicate, is_pure_instance, is_type
 
 logger = logging.getLogger(__name__)
 
@@ -214,13 +214,25 @@ def _compute_snapshot_for_scope() -> tuple[dict[str, dict[str, Any]], dict[str, 
         return result
 
     direct_instance_count_by_type = {type_id: 0 for type_id in type_ids}
+    direct_pure_instance_count_by_type = {type_id: 0 for type_id in type_ids}
     total_instance_count_by_type = {type_id: 0 for type_id in type_ids}
 
-    for direct_types in direct_instance_types_by_concept.values():
+    for concept_id, direct_types in direct_instance_types_by_concept.items():
         for direct_type in direct_types:
             direct_instance_count_by_type[direct_type] = (
                 direct_instance_count_by_type.get(direct_type, 0) + 1
             )
+        doc_relationships = relationships_by_id.get(concept_id) or {}
+        if is_pure_instance(
+            {
+                "concept_id": concept_id,
+                "relationships": doc_relationships,
+            }
+        ):
+            for direct_type in direct_types:
+                direct_pure_instance_count_by_type[direct_type] = (
+                    direct_pure_instance_count_by_type.get(direct_type, 0) + 1
+                )
 
         seen_for_concept: set[str] = set()
         for direct_type in direct_types:
@@ -261,6 +273,9 @@ def _compute_snapshot_for_scope() -> tuple[dict[str, dict[str, Any]], dict[str, 
 
         if kind == "type":
             direct_instance_count = int(direct_instance_count_by_type.get(concept_id, 0))
+            direct_pure_instance_count = int(
+                direct_pure_instance_count_by_type.get(concept_id, 0)
+            )
             total_instance_count = int(total_instance_count_by_type.get(concept_id, 0))
             direct_subtype_count = int(len(type_children.get(concept_id, set())))
             total_subtype_count = int(len(_descendants(concept_id, set())))
@@ -268,7 +283,9 @@ def _compute_snapshot_for_scope() -> tuple[dict[str, dict[str, Any]], dict[str, 
             entry.update(
                 {
                     "has_any_instances_in_subtree": total_instance_count > 0,
+                    "has_direct_pure_instances": direct_pure_instance_count > 0,
                     "direct_instance_count": direct_instance_count,
+                    "direct_pure_instance_count": direct_pure_instance_count,
                     "total_instance_count_in_subtree": total_instance_count,
                     "direct_subtype_count": direct_subtype_count,
                     "total_subtype_count_in_subtree": total_subtype_count,

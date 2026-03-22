@@ -212,7 +212,7 @@ export async function populatePeopleDropdown(selectElementId, selectedPersonId =
           option.value = JSON.stringify({ id: dbId, concept_id: cid });
           option.dataset.id = dbId;
           option.dataset.conceptId = cid;
-          // Display name: prefer backend-provided display name; avoid legacy metadata.title
+          // Display name: prefer backend-provided display name.
           option.textContent = person.name || cid || dbId;
           select.appendChild(option);
         });
@@ -259,7 +259,7 @@ export async function populateOrganisationsDropdown(selectElementId, selectedOrg
           option.value = JSON.stringify({ id: dbId, concept_id: cid });
           option.dataset.id = dbId;
           option.dataset.conceptId = cid;
-          // Display name: prefer backend-provided display name; avoid legacy metadata.title
+          // Display name: prefer backend-provided display name.
           option.textContent = org.name || cid || dbId;
           select.appendChild(option);
         });
