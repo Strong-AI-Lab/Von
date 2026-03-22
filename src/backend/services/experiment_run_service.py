@@ -7,7 +7,7 @@ import logging
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 
 from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import OperationFailure, PyMongoError
@@ -910,10 +910,22 @@ def record_experiment_observation(
         return {"success": False, "error": "no_valid_observations"}
 
     observed_outcomes: list[Any] = []
-    evidence = dict(state.get("evidence")) if isinstance(state.get("evidence"), Mapping) else {}
-    tool_invocations = list(evidence.get("tool_invocations") or [])
-    workflow_execution = list(evidence.get("workflow_execution") or [])
-    policy_decisions = list(evidence.get("policy_decisions") or [])
+    evidence: dict[str, Any] = (
+        dict(cast(Mapping[str, Any], state.get("evidence")))
+        if isinstance(state.get("evidence"), Mapping)
+        else {}
+    )
+    tool_invocations: list[Any] = list(
+        cast(Sequence[Any], evidence.get("tool_invocations") or [])
+    )
+    workflow_execution: list[dict[str, Any]] = [
+        copy.deepcopy(dict(item))
+        for item in cast(Sequence[Any], evidence.get("workflow_execution") or [])
+        if isinstance(item, Mapping)
+    ]
+    policy_decisions: list[Any] = list(
+        cast(Sequence[Any], evidence.get("policy_decisions") or [])
+    )
     turn_ids = _normalise_strings(
         [
             *state.get("turn_execution_request_ids", []),
@@ -1128,8 +1140,13 @@ def compute_experiment_verdict(
     )
     state["completed_at_utc"] = now_iso
     state["updated_at_utc"] = now_iso
+    existing_metrics: dict[str, Any] = (
+        dict(cast(Mapping[str, Any], state.get("metrics")))
+        if isinstance(state.get("metrics"), Mapping)
+        else {}
+    )
     state["metrics"] = {
-        **(dict(state.get("metrics")) if isinstance(state.get("metrics"), Mapping) else {}),
+        **existing_metrics,
         "observation_total": total,
         "pass_count": pass_count,
         "fail_count": fail_count,
@@ -1241,8 +1258,8 @@ def emit_experiment_learning_signal(
     baseline_id = _safe_str(baseline_workflow_id) or (
         candidate_workflow_ids[0] if candidate_workflow_ids else expected_id
     )
-    spec_fixture = (
-        spec_state.get("fixture_payload")
+    spec_fixture: dict[str, Any] = (
+        dict(cast(Mapping[str, Any], spec_state.get("fixture_payload")))
         if isinstance(spec_state.get("fixture_payload"), Mapping)
         else {}
     )
@@ -1340,6 +1357,7 @@ def prepare_meeting_invitation_experiment_spec(
     if not invitation:
         return {"success": False, "error": "invitation_text_required"}
 
+    resolved_candidate_workflow_ids = _normalise_strings(candidate_workflow_ids)
     spec_name = (
         _safe_str(name, limit=200)
         or "Meeting invitation workflow derivation and validation"
@@ -1394,8 +1412,8 @@ def prepare_meeting_invitation_experiment_spec(
         description=(
             "Testing spec for deriving, selecting, and validating a meeting-invitation workflow."
         ),
-        candidate_workflow_ids=candidate_workflow_ids,
-        target_workflow_ids=candidate_workflow_ids[:1],
+        candidate_workflow_ids=resolved_candidate_workflow_ids,
+        target_workflow_ids=resolved_candidate_workflow_ids[:1],
         fixture_payload={"invitation_text": invitation},
         theory_setup=theory_setup,
         expected_outcomes=expected_outcomes,

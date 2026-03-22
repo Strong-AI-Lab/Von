@@ -123,6 +123,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 - When uncertain, ask succinctly; do not guess or fabricate behaviour.
 - **Task lifecycle discipline**:
 	- Before implementation, use or create an appropriate task branch and transition the Jira task to `In Progress`.
+	- If resuming from already-started or handed-off work, re-check branch/Jira/reflection/merge obligations before continuing; do not assume a previous turn or agent already handled them.
 	- At task start, review the task age, epic context, and related older issues sceptically; if the wording is stale, reinterpret the task toward the current Von design and record that in Jira instead of following outdated prescriptions literally.
 	- For research-sensitive or architecture-shaping tasks, consider whether a short targeted literature review would materially improve the plan; if so, do it before coding and update the Jira task/epic or subtasks when the literature changes the intended approach.
 	- During substantial work, post concise Jira progress comments at meaningful milestones.

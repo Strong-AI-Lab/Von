@@ -3,11 +3,13 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from unittest.mock import MagicMock
 
 from src.backend.services import concept_service
 from src.backend.services.testing_workflow_vontology_service import (
     CANONICAL_TESTING_WORKFLOW_IDS,
     EPHEMERAL_THEORY_GC_WORKFLOW_ID,
+    MEETING_INVITATION_CANDIDATE_WORKFLOW_ID,
     MEETING_INVITATION_TESTING_WORKFLOW_ID,
     PROMOTION_GATE_WORKFLOW_ID,
     SYNTHETIC_WORKFLOW_REGRESSION_SUITE_WORKFLOW_ID,
@@ -18,6 +20,12 @@ from src.backend.services.workflow_discovery_service import (
     invalidate_workflow_discovery_executability_caches,
 )
 from src.backend.workflows import workflow_concept_authority_service as authority_service
+from src.backend.workflows.action_registry import ActionRegistry, WorkflowEnvironment
+from src.backend.workflows.durable.subworkflow_actions import register_subworkflow_actions
+from src.backend.workflows.durable.testing_workflow_actions import (
+    register_testing_workflow_actions,
+)
+from src.backend.workflows.engine import WorkflowExecutor
 from src.backend.workflows.vontology_loader import load_workflow_definition_from_vontology
 
 
@@ -58,8 +66,11 @@ def test_bootstrap_materialises_testing_workflow_family(
 
     publication = report.get("publication") or {}
     counts = publication.get("counts") or {}
-    assert counts.get("workflows_published") == 4
+    assert counts.get("workflows_published") == 5
     assert counts.get("errors") == 0
+    prompt_support = report.get("prompt_support") or {}
+    assert prompt_support.get("success") is True
+    assert prompt_support.get("counts", {}).get("persisted_prompts") == 2
 
     for workflow_id in CANONICAL_TESTING_WORKFLOW_IDS:
         definition = load_workflow_definition_from_vontology(workflow_id)
@@ -84,6 +95,38 @@ def test_bootstrap_materialises_testing_workflow_family(
         and item.get("extractor") == "first_quoted_text"
         for item in input_mappings
     )
+    assert all(
+        not (
+            isinstance(item, dict)
+            and item.get("target_context_key") == "candidate_workflow_ids"
+        )
+        for item in input_mappings
+    )
+
+    candidate_definition = load_workflow_definition_from_vontology(
+        MEETING_INVITATION_CANDIDATE_WORKFLOW_ID
+    )
+    assert candidate_definition is not None
+    candidate_launch_contract = candidate_definition.metadata.get(
+        "launch_input_contract"
+    )
+    assert isinstance(candidate_launch_contract, dict)
+    assert candidate_launch_contract.get("required_inputs") == ["invitation_text"]
+    candidate_step_id = authority_service._step_concept_id(
+        workflow_id=MEETING_INVITATION_CANDIDATE_WORKFLOW_ID,
+        state_id="derive_invitation_structure",
+    )
+    candidate_step = candidate_definition.states[candidate_step_id]
+    assert len(candidate_step.actions) == 1
+    candidate_action = candidate_step.actions[0]
+    assert candidate_action.action_id == "llm.action"
+    assert candidate_action.execution_mode == "llm"
+    prompt_contract = candidate_action.prompt_contract
+    assert isinstance(prompt_contract, dict)
+    assert prompt_contract.get("resolved_prompt_concept_id") == (
+        "#V#meeting_invitation_structure_prompt"
+    )
+    assert candidate_action.validation_policy == {"output_format": "json_value"}
 
     meeting_concept = concept_service.get_concept_by_concept_id(
         MEETING_INVITATION_TESTING_WORKFLOW_ID
@@ -92,6 +135,16 @@ def test_bootstrap_materialises_testing_workflow_family(
     meeting_types = _relationship_targets(meeting_concept, "is_an_instance_of")
     assert "#V#testing_workflow" in meeting_types
     assert "#V#theory_slice_test_workflow" in meeting_types
+    assert "#V#durable_workflow" in meeting_types
+
+    candidate_concept = concept_service.get_concept_by_concept_id(
+        MEETING_INVITATION_CANDIDATE_WORKFLOW_ID
+    )
+    assert candidate_concept is not None
+    candidate_types = _relationship_targets(candidate_concept, "is_an_instance_of")
+    assert "#V#ai_workflow" in candidate_types
+    assert "#V#durable_workflow" in candidate_types
+    assert "#V#testing_workflow" not in candidate_types
 
     synthetic_concept = concept_service.get_concept_by_concept_id(
         SYNTHETIC_WORKFLOW_REGRESSION_SUITE_WORKFLOW_ID
@@ -142,16 +195,10 @@ def test_bootstrap_materialises_testing_workflow_family(
         suite_execute_step,
         "is_an_instance_of",
     )
-
-    meeting_note_rows = get_texts_for_concept(
-        subject_concept_id=meeting_execute_step_id,
-        predicate="hasNote",
-        limit=10,
-    )
-    assert any(
-        "experiment.execute_target_workflow" in str(row.get("text") or "")
-        for row in meeting_note_rows
-        if isinstance(row, dict)
+    meeting_execute_action = meeting_definition.states[meeting_execute_step_id].actions[0]
+    assert meeting_execute_action.action_id == "workflow_invoke_subworkflow"
+    assert meeting_execute_action.inputs.get("workflow_id") == (
+        MEETING_INVITATION_CANDIDATE_WORKFLOW_ID
     )
 
     synthetic_note_rows = get_texts_for_concept(
@@ -164,6 +211,28 @@ def test_bootstrap_materialises_testing_workflow_family(
         for row in synthetic_note_rows
         if isinstance(row, dict)
     )
+    structure_prompt_rows = get_texts_for_concept(
+        subject_concept_id="#V#meeting_invitation_structure_prompt",
+        predicate="hasContent",
+        limit=5,
+    )
+    assert any(
+        "meeting_type, title, time, participants, location_signal" in str(
+            row.get("text") or ""
+        )
+        for row in structure_prompt_rows
+        if isinstance(row, dict)
+    )
+    observation_prompt_rows = get_texts_for_concept(
+        subject_concept_id="#V#meeting_invitation_observation_prompt",
+        predicate="hasContent",
+        limit=5,
+    )
+    assert any(
+        "array of exactly four observation objects" in str(row.get("text") or "")
+        for row in observation_prompt_rows
+        if isinstance(row, dict)
+    )
 
 
 def test_bootstrap_skips_republication_when_testing_workflow_family_is_current(
@@ -171,7 +240,7 @@ def test_bootstrap_skips_republication_when_testing_workflow_family_is_current(
 ) -> None:
     first_report = bootstrap_canonical_testing_workflows()
     first_counts = (first_report.get("publication") or {}).get("counts") or {}
-    assert first_counts.get("workflows_published") == 4
+    assert first_counts.get("workflows_published") == 5
 
     second_report = bootstrap_canonical_testing_workflows()
     second_publication = second_report.get("publication") or {}
@@ -183,3 +252,77 @@ def test_bootstrap_skips_republication_when_testing_workflow_family_is_current(
     assert second_counts.get("errors") == 0
     assert second_report.get("typed_workflow_ids") == []
     assert second_report.get("typed_step_ids") == []
+
+
+def test_meeting_invitation_testing_workflow_executes_end_to_end_via_vontology(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_testing_workflows()
+    meeting_definition = load_workflow_definition_from_vontology(
+        MEETING_INVITATION_TESTING_WORKFLOW_ID
+    )
+    assert meeting_definition is not None
+
+    registry = ActionRegistry()
+    register_testing_workflow_actions(registry)
+    register_subworkflow_actions(
+        registry,
+        definition_loader=load_workflow_definition_from_vontology,
+    )
+
+    llm_client = MagicMock()
+    llm_client.generate.side_effect = [
+        (
+            '{"meeting_type":"project_meeting","title":"Roadmap sync",'
+            '"time":"Monday 10am","participants":"team",'
+            '"location_signal":"Room 4","topic_purpose":"Discuss roadmap",'
+            '"safe_downstream_action":"draft_calendar_entry"}'
+        ),
+        (
+            '[{"label":"meeting_type_classification","verdict":"pass",'
+            '"expected_outcome":"project_meeting",'
+            '"observed_outcome":"project_meeting"},'
+            '{"label":"structured_meeting_fields","verdict":"pass",'
+            '"expected_outcome":"title,time,participants,location_signal,topic_purpose",'
+            '"observed_outcome":"all expected fields present"},'
+            '{"label":"mutation_safety","verdict":"pass",'
+            '"expected_outcome":"no_canonical_mutations_without_gate",'
+            '"observed_outcome":"no canonical mutations attempted"},'
+            '{"label":"downstream_actions","verdict":"pass",'
+            '"expected_outcome":"draft_calendar_entry",'
+            '"observed_outcome":"draft_calendar_entry"}]'
+        ),
+    ]
+
+    result = WorkflowExecutor(registry=registry, max_transitions=30).run(
+        meeting_definition,
+        environment=WorkflowEnvironment(
+            llm_client=llm_client,
+            user_namespace="#V#user@org",
+        ),
+        data={
+            "invitation_text": (
+                "Please meet on Monday at 10am in Room 4 to discuss the roadmap."
+            ),
+            "expected_meeting_type": "project_meeting",
+            "expected_structure_fields": [
+                "title",
+                "time",
+                "participants",
+                "location_signal",
+                "topic_purpose",
+            ],
+            "expected_downstream_actions": ["draft_calendar_entry"],
+        },
+    )
+
+    assert result.completed is True
+    assert result.error is None
+    assert result.final_state == authority_service._step_concept_id(
+        workflow_id=MEETING_INVITATION_TESTING_WORKFLOW_ID,
+        state_id="complete",
+    )
+    assert result.data["candidate_meeting_type"] == "project_meeting"
+    assert result.data["candidate_safe_downstream_action"] == "draft_calendar_entry"
+    assert result.data["verdict"] == "pass"
+    assert len(result.data["meeting_candidate_observations"]) == 4

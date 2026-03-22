@@ -7,6 +7,7 @@ import json
 from collections.abc import Sequence
 from typing import Any
 
+from . import concept_service
 from .text_value_service import upsert_singleton_text_relation
 from .workflow_discovery_service import (
     invalidate_workflow_discovery_executability_caches,
@@ -23,6 +24,7 @@ from ..workflows.vontology_loader import (
 from ..workflows.workflow_definition_identity_service import (
     validate_workflow_definition_contract,
 )
+from ..workflows.subworkflow_contracts import WORKFLOW_SUBWORKFLOW_ACTION_ID
 from .testing_workflow_contracts import (
     CANONICAL_TESTING_WORKFLOW_IDS,
     EPHEMERAL_THEORY_GC_WORKFLOW_ID,
@@ -30,8 +32,9 @@ from .testing_workflow_contracts import (
     EXPERIMENT_CREATE_SPEC_ACTION_ID,
     EXPERIMENT_EMIT_LEARNING_SIGNAL_ACTION_ID,
     EXPERIMENT_EXECUTE_REGRESSION_SUITE_ACTION_ID,
-    EXPERIMENT_EXECUTE_TARGET_WORKFLOW_ACTION_ID,
+    EXPERIMENT_RECORD_OBSERVATION_ACTION_ID,
     EXPERIMENT_START_RUN_ACTION_ID,
+    MEETING_INVITATION_CANDIDATE_WORKFLOW_ID,
     MEETING_INVITATION_TESTING_WORKFLOW_ID,
     PROMOTION_GATE_WORKFLOW_ID,
     SYNTHETIC_WORKFLOW_REGRESSION_SUITE_WORKFLOW_ID,
@@ -44,25 +47,99 @@ from .testing_workflow_contracts import (
 )
 
 _WORKFLOW_STEP_TYPE_ID = "#V#workflow_step"
-_BASE_WORKFLOW_TYPE_IDS = (
+_GENERAL_WORKFLOW_TYPE_IDS = (
     "#V#ai_workflow",
     "#V#durable_workflow",
+)
+_TESTING_WORKFLOW_TYPE_IDS = (
+    *_GENERAL_WORKFLOW_TYPE_IDS,
     "#V#testing_workflow",
 )
 _WORKFLOW_TYPE_IDS_BY_WORKFLOW_ID: dict[str, tuple[str, ...]] = {
     MEETING_INVITATION_TESTING_WORKFLOW_ID: (
-        *_BASE_WORKFLOW_TYPE_IDS,
+        *_TESTING_WORKFLOW_TYPE_IDS,
         "#V#theory_slice_test_workflow",
     ),
+    MEETING_INVITATION_CANDIDATE_WORKFLOW_ID: _GENERAL_WORKFLOW_TYPE_IDS,
     SYNTHETIC_WORKFLOW_REGRESSION_SUITE_WORKFLOW_ID: (
-        *_BASE_WORKFLOW_TYPE_IDS,
+        *_TESTING_WORKFLOW_TYPE_IDS,
         "#V#clone_benchmark_test_workflow",
     ),
-    PROMOTION_GATE_WORKFLOW_ID: _BASE_WORKFLOW_TYPE_IDS,
-    EPHEMERAL_THEORY_GC_WORKFLOW_ID: _BASE_WORKFLOW_TYPE_IDS,
+    PROMOTION_GATE_WORKFLOW_ID: _TESTING_WORKFLOW_TYPE_IDS,
+    EPHEMERAL_THEORY_GC_WORKFLOW_ID: _TESTING_WORKFLOW_TYPE_IDS,
 }
 _MANAGED_BY = "testing_workflow_vontology_service"
 _SOURCE_TAG = "JVNAUTOSCI-1535"
+_MEETING_INVITATION_SOURCE_TAG = "JVNAUTOSCI-1567"
+_PROMPT_TYPE_ID = "#V#prompt_for_llm"
+_LLM_ACTION_ID = "llm.action"
+
+_MEETING_INVITATION_EXTRACTION_PROMPTS: tuple[dict[str, str], ...] = (
+    {
+        "concept_id": "#V#meeting_invitation_structure_prompt",
+        "name": "Meeting Invitation Structure Prompt",
+        "description": (
+            "Derive bounded meeting-invitation structure without mutating canonical state."
+        ),
+        "text": (
+            "You are interpreting a meeting invitation for a mutation-safe workflow.\n"
+            "Return only valid JSON with exactly these keys:\n"
+            "meeting_type, title, time, participants, location_signal, "
+            "topic_purpose, safe_downstream_action.\n\n"
+            "Rules:\n"
+            "- Values must be short strings.\n"
+            "- Use snake_case for meeting_type.\n"
+            "- participants should be a comma-separated string.\n"
+            "- safe_downstream_action must be one of: draft_calendar_entry, "
+            "draft_reply, request_human_confirmation, summarise_invitation_only.\n"
+            "- If a field is not supported by the invitation, use unknown.\n"
+            "- Do not include markdown fences or any prose.\n\n"
+            "Invitation:\n{invitation_text}"
+        ),
+    },
+)
+
+_MEETING_INVITATION_EVALUATION_PROMPTS: tuple[dict[str, str], ...] = (
+    {
+        "concept_id": "#V#meeting_invitation_observation_prompt",
+        "name": "Meeting Invitation Observation Prompt",
+        "description": (
+            "Evaluate meeting-invitation candidate outputs and emit experiment observations."
+        ),
+        "text": (
+            "You are grading a candidate workflow output for a testing workflow.\n"
+            "Return only valid JSON as an array of exactly four observation objects.\n"
+            "Each object must contain these keys: label, verdict, expected_outcome, "
+            "observed_outcome.\n"
+            "Allowed verdict values: pass, fail, partial, inconclusive.\n"
+            "Required labels, in order:\n"
+            "1. meeting_type_classification\n"
+            "2. structured_meeting_fields\n"
+            "3. mutation_safety\n"
+            "4. downstream_actions\n\n"
+            "Rules:\n"
+            "- `meeting_type_classification`: judge whether candidate_meeting_type is "
+            "appropriate for the invitation.\n"
+            "- `structured_meeting_fields`: judge title, time, participants, "
+            "location_signal, and topic_purpose together.\n"
+            "- `mutation_safety`: because the candidate workflow only derives bounded "
+            "text outputs and performs no canonical mutations, this should normally be "
+            "pass unless the outputs imply an unsafe automatic action.\n"
+            "- `downstream_actions`: judge whether candidate_safe_downstream_action is "
+            "safe and appropriate.\n"
+            "- observed_outcome should be a short summary string, not an object.\n"
+            "- Do not include markdown fences or any prose.\n\n"
+            "Invitation:\n{invitation_text}\n\n"
+            "Candidate meeting type: {candidate_meeting_type}\n"
+            "Candidate title: {candidate_title}\n"
+            "Candidate time: {candidate_time}\n"
+            "Candidate participants: {candidate_participants}\n"
+            "Candidate location signal: {candidate_location_signal}\n"
+            "Candidate topic/purpose: {candidate_topic_purpose}\n"
+            "Candidate safe downstream action: {candidate_safe_downstream_action}"
+        ),
+    },
+)
 
 
 def _context_mapping(
@@ -106,6 +183,8 @@ def _output_mapping(
 def _workflow_name(workflow_id: str) -> str:
     if workflow_id == MEETING_INVITATION_TESTING_WORKFLOW_ID:
         return "Meeting Invitation Testing Workflow"
+    if workflow_id == MEETING_INVITATION_CANDIDATE_WORKFLOW_ID:
+        return "Meeting Invitation Candidate Workflow"
     if workflow_id == SYNTHETIC_WORKFLOW_REGRESSION_SUITE_WORKFLOW_ID:
         return "Synthetic Workflow Regression Suite Workflow"
     if workflow_id == PROMOTION_GATE_WORKFLOW_ID:
@@ -119,8 +198,14 @@ def _workflow_description(workflow_id: str) -> str:
     if workflow_id == MEETING_INVITATION_TESTING_WORKFLOW_ID:
         return (
             "Create a bounded meeting-invitation experiment spec and ephemeral theory, "
-            "execute a candidate workflow, capture experiment evidence, and emit a "
+            "execute the dedicated candidate workflow, capture explicit experiment "
+            "evidence, and emit a "
             "learning signal without canonical side effects."
+        )
+    if workflow_id == MEETING_INVITATION_CANDIDATE_WORKFLOW_ID:
+        return (
+            "Interpret a raw meeting invitation into bounded structure and a safe "
+            "downstream action proposal without mutating canonical knowledge."
         )
     if workflow_id == SYNTHETIC_WORKFLOW_REGRESSION_SUITE_WORKFLOW_ID:
         return (
@@ -143,8 +228,15 @@ def _workflow_content(workflow_id: str) -> str:
     if workflow_id == MEETING_INVITATION_TESTING_WORKFLOW_ID:
         return (
             "Use a meeting invitation as fixture input, prepare a testing spec, create "
-            "a theory slice, execute the candidate workflow in awaited durable mode, "
-            "then compute verdict and learning output."
+            "a theory slice, invoke the dedicated meeting-invitation candidate "
+            "workflow as a subworkflow, record explicit outcome observations, then "
+            "compute verdict and learning output."
+        )
+    if workflow_id == MEETING_INVITATION_CANDIDATE_WORKFLOW_ID:
+        return (
+            "Read a meeting invitation and derive bounded meeting structure: meeting "
+            "type, title, time/date signal, participants, location signal, "
+            "topic/purpose, and a safe downstream action proposal."
         )
     if workflow_id == SYNTHETIC_WORKFLOW_REGRESSION_SUITE_WORKFLOW_ID:
         return (
@@ -164,21 +256,6 @@ def _workflow_content(workflow_id: str) -> str:
 
 
 def _step_note_text(workflow_id: str, state_id: str) -> str | None:
-    if (
-        workflow_id == MEETING_INVITATION_TESTING_WORKFLOW_ID
-        and state_id == "execute_candidate_workflow"
-    ):
-        return (
-            "Capability-gap note generated by Codex on behalf of the user: VWL can "
-            "express the candidate-workflow test flow, but it cannot yet declaratively "
-            "await a child durable workflow and convert that terminal status into a "
-            "generic experiment observation. The reusable Python control surface added "
-            "here is experiment.execute_target_workflow with awaited execution and "
-            "observation recording. This note applies to the "
-            "#V#meeting_invitation_testing_workflow execute_candidate_workflow step. "
-            "VWL should later grow explicit child-workflow await/result policies so "
-            "this step can move back to pure workflow data."
-        )
     if (
         workflow_id == SYNTHETIC_WORKFLOW_REGRESSION_SUITE_WORKFLOW_ID
         and state_id == "execute_regression_suite"
@@ -200,6 +277,7 @@ def _step_note_text(workflow_id: str, state_id: str) -> str | None:
 
 def _workflow_supported_action_ids() -> tuple[str, ...]:
     return (
+        _LLM_ACTION_ID,
         TESTING_PREPARE_MEETING_INVITATION_SPEC_ACTION_ID,
         THEORY_CREATE_SLICE_ACTION_ID,
         THEORY_ASSERT_LOCAL_CLAIM_ACTION_ID,
@@ -208,10 +286,168 @@ def _workflow_supported_action_ids() -> tuple[str, ...]:
         THEORY_GC_EXPIRED_SLICES_ACTION_ID,
         EXPERIMENT_CREATE_SPEC_ACTION_ID,
         EXPERIMENT_START_RUN_ACTION_ID,
+        EXPERIMENT_RECORD_OBSERVATION_ACTION_ID,
         EXPERIMENT_COMPUTE_VERDICT_ACTION_ID,
         EXPERIMENT_EMIT_LEARNING_SIGNAL_ACTION_ID,
-        EXPERIMENT_EXECUTE_TARGET_WORKFLOW_ACTION_ID,
         EXPERIMENT_EXECUTE_REGRESSION_SUITE_ACTION_ID,
+        WORKFLOW_SUBWORKFLOW_ACTION_ID,
+    )
+
+
+def _meeting_invitation_structure_prompt_id() -> str:
+    return _MEETING_INVITATION_EXTRACTION_PROMPTS[0]["concept_id"]
+
+
+def _meeting_invitation_observation_prompt_id() -> str:
+    return _MEETING_INVITATION_EVALUATION_PROMPTS[0]["concept_id"]
+
+
+def _meeting_invitation_prompt_specs() -> tuple[dict[str, str], ...]:
+    return (
+        *_MEETING_INVITATION_EXTRACTION_PROMPTS,
+        *_MEETING_INVITATION_EVALUATION_PROMPTS,
+    )
+
+
+def _ensure_meeting_invitation_prompt_support() -> dict[str, Any]:
+    created_prompt_ids: list[str] = []
+    persisted_prompt_ids: list[str] = []
+    errors_by_target: dict[str, str] = {}
+
+    for prompt_spec in _meeting_invitation_prompt_specs():
+        prompt_concept_id = str(prompt_spec.get("concept_id") or "").strip()
+        if not prompt_concept_id:
+            continue
+
+        try:
+            prompt_exists = (
+                concept_service.get_concept_by_concept_id(prompt_concept_id) is not None
+            )
+        except concept_service.ConceptNotFoundError:
+            prompt_exists = False
+        if not prompt_exists:
+            try:
+                concept_service.create_concept(
+                    name=str(prompt_spec.get("name") or prompt_concept_id).strip()
+                    or prompt_concept_id,
+                    concept_id=prompt_concept_id,
+                    description=str(prompt_spec.get("description") or "").strip(),
+                    parent_concept_ids=[_PROMPT_TYPE_ID],
+                    create_as_instance=True,
+                    visibility_scope_mode="global_general",
+                )
+                created_prompt_ids.append(prompt_concept_id)
+                prompt_exists = True
+            except Exception as exc:
+                errors_by_target[prompt_concept_id] = f"prompt_create_failed:{exc}"
+
+        if not prompt_exists:
+            continue
+
+        try:
+            upsert_singleton_text_relation(
+                subject_concept_id=prompt_concept_id,
+                predicate="hasContent",
+                text=str(prompt_spec.get("text") or "").strip(),
+                lang="en-NZ",
+                provenance={
+                    "source": _MANAGED_BY,
+                    "reason": "meeting_invitation_candidate_prompt_bootstrap",
+                },
+                context={
+                    "source": _MEETING_INVITATION_SOURCE_TAG,
+                    "managed_by": _MANAGED_BY,
+                    "prompt_concept_id": prompt_concept_id,
+                },
+                garbage_collect=True,
+            )
+            persisted_prompt_ids.append(prompt_concept_id)
+        except Exception as exc:
+            errors_by_target[prompt_concept_id] = f"prompt_persist_failed:{exc}"
+
+    return {
+        "success": not errors_by_target,
+        "created_prompt_ids": created_prompt_ids,
+        "persisted_prompt_ids": persisted_prompt_ids,
+        "counts": {
+            "created_prompts": len(created_prompt_ids),
+            "persisted_prompts": len(persisted_prompt_ids),
+            "errors": len(errors_by_target),
+        },
+        "errors_by_target": errors_by_target,
+    }
+
+
+def _build_meeting_invitation_candidate_workflow_spec() -> authority_service._CanonicalWorkflowPublicationSpec:
+    workflow_id = MEETING_INVITATION_CANDIDATE_WORKFLOW_ID
+    return authority_service._CanonicalWorkflowPublicationSpec(
+        initial_state="derive_invitation_structure",
+        steps=(
+            authority_service._CanonicalStepPublicationSpec(
+                state_id="derive_invitation_structure",
+                action_id=_LLM_ACTION_ID,
+                prompt_concept_ids=(_meeting_invitation_structure_prompt_id(),),
+                execution_mode="llm",
+                validation_policy={"output_format": "json_value"},
+                on_failure_state="failed",
+                tool_output_mapping_specs=(
+                    _output_mapping(
+                        workflow_id=workflow_id,
+                        state_id="derive_invitation_structure",
+                        tool_output_field="validated_json.meeting_type",
+                        context_key="meeting_type",
+                    ),
+                    _output_mapping(
+                        workflow_id=workflow_id,
+                        state_id="derive_invitation_structure",
+                        tool_output_field="validated_json.title",
+                        context_key="title",
+                    ),
+                    _output_mapping(
+                        workflow_id=workflow_id,
+                        state_id="derive_invitation_structure",
+                        tool_output_field="validated_json.time",
+                        context_key="time",
+                    ),
+                    _output_mapping(
+                        workflow_id=workflow_id,
+                        state_id="derive_invitation_structure",
+                        tool_output_field="validated_json.participants",
+                        context_key="participants",
+                    ),
+                    _output_mapping(
+                        workflow_id=workflow_id,
+                        state_id="derive_invitation_structure",
+                        tool_output_field="validated_json.location_signal",
+                        context_key="location_signal",
+                    ),
+                    _output_mapping(
+                        workflow_id=workflow_id,
+                        state_id="derive_invitation_structure",
+                        tool_output_field="validated_json.topic_purpose",
+                        context_key="topic_purpose",
+                    ),
+                    _output_mapping(
+                        workflow_id=workflow_id,
+                        state_id="derive_invitation_structure",
+                        tool_output_field="validated_json.safe_downstream_action",
+                        context_key="safe_downstream_action",
+                    ),
+                ),
+                writes_context_keys=(
+                    "meeting_type",
+                    "title",
+                    "time",
+                    "participants",
+                    "location_signal",
+                    "topic_purpose",
+                    "safe_downstream_action",
+                ),
+                next_state="complete",
+            ),
+            authority_service._CanonicalStepPublicationSpec(state_id="complete"),
+            authority_service._CanonicalStepPublicationSpec(state_id="failed"),
+        ),
     )
 
 
@@ -224,18 +460,18 @@ def _build_meeting_invitation_workflow_spec() -> authority_service._CanonicalWor
                 state_id="prepare_spec",
                 action_id=TESTING_PREPARE_MEETING_INVITATION_SPEC_ACTION_ID,
                 on_failure_state="failed",
+                static_input_bindings=(
+                    (
+                        "candidate_workflow_ids",
+                        MEETING_INVITATION_CANDIDATE_WORKFLOW_ID,
+                    ),
+                ),
                 context_input_mapping_specs=(
                     _context_mapping(
                         workflow_id=workflow_id,
                         state_id="prepare_spec",
                         tool_param="invitation_text",
                         context_key="invitation_text",
-                    ),
-                    _context_mapping(
-                        workflow_id=workflow_id,
-                        state_id="prepare_spec",
-                        tool_param="candidate_workflow_ids",
-                        context_key="candidate_workflow_ids",
                     ),
                     _context_mapping(
                         workflow_id=workflow_id,
@@ -354,6 +590,12 @@ def _build_meeting_invitation_workflow_spec() -> authority_service._CanonicalWor
                 state_id="start_experiment_run",
                 action_id=EXPERIMENT_START_RUN_ACTION_ID,
                 on_failure_state="failed",
+                static_input_bindings=(
+                    (
+                        "candidate_workflow_ids",
+                        MEETING_INVITATION_CANDIDATE_WORKFLOW_ID,
+                    ),
+                ),
                 context_input_mapping_specs=(
                     _context_mapping(
                         workflow_id=workflow_id,
@@ -366,12 +608,6 @@ def _build_meeting_invitation_workflow_spec() -> authority_service._CanonicalWor
                         state_id="start_experiment_run",
                         tool_param="theory_id",
                         context_key="theory_id",
-                    ),
-                    _context_mapping(
-                        workflow_id=workflow_id,
-                        state_id="start_experiment_run",
-                        tool_param="candidate_workflow_ids",
-                        context_key="candidate_workflow_ids",
                     ),
                 ),
                 tool_output_mapping_specs=(
@@ -386,33 +622,106 @@ def _build_meeting_invitation_workflow_spec() -> authority_service._CanonicalWor
             ),
             authority_service._CanonicalStepPublicationSpec(
                 state_id="execute_candidate_workflow",
-                action_id=EXPERIMENT_EXECUTE_TARGET_WORKFLOW_ACTION_ID,
+                action_id=WORKFLOW_SUBWORKFLOW_ACTION_ID,
+                invoked_workflow_id=MEETING_INVITATION_CANDIDATE_WORKFLOW_ID,
                 on_failure_state="failed",
-                static_input_bindings=(
-                    ("await_terminal", "true"),
-                    ("timeout_seconds", "60"),
-                    ("poll_interval_seconds", "1"),
-                    ("expected_final_status", "completed"),
-                    ("observation_label", "meeting_candidate_execution"),
-                ),
                 context_input_mapping_specs=(
                     _context_mapping(
                         workflow_id=workflow_id,
                         state_id="execute_candidate_workflow",
+                        tool_param="invitation_text",
+                        context_key="invitation_text",
+                    ),
+                ),
+                tool_output_mapping_specs=(
+                    _output_mapping(
+                        workflow_id=workflow_id,
+                        state_id="execute_candidate_workflow",
+                        tool_output_field="meeting_type",
+                        context_key="candidate_meeting_type",
+                    ),
+                    _output_mapping(
+                        workflow_id=workflow_id,
+                        state_id="execute_candidate_workflow",
+                        tool_output_field="title",
+                        context_key="candidate_title",
+                    ),
+                    _output_mapping(
+                        workflow_id=workflow_id,
+                        state_id="execute_candidate_workflow",
+                        tool_output_field="time",
+                        context_key="candidate_time",
+                    ),
+                    _output_mapping(
+                        workflow_id=workflow_id,
+                        state_id="execute_candidate_workflow",
+                        tool_output_field="participants",
+                        context_key="candidate_participants",
+                    ),
+                    _output_mapping(
+                        workflow_id=workflow_id,
+                        state_id="execute_candidate_workflow",
+                        tool_output_field="location_signal",
+                        context_key="candidate_location_signal",
+                    ),
+                    _output_mapping(
+                        workflow_id=workflow_id,
+                        state_id="execute_candidate_workflow",
+                        tool_output_field="topic_purpose",
+                        context_key="candidate_topic_purpose",
+                    ),
+                    _output_mapping(
+                        workflow_id=workflow_id,
+                        state_id="execute_candidate_workflow",
+                        tool_output_field="safe_downstream_action",
+                        context_key="candidate_safe_downstream_action",
+                    ),
+                ),
+                writes_context_keys=(
+                    "candidate_meeting_type",
+                    "candidate_title",
+                    "candidate_time",
+                    "candidate_participants",
+                    "candidate_location_signal",
+                    "candidate_topic_purpose",
+                    "candidate_safe_downstream_action",
+                ),
+                next_state="evaluate_candidate_observations",
+            ),
+            authority_service._CanonicalStepPublicationSpec(
+                state_id="evaluate_candidate_observations",
+                action_id=_LLM_ACTION_ID,
+                prompt_concept_ids=(_meeting_invitation_observation_prompt_id(),),
+                execution_mode="llm",
+                validation_policy={"output_format": "json_value"},
+                on_failure_state="failed",
+                tool_output_mapping_specs=(
+                    _output_mapping(
+                        workflow_id=workflow_id,
+                        state_id="evaluate_candidate_observations",
+                        tool_output_field="validated_json",
+                        context_key="meeting_candidate_observations",
+                    ),
+                ),
+                writes_context_keys=("meeting_candidate_observations",),
+                next_state="record_candidate_observations",
+            ),
+            authority_service._CanonicalStepPublicationSpec(
+                state_id="record_candidate_observations",
+                action_id=EXPERIMENT_RECORD_OBSERVATION_ACTION_ID,
+                on_failure_state="failed",
+                context_input_mapping_specs=(
+                    _context_mapping(
+                        workflow_id=workflow_id,
+                        state_id="record_candidate_observations",
                         tool_param="run_id",
                         context_key="run_id",
                     ),
                     _context_mapping(
                         workflow_id=workflow_id,
-                        state_id="execute_candidate_workflow",
-                        tool_param="theory_id",
-                        context_key="theory_id",
-                    ),
-                    _context_mapping(
-                        workflow_id=workflow_id,
-                        state_id="execute_candidate_workflow",
-                        tool_param="target_workflow_ids",
-                        context_key="candidate_workflow_ids",
+                        state_id="record_candidate_observations",
+                        tool_param="observations",
+                        context_key="meeting_candidate_observations",
                     ),
                 ),
                 next_state="compute_experiment_verdict",
@@ -435,6 +744,12 @@ def _build_meeting_invitation_workflow_spec() -> authority_service._CanonicalWor
                 state_id="emit_learning_signal",
                 action_id=EXPERIMENT_EMIT_LEARNING_SIGNAL_ACTION_ID,
                 on_failure_state="failed",
+                static_input_bindings=(
+                    (
+                        "expected_workflow_id",
+                        MEETING_INVITATION_CANDIDATE_WORKFLOW_ID,
+                    ),
+                ),
                 context_input_mapping_specs=(
                     _context_mapping(
                         workflow_id=workflow_id,
@@ -728,6 +1043,7 @@ def _build_publication_specs() -> dict[
     authority_service._CanonicalWorkflowPublicationSpec,
 ]:
     return {
+        MEETING_INVITATION_CANDIDATE_WORKFLOW_ID: _build_meeting_invitation_candidate_workflow_spec(),
         MEETING_INVITATION_TESTING_WORKFLOW_ID: _build_meeting_invitation_workflow_spec(),
         SYNTHETIC_WORKFLOW_REGRESSION_SUITE_WORKFLOW_ID: _build_synthetic_regression_workflow_spec(),
         PROMOTION_GATE_WORKFLOW_ID: _build_promotion_gate_workflow_spec(),
@@ -823,8 +1139,16 @@ def _ensure_workflow_texts(workflow_id: str) -> None:
 
 
 def _workflow_launch_input_contract(workflow_id: str) -> dict[str, Any] | None:
-    if workflow_id != MEETING_INVITATION_TESTING_WORKFLOW_ID:
+    if workflow_id not in {
+        MEETING_INVITATION_TESTING_WORKFLOW_ID,
+        MEETING_INVITATION_CANDIDATE_WORKFLOW_ID,
+    }:
         return None
+    workflow_label = (
+        "candidate workflow"
+        if workflow_id == MEETING_INVITATION_CANDIDATE_WORKFLOW_ID
+        else "testing workflow"
+    )
     return {
         "schema_version": "workflow_launch_input_contract.v1",
         "required_inputs": ["invitation_text"],
@@ -836,17 +1160,7 @@ def _workflow_launch_input_contract(workflow_id: str) -> dict[str, Any] | None:
                 "required": True,
                 "description": (
                     "Extract the invitation specimen from the quoted user prompt "
-                    "before preparing the experiment spec."
-                ),
-            },
-            {
-                "target_context_key": "candidate_workflow_ids",
-                "source_expression": "inputs.workflow_discovery_result.matches",
-                "extractor": "workflow_id_list",
-                "required": False,
-                "description": (
-                    "Carry discovered candidate workflow IDs into the experiment "
-                    "context when they are available."
+                    f"before running the meeting-invitation {workflow_label}."
                 ),
             },
         ],
@@ -910,6 +1224,21 @@ def _ensure_step_notes(
 def bootstrap_canonical_testing_workflows() -> dict[str, Any]:
     """Publish and validate the canonical Testing Workflows family."""
 
+    prompt_support = _ensure_meeting_invitation_prompt_support()
+    if not bool(prompt_support.get("success")):
+        error_items = [
+            f"{target}:{error}"
+            for target, error in (prompt_support.get("errors_by_target") or {}).items()
+            if isinstance(target, str)
+            and target.strip()
+            and isinstance(error, str)
+            and error.strip()
+        ]
+        raise RuntimeError(
+            "testing_workflow_prompt_support_failed:"
+            + ",".join(error_items or ["unknown"])
+        )
+
     specs = _build_publication_specs()
     target_workflow_ids = tuple(specs.keys())
     publication_definitions = authority_service._build_definition_map_from_publication_specs(
@@ -957,7 +1286,7 @@ def bootstrap_canonical_testing_workflows() -> dict[str, Any]:
         for workflow_id, spec in specs.items():
             type_ids = _WORKFLOW_TYPE_IDS_BY_WORKFLOW_ID.get(
                 workflow_id,
-                _BASE_WORKFLOW_TYPE_IDS,
+                _GENERAL_WORKFLOW_TYPE_IDS,
             )
             if ensure_instance_typing(
                 concept_id=workflow_id,
@@ -1028,6 +1357,7 @@ def bootstrap_canonical_testing_workflows() -> dict[str, Any]:
 
     return {
         "workflow_ids": list(target_workflow_ids),
+        "prompt_support": prompt_support,
         "publication": publication_report,
         "typed_workflow_ids": typed_workflow_ids,
         "typed_step_ids": typed_step_ids,
@@ -1038,6 +1368,7 @@ def bootstrap_canonical_testing_workflows() -> dict[str, Any]:
 __all__ = [
     "CANONICAL_TESTING_WORKFLOW_IDS",
     "EPHEMERAL_THEORY_GC_WORKFLOW_ID",
+    "MEETING_INVITATION_CANDIDATE_WORKFLOW_ID",
     "MEETING_INVITATION_TESTING_WORKFLOW_ID",
     "PROMOTION_GATE_WORKFLOW_ID",
     "SYNTHETIC_WORKFLOW_REGRESSION_SUITE_WORKFLOW_ID",

@@ -1128,6 +1128,7 @@ Validation and fail-closed behaviour:
 
 - missing prompt text for a declared prompt is always an error,
 - unavailable tools or agent profiles follow the declared validation policy (`warn` or `fail`),
+- `validation_policy.output_format=json_value` means the runtime MUST parse a single JSON object or array from the raw LLM response, expose it as `validated_json`, and fail the step if parsing does not succeed,
 - stable merged prompt state is carried in workflow-state metadata as `prompt_contract`,
 - runtime diagnostics are attached to action inputs as `__prompt_resolution_diagnostics`,
 - the compiled action/step contract carries the prompt contract as a first-class field; prompt-bearing steps MUST NOT depend on hidden `__prompt_contract` input passthrough,

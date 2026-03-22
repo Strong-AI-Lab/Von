@@ -276,6 +276,7 @@ class _CanonicalStepPublicationSpec:
     concept_id: str | None = None
     action_id: str | None = None
     action_concept_id: str | None = None
+    prompt_concept_ids: tuple[str, ...] = ()
     execution_mode: str | None = None
     llm_policy: Mapping[str, Any] | None = None
     validation_policy: Mapping[str, Any] | None = None
@@ -3100,6 +3101,15 @@ def publish_canonical_chat_workflow_graphs(
                 step_relationships[
                     _CANONICAL_GRAPH_PREDICATES["invokesWorkflow"]
                 ] = [invoked_workflow_id]
+            prompt_concept_ids = [
+                item.strip()
+                for item in step.prompt_concept_ids
+                if isinstance(item, str) and item.strip()
+            ]
+            if prompt_concept_ids:
+                step_relationships[
+                    _CANONICAL_GRAPH_PREDICATES["workflowStepUsesLlmPrompt"]
+                ] = list(dict.fromkeys(prompt_concept_ids))
             if static_input_bindings:
                 step_relationships[_CANONICAL_GRAPH_PREDICATES["hasInputMap"]] = [
                     f"{key}={value}"

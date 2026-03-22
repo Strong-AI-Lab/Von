@@ -361,6 +361,38 @@ def _build_planning_outputs(
     )
 
 
+def _build_validated_json_outputs(
+    *,
+    response_text: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    from .durable.planning_workflow import _extract_json_payload
+
+    parsed_payload, parse_mode = _extract_json_payload(response_text)
+    if parsed_payload is None:
+        return (
+            {},
+            {
+                "status": "failed",
+                "reason": f"json_parse_failed:{parse_mode}",
+                "parse_mode": parse_mode,
+            },
+        )
+
+    return (
+        {
+            "validated_json": parsed_payload,
+            "validated_json_parse_mode": parse_mode,
+            "validated_json_raw_response": response_text,
+            "result": True,
+        },
+        {
+            "status": "success",
+            "output_format": "json_value",
+            "parse_mode": parse_mode,
+        },
+    )
+
+
 def _apply_validation_policy(
     *,
     request: WorkflowActionRequest,
@@ -428,6 +460,9 @@ def _apply_validation_policy(
 
     if output_format == "planning_plan_json":
         return _build_planning_outputs(response_text=response_text, request=request)
+
+    if output_format == "json_value":
+        return _build_validated_json_outputs(response_text=response_text)
 
     return (
         {"llm_step_validation_unhandled": output_format},
@@ -580,6 +615,14 @@ def _build_result(
         "aux_llm_calls": list(aux_llm_calls),
     }
     outputs.update(validated_outputs)
+    validation_status = _context_string(validation_summary.get("status")).lower()
+    if validation_status == "failed":
+        return WorkflowActionResult(
+            status="failed",
+            outputs=outputs,
+            error=_context_string(validation_summary.get("reason"))
+            or "workflow_llm_step_validation_failed",
+        )
     return WorkflowActionResult(outputs=outputs)
 
 

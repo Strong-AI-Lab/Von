@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import sys
 from types import ModuleType, SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 
 def _set_dotted_value(target: dict[str, Any], dotted_key: str, value: Any) -> None:
@@ -378,6 +378,37 @@ def test_prepare_meeting_invitation_experiment_spec_builds_gateable_fixture(monk
     assert captured["metadata"]["scenario"] == "meeting_invitation_testing"
 
 
+def test_prepare_meeting_invitation_experiment_spec_normalises_single_candidate_id(
+    monkeypatch,
+):
+    from src.backend.services import experiment_run_service as mod
+
+    captured: dict[str, Any] = {}
+
+    def _create_experiment_spec(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {
+            "success": True,
+            "experiment_spec_id": "#V#meeting_spec_single",
+            "experiment_spec": {"experiment_spec_id": "#V#meeting_spec_single"},
+        }
+
+    monkeypatch.setattr(mod, "create_experiment_spec", _create_experiment_spec)
+
+    result = mod.prepare_meeting_invitation_experiment_spec(
+        invitation_text="Please meet on Monday at 10am to discuss the roadmap.",
+        candidate_workflow_ids="#V#meeting_invitation_candidate_workflow",
+    )
+
+    assert result["success"] is True
+    assert captured["candidate_workflow_ids"] == [
+        "#V#meeting_invitation_candidate_workflow"
+    ]
+    assert captured["target_workflow_ids"] == [
+        "#V#meeting_invitation_candidate_workflow"
+    ]
+
+
 def test_execute_regression_suite_tier2_delegates_to_benchmark_harness(monkeypatch):
     from src.backend.services import experiment_run_service as mod
 
@@ -402,8 +433,10 @@ def test_execute_regression_suite_tier2_delegates_to_benchmark_harness(monkeypat
         calls["mongo_client"] = mongo_client
         return {"metrics": {"aggregate": {"all_runs_passed": True}}}
 
-    benchmark_module.build_default_benchmark_app = _build_default_benchmark_app
-    benchmark_module.run_kb_clone_benchmark = _run_kb_clone_benchmark
+    cast(Any, benchmark_module).build_default_benchmark_app = (
+        _build_default_benchmark_app
+    )
+    cast(Any, benchmark_module).run_kb_clone_benchmark = _run_kb_clone_benchmark
     monkeypatch.setitem(
         sys.modules,
         "src.backend.services.kb_clone_benchmark_service",
