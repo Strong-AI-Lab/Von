@@ -3973,6 +3973,132 @@ def test_plain_response_overridden_to_tool_pipeline_for_mutative_intent(monkeypa
     assert "workflow_selector_override" in aux_types
 
 
+def test_mutative_intent_prefers_launchable_discovered_custom_workflow(monkeypatch):
+    """Launchable discovered custom workflows should outrank generic tool fallback."""
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = "#V#launchable_mutative_custom_workflow"
+
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=selected_workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=selected_workflow_id,
+                initial_state="complete",
+                states={
+                    "complete": WorkflowStateSpec(
+                        state_id="complete",
+                        actions=(
+                            WorkflowActionInvocation(action_id="tool.prepare_custom"),
+                        ),
+                        terminal=True,
+                    )
+                },
+            ),
+            purpose="Launchable custom workflow for mutative routing tests.",
+            source="test",
+        )
+    )
+
+    monkeypatch.setattr(
+        orchestrator._gateway,
+        "describe_methods",
+        lambda: {"add_relationship": {"category": "write"}},
+    )
+
+    captured_execution: dict[str, Any] = {}
+
+    def _run_workflow(
+        workflow_def: WorkflowDefinition,
+        *,
+        data: Mapping[str, Any],
+        **_kwargs: Any,
+    ):
+        captured_execution["workflow_id"] = workflow_def.workflow_id
+        captured_execution["data"] = dict(data)
+        return SimpleNamespace(
+            completed=True,
+            final_state="complete",
+            error=None,
+            data={"response_text": "Executed via specialised workflow."},
+        )
+
+    monkeypatch.setattr(orchestrator._workflow_executor, "run", _run_workflow)
+
+    result = orchestrator.run(
+        prompt="Create a concept link in Vontology.",
+        context=[],
+        llm_client=_CapturingLLM([CHAT_ASSISTANT_WORKFLOW_ID]),
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Launchable mutative custom workflow",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Launchable mutative custom workflow",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                }
+            ],
+            "match_count": 1,
+        },
+        conversation_session_id="session-mutative-custom",
+        turn_id="turn-mutative-custom",
+    )
+
+    assert result.response_text.startswith("Executed via specialised workflow.")
+    assert captured_execution["workflow_id"] == selected_workflow_id
+    assert captured_execution["data"]["selected_workflow_id"] == selected_workflow_id
+
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.workflow_id == selected_workflow_id
+    assert result.workflow_routing.verdict == "custom_workflow_override"
+    assert result.workflow_routing.source == "selector_override"
+
+    override_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_selector_override"
+            and entry.get("reason")
+            == "mutative_intent_prefers_launchable_custom_workflow"
+        ),
+        None,
+    )
+    assert override_entry is not None
+    assert override_entry.get("prior_selected_workflow_id") == CHAT_ASSISTANT_WORKFLOW_ID
+    assert override_entry.get("selected_workflow_id") == selected_workflow_id
+    assert override_entry.get("write_policy_reason") == "default_allow_additive_low_risk"
+
+    launch_probe = override_entry.get("launch_viability_probe", {}).get(
+        "replacement_workflow"
+    )
+    assert isinstance(launch_probe, dict)
+    assert launch_probe.get("launchable") is True
+
+    dispatch_boundaries = [
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict) and entry.get("type") == "workflow_dispatch_boundary"
+    ]
+    assert [entry.get("boundary") for entry in dispatch_boundaries[-3:]] == [
+        "execution_mode_selected",
+        "workflow_handoff",
+        "workflow_terminal",
+    ]
+    assert dispatch_boundaries[-3].get("selected_execution_mode") == "custom_workflow"
+    assert dispatch_boundaries[-3].get("selected_workflow_id") == selected_workflow_id
+
+
 def test_plain_response_overridden_when_prompt_requires_tool_verification(monkeypatch):
     """Prompt-required tool checks must not be bypassed by plain-response routing."""
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
