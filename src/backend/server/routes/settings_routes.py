@@ -56,6 +56,7 @@ from ...services.feature_flags import (
     get_expert_footer_enabled,
     get_expert_tabs_enabled,
 )
+from ...services.window_session_context_service import get_effective_context
 from ...services.buttonify_service import BUTTONIFY_PROMPT_IDS
 from ...integrations.google.gmail_service import list_profile_ids_from_env
 from ...services.concept_service import list_concepts, get_concept_by_id
@@ -182,7 +183,16 @@ def _is_admin_or_owner_session() -> bool:
     """
 
     try:
-        role = session.get("role_in_org")
+        effective = get_effective_context(
+            request.headers.get("X-Von-Window-Session"),
+            dict(session),
+            session.get("user_concept_id"),
+        )
+        role = (
+            effective.get("role")
+            if isinstance(effective, dict)
+            else session.get("role_in_org")
+        )
         if isinstance(role, str) and role.strip().lower() in {"admin", "owner"}:
             return True
     except Exception:

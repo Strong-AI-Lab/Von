@@ -83,6 +83,7 @@ let gmailProfileStatusInFlight = false;
 let currentResolvedLlm = null;
 
 let __vonIsAdminOrOwner = false;
+let __canPersistWriteConservatism = false;
 let availableGmailProfiles = [];
 
 function _focusCurrentUserSettingsSection() {
@@ -1914,7 +1915,10 @@ async function loadAndDisplaySettings() {
     if (storedOrg?.concept_id) params.set('organisation_concept_id', storedOrg.concept_id);
     const settingsUrl = '/api/settings/' + (params.toString() ? '?' + params.toString() : '');
 
-    const response = await fetch(settingsUrl, { cache: 'no-store' });
+    const response = await fetch(settingsUrl, {
+      cache: 'no-store',
+      headers: buildSettingsFetchHeaders(),
+    });
     if (!response.ok) throw new Error(`Failed to fetch settings: ${response.statusText}`);
     const settings = await response.json();
 
@@ -1923,11 +1927,16 @@ async function loadAndDisplaySettings() {
       const sessionContext = await _fetchSessionContextForRole();
       const role = (sessionContext && sessionContext.role) ? String(sessionContext.role).toLowerCase() : '';
       __vonIsAdminOrOwner = role === 'admin' || role === 'owner';
+      __canPersistWriteConservatism = __vonIsAdminOrOwner
+        && Object.prototype.hasOwnProperty.call(settings, 'disable_write_tool_conservatism');
       const container = document.getElementById('disableWriteToolConservatismContainer');
       if (container) {
         container.classList.toggle('hidden', !__vonIsAdminOrOwner);
       }
-    } catch { __vonIsAdminOrOwner = false; }
+    } catch {
+      __vonIsAdminOrOwner = false;
+      __canPersistWriteConservatism = false;
+    }
 
     // The selector should reflect the resolved active model for the provider in scope,
     // not a stale enabled_llms entry from an older or broader context.
@@ -2383,7 +2392,7 @@ async function saveAllSettings(changedProvider = null) {
     auto_proceed_minimal_imposition_enabled: !!document.getElementById('autoProceedMinimalImpositionToggle')?.checked,
   };
 
-  if (__vonIsAdminOrOwner) {
+  if (__canPersistWriteConservatism) {
     const adminToggleEl = document.getElementById('disableWriteToolConservatismToggle');
     if (adminToggleEl) {
       settings.disable_write_tool_conservatism = !adminToggleEl.checked;
@@ -2580,7 +2589,10 @@ async function verifyOpenAiApiKey(savedModel = null) {
 
 export async function loadSettings() {
   try {
-    const response = await fetch('/api/settings/', { cache: 'no-store' });
+    const response = await fetch('/api/settings/', {
+      cache: 'no-store',
+      headers: buildSettingsFetchHeaders(),
+    });
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);
     }
@@ -2595,9 +2607,9 @@ export async function saveSettings(settings) {
   try {
     const response = await fetch('/api/settings/', {
       method: 'POST',
-      headers: {
+      headers: buildSettingsFetchHeaders({
         'Content-Type': 'application/json'
-      },
+      }),
       body: JSON.stringify(settings)
     });
 

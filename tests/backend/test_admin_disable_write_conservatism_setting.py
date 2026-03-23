@@ -113,6 +113,79 @@ def test_settings_endpoint_allows_disable_write_conservatism_for_admin(monkeypat
         assert captured["disabled"] is True
 
 
+def test_settings_endpoint_allows_disable_write_conservatism_for_window_session_admin(
+    monkeypatch,
+):
+    app = _make_settings_app()
+
+    captured: dict[str, Any] = {}
+
+    def _setter(disabled: bool) -> bool:
+        captured["disabled"] = disabled
+        return True
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.set_disable_write_tool_conservatism",
+        _setter,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.get_effective_context",
+        lambda window_session_id, flask_session, user_id: {
+            "role": "admin",
+            "organisation_id": "#V#uoa_strong_ai_lab",
+            "namespace": "#V#michael_witbrock@uoa_strong_ai_lab",
+        },
+    )
+
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/settings/",
+            json={"disable_write_tool_conservatism": True},
+            headers={"X-Von-Window-Session": "window-123"},
+        )
+
+        assert resp.status_code == 200
+        assert captured["disabled"] is True
+
+
+def test_settings_endpoint_rejects_disable_write_conservatism_for_window_session_member(
+    monkeypatch,
+):
+    app = _make_settings_app()
+
+    called = {"hit": False}
+
+    def _setter(_disabled: bool) -> bool:
+        called["hit"] = True
+        return True
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.set_disable_write_tool_conservatism",
+        _setter,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.get_effective_context",
+        lambda window_session_id, flask_session, user_id: {
+            "role": "member",
+            "organisation_id": "#V#uoa_strong_ai_lab",
+            "namespace": "#V#michael_witbrock@uoa_strong_ai_lab",
+        },
+    )
+
+    with app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["role_in_org"] = "admin"
+
+        resp = client.post(
+            "/api/settings/",
+            json={"disable_write_tool_conservatism": True},
+            headers={"X-Von-Window-Session": "window-123"},
+        )
+
+        assert resp.status_code == 403
+        assert called["hit"] is False
+
+
 def test_settings_endpoint_only_returns_flag_for_admin(monkeypatch):
     app = _make_settings_app()
 
