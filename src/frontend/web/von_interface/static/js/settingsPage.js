@@ -5,7 +5,12 @@ import {
   getBackgroundTaskState,
   subscribeBackgroundTaskUpdates
 } from './backgroundTaskTracker.js';
-import { renderOrgSelector, setupOrgSwitchListener, switchOrganisation } from './components/orgSelector.js';
+import {
+  normaliseOrganisationDisplayName,
+  renderOrgSelector,
+  setupOrgSwitchListener,
+  switchOrganisation
+} from './components/orgSelector.js';
 import { populateLanguageSelect } from './languageConfig.js';
 import {
   loadAndRenderOllamaHosts,
@@ -164,6 +169,109 @@ function resolveActiveLlmScopeContext() {
   }
 
   return { scope: null, conceptId: null };
+}
+
+function readOptionText(option) {
+  const text = String(option?.textContent || '').trim();
+  return text || null;
+}
+
+function buildStoredUserContextFromOption(option) {
+  if (!option) return null;
+  return {
+    id: option.dataset?.id || null,
+    concept_id: option.dataset?.conceptId || null,
+    name: readOptionText(option),
+  };
+}
+
+function buildStoredOrganisationContextFromOption(option) {
+  const conceptId = option?.dataset?.conceptId || null;
+  if (!option || (!option.dataset?.id && !conceptId)) return null;
+  return {
+    id: option.dataset?.id || null,
+    concept_id: conceptId,
+    name: normaliseOrganisationDisplayName(option.textContent) || readOptionText(option),
+  };
+}
+
+function getSelectedUserContextFromUi() {
+  const userSelect = document.getElementById('currentUserSelect');
+  return buildStoredUserContextFromOption(userSelect?.selectedOptions?.[0]);
+}
+
+function getSelectedOrganisationContextFromUi() {
+  const orgSelect = document.getElementById('currentOrganisationSelect');
+  return buildStoredOrganisationContextFromOption(orgSelect?.selectedOptions?.[0]);
+}
+
+function resolveDisplayedProviderModels(settings) {
+  const effectiveLlm = settings?.resolved_llm || settings?.active_llm || null;
+  const enabledLlms = Array.isArray(settings?.enabled_llms) ? settings.enabled_llms : [];
+  let currentOllamaModel = null;
+  let currentOpenAIModel = null;
+
+  for (const entry of enabledLlms) {
+    if (!entry || typeof entry !== 'object') continue;
+    if (entry.provider === 'ollama' && entry.model && !currentOllamaModel) {
+      currentOllamaModel = entry.model;
+    } else if (entry.provider === 'openai' && entry.model && !currentOpenAIModel) {
+      currentOpenAIModel = entry.model;
+    }
+  }
+
+  if (effectiveLlm?.provider === 'ollama' && effectiveLlm.model) {
+    currentOllamaModel = effectiveLlm.model;
+  } else if (effectiveLlm?.provider === 'openai' && effectiveLlm.model) {
+    currentOpenAIModel = effectiveLlm.model;
+  }
+
+  return {
+    effectiveLlm,
+    currentOllamaModel,
+    currentOpenAIModel,
+  };
+}
+
+async function syncInitialScopedSelections({
+  setUserConcept = async (userConceptId) =>
+    postJson('/von/api/session/set_user_concept', { user_concept_id: userConceptId }),
+  switchOrganisationFn = switchOrganisation,
+  refreshRagStatus = () => loadRagStatus(null),
+} = {}) {
+  const userData = getSelectedUserContextFromUi();
+  setStoredJson(LS_USER_KEY, userData);
+
+  let fallbackNamespace = '';
+  if (userData?.concept_id) {
+    try {
+      const resp = await setUserConcept(userData.concept_id);
+      fallbackNamespace = resp?.namespace || '';
+      setSessionScopedNamespace(fallbackNamespace);
+    } catch (e) {
+      console.warn('Failed to sync server session user concept (initial load)', e);
+    }
+  } else {
+    setSessionScopedNamespace(null);
+  }
+
+  const orgData = getSelectedOrganisationContextFromUi();
+  setStoredJson(LS_ORG_KEY, orgData);
+
+  try {
+    const resp = await switchOrganisationFn(orgData?.concept_id || null, orgData?.name || null);
+    if (resp && Object.prototype.hasOwnProperty.call(resp, 'namespace')) {
+      setSessionScopedNamespace(resp.namespace || null);
+    } else {
+      setSessionScopedNamespace(fallbackNamespace || null);
+    }
+  } catch (e) {
+    console.warn('Failed to sync organisation via backend (initial load)', e);
+    setSessionScopedNamespace(fallbackNamespace || null);
+  }
+
+  renderActiveNamespace();
+  void refreshRagStatus();
 }
 
 function buildEnabledLlmSelections() {
@@ -1262,6 +1370,16 @@ export function __testOnly_getPreferredRagNamespace() {
   return getPreferredRagNamespace();
 }
 
+// Export for testing
+export function __testOnly_resolveDisplayedProviderModels(settings) {
+  return resolveDisplayedProviderModels(settings);
+}
+
+// Export for testing
+export async function __testOnly_syncInitialScopedSelections(overrides = {}) {
+  await syncInitialScopedSelections(overrides);
+}
+
 function isSettingsRuntimePanelVisible() {
   try {
     const frameEl = window.frameElement;
@@ -1418,7 +1536,7 @@ function resolveOrgNameFromSelect(orgConceptId) {
   for (const opt of select.options) {
     const optCid = normaliseOrgConceptId(opt.dataset?.conceptId);
     if (optCid && optCid === target) {
-      return opt.textContent || null;
+      return normaliseOrganisationDisplayName(opt.textContent) || readOptionText(opt);
     }
   }
   return null;
@@ -1446,11 +1564,9 @@ function applyStoredSelection(selectId, stored, fallbackSelected = true) {
   if (fallbackSelected) {
     const current = sel.selectedOptions?.[0];
     if (current && (current.dataset?.id || current.dataset?.conceptId)) {
-      const storedVal = {
-        id: current.dataset.id || null,
-        concept_id: current.dataset.conceptId || null,
-        name: current.textContent || null
-      };
+      const storedVal = selectId === 'currentUserSelect'
+        ? buildStoredUserContextFromOption(current)
+        : buildStoredOrganisationContextFromOption(current);
       setStoredJson(selectId === 'currentUserSelect' ? LS_USER_KEY : LS_ORG_KEY, storedVal);
       return storedVal;
     }
@@ -1501,7 +1617,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const sel = document.getElementById('currentUserSelect');
     const opt = sel?.selectedOptions?.[0];
     if (opt) {
-      setStoredJson(LS_USER_KEY, { id: opt.dataset.id || null, concept_id: opt.dataset.conceptId || null, name: opt.textContent || null });
+      setStoredJson(LS_USER_KEY, buildStoredUserContextFromOption(opt));
       if (window.parent?.updateModelInfoFooterDisplay) { window.parent.updateModelInfoFooterDisplay(); }
       // Keep the authenticated server session aligned with the selected user concept.
       if (opt.dataset.conceptId) {
@@ -1540,7 +1656,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     if (opt && (opt.dataset?.id || conceptId)) {
-      setStoredJson(LS_ORG_KEY, { id: opt.dataset.id || null, concept_id: conceptId, name: opt.textContent || null });
+      setStoredJson(LS_ORG_KEY, buildStoredOrganisationContextFromOption(opt));
       if (window.parent?.updateModelInfoFooterDisplay) { window.parent.updateModelInfoFooterDisplay(); }
       // Persist organisation preference (and language if set)
       persistCurrentUserPreferences();
@@ -1813,30 +1929,14 @@ async function loadAndDisplaySettings() {
       }
     } catch { __vonIsAdminOrOwner = false; }
 
-    // Extract current model information from resolved_llm (respects user > org > global precedence)
-    // Falls back to active_llm for backwards compatibility
-    const effectiveLlm = settings.resolved_llm || settings.active_llm;
+    // The selector should reflect the resolved active model for the provider in scope,
+    // not a stale enabled_llms entry from an older or broader context.
+    const {
+      effectiveLlm,
+      currentOllamaModel,
+      currentOpenAIModel,
+    } = resolveDisplayedProviderModels(settings);
     currentResolvedLlm = effectiveLlm || null;
-    const enabledLlms = Array.isArray(settings.enabled_llms) ? settings.enabled_llms : [];
-    let currentOllamaModel = null;
-    let currentOpenAIModel = null;
-
-    for (const entry of enabledLlms) {
-      if (!entry || typeof entry !== 'object') continue;
-      if (entry.provider === 'ollama' && entry.model) {
-        currentOllamaModel = entry.model;
-      } else if (entry.provider === 'openai' && entry.model) {
-        currentOpenAIModel = entry.model;
-      }
-    }
-
-    if (effectiveLlm) {
-      if (!currentOllamaModel && effectiveLlm.provider === 'ollama') {
-        currentOllamaModel = effectiveLlm.model;
-      } else if (!currentOpenAIModel && effectiveLlm.provider === 'openai') {
-        currentOpenAIModel = effectiveLlm.model;
-      }
-    }
 
     // Load and display Ollama hosts first
     await loadAndRenderOllamaHosts();
@@ -1855,9 +1955,6 @@ async function loadAndDisplaySettings() {
       }
     }
 
-    // Track if we should persist a backfilled concept_id
-    let shouldPersistBackfill = false;
-
     // Populate People and select the saved one
     await populatePeopleDropdown('currentUserSelect', settings.current_user_person_id);
     // If we have concept_id too, attempt to match based on data attribute
@@ -1869,33 +1966,9 @@ async function loadAndDisplaySettings() {
           if (opt.dataset?.conceptId === targetCid) { opt.selected = true; break; }
         }
       }
-      // If settings lacks concept_id but the selected option has one, mark for backfill
-      if (userSelect && !targetCid) {
-        const sel = userSelect.selectedOptions?.[0];
-        if (sel?.dataset?.conceptId) {
-          shouldPersistBackfill = true;
-        }
-      }
     } catch { }
     // Override with stored local selection if present
     applyStoredSelection('currentUserSelect', getStoredJson(LS_USER_KEY));
-
-    // Align server session identity with the selected user concept on initial load.
-    // Without this, the UI can show #V#lu_yunli while the server session remains email-derived,
-    // causing org/namespace inconsistencies.
-    try {
-      const userSelect = document.getElementById('currentUserSelect');
-      const selected = userSelect?.selectedOptions?.[0];
-      const selectedConceptId = selected?.dataset?.conceptId;
-      if (selectedConceptId) {
-        const resp = await postJson('/von/api/session/set_user_concept', { user_concept_id: selectedConceptId });
-        setSessionScopedNamespace(resp?.namespace || null);
-        renderActiveNamespace();
-        void loadRagStatus(null);
-      }
-    } catch (e) {
-      console.warn('Failed to sync server session user concept (initial load)', e);
-    }
 
     // Populate Organisations and select the saved one
     await populateOrganisationsDropdown('currentOrganisationSelect', settings.current_organisation_id);
@@ -1906,13 +1979,6 @@ async function loadAndDisplaySettings() {
       if (orgSelect && targetCid) {
         for (const opt of orgSelect.options) {
           if (opt.dataset?.conceptId === targetCid) { opt.selected = true; break; }
-        }
-      }
-      // If settings lacks concept_id but the selected option has one, mark for backfill
-      if (orgSelect && !targetCid) {
-        const sel = orgSelect.selectedOptions?.[0];
-        if (sel?.dataset?.conceptId) {
-          shouldPersistBackfill = true;
         }
       }
     } catch { }
@@ -1979,6 +2045,11 @@ async function loadAndDisplaySettings() {
     } catch (error) {
       console.error('Error initializing organisation selector:', error);
     }
+
+    // Keep storage and server session aligned with the restored dropdown state.
+    // Otherwise the page can look correctly selected while saves and namespace reads
+    // still operate on stale user-only context.
+    await syncInitialScopedSelections();
 
     // Populate OpenAI settings
     const envVarInput = document.getElementById('openaiApiKeyEnvVar');
@@ -2145,15 +2216,6 @@ async function loadAndDisplaySettings() {
     if (await checkOpenAiEnvVar()) {
       await verifyOpenAiApiKey(currentOpenAIModel); // Pass the current OpenAI model
     }
-
-    // If we identified missing concept_ids but selections have them, persist once
-    // We no longer persist user/org/language backfills to the server; they are client-side only now.
-    try {
-      if (shouldPersistBackfill) {
-        // Save only active_llm & api key (exclude user/org/language) if needed
-        await saveAllSettings();
-      }
-    } catch (e) { console.warn('Save after backfill failed (non-critical):', e); }
 
     // Trigger height update after all settings content is loaded
     setTimeout(() => {
@@ -2399,7 +2461,7 @@ async function loadUserConceptPreferences(userConceptId) {
         }
         const selOpt = orgSel.selectedOptions?.[0];
         if (selOpt) {
-          setStoredJson(LS_ORG_KEY, { id: selOpt.dataset.id || null, concept_id: selOpt.dataset.conceptId || null, name: selOpt.textContent || null });
+          setStoredJson(LS_ORG_KEY, buildStoredOrganisationContextFromOption(selOpt));
         }
       }
     } else {

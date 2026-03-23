@@ -1,11 +1,15 @@
 import {
     __testOnly_formatRagSummaryForSettings,
-    __testOnly_getPreferredRagNamespace
+    __testOnly_getPreferredRagNamespace,
+    __testOnly_resolveDisplayedProviderModels,
+    __testOnly_syncInitialScopedSelections,
 } from '../settingsPage.js';
 
 describe('settingsPage RAG status summary', () => {
     beforeEach(() => {
+        document.body.innerHTML = '';
         localStorage.clear();
+        sessionStorage.clear();
     });
 
     test('prefers current_user_namespace over legacy von_namespace', () => {
@@ -65,6 +69,67 @@ describe('settingsPage RAG status summary', () => {
 
         const { summaryText } = __testOnly_formatRagSummaryForSettings(ragData, null);
         expect(summaryText).toBe('KA 5 • 3 pending');
+    });
+
+    test('prefers resolved_llm over stale enabled_llms for the active provider display', () => {
+        const result = __testOnly_resolveDisplayedProviderModels({
+            resolved_llm: { provider: 'openai', model: 'gpt-5.4-nano' },
+            enabled_llms: [
+                { provider: 'openai', model: 'gpt-5.4-mini' },
+                { provider: 'ollama', model: 'llama3.1:8b' },
+            ],
+        });
+
+        expect(result.currentOpenAIModel).toBe('gpt-5.4-nano');
+        expect(result.currentOllamaModel).toBe('llama3.1:8b');
+    });
+
+    test('initial scoped selection sync backfills storage and composite namespace from selected user and org', async () => {
+        document.body.innerHTML = `
+            <select id="currentUserSelect">
+                <option data-id="user-1" data-concept-id="#V#michael_witbrock" selected>Michael Witbrock</option>
+            </select>
+            <select id="currentOrganisationSelect">
+                <option value="">Personal</option>
+                <option data-id="org-1" data-concept-id="#V#university_of_auckland_strong_ai_lab" selected>
+                    University Of Auckland Strong Ai Lab (admin)
+                </option>
+            </select>
+            <div id="settingsActiveNamespaceValue"></div>
+            <div id="settingsActiveNamespaceHint"></div>
+        `;
+
+        const setUserConcept = jest.fn().mockResolvedValue({
+            namespace: '#V#michael_witbrock',
+        });
+        const switchOrganisationFn = jest.fn().mockResolvedValue({
+            namespace: '#V#michael_witbrock@university_of_auckland_strong_ai_lab',
+        });
+        const refreshRagStatus = jest.fn();
+
+        await __testOnly_syncInitialScopedSelections({
+            setUserConcept,
+            switchOrganisationFn,
+            refreshRagStatus,
+        });
+
+        expect(JSON.parse(localStorage.getItem('von_current_user'))).toMatchObject({
+            concept_id: '#V#michael_witbrock',
+            name: 'Michael Witbrock',
+        });
+        expect(JSON.parse(localStorage.getItem('von_current_org'))).toMatchObject({
+            concept_id: '#V#university_of_auckland_strong_ai_lab',
+            name: 'University Of Auckland Strong Ai Lab',
+        });
+        expect(localStorage.getItem('current_user_namespace')).toBe(
+            '#V#michael_witbrock@university_of_auckland_strong_ai_lab',
+        );
+        expect(setUserConcept).toHaveBeenCalledWith('#V#michael_witbrock');
+        expect(switchOrganisationFn).toHaveBeenCalledWith(
+            '#V#university_of_auckland_strong_ai_lab',
+            'University Of Auckland Strong Ai Lab',
+        );
+        expect(refreshRagStatus).toHaveBeenCalled();
     });
 });
 

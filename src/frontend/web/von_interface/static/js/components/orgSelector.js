@@ -21,6 +21,12 @@ const SS_CURRENT_NAMESPACE = 'current_user_namespace';
 const LS_ORG_CONTEXT = 'von_org_context';
 const LS_ORG_ROLE = 'von_org_role';
 
+export function normaliseOrganisationDisplayName(label) {
+    const text = String(label || '').trim();
+    if (!text) return null;
+    return text.replace(/\s*\([^()]+\)\s*$/, '').trim() || text;
+}
+
 /**
  * Load user's available organisations from backend
  */
@@ -164,8 +170,7 @@ export async function renderOrgSelector(containerId) {
                 try {
                     try {
                         const selected = e.target.selectedOptions?.[0];
-                        const label = selected ? String(selected.textContent || '').trim() : '';
-                        const name = label.replace(/\s*\(.+\)\s*$/, '').trim();
+                        const name = normaliseOrganisationDisplayName(selected?.textContent);
                         // JVNAUTOSCI-1011: Use sessionStorage for switching indicator
                         sessionStorage.setItem('von_org_switching', JSON.stringify({
                             concept_id: orgId || null,
@@ -180,8 +185,7 @@ export async function renderOrgSelector(containerId) {
                     if (orgId) {
                         // Get the org name from the selected option
                         const selected = e.target.selectedOptions?.[0];
-                        const label = selected ? String(selected.textContent || '').trim() : '';
-                        const orgDisplayName = label.replace(/\\s*\\(.+\\)\\s*$/, '').trim();
+                        const orgDisplayName = normaliseOrganisationDisplayName(selected?.textContent);
                         const response = await switchOrganisation(orgId, orgDisplayName || null);
                         try {
                             const orgData = {
