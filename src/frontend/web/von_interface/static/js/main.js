@@ -14,8 +14,16 @@ import {
   initialiseCopyJsonButtonPreCopyState,
   resetCopyJsonButtonPreCopyState
 } from './utils/copyJsonButtonState.js';
-import { getSessionScopedNamespace, hasSessionOrgContext, syncNamespaceFromLocalStorage, syncOrgContextFromLocalStorage } from './utils/sessionScopedStorage.js';
+import {
+  getSessionScopedNamespace,
+  hasSessionOrgContext,
+  setSessionScopedNamespace,
+  setSessionScopedOrgContext,
+  syncNamespaceFromLocalStorage,
+  syncOrgContextFromLocalStorage
+} from './utils/sessionScopedStorage.js';
 import { buildHealthTelemetryCopyPayload, buildHealthTelemetrySnapshot } from './utils/healthTelemetrySnapshot.js';
+import { hydrateStoredSelectionsFromUserPreferences } from './utils/userPreferenceBootstrap.js';
 import { isVontologyBusy, loadKeyConceptsForUser, preloadVontologyData, selectVontologyNodeByIdentifier, setupVontologySearchUI } from './vontology.js';
 
 // JVNAUTOSCI-1011: getCurrentNamespace is now provided by sessionScopedStorage.js
@@ -313,15 +321,15 @@ async function syncFlaskSessionOrg() {
       const existingOrg = sessionStorage.getItem('von_current_org');
       const parsed = existingOrg ? JSON.parse(existingOrg) : {};
       if (parsed?.concept_id !== context.organisation_id) {
-        sessionStorage.setItem('von_current_org', JSON.stringify({
+        setSessionScopedOrgContext({
           id: null,
           concept_id: context.organisation_id,
           name: parsed?.name || null
-        }));
+        });
         console.log('[main] Updated sessionStorage org to match window session');
       }
       if (context.namespace) {
-        sessionStorage.setItem('current_user_namespace', context.namespace);
+        setSessionScopedNamespace(context.namespace);
       }
       return;
     }
@@ -365,7 +373,7 @@ async function syncFlaskSessionOrg() {
     });
     console.log('[main] Window session org synced:', syncData);
     if (syncData.namespace) {
-      sessionStorage.setItem('current_user_namespace', syncData.namespace);
+      setSessionScopedNamespace(syncData.namespace);
     }
   } catch (err) {
     console.warn('[main] Error syncing org to session:', err);
@@ -393,6 +401,14 @@ async function ensureUserContext() {
 
     // If we already have user context, still sync session org but skip settings fetch
     if (localStorage.getItem('von_current_user')) {
+      try {
+        const storedUser = JSON.parse(localStorage.getItem('von_current_user') || 'null');
+        if (storedUser?.concept_id) {
+          await hydrateStoredSelectionsFromUserPreferences(storedUser.concept_id);
+        }
+      } catch (e) {
+        console.warn('[main] Failed to hydrate stored selections from user preferences:', e);
+      }
       // CRITICAL: Even with localStorage data, we must sync session org
       // to avoid race condition where /history/sessions is called before org context is set.
       await syncFlaskSessionOrg();
@@ -421,7 +437,7 @@ async function ensureUserContext() {
           ? String(settings.current_organisation_concept_id).replace(/^#V#/, '')
           : null;
         const ns = orgSlug ? `#V#${userSlug}@${orgSlug}` : `#V#${userSlug}`;
-        sessionStorage.setItem('current_user_namespace', ns);
+        setSessionScopedNamespace(ns);
         console.log('[main] Derived current_user_namespace from settings:', ns);
       } catch (e) {
         console.warn('[main] Failed to derive current_user_namespace from settings:', e);
@@ -433,20 +449,18 @@ async function ensureUserContext() {
     if (!settings.current_user_person_id) {
       const ns = sessionStorage.getItem('von_namespace') || localStorage.getItem('von_namespace');
       if (ns && !sessionStorage.getItem('current_user_namespace')) {
-        sessionStorage.setItem('current_user_namespace', ns);
+        setSessionScopedNamespace(ns);
         console.log('[main] Using existing von_namespace as current_user_namespace:', ns);
       }
     }
 
     // JVNAUTOSCI-1011: Store org context in both sessionStorage (window-scoped) and localStorage (persistent)
     if (settings.current_organisation_id) {
-      const org = {
+      setSessionScopedOrgContext({
         id: settings.current_organisation_id,
         concept_id: settings.current_organisation_concept_id,
         name: settings.current_organisation_name
-      };
-      sessionStorage.setItem('von_current_org', JSON.stringify(org));
-      localStorage.setItem('von_current_org', JSON.stringify(org)); // Persist for restart
+      });
       console.log('[main] Populated von_current_org in sessionStorage and localStorage from settings');
     }
 
@@ -462,7 +476,7 @@ async function ensureUserContext() {
         console.log('[main] Session org synced:', syncData);
         // Update namespace if returned
         if (syncData.namespace) {
-          sessionStorage.setItem('current_user_namespace', syncData.namespace);
+          setSessionScopedNamespace(syncData.namespace);
         }
       } catch (syncErr) {
         console.warn('[main] Error syncing org to session:', syncErr);

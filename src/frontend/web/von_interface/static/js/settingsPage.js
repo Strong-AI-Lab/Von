@@ -41,6 +41,10 @@ import {
   getSessionScopedNamespace,
   setSessionScopedNamespace,
 } from './utils/sessionScopedStorage.js';
+import {
+  fetchUserPreferences,
+  hydrateStoredSelectionsFromUserPreferences,
+} from './utils/userPreferenceBootstrap.js';
 
 // Helper to build fetch headers with window session context (JVNAUTOSCI-1011)
 function buildSettingsFetchHeaders(extraHeaders = {}) {
@@ -1979,6 +1983,17 @@ async function loadAndDisplaySettings() {
     // Override with stored local selection if present
     applyStoredSelection('currentUserSelect', getStoredJson(LS_USER_KEY));
 
+    // Restore missing org/language context from persisted per-user preferences
+    // before populating organisation-dependent UI or namespace state.
+    try {
+      const selectedUser = getSelectedUserContextFromUi();
+      if (selectedUser?.concept_id) {
+        await hydrateStoredSelectionsFromUserPreferences(selectedUser.concept_id);
+      }
+    } catch (e) {
+      console.warn('Failed to hydrate stored selections from user preferences', e);
+    }
+
     // Populate Organisations and select the saved one
     await populateOrganisationsDropdown('currentOrganisationSelect', settings.current_organisation_id);
     // If we have concept_id too, attempt to match based on data attribute
@@ -2452,9 +2467,8 @@ async function saveAllSettings(changedProvider = null) {
 
 async function loadUserConceptPreferences(userConceptId) {
   try {
-    const resp = await fetch(`/api/settings/user_prefs/${encodeURIComponent(userConceptId)}`);
-    if (!resp.ok) return;
-    const data = await resp.json();
+    const data = await fetchUserPreferences(userConceptId);
+    if (!data) return;
     if (data.preferred_language) {
       const langSel = document.getElementById('preferredLanguageSelect');
       if (langSel) {
