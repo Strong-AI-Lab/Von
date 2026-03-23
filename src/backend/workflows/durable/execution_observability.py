@@ -270,13 +270,14 @@ def build_workflow_execution_response(
         submission,
         workflow_inputs=workflow_inputs,
     )
-    if not isinstance(payload.get("workflow_execution"), Mapping):
+    workflow_execution_raw = payload.get("workflow_execution")
+    if not isinstance(workflow_execution_raw, Mapping):
         return payload
-    workflow_execution = (
-        dict(payload.get("workflow_execution"))
-        if isinstance(payload.get("workflow_execution"), Mapping)
-        else {}
-    )
+    # Normalise arbitrary mapping implementations into a plain string-key dict
+    # so downstream telemetry enrichment has a stable type contract.
+    workflow_execution: dict[str, Any] = {
+        _safe_str(key): value for key, value in workflow_execution_raw.items()
+    }
 
     if await_terminal:
         workflow_execution["await_terminal"] = True

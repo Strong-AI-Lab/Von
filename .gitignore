@@ -15,7 +15,10 @@ __pycache__/
 
 # pytest cache
 .pytest_cache/
+.pytest_cache_agent/
 pytest-cache*/
+.tmp_pytest/
+.tmp_pytest_base/
 
 # (Remove standalone .vscode ignore here; consolidated later for allowlist clarity)
 
@@ -94,6 +97,7 @@ coverage/
 # Temporary scripts directory (keep folder, ignore contents)
 scripts/tmp/*
 !scripts/tmp/.gitkeep
+tmp/
 
 # Runtime data (do not commit)
 data/
