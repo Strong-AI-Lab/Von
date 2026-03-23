@@ -19,7 +19,7 @@ def _make_retrieved_node(
     return wrapper
 
 
-def test_llamaindex_backend_filters_by_type_and_predicate(tmp_path: Path):
+def test_llamaindex_backend_filters_by_type_and_predicate(workspace_tmp_path: Path):
     with patch(
         "src.backend.services.rag_backends.llamaindex_backend.ServiceContext.from_defaults",
         return_value=MagicMock(),
@@ -28,7 +28,9 @@ def test_llamaindex_backend_filters_by_type_and_predicate(tmp_path: Path):
             LlamaIndexRAGService,
         )
 
-        rag = LlamaIndexRAGService(persistence_dir=str(tmp_path / "rag_storage"))
+        rag = LlamaIndexRAGService(
+            persistence_dir=str(workspace_tmp_path / "rag_storage")
+        )
 
         nodes = [
             _make_retrieved_node(
@@ -84,7 +86,7 @@ def test_llamaindex_backend_filters_by_type_and_predicate(tmp_path: Path):
         assert [r["text"] for r in results] == ["desc"]
 
 
-def test_llamaindex_backend_filters_by_mode_chat(tmp_path: Path):
+def test_llamaindex_backend_filters_by_mode_chat(workspace_tmp_path: Path):
     with patch(
         "src.backend.services.rag_backends.llamaindex_backend.ServiceContext.from_defaults",
         return_value=MagicMock(),
@@ -93,7 +95,9 @@ def test_llamaindex_backend_filters_by_mode_chat(tmp_path: Path):
             LlamaIndexRAGService,
         )
 
-        rag = LlamaIndexRAGService(persistence_dir=str(tmp_path / "rag_storage"))
+        rag = LlamaIndexRAGService(
+            persistence_dir=str(workspace_tmp_path / "rag_storage")
+        )
 
         nodes = [
             _make_retrieved_node(

@@ -6,8 +6,8 @@ import pytest
 
 
 @pytest.fixture()
-def tmp_rag_storage(tmp_path: Path):
-    storage = tmp_path / "rag_storage"
+def tmp_rag_storage(workspace_tmp_path: Path):
+    storage = workspace_tmp_path / "rag_storage"
     storage.mkdir(parents=True, exist_ok=True)
     yield storage
     if storage.exists():
@@ -93,3 +93,38 @@ def test_llamaindex_backend_stamps_namespace_into_metadata(tmp_rag_storage: Path
         )
 
         assert doc_instance.metadata.get("namespace") == "#V#user_a@org"
+
+
+def test_llamaindex_backend_omits_legacy_service_context_kwargs_when_deprecated(
+    tmp_rag_storage: Path,
+):
+    with (
+        patch(
+            "src.backend.services.rag_backends.llamaindex_backend.ServiceContext.from_defaults",
+            side_effect=ValueError(
+                "ServiceContext is deprecated. Use llama_index.settings.Settings instead."
+            ),
+        ),
+        patch(
+            "src.backend.services.rag_backends.llamaindex_backend.Document",
+            side_effect=lambda *args, **kwargs: MagicMock(metadata={}),
+        ),
+        patch(
+            "src.backend.services.rag_backends.llamaindex_backend.VectorStoreIndex.from_documents"
+        ) as mock_from_documents,
+    ):
+        mock_index = MagicMock()
+        mock_index.storage_context.persist = MagicMock()
+        mock_from_documents.return_value = mock_index
+
+        from src.backend.services.rag_backends.llamaindex_backend import (
+            LlamaIndexRAGService,
+        )
+
+        rag = LlamaIndexRAGService(persistence_dir=str(tmp_rag_storage))
+        rag.upsert_documents(
+            [{"id": "doc_a", "text": "hello", "metadata": {}}],
+            namespace="#V#user_a",
+        )
+
+        assert "service_context" not in mock_from_documents.call_args.kwargs

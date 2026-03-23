@@ -1860,10 +1860,23 @@ def create_flask_app(
             embedder = None
             llm = None
             try:
-                sc = getattr(service, "service_context", None)
-                if sc is not None:
-                    embedder = _describe_component(getattr(sc, "embed_model", None))
-                    llm = _describe_component(getattr(sc, "llm", None))
+                get_embedder = getattr(service, "get_runtime_embed_model", None)
+                if callable(get_embedder):
+                    embedder = _describe_component(get_embedder())
+
+                get_llm = getattr(service, "get_runtime_llm", None)
+                if callable(get_llm):
+                    llm = _describe_component(get_llm())
+
+                if embedder is None or llm is None:
+                    sc = getattr(service, "service_context", None)
+                    if sc is not None:
+                        if embedder is None:
+                            embedder = _describe_component(
+                                getattr(sc, "embed_model", None)
+                            )
+                        if llm is None:
+                            llm = _describe_component(getattr(sc, "llm", None))
             except Exception:
                 pass
 

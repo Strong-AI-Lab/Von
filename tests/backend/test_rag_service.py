@@ -81,3 +81,37 @@ def test_delete_documents(mock_llamaindex):
 
     # Verify that delete operation completed
     assert count >= 0
+
+
+def test_llamaindex_servicecontext_deprecation_falls_back_to_settings(
+    workspace_tmp_path,
+):
+    fake_embed_model = MagicMock()
+    fake_embed_model.get_text_embedding.return_value = [0.1, 0.2, 0.3]
+    fake_settings = MagicMock()
+    fake_settings.embed_model = fake_embed_model
+    fake_settings.llm = MagicMock()
+
+    with (
+        patch(
+            "src.backend.services.rag_backends.llamaindex_backend.ServiceContext.from_defaults",
+            side_effect=ValueError(
+                "ServiceContext is deprecated. Use llama_index.settings.Settings instead."
+            ),
+        ),
+        patch(
+            "src.backend.services.rag_backends.llamaindex_backend.Settings",
+            fake_settings,
+        ),
+    ):
+        from src.backend.services.rag_backends.llamaindex_backend import (
+            LlamaIndexRAGService,
+        )
+
+        rag = LlamaIndexRAGService(
+            persistence_dir=str(workspace_tmp_path / "rag_storage")
+        )
+
+        assert rag.service_context is None
+        assert rag.get_runtime_embed_model() is fake_embed_model
+        assert rag.embed(["hello"]) == [[0.1, 0.2, 0.3]]

@@ -55,13 +55,21 @@ def _missing_load_index_from_storage(*args, **kwargs):  # pragma: no cover
 class _FallbackServiceContext:
     """Compatibility shim.
 
-    Newer LlamaIndex releases removed ServiceContext in favour of global Settings.
-    We keep this symbol so tests can patch `ServiceContext.from_defaults`.
+    Newer LlamaIndex releases deprecated ServiceContext in favour of global
+    Settings. We keep this symbol so tests can patch
+    `ServiceContext.from_defaults`.
     """
 
     @classmethod
     def from_defaults(cls, *args, **kwargs):  # pragma: no cover
         return None
+
+
+class _FallbackSettings:
+    """Compatibility shim for Settings-based access in newer LlamaIndex."""
+
+    embed_model = None
+    llm = None
 
 
 # These are intentionally `Any` so Pylance doesn't complain when we swap in
@@ -71,6 +79,7 @@ Document: Any = _MissingDocument
 StorageContext: Any = _MissingStorageContext
 load_index_from_storage: Any = _missing_load_index_from_storage
 ServiceContext: Any = _FallbackServiceContext
+Settings: Any = _FallbackSettings
 
 
 # Attempt imports in a version-tolerant way.
@@ -82,6 +91,7 @@ try:  # pragma: no cover
     Document = getattr(core, "Document")
     StorageContext = getattr(core, "StorageContext")
     load_index_from_storage = getattr(core, "load_index_from_storage")
+    Settings = getattr(core, "Settings", Settings)
 
     try:
         service_context_mod = importlib.import_module(
@@ -99,6 +109,7 @@ except Exception:  # pragma: no cover
         StorageContext = getattr(llama_index, "StorageContext")
         load_index_from_storage = getattr(llama_index, "load_index_from_storage")
         ServiceContext = getattr(llama_index, "ServiceContext", ServiceContext)
+        Settings = getattr(llama_index, "Settings", Settings)
     except Exception:
         # Leave stubs in place so the module remains importable.
         pass
@@ -114,12 +125,63 @@ class LlamaIndexRAGService(RAGService):
         # Ensure base persistence directory exists
         os.makedirs(self.persistence_dir, exist_ok=True)
 
-        # Initialise ServiceContext (can be customised with specific LLM/Embed model).
-        # In newer LlamaIndex releases this may return None (Settings-based).
-        self.service_context = ServiceContext.from_defaults()
+        # Newer LlamaIndex releases use global Settings rather than
+        # ServiceContext. Keep a reference to whichever runtime surface the
+        # installed version exposes.
+        self.llamaindex_settings = Settings
+        self.service_context = self._build_service_context()
 
         # Best-effort diagnostics for UI/debugging.
         self._last_query_info: Dict[str, Any] | None = None
+
+    @staticmethod
+    def _is_service_context_deprecation_error(exc: Exception) -> bool:
+        message = str(exc)
+        return (
+            isinstance(exc, ValueError)
+            and "ServiceContext is deprecated" in message
+            and "Settings" in message
+        )
+
+    def _build_service_context(self) -> Any:
+        from_defaults = getattr(ServiceContext, "from_defaults", None)
+        if not callable(from_defaults):
+            return None
+
+        try:
+            return from_defaults()
+        except Exception as exc:
+            # LlamaIndex 0.14+ keeps the symbol but raises on use. Treat that as
+            # the signal to switch to Settings-based behaviour.
+            if self._is_service_context_deprecation_error(exc):
+                return None
+            raise
+
+    def _index_runtime_kwargs(self) -> Dict[str, Any]:
+        if self.service_context is not None:
+            return {"service_context": self.service_context}
+        return {}
+
+    def _get_runtime_component(self, component_name: str) -> Any:
+        if self.service_context is not None:
+            component = getattr(self.service_context, component_name, None)
+            if component is not None:
+                return component
+
+        settings_obj = getattr(self, "llamaindex_settings", None)
+        if settings_obj is None:
+            return None
+
+        try:
+            return getattr(settings_obj, component_name, None)
+        except Exception:
+            return None
+
+    def get_runtime_embed_model(self) -> Any:
+        return self._get_runtime_component("embed_model")
+
+    def get_runtime_llm(self) -> Any:
+        return self._get_runtime_component("llm")
 
     def _resolve_effective_namespace(self, namespace: Optional[str]) -> str:
         # Keep behaviour consistent with other parts of the system that may
@@ -157,10 +219,9 @@ class LlamaIndexRAGService(RAGService):
 
         try:
             storage_context = StorageContext.from_defaults(persist_dir=persist_dir)
-            kwargs = {}
-            if self.service_context is not None:
-                kwargs["service_context"] = self.service_context
-            index = load_index_from_storage(storage_context, **kwargs)
+            index = load_index_from_storage(
+                storage_context, **self._index_runtime_kwargs()
+            )
         except Exception:
             return None
 
@@ -174,10 +235,9 @@ class LlamaIndexRAGService(RAGService):
 
         persist_dir = self._namespace_persist_dir(namespace)
         os.makedirs(persist_dir, exist_ok=True)
-        kwargs = {}
-        if self.service_context is not None:
-            kwargs["service_context"] = self.service_context
-        index = VectorStoreIndex.from_documents(documents, **kwargs)
+        index = VectorStoreIndex.from_documents(
+            documents, **self._index_runtime_kwargs()
+        )
         index.storage_context.persist(persist_dir=persist_dir)
         self._indices[namespace] = index
         return index
@@ -433,13 +493,7 @@ class LlamaIndexRAGService(RAGService):
         self,
         texts: Iterable[str],
     ) -> List[List[float]]:
-        # Use the embedding model from service context (if present).
-        if self.service_context is None:
-            raise RuntimeError(
-                "Embeddings unavailable: LlamaIndex ServiceContext is not configured."
-            )
-
-        embed_model = getattr(self.service_context, "embed_model", None)
+        embed_model = self.get_runtime_embed_model()
         if embed_model is None:
             raise RuntimeError(
                 "Embeddings unavailable: LlamaIndex embed_model is not configured."
