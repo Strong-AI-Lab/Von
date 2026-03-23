@@ -45,6 +45,10 @@ _inventory_lock = Lock()
 _last_inventory_snapshot: Dict[str, Any] | None = None
 _durable_mcp_gateway_lock = Lock()
 _durable_mcp_gateway: Any | None = None
+_shared_workflow_registry_lock = Lock()
+_shared_workflow_registry: WorkflowRegistry | None = None
+_shared_action_registry_lock = Lock()
+_shared_action_registry: ActionRegistry | None = None
 
 _EXPECTED_AUTHORITATIVE_FILE_COPY_WORKFLOW_IDS: tuple[str, ...] = (
     "#V#file_copy_typing_workflow",
@@ -72,6 +76,101 @@ _EXPECTED_AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS: tuple[str, ...] = (
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def get_shared_workflow_registry_read_only(
+    *,
+    defer_parity_work: bool = True,
+    force_rebuild: bool = False,
+) -> WorkflowRegistry:
+    """Return a process-wide read-only registry for interactive runtime paths.
+
+    Reuse the same registry across startup, workflow launch verification, and
+    discovery fallback surfaces so those paths do not rebuild the full lazy
+    registry graph on every call.
+    """
+
+    global _shared_workflow_registry
+    with _shared_workflow_registry_lock:
+        if force_rebuild or _shared_workflow_registry is None:
+            _shared_workflow_registry = build_workflow_registry_read_only(
+                defer_parity_work=defer_parity_work
+            )
+        return _shared_workflow_registry
+
+
+def invalidate_shared_workflow_registry_read_only() -> dict[str, Any]:
+    """Drop the cached shared read-only workflow registry."""
+
+    global _shared_workflow_registry
+    with _shared_workflow_registry_lock:
+        had_registry = _shared_workflow_registry is not None
+        _shared_workflow_registry = None
+    return {
+        "success": True,
+        "cache": "shared_workflow_registry_read_only",
+        "had_cached_value": had_registry,
+    }
+
+
+def build_vontology_workflow_registry_snapshot(
+    *,
+    workflow_ids: List[str] | None = None,
+) -> WorkflowRegistry:
+    """Build a lightweight registry snapshot from authoritative workflow IDs.
+
+    Startup/bootstrap callers sometimes need the current set of Vontology-backed
+    workflow IDs for authority repair before strict parity work runs. Keep this
+    helper free of deferred parity threads and side effects so it can be used as
+    a preflight snapshot builder.
+    """
+
+    registry = WorkflowRegistry(
+        definition_loader=load_workflow_definition_from_vontology,
+    )
+    discovered_ids = (
+        list(workflow_ids)
+        if isinstance(workflow_ids, list)
+        else list(discover_workflow_ids())
+    )
+    for workflow_id in discovered_ids:
+        cleaned = str(workflow_id or "").strip()
+        if not cleaned:
+            continue
+        registry.register_lazy(
+            LazyWorkflowRegistration(
+                workflow_id=cleaned,
+                source="vontology",
+            )
+        )
+    return registry
+
+
+def get_shared_durable_action_registry(
+    *,
+    force_rebuild: bool = False,
+) -> ActionRegistry:
+    """Return a process-wide durable ActionRegistry for runtime surfaces."""
+
+    global _shared_action_registry
+    with _shared_action_registry_lock:
+        if force_rebuild or _shared_action_registry is None:
+            _shared_action_registry = build_durable_action_registry()
+        return _shared_action_registry
+
+
+def invalidate_shared_durable_action_registry() -> dict[str, Any]:
+    """Drop the cached shared durable ActionRegistry."""
+
+    global _shared_action_registry
+    with _shared_action_registry_lock:
+        had_registry = _shared_action_registry is not None
+        _shared_action_registry = None
+    return {
+        "success": True,
+        "cache": "shared_durable_action_registry",
+        "had_cached_value": had_registry,
+    }
 
 
 def register_workflow_from_vontology(
@@ -1095,7 +1194,9 @@ def _resolve_subworkflow_definition(workflow_id: str):
         return None
 
     try:
-        registry = build_workflow_registry_read_only()
+        # Reuse the process-wide read-only registry so subworkflow resolution
+        # does not rebuild the full lazy registry graph during action execution.
+        registry = get_shared_workflow_registry_read_only(defer_parity_work=True)
         definition = registry.get(workflow_id_clean)
         if definition is not None:
             return definition

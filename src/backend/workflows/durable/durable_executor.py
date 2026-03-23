@@ -55,6 +55,7 @@ from ..execution_contracts import (
     get_last_control_signal,
     get_last_control_signal_scope,
     set_workflow_result_envelope,
+    snapshot_workflow_mapping,
 )
 from ..plan_state_runtime import (
     apply_workflow_step_checkpoint,
@@ -171,6 +172,10 @@ class DurableWorkflowExecutor:
             context = dict(instance.inputs)
             current_state = definition.initial_state
             step_index = 0
+        context.setdefault("user_concept_id", instance.user_id)
+        context.setdefault("org_concept_id", instance.org_id)
+        context.setdefault("namespace", instance.namespace)
+        context.setdefault("user_namespace", instance.namespace)
         clear_control_signal_context(context)
 
         # Create execution environment
@@ -187,7 +192,10 @@ class DurableWorkflowExecutor:
         environment = WorkflowEnvironment(
             llm_client=llm_client,
             gateway=_get_or_build_durable_mcp_gateway(),
-            model=get_active_model_name(),
+            model=get_active_model_name(
+                user_concept_id=instance.user_id,
+                org_concept_id=instance.org_id,
+            ),
             user_namespace=instance.namespace,
         )
 
@@ -424,15 +432,19 @@ class DurableWorkflowExecutor:
                 )
 
                 action_outcome = normalise_action_outcome(result.status)
+                action_output_snapshot: dict[str, Any] = {}
                 if (
                     action_outcome != WORKFLOW_ACTION_OUTCOME_FAILURE
                     and isinstance(result.outputs, Mapping)
                 ):
-                    context.update(result.outputs)
+                    action_output_snapshot = snapshot_workflow_mapping(
+                        result.outputs
+                    )
+                    context.update(action_output_snapshot)
                     apply_tool_output_context_mappings(
                         context=context,
                         metadata=state_spec.metadata,
-                        action_outputs=result.outputs,
+                        action_outputs=action_output_snapshot,
                         state_id=current_state,
                         action_id=action_target_id,
                     )
@@ -444,7 +456,7 @@ class DurableWorkflowExecutor:
                     action_status=result.status,
                     action_outcome=action_outcome,
                     action_error=result.error,
-                    action_outputs=result.outputs if isinstance(result.outputs, Mapping) else {},
+                    action_outputs=action_output_snapshot,
                     control_signal=get_last_control_signal(context),
                     control_signal_scope=get_last_control_signal_scope(context),
                     duration_ms=result.duration_ms,

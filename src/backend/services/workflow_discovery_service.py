@@ -797,7 +797,10 @@ def _annotate_and_rank_candidates(
 ) -> List[WorkflowMatch]:
     """Attach executability/confidence metadata and rank candidates for routing."""
     annotated: list[WorkflowMatch] = []
-    for match in matches:
+    annotation_cap = max(max_results * 2, max_results)
+    required_routing_candidates = max(1, int(max_results))
+
+    for match in matches[:annotation_cap]:
         is_executable, reason, detail = _classify_workflow_concept_executability(
             match.concept_id
         )
@@ -819,6 +822,10 @@ def _annotate_and_rank_candidates(
             match.routing_exclusion_reason = None
         match.confidence_score = _compute_candidate_confidence(match)
         annotated.append(match)
+
+        routing_eligible_count = sum(1 for item in annotated if item.routing_eligible)
+        if routing_eligible_count >= required_routing_candidates:
+            break
 
     annotated.sort(
         key=lambda m: (
@@ -847,6 +854,27 @@ def _filter_routing_candidates(
 def _env_allow_non_executable_default() -> bool:
     value = os.getenv("VON_WORKFLOW_SELECTOR_ALLOW_NON_EXECUTABLE", "0")
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _has_enough_capability_matches(
+    matches: List[WorkflowMatch],
+    *,
+    threshold: float,
+    max_results: int,
+) -> bool:
+    seen_ids: set[str] = set()
+    qualifying_count = 0
+    for match in matches:
+        concept_id = str(match.concept_id or "").strip()
+        if not concept_id or concept_id in seen_ids:
+            continue
+        seen_ids.add(concept_id)
+        if float(match.relevance_score or 0.0) < threshold:
+            continue
+        qualifying_count += 1
+        if qualifying_count >= max(1, int(max_results)):
+            return True
+    return False
 
 
 @lru_cache(maxsize=512)
@@ -1003,24 +1031,35 @@ def discover_workflows(
             search_query, limit=max_results * 3
         )
         all_matches.extend(capability_matches)
+        capability_matches_sufficient = _has_enough_capability_matches(
+            capability_matches,
+            threshold=relevance_threshold,
+            max_results=max_results,
+        )
     except Exception as e:
+        capability_matches_sufficient = False
         errors.append(f"capability_index_error: {e}")
         logger.warning("Workflow capability index search failed: %s", e)
 
     # Secondary: existing search sources fill gaps the capability index misses.
-    try:
-        search_sources.append("semantic")
-        semantic_matches = _search_workflows_semantic(
-            search_query, limit=max_results * 2
-        )
-        all_matches.extend(semantic_matches)
-    except Exception as e:
-        errors.append(f"semantic_search_error: {e}")
-        logger.warning(f"Semantic workflow discovery failed: {e}")
+    if (
+        not capability_matches_sufficient
+        and (time.perf_counter() - start_time) < timeout_seconds
+    ):
+        try:
+            search_sources.append("semantic")
+            semantic_matches = _search_workflows_semantic(
+                search_query, limit=max_results * 2
+            )
+            all_matches.extend(semantic_matches)
+        except Exception as e:
+            errors.append(f"semantic_search_error: {e}")
+            logger.warning(f"Semantic workflow discovery failed: {e}")
 
-    # Check timeout
-    elapsed = time.perf_counter() - start_time
-    if elapsed < timeout_seconds:
+    if (
+        not capability_matches_sufficient
+        and (time.perf_counter() - start_time) < timeout_seconds
+    ):
         try:
             search_sources.append("vontology")
             vontology_matches = _search_workflows_vontology(
@@ -1031,7 +1070,11 @@ def discover_workflows(
             errors.append(f"vontology_search_error: {e}")
             logger.warning(f"Vontology workflow discovery failed: {e}")
 
-    if elapsed < timeout_seconds and keyword_fallback_queries:
+    if (
+        not capability_matches_sufficient
+        and keyword_fallback_queries
+        and (time.perf_counter() - start_time) < timeout_seconds
+    ):
         try:
             search_sources.append("name_fallback")
             fallback_matches = _search_workflows_name_fallback(

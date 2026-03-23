@@ -1,9 +1,15 @@
 from typing import Any, cast
 
+import pytest
+
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
 )
-from src.backend.workflows.action_registry import ActionRegistry
+from src.backend.workflows.action_registry import (
+    ActionRegistry,
+    ActionSpec,
+    WorkflowActionResult,
+)
 from src.backend.workflows import WorkflowRegistry
 from workflow_test_support import register_authoritative_test_workflows
 
@@ -41,19 +47,59 @@ class _CapturingLLM:
 
 
 def _seed_authoritative_conversation_turn_registry(monkeypatch) -> None:
-    def _build_registry() -> WorkflowRegistry:
+    def _build_registry(*, defer_parity_work: bool = True) -> WorkflowRegistry:
+        assert defer_parity_work is True
         registry = WorkflowRegistry()
         register_authoritative_test_workflows(registry)
         return registry
 
     monkeypatch.setattr(
-        "src.backend.integrations.internal_mcp.orchestrator.build_workflow_registry",
+        "src.backend.integrations.internal_mcp.orchestrator.get_shared_workflow_registry_read_only",
         _build_registry,
     )
     monkeypatch.setattr(
-        "src.backend.integrations.internal_mcp.orchestrator.build_durable_action_registry",
+        "src.backend.integrations.internal_mcp.orchestrator.get_shared_durable_action_registry",
         lambda: ActionRegistry(),
     )
+
+
+@pytest.fixture(autouse=True)
+def _stub_shared_runtime_registries(monkeypatch):
+    _seed_authoritative_conversation_turn_registry(monkeypatch)
+
+
+def test_orchestrator_constructor_uses_shared_runtime_registries(monkeypatch):
+    workflow_registry = WorkflowRegistry()
+    durable_actions = ActionRegistry()
+    durable_actions.register(
+        ActionSpec(
+            action_id="durable.test",
+            handler=lambda request: WorkflowActionResult(outputs={"ok": True}),
+            description="durable stub",
+        )
+    )
+    calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.get_shared_workflow_registry_read_only",
+        lambda *, defer_parity_work=True: calls.append(
+            ("workflow", defer_parity_work)
+        )
+        or workflow_registry,
+    )
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.get_shared_durable_action_registry",
+        lambda: calls.append(("actions", None)) or durable_actions,
+    )
+
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, _CapturingGateway()))
+
+    assert calls == [("workflow", True), ("actions", None)]
+    assert orchestrator._workflow_registry is workflow_registry
+    assert orchestrator._action_registry is not durable_actions
+    assert orchestrator._action_registry.get("durable.test") is not None
+    assert durable_actions.get("missing_tool_call.assess") is None
+    assert orchestrator._action_registry.has_fallback_handler() is True
 
 
 def test_instruction_message_uses_internal_guardrail_wording_without_budget_leak(
@@ -76,6 +122,46 @@ def test_instruction_message_uses_internal_guardrail_wording_without_budget_leak
     assert "Server limits:" not in instruction
     assert "INTERNAL EXECUTION GUARDRAILS:" in instruction
     assert "Do NOT mention budgets, caps, or internal limits" in instruction
+
+
+def test_instruction_message_keeps_tool_index_compact_for_large_catalogue(
+    monkeypatch,
+):
+    class _LargeGateway(_CapturingGateway):
+        def describe_methods(self):
+            catalogue: dict[str, dict[str, Any]] = {}
+            for index in range(160):
+                catalogue[f"tool_{index:03d}"] = {
+                    "category": "read",
+                    "description": "Synthetic tool for prompt-size regression coverage.",
+                    "input_schema": {
+                        "required": [],
+                        "optional": [],
+                        "allow_unknown": False,
+                        "description": None,
+                    },
+                    "output_schema": None,
+                }
+            return catalogue
+
+    orchestrator = object.__new__(InternalMCPChatOrchestrator)
+    orchestrator._gateway = cast(Any, _LargeGateway())
+    orchestrator._max_tool_invocations = 30
+    orchestrator._tool_batch_cap = 10
+    orchestrator._last_base_system_prompt_telemetry = None
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_load_base_system_prompt_from_vontology",
+        lambda preferred_language=None: (None, None),
+    )
+
+    instruction = orchestrator._instruction_message(preferred_language="en")
+
+    assert "Available tool names" in instruction
+    assert "tool_000" in instruction
+    assert "tool_159" in instruction
+    assert len(instruction) < 12_000
 
 
 def test_orchestrator_injects_deterministic_preflight_context(monkeypatch):

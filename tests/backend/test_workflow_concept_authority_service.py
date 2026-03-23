@@ -352,6 +352,61 @@ def test_ensure_context_input_mapping_concept_recovers_from_duplicate_key(monkey
     assert error is None
 
 
+def test_ensure_context_input_mapping_concept_persists_required_flag(monkeypatch):
+    mapping_id = "#V#workflow_mapping_context_key_optional_to_tool_parameter"
+
+    monkeypatch.setattr(
+        authority_service,
+        "_load_concept",
+        lambda _concept_id: (
+            {
+                "concept_id": mapping_id,
+                "concept_data": {},
+            },
+            None,
+        ),
+    )
+
+    update_calls: list[tuple[str, dict[str, Any]]] = []
+
+    monkeypatch.setattr(
+        authority_service.concept_service,
+        "update_concept",
+        lambda concept_id, payload: update_calls.append((concept_id, payload))
+        or {"updated": True},
+    )
+
+    created, error = authority_service._ensure_context_input_mapping_concept(
+        step_concept_id="#V#workflow_step_test",
+        mapping_target_id="#V#child_workflow",
+        mapping_spec=authority_service._CanonicalContextInputMappingSpec(
+            concept_id=mapping_id,
+            context_key="optional_context_key",
+            tool_param="optional_param",
+            required=False,
+        ),
+    )
+
+    assert created is False
+    assert error is None
+    assert update_calls == [
+        (
+            mapping_id,
+            {
+                "concept_data.workflow_mapping_spec": {
+                    "schema_version": 1,
+                    "mapping_type": "context_key_to_tool_param",
+                    "workflow_step_id": "#V#workflow_step_test",
+                    "tool_id": "#V#child_workflow",
+                    "context_key_concept_id": "#V#workflow_context_key_optional_context_key",
+                    "tool_param_name": "optional_param",
+                    "required": False,
+                }
+            },
+        )
+    ]
+
+
 def test_bootstrap_workflow_concept_identities_enforces_required_type(monkeypatch):
     registry = _DummyRegistry(workflow_ids=["#V#wf_retype"])
 

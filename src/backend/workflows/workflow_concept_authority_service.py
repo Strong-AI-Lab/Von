@@ -254,6 +254,7 @@ class _CanonicalContextInputMappingSpec:
     concept_id: str
     context_key: str
     tool_param: str
+    required: bool = True
 
 
 @dataclass(frozen=True)
@@ -1930,6 +1931,19 @@ def _build_definition_from_publication_spec(
                     and value.strip()
                 }
             )
+        if step.context_input_mapping_specs:
+            for mapping_spec in step.context_input_mapping_specs:
+                if not isinstance(mapping_spec.tool_param, str) or not mapping_spec.tool_param.strip():
+                    continue
+                if (
+                    not isinstance(mapping_spec.context_key, str)
+                    or not mapping_spec.context_key.strip()
+                ):
+                    continue
+                action_inputs[mapping_spec.tool_param.strip()] = {
+                    "$context_key": mapping_spec.context_key.strip(),
+                    "$mapping_concept_id": mapping_spec.concept_id,
+                }
         actions = (
             (
                 WorkflowActionInvocation(
@@ -2064,6 +2078,40 @@ def _build_definition_from_publication_spec(
         if is_terminal:
             termination_states.append(step.state_id)
         state_metadata: dict[str, Any] = {}
+        if step.invoked_workflow_id:
+            state_metadata["invokes_workflow"] = step.invoked_workflow_id
+            state_metadata["subworkflow_contract"] = {
+                "workflow_id": step.invoked_workflow_id
+            }
+        if step.context_input_mapping_specs:
+            reads_context_keys = [
+                mapping_spec.context_key.strip()
+                for mapping_spec in step.context_input_mapping_specs
+                if isinstance(mapping_spec.context_key, str)
+                and mapping_spec.context_key.strip()
+                and bool(mapping_spec.required)
+            ]
+            if reads_context_keys:
+                state_metadata["reads_context_keys"] = reads_context_keys
+        if step.tool_output_mapping_specs:
+            state_metadata["tool_output_context_mappings"] = [
+                {
+                    "tool_output_field": mapping_spec.tool_output_field,
+                    "context_key": mapping_spec.context_key,
+                    "mapping_concept_id": mapping_spec.concept_id,
+                }
+                for mapping_spec in step.tool_output_mapping_specs
+                if isinstance(mapping_spec.tool_output_field, str)
+                and mapping_spec.tool_output_field.strip()
+                and isinstance(mapping_spec.context_key, str)
+                and mapping_spec.context_key.strip()
+            ]
+        if step.writes_context_keys:
+            state_metadata["writes_context_keys"] = [
+                item.strip()
+                for item in step.writes_context_keys
+                if isinstance(item, str) and item.strip()
+            ]
         if isinstance(step.mutation_authority, Mapping):
             state_metadata["mutation_authority"] = dict(step.mutation_authority)
         states[step.state_id] = WorkflowStateSpec(
@@ -2286,6 +2334,9 @@ def _extract_runtime_step_publication_details(
                         concept_id=mapping_concept_id,
                         context_key=context_key,
                         tool_param=child_input_key_text,
+                        required=bool(
+                            raw_value.get("$required", raw_value.get("required", True))
+                        ),
                     )
                 )
                 continue
@@ -2425,6 +2476,7 @@ def _ensure_context_input_mapping_concept(
             mapping_spec.context_key
         ),
         "tool_param_name": mapping_spec.tool_param,
+        "required": bool(mapping_spec.required),
     }
     existing_spec = (
         ((existing_doc or {}).get("concept_data") or {}).get("workflow_mapping_spec")

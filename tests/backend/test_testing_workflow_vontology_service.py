@@ -200,6 +200,14 @@ def test_bootstrap_materialises_testing_workflow_family(
     assert meeting_execute_action.inputs.get("workflow_id") == (
         MEETING_INVITATION_CANDIDATE_WORKFLOW_ID
     )
+    meeting_prepare_step_id = authority_service._step_concept_id(
+        workflow_id=MEETING_INVITATION_TESTING_WORKFLOW_ID,
+        state_id="prepare_spec",
+    )
+    meeting_prepare_step = meeting_definition.states[meeting_prepare_step_id]
+    assert meeting_prepare_step.metadata.get("reads_context_keys") == [
+        "invitation_text"
+    ]
 
     synthetic_note_rows = get_texts_for_concept(
         subject_concept_id=suite_execute_step_id,
@@ -252,6 +260,40 @@ def test_bootstrap_skips_republication_when_testing_workflow_family_is_current(
     assert second_counts.get("errors") == 0
     assert second_report.get("typed_workflow_ids") == []
     assert second_report.get("typed_step_ids") == []
+
+
+def test_bootstrap_republishes_when_existing_mapping_materialisation_drifts(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_testing_workflows()
+
+    mapping_concept_id = authority_service._runtime_context_input_mapping_concept_id(
+        workflow_id=MEETING_INVITATION_TESTING_WORKFLOW_ID,
+        state_id="prepare_spec",
+        tool_param="expected_meeting_type",
+        context_key="expected_meeting_type",
+    )
+    concept_service.update_concept(
+        mapping_concept_id,
+        {"concept_data.workflow_mapping_spec.required": True},
+    )
+
+    republished_report = bootstrap_canonical_testing_workflows()
+    publication = republished_report.get("publication") or {}
+
+    assert publication.get("skipped") is not True
+    assert (publication.get("counts") or {}).get("workflows_published", 0) > 0
+
+    meeting_definition = load_workflow_definition_from_vontology(
+        MEETING_INVITATION_TESTING_WORKFLOW_ID
+    )
+    assert meeting_definition is not None
+    prepare_step_id = authority_service._step_concept_id(
+        workflow_id=MEETING_INVITATION_TESTING_WORKFLOW_ID,
+        state_id="prepare_spec",
+    )
+    prepare_step = meeting_definition.states[prepare_step_id]
+    assert prepare_step.metadata.get("reads_context_keys") == ["invitation_text"]
 
 
 def test_meeting_invitation_testing_workflow_executes_end_to_end_via_vontology(
@@ -326,3 +368,64 @@ def test_meeting_invitation_testing_workflow_executes_end_to_end_via_vontology(
     assert result.data["candidate_safe_downstream_action"] == "draft_calendar_entry"
     assert result.data["verdict"] == "pass"
     assert len(result.data["meeting_candidate_observations"]) == 4
+
+
+def test_meeting_invitation_testing_workflow_executes_with_optional_expectations_omitted(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_testing_workflows()
+    meeting_definition = load_workflow_definition_from_vontology(
+        MEETING_INVITATION_TESTING_WORKFLOW_ID
+    )
+    assert meeting_definition is not None
+
+    registry = ActionRegistry()
+    register_testing_workflow_actions(registry)
+    register_subworkflow_actions(
+        registry,
+        definition_loader=load_workflow_definition_from_vontology,
+    )
+
+    llm_client = MagicMock()
+    llm_client.generate.side_effect = [
+        (
+            '{"meeting_type":"meeting_workflow_candidate","title":"Roadmap sync",'
+            '"time":"Tuesday 2:00pm","participants":"team",'
+            '"location_signal":"Room 4","topic_purpose":"Project planning",'
+            '"safe_downstream_action":"draft_calendar_entry"}'
+        ),
+        (
+            '[{"label":"meeting_type_classification","verdict":"pass",'
+            '"expected_outcome":"meeting_workflow_candidate",'
+            '"observed_outcome":"meeting_workflow_candidate"},'
+            '{"label":"structured_meeting_fields","verdict":"pass",'
+            '"expected_outcome":"title,time,participants",'
+            '"observed_outcome":"all expected fields present"},'
+            '{"label":"mutation_safety","verdict":"pass",'
+            '"expected_outcome":"no_canonical_mutations_without_gate",'
+            '"observed_outcome":"no canonical mutations attempted"}]'
+        ),
+    ]
+
+    result = WorkflowExecutor(registry=registry, max_transitions=30).run(
+        meeting_definition,
+        environment=WorkflowEnvironment(
+            llm_client=llm_client,
+            user_namespace="#V#user@org",
+        ),
+        data={
+            "invitation_text": (
+                "Please join us on Tuesday at 2:00pm in Room 4 for project planning."
+            )
+        },
+    )
+
+    assert result.completed is True
+    assert result.error is None
+    assert result.final_state == authority_service._step_concept_id(
+        workflow_id=MEETING_INVITATION_TESTING_WORKFLOW_ID,
+        state_id="complete",
+    )
+    assert result.data["candidate_meeting_type"] == "meeting_workflow_candidate"
+    assert result.data["verdict"] == "pass"
+    assert len(result.data["meeting_candidate_observations"]) == 3

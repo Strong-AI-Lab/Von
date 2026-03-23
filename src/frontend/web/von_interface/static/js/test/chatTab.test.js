@@ -2176,6 +2176,56 @@ describe('thinking activity history normalisation', () => {
         expect(html).toContain('Timeout while fetching');
     });
 
+    test('renders workflow dispatch terminal failures as failure rows and preserves dispatch diagnostics in export', () => {
+        const request = {
+            workflowStagePath: {
+                path: [
+                    { stage_id: 'workflow_dispatch', stage_label: 'Workflow dispatch' }
+                ]
+            },
+            latestProgress: {
+                status: 'orchestrator_end',
+                orchestrator_status: 'completed',
+                phase: 'workflow_dispatch',
+                selected_workflow_id: '#V#synthetic_workflow_regression_suite_workflow',
+                selected_workflow_name: 'Synthetic workflow regression suite workflow',
+                workflow_selector_verdict: 'rag_selected',
+                workflow_selector_source: 'selector',
+                workflow_match_count: 2,
+                workflow_candidate_count: 5,
+                result_summary: 'workflow_terminal:failed',
+                workflow_routing_diagnostics: {
+                    dispatch: {
+                        dispatch_terminal_status: 'failed',
+                        dispatch_terminal_failure_reason: 'metadata_validation_failed',
+                        dispatch_terminal_failure_detail: 'metadata_read_context_key_missing:target_workflow_ids',
+                        dispatch_terminal_unresolved_required_inputs: ['target_workflow_ids']
+                    }
+                }
+            }
+        };
+
+        const html = __testOnly_renderThinkingCardBodyHTML(request);
+        expect(html).toContain('Workflow dispatch');
+        expect(html).toContain('thinking-card-tool-status failure');
+        expect(html).toContain('Dispatch terminal status');
+        expect(html).toContain('Metadata validation failed');
+        expect(html).toContain('target_workflow_ids');
+
+        const diagnosticsPayload = __testOnly_buildThinkingDiagnosticsPayload(request);
+        expect(diagnosticsPayload.stage_diagnostics).toEqual([
+            expect.objectContaining({
+                stage_id: 'workflow_dispatch',
+                state: 'failure',
+                diagnostics: expect.objectContaining({
+                    dispatch_terminal_status: 'failed',
+                    dispatch_terminal_failure_reason: 'metadata_validation_failed',
+                    dispatch_terminal_unresolved_required_inputs: ['target_workflow_ids']
+                })
+            })
+        ]);
+    });
+
     test('renders fallback latest-progress summary with selected workflow context', () => {
         const html = __testOnly_renderThinkingCardBodyHTML({
             latestProgress: {

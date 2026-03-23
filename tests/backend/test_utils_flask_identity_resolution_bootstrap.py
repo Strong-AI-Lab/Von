@@ -12,6 +12,7 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         identity_resolution_schedule_bootstrap_service as schedule_bootstrap,
         parent_specificity_schedule_bootstrap_service as parent_specificity_schedule_bootstrap,
         parent_specificity_vontology_service as parent_specificity_prompt_bootstrap,
+        testing_workflow_vontology_service as testing_workflow_bootstrap,
         workflow_description_vontology_service as workflow_description_prompt_bootstrap,
         workflow_gap_vontology_service as workflow_gap_prompt_bootstrap,
     )
@@ -25,6 +26,34 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     monkeypatch.setattr(utils_flask, "_build_durable_workflow_registry", lambda: object())
     monkeypatch.setattr(utils_flask, "_build_durable_action_registry", lambda: object())
     monkeypatch.setattr(utils_flask, "_get_durable_definition_loader", lambda: lambda _workflow_id: None)
+    monkeypatch.setattr(
+        utils_flask,
+        "_bootstrap_workflow_authority_for_startup",
+        lambda _logger: {
+            "success": True,
+            "counts": {
+                "registry_workflows": 31,
+                "created": 0,
+                "updated": 10,
+                "unchanged": 21,
+                "errors": 0,
+            },
+            "before_authority_counts": {
+                "registry_workflows": 31,
+                "missing_concepts": 0,
+                "missing_required_type": 10,
+                "lookup_errors": 0,
+                "valid": 21,
+            },
+            "after_authority_counts": {
+                "registry_workflows": 31,
+                "missing_concepts": 0,
+                "missing_required_type": 0,
+                "lookup_errors": 0,
+                "valid": 31,
+            },
+        },
+    )
 
     monkeypatch.setattr(durable_startup, "recover_orphaned_instances", lambda: 0)
     monkeypatch.setattr(
@@ -76,6 +105,15 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
             "linked_workflow_ids": ["#V#enrichment_workflow"],
         },
     )
+    monkeypatch.setattr(
+        testing_workflow_bootstrap,
+        "bootstrap_canonical_testing_workflows",
+        lambda: {
+            "success": True,
+            "workflow_ids": ["#V#meeting_invitation_testing_workflow"],
+            "publication": {"skipped": True},
+        },
+    )
 
     app_logger = MagicMock()
     result = utils_flask._start_durable_workflow_system(app_logger)
@@ -96,6 +134,13 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     )
     assert isinstance(workflow_description_prompt_report, dict)
     assert workflow_description_prompt_report.get("success") is True
+    testing_workflow_bootstrap_report = result.get("testing_workflow_bootstrap")
+    assert isinstance(testing_workflow_bootstrap_report, dict)
+    assert testing_workflow_bootstrap_report.get("success") is True
+    workflow_authority_bootstrap_report = result.get("workflow_authority_bootstrap")
+    assert isinstance(workflow_authority_bootstrap_report, dict)
+    assert workflow_authority_bootstrap_report.get("success") is True
+    assert workflow_authority_bootstrap_report.get("counts", {}).get("updated") == 10
     parent_schedule_report = result.get("parent_specificity_schedule_bootstrap")
     assert isinstance(parent_schedule_report, dict)
     assert parent_schedule_report.get("success") is True

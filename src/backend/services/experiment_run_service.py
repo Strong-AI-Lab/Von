@@ -14,7 +14,10 @@ from pymongo.errors import OperationFailure, PyMongoError
 
 from ..db.mongo_client import get_db
 from . import concept_service
-from .concept_service import ConceptNotFoundError, get_concept_by_concept_id
+from .concept_service import (
+    ConceptNotFoundError,
+    get_concept_by_concept_id_exact,
+)
 from .namespace_service import parse_namespace, resolve_canonical_namespace
 from .relationship_write_service import add_relationship
 from .testing_theory_service import compute_testing_theory_diff
@@ -167,7 +170,7 @@ def _coerce_namespace_context(
 
 def _get_concept_or_none(concept_id: str) -> Mapping[str, Any] | None:
     try:
-        concept = get_concept_by_concept_id(concept_id)
+        concept = get_concept_by_concept_id_exact(concept_id)
     except ConceptNotFoundError:
         return None
     return concept if isinstance(concept, Mapping) else None

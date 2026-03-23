@@ -37,6 +37,7 @@ from ...services.namespace_service import resolve_canonical_namespace
 from ..engine import WorkflowDefinition
 from ..vontology_loader import (
     build_workflow_process_graph,
+    build_workflow_process_graph_from_definition,
     detect_vacuous_workflow_steps,
     load_workflow_definition_from_vontology,
 )
@@ -524,7 +525,11 @@ def _verify_workflow_runnable_uncached(
     graph_warnings: Sequence[Any] = ()
     graph_error: str | None = None
     try:
-        graph, graph_warnings = build_workflow_process_graph(workflow_id)
+        if definition is not None:
+            graph = build_workflow_process_graph_from_definition(definition)
+            graph_warnings = ()
+        else:
+            graph, graph_warnings = build_workflow_process_graph(workflow_id)
     except Exception as exc:  # pragma: no cover - defensive
         graph_error = f"workflow_graph_build_failed:{type(exc).__name__}"
         graph = None
@@ -537,11 +542,9 @@ def _verify_workflow_runnable_uncached(
     conceptual_representation_success = isinstance(graph, Mapping)
 
     authoritative_started = perf_counter()
-    authoritative_definition = None
-    try:
-        authoritative_definition = load_workflow_definition_from_vontology(workflow_id)
-    except Exception:
-        authoritative_definition = None
+    authoritative_definition = (
+        definition if str(registration_source or "").strip().lower() == "vontology" else None
+    )
     stage_timings_ms["authoritative_definition_load_ms"] = round(
         (perf_counter() - authoritative_started) * 1000.0,
         3,
@@ -697,12 +700,29 @@ def verify_workflow_runnable(workflow_id: str) -> WorkflowRunnableVerification:
 
         prep_started = perf_counter()
         from .registry_factory import (
-            build_durable_action_registry,
-            build_workflow_registry_read_only,
+            get_shared_durable_action_registry,
+            get_shared_workflow_registry_read_only,
+            register_workflow_from_vontology,
         )
 
-        registry = build_workflow_registry_read_only()
+        # Reuse the startup/shared registry rather than rebuilding the lazy
+        # registry graph on every launch verification. This keeps verified
+        # submission aligned with the authoritative runtime registry that the
+        # worker itself will use once the instance starts executing.
+        registry = get_shared_workflow_registry_read_only(defer_parity_work=True)
         definition = registry.get(workflow_id)
+        if definition is None:
+            try:
+                registered, _error_code = register_workflow_from_vontology(
+                    registry=registry,
+                    workflow_id=workflow_id,
+                )
+                if registered:
+                    definition = registry.get(workflow_id)
+            except Exception:
+                # Fail closed later through the normal verification pathway if
+                # Vontology-backed refresh cannot repair the missing entry.
+                definition = None
         registration = getattr(registry, "get_registration", lambda _wid: None)(workflow_id)
         registration_source = (
             str(getattr(registration, "source", "") or "").strip()
@@ -744,7 +764,7 @@ def verify_workflow_runnable(workflow_id: str) -> WorkflowRunnableVerification:
             authoritative_definition=None,
         )
 
-        action_registry = build_durable_action_registry()
+        action_registry = get_shared_durable_action_registry()
         fallback_enabled = action_registry.has_fallback_handler()
         fallback_tool_names = (
             _internal_mcp_method_names() if fallback_enabled else frozenset()

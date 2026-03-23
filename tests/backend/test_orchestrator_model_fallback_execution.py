@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import time
+from types import SimpleNamespace
 from typing import Any, Mapping, cast
 
 import pytest
@@ -44,10 +46,97 @@ def _policy_state() -> _WorkflowModelPolicyState:
 
 def _bare_orchestrator() -> InternalMCPChatOrchestrator:
     orchestrator = object.__new__(InternalMCPChatOrchestrator)
+    orchestrator._logger = logging.getLogger(__name__)
     orchestrator._provider_probe_cache = {}
     orchestrator._provider_probe_cache_max_entries = 32
     orchestrator._provider_probe_cooldown_seconds = 0
+    orchestrator._workflow_model_policy_cache = {}
+    orchestrator._workflow_model_policy_cache_ttl_seconds = 60
+    orchestrator._max_context_chars = 120_000
+    orchestrator._follow_up_context_chars = 40_000
+    orchestrator._max_missing_tool_call_retries_per_turn = 3
     return orchestrator
+
+
+def test_load_workflow_model_policy_returns_disabled_state_without_resolution(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+    monkeypatch.setenv("VON_WORKFLOW_MODEL_POLICY_ENABLE", "0")
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_concept_id_by_name",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("disabled policy load should not resolve concept names")
+        ),
+    )
+
+    state, telemetry = orchestrator._load_workflow_model_policy(None)
+
+    assert state.enabled is False
+    assert state.policy is None
+    assert state.policy_id is None
+    assert state.predicate_id is None
+    assert state.errors == ()
+    assert telemetry is not None
+    assert telemetry["policy_source"] == "disabled"
+    assert telemetry["loaded"] is False
+
+
+def test_resolve_concept_id_by_name_uses_direct_slug_for_existing_concept(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+
+    monkeypatch.setattr(
+        "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
+        lambda query, *_args, **_kwargs: {"_id": "1"}
+        if query == {"concept_id": "#V#default_workflow_model_policy"}
+        else None,
+    )
+    monkeypatch.setattr(
+        "src.backend.vontology.code_concepts_registry.is_code_concept_id",
+        lambda _concept_id: False,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.concept_resolution_service.resolve_concept_by_name",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("direct slug resolution should not call name search")
+        ),
+    )
+
+    resolved = orchestrator._resolve_concept_id_by_name(
+        "default_workflow_model_policy"
+    )
+
+    assert resolved == "#V#default_workflow_model_policy"
+
+
+def test_resolve_concept_id_by_name_skips_name_search_for_missing_slug(
+    monkeypatch,
+) -> None:
+    orchestrator = _bare_orchestrator()
+
+    monkeypatch.setattr(
+        "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "src.backend.vontology.code_concepts_registry.is_code_concept_id",
+        lambda _concept_id: False,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.concept_resolution_service.resolve_concept_by_name",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("missing slug should fail fast without fuzzy search")
+        ),
+    )
+
+    resolved = orchestrator._resolve_concept_id_by_name(
+        "default_workflow_model_policy"
+    )
+
+    assert resolved is None
 
 
 def test_run_llm_with_fallbacks_records_attempt_chain_and_fallback_metadata(
@@ -312,3 +401,165 @@ def test_invoke_with_llm_heartbeat_uses_backfill_timeout_for_summariser(
     assert progress_events[-1]["status"] == "heartbeat"
     assert progress_events[-1]["stage"] == "summariser"
     assert progress_events[-1]["liveness_reason"] == "llm_call_pending"
+
+
+def test_limit_context_preserves_leading_system_messages() -> None:
+    orchestrator = _bare_orchestrator()
+
+    messages: list[Mapping[str, Any]] = [
+        {"role": "system", "content": "s" * 2000},
+        {"role": "system", "content": "t" * 1800},
+        {"role": "user", "content": "u" * 1200},
+        {"role": "assistant", "content": "a" * 900},
+    ]
+
+    limited = orchestrator._limit_context_for_llm(messages, max_chars=4000)
+
+    assert [msg["role"] for msg in limited] == ["system", "system", "assistant"]
+    assert limited[0]["content"] == "s" * 2000
+    assert limited[1]["content"] == "t" * 1800
+    assert limited[-1]["content"] == "a" * 900
+
+
+def test_build_follow_up_llm_context_keeps_recent_relevant_messages() -> None:
+    orchestrator = _bare_orchestrator()
+
+    messages = [
+        {"role": "system", "content": "system-one"},
+        {"role": "system", "content": "system-two"},
+        {"role": "user", "content": "old-user"},
+        {"role": "assistant", "content": "old-assistant"},
+        {"role": "tool", "content": "old-tool"},
+        {"role": "user", "content": "new-user"},
+        {"role": "assistant", "content": "new-assistant"},
+        {"role": "tool", "content": "recent-tool-1"},
+        {"role": "tool", "content": "recent-tool-2"},
+    ]
+
+    compacted = orchestrator._build_follow_up_llm_context(
+        messages,
+        max_chars=200,
+        keep_recent_tool_messages=2,
+        keep_recent_assistant_messages=1,
+        keep_recent_user_messages=1,
+    )
+
+    assert compacted[0]["content"] == "system-one"
+    assert compacted[1]["content"] == "system-two"
+    assert compacted[2]["role"] == "system"
+    assert "compacted" in compacted[2]["content"]
+    assert [msg["content"] for msg in compacted[3:]] == [
+        "new-user",
+        "new-assistant",
+        "recent-tool-1",
+        "recent-tool-2",
+    ]
+
+
+def test_tool_calling_backfill_uses_compacted_follow_up_context(monkeypatch) -> None:
+    orchestrator = _bare_orchestrator()
+    orchestrator._follow_up_context_chars = 200
+
+    captured: dict[str, Any] = {}
+
+    def _run_llm_with_fallbacks(**kwargs: Any) -> tuple[str, str, Mapping[str, Any]]:
+        captured["context"] = kwargs.get("context")
+        return "Final answer", "gpt-test", {}
+
+    monkeypatch.setattr(orchestrator, "_run_llm_with_fallbacks", _run_llm_with_fallbacks)
+    monkeypatch.setattr(
+        orchestrator,
+        "_interpret_model_turn",
+        lambda _text: SimpleNamespace(tool_calls=[], tool_call_parse_error=None),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_evaluate_prompt_requirements",
+        lambda **_kwargs: SimpleNamespace(
+            required_tools=[],
+            required_fetch_concept_ids=[],
+            required_read_file_copy_ids=[],
+            required_scholarly_representation_file_copy_ids=[],
+            required_create_type_name=None,
+            missing_tools=[],
+            missing_fetch_concept_ids=[],
+            missing_read_file_copy_ids=[],
+            missing_scholarly_representation_file_copy_ids=[],
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator, "_store_prompt_requirement_evaluation", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_assess_minimal_imposition_auto_proceed",
+        lambda _text: {"should_auto_proceed": False},
+    )
+    monkeypatch.setattr(
+        orchestrator, "_sanitise_user_visible_action_output", lambda text, **_kwargs: text
+    )
+    monkeypatch.setattr(
+        orchestrator, "_resolve_environment_max_tool_invocations", lambda _env: 4
+    )
+
+    augmented_context = [
+        {"role": "system", "content": "system-one"},
+        {"role": "system", "content": "system-two"},
+        {"role": "user", "content": "old-user-1"},
+        {"role": "assistant", "content": "old-assistant-1"},
+        {"role": "tool", "content": "old-tool-1"},
+        {"role": "user", "content": "old-user-2"},
+        {"role": "assistant", "content": "old-assistant-2"},
+        {"role": "tool", "content": "old-tool-2"},
+        {"role": "user", "content": "new-user"},
+        {"role": "assistant", "content": "new-assistant"},
+        {"role": "tool", "content": "recent-tool-0"},
+        {"role": "tool", "content": "recent-tool-1"},
+        {"role": "tool", "content": "recent-tool-2"},
+        {"role": "tool", "content": "recent-tool-3"},
+        {"role": "tool", "content": "recent-tool-4"},
+        {"role": "tool", "content": "recent-tool-5"},
+        {"role": "tool", "content": "recent-tool-6"},
+    ]
+
+    request = SimpleNamespace(
+        data={
+            "augmented_context": augmented_context,
+            "policy_state": None,
+            "registry_snapshot": None,
+            "user_concept_id": None,
+            "org_concept_id": None,
+            "model_for_stage": lambda _stage: "gpt-test",
+            "record_llm_call": lambda **_kwargs: None,
+            "aux_llm_calls": [],
+            "llm_calls": [],
+            "iteration_count": 0,
+            "remaining_tool_calls": [],
+            "invocations": [],
+            "method_catalogue": {},
+            "prompt": "Run the follow-up step",
+            "prompt_for_requirements": "Run the follow-up step",
+            "emit_progress": None,
+        },
+        environment=SimpleNamespace(llm_client=object()),
+    )
+
+    result = orchestrator._action_tool_calling_backfill(request)
+
+    assert result.outputs["final_response"] == "Final answer"
+    compacted = cast(list[Mapping[str, Any]], captured["context"])
+    assert compacted[0]["content"] == "system-one"
+    assert compacted[1]["content"] == "system-two"
+    assert compacted[2]["role"] == "system"
+    assert [msg["content"] for msg in compacted[3:]] == [
+        "old-user-2",
+        "old-assistant-2",
+        "new-user",
+        "new-assistant",
+        "recent-tool-1",
+        "recent-tool-2",
+        "recent-tool-3",
+        "recent-tool-4",
+        "recent-tool-5",
+        "recent-tool-6",
+    ]

@@ -391,3 +391,48 @@ def test_subworkflow_action_propagates_child_control_signal() -> None:
     nested = execution.outputs.get("subworkflow_result_envelope")
     assert isinstance(nested, dict)
     assert nested.get("control_signal") == "return"
+
+
+def test_subworkflow_action_compacts_child_runtime_payload_before_propagating() -> None:
+    registry = ActionRegistry()
+
+    def _emit_business_result(_request: WorkflowActionRequest) -> WorkflowActionResult:
+        return WorkflowActionResult(
+            outputs={
+                "answer": "stable",
+                "validated_json": {"answer": "stable"},
+                "llm_step_envelope": {"selected_model": "gpt-5-mini"},
+                "tool_messages": [{"tool": "dummy"}],
+            }
+        )
+
+    registry.register(ActionSpec(action_id="child.emit", handler=_emit_business_result))
+    register_subworkflow_actions(
+        registry,
+        definition_loader=lambda workflow_id: (
+            _child_success_definition() if workflow_id == "#V#child_success" else None
+        ),
+    )
+
+    execution = registry.execute(
+        WORKFLOW_SUBWORKFLOW_ACTION_ID,
+        inputs={
+            "workflow_id": "#V#child_success",
+            "__parent_workflow_id": "#V#parent",
+            "__parent_state_id": "start",
+        },
+        context={},
+        env=WorkflowEnvironment(llm_client=None),
+        trace=None,
+    )
+
+    assert execution.status == "success"
+    result_payload = execution.outputs.get("result")
+    assert isinstance(result_payload, dict)
+    assert result_payload.get("answer") == "stable"
+    assert result_payload.get("validated_json") == {"answer": "stable"}
+    assert "llm_step_envelope" not in result_payload
+    assert "tool_messages" not in result_payload
+    assert "workflow_step_result_envelopes" not in result_payload
+    assert "last_workflow_step_result_envelope" not in result_payload
+    assert "workflow_result_envelope" not in result_payload

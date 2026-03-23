@@ -1041,6 +1041,9 @@ def _build_activity_history_from_phase_history(
         _progress_str(latest_payload.get("phase")) or _progress_str(latest_payload.get("stage"))
     )
     latest_status = (_progress_str(latest_payload.get("status")) or "").lower()
+    latest_terminal_state = _resolve_latest_turn_execution_activity_state(
+        latest_payload
+    )
     stage_diagnostic_map = {
         _canonicalise_live_runtime_stage(entry.get("stage_id")) or _progress_str(entry.get("stage_id")): entry
         for entry in stage_diagnostics
@@ -1057,7 +1060,9 @@ def _build_activity_history_from_phase_history(
         is_latest = index == len(phase_history) - 1
         state = "success"
         if is_latest:
-            if latest_status in {"error", "failed", "cancelled"}:
+            if latest_terminal_state in {"success", "failure"}:
+                state = latest_terminal_state
+            elif latest_status in {"error", "failed", "cancelled"}:
                 state = "failure"
             else:
                 state = "pending"
@@ -1094,6 +1099,50 @@ def _build_activity_history_from_phase_history(
         activity_history[-1]["stage"] = latest_stage
 
     return activity_history[-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT :]
+
+
+def _resolve_latest_turn_execution_activity_state(
+    latest_progress: Mapping[str, Any] | None,
+) -> str | None:
+    if not isinstance(latest_progress, Mapping):
+        return None
+
+    workflow_routing_diagnostics = latest_progress.get("workflow_routing_diagnostics")
+    if isinstance(workflow_routing_diagnostics, Mapping):
+        dispatch = workflow_routing_diagnostics.get("dispatch")
+        if isinstance(dispatch, Mapping):
+            dispatch_terminal_status = (
+                _progress_str(dispatch.get("dispatch_terminal_status")) or ""
+            ).strip().lower()
+            if dispatch_terminal_status in {"failed", "failure"}:
+                return "failure"
+            if dispatch_terminal_status in {
+                "completed",
+                "complete",
+                "done",
+                "success",
+                "succeeded",
+            }:
+                return "success"
+
+    result_summary = (_progress_str(latest_progress.get("result_summary")) or "").strip()
+    if result_summary.lower().endswith(":failed"):
+        return "failure"
+
+    terminal_status_candidates = (
+        latest_progress.get("status"),
+        latest_progress.get("orchestrator_status"),
+        latest_progress.get("terminal_status"),
+        latest_progress.get("final_status"),
+    )
+    for value in terminal_status_candidates:
+        status = (_progress_str(value) or "").strip().lower()
+        if status in {"error", "failed", "failure", "cancelled", "canceled", "aborted", "terminated"}:
+            return "failure"
+        if status in {"completed", "complete", "done", "success", "succeeded"}:
+            return "success"
+
+    return None
 
 
 def _derive_tool_history_from_diagnostic_events(
@@ -1429,6 +1478,13 @@ def _build_turn_execution_stage_diagnostics(
     latest_progress_payload = (
         latest_progress if isinstance(latest_progress, Mapping) else {}
     )
+    latest_stage_id = _canonicalise_live_runtime_stage(
+        _progress_str(latest_progress_payload.get("phase"))
+        or _progress_str(latest_progress_payload.get("stage"))
+    )
+    latest_terminal_state = _resolve_latest_turn_execution_activity_state(
+        latest_progress_payload
+    )
     live_stage_diagnostic_map = _extract_live_stage_diagnostic_map(latest_progress_payload)
     stage_diagnostics: list[dict[str, Any]] = []
 
@@ -1532,6 +1588,38 @@ def _build_turn_execution_stage_diagnostics(
                 if isinstance(latest_stage_event, Mapping)
                 else None
             )
+            workflow_routing_diagnostics = latest_progress_payload.get(
+                "workflow_routing_diagnostics"
+            )
+            if isinstance(workflow_routing_diagnostics, Mapping):
+                dispatch = workflow_routing_diagnostics.get("dispatch")
+                if isinstance(dispatch, Mapping):
+                    stage_payload["dispatch_terminal_status"] = _progress_str(
+                        dispatch.get("dispatch_terminal_status")
+                    )
+                    stage_payload["dispatch_terminal_failure_reason"] = _progress_str(
+                        dispatch.get("dispatch_terminal_failure_reason")
+                    )
+                    stage_payload["dispatch_terminal_failure_detail"] = _progress_str(
+                        dispatch.get("dispatch_terminal_failure_detail")
+                    )
+                    unresolved_required_inputs = dispatch.get(
+                        "dispatch_terminal_unresolved_required_inputs"
+                    )
+                    if isinstance(unresolved_required_inputs, list):
+                        stage_payload[
+                            "dispatch_terminal_unresolved_required_inputs"
+                        ] = [
+                            str(item).strip()
+                            for item in unresolved_required_inputs
+                            if str(item).strip()
+                        ]
+
+        if (
+            latest_terminal_state in {"success", "failure"}
+            and stage_id == latest_stage_id
+        ):
+            stage_payload["terminal_state"] = latest_terminal_state
 
         stage_diagnostics.append(stage_payload)
 

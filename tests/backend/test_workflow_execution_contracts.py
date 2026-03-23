@@ -108,3 +108,54 @@ def test_workflow_executor_fails_break_without_explicit_on_break_route() -> None
 
     assert result.completed is False
     assert result.error == "workflow_break_outside_loop_scope"
+
+
+def test_step_result_envelope_snapshots_are_detached_from_live_context() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#snapshot_detach_workflow",
+        initial_state="compute",
+        states={
+            "compute": WorkflowStateSpec(
+                state_id="compute",
+                actions=(WorkflowActionInvocation(action_id="emit.payload"),),
+                transitions=(
+                    WorkflowTransitionSpec(
+                        to_state="done",
+                        reason="next_step",
+                        condition=lambda _ctx: True,
+                    ),
+                ),
+            ),
+            "done": WorkflowStateSpec(state_id="done", terminal=True),
+        },
+    )
+
+    registry = ActionRegistry()
+    registry.register(
+        ActionSpec(
+            action_id="emit.payload",
+            handler=lambda _request: WorkflowActionResult(
+                status="success",
+                outputs={"result": {"answer": 42}},
+            ),
+        )
+    )
+
+    result = WorkflowExecutor(registry=registry, max_transitions=5).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={},
+    )
+
+    envelopes = result.data.get("workflow_step_result_envelopes")
+    assert isinstance(envelopes, list)
+    assert len(envelopes) == 1
+    last_envelope = result.data.get("last_workflow_step_result_envelope")
+    assert isinstance(last_envelope, dict)
+
+    result.data["result"]["answer"] = 99
+    assert envelopes[0]["output_payload"]["result"]["answer"] == 42
+    assert last_envelope["output_payload"]["result"]["answer"] == 42
+
+    envelopes[0]["output_payload"]["result"]["answer"] = 7
+    assert last_envelope["output_payload"]["result"]["answer"] == 42

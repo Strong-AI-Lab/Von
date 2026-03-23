@@ -404,6 +404,7 @@ def start_workflow_use_episode(
     instance_id: str | None = None,
     stable_key: str | None = None,
     metadata: Mapping[str, Any] | None = None,
+    sync_aggregates: bool = True,
 ) -> dict[str, Any] | None:
     """Create or upsert a workflow-use episode attempt."""
 
@@ -455,7 +456,11 @@ def start_workflow_use_episode(
         upsert=True,
     )
 
-    aggregate = sync_workflow_concept_aggregates(cleaned_workflow_id)
+    aggregate = (
+        sync_workflow_concept_aggregates(cleaned_workflow_id)
+        if sync_aggregates
+        else None
+    )
     return {
         "episode_id": episode_id,
         "workflow_id": cleaned_workflow_id,
@@ -475,6 +480,7 @@ def finalise_workflow_use_episode(
     termination_code: str | None = None,
     termination_detail: str | None = None,
     metadata: Mapping[str, Any] | None = None,
+    sync_aggregates: bool = True,
 ) -> dict[str, Any] | None:
     """Mark an episode completed or terminated."""
 
@@ -530,7 +536,11 @@ def finalise_workflow_use_episode(
         upsert=True,
     )
 
-    aggregate = sync_workflow_concept_aggregates(cleaned_workflow_id)
+    aggregate = (
+        sync_workflow_concept_aggregates(cleaned_workflow_id)
+        if sync_aggregates
+        else None
+    )
     return {
         "episode_id": resolved_episode_id,
         "workflow_id": cleaned_workflow_id,

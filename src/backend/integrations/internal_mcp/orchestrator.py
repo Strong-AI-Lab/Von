@@ -74,8 +74,8 @@ from ...workflows.workflow_launch_input_contracts import (
 from ...workflows.vontology_loader import load_workflow_definition_from_vontology
 from ...workflows.workflow_selector import WorkflowSelector
 from ...workflows.durable.registry_factory import (
-    build_workflow_registry,
-    build_durable_action_registry,
+    get_shared_durable_action_registry,
+    get_shared_workflow_registry_read_only,
 )
 from ...workflows.workflow_gap_workflow_contracts import (
     WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
@@ -795,6 +795,8 @@ class InternalMCPChatOrchestrator:
         ("github_", "github"),
         ("workflow_", "workflow"),
         ("turn_execution_", "workflow"),
+        ("experiment_", "workflow"),
+        ("testing_", "workflow"),
         ("gmail_", "gmail"),
         ("rag_", "rag"),
         ("search_", "search"),
@@ -842,15 +844,21 @@ class InternalMCPChatOrchestrator:
                 "review",
             ),
         ),
-        (
-            "workflow",
             (
                 "workflow",
-                "scheduler",
-                "schedule",
-                "event binding",
-                "durable",
-                "instance",
+                (
+                    "workflow",
+                    "testing workflow",
+                    "experiment",
+                    "verdict",
+                    "promotion recommendation",
+                    "meeting invitation",
+                    "regression suite",
+                    "scheduler",
+                    "schedule",
+                    "event binding",
+                    "durable",
+                    "instance",
                 "orchestration",
             ),
         ),
@@ -1080,6 +1088,13 @@ class InternalMCPChatOrchestrator:
             min_value=1_000,
             max_value=200_000,
         )
+        self._follow_up_context_chars = self._coerce_int(
+            None,
+            env_var="VON_MCP_FOLLOW_UP_CONTEXT_CHARS",
+            default=40_000,
+            min_value=4_000,
+            max_value=200_000,
+        )
         # Structured tool-calling candidate caps.
         self._structured_tool_provider_default_limit = self._coerce_int(
             None,
@@ -1106,8 +1121,13 @@ class InternalMCPChatOrchestrator:
 
         self._prompt_templates = PromptTemplateService()
         # Unified registries: single source of truth for both conversation-turn
-        # and durable workflows/actions.  See JVNAUTOSCI-922 Phase 1.
-        self._workflow_registry = build_workflow_registry()
+        # and durable workflows/actions. Reuse the shared read-only workflow
+        # registry here so request-time orchestrator construction does not
+        # trigger the heavyweight authoritative parity rebuild path.
+        # See JVNAUTOSCI-922 Phase 1 and JVNAUTOSCI-1566.
+        self._workflow_registry = get_shared_workflow_registry_read_only(
+            defer_parity_work=True
+        )
         self._action_registry = self._build_action_registry()
         self._workflow_executor = WorkflowExecutor(
             registry=self._action_registry, max_transitions=50
@@ -1304,15 +1324,20 @@ class InternalMCPChatOrchestrator:
     def _build_action_registry(self) -> ActionRegistry:
         """Build a unified action registry for all workflow execution.
 
-        Starts from the durable action registry (rag_sync, considerations)
-        and adds conversation-turn handlers (narration, missing-tool-call,
-        write-policy, todo-refresh).  The result is a single registry usable
-        by both WorkflowExecutor and DurableWorkflowExecutor.
+        Starts from the shared durable action registry (rag_sync,
+        considerations) and adds conversation-turn handlers (narration,
+        missing-tool-call, write-policy, todo-refresh). The result is a single
+        registry usable by both WorkflowExecutor and DurableWorkflowExecutor.
+
+        Copy the durable registry into a fresh ActionRegistry so each
+        orchestrator instance can attach self-bound handlers and fallback
+        routing without mutating the shared durable runtime cache.
 
         See JVNAUTOSCI-922 Phase 1.1 — unified ActionRegistry.
         """
         # Start with durable handlers as the base.
-        registry = build_durable_action_registry()
+        registry = ActionRegistry()
+        registry.merge(get_shared_durable_action_registry())
 
         # Conversation-turn handlers — these reference ``self`` methods.
         registry.register(
@@ -1492,6 +1517,83 @@ class InternalMCPChatOrchestrator:
         # routed through the MCP gateway via _action_mcp_tool_invoke.
         registry.set_fallback_handler(self._action_mcp_tool_invoke)
         return registry
+
+    def _resolve_workflow_id_for_action_contract(
+        self,
+        *,
+        required_action_ids: frozenset[str],
+        preferred_workflow_id: str | None = None,
+        candidate_workflow_ids: Sequence[str] = (),
+        fallback_workflow_ids: Sequence[str] = (),
+    ) -> str | None:
+        """Resolve a workflow that satisfies a required action contract.
+
+        Keep this lookup bounded to explicit candidate IDs rather than scanning
+        every known workflow in the registry. The registry may contain many
+        lazily-registered Vontology workflows whose first access performs
+        heavyweight graph expansion. Request-time routing should only inspect
+        the selected workflow, selector-discovered candidates, and explicit
+        canonical fallback workflows.
+        """
+
+        required_actions = frozenset(
+            str(action_id).strip()
+            for action_id in (required_action_ids or ())
+            if isinstance(action_id, str) and str(action_id).strip()
+        )
+        if not required_actions:
+            return None
+
+        action_ids_cache: dict[str, frozenset[str]] = {}
+
+        def _workflow_action_ids(workflow_id: str | None) -> frozenset[str]:
+            cleaned = (
+                workflow_id.strip()
+                if isinstance(workflow_id, str) and workflow_id.strip()
+                else ""
+            )
+            if not cleaned:
+                return frozenset()
+            cached = action_ids_cache.get(cleaned)
+            if cached is not None:
+                return cached
+            workflow_def = self._workflow_registry.get(cleaned)
+            if workflow_def is None:
+                action_ids_cache[cleaned] = frozenset()
+                return frozenset()
+            resolved = frozenset(
+                str(action.action_id or "").strip()
+                for state in workflow_def.states.values()
+                for action in state.actions
+                if isinstance(action.action_id, str) and action.action_id.strip()
+            )
+            action_ids_cache[cleaned] = resolved
+            return resolved
+
+        ordered_candidates: list[str] = []
+        seen_candidates: set[str] = set()
+        for raw_candidate in (
+            preferred_workflow_id,
+            *candidate_workflow_ids,
+            *fallback_workflow_ids,
+        ):
+            candidate = (
+                raw_candidate.strip()
+                if isinstance(raw_candidate, str) and raw_candidate.strip()
+                else ""
+            )
+            if not candidate:
+                continue
+            dedupe_key = candidate.lower()
+            if dedupe_key in seen_candidates:
+                continue
+            seen_candidates.add(dedupe_key)
+            ordered_candidates.append(candidate)
+
+        for candidate in ordered_candidates:
+            if required_actions.issubset(_workflow_action_ids(candidate)):
+                return candidate
+        return None
 
     # -------------------------------------------------------------------
     # Generic MCP tool invocation action (Phase 3.1)
@@ -1890,6 +1992,8 @@ class InternalMCPChatOrchestrator:
             "tool_call_parse_error": data.get("tool_call_parse_error"),
             "result": retry_needed,
         }
+        if isinstance(aux_log, list):
+            outputs["aux_llm_calls"] = aux_log
 
         if request.trace is not None:
             request.trace.metadata.setdefault("missing_tool_call", {})
@@ -2660,6 +2764,8 @@ class InternalMCPChatOrchestrator:
             "missing_tool_call_recovery_outcome": recovery_outcome,
             "result": success,
         }
+        if isinstance(aux_log, list):
+            outputs["aux_llm_calls"] = aux_log
 
         if emit_progress_cb is not None:
             emit_progress_cb(
@@ -2709,14 +2815,20 @@ class InternalMCPChatOrchestrator:
         if not callable(model_for_stage):
             return None
 
+        shared_aux_llm_calls = data.get("aux_llm_calls")
         workflow_context = {
             "user_prompt": data.get("prompt") or "",
             "response_text": response_text if isinstance(response_text, str) else str(response_text),
             "interpretation": interpretation,
             "use_structured": use_structured,
             "tool_call_parse_error": tool_call_parse_error,
-            "aux_llm_calls": data.get("aux_llm_calls") or [],
-            "augmented_context": data.get("augmented_context") or [],
+            "aux_llm_calls": (
+                shared_aux_llm_calls if isinstance(shared_aux_llm_calls, list) else []
+            ),
+            "augmented_context": self._build_follow_up_llm_context(
+                cast(Sequence[Mapping[str, Any]], data.get("augmented_context") or []),
+                max_chars=self._follow_up_context_chars,
+            ),
             "tool_calls": tool_calls,
             "missing_tool_assessor": self._assess_missing_tool_call,
             "extract_tool_calls_fn": self._extract_tool_calls,
@@ -2803,7 +2915,131 @@ class InternalMCPChatOrchestrator:
         )
         if workflow_result is None:
             return None
+        outer_aux_llm_calls = data.get("aux_llm_calls")
+        self._project_missing_tool_call_aux_telemetry(
+            outer_aux_llm_calls if isinstance(outer_aux_llm_calls, list) else None,
+            workflow_result.data,
+        )
         return workflow_result.data
+
+    @staticmethod
+    def _project_missing_tool_call_aux_telemetry(
+        aux_log: list[Mapping[str, Any]] | None,
+        recovery_data: Mapping[str, Any] | None,
+    ) -> None:
+        """Project missing-tool-call telemetry into the outer aux stream.
+
+        Nested workflow execution does not always preserve shared list identity
+        for `aux_llm_calls`. Reconstruct the canonical missing-tool-call
+        telemetry from the returned recovery state when the nested entries are
+        absent so the top-level turn remains observable.
+        """
+
+        if not isinstance(aux_log, list) or not isinstance(recovery_data, Mapping):
+            return
+
+        existing_types = {
+            str(entry.get("type") or "")
+            for entry in aux_log
+            if isinstance(entry, Mapping)
+        }
+        assessment = recovery_data.get("missing_tool_call_assessment")
+        path = ""
+        if isinstance(assessment, Mapping):
+            path = str(assessment.get("path") or "").strip()
+            classifier_verdict = assessment.get("classifier_verdict")
+            classifier_verdict_text = (
+                "yes"
+                if classifier_verdict is True
+                else "no"
+                if classifier_verdict is False
+                else "unavailable"
+            )
+            if "missing_tool_call_detection" not in existing_types:
+                aux_log.append(
+                    {
+                        "type": "missing_tool_call_detection",
+                        "path": path,
+                        "is_json_action": bool(assessment.get("is_json_action")),
+                        "fenced_json": bool(assessment.get("fenced_json")),
+                        "classifier_invoked": bool(
+                            assessment.get("classifier_invoked")
+                        ),
+                        "classifier_has_verdict": bool(
+                            assessment.get("classifier_has_verdict")
+                        ),
+                        "classifier_used": bool(assessment.get("classifier_used")),
+                        "classifier_verdict": classifier_verdict_text,
+                        "retry_reason": str(
+                            recovery_data.get("missing_tool_call_retry_reason") or ""
+                        ),
+                        "retry_attempts": int(
+                            recovery_data.get("missing_tool_call_retry_attempts", 0)
+                        ),
+                        "retry_budget": int(
+                            recovery_data.get("missing_tool_call_retry_budget", 0)
+                        ),
+                        "retries_remaining": int(
+                            recovery_data.get("missing_tool_call_retry_remaining", 0)
+                        ),
+                    }
+                )
+                existing_types.add("missing_tool_call_detection")
+
+            if (
+                bool(assessment.get("classifier_invoked"))
+                and "missing_tool_call_classifier" not in existing_types
+            ):
+                aux_log.append(
+                    {
+                        "type": "missing_tool_call_classifier",
+                        "path": path,
+                        "model": "",
+                        "model_raw": "",
+                        "model_resolved": "",
+                        "prompt_placeholder_response": True,
+                        "prompt_injection_mode": "replace",
+                        "prompt_preview": "",
+                        "response_preview": classifier_verdict_text,
+                        "truncated": False,
+                    }
+                )
+                existing_types.add("missing_tool_call_classifier")
+
+        if "missing_tool_call_retry" in existing_types:
+            return
+
+        retry_success = bool(recovery_data.get("missing_tool_call_retry_success"))
+        retry_suppressed = bool(recovery_data.get("missing_tool_call_retry_suppressed"))
+        retry_stage = (
+            "completed" if retry_success else "skipped" if retry_suppressed else "failed"
+        )
+        aux_log.append(
+            {
+                "type": "missing_tool_call_retry",
+                "path": path,
+                "mechanism": "workflow_projection",
+                "stage": retry_stage,
+                "retry_reason": str(
+                    recovery_data.get("missing_tool_call_retry_reason") or ""
+                ),
+                "retry_attempts": int(
+                    recovery_data.get("missing_tool_call_retry_attempts", 0)
+                ),
+                "retry_budget": int(
+                    recovery_data.get("missing_tool_call_retry_budget", 0)
+                ),
+                "retries_remaining": int(
+                    recovery_data.get("missing_tool_call_retry_remaining", 0)
+                ),
+                "stop_reason": str(
+                    recovery_data.get("missing_tool_call_retry_stop_reason") or ""
+                ),
+                "recovery_outcome": str(
+                    recovery_data.get("missing_tool_call_recovery_outcome") or ""
+                ),
+            }
+        )
 
     def _action_narration_classify(self, request: Any) -> WorkflowActionResult:
         required = bool(
@@ -2883,6 +3119,159 @@ class InternalMCPChatOrchestrator:
                     clipped = clipped[:cut]
             raw = clipped.strip()
         return raw or None
+
+    @staticmethod
+    def _coerce_non_empty_text(value: object) -> str | None:
+        if value is None:
+            return None
+        text = value if isinstance(value, str) else str(value)
+        text = text.strip()
+        return text or None
+
+    @staticmethod
+    def _looks_like_machine_json_text(text: object) -> bool:
+        if not isinstance(text, str):
+            return False
+        candidate = text.strip()
+        if not candidate or candidate[0] not in "[{":
+            return False
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            return False
+        return isinstance(parsed, (list, dict))
+
+    @classmethod
+    def _render_structured_observation_lines(
+        cls, observations: object
+    ) -> list[str]:
+        if not isinstance(observations, Sequence) or isinstance(
+            observations, (str, bytes, bytearray)
+        ):
+            return []
+
+        lines: list[str] = []
+        for item in observations[:6]:
+            if isinstance(item, Mapping):
+                label = cls._coerce_non_empty_text(item.get("label")) or "observation"
+                verdict = cls._coerce_non_empty_text(item.get("verdict"))
+                expected = cls._coerce_non_empty_text(item.get("expected_outcome"))
+                observed = cls._coerce_non_empty_text(item.get("observed_outcome"))
+                segments = [label]
+                if verdict:
+                    segments.append(verdict)
+                detail_parts: list[str] = []
+                if expected:
+                    detail_parts.append(f"expected: {expected}")
+                if observed:
+                    detail_parts.append(f"observed: {observed}")
+                line = ": ".join(segments) if len(segments) > 1 else segments[0]
+                if detail_parts:
+                    line = f"{line} ({'; '.join(detail_parts)})"
+                lines.append(line)
+                continue
+
+            text = cls._coerce_non_empty_text(item)
+            if text:
+                lines.append(text)
+
+        extra_count = len(observations) - len(lines)
+        if extra_count > 0:
+            lines.append(f"... (+{extra_count} more observations)")
+        return lines
+
+    @classmethod
+    def _render_custom_workflow_response_text(
+        cls,
+        *,
+        workflow_id: str,
+        workflow_result: object,
+    ) -> str | None:
+        data = getattr(workflow_result, "data", None)
+        if not isinstance(data, Mapping):
+            data = {}
+
+        candidate_text: str | None = None
+        for key in ("response_text", "summary", "final_response"):
+            text = cls._coerce_non_empty_text(data.get(key))
+            if text:
+                candidate_text = text
+                if not cls._looks_like_machine_json_text(text):
+                    return text
+                break
+
+        lines: list[str] = []
+
+        verdict = cls._coerce_non_empty_text(data.get("verdict"))
+        if verdict:
+            lines.append(f"Workflow verdict: {verdict}.")
+
+        run_id = cls._coerce_non_empty_text(data.get("run_id"))
+        if run_id:
+            lines.append(f"Experiment run: {run_id}.")
+
+        verdict_summary = data.get("verdict_summary")
+        if isinstance(verdict_summary, Mapping):
+            summary_reason = cls._coerce_non_empty_text(verdict_summary.get("reason"))
+            if summary_reason:
+                lines.append(f"Verdict summary: {summary_reason}.")
+
+        promotion = data.get("promotion_recommendation")
+        if isinstance(promotion, Mapping):
+            promotion_bits: list[str] = []
+            recommended = promotion.get("recommended")
+            if isinstance(recommended, bool):
+                promotion_bits.append(
+                    "recommended" if recommended else "not recommended"
+                )
+            requires_gate = promotion.get("requires_promotion_gate")
+            if isinstance(requires_gate, bool):
+                promotion_bits.append(
+                    "promotion gate required"
+                    if requires_gate
+                    else "no promotion gate required"
+                )
+            promotion_reason = cls._coerce_non_empty_text(promotion.get("reason"))
+            if promotion_reason:
+                promotion_bits.append(promotion_reason)
+            if promotion_bits:
+                lines.append(
+                    f"Promotion recommendation: {'; '.join(promotion_bits)}."
+                )
+
+        meeting_type = cls._coerce_non_empty_text(data.get("candidate_meeting_type"))
+        if meeting_type:
+            lines.append(f"Candidate meeting type: {meeting_type}.")
+
+        safe_downstream_action = cls._coerce_non_empty_text(
+            data.get("candidate_safe_downstream_action")
+        )
+        if safe_downstream_action:
+            lines.append(
+                f"Candidate safe downstream action: {safe_downstream_action}."
+            )
+
+        observation_lines = cls._render_structured_observation_lines(
+            data.get("meeting_candidate_observations") or data.get("observations")
+        )
+        if observation_lines:
+            lines.append("Evidence:")
+            lines.extend(f"- {line}" for line in observation_lines)
+
+        if lines:
+            return "\n".join(lines)
+
+        if candidate_text:
+            return candidate_text
+
+        final_state = cls._coerce_non_empty_text(
+            getattr(workflow_result, "final_state", None)
+        )
+        completed = bool(getattr(workflow_result, "completed", False))
+        if final_state:
+            status = "completed" if completed else "failed"
+            return f"Workflow {workflow_id} {status} (state: {final_state})."
+        return None
 
     def _action_narration_render(self, request: Any) -> WorkflowActionResult:
         prompt_text = request.data.get("narration_prompt_text") or ""
@@ -4233,6 +4622,15 @@ class InternalMCPChatOrchestrator:
                 default_model=tool_call_model,
             )
             if recovery_data is not None:
+                recovery_aux_llm_calls = recovery_data.get("aux_llm_calls")
+                if (
+                    isinstance(aux_llm_calls, list)
+                    and isinstance(recovery_aux_llm_calls, list)
+                    and recovery_aux_llm_calls is not aux_llm_calls
+                ):
+                    aux_llm_calls.extend(
+                        entry for entry in recovery_aux_llm_calls if isinstance(entry, Mapping)
+                    )
                 response = recovery_data.get("response_text", response)
                 interpretation = recovery_data.get("interpretation", interpretation)
                 tool_calls = recovery_data.get("tool_calls", tool_calls)
@@ -5183,11 +5581,15 @@ class InternalMCPChatOrchestrator:
             "If the tool failed, explain the error. "
             "If you need to call another tool, you may do so."
         )
+        follow_up_context = self._build_follow_up_llm_context(
+            augmented_context,
+            max_chars=self._follow_up_context_chars,
+        )
         summariser_model = model_for_stage("summariser")
         current_response, summariser_model, _ = self._run_llm_with_fallbacks(
             stage="summariser",
             prompt=follow_up_prompt,
-            context=augmented_context,
+            context=follow_up_context,
             default_client=llm_client,
             default_model=summariser_model,
             policy_state=policy_state,
@@ -5250,7 +5652,7 @@ class InternalMCPChatOrchestrator:
                     if isinstance(method_catalogue_for_requirements, Mapping)
                     else None
                 ),
-                context_messages=augmented_context,
+                context_messages=follow_up_context,
                 tool_invocations=invocations_for_requirements,
                 url_requirement=(
                     prompt_requirement_url_policy
@@ -6618,11 +7020,42 @@ class InternalMCPChatOrchestrator:
                     continue
                 _append_candidate(tool_name.strip())
 
-        sorted_tool_names = sorted(ordered_tool_names, key=lambda value: value.lower())
+        salience_rank = {"high": 0, "medium": 1, "low": 2, "none": 3}
+        salience_cache: dict[str, str] = {}
+        family_cache: dict[str, str] = {}
+
+        def _tool_salience(tool_name: str) -> str:
+            key = tool_name.lower()
+            cached = salience_cache.get(key)
+            if cached is not None:
+                return cached
+            try:
+                value = str(get_tool_salience(tool_name) or "medium").strip().lower()
+            except Exception:
+                value = "medium"
+            salience_cache[key] = value
+            return value
+
+        def _tool_family(tool_name: str) -> str:
+            key = tool_name.lower()
+            cached = family_cache.get(key)
+            if cached is not None:
+                return cached
+            value = self._structured_tool_family_for_name(tool_name).lower()
+            family_cache[key] = value
+            return value
+
+        sorted_tool_names = sorted(
+            ordered_tool_names,
+            key=lambda value: (
+                salience_rank.get(_tool_salience(value), 1),
+                value.lower(),
+            ),
+        )
         family_matched_tools = [
             name
             for name in sorted_tool_names
-            if self._structured_tool_family_for_name(name).lower() in hinted_family_lookup
+            if _tool_family(name) in hinted_family_lookup
         ]
         read_tools = [name for name in sorted_tool_names if not _is_write_tool(name)]
 
@@ -6631,8 +7064,9 @@ class InternalMCPChatOrchestrator:
         _append_bucket(family_matched_tools)
 
         if profile == "planner":
-            _append_bucket(read_tools)
-            _append_bucket(write_tool_names)
+            if not hinted_family_lookup:
+                _append_bucket(read_tools)
+                _append_bucket(write_tool_names)
         elif profile == "validator":
             validation_helpers = [
                 name
@@ -6793,19 +7227,49 @@ class InternalMCPChatOrchestrator:
 
         return json_schema
 
+    @staticmethod
+    def _split_leading_system_messages(
+        messages: Sequence[Mapping[str, Any]],
+    ) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
+        leading_system: list[Mapping[str, Any]] = []
+        remainder_start = 0
+        for index, msg in enumerate(messages):
+            role = msg.get("role") if isinstance(msg, Mapping) else None
+            if role != "system":
+                remainder_start = index
+                break
+            leading_system.append(dict(msg))
+        else:
+            remainder_start = len(messages)
+        remainder: list[Mapping[str, Any]] = [
+            dict(msg) if isinstance(msg, Mapping) else msg
+            for msg in messages[remainder_start:]
+            if isinstance(msg, Mapping)
+        ]
+        return leading_system, remainder
+
     def _limit_context_for_llm(
-        self, messages: List[Mapping[str, Any]]
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        *,
+        max_chars: int | None = None,
     ) -> List[Mapping[str, Any]]:
         """Limit context size to avoid runaway prompt growth.
 
-        Keeps the system message (index 0) and then includes as many of the most
-        recent remaining messages as fit under the max-context budget.
+        Keeps leading system messages and then includes as many of the most
+        recent remaining messages as fit under the selected context budget.
         """
         if not messages:
             return []
 
-        system_msg = messages[0]
-        rest = list(messages[1:])
+        leading_system, rest = self._split_leading_system_messages(messages)
+        if not leading_system:
+            leading_system = [dict(messages[0])]
+            rest = [
+                dict(msg) if isinstance(msg, Mapping) else msg
+                for msg in messages[1:]
+                if isinstance(msg, Mapping)
+            ]
 
         def _msg_len(msg: Mapping[str, Any]) -> int:
             content = msg.get("content")
@@ -6813,9 +7277,12 @@ class InternalMCPChatOrchestrator:
                 return len(content)
             return len(str(content))
 
-        budget = self._max_context_chars
-        # Always keep system message; it is essential for tool behaviour.
-        total = _msg_len(system_msg)
+        budget = (
+            self._max_context_chars
+            if max_chars is None
+            else max(4_000, int(max_chars))
+        )
+        total = sum(_msg_len(msg) for msg in leading_system)
 
         kept_reversed: List[Mapping[str, Any]] = []
         for msg in reversed(rest):
@@ -6831,16 +7298,83 @@ class InternalMCPChatOrchestrator:
             total += msg_len
 
         kept = list(reversed(kept_reversed))
-        trimmed = [system_msg, *kept]
+        trimmed = [*leading_system, *kept]
 
         if len(trimmed) < len(messages):
             self._logger.info(
                 "[mcp_orchestrator] Trimmed context from %d to %d messages (max_context_chars=%d).",
                 len(messages),
                 len(trimmed),
-                self._max_context_chars,
+                budget,
             )
         return trimmed
+
+    def _build_follow_up_llm_context(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        *,
+        max_chars: int | None = None,
+        keep_recent_tool_messages: int = 6,
+        keep_recent_assistant_messages: int = 2,
+        keep_recent_user_messages: int = 2,
+    ) -> List[Mapping[str, Any]]:
+        """Compact late-stage follow-up context to the most relevant recent turns.
+
+        Summariser/backfill calls tend to occur after one or more large tool payloads
+        have already been appended to the conversation. Keeping the full historical
+        context can materially increase latency without improving the follow-up answer.
+        """
+        if not messages:
+            return []
+
+        leading_system, remainder = self._split_leading_system_messages(messages)
+        if not remainder:
+            return leading_system
+
+        tool_count = 0
+        assistant_count = 0
+        user_count = 0
+        kept_reversed: list[Mapping[str, Any]] = []
+        for msg in reversed(remainder):
+            role = msg.get("role") if isinstance(msg, Mapping) else None
+            keep = False
+            if role == "tool" and tool_count < keep_recent_tool_messages:
+                tool_count += 1
+                keep = True
+            elif role == "assistant" and assistant_count < keep_recent_assistant_messages:
+                assistant_count += 1
+                keep = True
+            elif role == "user" and user_count < keep_recent_user_messages:
+                user_count += 1
+                keep = True
+            elif not kept_reversed:
+                keep = True
+            if keep:
+                kept_reversed.append(dict(msg))
+
+        selected_tail = list(reversed(kept_reversed))
+        omitted_count = max(0, len(remainder) - len(selected_tail))
+        compacted: list[Mapping[str, Any]] = [*leading_system]
+        if omitted_count > 0:
+            compacted.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "Follow-up context compacted for a late-stage LLM call. "
+                        f"Omitted {omitted_count} earlier non-system messages and "
+                        "kept the most recent user, assistant, and tool messages."
+                    ),
+                }
+            )
+        compacted.extend(selected_tail)
+        limited = self._limit_context_for_llm(compacted, max_chars=max_chars)
+        if len(limited) < len(messages):
+            self._logger.info(
+                "[mcp_orchestrator] Compacted follow-up context from %d to %d messages.",
+                len(messages),
+                len(limited),
+            )
+        return limited
 
     def _truncate_nested_for_llm(
         self, value: Any, *, max_string_chars: int, max_list_items: int = 50
@@ -6897,39 +7431,94 @@ class InternalMCPChatOrchestrator:
             }
         return value
 
-    def _tool_listing(self) -> str:
-        """Generate a concise listing of available tools for the system prompt.
+    @staticmethod
+    def _compact_tool_name_lines(
+        tool_names: Sequence[str],
+        *,
+        max_items_per_line: int = 8,
+        max_line_chars: int = 120,
+    ) -> list[str]:
+        """Pack tool names into short comma-separated lines for prompt injection."""
 
-        Keep this as short as possible to avoid token bloat. Only include
-        essential information: tool name, brief description, and key parameters.
+        lines: list[str] = []
+        current: list[str] = []
+        for raw_name in tool_names:
+            name = str(raw_name or "").strip()
+            if not name:
+                continue
+            candidate = [*current, name]
+            candidate_text = ", ".join(candidate)
+            if current and (
+                len(current) >= max_items_per_line
+                or len(candidate_text) > max_line_chars
+            ):
+                lines.append(", ".join(current))
+                current = [name]
+                continue
+            current = candidate
+        if current:
+            lines.append(", ".join(current))
+        return lines
+
+    def _tool_listing(self) -> str:
+        """Generate a compact tool-name index for the system prompt.
+
+        Structured tool calling supplies full schemas separately, so the base
+        system prompt only needs an exact-name index. Keeping this compact avoids
+        front-loading tens of kilobytes of tool descriptions into every turn.
         """
         catalogue = self._gateway.describe_methods()
-        lines: List[str] = []
-        for name in sorted(catalogue.keys()):
-            metadata = catalogue[name]
-            if not isinstance(metadata, Mapping):
+        family_order = (
+            "search",
+            "workflow",
+            "rag",
+            "jira",
+            "github",
+            "gmail",
+            "arxiv",
+            "task",
+            "conversation",
+            "renderer",
+            "database",
+            "linkedin",
+            "vontology",
+            "unknown",
+        )
+        families: dict[str, list[str]] = {}
+        for raw_name in sorted(catalogue.keys()):
+            name = str(raw_name or "").strip()
+            if not name or not is_tool_visible(name):
                 continue
-            description = metadata.get("description") or ""
-            # Truncate long descriptions (increased to 200 for param examples)
-            if len(description) > 200:
-                description = description[:197] + "..."
+            metadata = catalogue.get(name)
+            category = (
+                str(metadata.get("category")).strip().lower()
+                if isinstance(metadata, Mapping)
+                and isinstance(metadata.get("category"), str)
+                and str(metadata.get("category")).strip()
+                else self._structured_tool_family_for_name(name)
+            )
+            families.setdefault(category, []).append(name)
 
-            input_schema = metadata.get("input_schema") or {}
-            required = input_schema.get("required") or []
-            optional = input_schema.get("optional") or {}
+        ordered_families = [
+            family for family in family_order if family in families and families[family]
+        ]
+        ordered_families.extend(
+            family
+            for family in sorted(families.keys())
+            if family not in ordered_families and families[family]
+        )
 
-            # Show required params + important optional params
-            params_list = list(required)
-            # For concept search alias, always show instance_of since it's critical
-            if name == "vontology_concept_search" and "instance_of" in optional:
-                params_list.append("instance_of (optional)")
-
-            if params_list:
-                params = f" (params: {', '.join(params_list)})"
-            else:
-                params = ""
-
-            lines.append(f"- {name}{params}: {description}")
+        lines: List[str] = [
+            "Available tool names (use exact names; structured tool calls receive full schemas separately):"
+        ]
+        for family in ordered_families:
+            compact_lines = self._compact_tool_name_lines(families[family])
+            if not compact_lines:
+                continue
+            label = family.replace("_", " ").strip() or "other"
+            for index, chunk in enumerate(compact_lines):
+                prefix = f"- {label}: " if index == 0 else "  "
+                lines.append(f"{prefix}{chunk}")
         return "\n".join(lines)
 
     def _instruction_message(
@@ -9209,6 +9798,15 @@ class InternalMCPChatOrchestrator:
     ) -> Optional[str]:
         if not isinstance(name, str) or not name.strip():
             return None
+
+        direct_candidate = self._resolve_slug_like_concept_name_directly(name)
+        if isinstance(direct_candidate, str):
+            return direct_candidate
+        if self._coerce_slug_name_to_concept_id(name) is not None:
+            # Workflow policy environment overrides are expected to use canonical
+            # slug-like identifiers. If a direct slug does not exist, fail fast
+            # instead of dropping into broad ontology search.
+            return None
         try:
             from src.backend.services.concept_resolution_service import (
                 resolve_concept_by_name,
@@ -9235,6 +9833,43 @@ class InternalMCPChatOrchestrator:
 
         resolved = resolution.get("resolved_concept_id")
         return resolved if isinstance(resolved, str) else None
+
+    @staticmethod
+    def _coerce_slug_name_to_concept_id(name: str) -> str | None:
+        raw = name.strip()
+        if not raw:
+            return None
+        if raw.startswith("#V#"):
+            return raw if InternalMCPChatOrchestrator._looks_like_concept_id(raw) else None
+        if " " in raw:
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*", raw):
+            return None
+        return f"#V#{raw}"
+
+    def _resolve_slug_like_concept_name_directly(self, name: str) -> str | None:
+        candidate = self._coerce_slug_name_to_concept_id(name)
+        if not isinstance(candidate, str):
+            return None
+
+        try:
+            from src.backend.vontology.code_concepts_registry import is_code_concept_id
+
+            if is_code_concept_id(candidate):
+                return candidate
+        except Exception:
+            pass
+
+        try:
+            from src.backend.db.repositories.concepts_repository import (
+                ConceptsRepository,
+            )
+
+            doc = ConceptsRepository.find_one({"concept_id": candidate}, {"_id": 1})
+        except Exception:
+            doc = None
+
+        return candidate if doc is not None else None
 
     @staticmethod
     def _looks_like_concept_id(value: Any) -> bool:
@@ -9610,6 +10245,30 @@ class InternalMCPChatOrchestrator:
                 return state, cached_telemetry
 
         enabled = self._is_workflow_model_policy_enabled()
+        if not enabled:
+            state = _WorkflowModelPolicyState(
+                enabled=False,
+                policy=None,
+                policy_id=None,
+                predicate_id=None,
+                errors=(),
+            )
+            telemetry: dict[str, Any] = {
+                "type": "workflow_model_policy",
+                "enabled": False,
+                "policy_id": "",
+                "predicate_id": "",
+                "loaded": False,
+                "policy_source": "disabled",
+                "errors": [],
+            }
+            self._workflow_model_policy_cache = {
+                "expires_at": now + float(self._workflow_model_policy_cache_ttl_seconds),
+                "state": state,
+                "telemetry": telemetry,
+            }
+            return state, telemetry
+
         policy_name = os.getenv(
             "VON_WORKFLOW_MODEL_POLICY_NAME", "default_workflow_model_policy"
         )
@@ -19173,6 +19832,7 @@ class InternalMCPChatOrchestrator:
                         "path": "orchestrator.execute_workflow",
                         "workflow_definition_identity": workflow_definition_identity,
                     },
+                    sync_aggregates=False,
                 )
                 if isinstance(start_payload, Mapping):
                     payload_episode_id = start_payload.get("episode_id")
@@ -19204,6 +19864,7 @@ class InternalMCPChatOrchestrator:
                             "path": "orchestrator.execute_workflow",
                             "workflow_definition_identity": workflow_definition_identity,
                         },
+                        sync_aggregates=False,
                     )
                 except Exception:
                     pass
@@ -21105,53 +21766,6 @@ class InternalMCPChatOrchestrator:
                 except Exception:
                     pass
 
-        def _workflow_action_ids(workflow_id: str | None) -> set[str]:
-            if not isinstance(workflow_id, str) or not workflow_id.strip():
-                return set()
-            workflow_def = self._workflow_registry.get(workflow_id.strip())
-            if workflow_def is None:
-                return set()
-            action_ids: set[str] = set()
-            for state in workflow_def.states.values():
-                for action in state.actions:
-                    action_id = str(action.action_id or "").strip()
-                    if action_id:
-                        action_ids.add(action_id)
-            return action_ids
-
-        def _workflow_matches_action_contract(
-            workflow_id: str | None,
-            *,
-            required_action_ids: frozenset[str],
-        ) -> bool:
-            action_ids = _workflow_action_ids(workflow_id)
-            return bool(action_ids) and required_action_ids.issubset(action_ids)
-
-        def _resolve_workflow_id_for_action_contract(
-            *,
-            required_action_ids: frozenset[str],
-            preferred_workflow_id: str | None = None,
-        ) -> str | None:
-            preferred = (
-                preferred_workflow_id.strip()
-                if isinstance(preferred_workflow_id, str)
-                and preferred_workflow_id.strip()
-                else None
-            )
-            if preferred and _workflow_matches_action_contract(
-                preferred, required_action_ids=required_action_ids
-            ):
-                return preferred
-            for workflow_id in self._workflow_registry.all_workflow_ids():
-                candidate = str(workflow_id).strip()
-                if not candidate:
-                    continue
-                if _workflow_matches_action_contract(
-                    candidate, required_action_ids=required_action_ids
-                ):
-                    return candidate
-            return None
-
         _TOOL_PIPELINE_ACTION_IDS = frozenset(
             {
                 "tool_calling.preflight_requirements",
@@ -21173,6 +21787,11 @@ class InternalMCPChatOrchestrator:
             if isinstance(selected_workflow_id, str) and selected_workflow_id.strip()
             else None
         )
+        discovered_workflow_ids_for_contract_routing = (
+            tuple(routing_info.discovered_workflow_ids)
+            if isinstance(routing_info, WorkflowRoutingInfo)
+            else ()
+        )
 
         selector_verdict = (
             routing_info.verdict.strip().lower()
@@ -21181,13 +21800,21 @@ class InternalMCPChatOrchestrator:
             and routing_info.verdict.strip()
             else ""
         )
-        selected_uses_tool_pipeline_contract = _workflow_matches_action_contract(
-            selected_workflow_id_text,
-            required_action_ids=_TOOL_PIPELINE_ACTION_IDS,
+        selected_uses_tool_pipeline_contract = bool(
+            selected_workflow_id_text
+            and self._resolve_workflow_id_for_action_contract(
+                required_action_ids=_TOOL_PIPELINE_ACTION_IDS,
+                preferred_workflow_id=selected_workflow_id_text,
+            )
+            == selected_workflow_id_text
         )
-        selected_uses_narration_contract = _workflow_matches_action_contract(
-            selected_workflow_id_text,
-            required_action_ids=_NARRATION_ACTION_IDS,
+        selected_uses_narration_contract = bool(
+            selected_workflow_id_text
+            and self._resolve_workflow_id_for_action_contract(
+                required_action_ids=_NARRATION_ACTION_IDS,
+                preferred_workflow_id=selected_workflow_id_text,
+            )
+            == selected_workflow_id_text
         )
         selected_requests_explicit_narration_workflow = (
             selected_workflow_id_text == CHAT_NARRATION_WORKFLOW_ID
@@ -25411,9 +26038,11 @@ class InternalMCPChatOrchestrator:
             )
             if not should_route_narration:
                 return screen_text
-            narration_workflow_id = _resolve_workflow_id_for_action_contract(
+            narration_workflow_id = self._resolve_workflow_id_for_action_contract(
                 required_action_ids=_NARRATION_ACTION_IDS,
                 preferred_workflow_id=selected_workflow_id_text,
+                candidate_workflow_ids=discovered_workflow_ids_for_contract_routing,
+                fallback_workflow_ids=(CHAT_NARRATION_WORKFLOW_ID,),
             )
             if narration_workflow_id is None:
                 return screen_text
@@ -26565,14 +27194,15 @@ class InternalMCPChatOrchestrator:
                     episode_source="chat_turn_workflow",
                 )
                 if wf_result is not None:
-                    wf_response = wf_result.data.get("response_text", "")
-                    if not isinstance(wf_response, str) or not wf_response.strip():
-                        wf_response = wf_result.data.get("summary", "")
+                    wf_response = self._render_custom_workflow_response_text(
+                        workflow_id=selected_workflow_id_text,
+                        workflow_result=wf_result,
+                    )
                     if not isinstance(wf_response, str) or not wf_response.strip():
                         wf_response = (
                             f"Workflow {selected_workflow_id_text} completed "
                             f"(state: {wf_result.final_state})."
-                    )
+                        )
                     wf_response = self._sanitise_user_visible_action_output(
                         wf_response,
                         aux_log=aux_llm_calls if isinstance(aux_llm_calls, list) else None,
@@ -26669,9 +27299,11 @@ class InternalMCPChatOrchestrator:
             selected_workflow_id=selected_workflow_id_text,
             dispatch_workflow_id=selected_workflow_id_text,
         )
-        tool_dispatch_workflow_id = _resolve_workflow_id_for_action_contract(
+        tool_dispatch_workflow_id = self._resolve_workflow_id_for_action_contract(
             required_action_ids=_TOOL_PIPELINE_ACTION_IDS,
             preferred_workflow_id=selected_workflow_id_text,
+            candidate_workflow_ids=discovered_workflow_ids_for_contract_routing,
+            fallback_workflow_ids=(TOOL_CALLING_WORKFLOW_ID,),
         )
         if tool_dispatch_workflow_id is None:
             _emit_dispatch_boundary(

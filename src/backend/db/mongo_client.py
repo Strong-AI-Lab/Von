@@ -1,6 +1,7 @@
 import os
 import sys
 import logging
+import threading
 import time
 from pathlib import Path
 from pymongo import MongoClient, ASCENDING, DESCENDING
@@ -277,6 +278,25 @@ _mongo_client_mock = None
 _using_fallback_real = False
 _effective_uri_real = MONGO_URI  # The URI actually used to create the real client
 _last_auto_recovery_check_at = 0.0
+_COLLECTION_INDEXES_LOCK = threading.Lock()
+_COLLECTION_INDEXES_READY: set[tuple[int, str, str]] = set()
+
+
+def _collection_index_ready_key(
+    db: Database, collection_name: str
+) -> tuple[int, str, str]:
+    client = getattr(db, "client", None)
+    client_identity = id(client) if client is not None else id(db)
+    db_name = str(getattr(db, "name", get_configured_database_name()))
+    return (client_identity, db_name, collection_name)
+
+
+def _mark_collection_indexes_ready(db: Database, collection_name: str) -> None:
+    _COLLECTION_INDEXES_READY.add(_collection_index_ready_key(db, collection_name))
+
+
+def _collection_indexes_are_ready(db: Database, collection_name: str) -> bool:
+    return _collection_index_ready_key(db, collection_name) in _COLLECTION_INDEXES_READY
 
 
 def _new_mongo_client(uri: str, server_selection_timeout_ms: int | None = None) -> MongoClient:
@@ -528,6 +548,8 @@ def close_connection():
     # mongomock doesn't require close(), but clear ref for correctness.
     _mongo_client_mock = None
     _last_auto_recovery_check_at = 0.0
+    with _COLLECTION_INDEXES_LOCK:
+        _COLLECTION_INDEXES_READY.clear()
 
 
 def invalidate_connection():
@@ -544,6 +566,8 @@ def invalidate_connection():
     _mongo_client_real = None
     _mongo_client_mock = None
     _last_auto_recovery_check_at = 0.0
+    with _COLLECTION_INDEXES_LOCK:
+        _COLLECTION_INDEXES_READY.clear()
 
 
 def test_connection(verbose: bool = False) -> bool:
@@ -568,6 +592,155 @@ def test_connection(verbose: bool = False) -> bool:
         if verbose:
             logger.warning("MongoDB connection test failed: %s", e)
         return False
+
+
+def _ensure_collection_indexes_once(
+    db: Database,
+    collection_name: str,
+    ensure_indexes,
+) -> Collection:
+    """Ensure collection indexes once per client/database pair.
+
+    Collection accessors sit on hot Vontology paths. Re-checking indexes on each
+    access causes repeated metadata round-trips and can stall request startup.
+    Fail open after the first attempt so reads can proceed even if index
+    verification is temporarily unavailable.
+    """
+
+    coll = db[collection_name]
+    if _collection_indexes_are_ready(db, collection_name):
+        return coll
+
+    with _COLLECTION_INDEXES_LOCK:
+        if _collection_indexes_are_ready(db, collection_name):
+            return coll
+        try:
+            ensure_indexes(coll)
+        except OperationFailure as e:
+            logger.warning("Could not create some indexes for %s: %s", collection_name, e)
+        except Exception as e:
+            logger.warning("Index creation skipped for %s: %s", collection_name, e)
+        _mark_collection_indexes_ready(db, collection_name)
+    return coll
+
+
+def _ensure_concepts_collection_indexes(concepts_coll: Collection) -> None:
+    existing_indexes = {idx["name"] for idx in concepts_coll.list_indexes()}
+
+    if (
+        "concept_id_1_unique" not in existing_indexes
+        and "concept_id_unique" not in existing_indexes
+    ):
+        concepts_coll.create_index(
+            [("concept_id", ASCENDING)], unique=True, name="concept_id_1_unique"
+        )
+
+    if "relationships.is_a_type_of_1" not in existing_indexes:
+        concepts_coll.create_index([("relationships.is_a_type_of", ASCENDING)])
+    if "relationships.has_subtype_1" not in existing_indexes:
+        concepts_coll.create_index([("relationships.has_subtype", ASCENDING)])
+    if "relationships.is_an_instance_of_1" not in existing_indexes:
+        concepts_coll.create_index([("relationships.is_an_instance_of", ASCENDING)])
+    if "relationships.has_instance_1" not in existing_indexes:
+        concepts_coll.create_index([("relationships.has_instance", ASCENDING)])
+    if "relationships.related_to_1" not in existing_indexes:
+        concepts_coll.create_index([("relationships.related_to", ASCENDING)])
+
+    if "metadata.concept_type_1" in existing_indexes:
+        try:
+            concepts_coll.drop_index("metadata.concept_type_1")
+        except Exception as _e:
+            logger.warning("Unable to drop retired metadata.concept_type index: %s", _e)
+    if "name_text" not in existing_indexes:
+        try:
+            concepts_coll.create_index(
+                [("name", "text")], name="name_text", default_language="none"
+            )
+        except Exception as _e:
+            logger.warning("Unable to create text index on name: %s", _e)
+    if "names.name_1" not in existing_indexes:
+        concepts_coll.create_index([("names.name", ASCENDING)], name="names.name_1")
+    if "names.text_1" not in existing_indexes:
+        concepts_coll.create_index([("names.text", ASCENDING)], name="names.text_1")
+    if "task_jira_external_id_lookup" not in existing_indexes:
+        concepts_coll.create_index(
+            [
+                ("relationships.is_an_instance_of", ASCENDING),
+                ("metadata.external_references.jira.external_id", ASCENDING),
+            ],
+            name="task_jira_external_id_lookup",
+        )
+    if "task_jira_external_id_org_lookup" not in existing_indexes:
+        concepts_coll.create_index(
+            [
+                ("relationships.is_an_instance_of", ASCENDING),
+                ("metadata.organisation_concept_id", ASCENDING),
+                ("metadata.external_references.jira.external_id", ASCENDING),
+            ],
+            name="task_jira_external_id_org_lookup",
+        )
+    if "timestamps.created_at_-1" not in existing_indexes:
+        concepts_coll.create_index([("timestamps.created_at", DESCENDING)])
+    if "timestamps.updated_at_-1" not in existing_indexes:
+        concepts_coll.create_index([("timestamps.updated_at", DESCENDING)])
+
+
+def _ensure_text_values_indexes(coll: Collection) -> None:
+    coll.create_index([("text", "text")], name="text_text_search")
+    coll.create_index([("lang", ASCENDING)], name="lang_1")
+    coll.create_index(
+        [("fingerprint", ASCENDING), ("lang", ASCENDING)],
+        name="fingerprint_lang_unique",
+        unique=True,
+        partialFilterExpression={"fingerprint": {"$exists": True, "$type": "string"}},
+    )
+    coll.create_index([("created_at", DESCENDING)], name="created_at_-1")
+    coll.create_index([("updated_at", DESCENDING)], name="updated_at_-1")
+
+
+def _ensure_text_relations_indexes(coll: Collection) -> None:
+    coll.create_index([("subject_concept_id", ASCENDING)], name="subject_concept_id_1")
+    coll.create_index([("predicate", ASCENDING)], name="predicate_1")
+    coll.create_index([("object_text_id", ASCENDING)], name="object_text_id_1")
+    coll.create_index(
+        [
+            ("subject_concept_id", ASCENDING),
+            ("predicate", ASCENDING),
+            ("object_text_id", ASCENDING),
+        ],
+        name="subject_predicate_object_unique",
+        unique=True,
+    )
+    coll.create_index(
+        [
+            ("predicate", ASCENDING),
+            ("context.next_run_epoch_ms", ASCENDING),
+            ("subject_concept_id", ASCENDING),
+        ],
+        name="schedule_due_lookup",
+        partialFilterExpression={
+            "predicate": "#V#next_run_scheduled_for",
+            "context.next_run_epoch_ms": {"$exists": True},
+        },
+    )
+    coll.create_index([("created_at", DESCENDING)], name="created_at_-1")
+    coll.create_index([("updated_at", DESCENDING)], name="updated_at_-1")
+
+
+def _ensure_meta_relations_indexes(coll: Collection) -> None:
+    existing_indexes = {idx["name"] for idx in coll.list_indexes()}
+    if "type_1_subject_type_id_1" not in existing_indexes:
+        coll.create_index(
+            [("type", ASCENDING), ("subject_type_id", ASCENDING)],
+            name="type_1_subject_type_id_1",
+        )
+    if "type_1_predicate_id_1" not in existing_indexes:
+        coll.create_index(
+            [("type", ASCENDING), ("predicate_id", ASCENDING)],
+            name="type_1_predicate_id_1",
+        )
+    if "updated_at_-1" not in existing_indexes:
+        coll.create_index([("updated_at", DESCENDING)], name="updated_at_-1")
 
 
 # --- Collection Access ---
@@ -609,103 +782,11 @@ def get_concepts_collection() -> Collection | None:
     """
     db = get_db()
     if db is not None:
-        concepts_coll = db[CONCEPTS_COLLECTION_NAME]
-        # Ensure indexes for unified concepts collection (idempotent)
-        try:
-            # Check if indexes already exist to avoid conflicts
-            existing_indexes = [idx["name"] for idx in concepts_coll.list_indexes()]
-
-            # Index for concept_id (primary identifier)
-            # Check for both old and new index names to avoid conflicts
-            if (
-                "concept_id_1_unique" not in existing_indexes
-                and "concept_id_unique" not in existing_indexes
-            ):
-                concepts_coll.create_index(
-                    [("concept_id", ASCENDING)], unique=True, name="concept_id_1_unique"
-                )
-
-            # Indexes for relationship fields (Phase 2 clear naming)
-            if "relationships.is_a_type_of_1" not in existing_indexes:
-                concepts_coll.create_index([("relationships.is_a_type_of", ASCENDING)])
-            if "relationships.has_subtype_1" not in existing_indexes:
-                concepts_coll.create_index([("relationships.has_subtype", ASCENDING)])
-            if "relationships.is_an_instance_of_1" not in existing_indexes:
-                concepts_coll.create_index(
-                    [("relationships.is_an_instance_of", ASCENDING)]
-                )
-            if "relationships.has_instance_1" not in existing_indexes:
-                concepts_coll.create_index([("relationships.has_instance", ASCENDING)])
-            if "relationships.related_to_1" not in existing_indexes:
-                concepts_coll.create_index([("relationships.related_to", ASCENDING)])
-
-            # Remove retired runtime-classification index once structural routes are in use.
-            if "metadata.concept_type_1" in existing_indexes:
-                try:
-                    concepts_coll.drop_index("metadata.concept_type_1")
-                except Exception as _e:
-                    logger.warning(
-                        f"Unable to drop retired metadata.concept_type index: {_e}"
-                    )
-            # Migrate away from the legacy title text index to name text index
-            if "name_text" not in existing_indexes:
-                try:
-                    concepts_coll.create_index(
-                        [("name", "text")], name="name_text", default_language="none"
-                    )
-                except Exception as _e:
-                    # Best-effort; some MongoDB configurations may restrict text indexes
-                    logger.warning(f"Unable to create text index on name: {_e}")
-            # New: Support searching within names[] (canonical storage for display names)
-            if "names.name_1" not in existing_indexes:
-                concepts_coll.create_index(
-                    [("names.name", ASCENDING)], name="names.name_1"
-                )
-            # Legacy compatibility: some names[] entries might use 'text' instead of 'name'
-            if "names.text_1" not in existing_indexes:
-                concepts_coll.create_index(
-                    [("names.text", ASCENDING)], name="names.text_1"
-                )
-            # Task import and incremental Jira sync rely on exact Jira issue-key
-            # lookups plus organisation-scoped replays.
-            if "task_jira_external_id_lookup" not in existing_indexes:
-                concepts_coll.create_index(
-                    [
-                        ("relationships.is_an_instance_of", ASCENDING),
-                        (
-                            "metadata.external_references.jira.external_id",
-                            ASCENDING,
-                        ),
-                    ],
-                    name="task_jira_external_id_lookup",
-                )
-            if "task_jira_external_id_org_lookup" not in existing_indexes:
-                concepts_coll.create_index(
-                    [
-                        ("relationships.is_an_instance_of", ASCENDING),
-                        ("metadata.organisation_concept_id", ASCENDING),
-                        (
-                            "metadata.external_references.jira.external_id",
-                            ASCENDING,
-                        ),
-                    ],
-                    name="task_jira_external_id_org_lookup",
-                )
-
-            # Timestamp indexes
-            if "timestamps.created_at_-1" not in existing_indexes:
-                concepts_coll.create_index([("timestamps.created_at", DESCENDING)])
-            if "timestamps.updated_at_-1" not in existing_indexes:
-                concepts_coll.create_index([("timestamps.updated_at", DESCENDING)])
-
-        except OperationFailure as e:
-            logger.warning(
-                f"Could not create some indexes for concepts collection: {e}"
-            )
-        except Exception as e:
-            logger.warning(f"Index creation skipped for concepts collection: {e}")
-
-        return concepts_coll
+        return _ensure_collection_indexes_once(
+            db,
+            CONCEPTS_COLLECTION_NAME,
+            _ensure_concepts_collection_indexes,
+        )
     return None
 
 
@@ -827,43 +908,11 @@ def get_text_values_collection() -> Collection | None:
     """
     db = get_db()
     if db is not None:
-        coll = db[TEXT_VALUES_COLLECTION_NAME]
-        try:
-            existing_indexes = [idx["name"] for idx in coll.list_indexes()]
-
-            # Full-text search on text content
-            if "text_text_search" not in existing_indexes:
-                coll.create_index([("text", "text")], name="text_text_search")
-
-            # Language code for filtering
-            if "lang_1" not in existing_indexes:
-                coll.create_index([("lang", ASCENDING)])
-
-            # Optional fingerprint + lang unique combo for dedup (only when fingerprint exists)
-            if "fingerprint_lang_unique" not in existing_indexes:
-                coll.create_index(
-                    [("fingerprint", ASCENDING), ("lang", ASCENDING)],
-                    name="fingerprint_lang_unique",
-                    unique=True,
-                    partialFilterExpression={
-                        "fingerprint": {"$exists": True, "$type": "string"}
-                    },
-                )
-
-            # Timestamps
-            if "created_at_-1" not in existing_indexes:
-                coll.create_index([("created_at", DESCENDING)], name="created_at_-1")
-            if "updated_at_-1" not in existing_indexes:
-                coll.create_index([("updated_at", DESCENDING)], name="updated_at_-1")
-        except OperationFailure as e:
-            logger.warning(
-                f"Could not create some indexes for {TEXT_VALUES_COLLECTION_NAME}: {e}"
-            )
-        except Exception as e:
-            logger.warning(
-                f"Index creation skipped for {TEXT_VALUES_COLLECTION_NAME}: {e}"
-            )
-        return coll
+        return _ensure_collection_indexes_once(
+            db,
+            TEXT_VALUES_COLLECTION_NAME,
+            _ensure_text_values_indexes,
+        )
     return None
 
 
@@ -873,64 +922,11 @@ def get_text_relations_collection() -> Collection | None:
     """
     db = get_db()
     if db is not None:
-        coll = db[TEXT_RELATIONS_COLLECTION_NAME]
-        try:
-            existing_indexes = [idx["name"] for idx in coll.list_indexes()]
-
-            # Fast lookups by subject, predicate, and object
-            if "subject_concept_id_1" not in existing_indexes:
-                coll.create_index(
-                    [("subject_concept_id", ASCENDING)], name="subject_concept_id_1"
-                )
-            if "predicate_1" not in existing_indexes:
-                coll.create_index([("predicate", ASCENDING)], name="predicate_1")
-            if "object_text_id_1" not in existing_indexes:
-                coll.create_index(
-                    [("object_text_id", ASCENDING)], name="object_text_id_1"
-                )
-
-            # Enforce uniqueness of the same triple
-            if "subject_predicate_object_unique" not in existing_indexes:
-                coll.create_index(
-                    [
-                        ("subject_concept_id", ASCENDING),
-                        ("predicate", ASCENDING),
-                        ("object_text_id", ASCENDING),
-                    ],
-                    name="subject_predicate_object_unique",
-                    unique=True,
-                )
-
-            # WS5: query-first due schedule scans use next_run epoch metadata on
-            # schedule relations. This avoids broad in-memory concept scans.
-            if "schedule_due_lookup" not in existing_indexes:
-                coll.create_index(
-                    [
-                        ("predicate", ASCENDING),
-                        ("context.next_run_epoch_ms", ASCENDING),
-                        ("subject_concept_id", ASCENDING),
-                    ],
-                    name="schedule_due_lookup",
-                    partialFilterExpression={
-                        "predicate": "#V#next_run_scheduled_for",
-                        "context.next_run_epoch_ms": {"$exists": True},
-                    },
-                )
-
-            # Timestamps
-            if "created_at_-1" not in existing_indexes:
-                coll.create_index([("created_at", DESCENDING)], name="created_at_-1")
-            if "updated_at_-1" not in existing_indexes:
-                coll.create_index([("updated_at", DESCENDING)], name="updated_at_-1")
-        except OperationFailure as e:
-            logger.warning(
-                f"Could not create some indexes for {TEXT_RELATIONS_COLLECTION_NAME}: {e}"
-            )
-        except Exception as e:
-            logger.warning(
-                f"Index creation skipped for {TEXT_RELATIONS_COLLECTION_NAME}: {e}"
-            )
-        return coll
+        return _ensure_collection_indexes_once(
+            db,
+            TEXT_RELATIONS_COLLECTION_NAME,
+            _ensure_text_relations_indexes,
+        )
     return None
 
 
@@ -947,30 +943,11 @@ def get_meta_relations_collection() -> Collection | None:
     """
     db = get_db()
     if db is not None:
-        coll = db[META_RELATIONS_COLLECTION_NAME]
-        try:
-            existing_indexes = [idx["name"] for idx in coll.list_indexes()]
-            if "type_1_subject_type_id_1" not in existing_indexes:
-                coll.create_index(
-                    [("type", ASCENDING), ("subject_type_id", ASCENDING)],
-                    name="type_1_subject_type_id_1",
-                )
-            if "type_1_predicate_id_1" not in existing_indexes:
-                coll.create_index(
-                    [("type", ASCENDING), ("predicate_id", ASCENDING)],
-                    name="type_1_predicate_id_1",
-                )
-            if "updated_at_-1" not in existing_indexes:
-                coll.create_index([("updated_at", DESCENDING)], name="updated_at_-1")
-        except OperationFailure as e:
-            logger.warning(
-                f"Could not create some indexes for {META_RELATIONS_COLLECTION_NAME}: {e}"
-            )
-        except Exception as e:
-            logger.warning(
-                f"Index creation skipped for {META_RELATIONS_COLLECTION_NAME}: {e}"
-            )
-        return coll
+        return _ensure_collection_indexes_once(
+            db,
+            META_RELATIONS_COLLECTION_NAME,
+            _ensure_meta_relations_indexes,
+        )
     return None
 
 

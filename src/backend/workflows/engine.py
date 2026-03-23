@@ -41,6 +41,7 @@ from .execution_contracts import (
     get_last_control_signal_scope,
     resolve_control_signal_from_outputs,
     set_workflow_result_envelope,
+    snapshot_workflow_mapping,
     stamp_control_signal_context,
 )
 from .plan_state_runtime import (
@@ -1493,6 +1494,7 @@ class WorkflowExecutor:
                         if isinstance(existing_record_raw, Mapping):
                             existing_record = existing_record_raw
                     if existing_record is not None:
+                        action_output_snapshot: dict[str, Any] = {}
                         cached_outputs_raw = existing_record.get("outputs")
                         cached_outputs = (
                             {
@@ -1525,11 +1527,17 @@ class WorkflowExecutor:
                                 duration_ms=result.duration_ms,
                             )
                         if cached_outputs:
-                            context.update(cached_outputs)
+                            cached_output_snapshot = snapshot_workflow_mapping(
+                                cached_outputs
+                            )
+                            action_output_snapshot = snapshot_workflow_mapping(
+                                cached_output_snapshot
+                            )
+                            context.update(cached_output_snapshot)
                             apply_tool_output_context_mappings(
                                 context=context,
                                 metadata=state_spec.metadata,
-                                action_outputs=cached_outputs,
+                                action_outputs=cached_output_snapshot,
                                 state_id=current_state,
                                 action_id=action_target_id,
                             )
@@ -1655,15 +1663,19 @@ class WorkflowExecutor:
                                 duration_ms=result.duration_ms,
                             )
                         action_outcome = normalise_action_outcome(result.status)
+                        action_output_snapshot: dict[str, Any] = {}
                         if (
                             action_outcome != WORKFLOW_ACTION_OUTCOME_FAILURE
                             and isinstance(result.outputs, Mapping)
                         ):
-                            context.update(result.outputs)
+                            action_output_snapshot = snapshot_workflow_mapping(
+                                result.outputs
+                            )
+                            context.update(action_output_snapshot)
                             apply_tool_output_context_mappings(
                                 context=context,
                                 metadata=state_spec.metadata,
-                                action_outputs=result.outputs,
+                                action_outputs=action_output_snapshot,
                                 state_id=current_state,
                                 action_id=action_target_id,
                             )
@@ -1675,7 +1687,9 @@ class WorkflowExecutor:
                                 == WORKFLOW_ACTION_OUTCOME_SUCCESS
                             ):
                                 raw_records[idempotency_key] = {
-                                    "outputs": dict(result.outputs),
+                                    "outputs": snapshot_workflow_mapping(
+                                        action_output_snapshot
+                                    ),
                                     "call_id": result.call_id,
                                 }
                                 idempotency_event = {
@@ -1703,9 +1717,7 @@ class WorkflowExecutor:
                         action_status=result.status,
                         action_outcome=action_outcome,
                         action_error=result.error,
-                        action_outputs=result.outputs
-                        if isinstance(result.outputs, Mapping)
-                        else {},
+                        action_outputs=action_output_snapshot,
                         control_signal=get_last_control_signal(context),
                         control_signal_scope=get_last_control_signal_scope(context),
                         duration_ms=result.duration_ms,

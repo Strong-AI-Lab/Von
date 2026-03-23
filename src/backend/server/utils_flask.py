@@ -98,13 +98,75 @@ _durable_action_registry = None
 def _build_durable_workflow_registry():
     """Build the durable runtime registry without blocking on parity work."""
     from ..workflows.durable.registry_factory import (
-        build_workflow_registry_read_only,
+        get_shared_workflow_registry_read_only,
     )
 
-    # Durable startup only needs an authoritative workflow registry. Keep the
-    # parity/capability inventory path deferred so the worker can start even
-    # when Vontology-backed diagnostics are slow.
-    return build_workflow_registry_read_only(defer_parity_work=True)
+    # Durable startup should populate the same shared registry that verified
+    # submission and discovery reuse later, otherwise launch-time verification
+    # pays for a second full lazy-registry build in the same process.
+    return get_shared_workflow_registry_read_only(defer_parity_work=True)
+
+
+def _bootstrap_workflow_authority_for_startup(app_logger) -> dict[str, Any]:
+    """Repair workflow identity/type drift before strict parity checks run.
+
+    Registry construction is intentionally read-only. Startup still needs one
+    authoritative preflight repair pass so strict parity enforcement does not
+    collapse interactive routes back to direct-LLM fallback when workflow
+    concepts exist but are missing required typing metadata.
+    """
+
+    try:
+        from ..workflows.durable.registry_factory import (
+            build_vontology_workflow_registry_snapshot,
+            invalidate_shared_workflow_registry_read_only,
+        )
+        from ..workflows.workflow_concept_authority_service import (
+            bootstrap_workflow_concept_identities,
+            build_workflow_concept_authority_report,
+        )
+
+        authority_registry = build_vontology_workflow_registry_snapshot()
+        before_report = build_workflow_concept_authority_report(
+            registry=authority_registry
+        )
+        bootstrap_report = dict(
+            bootstrap_workflow_concept_identities(registry=authority_registry)
+        )
+        after_report = build_workflow_concept_authority_report(registry=authority_registry)
+        invalidate_shared_workflow_registry_read_only()
+
+        report = {
+            **bootstrap_report,
+            "success": not bool(after_report.get("drift_detected")),
+            "before_authority_counts": dict(before_report.get("counts") or {}),
+            "after_authority_counts": dict(after_report.get("counts") or {}),
+        }
+        if not bool(report.get("success")):
+            app_logger.warning(
+                "[durable_workflows] workflow authority bootstrap incomplete: %s",
+                report,
+            )
+        return report
+    except Exception as exc:
+        report = {
+            "success": False,
+            "error": str(exc),
+            "counts": {
+                "registry_workflows": 0,
+                "created": 0,
+                "updated": 0,
+                "unchanged": 0,
+                "errors": 1,
+            },
+            "before_authority_counts": {},
+            "after_authority_counts": {},
+        }
+        app_logger.warning(
+            "[durable_workflows] workflow authority bootstrap error: %s",
+            exc,
+        )
+        return report
 
 
 def _build_durable_action_registry():
@@ -113,9 +175,9 @@ def _build_durable_action_registry():
     Uses the centralised factory from registry_factory.py.
     See JVNAUTOSCI-922 Phase 1.
     """
-    from ..workflows.durable.registry_factory import build_durable_action_registry
+    from ..workflows.durable.registry_factory import get_shared_durable_action_registry
 
-    return build_durable_action_registry()
+    return get_shared_durable_action_registry()
 
 
 def _get_durable_definition_loader():
@@ -186,6 +248,29 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             recover_orphaned_instances,
             get_system_status,
         )
+        from ..services.testing_workflow_vontology_service import (
+            bootstrap_canonical_testing_workflows,
+        )
+
+        testing_workflow_bootstrap_report: dict[str, Any]
+        try:
+            testing_workflow_bootstrap_report = dict(
+                bootstrap_canonical_testing_workflows()
+            )
+            testing_workflow_bootstrap_report.setdefault("success", True)
+        except Exception as bootstrap_exc:
+            testing_workflow_bootstrap_report = {
+                "success": False,
+                "error": str(bootstrap_exc),
+            }
+            app_logger.warning(
+                "[durable_workflows] testing workflow bootstrap error: %s",
+                bootstrap_exc,
+            )
+
+        workflow_authority_bootstrap_report = _bootstrap_workflow_authority_for_startup(
+            app_logger
+        )
 
         # Build registries if not already done
         if _durable_workflow_registry is None:
@@ -213,6 +298,18 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
                 os.getenv("VON_DURABLE_SCHEDULER_CHECK_INTERVAL", "60.0")
             ),
         )
+        result["testing_workflow_bootstrap"] = testing_workflow_bootstrap_report
+        result["workflow_authority_bootstrap"] = workflow_authority_bootstrap_report
+        if not bool(testing_workflow_bootstrap_report.get("success", False)):
+            app_logger.warning(
+                "[durable_workflows] testing workflow bootstrap failed: %s",
+                testing_workflow_bootstrap_report,
+            )
+        if not bool(workflow_authority_bootstrap_report.get("success", False)):
+            app_logger.warning(
+                "[durable_workflows] workflow authority bootstrap failed: %s",
+                workflow_authority_bootstrap_report,
+            )
 
         # Ensure long-running identity-resolution maintenance keeps running
         # without manual schedule setup.

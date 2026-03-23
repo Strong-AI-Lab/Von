@@ -1673,23 +1673,30 @@ def validate_openai_config(
     return is_valid, messages
 
 
-def get_active_model_name() -> Optional[str]:
+def get_active_model_name(
+    *,
+    user_concept_id: Optional[str] = None,
+    org_concept_id: Optional[str] = None,
+) -> Optional[str]:
     """Helper function to get the model name from the active LLM setting."""
-    # Get user/org context from session if available
-    user_concept_id = None
-    org_concept_id = None
-    try:
-        from flask import session, has_request_context
-        from ..security.access_control import get_effective_user_concept_id
+    resolved_user_concept_id = user_concept_id
+    resolved_org_concept_id = org_concept_id
+    if not resolved_user_concept_id or not resolved_org_concept_id:
+        try:
+            from flask import has_request_context, session
+            from ..security.access_control import get_effective_user_concept_id
 
-        if has_request_context():
-            user_concept_id = get_effective_user_concept_id()
-            org_concept_id = session.get("organisation_concept_id")
-    except Exception:
-        pass
+            if has_request_context():
+                if not resolved_user_concept_id:
+                    resolved_user_concept_id = get_effective_user_concept_id()
+                if not resolved_org_concept_id:
+                    resolved_org_concept_id = session.get("organisation_concept_id")
+        except Exception:
+            pass
 
     active_llm = resolve_llm_setting(
-        user_concept_id=user_concept_id, org_concept_id=org_concept_id
+        user_concept_id=resolved_user_concept_id,
+        org_concept_id=resolved_org_concept_id,
     )
     if active_llm:
         provider = active_llm.get("provider")

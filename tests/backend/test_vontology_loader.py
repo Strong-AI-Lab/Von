@@ -484,6 +484,32 @@ class TestWorkflowStepRuntimePolicyResolution:
             "mutative_vontology_non_destructive"
         )
 
+    def test_resolve_workflow_step_runtime_policies_fetches_texts_once(self):
+        rows = [
+            {
+                "predicate": "#V#hasWorkflowStepRetryPolicyJson",
+                "text": (
+                    '{"schema_version":"workflow_step_retry_policy.v1",'
+                    '"max_attempts":3,"retry_on_outcomes":["failure"]}'
+                ),
+            },
+            {
+                "predicate": "#V#hasWorkflowStepApprovalGateJson",
+                "text": (
+                    '{"schema_version":"workflow_step_approval_gate.v1",'
+                    '"approval_context_key":"write_approved"}'
+                ),
+            },
+        ]
+
+        with patch(
+            "src.backend.workflows.vontology_loader.get_texts_for_concept",
+            return_value=rows,
+        ) as mocked_get_texts:
+            resolve_workflow_step_runtime_policies("#V#step", text_cache={})
+
+        assert mocked_get_texts.call_count == 1
+
 
 class TestWorkflowLongHorizonPolicyResolution:
     def test_resolve_workflow_long_horizon_policies_reads_text_relations(self):
@@ -532,6 +558,35 @@ class TestWorkflowLongHorizonPolicyResolution:
             "discover": "done",
             "dispatch": "done",
         }
+
+    def test_resolve_workflow_long_horizon_policies_fetches_texts_once(self):
+        rows = [
+            {
+                "predicate": "#V#hasWorkflowPlanStatePolicyJson",
+                "text": (
+                    '{"schema_version":"workflow_plan_state_policy.v1",'
+                    '"plan_items":["discover"]}'
+                ),
+            },
+            {
+                "predicate": "#V#hasWorkflowCompletionGateJson",
+                "text": (
+                    '{"schema_version":"workflow_completion_gate.v1",'
+                    '"required_done_plan_items":["discover"]}'
+                ),
+            },
+        ]
+
+        with patch(
+            "src.backend.workflows.vontology_loader.get_texts_for_concept",
+            return_value=rows,
+        ) as mocked_get_texts:
+            resolve_workflow_long_horizon_policies(
+                "#V#long_horizon_workflow",
+                text_cache={},
+            )
+
+        assert mocked_get_texts.call_count == 1
 
 
 class TestWorkflowPromptContracts:
@@ -1846,6 +1901,55 @@ class TestSemanticContextMapping:
         assert defn.states["#V#step"].metadata["reads_context_keys"] == [
             "target_type_id"
         ]
+
+    def test_structured_input_mapping_can_be_optional(self):
+        mapping_id = "#V#mapping_structured_optional_input"
+        docs = {
+            "#V#step": {
+                "concept_id": "#V#step",
+                "relationships": {},
+            },
+            mapping_id: {
+                "concept_id": mapping_id,
+                "concept_data": {
+                    "workflow_mapping_spec": {
+                        "schema_version": 1,
+                        "mapping_type": "context_key_to_tool_param",
+                        "workflow_step_id": "#V#step",
+                        "tool_id": "fetch_concept",
+                        "context_key_concept_id": "#V#workflow_context_key_target_type_id",
+                        "tool_param_name": "concept_id",
+                        "required": False,
+                    }
+                },
+                "relationships": {},
+            },
+        }
+        steps = [
+            _make_step(
+                "#V#step",
+                invokes_action="fetch_concept",
+                context_input_mappings=[mapping_id],
+            )
+        ]
+        graph = _make_graph(initial_step="#V#step", steps=steps)
+
+        with _stub_fetch_concepts(docs), _stub_narrative():
+            with patch(
+                "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+                return_value=(graph, []),
+            ):
+                defn = load_workflow_definition_from_vontology("#V#test_workflow")
+
+        assert defn is not None
+        action = defn.states["#V#step"].actions[0]
+        assert action.inputs == {
+            "concept_id": {
+                "$context_key": "target_type_id",
+                "$mapping_concept_id": mapping_id,
+            }
+        }
+        assert "reads_context_keys" not in defn.states["#V#step"].metadata
 
     def test_structured_input_mapping_tool_mismatch_is_rejected(self):
         mapping_id = "#V#mapping_structured_input_mismatch"

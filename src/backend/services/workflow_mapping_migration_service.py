@@ -146,7 +146,7 @@ def _parse_input_mapping(
         action_id=action_id,
     )
 
-    context_key, tool_param, reason = _extract_mapping_pair(
+    context_key, tool_param, _, reason = _extract_mapping_pair(
         mapping_concept_id=mapping_concept_id,
         mapping_doc=dict(mapping_doc) if isinstance(mapping_doc, Mapping) else None,
         step_id=step_id,
@@ -162,7 +162,7 @@ def _parse_input_mapping(
 
     if recovery_required:
         fallback_doc = _description_only_doc(mapping_concept_id, mapping_doc)
-        context_key, tool_param, fallback_reason = _extract_mapping_pair(
+        context_key, tool_param, _, fallback_reason = _extract_mapping_pair(
             mapping_concept_id=mapping_concept_id,
             mapping_doc=fallback_doc,
             step_id=step_id,

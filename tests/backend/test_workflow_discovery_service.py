@@ -28,6 +28,7 @@ from src.backend.services.workflow_discovery_service import (
     WORKFLOW_TYPE_IDS,
     WorkflowDiscoveryResult,
     WorkflowMatch,
+    _annotate_and_rank_candidates,
     _build_keyword_fallback_queries,
     _classify_workflow_concept_executability,
     _deduplicate_and_rank,
@@ -686,6 +687,70 @@ class TestDiscoverWorkflowsForTurn:
         discover_workflows("Represent the uploaded paper now", max_results=1)
 
         assert mock_name_fallback.called is True
+
+    @patch("src.backend.services.workflow_discovery_service._enrich_workflow_matches")
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_name_fallback")
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_vontology")
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
+    @patch("src.backend.services.workflow_discovery_service._search_workflow_capabilities")
+    def test_capability_index_short_circuits_secondary_search_when_sufficient(
+        self,
+        mock_capability: MagicMock,
+        mock_semantic: MagicMock,
+        mock_vontology: MagicMock,
+        mock_name_fallback: MagicMock,
+        mock_enrich: MagicMock,
+    ) -> None:
+        mock_capability.return_value = [
+            WorkflowMatch("#V#wf1", "Workflow 1", relevance_score=0.95),
+            WorkflowMatch("#V#wf2", "Workflow 2", relevance_score=0.92),
+            WorkflowMatch("#V#wf3", "Workflow 3", relevance_score=0.9),
+        ]
+        mock_semantic.return_value = []
+        mock_vontology.return_value = []
+        mock_name_fallback.return_value = []
+        mock_enrich.side_effect = lambda matches: matches
+
+        with patch(
+            "src.backend.services.workflow_discovery_service._classify_workflow_concept_executability",
+            return_value=(True, EXECUTABILITY_EXECUTABLE_NOW, None),
+        ), patch(
+            "src.backend.services.workflow_discovery_service._has_authoritative_routing_text",
+            return_value=True,
+        ):
+            result = discover_workflows("Represent the uploaded paper now", max_results=3)
+
+        assert len(result.matches) == 3
+        assert result.search_sources == ["capability_index"]
+        assert mock_semantic.called is False
+        assert mock_vontology.called is False
+        assert mock_name_fallback.called is False
+
+    @patch(
+        "src.backend.services.workflow_discovery_service._classify_workflow_concept_executability"
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._has_authoritative_routing_text"
+    )
+    def test_annotation_stops_after_enough_routing_candidates(
+        self,
+        mock_has_authoritative_text: MagicMock,
+        mock_classify: MagicMock,
+    ) -> None:
+        matches = [
+            WorkflowMatch("#V#wf1", "Workflow 1", relevance_score=0.95),
+            WorkflowMatch("#V#wf2", "Workflow 2", relevance_score=0.93),
+            WorkflowMatch("#V#wf3", "Workflow 3", relevance_score=0.91),
+            WorkflowMatch("#V#wf4", "Workflow 4", relevance_score=0.89),
+        ]
+        mock_classify.return_value = (True, EXECUTABILITY_EXECUTABLE_NOW, None)
+        mock_has_authoritative_text.return_value = True
+
+        annotated = _annotate_and_rank_candidates(matches, max_results=2)
+
+        assert len(annotated) == 2
+        assert mock_classify.call_count == 2
+        assert mock_has_authoritative_text.call_count == 2
 
     @patch("src.backend.services.workflow_discovery_service.discover_workflows")
     def test_catches_exceptions(self, mock_discover: MagicMock) -> None:

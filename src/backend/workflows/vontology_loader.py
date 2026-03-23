@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, cast
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..services.text_value_service import (
@@ -404,6 +404,7 @@ _WORKFLOW_MAPPING_SPEC_ALLOWED_KEYS: Tuple[str, ...] = (
     "tool_param_name",
     "tool_output_field_name",
     "target_context_key_concept_id",
+    "required",
 )
 _WORKFLOW_INPUT_MAPPING_TYPES: Tuple[str, ...] = (
     "context_key_to_tool_param",
@@ -417,6 +418,18 @@ _WORKFLOW_OUTPUT_MAPPING_TYPES: Tuple[str, ...] = (
 
 def _normalise_mapping_type(value: Any) -> str:
     return str(value or "").strip().lower()
+
+
+def _coerce_mapping_required(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"false", "0", "no", "off"}:
+            return False
+        if lowered in {"true", "1", "yes", "on"}:
+            return True
+    return bool(value) if value is not None else True
 
 
 def _coerce_mapping_spec_object(value: Any) -> Dict[str, Any] | None:
@@ -657,6 +670,105 @@ def detect_vacuous_workflow_steps(
     return issues
 
 
+def build_workflow_process_graph_from_definition(
+    definition: WorkflowDefinition | None,
+) -> Dict[str, Any] | None:
+    """Project an in-memory workflow definition into graph-like step metadata.
+
+    Launch-time verification already has a resolved ``WorkflowDefinition`` in
+    memory. Rebuilding the raw Vontology process graph just to recover vacuity
+    diagnostics is unnecessarily expensive, so this helper derives the small
+    graph shape that ``detect_vacuous_workflow_steps()`` needs directly from
+    the definition.
+    """
+
+    if definition is None:
+        return None
+
+    workflow_id = str(getattr(definition, "workflow_id", "") or "").strip()
+    initial_state = str(getattr(definition, "initial_state", "") or "").strip()
+    states_raw = getattr(definition, "states", {})
+    states = states_raw if isinstance(states_raw, Mapping) else {}
+
+    steps: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+
+    for index, state_id in enumerate(str(item) for item in states.keys()):
+        state_spec = states[state_id]
+        metadata_raw = getattr(state_spec, "metadata", {})
+        metadata = dict(metadata_raw) if isinstance(metadata_raw, Mapping) else {}
+        actions_raw = getattr(state_spec, "actions", ())
+        actions = (
+            list(actions_raw)
+            if isinstance(actions_raw, Sequence)
+            and not isinstance(actions_raw, (str, bytes, bytearray))
+            else []
+        )
+
+        invokes_action = ""
+        invokes_workflow = str(metadata.get("invokes_workflow") or "").strip()
+        for action in actions:
+            action_target = str(
+                getattr(action, "action_id", None)
+                or getattr(action, "target_id", "")
+                or ""
+            ).strip()
+            if action_target:
+                invokes_action = action_target
+                break
+
+        steps.append(
+            {
+                "step_id": state_id,
+                "name": state_id,
+                "step_index": index,
+                "invokes_action": invokes_action or None,
+                "invokes_workflow": invokes_workflow or None,
+                "preconditions": list(metadata.get("preconditions") or []),
+                "effects": list(metadata.get("effects") or []),
+                "reads_variables": list(metadata.get("reads_variables") or []),
+                "writes_variables": list(metadata.get("writes_variables") or []),
+                "context_input_mappings": list(
+                    metadata.get("context_input_mappings") or []
+                ),
+                "tool_output_context_mappings": list(
+                    metadata.get("tool_output_context_mappings") or []
+                ),
+                "writes_context_keys": list(metadata.get("writes_context_keys") or []),
+            }
+        )
+
+        transitions_raw = getattr(state_spec, "transitions", ())
+        transitions = (
+            list(transitions_raw)
+            if isinstance(transitions_raw, Sequence)
+            and not isinstance(transitions_raw, (str, bytes, bytearray))
+            else []
+        )
+        for transition in transitions:
+            to_state = str(getattr(transition, "to_state", "") or "").strip()
+            if not to_state:
+                continue
+            predicate = str(getattr(transition, "reason", "") or "").strip() or "transition"
+            edges.append({"from": state_id, "predicate": predicate, "to": to_state})
+
+    workflow_metadata_raw = getattr(definition, "metadata", {})
+    workflow_metadata = (
+        dict(workflow_metadata_raw)
+        if isinstance(workflow_metadata_raw, Mapping)
+        else {}
+    )
+    return {
+        "workflow_id": workflow_id,
+        "initial_step": initial_state or None,
+        "steps": steps,
+        "edges": edges,
+        "warnings": [],
+        "workflow_metadata": workflow_metadata,
+        "variable_declarations": list(workflow_metadata.get("variable_declarations") or []),
+    }
+
+
 def _first_relationship_target(
     relationships: Mapping[str, Any], candidate_predicates: Iterable[str]
 ) -> Optional[str]:
@@ -760,12 +872,13 @@ def _extract_mapping_pair(
     mapping_doc: Dict[str, Any] | None,
     step_id: str | None,
     action_id: str | None,
-) -> tuple[str | None, str | None, str | None]:
+) -> tuple[str | None, str | None, bool, str | None]:
     structured_spec, structured_error = _extract_structured_mapping_spec(mapping_doc)
     if structured_spec:
         mapping_type = _normalise_mapping_type(structured_spec.get("mapping_type"))
+        required = _coerce_mapping_required(structured_spec.get("required"))
         if mapping_type not in _WORKFLOW_INPUT_MAPPING_TYPES:
-            return None, None, "schema_mapping_type_mismatch"
+            return None, None, required, "schema_mapping_type_mismatch"
         validation_error = _validate_mapping_spec_common(
             spec=structured_spec,
             step_id=step_id,
@@ -774,34 +887,34 @@ def _extract_mapping_pair(
         if validation_error:
             context_key, tool_param = _mapping_pair_from_concept_id(mapping_concept_id)
             if context_key and tool_param:
-                return context_key, tool_param, None
+                return context_key, tool_param, required, None
             description = _mapping_description_text(mapping_concept_id, mapping_doc)
             context_key, tool_param = _mapping_pair_from_description(
                 str(description or "")
             )
             if context_key and tool_param:
-                return context_key, tool_param, None
-            return None, None, validation_error
+                return context_key, tool_param, required, None
+            return None, None, required, validation_error
         context_key = _normalise_context_key_symbol(
             str(structured_spec.get("context_key_concept_id") or "")
         )
         tool_param = str(structured_spec.get("tool_param_name") or "").strip()
         if not context_key or not tool_param:
-            return None, None, "schema_required_fields_missing"
-        return context_key, tool_param, None
+            return None, None, required, "schema_required_fields_missing"
+        return context_key, tool_param, required, None
     if structured_error:
-        return None, None, structured_error
+        return None, None, True, structured_error
 
     context_key, tool_param = _mapping_pair_from_concept_id(mapping_concept_id)
     if context_key and tool_param:
-        return context_key, tool_param, None
+        return context_key, tool_param, True, None
 
     description = _mapping_description_text(mapping_concept_id, mapping_doc)
     context_key, tool_param = _mapping_pair_from_description(str(description or ""))
     if context_key and tool_param:
-        return context_key, tool_param, None
+        return context_key, tool_param, True, None
 
-    return None, None, "mapping_pattern_not_detected"
+    return None, None, True, "mapping_pattern_not_detected"
 
 
 def _tool_output_mapping_pair_from_concept_id(
@@ -1564,6 +1677,8 @@ def _normalise_workflow_publication_lifecycle(
 def resolve_workflow_publication_lifecycle(
     workflow_id: str,
     workflow_doc: Mapping[str, Any] | None = None,
+    *,
+    text_cache: Dict[str, List[Mapping[str, Any]]] | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
     """Resolve explicit workflow publication lifecycle metadata.
 
@@ -1604,6 +1719,7 @@ def resolve_workflow_publication_lifecycle(
         concept_id=workflow_id_text,
         predicate_precedence=WORKFLOW_PUBLICATION_LIFECYCLE_TEXT_PREDICATE_PRECEDENCE,
         normaliser=_normalise_workflow_publication_lifecycle,
+        text_cache=text_cache,
     )
     if lifecycle is not None:
         return lifecycle, lifecycle_source or WORKFLOW_PUBLICATION_LIFECYCLE_SOURCE_NONE
@@ -1612,17 +1728,42 @@ def resolve_workflow_publication_lifecycle(
     return None, WORKFLOW_PUBLICATION_LIFECYCLE_SOURCE_NONE
 
 
+def _get_cached_policy_text_rows(
+    concept_id: str,
+    *,
+    text_cache: Dict[str, List[Mapping[str, Any]]] | None = None,
+) -> List[Mapping[str, Any]]:
+    if text_cache is not None and concept_id in text_cache:
+        return text_cache[concept_id]
+
+    try:
+        raw_texts = get_texts_for_concept(concept_id)
+    except Exception:
+        raw_texts = []
+    texts: List[Mapping[str, Any]] = [
+        cast(Mapping[str, Any], item)
+        for item in raw_texts
+        if isinstance(item, Mapping)
+    ]
+
+    if text_cache is not None:
+        text_cache[concept_id] = texts
+    return texts
+
+
 def _resolve_policy_from_text_relations(
     *,
     concept_id: str,
     predicate_precedence: Tuple[Tuple[str, ...], ...],
     normaliser: Callable[[Any], dict[str, Any] | None],
+    text_rows: Sequence[Mapping[str, Any]] | None = None,
+    text_cache: Dict[str, List[Mapping[str, Any]]] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    try:
-        raw_texts = get_texts_for_concept(concept_id)
-    except Exception:
-        raw_texts = []
-    texts = [item for item in raw_texts if isinstance(item, Mapping)]
+    texts = list(
+        text_rows
+        if text_rows is not None
+        else _get_cached_policy_text_rows(concept_id, text_cache=text_cache)
+    )
     invalid_sources: list[str] = []
 
     for predicate_aliases in predicate_precedence:
@@ -1649,16 +1790,20 @@ def _resolve_policy_from_text_relations(
 
 def resolve_workflow_step_runtime_policies(
     step_id: str,
+    *,
+    text_cache: Dict[str, List[Mapping[str, Any]]] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     policies: dict[str, Any] = {}
     warnings: list[str] = []
     if not isinstance(step_id, str) or not step_id.strip():
         return policies, warnings
+    text_rows = _get_cached_policy_text_rows(step_id, text_cache=text_cache)
 
     retry_policy, retry_source = _resolve_policy_from_text_relations(
         concept_id=step_id,
         predicate_precedence=WORKFLOW_STEP_RETRY_POLICY_TEXT_PREDICATE_PRECEDENCE,
         normaliser=_normalise_retry_policy_spec,
+        text_rows=text_rows,
     )
     if retry_policy is not None:
         policies["retry_policy"] = retry_policy
@@ -1669,6 +1814,7 @@ def resolve_workflow_step_runtime_policies(
         concept_id=step_id,
         predicate_precedence=WORKFLOW_STEP_APPROVAL_GATE_TEXT_PREDICATE_PRECEDENCE,
         normaliser=_normalise_approval_gate_spec,
+        text_rows=text_rows,
     )
     if approval_gate is not None:
         policies["approval_gate"] = approval_gate
@@ -1681,6 +1827,7 @@ def resolve_workflow_step_runtime_policies(
         concept_id=step_id,
         predicate_precedence=WORKFLOW_STEP_IDEMPOTENCY_POLICY_TEXT_PREDICATE_PRECEDENCE,
         normaliser=_normalise_idempotency_policy_spec,
+        text_rows=text_rows,
     )
     if idempotency_policy is not None:
         policies["idempotency_policy"] = idempotency_policy
@@ -1694,6 +1841,7 @@ def resolve_workflow_step_runtime_policies(
         concept_id=step_id,
         predicate_precedence=WORKFLOW_STEP_CHECKPOINT_POLICY_TEXT_PREDICATE_PRECEDENCE,
         normaliser=normalise_workflow_step_checkpoint_policy_spec,
+        text_rows=text_rows,
     )
     if checkpoint_policy is not None:
         policies["checkpoint_policy"] = checkpoint_policy
@@ -1707,6 +1855,7 @@ def resolve_workflow_step_runtime_policies(
         concept_id=step_id,
         predicate_precedence=WORKFLOW_STEP_MUTATION_AUTHORITY_TEXT_PREDICATE_PRECEDENCE,
         normaliser=normalise_workflow_step_mutation_authority_spec,
+        text_rows=text_rows,
     )
     if mutation_authority is not None:
         policies["mutation_authority"] = mutation_authority
@@ -1721,16 +1870,20 @@ def resolve_workflow_step_runtime_policies(
 
 def resolve_workflow_long_horizon_policies(
     workflow_id: str,
+    *,
+    text_cache: Dict[str, List[Mapping[str, Any]]] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     policies: dict[str, Any] = {}
     warnings: list[str] = []
     if not isinstance(workflow_id, str) or not workflow_id.strip():
         return policies, warnings
+    text_rows = _get_cached_policy_text_rows(workflow_id, text_cache=text_cache)
 
     plan_state_policy, plan_state_source = _resolve_policy_from_text_relations(
         concept_id=workflow_id,
         predicate_precedence=WORKFLOW_PLAN_STATE_POLICY_TEXT_PREDICATE_PRECEDENCE,
         normaliser=normalise_workflow_plan_state_policy_spec,
+        text_rows=text_rows,
     )
     if plan_state_policy is not None:
         policies["plan_state_policy"] = plan_state_policy
@@ -1743,6 +1896,7 @@ def resolve_workflow_long_horizon_policies(
         concept_id=workflow_id,
         predicate_precedence=WORKFLOW_COMPLETION_GATE_TEXT_PREDICATE_PRECEDENCE,
         normaliser=normalise_workflow_completion_gate_spec,
+        text_rows=text_rows,
     )
     if completion_gate is not None:
         policies["completion_gate"] = completion_gate
@@ -1881,12 +2035,20 @@ def build_workflow_process_graph(
     if not isinstance(relationships, dict):
         relationships = {}
 
+    text_policy_cache: Dict[str, List[Mapping[str, Any]]] = {}
     workflow_runtime_policies, workflow_policy_warnings = (
-        resolve_workflow_long_horizon_policies(workflow_id)
+        resolve_workflow_long_horizon_policies(
+            workflow_id,
+            text_cache=text_policy_cache,
+        )
     )
     warnings.extend(workflow_policy_warnings)
     publication_lifecycle, publication_lifecycle_source = (
-        resolve_workflow_publication_lifecycle(workflow_id, workflow_doc)
+        resolve_workflow_publication_lifecycle(
+            workflow_id,
+            workflow_doc,
+            text_cache=text_policy_cache,
+        )
     )
     if publication_lifecycle is not None:
         workflow_runtime_policies["publication_lifecycle"] = publication_lifecycle
@@ -2256,7 +2418,8 @@ def build_workflow_process_graph(
         )
 
         runtime_policies, policy_warnings = resolve_workflow_step_runtime_policies(
-            step_id
+            step_id,
+            text_cache=text_policy_cache,
         )
         warnings.extend(policy_warnings)
 
@@ -2465,7 +2628,7 @@ def load_workflow_definition_from_vontology(
                 for mapping_concept_id in semantic_mapping_ids:
                     if not isinstance(mapping_concept_id, str) or not mapping_concept_id:
                         continue
-                    context_key, tool_param, parse_error = _extract_mapping_pair(
+                    context_key, tool_param, required, parse_error = _extract_mapping_pair(
                         mapping_concept_id=mapping_concept_id,
                         mapping_doc=mapping_docs.get(mapping_concept_id),
                         step_id=step_id,
@@ -2485,7 +2648,8 @@ def load_workflow_definition_from_vontology(
                         "$context_key": context_key,
                         "$mapping_concept_id": mapping_concept_id,
                     }
-                    reads_context_keys.append(context_key)
+                    if required:
+                        reads_context_keys.append(context_key)
                     if is_subworkflow_action:
                         subworkflow_input_mappings.append(
                             {

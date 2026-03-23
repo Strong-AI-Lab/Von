@@ -7,6 +7,7 @@ and durable executors remain behaviourally aligned.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any, Dict, Mapping, MutableMapping
 
 
@@ -239,6 +240,31 @@ def _build_mutation_summary(
     }
 
 
+def snapshot_workflow_mapping(
+    value: Mapping[str, Any] | None,
+) -> Dict[str, Any]:
+    """Return a detached mapping snapshot safe for workflow context persistence.
+
+    Durable checkpoints and result envelopes should store value snapshots, not
+    live aliasing references into the mutable workflow context. Deep-copy here
+    to keep stored payloads tree-shaped and BSON-safe even when the same action
+    outputs are reused across context keys and diagnostic envelopes.
+    """
+
+    if not isinstance(value, Mapping):
+        return {}
+
+    payload = {
+        str(key): item
+        for key, item in value.items()
+        if isinstance(key, str) and str(key)
+    }
+    try:
+        return deepcopy(payload)
+    except Exception:
+        return dict(payload)
+
+
 def build_step_result_envelope(
     *,
     workflow_id: str,
@@ -254,11 +280,7 @@ def build_step_result_envelope(
     context_before: Mapping[str, Any],
     context_after: Mapping[str, Any],
 ) -> Dict[str, Any]:
-    output_payload = (
-        dict(action_outputs)
-        if isinstance(action_outputs, Mapping)
-        else {}
-    )
+    output_payload = snapshot_workflow_mapping(action_outputs)
     return {
         "schema_version": WORKFLOW_STEP_RESULT_ENVELOPE_SCHEMA_VERSION,
         "workflow_id": str(workflow_id or "").strip(),
@@ -290,9 +312,11 @@ def append_step_result_envelope(
     if not isinstance(existing, list):
         existing = []
         context[WORKFLOW_STEP_RESULT_ENVELOPES_KEY] = existing
-    payload = dict(envelope)
+    payload = snapshot_workflow_mapping(envelope)
     existing.append(payload)
-    context[LAST_WORKFLOW_STEP_RESULT_ENVELOPE_KEY] = payload
+    context[LAST_WORKFLOW_STEP_RESULT_ENVELOPE_KEY] = snapshot_workflow_mapping(
+        payload
+    )
 
 
 def build_workflow_result_envelope(
@@ -334,5 +358,5 @@ def set_workflow_result_envelope(
     context: MutableMapping[str, Any],
     envelope: Mapping[str, Any],
 ) -> None:
-    context[WORKFLOW_RESULT_ENVELOPE_KEY] = dict(envelope)
+    context[WORKFLOW_RESULT_ENVELOPE_KEY] = snapshot_workflow_mapping(envelope)
 

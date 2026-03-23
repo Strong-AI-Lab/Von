@@ -742,6 +742,81 @@ def get_concept(
     return get_concept_by_id(concept_id)
 
 
+def _finalise_concept_lookup_doc(
+    concept_doc: Dict[str, Any],
+    *,
+    requested_concept_id: str,
+) -> Dict[str, Any]:
+    if "_id" in concept_doc:
+        concept_doc["id"] = str(concept_doc.pop("_id"))
+    # Ensure name is present using centralized accessor
+    try:
+        from ..vontology.utils_vontology import (
+            get_concept_display_name_with_names_fallback,
+        )
+
+        resolved_name = get_concept_display_name_with_names_fallback(concept_doc)
+        if resolved_name:
+            concept_doc["name"] = resolved_name
+    except Exception:
+        if not concept_doc.get("name"):
+            cid = concept_doc.get("concept_id") or requested_concept_id
+            if isinstance(cid, str) and cid.startswith("#V#"):
+                concept_doc["name"] = cid[3:].replace("_", " ").title()
+    try:
+        from .annotation_extraction_service import (
+            PROMPT_CONCEPT_ID,
+        )  # lazy import
+
+        if (
+            concept_doc.get("concept_id") == PROMPT_CONCEPT_ID
+            and "description" in concept_doc
+        ):
+            concept_doc.pop("description", None)
+    except Exception:
+        pass
+
+    # Add kind field (type, predicate, or individual) for frontend
+    try:
+        from ..vontology.utils_vontology import is_predicate, is_type
+
+        if is_predicate(concept_doc):
+            concept_doc["kind"] = "predicate"
+        elif is_type(concept_doc):
+            concept_doc["kind"] = "type"
+        else:
+            concept_doc["kind"] = "individual"
+    except Exception:
+        concept_doc["kind"] = "unknown"
+
+    return concept_doc
+
+
+def _find_concept_by_exact_concept_id(
+    concept_id: str,
+    *,
+    concepts_coll: Any | None = None,
+) -> Dict[str, Any] | None:
+    collection = concepts_coll if concepts_coll is not None else ConceptsRepository.collection()
+    if collection is None:
+        raise ConceptServiceError("Database collection 'concepts' not available.")
+
+    from ..utils.concept_id_utils import canonicalise_vontology_concept_id
+
+    canonical_id = canonicalise_vontology_concept_id(concept_id)
+    concept_doc = None
+    if canonical_id and canonical_id != concept_id:
+        concept_doc = collection.find_one({"concept_id": canonical_id})
+    if concept_doc is None:
+        concept_doc = collection.find_one({"concept_id": concept_id})
+    if not isinstance(concept_doc, dict):
+        return None
+    return _finalise_concept_lookup_doc(
+        concept_doc,
+        requested_concept_id=concept_id,
+    )
+
+
 def get_concept_by_id(concept_id: str) -> Optional[Dict[str, Any]]:
     """Retrieves a concept by its unique ID.
     Supports documents where _id may be an ObjectId or a string of the ObjectId hex.
@@ -777,40 +852,10 @@ def get_concept_by_id(concept_id: str) -> Optional[Dict[str, Any]]:
         concept_doc = concepts_coll.find_one(query_filter)
 
         if concept_doc:
-            concept_doc["id"] = (
-                str(concept_doc.pop("_id")) if "_id" in concept_doc else concept_id
+            concept_doc = _finalise_concept_lookup_doc(
+                concept_doc,
+                requested_concept_id=concept_id,
             )
-
-            # Ensure name is present using centralized accessor with language fallback
-            try:
-                from ..vontology.utils_vontology import (
-                    get_concept_display_name_with_names_fallback,
-                )
-
-                resolved_name = get_concept_display_name_with_names_fallback(
-                    concept_doc
-                )
-                if resolved_name:
-                    concept_doc["name"] = resolved_name
-            except Exception:
-                # Legacy fallback from concept_id
-                if not concept_doc.get("name"):
-                    cid = concept_doc.get("concept_id")
-                    if isinstance(cid, str) and cid.startswith("#V#"):
-                        concept_doc["name"] = cid[3:].replace("_", " ").title()
-            # Scrub legacy top-level description for protected prompt concept(s)
-            try:
-                from .annotation_extraction_service import (
-                    PROMPT_CONCEPT_ID,
-                )  # lazy import to avoid cycle
-
-                if (
-                    concept_doc.get("concept_id") == PROMPT_CONCEPT_ID
-                    and "description" in concept_doc
-                ):
-                    concept_doc.pop("description", None)
-            except Exception:
-                pass
             return concept_doc
 
         raise ConceptNotFoundError(f"concept with ID '{concept_id}' not found.")
@@ -819,6 +864,40 @@ def get_concept_by_id(concept_id: str) -> Optional[Dict[str, Any]]:
             raise
         logger.error(f"Error retrieving concept by ID {concept_id}: {e}", exc_info=True)
         raise ConceptServiceError(f"Could not retrieve concept: {str(e)}")
+
+
+def get_concept_by_concept_id_exact(concept_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve a concept by exact canonical concept_id lookup only.
+
+    This intentionally skips alias, name-resolution, and virtual-concept
+    fallbacks. Use it when the caller already holds a machine-generated or
+    authoritative concept ID and needs a bounded existence/read check.
+    """
+
+    concepts_coll = ConceptsRepository.collection()
+    if concepts_coll is None:
+        raise ConceptServiceError("Database collection 'concepts' not available.")
+
+    try:
+        concept_doc = _find_concept_by_exact_concept_id(
+            concept_id,
+            concepts_coll=concepts_coll,
+        )
+        if concept_doc is not None:
+            return concept_doc
+        raise ConceptNotFoundError(f"concept with concept_id '{concept_id}' not found.")
+    except Exception as e:
+        if isinstance(e, ConceptNotFoundError):
+            raise
+        logger.error(
+            "Error retrieving concept by exact concept_id %s: %s",
+            concept_id,
+            e,
+            exc_info=True,
+        )
+        raise ConceptServiceError(
+            f"Could not retrieve concept by exact concept_id: {str(e)}"
+        )
 
 
 def get_concept_by_concept_id(concept_id: str) -> Optional[Dict[str, Any]]:
@@ -830,62 +909,11 @@ def get_concept_by_concept_id(concept_id: str) -> Optional[Dict[str, Any]]:
         raise ConceptServiceError("Database collection 'concepts' not available.")
 
     try:
-        # Canonicalise punctuation variants (e.g. hyphen vs underscore) while keeping
-        # a safe fallback to the original value for existing legacy records.
-        from ..utils.concept_id_utils import canonicalise_vontology_concept_id
-
-        canonical_id = canonicalise_vontology_concept_id(concept_id)
-        concept_doc = None
-        if canonical_id and canonical_id != concept_id:
-            concept_doc = concepts_coll.find_one({"concept_id": canonical_id})
-        if concept_doc is None:
-            concept_doc = concepts_coll.find_one({"concept_id": concept_id})
+        concept_doc = _find_concept_by_exact_concept_id(
+            concept_id,
+            concepts_coll=concepts_coll,
+        )
         if concept_doc:
-            if "_id" in concept_doc:
-                concept_doc["id"] = str(concept_doc.pop("_id"))
-            # Ensure name is present using centralized accessor
-            try:
-                from ..vontology.utils_vontology import (
-                    get_concept_display_name_with_names_fallback,
-                )
-
-                resolved_name = get_concept_display_name_with_names_fallback(
-                    concept_doc
-                )
-                if resolved_name:
-                    concept_doc["name"] = resolved_name
-            except Exception:
-                if not concept_doc.get("name"):
-                    cid = concept_doc.get("concept_id")
-                    if isinstance(cid, str) and cid.startswith("#V#"):
-                        concept_doc["name"] = cid[3:].replace("_", " ").title()
-            try:
-                from .annotation_extraction_service import (
-                    PROMPT_CONCEPT_ID,
-                )  # lazy import
-
-                if (
-                    concept_doc.get("concept_id") == PROMPT_CONCEPT_ID
-                    and "description" in concept_doc
-                ):
-                    concept_doc.pop("description", None)
-            except Exception:
-                pass
-
-            # Add kind field (type, predicate, or individual) for frontend
-            try:
-                from ..vontology.utils_vontology import is_type, is_predicate
-
-                # Check predicate FIRST: predicates can have is_a_type_of relationships
-                if is_predicate(concept_doc):
-                    concept_doc["kind"] = "predicate"
-                elif is_type(concept_doc):
-                    concept_doc["kind"] = "type"
-                else:
-                    concept_doc["kind"] = "individual"
-            except Exception:
-                concept_doc["kind"] = "unknown"
-
             return concept_doc
 
         # JVNAUTOSCI-945: Try alias resolution for renamed concepts

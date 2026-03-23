@@ -237,6 +237,37 @@ class TestRagFirstPrompt:
         assert prompt.prompt_text is not None
         assert "What is the meaning of life?" in prompt.prompt_text
 
+    def test_prompt_can_directly_recommend_specific_candidate_without_policy(self):
+        selector = _build_selector()
+        prompt = selector.prepare_selection_prompt(
+            turn_text=(
+                "Run a meeting invitation testing workflow, prepare the experiment "
+                "spec, execute the target workflow, and compute the verdict."
+            ),
+            discovered_workflows=[
+                {
+                    "concept_id": "#V#synthetic_workflow_regression_suite_workflow",
+                    "name": "Synthetic workflow regression suite workflow",
+                    "description": "Run generic workflow regression suites and compute verdicts.",
+                },
+                {
+                    "concept_id": "#V#meeting_invitation_testing_workflow",
+                    "name": "Meeting invitation testing workflow",
+                    "description": "Create a bounded meeting invitation experiment and execute it.",
+                },
+            ],
+        )
+
+        assert prompt.policy_recommendation["guidance_mode"] == "direct"
+        assert (
+            prompt.policy_recommendation["recommended_workflow_id"]
+            == "#V#meeting_invitation_testing_workflow"
+        )
+        assert (
+            prompt.policy_recommendation["direct_selection_basis"]
+            == "lexical_specificity"
+        )
+
     def test_prompt_missing_candidate_list_fails_closed(self):
         selector = WorkflowSelector(
             registry=_build_registry(),
@@ -284,6 +315,36 @@ class TestRagFirstPrompt:
         assert result.workflow_id == "#V#chat_assistant_workflow"
         assert result.verdict == "selector_prompt_unavailable"
         assert result.selection_source == "selector_fail_closed"
+        mock_llm.generate.assert_not_called()
+
+    def test_select_workflow_uses_direct_specificity_recommendation_without_llm(self):
+        selector = _build_selector()
+        mock_llm = MagicMock()
+
+        result = selector.select_workflow(
+            llm_client=mock_llm,
+            model="test-model",
+            turn_text=(
+                "Run a meeting invitation testing workflow, prepare the experiment "
+                "spec, execute the target workflow, and compute the verdict."
+            ),
+            discovered_workflows=[
+                {
+                    "concept_id": "#V#synthetic_workflow_regression_suite_workflow",
+                    "name": "Synthetic workflow regression suite workflow",
+                    "description": "Run generic workflow regression suites and compute verdicts.",
+                },
+                {
+                    "concept_id": "#V#meeting_invitation_testing_workflow",
+                    "name": "Meeting invitation testing workflow",
+                    "description": "Create a bounded meeting invitation experiment and execute it.",
+                },
+            ],
+        )
+
+        assert result.workflow_id == "#V#meeting_invitation_testing_workflow"
+        assert result.verdict == "policy_selected"
+        assert result.selection_source == "policy_direct"
         mock_llm.generate.assert_not_called()
 
 

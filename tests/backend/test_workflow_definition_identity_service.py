@@ -493,6 +493,43 @@ def test_validate_contract_keeps_prompt_contract_warnings_non_blocking() -> None
     )
 
 
+def test_validate_contract_treats_llm_execution_mode_as_supported_without_registry_action() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#llm_step_workflow",
+        initial_state="prompted",
+        states={
+            "prompted": WorkflowStateSpec(
+                state_id="prompted",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id="llm.action",
+                        execution_mode=WORKFLOW_STEP_EXECUTION_MODE_LLM,
+                    ),
+                ),
+                terminal=True,
+                metadata={
+                    "prompt_contract": {
+                        "validation_policy": "warn",
+                        "requested_prompt_concept_ids": ["#V#prompt"],
+                        "resolved_prompt_concept_id": "#V#prompt",
+                    }
+                },
+            ),
+        },
+        termination_states=("prompted",),
+    )
+
+    validation = validate_workflow_definition_contract(
+        definition=definition,
+        supported_action_ids=set(),
+        enforce_supported_actions=True,
+    )
+
+    assert validation["valid"] is True
+    assert validation.get("unsupported_action_ids") == []
+    assert "unsupported_workflow_actions" not in (validation.get("errors") or [])
+
+
 def test_validate_contract_reports_invalid_checkpoint_policy() -> None:
     definition = WorkflowDefinition(
         workflow_id="#V#checkpoint_policy_invalid_workflow",

@@ -12,6 +12,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 6. Do not use direct DB access methods for Vontology data; use Vontology routes/services (API/MCP) instead.
 7. **Vontology is THE source of truth** for all persistent knowledge and data. Exceptions (e.g., ephemeral caches, session state) must be rare and explicitly justified.
 8. Jira issues must be assigned on creation (assignee = current user unless told otherwise).
+8A. **Branch first**: substantial Jira work belongs on a task branch named for the Jira key, not on `main`.
 9. Keep changes minimal, well-scoped, and add/update tests and docs where relevant.
 10. Prefer small, composable functions; avoid monolithic helpers.
 11. Always check VS Code Problems panel (or run `get_errors`) after edits and when errors are reported. If the Problems panel is not available, run `pyright` as a proxy.
@@ -33,6 +34,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 23. In docs/examples for secret env vars, use explicit placeholders like `<YOUR-CLIENT-SECRET-HERE>` and avoid token-like sample strings that can trigger secret scanners.
 24. If you are reasonably confident task implementation is complete, proactively run the merge-and-close flow unless the user explicitly asks to hold.
 25. **Definition of fully complete Jira task**: merged to `main`, Jira and linked issues updated, required Vontology workflow/state changes materialised, and for substantial tasks the reflection pass has produced any justified `AGENTS.md` or Jira guidance update.
+25A. **End-to-end Jira closure evidence must be direct**: when a task claims user-visible or end-to-end acceptance, do not mark it fixed/finished/Done on nearby commits, related-task work, or indirect unit tests alone; rerun the exact or nearest-real acceptance path and record that evidence in Jira before closure.
 26. **Fail closed when Vontology is unavailable for Vontology-governed behaviour**: do not silently fall back to in-code prompts, stale context reuse, or heuristic hacks. If required Vontology prompts/workflow data cannot be resolved, no-op that transformation and emit a clear user-visible and telemetry-visible reason.
 27. **Minimal-imposition principle**: exhaust existing context/data/search first; ask humans only when necessary, and then only for concise, low-effort, high-value inputs they are likely to know without extra work.
 27A. **Minimal-imposition mutation policy**: low-risk additive Vontology writes should default-allow when evidence-backed inputs make the intended additive action clear and the user has not explicitly denied it.
@@ -123,11 +125,13 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 - When uncertain, ask succinctly; do not guess or fabricate behaviour.
 - **Task lifecycle discipline**:
 	- Before implementation, use or create an appropriate task branch and transition the Jira task to `In Progress`.
+	- Do not do substantial Jira implementation work on `main`; if you notice work has started without the task branch, stop and correct that first.
 	- If resuming from already-started or handed-off work, re-check branch/Jira/reflection/merge obligations before continuing; do not assume a previous turn or agent already handled them.
 	- At task start, review the task age, epic context, and related older issues sceptically; if the wording is stale, reinterpret the task toward the current Von design and record that in Jira instead of following outdated prescriptions literally.
 	- For research-sensitive or architecture-shaping tasks, consider whether a short targeted literature review would materially improve the plan; if so, do it before coding and update the Jira task/epic or subtasks when the literature changes the intended approach.
 	- During substantial work, post concise Jira progress comments at meaningful milestones.
 	- Before `Done`, complete the linked-issue review and ensure implementation branch work has been committed, pushed, and merged.
+	- Before saying a task is finished or transitioning it to `Done`, verify the acceptance path from the branch that will be merged. For end-to-end/user-visible tasks, direct call-path evidence is required; related-task commits and passing local unit tests are supporting evidence only.
 	- Before `Done`, review related older tasks again and update, comment, or transition any whose original intent has been absorbed, superseded, narrowed, or made obsolete by the completed work.
 	- After merge, transition the task to `Done` and post a progress update on the parent issue.
 	- If implementation appears complete and there is no explicit request to hold, execute the merge-and-close flow proactively.

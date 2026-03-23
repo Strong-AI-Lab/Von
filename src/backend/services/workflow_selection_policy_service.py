@@ -10,6 +10,7 @@ candidate list when evidence is strong.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from threading import Lock
@@ -85,6 +86,38 @@ _DEFAULT_CONFIG: dict[str, float] = {
     "direct_selection_min_margin": 0.18,
     "direct_selection_min_average_reward": 0.2,
 }
+
+_LEXICAL_DIRECT_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "at",
+        "by",
+        "for",
+        "from",
+        "how",
+        "i",
+        "in",
+        "is",
+        "it",
+        "my",
+        "of",
+        "on",
+        "or",
+        "please",
+        "run",
+        "show",
+        "start",
+        "that",
+        "the",
+        "this",
+        "to",
+        "use",
+        "what",
+        "workflow",
+    }
+)
 
 _policy_lock = Lock()
 _live_policy_snapshot: WorkflowSelectionPolicySnapshot | None = None
@@ -339,6 +372,130 @@ def rank_policy_candidates(
     return scores
 
 
+def _normalise_selector_text(value: Any) -> str:
+    clean = _safe_str(value).lower()
+    if not clean:
+        return ""
+    return re.sub(r"[^a-z0-9]+", " ", clean).strip()
+
+
+def _filtered_selector_tokens(value: Any, *, limit: int = 24) -> tuple[str, ...]:
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for token in extract_selection_query_tokens(_safe_str(value), limit=limit * 3):
+        if len(token) < 3 or token in _LEXICAL_DIRECT_STOPWORDS or token in seen:
+            continue
+        seen.add(token)
+        tokens.append(token)
+        if len(tokens) >= limit:
+            break
+    return tuple(tokens)
+
+
+def _selector_query_phrases(value: Any, *, max_phrases: int = 12) -> tuple[str, ...]:
+    words = [token for token in _filtered_selector_tokens(value, limit=18)]
+    phrases: list[str] = []
+    seen: set[str] = set()
+    for width in (3, 2):
+        if len(words) < width:
+            continue
+        for index in range(len(words) - width + 1):
+            phrase = " ".join(words[index : index + width])
+            if phrase in seen:
+                continue
+            seen.add(phrase)
+            phrases.append(phrase)
+            if len(phrases) >= max_phrases:
+                return tuple(phrases)
+    return tuple(phrases)
+
+
+def _recommend_direct_candidate_by_specificity(
+    *,
+    turn_text: str,
+    candidate_workflows: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, Any] | None:
+    rows = _coerce_candidate_workflows(candidate_workflows)
+    if len(rows) < 2:
+        return None
+
+    query_tokens = set(_filtered_selector_tokens(turn_text, limit=24))
+    if len(query_tokens) < 2:
+        return None
+    query_phrases = _selector_query_phrases(turn_text)
+
+    scores: list[dict[str, Any]] = []
+    for row in rows:
+        label_text = f"{row['concept_id']} {row['name']}"
+        description_text = row.get("description") or ""
+        label_tokens = set(_filtered_selector_tokens(label_text, limit=18))
+        description_tokens = set(_filtered_selector_tokens(description_text, limit=36))
+        label_overlap = tuple(sorted(label_tokens & query_tokens))
+        description_overlap = tuple(
+            sorted((description_tokens & query_tokens) - set(label_overlap))
+        )
+        normalised_label = _normalise_selector_text(label_text)
+        phrase_hits = tuple(
+            phrase
+            for phrase in query_phrases
+            if phrase and phrase in normalised_label
+        )
+        score = (
+            len(label_overlap) * 3
+            + len(description_overlap)
+            + len(phrase_hits) * 4
+        )
+        scores.append(
+            {
+                "workflow_id": row["concept_id"],
+                "score": score,
+                "label_overlap": label_overlap,
+                "description_overlap": description_overlap,
+                "phrase_hits": phrase_hits,
+            }
+        )
+
+    scores.sort(
+        key=lambda item: (
+            -int(item["score"]),
+            -len(item["phrase_hits"]),
+            -len(item["label_overlap"]),
+            item["workflow_id"],
+        )
+    )
+    if not scores:
+        return None
+
+    top = scores[0]
+    second_score = int(scores[1]["score"]) if len(scores) > 1 else 0
+    margin = int(top["score"]) - second_score
+    label_overlap = tuple(top["label_overlap"])
+    phrase_hits = tuple(top["phrase_hits"])
+    if int(top["score"]) < 8 or len(label_overlap) < 2 or margin < 3:
+        return None
+
+    overlap_text = ", ".join(label_overlap[:4])
+    phrase_text = ", ".join(phrase_hits[:3])
+    reasoning = (
+        f"Direct lexical selector match favours {top['workflow_id']} "
+        f"(label overlap: {overlap_text or 'none'}"
+    )
+    if phrase_text:
+        reasoning += f"; phrase hits: {phrase_text}"
+    reasoning += f"; margin {margin})."
+    confidence = min(
+        0.96,
+        0.74 + min(len(label_overlap), 4) * 0.04 + min(len(phrase_hits), 2) * 0.05,
+    )
+    return {
+        "workflow_id": top["workflow_id"],
+        "confidence_score": round(confidence, 6),
+        "reasoning": reasoning,
+        "selection_reason": "lexical_specificity_direct_candidate",
+        "candidate_scores": scores,
+    }
+
+
 def recommend_workflow_with_policy(
     *,
     turn_text: str,
@@ -347,12 +504,50 @@ def recommend_workflow_with_policy(
 ) -> dict[str, Any]:
     """Return policy guidance for selector candidate ordering or direct selection."""
 
+    lexical_direct = _recommend_direct_candidate_by_specificity(
+        turn_text=turn_text,
+        candidate_workflows=candidate_workflows,
+    )
     scores = rank_policy_candidates(
         turn_text=turn_text,
         candidate_workflows=candidate_workflows,
         snapshot=snapshot,
     )
     policy = snapshot if snapshot is not None else get_live_selection_policy()
+    if lexical_direct is not None and (
+        policy is None
+        or not scores
+        or not (
+            int(scores[0]["attempts"]) >= int(
+                _coerce_float(
+                    policy.config.get(
+                        "direct_selection_min_attempts",
+                        _DEFAULT_CONFIG["direct_selection_min_attempts"],
+                    )
+                )
+            )
+            and _coerce_float(scores[0]["average_reward"])
+            >= _coerce_float(
+                policy.config.get(
+                    "direct_selection_min_average_reward",
+                    _DEFAULT_CONFIG["direct_selection_min_average_reward"],
+                )
+            )
+        )
+    ):
+        return {
+            "policy_active": policy is not None,
+            "guidance_mode": "direct",
+            "recommended_workflow_id": lexical_direct["workflow_id"],
+            "confidence_score": lexical_direct["confidence_score"],
+            "reasoning": lexical_direct["reasoning"],
+            "snapshot_id": policy.snapshot_id if policy is not None else None,
+            "candidate_scores": scores,
+            "ranked_candidate_ids": [item["workflow_id"] for item in scores],
+            "direct_selection_basis": "lexical_specificity",
+            "selection_reason": lexical_direct["selection_reason"],
+        }
+
     if not scores or policy is None:
         return {
             "policy_active": False,

@@ -10,7 +10,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from . import concept_service
-from .concept_service import ConceptNotFoundError, get_concept_by_concept_id
+from .concept_service import (
+    ConceptNotFoundError,
+    get_concept_by_concept_id_exact,
+)
 from .relationship_write_service import add_relationship
 from .testing_workflow_contracts import (
     DERIVED_FROM_CANONICAL_CONCEPT_PREDICATE_ID,
@@ -109,7 +112,7 @@ def _coerce_float(value: Any, *, default: float = 0.0) -> float:
 
 def _get_concept_or_none(concept_id: str) -> Mapping[str, Any] | None:
     try:
-        concept = get_concept_by_concept_id(concept_id)
+        concept = get_concept_by_concept_id_exact(concept_id)
     except ConceptNotFoundError:
         return None
     return concept if isinstance(concept, Mapping) else None

@@ -1530,6 +1530,16 @@ def test_turn_execution_diagnostics_clear_stale_selector_prompt_failure_after_su
     assert workflow_dispatch.get("workflow_selection_rationale") == (
         "selector_selected_discovered_candidate"
     )
+    assert workflow_dispatch.get("terminal_state") == "failure"
+    assert workflow_dispatch.get("dispatch_terminal_status") == "failed"
+    assert workflow_dispatch.get("dispatch_terminal_failure_reason") == (
+        "workflow_launch_input_resolution_failed"
+    )
+
+    activity_history = diagnostics.get("activity_history")
+    assert isinstance(activity_history, list)
+    assert activity_history[-1].get("stage") == "workflow_dispatch"
+    assert activity_history[-1].get("state") == "failure"
 
     routing_diagnostics = diagnostics.get("workflow_routing_diagnostics")
     assert isinstance(routing_diagnostics, dict)

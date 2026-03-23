@@ -131,7 +131,8 @@ def build_db_independent_orchestrator(
     from src.backend.workflows.workflow_registry import WorkflowRegistration
     from src.backend.workflows import workflow_concept_authority_service as authority_service
 
-    def _build_test_registry() -> WorkflowRegistry:
+    def _build_test_registry(*, defer_parity_work: bool = True) -> WorkflowRegistry:
+        assert defer_parity_work is True
         registry = WorkflowRegistry()
         for workflow_id in CONVERSATION_TURN_WORKFLOW_IDS:
             spec = authority_service._CANONICAL_WORKFLOW_PUBLICATION_SPECS.get(
@@ -153,11 +154,11 @@ def build_db_independent_orchestrator(
         return registry
 
     monkeypatch.setattr(
-        "src.backend.integrations.internal_mcp.orchestrator.build_workflow_registry",
+        "src.backend.integrations.internal_mcp.orchestrator.get_shared_workflow_registry_read_only",
         _build_test_registry,
     )
     monkeypatch.setattr(
-        "src.backend.integrations.internal_mcp.orchestrator.build_durable_action_registry",
+        "src.backend.integrations.internal_mcp.orchestrator.get_shared_durable_action_registry",
         lambda: ActionRegistry(),
     )
     monkeypatch.setattr(

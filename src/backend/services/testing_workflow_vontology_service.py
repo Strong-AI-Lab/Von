@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from . import concept_service
@@ -148,6 +148,7 @@ def _context_mapping(
     state_id: str,
     tool_param: str,
     context_key: str,
+    required: bool = True,
 ) -> authority_service._CanonicalContextInputMappingSpec:
     return authority_service._CanonicalContextInputMappingSpec(
         concept_id=authority_service._runtime_context_input_mapping_concept_id(
@@ -158,6 +159,7 @@ def _context_mapping(
         ),
         context_key=context_key,
         tool_param=tool_param,
+        required=required,
     )
 
 
@@ -478,18 +480,21 @@ def _build_meeting_invitation_workflow_spec() -> authority_service._CanonicalWor
                         state_id="prepare_spec",
                         tool_param="expected_meeting_type",
                         context_key="expected_meeting_type",
+                        required=False,
                     ),
                     _context_mapping(
                         workflow_id=workflow_id,
                         state_id="prepare_spec",
                         tool_param="expected_structure_fields",
                         context_key="expected_structure_fields",
+                        required=False,
                     ),
                     _context_mapping(
                         workflow_id=workflow_id,
                         state_id="prepare_spec",
                         tool_param="expected_downstream_actions",
                         context_key="expected_downstream_actions",
+                        required=False,
                     ),
                 ),
                 tool_output_mapping_specs=(
@@ -1062,6 +1067,7 @@ def _build_publication_purposes(workflow_ids: Sequence[str]) -> dict[str, str]:
 def _validate_existing_materialisation(
     *,
     target_workflow_ids: Sequence[str],
+    publication_definitions: Mapping[str, Any] | None = None,
 ) -> tuple[bool, dict[str, dict[str, Any]]]:
     workflow_ids = tuple(
         str(item).strip()
@@ -1101,6 +1107,18 @@ def _validate_existing_materialisation(
         if definition is None:
             return False, {}
 
+        authoritative_definition = (
+            publication_definitions.get(workflow_id)
+            if isinstance(publication_definitions, Mapping)
+            else None
+        )
+        if authoritative_definition is not None:
+            if not _materialisation_matches_publication_definition(
+                loaded_definition=definition,
+                publication_definition=authoritative_definition,
+            ):
+                return False, {}
+
         validation = validate_workflow_definition_contract(
             definition=definition,
             supported_action_ids=supported_action_ids,
@@ -1112,6 +1130,94 @@ def _validate_existing_materialisation(
             return False, {}
 
     return True, validation_by_workflow_id
+
+
+def _stable_state_metadata_subset(state: Any) -> dict[str, Any]:
+    metadata = getattr(state, "metadata", None)
+    if not isinstance(metadata, dict):
+        return {}
+    comparable: dict[str, Any] = {}
+    for key in (
+        "invokes_workflow",
+        "reads_context_keys",
+        "writes_context_keys",
+        "tool_output_context_mappings",
+        "subworkflow_contract",
+        "mutation_authority",
+    ):
+        value = metadata.get(key)
+        if value:
+            comparable[key] = value
+    return comparable
+
+
+def _materialisation_value_matches(*, loaded_value: Any, expected_value: Any) -> bool:
+    if loaded_value == expected_value:
+        return True
+    if isinstance(loaded_value, dict) and isinstance(expected_value, dict):
+        for key, value in expected_value.items():
+            if key not in loaded_value:
+                return False
+            if not _materialisation_value_matches(
+                loaded_value=loaded_value.get(key),
+                expected_value=value,
+            ):
+                return False
+        # Publication definitions intentionally capture only the stable subset that
+        # must remain invariant across materialisations. Loaded workflow metadata may
+        # legitimately include extra derived fields once Vontology resolution has
+        # expanded contracts and mappings.
+        return True
+    if isinstance(loaded_value, list) and isinstance(expected_value, list):
+        if len(loaded_value) != len(expected_value):
+            return False
+        return all(
+            _materialisation_value_matches(loaded_value=item, expected_value=expected)
+            for item, expected in zip(loaded_value, expected_value)
+        )
+    return False
+
+
+def _materialisation_matches_publication_definition(
+    *,
+    loaded_definition: Any,
+    publication_definition: Any,
+) -> bool:
+    workflow_id = str(
+        getattr(loaded_definition, "workflow_id", None)
+        or getattr(publication_definition, "workflow_id", None)
+        or ""
+    ).strip()
+    loaded_states_raw = getattr(loaded_definition, "states", None)
+    publication_states_raw = getattr(publication_definition, "states", None)
+    loaded_states = loaded_states_raw if isinstance(loaded_states_raw, Mapping) else {}
+    publication_states = (
+        publication_states_raw if isinstance(publication_states_raw, Mapping) else {}
+    )
+    for state_id, publication_state in publication_states.items():
+        loaded_state = loaded_states.get(state_id)
+        if loaded_state is None and workflow_id:
+            loaded_state = loaded_states.get(
+                authority_service._step_concept_id(
+                    workflow_id=workflow_id,
+                    state_id=str(state_id or "").strip(),
+                )
+            )
+        if loaded_state is None:
+            return False
+        expected = _stable_state_metadata_subset(publication_state)
+        if not expected:
+            continue
+        loaded = _stable_state_metadata_subset(loaded_state)
+        for key, expected_value in expected.items():
+            if key not in loaded:
+                return False
+            if not _materialisation_value_matches(
+                loaded_value=loaded.get(key),
+                expected_value=expected_value,
+            ):
+                return False
+    return True
 
 
 def _ensure_workflow_texts(workflow_id: str) -> None:
@@ -1246,7 +1352,10 @@ def bootstrap_canonical_testing_workflows() -> dict[str, Any]:
     )
     publication_purposes = _build_publication_purposes(target_workflow_ids)
     already_current, existing_validation_by_workflow_id = (
-        _validate_existing_materialisation(target_workflow_ids=target_workflow_ids)
+        _validate_existing_materialisation(
+            target_workflow_ids=target_workflow_ids,
+            publication_definitions=publication_definitions,
+        )
     )
 
     typed_workflow_ids: list[str] = []

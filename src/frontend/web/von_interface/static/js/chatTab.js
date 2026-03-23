@@ -836,6 +836,21 @@ function canonicalThinkingTerminalStatus(value) {
     return null;
 }
 
+function terminalThinkingProgressStateToRowState(value) {
+    const terminalStatus = canonicalThinkingTerminalStatus(value);
+    if (terminalStatus === THINKING_STATUS_COMPLETED) {
+        return 'success';
+    }
+    if (
+        terminalStatus === THINKING_STATUS_FAILED
+        || terminalStatus === THINKING_STATUS_CANCELLED
+        || terminalStatus === THINKING_STATUS_TERMINATED
+    ) {
+        return 'failure';
+    }
+    return null;
+}
+
 function resolveThinkingTerminalStatus(progress) {
     if (!progress || typeof progress !== 'object') {
         return null;
@@ -853,6 +868,53 @@ function resolveThinkingTerminalStatus(progress) {
         }
     }
     return null;
+}
+
+function getWorkflowRoutingDispatchDiagnostics(progressLike) {
+    const workflowRoutingDiagnostics = (
+        progressLike
+        && typeof progressLike === 'object'
+        && progressLike.workflow_routing_diagnostics
+        && typeof progressLike.workflow_routing_diagnostics === 'object'
+    )
+        ? progressLike.workflow_routing_diagnostics
+        : null;
+    const dispatchDiagnostics = workflowRoutingDiagnostics?.dispatch;
+    return (dispatchDiagnostics && typeof dispatchDiagnostics === 'object')
+        ? dispatchDiagnostics
+        : null;
+}
+
+function resolveThinkingWorkflowDispatchRowState(progressLike) {
+    const dispatchDiagnostics = getWorkflowRoutingDispatchDiagnostics(progressLike);
+    const dispatchState = terminalThinkingProgressStateToRowState(
+        dispatchDiagnostics?.dispatch_terminal_status
+    );
+    if (dispatchState) {
+        return dispatchState;
+    }
+
+    const resultSummary = normaliseThinkingActivityString(progressLike?.result_summary).toLowerCase();
+    if (resultSummary.endsWith(':failed')) {
+        return 'failure';
+    }
+
+    return null;
+}
+
+function resolveThinkingLatestStageRowState(progressLike, stageId) {
+    if (!progressLike || typeof progressLike !== 'object') {
+        return null;
+    }
+    const cleanStageId = canonicaliseThinkingDiagnosticStageId(stageId);
+    if (cleanStageId === 'workflow_dispatch') {
+        const dispatchState = resolveThinkingWorkflowDispatchRowState(progressLike);
+        if (dispatchState) {
+            return dispatchState;
+        }
+    }
+
+    return terminalThinkingProgressStateToRowState(resolveThinkingTerminalStatus(progressLike));
 }
 
 function isTerminalThinkingProgress(progress) {
@@ -2325,6 +2387,7 @@ function buildWorkflowRoutingContext(progressLike, workflowDiscovery = null) {
     const workflowMatchCount = Number.isFinite(progressLike.workflow_match_count)
         ? Math.max(0, Number(progressLike.workflow_match_count))
         : getWorkflowDiscoveryMatchCount(workflowDiscovery);
+    const dispatchDiagnostics = getWorkflowRoutingDispatchDiagnostics(progressLike);
 
     return {
         selectedWorkflowId,
@@ -2343,6 +2406,14 @@ function buildWorkflowRoutingContext(progressLike, workflowDiscovery = null) {
         workflowCandidateCount: Number.isFinite(progressLike.workflow_candidate_count)
             ? Math.max(0, Number(progressLike.workflow_candidate_count))
             : getWorkflowDiscoveryCandidateCount(workflowDiscovery),
+        dispatchTerminalStatus: normaliseThinkingActivityString(dispatchDiagnostics?.dispatch_terminal_status) || null,
+        dispatchTerminalFailureReason: normaliseThinkingActivityString(dispatchDiagnostics?.dispatch_terminal_failure_reason) || null,
+        dispatchTerminalFailureDetail: normaliseThinkingActivityString(dispatchDiagnostics?.dispatch_terminal_failure_detail) || null,
+        dispatchTerminalUnresolvedRequiredInputs: Array.isArray(dispatchDiagnostics?.dispatch_terminal_unresolved_required_inputs)
+            ? dispatchDiagnostics.dispatch_terminal_unresolved_required_inputs
+                .map((value) => normaliseThinkingActivityString(value))
+                .filter(Boolean)
+            : [],
         hasSelection: Boolean(selectedWorkflowText),
         hasDirectMatch: Number.isFinite(workflowMatchCount) && Number(workflowMatchCount) > 0,
         noDirectMatch: workflowMatchCount !== null && Number(workflowMatchCount) <= 0,
@@ -2807,6 +2878,10 @@ function buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request) 
         data.workflow_candidate_count = routingNarrative.context.workflowCandidateCount;
         data.workflow_selection_narrative = routingNarrative.text || null;
         data.workflow_selection_narrative_html = routingNarrative.html || null;
+        data.dispatch_terminal_status = routingNarrative.context.dispatchTerminalStatus;
+        data.dispatch_terminal_failure_reason = routingNarrative.context.dispatchTerminalFailureReason;
+        data.dispatch_terminal_failure_detail = routingNarrative.context.dispatchTerminalFailureDetail;
+        data.dispatch_terminal_unresolved_required_inputs = routingNarrative.context.dispatchTerminalUnresolvedRequiredInputs;
     }
 
     if (cleanStageId === 'tool_execute') {
@@ -2901,9 +2976,29 @@ function renderThinkingWorkflowStageDiagnosticDataHTML(data, workflowDiscovery =
                 value: data.workflow_selection_narrative,
                 html: data.workflow_selection_narrative_html
             },
+            {
+                label: 'Dispatch terminal status',
+                value: data.dispatch_terminal_status
+                    ? formatThinkingActivityFallbackLabel(data.dispatch_terminal_status)
+                    : ''
+            },
+            {
+                label: 'Dispatch failure reason',
+                value: data.dispatch_terminal_failure_reason
+                    ? formatThinkingActivityFallbackLabel(data.dispatch_terminal_failure_reason)
+                    : ''
+            },
             { label: 'Routing matches', value: data.workflow_match_count },
             { label: 'Candidates considered', value: data.workflow_candidate_count }
         );
+        sections.push(buildThinkingDiagnosticListHTML(
+            'Dispatch failure detail',
+            data.dispatch_terminal_failure_detail ? [data.dispatch_terminal_failure_detail] : []
+        ));
+        sections.push(buildThinkingDiagnosticListHTML(
+            'Unresolved required inputs',
+            data.dispatch_terminal_unresolved_required_inputs
+        ));
     } else if (data.stage_id === 'tool_execute') {
         facts.push(
             { label: 'Tool calls observed', value: data.tool_call_count },
@@ -3286,9 +3381,8 @@ function buildThinkingWorkflowStageRows(request) {
         const lastStage = path[path.length - 1];
         return normaliseThinkingActivityString(lastStage?.stage_id || lastStage?.runtime_stage_normalised);
     })();
-    const latestStatus = normaliseThinkingActivityString(latestProgress?.status).toLowerCase();
     const latestIsTerminal = isTerminalThinkingProgress(latestProgress);
-    const latestIsFailure = latestStatus === 'error' || latestStatus === 'failed';
+    const latestStageRowState = resolveThinkingLatestStageRowState(latestProgress, latestStageId);
 
     const stageRows = path.map((entry, index) => {
         const stageId = normaliseThinkingActivityString(entry.stage_id || entry.runtime_stage_normalised);
@@ -3315,7 +3409,7 @@ function buildThinkingWorkflowStageRows(request) {
             }
         } else if (index === path.length - 1 && !latestIsTerminal) {
             state = 'pending';
-        } else if (latestIsFailure && stageId === latestStageId) {
+        } else if (stageId === latestStageId && latestStageRowState === 'failure') {
             state = 'failure';
         }
 

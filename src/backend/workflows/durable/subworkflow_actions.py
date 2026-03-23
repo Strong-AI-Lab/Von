@@ -18,16 +18,49 @@ from ..action_registry import (
     WorkflowActionResult,
 )
 from ..engine import WorkflowDefinition, WorkflowExecutor
+from ..engine import (
+    LAST_WORKFLOW_APPROVAL_GATE_KEY,
+    LAST_WORKFLOW_IDEMPOTENCY_EVENT_KEY,
+    LAST_WORKFLOW_RETRY_EVENT_KEY,
+    LAST_WORKFLOW_TERMINAL_EFFECT_EVENT_KEY,
+    LAST_WORKFLOW_TOOL_OUTPUT_MAPPING_EVENT_KEY,
+    WORKFLOW_APPROVAL_GATE_EVENTS_KEY,
+    WORKFLOW_IDEMPOTENCY_EVENTS_KEY,
+    WORKFLOW_IDEMPOTENCY_RECORDS_KEY,
+    WORKFLOW_RETRY_EVENTS_KEY,
+    WORKFLOW_TERMINAL_EFFECT_EVENTS_KEY,
+    WORKFLOW_TOOL_OUTPUT_MAPPING_EVENTS_KEY,
+)
 from ..subworkflow_contracts import (
     WORKFLOW_SUBWORKFLOW_ACTION_ID,
     WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE,
     WORKFLOW_SUBWORKFLOW_FAILURE_MODE_PROPAGATE,
 )
 from ..execution_contracts import (
+    LAST_CONTROL_SIGNAL_BREAK_KEY,
+    LAST_CONTROL_SIGNAL_CONTINUE_KEY,
+    LAST_CONTROL_SIGNAL_ERROR_KEY,
+    LAST_CONTROL_SIGNAL_KEY,
+    LAST_CONTROL_SIGNAL_RETURN_KEY,
+    LAST_CONTROL_SIGNAL_SCOPE_KEY,
+    LAST_WORKFLOW_STEP_RESULT_ENVELOPE_KEY,
     WORKFLOW_CONTROL_SIGNAL_NONE,
+    WORKFLOW_RESULT_ENVELOPE_KEY,
+    WORKFLOW_RETURN_PAYLOAD_KEY,
+    WORKFLOW_RUNTIME_EVENTS_KEY,
+    WORKFLOW_RUNTIME_METRICS_KEY,
+    WORKFLOW_STEP_RESULT_ENVELOPES_KEY,
     append_runtime_event,
     increment_runtime_metric,
     normalise_control_signal,
+)
+from ..metadata_validation import LAST_METADATA_EVENT_KEY, WORKFLOW_METADATA_EVENTS_KEY
+from ..plan_state_runtime import (
+    LAST_WORKFLOW_COMPLETION_GATE_KEY,
+    LAST_WORKFLOW_PLAN_STATE_EVENT_KEY,
+    WORKFLOW_COMPLETION_GATE_KEY,
+    WORKFLOW_PLAN_STATE_EVENTS_KEY,
+    WORKFLOW_PLAN_STATE_KEY,
 )
 from ..trace_model import WorkflowExecutionTrace
 from ..vontology_loader import load_workflow_definition_from_vontology
@@ -49,6 +82,53 @@ _MAX_SUBWORKFLOW_INVOCATIONS_ENV = "VON_WORKFLOW_SUBWORKFLOW_MAX_INVOCATIONS"
 _DEFAULT_SUBWORKFLOW_INVOCATION_LIMIT = 64
 _DEFAULT_MAX_TRANSITIONS = 40
 _MAX_TRANSITIONS_LIMIT = 300
+_INTERNAL_CHILD_RESULT_KEYS: frozenset[str] = frozenset(
+    {
+        "__parent_state_id",
+        "__parent_workflow_id",
+        "__workflow_invocation_chain",
+        "__workflow_subworkflow_invocation_count",
+        LAST_CONTROL_SIGNAL_KEY,
+        LAST_CONTROL_SIGNAL_SCOPE_KEY,
+        LAST_CONTROL_SIGNAL_BREAK_KEY,
+        LAST_CONTROL_SIGNAL_CONTINUE_KEY,
+        LAST_CONTROL_SIGNAL_RETURN_KEY,
+        LAST_CONTROL_SIGNAL_ERROR_KEY,
+        WORKFLOW_RETURN_PAYLOAD_KEY,
+        WORKFLOW_RUNTIME_EVENTS_KEY,
+        WORKFLOW_RUNTIME_METRICS_KEY,
+        WORKFLOW_STEP_RESULT_ENVELOPES_KEY,
+        LAST_WORKFLOW_STEP_RESULT_ENVELOPE_KEY,
+        WORKFLOW_RESULT_ENVELOPE_KEY,
+        WORKFLOW_TOOL_OUTPUT_MAPPING_EVENTS_KEY,
+        LAST_WORKFLOW_TOOL_OUTPUT_MAPPING_EVENT_KEY,
+        WORKFLOW_TERMINAL_EFFECT_EVENTS_KEY,
+        LAST_WORKFLOW_TERMINAL_EFFECT_EVENT_KEY,
+        WORKFLOW_APPROVAL_GATE_EVENTS_KEY,
+        LAST_WORKFLOW_APPROVAL_GATE_KEY,
+        WORKFLOW_RETRY_EVENTS_KEY,
+        LAST_WORKFLOW_RETRY_EVENT_KEY,
+        WORKFLOW_IDEMPOTENCY_EVENTS_KEY,
+        LAST_WORKFLOW_IDEMPOTENCY_EVENT_KEY,
+        WORKFLOW_IDEMPOTENCY_RECORDS_KEY,
+        WORKFLOW_METADATA_EVENTS_KEY,
+        LAST_METADATA_EVENT_KEY,
+        WORKFLOW_PLAN_STATE_KEY,
+        WORKFLOW_PLAN_STATE_EVENTS_KEY,
+        LAST_WORKFLOW_PLAN_STATE_EVENT_KEY,
+        WORKFLOW_COMPLETION_GATE_KEY,
+        LAST_WORKFLOW_COMPLETION_GATE_KEY,
+    }
+)
+_TELEMETRY_CHILD_RESULT_KEYS: frozenset[str] = frozenset(
+    {
+        "aux_llm_calls",
+        "llm_calls",
+        "llm_step_envelope",
+        "tool_invocations",
+        "tool_messages",
+    }
+)
 
 
 def _normalise_text(value: Any) -> str:
@@ -144,6 +224,30 @@ def _append_parent_trace_event(
         existing = []
         metadata["subworkflow_invocations"] = existing
     existing.append(dict(invocation_event))
+
+
+def _compact_child_result_payload(child_data: Mapping[str, Any] | None) -> Dict[str, Any]:
+    """Strip child runtime telemetry before copying child context into parent state.
+
+    Parent workflows should consume child business outputs via explicit
+    `result.<field>` mappings, not by inheriting the child's full execution
+    telemetry and checkpoint history. Keeping that boundary compact prevents
+    recursive/nested step-envelope persistence from blowing up durable
+    checkpointing while preserving the child outputs that workflow metadata maps.
+    """
+
+    if not isinstance(child_data, Mapping):
+        return {}
+
+    compact_payload: Dict[str, Any] = {}
+    for raw_key, value in child_data.items():
+        key = _normalise_text(raw_key)
+        if not key:
+            continue
+        if key in _INTERNAL_CHILD_RESULT_KEYS or key in _TELEMETRY_CHILD_RESULT_KEYS:
+            continue
+        compact_payload[key] = value
+    return compact_payload
 
 
 def _build_subworkflow_handler(
@@ -269,8 +373,9 @@ def _build_subworkflow_handler(
             },
         )
 
+        child_result_payload = _compact_child_result_payload(child_result.data)
         outputs: Dict[str, Any] = {
-            "result": dict(child_result.data),
+            "result": child_result_payload,
             "subworkflow_invocation": invocation_event,
             "subworkflow_result_envelope": (
                 dict(child_result.result_envelope)

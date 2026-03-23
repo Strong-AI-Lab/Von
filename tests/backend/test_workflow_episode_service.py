@@ -158,6 +158,51 @@ def test_workflow_episode_aggregates_sync_to_workflow_concept():
     assert usage.get("completion_rate") == pytest.approx(0.5)
 
 
+def test_workflow_episode_can_skip_concept_aggregate_sync():
+    workflow_id = "#V#workflow_episode_skip_aggregate_sync"
+    _ensure_workflow_concept(workflow_id)
+    stable_key = build_workflow_episode_stable_key(
+        workflow_id=workflow_id,
+        source="chat_turn_workflow",
+        turn_id="turn-skip-sync",
+        session_id="session-skip-sync",
+        stage="tool_calling",
+    )
+
+    started = start_workflow_use_episode(
+        workflow_id=workflow_id,
+        source="chat_turn_workflow",
+        stable_key=stable_key,
+        turn_id="turn-skip-sync",
+        session_id="session-skip-sync",
+        sync_aggregates=False,
+    )
+    finished = finalise_workflow_use_episode(
+        workflow_id=workflow_id,
+        stable_key=stable_key,
+        completed=True,
+        terminal_stage="completed",
+        termination_code="completed",
+        termination_detail=None,
+        sync_aggregates=False,
+    )
+
+    assert started is not None
+    assert started["aggregate"] is None
+    assert finished is not None
+    assert finished["aggregate"] is None
+
+    concept_doc = ConceptsRepository.find_one(
+        {"concept_id": workflow_id},
+        projection={"concept_data.workflow_use_aggregates": 1},
+    )
+    assert concept_doc is not None
+    usage = (
+        (concept_doc.get("concept_data") or {}).get("workflow_use_aggregates") or {}
+    )
+    assert usage == {}
+
+
 def test_list_workflow_use_episodes_matches_equivalent_namespace_forms():
     workflow_id = "#V#workflow_episode_namespace_equivalence"
     stable_key = build_workflow_episode_stable_key(

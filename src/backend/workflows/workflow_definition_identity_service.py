@@ -1235,7 +1235,14 @@ def validate_workflow_definition_contract(
                         )
 
         if enforce_supported_actions:
+            llm_action_ids = {
+                str(spec.get("action_id") or spec.get("target_id") or "").strip()
+                for spec in llm_actions
+                if str(spec.get("action_id") or spec.get("target_id") or "").strip()
+            }
             for action_id in actions:
+                if action_id in llm_action_ids:
+                    continue
                 if action_id not in supported_action_set:
                     unsupported_action_ids.append(action_id)
 

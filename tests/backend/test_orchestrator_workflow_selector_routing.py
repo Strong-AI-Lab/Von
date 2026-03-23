@@ -4917,3 +4917,109 @@ def test_custom_workflow_result_preserves_messages_and_invocations(monkeypatch):
     assert dispatch_boundaries[-1].get("boundary") == "workflow_terminal"
     assert dispatch_boundaries[-1].get("selected_execution_mode") == "custom_workflow"
     assert dispatch_boundaries[-1].get("dispatch_workflow_id") == selected_workflow_id
+
+
+def test_custom_workflow_structured_result_renders_verdict_evidence_and_promotion(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = "#V#custom_gap_analysis_workflow"
+    monkeypatch.setenv("VON_WORKFLOW_SELECTOR_ALLOW_POLICY_UNSAFE", "1")
+
+    monkeypatch.setattr(
+        orchestrator,
+        "execute_workflow",
+        lambda workflow_id, **_kwargs: (
+            SimpleNamespace(
+                data={
+                    "response_text": json.dumps(
+                        [
+                            {
+                                "label": "meeting_type_classification",
+                                "verdict": "pass",
+                                "expected_outcome": "project_meeting",
+                                "observed_outcome": "project_meeting",
+                            }
+                        ]
+                    ),
+                    "run_id": "#V#run_meeting_test",
+                    "verdict": "pass",
+                    "verdict_summary": {
+                        "reason": "all_recorded_observations_passed",
+                    },
+                    "promotion_recommendation": {
+                        "recommended": True,
+                        "requires_promotion_gate": True,
+                        "reason": "explicit_promotion_gate_required",
+                    },
+                    "candidate_meeting_type": "project_meeting",
+                    "candidate_safe_downstream_action": "draft_calendar_entry",
+                    "meeting_candidate_observations": [
+                        {
+                            "label": "meeting_type_classification",
+                            "verdict": "pass",
+                            "expected_outcome": "project_meeting",
+                            "observed_outcome": "project_meeting",
+                        },
+                        {
+                            "label": "structured_meeting_fields",
+                            "verdict": "pass",
+                            "expected_outcome": "title,time,participants",
+                            "observed_outcome": "all expected fields present",
+                        },
+                    ],
+                },
+                final_state="complete",
+                completed=True,
+            )
+            if workflow_id == selected_workflow_id
+            else pytest.fail(f"unexpected workflow execution: {workflow_id}")
+        ),
+    )
+
+    result = orchestrator.run(
+        prompt="Use the discovered workflow.",
+        context=[],
+        llm_client=_CapturingLLM([selected_workflow_id]),
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Custom gap workflow",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Custom gap workflow",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                }
+            ],
+            "match_count": 1,
+        },
+    )
+
+    assert "Workflow verdict: pass." in result.response_text
+    assert "Experiment run: #V#run_meeting_test." in result.response_text
+    assert (
+        "Promotion recommendation: recommended; promotion gate required; "
+        "explicit_promotion_gate_required."
+    ) in result.response_text
+    assert "Candidate meeting type: project_meeting." in result.response_text
+    assert (
+        "Candidate safe downstream action: draft_calendar_entry."
+    ) in result.response_text
+    assert "Evidence:" in result.response_text
+    assert (
+        "- meeting_type_classification: pass (expected: project_meeting; "
+        "observed: project_meeting)"
+    ) in result.response_text
+    assert (
+        "- structured_meeting_fields: pass (expected: title,time,participants; "
+        "observed: all expected fields present)"
+    ) in result.response_text
