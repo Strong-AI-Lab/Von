@@ -57,49 +57,44 @@ Authoring policy:
 - Vontology workflow graphs, mappings, schedules, and event bindings are first-class implementation artefacts.
 - When behaviour can be expressed in VWL, preferred implementation is to materialise it in Vontology and then add only the supporting code/tooling needed for execution, validation, and telemetry.
 - Backend code SHOULD primarily supply reusable actions, validators, loaders, and telemetry for workflows, rather than embedding task-specific orchestration that VWL could already express.
+- Repo-side workflow/template/prompt files are non-authoritative by default. They MAY exist only as migration seeds, generated snapshots, test fixtures, or exports unless an explicitly approved exception says otherwise.
+- Replacing bespoke Python workflow builders with repo-side declarative files is therefore not, by itself, workflow-first convergence. The authoritative authored logic still belongs in Vontology-native artefacts.
+- Workflow-related Jira work SHOULD follow the workflow-authority readiness/closure checklist in `AGENTS.md` before implementation and before `Done`.
 
-### 2.1 Version-Controlled Workflow Sources
+### 2.1 Workflow Authority Model
 
-Canonical workflow families MAY also be authored as version-controlled workflow source bundles and then imported through the generic publication/materialisation path.
+Canonical workflow definitions, reusable workflow-authoring metadata, routing metadata, and prompt metadata SHOULD be authored directly in Vontology-native graph/text/policy structures whenever the runtime can represent them there.
 
-Current bundle contract:
+Normative authority rule:
 
-- schema version: `authored_workflow_source_bundle.v1`
-- canonical repository location: `src/backend/workflows/authored_sources/*.json`
-- generic loader/import path:
-  - `src/backend/workflows/workflow_concept_authority_service.py`
-  - `src/backend/services/workflow_authored_source_bootstrap.py`
+- supporting code MAY compile, validate, publish, or export these artefacts;
+- repo-side files MUST NOT be treated as the canonical authored source when the same logic can be held in Vontology;
+- if a production path depends on repo-side files for workflow authority, that path is source-authority drift and should be treated as contract debt, not normal conformance.
 
-Bundle intent:
+### 2.2 Transitional Repo-Side Workflow Artefacts
 
-- declare workflow publication specs without embedding workflow-family-specific Python spec builders;
-- carry workflow-level text relations, launch-input contracts, and step-level notes alongside the workflow graph source;
-- allow deterministic re-publication and short-circuit validation against the materialised Vontology workflow graph.
+Some repo-side workflow artefacts currently exist while the stronger authority model is being restored. They do not satisfy the workflow-authority contract on their own.
 
-Current bundle surface:
+Current transitional examples include:
 
-- workflow entries MAY include generic `text_relations` payloads in addition to description/content/notes convenience fields;
-- these authored workflow text relations are the preferred repository-side source for metadata such as routing profiles and discovery exemplars when the workflow is not being authored directly in Vontology first.
+- `src/backend/workflows/authored_sources/*.json`
+- `src/backend/workflows/authored_sources/workflow_template_profiles.json`
 
-Normative authoring rule:
+Permitted roles for such artefacts:
 
-- If a canonical workflow family is not authored directly in Vontology graph data, it SHOULD be authored in one of these version-controlled workflow source bundles.
-- Workflow-family-specific Python functions that assemble canonical workflow specs are a contract failure unless they are implementing a genuinely reusable VWL/runtime extension that does not yet exist elsewhere.
+- migration seed data used to move existing file-authored logic into Vontology-native authority;
+- generated snapshots exported from Vontology for diff/review;
+- test fixtures or deterministic export examples.
 
-### 2.2 Version-Controlled Workflow Template Bundles
+Non-permitted role:
 
-Reusable authored workflow-spec templates MAY be stored as a separate bundle family when the runtime needs to materialise a concrete workflow definition from declarative metadata rather than from a pre-existing canonical workflow graph.
+- acting as the authoritative source of workflow logic, template logic, routing metadata, or prompt metadata for production behaviour.
 
-Current template bundle contract:
+Supporting code notes:
 
-- schema version: `authored_workflow_template_bundle.v1`
-- canonical repository location: `src/backend/workflows/authored_sources/workflow_template_profiles.json`
-- generic loader/render path: `src/backend/workflows/workflow_template_profile_service.py`
-
-Normative authoring rule:
-
-- workflow-family-specific Python template-builder functions MUST NOT be introduced for cases that can instead be expressed as authored workflow-spec templates plus generic rendering/materialisation support;
-- if automatic template choice is needed, it MUST be driven by declarative template-profile metadata rather than workflow-family-specific request regexes.
+- generic publication/materialisation helpers, validators, and export tooling remain valid runtime support;
+- the current file-backed helpers under `workflow_concept_authority_service.py`, `workflow_authored_source_bootstrap.py`, and `workflow_template_profile_service.py` should be understood as transitional debt until they read authoritative Vontology-native artefacts instead of repo-side authored bundles;
+- future review/export tooling should make Vontology-authored workflow logic easy to inspect without restoring file authority.
 
 ## 3. VWL Ontology Vocabulary
 
