@@ -20,6 +20,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Sequence
 
+from ...services.prompt_template_service import PromptTemplateService
 from ..action_registry import (
     ActionRegistry,
     ActionSpec,
@@ -46,38 +47,6 @@ _JSON_FENCE_RE = re.compile(
     r"```(?:json)?\s*(?P<body>\{[\s\S]*\}|\[[\s\S]*\])\s*```",
     re.IGNORECASE,
 )
-
-_DEFAULT_PLANNER_PROMPT = """You are a planning engine for Von.
-
-Generate a forward plan that is concrete, executable, and concise.
-Use New Zealand English spelling.
-
-Return JSON only with this schema:
-{
-  "goal": "string",
-  "assumptions": ["string", "..."],
-  "actions": [
-    {
-      "id": "a1",
-      "title": "string",
-      "kind": "tool_call | workflow_invocation | analysis | response",
-      "tool_name": "string or null",
-      "workflow_id": "string or null",
-      "payload": { "any": "json" },
-      "dependencies": ["a0", "..."],
-      "rationale": "string",
-      "expected_outcome": "string"
-    }
-  ]
-}
-
-Rules:
-- Include at least one action.
-- Prefer actionable next steps over abstract advice.
-- Use tool_call/workflow_invocation when suitable.
-- Do not include Markdown fences.
-"""
-
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -189,8 +158,8 @@ def _collect_available_workflow_ids() -> list[str]:
         return []
 
 
-def _resolve_planning_prompt(context: Mapping[str, Any]) -> str:
-    """Resolve planning prompt from Vontology concept first, then fallback text."""
+def _resolve_planning_prompt(context: Mapping[str, Any]) -> str | None:
+    """Resolve planning prompt text from Vontology or an inline override."""
     inline_prompt = _normalise_text(context.get("prompt_template"))
     if inline_prompt:
         return inline_prompt
@@ -200,20 +169,17 @@ def _resolve_planning_prompt(context: Mapping[str, Any]) -> str:
         prompt_concept_id = DEFAULT_PROMPT_CONCEPT_ID
 
     try:
-        from ...prompt.annotation_prompt import AnnotationPromptBuilder
-
-        builder = AnnotationPromptBuilder(prompt_concept_id)
-        instruction = builder.get_instruction()
-        if (
-            isinstance(instruction, str)
-            and instruction.strip()
-            and "missing canonical relation text" not in instruction.lower()
-        ):
-            return instruction.strip()
+        prompt_service = PromptTemplateService(default_max_chars=6000)
+        _resolved_prompt_id, prompt_text = prompt_service.resolve_prompt_text(
+            [prompt_concept_id],
+            fallback=None,
+            max_chars=6000,
+        )
+        if isinstance(prompt_text, str) and prompt_text.strip():
+            return prompt_text.strip()
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("[planning_workflow] prompt concept lookup failed: %s", exc)
-
-    return _DEFAULT_PLANNER_PROMPT
+    return None
 
 
 def _extract_json_payload(raw_text: str) -> tuple[Any, str]:
@@ -362,15 +328,23 @@ def _handle_assess_context(request: WorkflowActionRequest) -> WorkflowActionResu
             "planning_inventory": planning_inventory,
             "planning_diagnostics": planning_diagnostics,
             "planning_prompt_text": _resolve_planning_prompt(context),
+            "planning_prompt_concept_id": (
+                _normalise_text(context.get("prompt_concept_id"))
+                or DEFAULT_PROMPT_CONCEPT_ID
+            ),
             "planning_trace": trace,
         }
     )
 
 
-def _build_inference_prompt(context: Mapping[str, Any]) -> str:
+def _build_inference_prompt(context: Mapping[str, Any]) -> str | None:
     planning_context = context.get("planning_context", {})
     planning_inventory = context.get("planning_inventory", {})
-    prompt_template = _resolve_planning_prompt(context)
+    prompt_template = _normalise_text(context.get("planning_prompt_text"))
+    if not prompt_template:
+        prompt_template = _resolve_planning_prompt(context)
+    if not prompt_template:
+        return None
     payload = {
         "goal": (
             planning_context.get("goal")
@@ -423,6 +397,21 @@ def _handle_infer_plan(request: WorkflowActionRequest) -> WorkflowActionResult:
         llm = get_llm_client()
 
     prompt = _build_inference_prompt(context)
+    if not prompt:
+        diagnostics = dict(context.get("planning_diagnostics", {}))
+        diagnostics["prompt"] = {
+            "available": False,
+            "prompt_concept_id": (
+                _normalise_text(context.get("planning_prompt_concept_id"))
+                or _normalise_text(context.get("prompt_concept_id"))
+                or DEFAULT_PROMPT_CONCEPT_ID
+            ),
+        }
+        return WorkflowActionResult(
+            status="failed",
+            error="planning_prompt_unavailable",
+            outputs={"planning_diagnostics": diagnostics},
+        )
     raw_response = llm.generate(prompt, llm_params={"max_tokens": 1600})
     parsed_payload, parse_mode = _extract_json_payload(str(raw_response or ""))
     if not isinstance(parsed_payload, Mapping):

@@ -26,6 +26,7 @@ WORKFLOW_GAP_RUN_CANDIDATE_TEST_ACTION_ID = "workflow_gap.run_candidate_test"
 
 WORKFLOW_GAP_ANALYSIS_PROMPT_TYPE_ID = "#V#prompt_for_llm"
 WORKFLOW_GAP_ANALYSIS_PROMPT_CONCEPT_ID = "#V#workflow_gap_analysis_prompt"
+WORKFLOW_GAP_CANDIDATE_PROMPT_CONCEPT_ID = "#V#workflow_gap_candidate_execution_prompt"
 WORKFLOW_GAP_TEST_PROMPT_CONCEPT_ID = "#V#workflow_gap_test_prompt"
 WORKFLOW_GAP_ANALYSIS_PROMPT_LINK_PREDICATE = "#V#has_workflow_gap_analysis_prompt"
 WORKFLOW_GAP_TEST_PROMPT_LINK_PREDICATE = "#V#has_workflow_gap_test_prompt"

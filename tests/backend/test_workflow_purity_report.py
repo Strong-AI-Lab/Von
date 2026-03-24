@@ -130,6 +130,7 @@ def test_build_workflow_purity_report_counts_runtime_and_code_impurity(
                     "built_in_registration_count": 2,
                     "remaining_python_workflow_family_count": 3,
                     "python_authored_canonical_workflow_source_count": 2,
+                    "python_authored_workflow_prompt_source_count": 2,
                     "direct_instance_create_callsite_count": 3,
                     "env_event_binding_count": 0,
                     "legacy_selector_mode_count": 1,
@@ -155,6 +156,7 @@ def test_build_workflow_purity_report_counts_runtime_and_code_impurity(
         "built_in_registration_count": 2,
         "remaining_python_workflow_family_count": 3,
         "python_authored_canonical_workflow_source_count": 2,
+        "python_authored_workflow_prompt_source_count": 0,
         "direct_instance_create_callsite_count": 0,
         "env_event_binding_count": 0,
         "legacy_selector_mode_count": 1,
@@ -231,6 +233,7 @@ def test_build_workflow_purity_report_flags_baseline_regressions(tmp_path: Path)
                     "built_in_registration_count": 0,
                     "remaining_python_workflow_family_count": 0,
                     "python_authored_canonical_workflow_source_count": 0,
+                    "python_authored_workflow_prompt_source_count": 0,
                     "direct_instance_create_callsite_count": 0,
                     "env_event_binding_count": 0,
                     "legacy_selector_mode_count": 0,
@@ -274,6 +277,7 @@ def test_build_workflow_purity_report_does_not_resolve_lazy_registrations(
                     "built_in_registration_count": 0,
                     "remaining_python_workflow_family_count": 0,
                     "python_authored_canonical_workflow_source_count": 0,
+                    "python_authored_workflow_prompt_source_count": 0,
                     "direct_instance_create_callsite_count": 0,
                     "env_event_binding_count": 0,
                     "legacy_selector_mode_count": 0,
@@ -341,6 +345,7 @@ def test_build_workflow_purity_report_flags_repo_seed_authority_drift(
                     "built_in_registration_count": 0,
                     "remaining_python_workflow_family_count": 0,
                     "python_authored_canonical_workflow_source_count": 0,
+                    "python_authored_workflow_prompt_source_count": 0,
                     "direct_instance_create_callsite_count": 0,
                     "env_event_binding_count": 0,
                     "legacy_selector_mode_count": 0,
@@ -404,6 +409,7 @@ def test_build_workflow_purity_report_flags_vontology_first_seed_contract_violat
                     "built_in_registration_count": 0,
                     "remaining_python_workflow_family_count": 0,
                     "python_authored_canonical_workflow_source_count": 0,
+                    "python_authored_workflow_prompt_source_count": 0,
                     "direct_instance_create_callsite_count": 0,
                     "env_event_binding_count": 0,
                     "legacy_selector_mode_count": 0,
@@ -428,4 +434,65 @@ def test_build_workflow_purity_report_flags_vontology_first_seed_contract_violat
     assert sorted(item["name"] for item in contracts["violations"]) == [
         "canonical_workflow_publication_vontology_first",
         "workflow_template_bundle_vontology_first",
+    ]
+
+
+def test_build_workflow_purity_report_flags_python_authored_workflow_prompt_sources(
+    tmp_path: Path,
+) -> None:
+    _write(
+        "src/backend/services/workflow_gap_vontology_service.py",
+        (
+            "WORKFLOW_GAP_ANALYSIS_PROMPT = \"Return JSON that analyses the gap and "
+            "proposes reusable workflow behaviour for the user request.\"\n\n"
+            "def _build_candidate_prompt_template():\n"
+            "    return \"Create a candidate workflow prompt body with acceptance checks "
+            "and recent-turn context.\"\n"
+        ),
+        root=tmp_path,
+    )
+    baseline_path = tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workflow_purity_baseline.v1",
+                "counters": {
+                    "built_in_registration_count": 0,
+                    "remaining_python_workflow_family_count": 0,
+                    "python_authored_canonical_workflow_source_count": 0,
+                    "python_authored_workflow_prompt_source_count": 0,
+                    "direct_instance_create_callsite_count": 0,
+                    "env_event_binding_count": 0,
+                    "legacy_selector_mode_count": 0,
+                    "builtin_capability_override_count": 0,
+                    "non_vontology_discoverable_workflow_count": 0,
+                    "repo_seed_authority_drift_path_count": 0,
+                    "vontology_first_seed_fallback_violation_count": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = build_workflow_purity_report(
+        registry=None,
+        project_root=tmp_path,
+        baseline_path=baseline_path,
+    )
+
+    assert report["counters"]["python_authored_workflow_prompt_source_count"] == 2
+    assert report["details"]["python_authored_workflow_prompt_sources"] == [
+        {
+            "path": "src/backend/services/workflow_gap_vontology_service.py",
+            "kind": "assignment",
+            "symbol": "WORKFLOW_GAP_ANALYSIS_PROMPT",
+            "line": 1,
+        },
+        {
+            "path": "src/backend/services/workflow_gap_vontology_service.py",
+            "kind": "function",
+            "symbol": "_build_candidate_prompt_template",
+            "line": 3,
+        },
     ]

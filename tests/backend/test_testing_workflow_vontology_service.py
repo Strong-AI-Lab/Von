@@ -6,6 +6,7 @@ import pytest
 from unittest.mock import MagicMock
 
 from src.backend.services import concept_service
+from src.backend.services.concept_service import ConceptNotFoundError
 from src.backend.services.testing_workflow_vontology_service import (
     CANONICAL_TESTING_WORKFLOW_IDS,
     EPHEMERAL_THEORY_GC_WORKFLOW_ID,
@@ -15,7 +16,11 @@ from src.backend.services.testing_workflow_vontology_service import (
     SYNTHETIC_WORKFLOW_REGRESSION_SUITE_WORKFLOW_ID,
     bootstrap_canonical_testing_workflows,
 )
-from src.backend.services.text_value_service import get_texts_for_concept
+from src.backend.services.text_value_service import (
+    get_texts_for_concept,
+    upsert_singleton_text_relation,
+)
+from src.backend.services.workflow_prompt_authority_service import DEFAULT_PROMPT_TYPE_ID
 from src.backend.services.workflow_discovery_service import (
     invalidate_workflow_discovery_executability_caches,
 )
@@ -37,6 +42,40 @@ def _relationship_targets(concept_doc: dict[str, Any] | None, predicate: str) ->
     if isinstance(raw_targets, list):
         return [str(item).strip() for item in raw_targets if str(item).strip()]
     return []
+
+
+_MEETING_INVITATION_TEST_PROMPT_TEXTS: dict[str, str] = {
+    "#V#meeting_invitation_structure_prompt": (
+        "Return JSON with meeting_type, title, time, participants, "
+        "location_signal, topic_purpose, and safe_downstream_action."
+    ),
+    "#V#meeting_invitation_observation_prompt": (
+        "Return an array of exactly four observation objects describing the "
+        "candidate meeting workflow result."
+    ),
+}
+
+
+def _seed_meeting_invitation_prompt_content() -> None:
+    for concept_id, text in _MEETING_INVITATION_TEST_PROMPT_TEXTS.items():
+        try:
+            concept_service.get_concept_by_concept_id(concept_id)
+        except ConceptNotFoundError:
+            concept_service.create_concept(
+                name=concept_id.replace("#V#", "").replace("_", " ").title(),
+                concept_id=concept_id,
+                description="Test prompt concept for canonical testing workflow bootstraps.",
+                parent_concept_ids=[DEFAULT_PROMPT_TYPE_ID],
+                create_as_instance=True,
+                visibility_scope_mode="global_general",
+            )
+        upsert_singleton_text_relation(
+            subject_concept_id=concept_id,
+            predicate="hasContent",
+            text=text,
+            lang="en-NZ",
+            garbage_collect=True,
+        )
 
 
 @pytest.fixture
@@ -62,6 +101,7 @@ def _reset_mock_db(monkeypatch: pytest.MonkeyPatch):
 def test_bootstrap_materialises_testing_workflow_family(
     _reset_mock_db: Any,
 ) -> None:
+    _seed_meeting_invitation_prompt_content()
     report = bootstrap_canonical_testing_workflows()
 
     publication = report.get("publication") or {}
@@ -70,7 +110,7 @@ def test_bootstrap_materialises_testing_workflow_family(
     assert counts.get("errors") == 0
     prompt_support = report.get("prompt_support") or {}
     assert prompt_support.get("success") is True
-    assert prompt_support.get("counts", {}).get("persisted_prompts") == 2
+    assert prompt_support.get("counts", {}).get("validated_prompts") == 2
 
     for workflow_id in CANONICAL_TESTING_WORKFLOW_IDS:
         definition = load_workflow_definition_from_vontology(workflow_id)
@@ -327,6 +367,7 @@ def test_bootstrap_materialises_testing_workflow_family(
 def test_bootstrap_skips_republication_when_testing_workflow_family_is_current(
     _reset_mock_db: Any,
 ) -> None:
+    _seed_meeting_invitation_prompt_content()
     first_report = bootstrap_canonical_testing_workflows()
     first_counts = (first_report.get("publication") or {}).get("counts") or {}
     assert first_counts.get("workflows_published") == 5
@@ -346,6 +387,7 @@ def test_bootstrap_skips_republication_when_testing_workflow_family_is_current(
 def test_bootstrap_can_force_republish_when_testing_workflow_family_is_current(
     _reset_mock_db: Any,
 ) -> None:
+    _seed_meeting_invitation_prompt_content()
     bootstrap_canonical_testing_workflows()
 
     forced_report = bootstrap_canonical_testing_workflows(force_republish=True)
@@ -361,6 +403,7 @@ def test_bootstrap_can_force_republish_when_testing_workflow_family_is_current(
 def test_bootstrap_preserves_authoritative_vontology_mapping_edits_when_family_remains_valid(
     _reset_mock_db: Any,
 ) -> None:
+    _seed_meeting_invitation_prompt_content()
     bootstrap_canonical_testing_workflows()
 
     mapping_concept_id = authority_service._runtime_context_input_mapping_concept_id(
@@ -398,6 +441,7 @@ def test_bootstrap_preserves_authoritative_vontology_mapping_edits_when_family_r
 def test_meeting_invitation_testing_workflow_executes_end_to_end_via_vontology(
     _reset_mock_db: Any,
 ) -> None:
+    _seed_meeting_invitation_prompt_content()
     bootstrap_canonical_testing_workflows()
     meeting_definition = load_workflow_definition_from_vontology(
         MEETING_INVITATION_TESTING_WORKFLOW_ID
@@ -472,6 +516,7 @@ def test_meeting_invitation_testing_workflow_executes_end_to_end_via_vontology(
 def test_meeting_invitation_testing_workflow_executes_with_optional_expectations_omitted(
     _reset_mock_db: Any,
 ) -> None:
+    _seed_meeting_invitation_prompt_content()
     bootstrap_canonical_testing_workflows()
     meeting_definition = load_workflow_definition_from_vontology(
         MEETING_INVITATION_TESTING_WORKFLOW_ID

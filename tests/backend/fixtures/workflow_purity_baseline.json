@@ -7,6 +7,7 @@
     "legacy_selector_mode_count": 0,
     "non_vontology_discoverable_workflow_count": 0,
     "python_authored_canonical_workflow_source_count": 0,
+    "python_authored_workflow_prompt_source_count": 0,
     "remaining_python_workflow_family_count": 0,
     "repo_seed_authority_drift_path_count": 0,
     "vontology_first_seed_fallback_violation_count": 0

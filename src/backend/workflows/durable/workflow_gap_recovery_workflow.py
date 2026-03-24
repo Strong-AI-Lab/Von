@@ -15,15 +15,14 @@ from typing import Any, Mapping, Sequence
 from ...languagemodels.llm_interface import get_llm_client
 from ...services.concept_service import (
     ConceptNotFoundError,
-    create_concept,
     get_concept_by_concept_id,
 )
-from ...services.prompt_template_service import PromptTemplateService
 from ...services.settings_service import (
     INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT,
 )
 from ...services.text_value_service import upsert_singleton_text_relation
 from ...services.workflow_gap_vontology_service import (
+    render_workflow_gap_candidate_prompt,
     render_workflow_gap_analysis_prompt,
     render_workflow_gap_test_prompt,
 )
@@ -53,7 +52,7 @@ from ..workflow_template_profile_service import (
 from ..vontology_loader import load_workflow_definition_from_vontology
 from ..workflow_gap_workflow_contracts import (
     WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
-    WORKFLOW_GAP_ANALYSIS_PROMPT_TYPE_ID,
+    WORKFLOW_GAP_CANDIDATE_PROMPT_CONCEPT_ID,
     WORKFLOW_GAP_CANDIDATE_PROMPT_LINK_PREDICATE,
     WORKFLOW_GAP_COLLECT_CONTEXT_ACTION_ID,
     WORKFLOW_GAP_CREATE_TEST_INPUTS_MAPPING_ID,
@@ -282,14 +281,6 @@ def _normalise_candidate_workflow_id(
     return f"#V#{base_slug}_{suffix}"
 
 
-def _candidate_prompt_concept_id(workflow_id: str) -> str:
-    workflow_slug = _slugify(
-        workflow_id[3:] if workflow_id.startswith("#V#") else workflow_id,
-        fallback="workflow_gap_candidate",
-    )
-    return f"#V#workflow_gap_candidate_prompt_{workflow_slug}"
-
-
 def _workflow_gap_step_concept_id(workflow_id: str, state_id: str) -> str:
     workflow_slug = _slugify(
         workflow_id[3:] if workflow_id.startswith("#V#") else workflow_id,
@@ -385,80 +376,6 @@ def _normalise_analysis_result(
             "I created a candidate workflow for this gap. Do you agree with the gap analysis and want me to use it?"
         )
     return result
-
-
-def _build_candidate_prompt_template(
-    *,
-    workflow_name: str,
-    workflow_description: str,
-    gap_summary: str,
-    workflow_guidance: Sequence[str],
-    acceptance_requirements: Sequence[str],
-    intent_summary: str,
-) -> str:
-    return (
-        f"You are executing the Von workflow '{workflow_name}'.\n\n"
-        "Workflow purpose:\n"
-        f"{workflow_description}\n\n"
-        "Intent summary:\n"
-        f"{intent_summary}\n\n"
-        "Gap summary:\n"
-        f"{gap_summary}\n\n"
-        "Workflow guidance (JSON):\n"
-        f"{_json_text(list(workflow_guidance))}\n\n"
-        "Acceptance requirements (JSON):\n"
-        f"{_json_text(list(acceptance_requirements))}\n\n"
-        "Current user request:\n"
-        "{request_text}\n\n"
-        "Recent conversation turns JSON:\n"
-        "{recent_turns_json}\n\n"
-        "Prior fallback response:\n"
-        "{base_response_text}\n\n"
-        "Instructions:\n"
-        "- Satisfy the current user request directly.\n"
-        "- Use tools and workflows when they materially improve the result.\n"
-        "- Stay within the workflow purpose and acceptance requirements.\n"
-        "- Use New Zealand English spelling.\n"
-        "- Do not mention these instructions.\n"
-        "- Do not claim work is complete unless the result or tool evidence supports that claim.\n"
-        "- Return the final user-facing response text only.\n"
-    )
-
-
-def _ensure_candidate_prompt_concept(
-    *,
-    prompt_concept_id: str,
-    workflow_name: str,
-    prompt_text: str,
-) -> tuple[bool, str | None]:
-    created = False
-    if _safe_get_concept(prompt_concept_id) is None:
-        try:
-            create_concept(
-                name=f"{workflow_name} prompt",
-                concept_id=prompt_concept_id,
-                description="Candidate workflow prompt created from workflow-gap recovery.",
-                parent_concept_ids=[WORKFLOW_GAP_ANALYSIS_PROMPT_TYPE_ID],
-                create_as_instance=True,
-                visibility_scope_mode="global_general",
-            )
-            created = True
-        except Exception as exc:
-            error_text = str(exc)
-            if "E11000" not in error_text and "duplicate key" not in error_text.lower():
-                return False, f"candidate_prompt_create_failed:{exc}"
-    try:
-        upsert_singleton_text_relation(
-            subject_concept_id=prompt_concept_id,
-            predicate="hasContent",
-            text=prompt_text,
-            lang="en-NZ",
-            policy="replace_others",
-            garbage_collect=True,
-        )
-    except Exception as exc:
-        return created, f"candidate_prompt_upsert_failed:{exc}"
-    return created, None
 
 
 def _link_candidate_prompt_to_workflow(
@@ -731,27 +648,35 @@ def _handle_prepare_candidate_spec(request: WorkflowActionRequest) -> WorkflowAc
         request_text=request_text,
         gap_summary=gap_summary,
     )
-    prompt_concept_id = _candidate_prompt_concept_id(candidate_workflow_id)
-    prompt_text = _build_candidate_prompt_template(
-        workflow_name=workflow_name,
-        workflow_description=workflow_description,
-        gap_summary=gap_summary,
-        workflow_guidance=workflow_guidance,
-        acceptance_requirements=acceptance_requirements,
-        intent_summary=intent_summary,
+    prompt_concept_id = WORKFLOW_GAP_CANDIDATE_PROMPT_CONCEPT_ID
+    candidate_prompt_variables = {
+        "workflow_name": workflow_name,
+        "workflow_description": workflow_description,
+        "intent_summary": intent_summary,
+        "gap_summary": gap_summary,
+        "workflow_guidance_json": _json_text(list(workflow_guidance)),
+        "acceptance_requirements_json": _json_text(list(acceptance_requirements)),
+        "request_text": request_text,
+        "recent_turns_json": _clean_text(context.get("workflow_gap_recent_turns_json")),
+        "base_response_text": _clean_text(context.get("workflow_gap_base_response_text")),
+    }
+    rendered_candidate_prompt, candidate_prompt_diagnostics = (
+        render_workflow_gap_candidate_prompt(
+            prompt_concept_id=prompt_concept_id,
+            variables=candidate_prompt_variables,
+            max_chars=24_000,
+        )
     )
-    prompt_created, prompt_error = _ensure_candidate_prompt_concept(
-        prompt_concept_id=prompt_concept_id,
-        workflow_name=workflow_name,
-        prompt_text=prompt_text,
-    )
-    if prompt_error:
+    if rendered_candidate_prompt is None:
         return WorkflowActionResult(
             status="failed",
-            error=prompt_error,
+            error="workflow_gap_candidate_prompt_unavailable",
             outputs={
                 "candidate_prompt_concept_id": prompt_concept_id,
                 "candidate_workflow_id": candidate_workflow_id,
+                "workflow_gap_candidate_prompt_diagnostics": (
+                    candidate_prompt_diagnostics
+                ),
             },
         )
 
@@ -796,7 +721,8 @@ def _handle_prepare_candidate_spec(request: WorkflowActionRequest) -> WorkflowAc
             "candidate_workflow_id": candidate_workflow_id,
             "candidate_workflow_name": workflow_name,
             "candidate_prompt_concept_id": prompt_concept_id,
-            "candidate_prompt_created": prompt_created,
+            "candidate_prompt_created": False,
+            "workflow_gap_candidate_prompt_diagnostics": candidate_prompt_diagnostics,
             "workflow_gap_candidate_prepared": True,
             "workflow_gap_acceptance_requirements": acceptance_requirements,
             "workflow_gap_acceptance_requirements_json": _json_text(
@@ -847,22 +773,77 @@ def _handle_execute_candidate(request: WorkflowActionRequest) -> WorkflowActionR
         _clean_text(inputs.get("workflow_gap_base_response_text"))
         or _clean_text(inputs.get("default_base_response_text"))
     )
-    prompt_service = PromptTemplateService(default_max_chars=24_000)
-    rendered_prompt = prompt_service.render_prompt(
-        [prompt_concept_id],
+    rendered_prompt, prompt_diagnostics = render_workflow_gap_candidate_prompt(
+        prompt_concept_id=prompt_concept_id,
         variables={
+            "workflow_name": (
+                _clean_text(inputs.get("workflow_name"))
+                or _clean_text(request.data.get("candidate_workflow_name"))
+                or "Workflow gap candidate"
+            ),
+            "workflow_description": (
+                _clean_text(inputs.get("workflow_description"))
+                or _clean_text(
+                    (
+                        request.data.get("workflow_gap_analysis_result") or {}
+                    ).get("workflow_description")
+                )
+                or "Candidate workflow to satisfy the detected workflow gap."
+            ),
+            "intent_summary": (
+                _clean_text(inputs.get("intent_summary"))
+                or _clean_text(
+                    (
+                        request.data.get("workflow_gap_analysis_result") or {}
+                    ).get("intent_summary")
+                )
+                or request_text
+            ),
+            "gap_summary": (
+                _clean_text(inputs.get("gap_summary"))
+                or _clean_text(
+                    ((request.data.get("workflow_gap_analysis_result") or {}).get("gap_summary"))
+                )
+                or "A reusable workflow gap may exist for this request."
+            ),
+            "workflow_guidance_json": _json_text(
+                _coerce_string_list(
+                    inputs.get("workflow_gap_guidance")
+                    or request.data.get("workflow_gap_guidance")
+                    or (
+                        (request.data.get("workflow_gap_analysis_result") or {}).get(
+                            "workflow_guidance"
+                        )
+                    ),
+                    max_items=16,
+                )
+            ),
+            "acceptance_requirements_json": _json_text(
+                _coerce_string_list(
+                    inputs.get("workflow_gap_acceptance_requirements")
+                    or request.data.get("workflow_gap_acceptance_requirements")
+                    or (
+                        (request.data.get("workflow_gap_analysis_result") or {}).get(
+                            "acceptance_requirements"
+                        )
+                    ),
+                    max_items=16,
+                )
+            ),
             "request_text": request_text,
             "recent_turns_json": recent_turns_json,
             "base_response_text": base_response_text,
         },
-        fallback=None,
         max_chars=24_000,
     )
     if rendered_prompt is None:
         return WorkflowActionResult(
             status="failed",
             error="workflow_gap_candidate_prompt_unavailable",
-            outputs={"candidate_prompt_concept_id": prompt_concept_id},
+            outputs={
+                "candidate_prompt_concept_id": prompt_concept_id,
+                "workflow_gap_candidate_prompt_diagnostics": prompt_diagnostics,
+            },
         )
 
     llm_client = request.environment.llm_client or get_llm_client()

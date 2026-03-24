@@ -10,9 +10,15 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from . import concept_service
-from .concept_service import ConceptNotFoundError, get_concept_by_concept_id
-from .text_value_service import get_texts_for_concept, upsert_singleton_text_relation
+from .workflow_prompt_authority_service import (
+    WorkflowPromptConceptSpec,
+    WorkflowPromptLinkSpec,
+    ensure_prompt_concept_support,
+    normalise_strings,
+    resolve_linked_prompt_concept_id,
+    safe_get_concept,
+    safe_str,
+)
 from ..workflows.vontology_loader import build_workflow_process_graph
 
 DESCRIPTION_PROMPT_TYPE_ID = "#V#prompt_for_llm"
@@ -28,58 +34,6 @@ _WORKFLOW_DESCRIPTION_LINK_PREDICATES: tuple[str, ...] = (
     "hasWorkflowDescriptionPrompt",
 )
 
-_CANONICAL_GENERIC_DESCRIPTION_PROMPT_TEXT = """You are a knowledge engineer helping to document an ontology.
-
-Given the following concept information, generate a clear, concise description
-(1-3 sentences) that:
-1. Explains what the concept represents.
-2. Distinguishes it from similar concepts where the evidence supports that.
-3. Uses precise, encyclopaedic language in New Zealand English.
-
-Concept name: {concept_name}
-Concept ID: {concept_id}
-Type hierarchy: {type_hierarchy}
-Relationships: {relationships}
-Existing description: {description}
-
-Respond with ONLY the description text, with no preamble or explanation."""
-
-_CANONICAL_WORKFLOW_DESCRIPTION_PROMPT_TEXT = """You are improving workflow descriptions for RAG-based workflow discovery and capability matching in Von.
-
-Given the workflow concept information and workflow-structure context, write a retrieval-quality workflow description in New Zealand English.
-
-Return plain text only. Keep it under 160 words and include:
-- One lead sentence saying what task shapes the workflow handles and what it does.
-- `Domain: ...`
-- `Input types: ...`
-- `Output types: ...`
-- `Prerequisite capabilities: ...`
-- `Cost class: ...`
-- `Maturity: ...`
-- `Estimated success likelihood: ...`
-
-Rules:
-- Use only evidence present in the concept information, relationships, and workflow graph.
-- Mention major invoked actions or subworkflows only when they help retrieval.
-- If the workflow is skeletal, partially non-executable, or missing action bindings, say so explicitly in `Maturity`.
-- Prefer compact, information-dense prose over marketing language.
-- Do not mention this prompt or the word "RAG".
-
-Concept name: {concept_name}
-Concept ID: {concept_id}
-Existing description: {description}
-Type hierarchy: {type_hierarchy}
-Relationships: {relationships}
-Workflow initial step: {workflow_initial_step}
-Workflow step count: {workflow_step_count}
-Workflow actions: {workflow_action_ids}
-Workflow subworkflows: {workflow_subworkflow_ids}
-Workflow transition reasons: {workflow_transition_reasons}
-Workflow output context keys: {workflow_output_context_keys}
-Workflow structure summary: {workflow_structure_summary}
-Workflow graph warnings: {workflow_graph_warnings}
-"""
-
 _WORKFLOW_DOMAIN_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("jira", "reconciliation", "import"), "Jira task synchronisation and reconciliation"),
     (("file_copy", "upload", "document", "image"), "File-copy ingestion and interpretation"),
@@ -92,35 +46,8 @@ _WORKFLOW_DOMAIN_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("testing", "experiment", "benchmark", "promotion", "theory"), "Workflow testing and experiment evaluation"),
 )
 
-
-def _safe_str(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    cleaned = value.strip()
-    return cleaned or None
-
-
-def _normalise_strings(values: Any) -> tuple[str, ...]:
-    if isinstance(values, str):
-        values = [values]
-    if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray)):
-        return ()
-    seen: set[str] = set()
-    output: list[str] = []
-    for value in values:
-        cleaned = _safe_str(value)
-        if not cleaned:
-            continue
-        lowered = cleaned.lower()
-        if lowered in seen:
-            continue
-        seen.add(lowered)
-        output.append(cleaned)
-    return tuple(output)
-
-
 def _humanise_identifier(value: Any) -> str | None:
-    cleaned = _safe_str(value)
+    cleaned = safe_str(value)
     if not cleaned:
         return None
     if cleaned.startswith("#V#"):
@@ -130,7 +57,7 @@ def _humanise_identifier(value: Any) -> str | None:
 
 
 def _parse_context_items(value: Any) -> tuple[str, ...]:
-    cleaned = _safe_str(value)
+    cleaned = safe_str(value)
     if not cleaned:
         return ()
     lowered = cleaned.lower()
@@ -153,7 +80,7 @@ def _parse_context_items(value: Any) -> tuple[str, ...]:
     seen: set[str] = set()
     output: list[str] = []
     for item in items:
-        cleaned_item = _safe_str(item)
+        cleaned_item = safe_str(item)
         if not cleaned_item:
             continue
         lowered_item = cleaned_item.lower()
@@ -165,7 +92,7 @@ def _parse_context_items(value: Any) -> tuple[str, ...]:
 
 
 def _build_sentence(text: str | None, fallback: str) -> str:
-    chosen = _safe_str(text) or fallback
+    chosen = safe_str(text) or fallback
     if chosen.endswith("."):
         return chosen
     return f"{chosen}."
@@ -221,15 +148,15 @@ def build_deterministic_workflow_description(
     if not context:
         return None
 
-    name = _safe_str(concept_name) or _humanise_identifier(concept_id) or concept_id
-    base_description = _safe_str(existing_description)
+    name = safe_str(concept_name) or _humanise_identifier(concept_id) or concept_id
+    base_description = safe_str(existing_description)
     action_ids = _parse_context_items(context.get("workflow_action_ids"))
     subworkflow_ids = _parse_context_items(context.get("workflow_subworkflow_ids"))
     transition_reasons = _parse_context_items(context.get("workflow_transition_reasons"))
     output_context_keys = _parse_context_items(context.get("workflow_output_context_keys"))
     graph_warnings = _parse_context_items(context.get("workflow_graph_warnings"))
     try:
-        step_count = int(_safe_str(context.get("workflow_step_count")) or "0")
+        step_count = int(safe_str(context.get("workflow_step_count")) or "0")
     except ValueError:
         step_count = 0
 
@@ -293,11 +220,7 @@ def build_deterministic_workflow_description(
 
 
 def _safe_get_concept(concept_id: str) -> Mapping[str, Any] | None:
-    try:
-        concept = get_concept_by_concept_id(concept_id)
-    except ConceptNotFoundError:
-        return None
-    return concept if isinstance(concept, Mapping) else None
+    return safe_get_concept(concept_id)
 
 
 def resolve_workflow_description_prompt_concept_id(
@@ -305,25 +228,12 @@ def resolve_workflow_description_prompt_concept_id(
     workflow_id: str | None = None,
     prompt_concept_id: str | None = None,
 ) -> str | None:
-    explicit_id = _safe_str(prompt_concept_id)
-    if explicit_id:
-        return explicit_id
-
-    workflow_concept_id = _safe_str(workflow_id)
-    if workflow_concept_id:
-        for predicate in _WORKFLOW_DESCRIPTION_LINK_PREDICATES:
-            rows = get_texts_for_concept(
-                workflow_concept_id,
-                predicate=predicate,
-                limit=1,
-            )
-            if not rows:
-                continue
-            linked_prompt_id = _safe_str((rows[0] or {}).get("text"))
-            if linked_prompt_id and linked_prompt_id.startswith("#V#"):
-                return linked_prompt_id
-
-    return WORKFLOW_DESCRIPTION_PROMPT_CONCEPT_ID
+    return resolve_linked_prompt_concept_id(
+        workflow_id=workflow_id,
+        prompt_concept_id=prompt_concept_id,
+        predicates=_WORKFLOW_DESCRIPTION_LINK_PREDICATES,
+        default_prompt_concept_id=WORKFLOW_DESCRIPTION_PROMPT_CONCEPT_ID,
+    )
 
 
 def build_workflow_description_prompt_context(concept_id: str) -> dict[str, str]:
@@ -341,7 +251,7 @@ def build_workflow_description_prompt_context(concept_id: str) -> dict[str, str]
     if not steps:
         return {}
 
-    initial_step = _safe_str(graph.get("initial_step")) or "Unknown"
+    initial_step = safe_str(graph.get("initial_step")) or "Unknown"
     action_ids: list[str] = []
     subworkflow_ids: list[str] = []
     transition_reasons: list[str] = []
@@ -349,16 +259,16 @@ def build_workflow_description_prompt_context(concept_id: str) -> dict[str, str]
     step_summaries: list[str] = []
 
     def _append_unique(target: list[str], value: Any) -> None:
-        cleaned = _safe_str(value)
+        cleaned = safe_str(value)
         if cleaned and cleaned not in target:
             target.append(cleaned)
 
     for step in steps:
-        step_id = _safe_str(step.get("step_id")) or "unknown_step"
-        action_id = _safe_str(step.get("invokes_action_target")) or _safe_str(
+        step_id = safe_str(step.get("step_id")) or "unknown_step"
+        action_id = safe_str(step.get("invokes_action_target")) or safe_str(
             step.get("invokes_action")
         )
-        subworkflow_id = _safe_str(step.get("invokes_workflow"))
+        subworkflow_id = safe_str(step.get("invokes_workflow"))
         _append_unique(action_ids, action_id)
         _append_unique(subworkflow_ids, subworkflow_id)
 
@@ -418,99 +328,47 @@ def ensure_workflow_description_prompt_support(
 ) -> dict[str, Any]:
     """Ensure workflow-description prompt concepts exist and are linked."""
 
-    requested_workflow_ids = _normalise_strings(workflow_ids)
-    created_prompt_ids: list[str] = []
-    persisted_prompt_ids: list[str] = []
-    linked_workflow_ids: list[str] = []
-    errors_by_target: dict[str, str] = {}
-
-    prompt_specs = (
-        (
-            generic_prompt_concept_id,
-            "Concept description prompt",
-            "Canonical LLM prompt for general concept description generation.",
-            _CANONICAL_GENERIC_DESCRIPTION_PROMPT_TEXT,
+    requested_workflow_ids = normalise_strings(workflow_ids)
+    report = ensure_prompt_concept_support(
+        prompt_specs=(
+            WorkflowPromptConceptSpec(
+                concept_id=generic_prompt_concept_id,
+                name="Concept description prompt",
+                description=(
+                    "Canonical LLM prompt for general concept description generation."
+                ),
+                parent_concept_ids=(DESCRIPTION_PROMPT_TYPE_ID,),
+            ),
+            WorkflowPromptConceptSpec(
+                concept_id=workflow_prompt_concept_id,
+                name="Workflow description prompt",
+                description=(
+                    "Canonical LLM prompt for retrieval-quality workflow descriptions."
+                ),
+                parent_concept_ids=(DESCRIPTION_PROMPT_TYPE_ID,),
+            ),
         ),
-        (
-            workflow_prompt_concept_id,
-            "Workflow description prompt",
-            "Canonical LLM prompt for retrieval-quality workflow descriptions.",
-            _CANONICAL_WORKFLOW_DESCRIPTION_PROMPT_TEXT,
-        ),
-    )
-
-    for prompt_concept_id, prompt_name, prompt_description, prompt_text in prompt_specs:
-        prompt_concept = _safe_get_concept(prompt_concept_id)
-        if prompt_concept is None:
-            try:
-                concept_service.create_concept(
-                    name=prompt_name,
-                    concept_id=prompt_concept_id,
-                    description=prompt_description,
-                    parent_concept_ids=[DESCRIPTION_PROMPT_TYPE_ID],
-                    create_as_instance=True,
-                    visibility_scope_mode="global_general",
-                )
-                created_prompt_ids.append(prompt_concept_id)
-            except Exception as exc:
-                errors_by_target[prompt_concept_id] = f"prompt_create_failed:{exc}"
-                continue
-
-        try:
-            upsert_singleton_text_relation(
-                subject_concept_id=prompt_concept_id,
-                predicate=prompt_predicate,
-                text=prompt_text,
-                lang=language,
-                policy=policy,
-                garbage_collect=garbage_collect,
-                provenance={
-                    "source": "workflow_description_vontology_service",
-                    "reason": "canonical_workflow_description_prompt_bootstrap",
-                },
-                context={"jira": "JVNAUTOSCI-1425"},
-            )
-            persisted_prompt_ids.append(prompt_concept_id)
-        except Exception as exc:
-            errors_by_target[prompt_concept_id] = f"prompt_persist_failed:{exc}"
-
-    for workflow_id in requested_workflow_ids:
-        try:
-            upsert_singleton_text_relation(
-                subject_concept_id=workflow_id,
+        workflow_links=tuple(
+            WorkflowPromptLinkSpec(
+                workflow_id=workflow_id,
+                prompt_concept_id=workflow_prompt_concept_id,
                 predicate=workflow_link_predicate,
-                text=workflow_prompt_concept_id,
-                lang=language,
-                policy=policy,
-                garbage_collect=garbage_collect,
-                provenance={
-                    "source": "workflow_description_vontology_service",
-                    "reason": "workflow_description_prompt_link_bootstrap",
-                },
                 context={
                     "prompt_concept_id": workflow_prompt_concept_id,
                     "jira": "JVNAUTOSCI-1425",
                 },
+                reason="workflow_description_prompt_link_bootstrap",
             )
-            linked_workflow_ids.append(workflow_id)
-        except Exception as exc:
-            errors_by_target[workflow_id] = f"workflow_prompt_link_failed:{exc}"
-
-    return {
-        "success": not errors_by_target,
-        "generic_prompt_concept_id": generic_prompt_concept_id,
-        "workflow_prompt_concept_id": workflow_prompt_concept_id,
-        "created_prompt_ids": created_prompt_ids,
-        "persisted_prompt_ids": persisted_prompt_ids,
-        "linked_workflow_ids": linked_workflow_ids,
-        "counts": {
-            "created_prompts": len(created_prompt_ids),
-            "persisted_prompts": len(persisted_prompt_ids),
-            "linked_workflows": len(linked_workflow_ids),
-            "errors": len(errors_by_target),
-        },
-        "errors_by_target": errors_by_target,
-    }
+            for workflow_id in requested_workflow_ids
+        ),
+        provenance_source="workflow_description_vontology_service",
+        language=language,
+        policy=policy,
+        garbage_collect=garbage_collect,
+    )
+    report["generic_prompt_concept_id"] = generic_prompt_concept_id
+    report["workflow_prompt_concept_id"] = workflow_prompt_concept_id
+    return report
 
 
 __all__ = [

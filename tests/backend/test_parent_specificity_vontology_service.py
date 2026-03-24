@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 
 def test_resolve_prompt_concept_prefers_workflow_link(monkeypatch) -> None:
     from src.backend.services import parent_specificity_vontology_service as mod
 
     monkeypatch.setattr(
         mod,
-        "get_texts_for_concept",
-        lambda concept_id, predicate=None, limit=1: (
-            [{"text": "#V#linked_prompt"}]
-            if concept_id == mod.PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID
-            and predicate == mod.PARENT_SPECIFICITY_PROMPT_LINK_PREDICATE
-            else []
-        ),
+        "resolve_linked_prompt_concept_id",
+        lambda **_kwargs: "#V#linked_prompt",
     )
 
     resolved = mod.resolve_parent_specificity_prompt_concept_id(
@@ -27,32 +24,34 @@ def test_resolve_prompt_concept_prefers_workflow_link(monkeypatch) -> None:
 def test_ensure_prompt_support_creates_prompt_and_links_workflow(monkeypatch) -> None:
     from src.backend.services import parent_specificity_vontology_service as mod
 
-    created: list[dict[str, object]] = []
-    upserts: list[dict[str, object]] = []
+    captured: dict[str, object] = {}
 
-    monkeypatch.setattr(mod, "_safe_get_concept", lambda _concept_id: None)
-    monkeypatch.setattr(
-        mod.concept_service,
-        "create_concept",
-        lambda **kwargs: created.append(kwargs) or {"concept_id": kwargs["concept_id"]},
-    )
     monkeypatch.setattr(
         mod,
-        "upsert_singleton_text_relation",
-        lambda **kwargs: upserts.append(kwargs) or {"success": True},
+        "ensure_prompt_concept_support",
+        lambda **kwargs: captured.update(kwargs)
+        or {
+            "success": True,
+            "counts": {
+                "created_prompts": 1,
+                "validated_prompts": 1,
+                "missing_content_prompts": 0,
+                "linked_workflows": 1,
+                "errors": 0,
+            },
+        },
     )
 
     report = mod.ensure_parent_specificity_prompt_support()
 
     assert report["success"] is True
-    assert created
-    assert created[0]["concept_id"] == mod.PARENT_SPECIFICITY_PROMPT_CONCEPT_ID
-    linked_workflow_upsert = next(
-        item
-        for item in upserts
-        if item["subject_concept_id"] == mod.PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID
-    )
-    assert linked_workflow_upsert["predicate"] == mod.PARENT_SPECIFICITY_PROMPT_LINK_PREDICATE
+    prompt_specs = cast(tuple[Any, ...], tuple(cast(Any, captured["prompt_specs"])))
+    assert len(prompt_specs) == 1
+    assert prompt_specs[0].concept_id == mod.PARENT_SPECIFICITY_PROMPT_CONCEPT_ID
+    workflow_links = cast(tuple[Any, ...], tuple(cast(Any, captured["workflow_links"])))
+    assert len(workflow_links) == 1
+    assert workflow_links[0].workflow_id == mod.PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID
+    assert workflow_links[0].predicate == mod.PARENT_SPECIFICITY_PROMPT_LINK_PREDICATE
 
 
 def test_render_prompt_reports_missing_prompt(monkeypatch) -> None:
@@ -63,15 +62,14 @@ def test_render_prompt_reports_missing_prompt(monkeypatch) -> None:
         "resolve_parent_specificity_prompt_concept_id",
         lambda **_kwargs: mod.PARENT_SPECIFICITY_PROMPT_CONCEPT_ID,
     )
-
-    class _FakePromptService:
-        def __init__(self, *, default_max_chars: int = 0) -> None:
-            self.default_max_chars = default_max_chars
-
-        def render_prompt(self, *_args, **_kwargs):
-            return None
-
-    monkeypatch.setattr(mod, "PromptTemplateService", _FakePromptService)
+    monkeypatch.setattr(
+        mod,
+        "render_authoritative_prompt",
+        lambda **_kwargs: (
+            None,
+            {"error": "parent_specificity_prompt_missing_or_empty"},
+        ),
+    )
 
     rendered, diagnostics = mod.render_parent_specificity_prompt(
         workflow_id=mod.PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID,

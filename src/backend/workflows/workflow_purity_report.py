@@ -84,6 +84,27 @@ CANONICAL_WORKFLOW_SOURCE_LITERAL_PATTERNS = {
     ),
 }
 
+WORKFLOW_PROMPT_SOURCE_SCAN_GLOBS = (
+    "src/backend/services/*workflow*_service.py",
+    "src/backend/services/parent_specificity_vontology_service.py",
+    "src/backend/workflows/durable/*_workflow.py",
+)
+WORKFLOW_PROMPT_SOURCE_IGNORED_TARGET_SUFFIXES = (
+    "_CONCEPT_ID",
+    "_TYPE_ID",
+    "_LINK_PREDICATE",
+    "_PREDICATE",
+    "_PREDICATES",
+    "_PATTERN",
+    "_PATTERNS",
+    "_SPECS",
+    "_WORKFLOW_IDS",
+)
+WORKFLOW_PROMPT_SOURCE_FUNCTION_PATTERNS = (
+    re.compile(r"^_?build_.*prompt.*template$"),
+    re.compile(r"^_?ensure_.*prompt.*concept$"),
+)
+
 REPO_SEED_AUTHORITY_SCAN_GLOBS = ("src/backend/**/*.py",)
 REPO_SEED_AUTHORITY_ALLOWED_PATHS = frozenset(
     {
@@ -155,6 +176,61 @@ def _iter_files(project_root: Path, globs: Sequence[str]) -> list[Path]:
             if path.is_file():
                 matched[str(path.resolve())] = path
     return sorted(matched.values(), key=lambda item: str(item.resolve()))
+
+
+def _extract_target_names(node: ast.AST) -> list[str]:
+    if isinstance(node, ast.Name):
+        return [node.id]
+    if isinstance(node, (ast.Tuple, ast.List)):
+        names: list[str] = []
+        for element in node.elts:
+            names.extend(_extract_target_names(element))
+        return names
+    return []
+
+
+def _collect_string_literals(node: ast.AST | None) -> list[str]:
+    if node is None:
+        return []
+    strings: list[str] = []
+    for child in ast.walk(node):
+        if isinstance(child, ast.Constant) and isinstance(child.value, str):
+            strings.append(child.value)
+    return strings
+
+
+def _looks_like_python_authored_prompt_body(strings: Sequence[str]) -> bool:
+    meaningful_fragments = []
+    for raw in strings:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        if text.startswith("#V#"):
+            continue
+        if text in {
+            "hasContent",
+            "#V#hasContent",
+            "en-NZ",
+            "replace_others",
+        }:
+            continue
+        meaningful_fragments.append(text)
+    if not meaningful_fragments:
+        return False
+    return any(
+        len(fragment) >= 40 and any(character.isspace() for character in fragment)
+        for fragment in meaningful_fragments
+    )
+
+
+def _is_prompt_source_target_name(name: str) -> bool:
+    upper_name = name.upper()
+    if "PROMPT" not in upper_name:
+        return False
+    return not any(
+        upper_name.endswith(suffix)
+        for suffix in WORKFLOW_PROMPT_SOURCE_IGNORED_TARGET_SUFFIXES
+    )
 
 
 def _extract_top_level_function_source(
@@ -354,6 +430,83 @@ def _scan_python_authored_canonical_workflow_sources(
         "source_count": sum(len(item["matched_symbols"]) for item in sources),
         "sources": sources,
         "file_globs": list(CANONICAL_WORKFLOW_SOURCE_SCAN_GLOBS),
+    }
+
+
+def _scan_python_authored_workflow_prompt_sources(
+    project_root: Path,
+) -> dict[str, Any]:
+    matches: list[dict[str, Any]] = []
+    for path in _iter_files(project_root, WORKFLOW_PROMPT_SOURCE_SCAN_GLOBS):
+        relative_path = _relative_path(path, project_root)
+        text = path.read_text(encoding="utf-8")
+        try:
+            tree = ast.parse(text, filename=relative_path)
+        except SyntaxError:
+            continue
+
+        for node in tree.body:
+            if isinstance(node, ast.Assign):
+                target_names: list[str] = []
+                for target in node.targets:
+                    target_names.extend(_extract_target_names(target))
+                prompt_targets = [
+                    name for name in target_names if _is_prompt_source_target_name(name)
+                ]
+                if prompt_targets and _looks_like_python_authored_prompt_body(
+                    _collect_string_literals(node.value)
+                ):
+                    matches.append(
+                        {
+                            "path": relative_path,
+                            "kind": "assignment",
+                            "symbol": sorted(dict.fromkeys(prompt_targets))[0],
+                            "line": int(node.lineno),
+                        }
+                    )
+                continue
+
+            if isinstance(node, ast.AnnAssign):
+                target_names = _extract_target_names(node.target)
+                prompt_targets = [
+                    name for name in target_names if _is_prompt_source_target_name(name)
+                ]
+                if prompt_targets and _looks_like_python_authored_prompt_body(
+                    _collect_string_literals(node.value)
+                ):
+                    matches.append(
+                        {
+                            "path": relative_path,
+                            "kind": "assignment",
+                            "symbol": sorted(dict.fromkeys(prompt_targets))[0],
+                            "line": int(node.lineno),
+                        }
+                    )
+                continue
+
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if not any(
+                    pattern.match(node.name)
+                    for pattern in WORKFLOW_PROMPT_SOURCE_FUNCTION_PATTERNS
+                ):
+                    continue
+                if not _looks_like_python_authored_prompt_body(
+                    _collect_string_literals(node)
+                ):
+                    continue
+                matches.append(
+                    {
+                        "path": relative_path,
+                        "kind": "function",
+                        "symbol": node.name,
+                        "line": int(node.lineno),
+                    }
+                )
+
+    return {
+        "source_count": len(matches),
+        "sources": matches,
+        "file_globs": list(WORKFLOW_PROMPT_SOURCE_SCAN_GLOBS),
     }
 
 
@@ -680,6 +833,7 @@ def build_workflow_purity_report(
     canonical_workflow_sources = _scan_python_authored_canonical_workflow_sources(
         repo_root
     )
+    workflow_prompt_sources = _scan_python_authored_workflow_prompt_sources(repo_root)
     repo_seed_authority = _scan_repo_seed_authority_drift(repo_root)
     seed_fallback_contracts = _scan_vontology_first_seed_fallback_contracts(repo_root)
     builtin_capability_overrides = sorted(BUILTIN_WORKFLOW_CAPABILITIES)
@@ -691,6 +845,9 @@ def build_workflow_purity_report(
         ),
         "python_authored_canonical_workflow_source_count": int(
             canonical_workflow_sources.get("source_count", 0)
+        ),
+        "python_authored_workflow_prompt_source_count": int(
+            workflow_prompt_sources.get("source_count", 0)
         ),
         "direct_instance_create_callsite_count": int(
             direct_create.get("offending_callsite_count", 0)
@@ -732,6 +889,9 @@ def build_workflow_purity_report(
             ),
             "python_authored_canonical_workflow_sources": copy.deepcopy(
                 canonical_workflow_sources.get("sources", [])
+            ),
+            "python_authored_workflow_prompt_sources": copy.deepcopy(
+                workflow_prompt_sources.get("sources", [])
             ),
             "repo_seed_authority_drift": repo_seed_authority,
             "vontology_first_seed_fallback_contracts": seed_fallback_contracts,

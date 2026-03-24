@@ -1,7 +1,7 @@
 # Von Workflow Language (VWL) Manual
 
 Status: Draft (current implementation-aligned)
-Last updated: 2026-03-24 (Pacific/Auckland)
+Last updated: 2026-03-25 (Pacific/Auckland)
 Audience: Human engineers and AI agents
 
 ## 1. Purpose and Scope
@@ -96,6 +96,7 @@ Supporting code notes:
 - generic publication/materialisation helpers, validators, and export tooling remain valid runtime support;
 - `workflow_concept_authority_service.py` now derives canonical publication specs/text from authoritative Vontology workflow state where present, and only falls back to repo-side seed bundles when a canonical workflow is missing or clearly incomplete;
 - `workflow_template_profile_service.py` now resolves workflow-template concepts and template/profile text relations from Vontology, and only hydrates them from the seed bundle when the authoritative template concepts are absent;
+- `workflow_prompt_authority_service.py` now provides only generic prompt-concept creation, validation, linking, and rendering support; workflow-governed prompt bodies themselves remain authoritative Vontology text relations rather than Python-authored defaults;
 - `workflow_repo_seed_bootstrap.py` now treats repo-side workflow bundles as seed fixtures only: a valid current Vontology workflow family is preserved rather than being overwritten back to seed parity;
 - generated review snapshots under `docs/generated/workflow_authority_review_snapshots/` are acceptable because they are explicitly non-authoritative derived artefacts;
 - use `pdm run python scripts/workflow_authority_review_snapshot.py export` to refresh local review snapshots and `pdm run python scripts/workflow_authority_review_snapshot.py diff` to compare the current authoritative KB state against the last generated local snapshot without restoring file authority.
@@ -1316,6 +1317,8 @@ Conflict handling is field-wise rather than union-based. In particular:
 Validation and fail-closed behaviour:
 
 - missing prompt text for a declared prompt is always an error,
+- workflow-governed bootstrap/support services MAY create or link prompt concepts, but they MUST NOT author or silently repopulate prompt body text from Python;
+- planning, enrichment, workflow-gap analysis/test/candidate execution, and analogous workflow-governed prompt consumers MUST fail closed when the authoritative prompt concept is missing or empty;
 - unavailable tools or agent profiles follow the declared validation policy (`warn` or `fail`),
 - `validation_policy.output_format=json_value` means the runtime MUST parse a single JSON object or array from the raw LLM response, expose it as `validated_json`, and fail the step if parsing does not succeed,
 - stable merged prompt state is carried in workflow-state metadata as `prompt_contract`,

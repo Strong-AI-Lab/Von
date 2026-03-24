@@ -363,7 +363,15 @@ class TestRuminationDispatch:
             patch(
                 "src.backend.workflows.durable.enrichment_workflow."
                 "_resolve_prompt_template",
-                return_value="Generate for {concept_name}: {predicate}",
+                return_value=(
+                    "Generate for {concept_name}: {predicate}",
+                    {
+                        "source": "inline_template",
+                        "prompt_concept_id": None,
+                        "available": True,
+                        "error": None,
+                    },
+                ),
             ),
             patch(
                 "src.backend.languagemodels.llm_interface.get_llm_client",

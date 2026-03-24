@@ -181,16 +181,47 @@ class TestPlanningInferHandler:
         mock_llm = MagicMock()
         mock_llm.generate.return_value = "I cannot provide JSON."
 
+        with patch(
+            "src.backend.workflows.durable.planning_workflow._resolve_planning_prompt",
+            return_value="Planner prompt.",
+        ):
+            req = WorkflowActionRequest(
+                action_id="planning.infer_plan",
+                inputs={},
+                environment=WorkflowEnvironment(llm_client=mock_llm),
+                data={"planning_context": {"goal": "Test parse failure"}},
+            )
+
+            result = _handle_infer_plan(req)
+        assert result.ok is False
+        assert "planning_json_parse_failed" in str(result.error)
+
+    def test_infer_fails_closed_when_prompt_is_unavailable(self) -> None:
+        from src.backend.workflows.action_registry import (
+            WorkflowActionRequest,
+            WorkflowEnvironment,
+        )
+        from src.backend.workflows.durable.planning_workflow import _handle_infer_plan
+
         req = WorkflowActionRequest(
             action_id="planning.infer_plan",
             inputs={},
-            environment=WorkflowEnvironment(llm_client=mock_llm),
-            data={"planning_context": {"goal": "Test parse failure"}},
+            environment=WorkflowEnvironment(llm_client=MagicMock()),
+            data={
+                "planning_context": {"goal": "Test missing prompt"},
+                "planning_prompt_concept_id": "#V#forward_inference_planning_prompt_v1",
+            },
         )
 
-        result = _handle_infer_plan(req)
+        with patch(
+            "src.backend.workflows.durable.planning_workflow._resolve_planning_prompt",
+            return_value=None,
+        ):
+            result = _handle_infer_plan(req)
+
         assert result.ok is False
-        assert "planning_json_parse_failed" in str(result.error)
+        assert result.error == "planning_prompt_unavailable"
+        assert result.outputs["planning_diagnostics"]["prompt"]["available"] is False
 
 
 class TestPlanningValidateHandler:

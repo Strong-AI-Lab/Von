@@ -113,13 +113,6 @@ def test_execute_candidate_disables_recursive_gap_recovery(monkeypatch) -> None:
 
     captured: dict[str, object] = {}
 
-    class _FakePromptService:
-        def __init__(self, *, default_max_chars: int = 0) -> None:
-            self.default_max_chars = default_max_chars
-
-        def render_prompt(self, *_args, **_kwargs):
-            return SimpleNamespace(text="Candidate prompt")
-
     class _FakeOrchestrator:
         def __init__(
             self,
@@ -142,7 +135,14 @@ def test_execute_candidate_disables_recursive_gap_recovery(monkeypatch) -> None:
                 llm_calls=(),
             )
 
-    monkeypatch.setattr(mod, "PromptTemplateService", _FakePromptService)
+    monkeypatch.setattr(
+        mod,
+        "render_workflow_gap_candidate_prompt",
+        lambda **_kwargs: (
+            SimpleNamespace(text="Candidate prompt"),
+            {"error": None},
+        ),
+    )
     monkeypatch.setattr(
         "src.backend.integrations.internal_mcp.orchestrator.InternalMCPChatOrchestrator",
         _FakeOrchestrator,
@@ -184,13 +184,6 @@ def test_execute_candidate_uses_canonical_cap_default_when_env_cap_missing(
 
     captured: dict[str, object] = {}
 
-    class _FakePromptService:
-        def __init__(self, *, default_max_chars: int = 0) -> None:
-            self.default_max_chars = default_max_chars
-
-        def render_prompt(self, *_args, **_kwargs):
-            return SimpleNamespace(text="Candidate prompt")
-
     class _FakeOrchestrator:
         def __init__(
             self,
@@ -210,7 +203,14 @@ def test_execute_candidate_uses_canonical_cap_default_when_env_cap_missing(
                 llm_calls=(),
             )
 
-    monkeypatch.setattr(mod, "PromptTemplateService", _FakePromptService)
+    monkeypatch.setattr(
+        mod,
+        "render_workflow_gap_candidate_prompt",
+        lambda **_kwargs: (
+            SimpleNamespace(text="Candidate prompt"),
+            {"error": None},
+        ),
+    )
     monkeypatch.setattr(
         "src.backend.integrations.internal_mcp.orchestrator.InternalMCPChatOrchestrator",
         _FakeOrchestrator,
@@ -248,8 +248,11 @@ def test_prepare_candidate_spec_uses_authored_gap_candidate_template(
 
     monkeypatch.setattr(
         mod,
-        "_ensure_candidate_prompt_concept",
-        lambda **_kwargs: (True, None),
+        "render_workflow_gap_candidate_prompt",
+        lambda **_kwargs: (
+            SimpleNamespace(text="Candidate prompt"),
+            {"error": None},
+        ),
     )
 
     registry = ActionRegistry()
@@ -284,6 +287,9 @@ def test_prepare_candidate_spec_uses_authored_gap_candidate_template(
     assert candidate_spec["steps"][0]["action_id"] == "workflow_gap.execute_candidate"
     assert candidate_spec["steps"][0]["inputs"]["prompt_concept_id"] == (
         result.outputs["candidate_prompt_concept_id"]
+    )
+    assert result.outputs["candidate_prompt_concept_id"] == (
+        mod.WORKFLOW_GAP_CANDIDATE_PROMPT_CONCEPT_ID
     )
 
 

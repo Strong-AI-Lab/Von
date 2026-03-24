@@ -290,6 +290,7 @@ class TestEnrichmentActionHandlers:
                 data={
                     "predicate": "hasDescription",
                     "current_batch": ["#V#test"],
+                    "prompt_template": "Describe {concept_name} for retrieval.",
                 },
             )
 
@@ -392,6 +393,7 @@ class TestEnrichmentActionHandlers:
                 data={
                     "predicate": "hasDescription",
                     "current_batch": ["#V#planning_workflow"],
+                    "prompt_template": "Describe {concept_name} for retrieval.",
                 },
             )
 
@@ -457,6 +459,7 @@ class TestEnrichmentActionHandlers:
                     "predicate": "hasDescription",
                     "current_batch": ["#V#planning_workflow"],
                     "prefer_deterministic_workflow_description": True,
+                    "prompt_template": "Describe {concept_name} for retrieval.",
                 },
             )
 
@@ -469,6 +472,71 @@ class TestEnrichmentActionHandlers:
             assert stored_text.startswith(
                 "Forward inference workflow that proposes concrete next actions."
             )
+
+    def test_process_batch_fails_closed_when_prompt_is_unavailable(self) -> None:
+        from src.backend.workflows.action_registry import (
+            WorkflowActionRequest,
+            WorkflowEnvironment,
+        )
+        from src.backend.workflows.durable.enrichment_workflow import (
+            _handle_process_batch,
+        )
+
+        mock_llm = MagicMock()
+
+        with (
+            patch(
+                "src.backend.languagemodels.llm_interface.get_llm_client",
+                return_value=mock_llm,
+            ),
+            patch(
+                "src.backend.db.repositories.concepts_repository.ConceptsRepository.find_one",
+                return_value={"concept_id": "#V#planning_workflow"},
+            ),
+            patch(
+                "src.backend.workflows.durable.enrichment_workflow._build_concept_context",
+                return_value={"concept_name": "Planning Workflow"},
+            ),
+            patch(
+                "src.backend.workflows.durable.enrichment_workflow._resolve_prompt_template",
+                return_value=(
+                    None,
+                    {
+                        "source": "none",
+                        "prompt_concept_id": "#V#generate_concept_description_prompt",
+                        "available": False,
+                        "error": "enrichment_prompt_unavailable",
+                    },
+                ),
+            ),
+        ):
+            req = WorkflowActionRequest(
+                action_id="enrichment.process_batch",
+                inputs={},
+                environment=WorkflowEnvironment(llm_client=mock_llm),
+                data={
+                    "predicate": "hasDescription",
+                    "current_batch": ["#V#planning_workflow"],
+                },
+            )
+
+            result = _handle_process_batch(req)
+
+        assert result.ok
+        assert result.outputs["processed_count"] == 0
+        assert result.outputs["failed_count"] == 1
+        assert result.outputs["prompt_resolution_errors"] == [
+            {
+                "concept_id": "#V#planning_workflow",
+                "predicate": "hasDescription",
+                "diagnostics": {
+                    "source": "none",
+                    "prompt_concept_id": "#V#generate_concept_description_prompt",
+                    "available": False,
+                    "error": "enrichment_prompt_unavailable",
+                },
+            }
+        ]
 
     def test_finalise_produces_summary(self) -> None:
         from src.backend.workflows.action_registry import (

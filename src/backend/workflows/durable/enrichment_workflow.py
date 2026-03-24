@@ -29,6 +29,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional
 
+from ...services.prompt_template_service import PromptTemplateService
 from ..engine import (
     WorkflowActionInvocation,
     WorkflowDefinition,
@@ -43,6 +44,7 @@ from ..action_registry import (
 )
 from ..workflow_registry import WorkflowRegistration
 from ...services.workflow_description_vontology_service import (
+    DESCRIPTION_PROMPT_CONCEPT_ID,
     build_deterministic_workflow_description,
     build_workflow_description_prompt_context,
     resolve_workflow_description_prompt_concept_id,
@@ -56,23 +58,6 @@ ENRICHMENT_WORKFLOW_ID = "#V#enrichment_workflow"
 DEFAULT_BATCH_SIZE = 5
 DEFAULT_CANDIDATE_LIMIT = 50
 _WORKFLOW_DESCRIPTION_PREDICATES = {"hasDescription", "#V#hasDescription"}
-
-# Fallback prompt when neither prompt_concept_id nor prompt_template is given.
-_DEFAULT_ENRICHMENT_PROMPT = """You are a knowledge engineer helping to document an ontology.
-
-Given the following concept information, generate a clear, concise text (1-3 sentences)
-for the relation type "{predicate}" that:
-1. Is relevant and accurate for the concept
-2. Uses precise, encyclopaedic language
-3. Is written in New Zealand English
-
-Concept name: {concept_name}
-Concept ID: {concept_id}
-Type hierarchy: {type_hierarchy}
-Relationships: {relationships}
-
-Respond with ONLY the text, no preamble or explanation."""
-
 
 def build_enrichment_workflow_test_definition() -> WorkflowDefinition:
     """Build the parameterised enrichment workflow definition.
@@ -283,11 +268,22 @@ def _resolve_prompt_template(
     ctx: Dict[str, Any],
     *,
     concept_id: str | None = None,
-) -> str:
-    """Resolve the prompt template from context (prompt_concept_id, prompt_template, or default)."""
+) -> tuple[str | None, dict[str, Any]]:
+    """Resolve the authoritative prompt template for enrichment.
+
+    Inline prompt templates remain supported for explicitly parameterised
+    enrichment runs. Otherwise prompt bodies must resolve from Vontology prompt
+    concepts; there is no silent Python fallback.
+    """
     # 1. Explicit inline template
-    if ctx.get("prompt_template"):
-        return ctx["prompt_template"]
+    inline_prompt = ctx.get("prompt_template")
+    if isinstance(inline_prompt, str) and inline_prompt.strip():
+        return inline_prompt, {
+            "source": "inline_template",
+            "prompt_concept_id": None,
+            "available": True,
+            "error": None,
+        }
 
     # 2. Vontology-stored prompt
     prompt_concept_id = ctx.get("prompt_concept_id")
@@ -302,21 +298,45 @@ def _resolve_prompt_template(
             prompt_concept_id = resolve_workflow_description_prompt_concept_id(
                 workflow_id=ENRICHMENT_WORKFLOW_ID
             )
+        else:
+            prompt_concept_id = DESCRIPTION_PROMPT_CONCEPT_ID
     if prompt_concept_id:
         try:
-            from ...prompt.annotation_prompt import AnnotationPromptBuilder
-
-            builder = AnnotationPromptBuilder(prompt_concept_id)
-            instruction = builder.get_instruction()
-            if instruction and "missing canonical relation" not in instruction.lower():
-                return instruction
+            prompt_service = PromptTemplateService(default_max_chars=12000)
+            _resolved_prompt_id, prompt_text = prompt_service.resolve_prompt_text(
+                [str(prompt_concept_id).strip()],
+                fallback=None,
+                max_chars=12000,
+            )
+            if isinstance(prompt_text, str) and prompt_text.strip():
+                return prompt_text, {
+                    "source": "vontology_prompt_concept",
+                    "prompt_concept_id": str(prompt_concept_id).strip(),
+                    "available": True,
+                    "error": None,
+                }
         except Exception as e:
             logger.debug(
                 "Could not load prompt from Vontology %s: %s", prompt_concept_id, e
             )
+            return None, {
+                "source": "vontology_prompt_concept",
+                "prompt_concept_id": str(prompt_concept_id).strip(),
+                "available": False,
+                "error": f"prompt_lookup_failed:{e}",
+            }
 
-    # 3. Default
-    return _DEFAULT_ENRICHMENT_PROMPT
+    # 3. Fail closed when no authoritative prompt source is available.
+    return None, {
+        "source": "none",
+        "prompt_concept_id": (
+            str(prompt_concept_id).strip()
+            if isinstance(prompt_concept_id, str) and prompt_concept_id.strip()
+            else None
+        ),
+        "available": False,
+        "error": "enrichment_prompt_unavailable",
+    }
 
 
 class _DefaultEmptyTemplateDict(dict[str, str]):
@@ -554,6 +574,7 @@ def _handle_process_batch(request: WorkflowActionRequest) -> WorkflowActionResul
         newly_failed = 0
         newly_skipped = 0
         newly_deterministic_fallback = 0
+        prompt_resolution_errors: list[dict[str, Any]] = []
 
         for concept_id in batch:
             try:
@@ -565,7 +586,26 @@ def _handle_process_batch(request: WorkflowActionRequest) -> WorkflowActionResul
                 # Build context and format prompt
                 tmpl_ctx = _build_concept_context(concept)
                 tmpl_ctx["predicate"] = predicate
-                prompt_template = _resolve_prompt_template(ctx, concept_id=concept_id)
+                prompt_template, prompt_diagnostics = _resolve_prompt_template(
+                    ctx,
+                    concept_id=concept_id,
+                )
+                if not prompt_template:
+                    logger.warning(
+                        "[enrichment_workflow] Prompt unavailable for %s (predicate=%s): %s",
+                        concept_id,
+                        predicate,
+                        prompt_diagnostics,
+                    )
+                    prompt_resolution_errors.append(
+                        {
+                            "concept_id": concept_id,
+                            "predicate": predicate,
+                            "diagnostics": prompt_diagnostics,
+                        }
+                    )
+                    newly_failed += 1
+                    continue
 
                 prompt = _format_prompt_template(prompt_template, tmpl_ctx)
                 text = ""
@@ -658,6 +698,7 @@ def _handle_process_batch(request: WorkflowActionRequest) -> WorkflowActionResul
                 "deterministic_fallback_count": (
                     deterministic_fallback_count + newly_deterministic_fallback
                 ),
+                "prompt_resolution_errors": prompt_resolution_errors,
             }
         )
     except Exception as e:

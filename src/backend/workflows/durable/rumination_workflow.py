@@ -1425,7 +1425,36 @@ def _handle_dispatch_enrichment(request: WorkflowActionRequest) -> WorkflowActio
         prompt_ctx: Dict[str, Any] = {}
         if prompt_concept_id:
             prompt_ctx["prompt_concept_id"] = prompt_concept_id
-        prompt_template = _resolve_prompt_template(prompt_ctx)
+        prompt_template, prompt_diagnostics = _resolve_prompt_template(prompt_ctx)
+        if not prompt_template:
+            logger.warning(
+                "[rumination] Prompt unavailable for %s enrichment task (predicate=%s): %s",
+                gap_name,
+                predicate,
+                prompt_diagnostics,
+            )
+            dispatched.append(
+                {
+                    "gap_name": gap_name,
+                    "predicate": predicate,
+                    "candidates": len(candidates),
+                    "processed": 0,
+                    "failed": len(candidates),
+                    "prompt_diagnostics": prompt_diagnostics,
+                }
+            )
+            return WorkflowActionResult(
+                outputs={
+                    "plan_index": plan_index + 1,
+                    "has_more_tasks": plan_index + 1 < len(plan),
+                    "dispatched_tasks": dispatched,
+                    "total_processed": total_processed,
+                    "total_failed": total_failed + len(candidates),
+                    "relation_metrics": relation_metrics,
+                    "relation_changes": relation_changes,
+                    "relation_questions": relation_questions,
+                }
+            )
 
         llm = get_llm_client()
         task_processed = 0

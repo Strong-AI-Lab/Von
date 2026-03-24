@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 
 def test_resolve_workflow_description_prompt_prefers_workflow_link(
     monkeypatch,
@@ -10,13 +12,8 @@ def test_resolve_workflow_description_prompt_prefers_workflow_link(
 
     monkeypatch.setattr(
         mod,
-        "get_texts_for_concept",
-        lambda concept_id, predicate=None, limit=1: (
-            [{"text": "#V#linked_workflow_description_prompt"}]
-            if concept_id == "#V#enrichment_workflow"
-            and predicate == mod.WORKFLOW_DESCRIPTION_PROMPT_LINK_PREDICATE
-            else []
-        ),
+        "resolve_linked_prompt_concept_id",
+        lambda **_kwargs: "#V#linked_workflow_description_prompt",
     )
 
     resolved = mod.resolve_workflow_description_prompt_concept_id(
@@ -78,31 +75,35 @@ def test_ensure_workflow_description_prompt_support_bootstraps_prompts_and_link(
 ) -> None:
     from src.backend.services import workflow_description_vontology_service as mod
 
-    created: list[dict[str, object]] = []
-    upserts: list[dict[str, object]] = []
+    captured: dict[str, object] = {}
 
-    monkeypatch.setattr(mod, "_safe_get_concept", lambda _concept_id: None)
-    monkeypatch.setattr(
-        mod.concept_service,
-        "create_concept",
-        lambda **kwargs: created.append(kwargs) or {"concept_id": kwargs["concept_id"]},
-    )
     monkeypatch.setattr(
         mod,
-        "upsert_singleton_text_relation",
-        lambda **kwargs: upserts.append(kwargs) or {"success": True},
+        "ensure_prompt_concept_support",
+        lambda **kwargs: captured.update(kwargs)
+        or {
+            "success": True,
+            "counts": {
+                "created_prompts": 2,
+                "validated_prompts": 2,
+                "missing_content_prompts": 0,
+                "linked_workflows": 1,
+                "errors": 0,
+            },
+        },
     )
 
     report = mod.ensure_workflow_description_prompt_support()
 
     assert report["success"] is True
-    created_ids = [str(item["concept_id"]) for item in created]
+    prompt_specs = cast(tuple[Any, ...], tuple(cast(Any, captured["prompt_specs"])))
+    created_ids = {item.concept_id for item in prompt_specs}
     assert mod.DESCRIPTION_PROMPT_CONCEPT_ID in created_ids
     assert mod.WORKFLOW_DESCRIPTION_PROMPT_CONCEPT_ID in created_ids
-    linked_workflow_upsert = next(
-        item for item in upserts if item["subject_concept_id"] == "#V#enrichment_workflow"
-    )
-    assert linked_workflow_upsert["predicate"] == mod.WORKFLOW_DESCRIPTION_PROMPT_LINK_PREDICATE
+    workflow_links = cast(tuple[Any, ...], tuple(cast(Any, captured["workflow_links"])))
+    assert len(workflow_links) == 1
+    assert workflow_links[0].workflow_id == "#V#enrichment_workflow"
+    assert workflow_links[0].predicate == mod.WORKFLOW_DESCRIPTION_PROMPT_LINK_PREDICATE
 
 
 def test_build_deterministic_workflow_description_returns_retrieval_ready_text() -> None:
