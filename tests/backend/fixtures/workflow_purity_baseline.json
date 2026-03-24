@@ -6,6 +6,7 @@
     "env_event_binding_count": 0,
     "legacy_selector_mode_count": 0,
     "non_vontology_discoverable_workflow_count": 0,
+    "python_authored_canonical_workflow_source_count": 0,
     "remaining_python_workflow_family_count": 0
   },
   "generated_at_utc": "2026-03-18T04:29:40.719614+00:00",

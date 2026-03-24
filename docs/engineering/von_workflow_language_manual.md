@@ -58,6 +58,29 @@ Authoring policy:
 - When behaviour can be expressed in VWL, preferred implementation is to materialise it in Vontology and then add only the supporting code/tooling needed for execution, validation, and telemetry.
 - Backend code SHOULD primarily supply reusable actions, validators, loaders, and telemetry for workflows, rather than embedding task-specific orchestration that VWL could already express.
 
+### 2.1 Version-Controlled Workflow Sources
+
+Canonical workflow families MAY also be authored as version-controlled workflow source bundles and then imported through the generic publication/materialisation path.
+
+Current bundle contract:
+
+- schema version: `authored_workflow_source_bundle.v1`
+- canonical repository location: `src/backend/workflows/authored_sources/*.json`
+- generic loader/import path:
+  - `src/backend/workflows/workflow_concept_authority_service.py`
+  - `src/backend/services/workflow_authored_source_bootstrap.py`
+
+Bundle intent:
+
+- declare workflow publication specs without embedding workflow-family-specific Python spec builders;
+- carry workflow-level text relations, launch-input contracts, and step-level notes alongside the workflow graph source;
+- allow deterministic re-publication and short-circuit validation against the materialised Vontology workflow graph.
+
+Normative authoring rule:
+
+- If a canonical workflow family is not authored directly in Vontology graph data, it SHOULD be authored in one of these version-controlled workflow source bundles.
+- Workflow-family-specific Python functions that assemble canonical workflow specs are a contract failure unless they are implementing a genuinely reusable VWL/runtime extension that does not yet exist elsewhere.
+
 ## 3. VWL Ontology Vocabulary
 
 ### 3.1 Core Type Concepts

@@ -58,7 +58,17 @@ def test_build_workflow_purity_report_counts_runtime_and_code_impurity(
     )
     _write(
         "src/backend/services/paper_representation_workflow_vontology_service.py",
-        "def build_registration():\n    return WorkflowRegistration(workflow_id='#V#paper')\n",
+        (
+            "def _build_sample_workflow_spec():\n"
+            "    return {'workflow_id': '#V#paper'}\n\n"
+            "def build_registration():\n"
+            "    return WorkflowRegistration(workflow_id='#V#paper')\n"
+        ),
+        root=tmp_path,
+    )
+    _write(
+        "src/backend/workflows/workflow_concept_authority_service.py",
+        "_CANONICAL_WORKFLOW_PUBLICATION_SPECS = {}\n",
         root=tmp_path,
     )
     _write(
@@ -119,6 +129,7 @@ def test_build_workflow_purity_report_counts_runtime_and_code_impurity(
                 "counters": {
                     "built_in_registration_count": 2,
                     "remaining_python_workflow_family_count": 3,
+                    "python_authored_canonical_workflow_source_count": 2,
                     "direct_instance_create_callsite_count": 3,
                     "env_event_binding_count": 0,
                     "legacy_selector_mode_count": 1,
@@ -141,6 +152,7 @@ def test_build_workflow_purity_report_counts_runtime_and_code_impurity(
     assert report["counters"] == {
         "built_in_registration_count": 2,
         "remaining_python_workflow_family_count": 3,
+        "python_authored_canonical_workflow_source_count": 2,
         "direct_instance_create_callsite_count": 0,
         "env_event_binding_count": 0,
         "legacy_selector_mode_count": 1,
@@ -160,6 +172,17 @@ def test_build_workflow_purity_report_counts_runtime_and_code_impurity(
         "src/backend/services/paper_representation_workflow_vontology_service.py",
         "src/backend/workflows/definitions.py",
         "src/backend/workflows/durable/sample_workflow.py",
+    ]
+    canonical_sources = report["details"]["python_authored_canonical_workflow_sources"]
+    assert canonical_sources == [
+        {
+            "path": "src/backend/services/paper_representation_workflow_vontology_service.py",
+            "matched_symbols": ["_build_sample_workflow_spec"],
+        },
+        {
+            "path": "src/backend/workflows/workflow_concept_authority_service.py",
+            "matched_symbols": ["canonical_publication_spec_literal"],
+        },
     ]
     direct_calls = report["details"]["direct_instance_create"]["callsites"]
     assert len(direct_calls) == 3
@@ -199,6 +222,7 @@ def test_build_workflow_purity_report_flags_baseline_regressions(tmp_path: Path)
                 "counters": {
                     "built_in_registration_count": 0,
                     "remaining_python_workflow_family_count": 0,
+                    "python_authored_canonical_workflow_source_count": 0,
                     "direct_instance_create_callsite_count": 0,
                     "env_event_binding_count": 0,
                     "legacy_selector_mode_count": 0,
@@ -239,6 +263,7 @@ def test_build_workflow_purity_report_does_not_resolve_lazy_registrations(
                 "counters": {
                     "built_in_registration_count": 0,
                     "remaining_python_workflow_family_count": 0,
+                    "python_authored_canonical_workflow_source_count": 0,
                     "direct_instance_create_callsite_count": 0,
                     "env_event_binding_count": 0,
                     "legacy_selector_mode_count": 0,

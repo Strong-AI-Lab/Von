@@ -70,6 +70,20 @@ PYTHON_WORKFLOW_FAMILY_FUNCTION_PATTERNS = (
 )
 WORKFLOW_REGISTRATION_CALL_PATTERN = re.compile(r"\bWorkflowRegistration\(")
 
+CANONICAL_WORKFLOW_SOURCE_SCAN_GLOBS = (
+    "src/backend/workflows/workflow_concept_authority_service.py",
+    "src/backend/services/*workflow*_service.py",
+)
+CANONICAL_WORKFLOW_SOURCE_FUNCTION_PATTERNS = (
+    re.compile(r"^_?build_.*workflow_spec$"),
+)
+CANONICAL_WORKFLOW_SOURCE_LITERAL_PATTERNS = {
+    "canonical_publication_spec_literal": re.compile(
+        r"^\s*_CANONICAL_WORKFLOW_PUBLICATION_SPECS\s*=\s*\{",
+        re.MULTILINE,
+    ),
+}
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -210,6 +224,48 @@ def _scan_python_workflow_family_files(project_root: Path) -> dict[str, Any]:
         "family_file_count": len(family_files),
         "family_files": family_files,
         "file_globs": list(PYTHON_WORKFLOW_FAMILY_FILE_GLOBS),
+    }
+
+
+def _scan_python_authored_canonical_workflow_sources(
+    project_root: Path,
+) -> dict[str, Any]:
+    sources: list[dict[str, Any]] = []
+    for path in _iter_files(project_root, CANONICAL_WORKFLOW_SOURCE_SCAN_GLOBS):
+        relative_path = _relative_path(path, project_root)
+        text = path.read_text(encoding="utf-8")
+        matched_symbols: list[str] = []
+        try:
+            tree = ast.parse(text, filename=relative_path)
+        except SyntaxError:
+            tree = None
+
+        if tree is not None:
+            for node in tree.body:
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if any(
+                    pattern.match(node.name)
+                    for pattern in CANONICAL_WORKFLOW_SOURCE_FUNCTION_PATTERNS
+                ):
+                    matched_symbols.append(node.name)
+
+        for pattern_name, pattern in CANONICAL_WORKFLOW_SOURCE_LITERAL_PATTERNS.items():
+            if pattern.search(text):
+                matched_symbols.append(pattern_name)
+
+        if matched_symbols:
+            sources.append(
+                {
+                    "path": relative_path,
+                    "matched_symbols": sorted(dict.fromkeys(matched_symbols)),
+                }
+            )
+
+    return {
+        "source_count": sum(len(item["matched_symbols"]) for item in sources),
+        "sources": sources,
+        "file_globs": list(CANONICAL_WORKFLOW_SOURCE_SCAN_GLOBS),
     }
 
 
@@ -375,12 +431,18 @@ def build_workflow_purity_report(
     env_event_binding = _scan_env_event_binding_authority(repo_root)
     legacy_selector = _scan_legacy_selector_support(repo_root)
     python_workflow_families = _scan_python_workflow_family_files(repo_root)
+    canonical_workflow_sources = _scan_python_authored_canonical_workflow_sources(
+        repo_root
+    )
     builtin_capability_overrides = sorted(BUILTIN_WORKFLOW_CAPABILITIES)
 
     counters = {
         "built_in_registration_count": len(built_in_workflow_ids),
         "remaining_python_workflow_family_count": int(
             python_workflow_families.get("family_file_count", 0)
+        ),
+        "python_authored_canonical_workflow_source_count": int(
+            canonical_workflow_sources.get("source_count", 0)
         ),
         "direct_instance_create_callsite_count": int(
             direct_create.get("offending_callsite_count", 0)
@@ -413,6 +475,9 @@ def build_workflow_purity_report(
             "non_vontology_discoverable_workflow_ids": non_vontology_discoverable_workflow_ids,
             "remaining_python_workflow_family_files": copy.deepcopy(
                 python_workflow_families.get("family_files", [])
+            ),
+            "python_authored_canonical_workflow_sources": copy.deepcopy(
+                canonical_workflow_sources.get("sources", [])
             ),
             "direct_instance_create": direct_create,
             "env_event_binding_authority": env_event_binding,

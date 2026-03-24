@@ -3,6 +3,12 @@
 Task: `JVNAUTOSCI-1575`  
 Date: 2026-03-24
 
+Update after `JVNAUTOSCI-1576`:
+
+- canonical workflow publication sources were migrated out of Python workflow-family spec builders and into version-controlled authored workflow source bundles under `src/backend/workflows/authored_sources/*.json`
+- generic publication/materialisation support now lives in `src/backend/workflows/workflow_concept_authority_service.py` and `src/backend/services/workflow_authored_source_bootstrap.py`
+- workflow-purity telemetry now includes `python_authored_canonical_workflow_source_count`; current expected value is `0`
+
 ## Executive Summary
 
 As of 2026-03-24, Von's workflow runtime is substantially cleaner than earlier conversion-sweep documents suggest. Running `pdm run python scripts/workflow_purity_report.py` produced:
@@ -15,14 +21,14 @@ As of 2026-03-24, Von's workflow runtime is substantially cleaner than earlier c
 - `builtin_capability_override_count=0`
 - `non_vontology_discoverable_workflow_count=0`
 
-That means the main remaining VWL contract failures are no longer about runtime registration authority. They are concentrated in four places:
+That means the main remaining VWL contract failures are no longer about runtime registration authority. After `JVNAUTOSCI-1576`, they are concentrated in four places:
 
-1. Python is still the authoritative authoring source for many canonical workflows and some prompts, even when the executable workflow already lives in Vontology.
-2. Workflow creation and gap-recovery still contain hard-coded workflow templates and request-shape heuristics in Python.
-3. File-copy upload routing still depends on Python route maps and hard-coded downstream workflow IDs.
-4. Testing Workflows still contain meeting-specific fixture preparation and benchmark-tier branching that should become generic testing-workflow surfaces.
+1. Workflow creation and gap-recovery still contain hard-coded workflow templates and request-shape heuristics in Python.
+2. File-copy upload routing still depends on Python route maps and hard-coded downstream workflow IDs.
+3. Testing Workflows still contain meeting-specific fixture preparation and benchmark-tier branching that should become generic testing-workflow surfaces.
+4. Some workflow prompt bodies are still authored in Python and then persisted into Vontology prompt concepts.
 
-The largest current contract failure is therefore: "Vontology is authoritative at runtime, but several workflow families are still authored in Python first and only then published into Vontology." Current VWL already suffices for a large part of that residue. The main justified new extensions are:
+The largest current contract failure is therefore no longer "canonical workflows are authored in Python first". That part is now addressed for canonical published workflow families. The remaining justified extensions are:
 
 - declarative workflow-template applicability and discovery exemplars
 - declarative typed-subworkflow route maps
@@ -53,19 +59,17 @@ The audit also used `workflow_list_definitions(limit=200)` to cross-check the cu
 
 ## Baseline Interpretation
 
-The workflow-purity counters are accurate for runtime purity, but they do not currently measure source-authoring drift. In particular, they do not flag the case where:
+The workflow-purity counters are accurate for runtime purity and now also flag Python-authored canonical workflow publication surfaces via `python_authored_canonical_workflow_source_count`.
 
-- a canonical workflow graph is built in Python via `_CanonicalWorkflowPublicationSpec`,
-- then published into Vontology,
-- and then executed authoritatively from Vontology.
+They still do not fully measure all source-authoring drift. In particular, they do not yet count code-authored workflow prompt bodies, and they do not by themselves classify every hard-coded workflow-template builder outside the canonical publication path.
 
-So the zeroed purity counters should be read as "runtime authority is now Vontology-backed", not "workflow-first convergence is complete".
+So the zeroed runtime-authority counters plus a zero canonical-source counter should be read as "runtime authority is Vontology-backed and canonical publication sources are no longer Python-authored", not "workflow-first convergence is complete".
 
 ## Exhaustive Findings
 
 | Family | Locations | Current behaviour | Example workflows / task classes | Current VWL sufficient? | Equivalent VWL representation or smallest coherent extension | Other examples covered | Delete / migrate / retain | Migration risk, dependencies, priority |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Python-authored canonical workflow publication specs | `src/backend/workflows/workflow_concept_authority_service.py:378`, `:2242`, `:3349`; `src/backend/services/paper_representation_workflow_vontology_service.py:125`, `:526`, `:1041`; `src/backend/services/talk_representation_workflow_vontology_service.py:171`, `:499`, `:522`, `:712`; `src/backend/services/testing_workflow_vontology_service.py:383`, `:456`, `:780`, `:932`, `:992`, `:1388` | Canonical workflow graphs are still assembled as Python dataclass specs and then published into Vontology. | Chat narration, buttonify, tool-calling, turn execution, file-copy typing/upload/interpretation, planning, rumination, workflow authoring, scholarly/arXiv paper workflows, talk workflows, testing workflows. | Yes. | Store the authoritative workflow definition directly as Vontology workflow graph data or as version-controlled workflow source assets imported through the generic publication/materialisation path. Keep only generic import, validation, and publication helpers in Python. | Any future canonical workflow family. | Migrate workflow-family-specific spec builders out of Python. Retain the generic publication/import/validation utilities. | Medium-high migration volume. Main dependency is choosing one durable source-of-truth format for authored workflow definitions. Priority `P1`. |
+| Python-authored canonical workflow publication specs | Historical locations before `JVNAUTOSCI-1576`: `src/backend/workflows/workflow_concept_authority_service.py`; `src/backend/services/paper_representation_workflow_vontology_service.py`; `src/backend/services/talk_representation_workflow_vontology_service.py`; `src/backend/services/testing_workflow_vontology_service.py`. Current source bundles: `src/backend/workflows/authored_sources/*.json`. | Resolved for canonical published workflow families. Canonical workflow graphs are now sourced from version-controlled workflow bundles and imported through the generic publication/materialisation path. | Chat narration, buttonify, tool-calling, turn execution, file-copy typing/upload/interpretation, planning, rumination, workflow authoring, scholarly/arXiv paper workflows, talk workflows, testing workflows. | Yes. | Store the authoritative workflow definition directly as Vontology workflow graph data or as version-controlled workflow source assets imported through the generic publication/materialisation path. Keep only generic import, validation, and publication helpers in Python. | Any future canonical workflow family. | Completed by `JVNAUTOSCI-1576` for the currently published canonical families. Retain the generic publication/import/validation utilities and reject future workflow-family-specific spec builders. | Migration landed. Ongoing risk is regression, so keep purity telemetry and review discipline in place. |
 | Code-authored workflow prompts | `src/backend/services/testing_workflow_vontology_service.py:77`, `:102`; `src/backend/workflows/durable/workflow_gap_recovery_workflow.py:282`, `:482` | Prompt text is still created from Python constants/templates and then persisted into prompt concepts. | Meeting-invitation structure/evaluation prompts, gap-recovery candidate prompt. | Yes. | Store prompt bodies directly in Vontology prompt concepts and treat Python only as prompt resolution/rendering infrastructure. | Future workflow-repair prompts, authoring prompts, test-fixture prompts. | Migrate prompt text out of Python. Retain prompt rendering and prompt-resolution support. | Low migration risk. Depends mainly on adopting prompt-source discipline alongside workflow-source discipline. Priority `P2`. |
 | Hard-coded workflow templates in workflow creation and gap recovery | `src/backend/workflows/durable/workflow_creation_workflow.py:531`, `:586`, `:704`, `:1113`; `src/backend/workflows/durable/workflow_gap_recovery_workflow.py:482`, `:806` | Python builds full workflow specs for default, scholarly-paper, PhD-student, and gap-recovery candidate workflows. | Text-driven workflow creation for scholarly-paper representation, PhD-student representation, single-step recovery candidate workflows. | Partly. Template bodies are already expressible; automatic template choice is not yet declarative. | Today: support explicit `workflow_template_id` or authored workflow-definition fragments stored in Vontology. Extension needed for automatic selection: a declarative `workflow_template_profile` with applicability metadata and examples. | User-onboarding workflows, new representation workflows, future recovery-generated candidate workflows. | Migrate template bodies out of Python now. Retain only generic template-loading and materialisation support after a template-profile extension exists. | Medium risk. Depends on a stable template asset format and template-resolution contract. Priority `P1`. |
 | Workflow discovery seeds and override-role heuristics | `src/backend/services/workflow_discovery_service.py:914`, `:923`, `:1021`; `src/backend/services/workflow_override_policy_service.py:81`, `:98`, `:295`, `:422` | Workflow creation is boosted by a Python regex + intent seed. Override policy still infers `authoring` and `maintenance` roles from name/description/action hints when `routing_profile` metadata is absent. | Workflow creation requests, authoring/meta workflow promotion, maintenance workflow decline. | Partly. Routing profiles already cover role and authoring intent, but discovery exemplars are not yet declarative. | Backfill `workflow_routing_profile.v1` for all relevant workflows now. Add a declarative discovery-exemplar surface so regex-based workflow-specific seeding can be retired coherently. | Workflow repair, workflow introspection, future maintenance/meta workflows. | Migrate heuristics out of code as metadata coverage improves. Retain only minimal generic fallback while legacy workflows are being backfilled. | Low-medium risk. Depends on loader/index/search support for exemplar metadata. Priority `P2`. |
@@ -83,7 +87,7 @@ These areas are not themselves contract failures and should not be deleted merel
 
 ## Prioritised Extension and Migration Plan
 
-1. `P1`: Move remaining canonical workflow definitions out of Python spec builders and into direct VWL/Vontology-authored sources.
+1. `P1`: Completed 2026-03-24 via `JVNAUTOSCI-1576`: move canonical published workflow definitions out of Python spec builders and into direct VWL/Vontology-authored sources.
 2. `P1`: Add declarative workflow-template profiles and migrate workflow creation / gap recovery off hard-coded template builders.
 3. `P1`: Add declarative typed-subworkflow route maps and migrate file-copy upload classification policy out of Python.
 4. `P1`: Generalise testing-workflow fixture preparation and test-tier escalation semantics so meeting-specific and benchmark-specific logic does not keep reappearing in Python.
@@ -97,7 +101,7 @@ This audit was exhaustive across the current workflow runtime, authoring, discov
 Residual uncertainty remains in two narrow areas:
 
 - Generic concept-mutation services were not audited line-by-line unless a workflow module depended on them directly. There may still be future opportunities to turn some domain-specific durable actions into more general VWL mutation primitives.
-- The current workflow-purity telemetry does not yet surface source-authoring drift, so a future audit helper should probably add counters for Python-authored workflow specs and code-authored prompt bodies.
+- Workflow-purity telemetry now surfaces Python-authored canonical workflow sources, but it still does not directly count code-authored prompt bodies.
 
 No additional workflow-family-specific authoring surfaces were found by broad searches over:
 

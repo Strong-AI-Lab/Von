@@ -13,6 +13,7 @@ import logging
 import re
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ..db.repositories.concepts_repository import ConceptsRepository
@@ -373,1919 +374,424 @@ _PARENT_SPECIFICITY_DOSSIER_CONTEXT_INPUT_MAPPINGS: tuple[str, ...] = (
     PARENT_SPECIFICITY_DOSSIER_CONTEXT_INPUT_MAPPING_CONCEPT_ID,
 )
 
+AUTHORED_WORKFLOW_SOURCE_BUNDLE_SCHEMA_VERSION = "authored_workflow_source_bundle.v1"
+AUTHORED_WORKFLOW_SOURCE_DIR = Path(__file__).with_name("authored_sources")
+_CANONICAL_WORKFLOW_PUBLICATION_SOURCE_PATH = (
+    AUTHORED_WORKFLOW_SOURCE_DIR / "canonical_workflow_publication_specs.json"
+)
+
+
+def _normalise_authored_source_text(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _normalise_authored_source_string_tuple(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, Sequence) or isinstance(value, str):
+        return ()
+    cleaned: list[str] = []
+    for item in value:
+        item_text = str(item or "").strip()
+        if item_text:
+            cleaned.append(item_text)
+    return tuple(dict.fromkeys(cleaned))
+
+
+def _parse_static_input_bindings_payload(
+    raw_payload: Any,
+) -> tuple[tuple[str, str], ...]:
+    bindings: list[tuple[str, str]] = []
+    if isinstance(raw_payload, Mapping):
+        iterable = raw_payload.items()
+    elif isinstance(raw_payload, Sequence) and not isinstance(raw_payload, str):
+        iterable = raw_payload
+    else:
+        iterable = ()
+
+    for item in iterable:
+        if isinstance(item, Mapping):
+            key = _normalise_authored_source_text(
+                item.get("tool_param") or item.get("key")
+            )
+            value = _normalise_authored_source_text(item.get("value"))
+        elif isinstance(item, Sequence) and not isinstance(item, str) and len(item) == 2:
+            key = _normalise_authored_source_text(item[0])
+            value = _normalise_authored_source_text(item[1])
+        else:
+            continue
+        if key and value:
+            bindings.append((key, value))
+    return tuple(bindings)
+
+
+def _parse_context_input_mapping_specs_payload(
+    raw_payload: Any,
+) -> tuple[_CanonicalContextInputMappingSpec, ...]:
+    if not isinstance(raw_payload, Sequence) or isinstance(raw_payload, str):
+        return ()
+    specs: list[_CanonicalContextInputMappingSpec] = []
+    for item in raw_payload:
+        if not isinstance(item, Mapping):
+            continue
+        concept_id = _normalise_authored_source_text(item.get("concept_id"))
+        context_key = _normalise_authored_source_text(item.get("context_key"))
+        tool_param = _normalise_authored_source_text(item.get("tool_param"))
+        if not concept_id or not context_key or not tool_param:
+            continue
+        specs.append(
+            _CanonicalContextInputMappingSpec(
+                concept_id=concept_id,
+                context_key=context_key,
+                tool_param=tool_param,
+                required=bool(item.get("required", True)),
+            )
+        )
+    return tuple(specs)
+
+
+def _parse_tool_output_mapping_specs_payload(
+    raw_payload: Any,
+) -> tuple[
+    ParentSpecificityToolOutputMappingSpec
+    | WorkflowGapOutputMappingSpec
+    | _CanonicalToolOutputMappingSpec,
+    ...
+]:
+    if not isinstance(raw_payload, Sequence) or isinstance(raw_payload, str):
+        return ()
+    specs: list[
+        ParentSpecificityToolOutputMappingSpec
+        | WorkflowGapOutputMappingSpec
+        | _CanonicalToolOutputMappingSpec
+    ] = []
+    for item in raw_payload:
+        if not isinstance(item, Mapping):
+            continue
+        concept_id = _normalise_authored_source_text(item.get("concept_id"))
+        tool_output_field = _normalise_authored_source_text(item.get("tool_output_field"))
+        context_key = _normalise_authored_source_text(item.get("context_key"))
+        if not concept_id or not tool_output_field or not context_key:
+            continue
+        child_output_field = _normalise_authored_source_text(
+            item.get("child_output_field")
+        )
+        if child_output_field is not None:
+            specs.append(
+                _CanonicalToolOutputMappingSpec(
+                    concept_id=concept_id,
+                    tool_output_field=tool_output_field,
+                    context_key=context_key,
+                )
+            )
+            continue
+        specs.append(
+            _CanonicalToolOutputMappingSpec(
+                concept_id=concept_id,
+                tool_output_field=tool_output_field,
+                context_key=context_key,
+            )
+        )
+    return tuple(specs)
+
+
+def _parse_conditional_transition_payload(
+    raw_payload: Any,
+) -> tuple[_CanonicalConditionalTransitionPublicationSpec, ...]:
+    if not isinstance(raw_payload, Sequence) or isinstance(raw_payload, str):
+        return ()
+    transitions: list[_CanonicalConditionalTransitionPublicationSpec] = []
+    for item in raw_payload:
+        if not isinstance(item, Mapping):
+            continue
+        to_state = _normalise_authored_source_text(item.get("to_state"))
+        if not to_state:
+            continue
+        condition_spec = item.get("condition_spec")
+        transitions.append(
+            _CanonicalConditionalTransitionPublicationSpec(
+                to_state=to_state,
+                condition_spec=(
+                    dict(condition_spec)
+                    if isinstance(condition_spec, Mapping)
+                    else {"kind": "always"}
+                ),
+                reason=_normalise_authored_source_text(item.get("reason")),
+            )
+        )
+    return tuple(transitions)
+
+
+def _parse_publication_step_payload(
+    raw_payload: Any,
+) -> _CanonicalStepPublicationSpec:
+    if not isinstance(raw_payload, Mapping):
+        raise ValueError("authored_workflow_step_payload_missing")
+    state_id = _normalise_authored_source_text(raw_payload.get("state_id"))
+    if not state_id:
+        raise ValueError("authored_workflow_step_state_id_missing")
+    llm_policy = raw_payload.get("llm_policy")
+    validation_policy = raw_payload.get("validation_policy")
+    mutation_authority = raw_payload.get("mutation_authority")
+    return _CanonicalStepPublicationSpec(
+        state_id=state_id,
+        concept_id=_normalise_authored_source_text(raw_payload.get("concept_id")),
+        action_id=_normalise_authored_source_text(raw_payload.get("action_id")),
+        action_concept_id=_normalise_authored_source_text(
+            raw_payload.get("action_concept_id")
+        ),
+        prompt_concept_ids=_normalise_authored_source_string_tuple(
+            raw_payload.get("prompt_concept_ids")
+        ),
+        execution_mode=_normalise_authored_source_text(
+            raw_payload.get("execution_mode")
+        ),
+        llm_policy=dict(llm_policy) if isinstance(llm_policy, Mapping) else None,
+        validation_policy=(
+            dict(validation_policy)
+            if isinstance(validation_policy, Mapping)
+            else None
+        ),
+        mutation_authority=(
+            dict(mutation_authority)
+            if isinstance(mutation_authority, Mapping)
+            else None
+        ),
+        invoked_workflow_id=_normalise_authored_source_text(
+            raw_payload.get("invoked_workflow_id")
+        ),
+        static_input_bindings=_parse_static_input_bindings_payload(
+            raw_payload.get("static_input_bindings")
+        ),
+        context_input_mappings=_normalise_authored_source_string_tuple(
+            raw_payload.get("context_input_mappings")
+        ),
+        context_input_mapping_specs=_parse_context_input_mapping_specs_payload(
+            raw_payload.get("context_input_mapping_specs")
+        ),
+        tool_output_context_mappings=_normalise_authored_source_string_tuple(
+            raw_payload.get("tool_output_context_mappings")
+        ),
+        tool_output_mapping_specs=_parse_tool_output_mapping_specs_payload(
+            raw_payload.get("tool_output_mapping_specs")
+        ),
+        writes_context_keys=_normalise_authored_source_string_tuple(
+            raw_payload.get("writes_context_keys")
+        ),
+        next_state=_normalise_authored_source_text(raw_payload.get("next_state")),
+        on_true_state=_normalise_authored_source_text(
+            raw_payload.get("on_true_state")
+        ),
+        on_false_state=_normalise_authored_source_text(
+            raw_payload.get("on_false_state")
+        ),
+        on_failure_state=_normalise_authored_source_text(
+            raw_payload.get("on_failure_state")
+        ),
+        on_unknown_state=_normalise_authored_source_text(
+            raw_payload.get("on_unknown_state")
+        ),
+        on_approval_required_state=_normalise_authored_source_text(
+            raw_payload.get("on_approval_required_state")
+        ),
+        on_break_state=_normalise_authored_source_text(
+            raw_payload.get("on_break_state")
+        ),
+        on_continue_state=_normalise_authored_source_text(
+            raw_payload.get("on_continue_state")
+        ),
+        conditional_transitions=_parse_conditional_transition_payload(
+            raw_payload.get("conditional_transitions")
+        ),
+        effects=_normalise_authored_source_string_tuple(raw_payload.get("effects")),
+    )
+
+
+def _parse_publication_spec_payload(
+    raw_payload: Any,
+) -> _CanonicalWorkflowPublicationSpec:
+    if not isinstance(raw_payload, Mapping):
+        raise ValueError("authored_workflow_publication_spec_missing")
+    steps_payload = raw_payload.get("steps")
+    if not isinstance(steps_payload, Sequence) or isinstance(steps_payload, str):
+        raise ValueError("authored_workflow_publication_steps_missing")
+    steps = tuple(_parse_publication_step_payload(item) for item in steps_payload)
+    if not steps:
+        raise ValueError("authored_workflow_publication_steps_missing")
+    initial_state = _normalise_authored_source_text(raw_payload.get("initial_state"))
+    if not initial_state:
+        initial_state = steps[0].state_id
+    return _CanonicalWorkflowPublicationSpec(
+        initial_state=initial_state,
+        steps=steps,
+    )
+
+
+def _append_authored_text_relation_spec(
+    *,
+    target: list[dict[str, Any]],
+    predicate: str,
+    text: str | None,
+    lang: str = "en-NZ",
+) -> None:
+    if not text:
+        return
+    target.append(
+        {
+            "predicate": predicate,
+            "text": text,
+            "lang": lang,
+        }
+    )
+
+
+@lru_cache(maxsize=None)
+def _load_authored_workflow_source_bundle_cached(
+    asset_path: str,
+) -> dict[str, Any]:
+    path = Path(asset_path).resolve()
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping):
+        raise ValueError("authored_workflow_source_bundle_not_mapping")
+    schema_version = _normalise_authored_source_text(payload.get("schema_version"))
+    if schema_version != AUTHORED_WORKFLOW_SOURCE_BUNDLE_SCHEMA_VERSION:
+        raise ValueError(
+            "authored_workflow_source_bundle_schema_unsupported:"
+            f"{schema_version or 'missing'}"
+        )
+
+    workflows_payload = payload.get("workflows")
+    if not isinstance(workflows_payload, Sequence) or isinstance(
+        workflows_payload,
+        str,
+    ):
+        raise ValueError("authored_workflow_source_bundle_workflows_missing")
+
+    publication_specs: dict[str, _CanonicalWorkflowPublicationSpec] = {}
+    publication_purposes: dict[str, str] = {}
+    workflow_type_ids: dict[str, tuple[str, ...]] = {}
+    workflow_text_relations: dict[str, tuple[dict[str, Any], ...]] = {}
+    workflow_launch_contracts: dict[str, Mapping[str, Any]] = {}
+    step_text_relations: dict[str, tuple[dict[str, Any], ...]] = {}
+
+    for item in workflows_payload:
+        if not isinstance(item, Mapping):
+            continue
+        workflow_id = _normalise_authored_source_text(item.get("workflow_id"))
+        if not workflow_id:
+            raise ValueError("authored_workflow_source_workflow_id_missing")
+        publication_specs[workflow_id] = _parse_publication_spec_payload(
+            item.get("publication_spec")
+        )
+
+        publication_purpose = _normalise_authored_source_text(
+            item.get("publication_purpose")
+        ) or _normalise_authored_source_text(item.get("content"))
+        if publication_purpose:
+            publication_purposes[workflow_id] = publication_purpose
+
+        type_ids = _normalise_authored_source_string_tuple(item.get("type_ids"))
+        if type_ids:
+            workflow_type_ids[workflow_id] = type_ids
+
+        workflow_text_specs: list[dict[str, Any]] = []
+        _append_authored_text_relation_spec(
+            target=workflow_text_specs,
+            predicate="hasDescription",
+            text=_normalise_authored_source_text(item.get("description")),
+        )
+        _append_authored_text_relation_spec(
+            target=workflow_text_specs,
+            predicate="hasContent",
+            text=_normalise_authored_source_text(item.get("content")),
+        )
+        for note in item.get("workflow_notes") or ():
+            _append_authored_text_relation_spec(
+                target=workflow_text_specs,
+                predicate="hasNote",
+                text=_normalise_authored_source_text(note),
+            )
+        if workflow_text_specs:
+            workflow_text_relations[workflow_id] = tuple(workflow_text_specs)
+
+        launch_contract = item.get("launch_input_contract")
+        if isinstance(launch_contract, Mapping):
+            workflow_launch_contracts[workflow_id] = dict(launch_contract)
+
+        raw_step_notes = item.get("step_notes")
+        if isinstance(raw_step_notes, Mapping):
+            for state_id, notes in raw_step_notes.items():
+                state_id_text = _normalise_authored_source_text(state_id)
+                if not state_id_text:
+                    continue
+                step_text_specs: list[dict[str, Any]] = []
+                for note in notes or ():
+                    _append_authored_text_relation_spec(
+                        target=step_text_specs,
+                        predicate="hasNote",
+                        text=_normalise_authored_source_text(note),
+                    )
+                if not step_text_specs:
+                    continue
+                step_text_relations[
+                    _step_concept_id(
+                        workflow_id=workflow_id,
+                        state_id=state_id_text,
+                    )
+                ] = tuple(step_text_specs)
+
+    return {
+        "asset_path": str(path),
+        "family_id": _normalise_authored_source_text(payload.get("family_id")),
+        "managed_by": _normalise_authored_source_text(payload.get("managed_by")),
+        "source_tag": _normalise_authored_source_text(payload.get("source_tag")),
+        "supported_action_ids": _normalise_authored_source_string_tuple(
+            payload.get("supported_action_ids")
+        ),
+        "publication_specs": publication_specs,
+        "publication_purposes": publication_purposes,
+        "workflow_type_ids": workflow_type_ids,
+        "workflow_text_relations": workflow_text_relations,
+        "workflow_launch_contracts": workflow_launch_contracts,
+        "step_text_relations": step_text_relations,
+    }
+
+
+def load_authored_workflow_source_bundle(asset_path: str | Path) -> dict[str, Any]:
+    """Load one version-controlled authored workflow source bundle."""
+
+    return _load_authored_workflow_source_bundle_cached(str(Path(asset_path).resolve()))
+
+
+def clear_authored_workflow_source_bundle_cache() -> None:
+    _load_authored_workflow_source_bundle_cached.cache_clear()
+
+
+def publication_spec_step_concept_ids(
+    *,
+    workflow_id: str,
+    spec: _CanonicalWorkflowPublicationSpec,
+) -> tuple[str, ...]:
+    ordered_ids: list[str] = []
+    for step in spec.steps:
+        explicit_concept_id = (
+            step.concept_id.strip()
+            if isinstance(step.concept_id, str) and step.concept_id.strip()
+            else None
+        )
+        ordered_ids.append(
+            explicit_concept_id
+            if explicit_concept_id is not None
+            else _step_concept_id(workflow_id=workflow_id, state_id=step.state_id)
+        )
+    return tuple(ordered_ids)
+
 
 # Keep this mapping deterministic so publication is stable across runs.
-_CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSpec] = {
-    MISSING_TOOL_CALL_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="observed",
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id="observed",
-                action_id="missing_tool_call.assess",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="needs_retry",
-                        reason="retry_needed",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "missing_tool_call_retry_needed",
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="completed",
-                        reason="no_retry_required",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="needs_retry",
-                action_id="missing_tool_call.retry",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="completed",
-                        reason="retry_succeeded",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "missing_tool_call_retry_success",
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="failed",
-                        reason="retry_failed",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(state_id="completed"),
-            _CanonicalStepPublicationSpec(state_id="failed"),
-        ),
-    ),
-    CHAT_NARRATION_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="classify_need",
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id="classify_need",
-                action_id="narration.classify",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="select_prompt_fragments",
-                        reason="narration_required",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "narration_required",
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="completed",
-                        reason="narration_not_required",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="select_prompt_fragments",
-                action_id="narration.select_prompts",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="render_narration",
-                        reason="prompt_selected",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="render_narration",
-                action_id="narration.render",
-                execution_mode="llm",
-                llm_policy={
-                    "tool_mode": "none",
-                    "policy_stage": "narration",
-                    "prompt_text_context_key": "narration_prompt_text",
-                    "response_contract_text": (
-                        "Return ONLY one block: <spoken>...</spoken>. "
-                        "Do not include <screen>. Do not include code blocks. "
-                        "Use New Zealand English spelling."
-                    ),
-                    "context_fields": [
-                        {"label": "User message", "context_key": "user_prompt"},
-                        {
-                            "label": (
-                                "On-screen content (do not read verbatim if long; "
-                                "summarise)"
-                            ),
-                            "context_key": "screen_text",
-                        },
-                    ],
-                },
-                validation_policy={"output_format": "narration_spoken_xml"},
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="emit_audio",
-                        reason="rendered",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "narration_rendered",
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="failed",
-                        reason="render_failed",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="emit_audio",
-                action_id="narration.emit_audio",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="completed",
-                        reason="emitted",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(state_id="completed"),
-            _CanonicalStepPublicationSpec(state_id="failed"),
-        ),
-    ),
-    CHAT_BUTTONIFY_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="assess_input",
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id="assess_input",
-                action_id="buttonify.assess_input",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="select_prompt",
-                        reason="eligible",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "buttonify_should_run",
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="completed",
-                        reason="skipped",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="select_prompt",
-                action_id="buttonify.select_prompt",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="extract_options",
-                        reason="prompt_selected",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="extract_options",
-                action_id="buttonify.extract_options",
-                execution_mode="llm",
-                llm_policy={
-                    "tool_mode": "none",
-                    "policy_stage": "buttonify",
-                    "prompt_text_context_key": "buttonify_prompt_text",
-                    "context_fields": [
-                        {"label": "User message", "context_key": "user_prompt"},
-                        {
-                            "label": "Assistant response",
-                            "context_key": "screen_text",
-                        },
-                    ],
-                },
-                validation_policy={"output_format": "buttonify_options_json"},
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="completed",
-                        reason="transformation_completed",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(state_id="completed"),
-        ),
-    ),
-    CHAT_ASSISTANT_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="completed",
-        steps=(
-            _CanonicalStepPublicationSpec(state_id="completed"),
-        ),
-    ),
-    TODO_REFRESH_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="check_cache_freshness",
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id="check_cache_freshness",
-                action_id="todo_refresh.check_cache",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="maybe_fetch_gmail",
-                        reason="refresh_needed",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "todo_refresh_needed",
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="completed",
-                        reason="cache_fresh",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="maybe_fetch_gmail",
-                action_id="todo_refresh.fetch_gmail",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="extract_tasks",
-                        reason="gmail_checked",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="extract_tasks",
-                action_id="todo_refresh.extract_tasks",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="prioritise",
-                        reason="tasks_extracted",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="prioritise",
-                action_id="todo_refresh.prioritise",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="summarise",
-                        reason="prioritised",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="summarise",
-                action_id="todo_refresh.summarise",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="completed",
-                        reason="summarised",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(state_id="completed"),
-        ),
-    ),
-    WRITE_TOOL_POLICY_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="decide",
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id="decide",
-                action_id="write_policy.decide",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="approval_required",
-                        reason="on_approval_required",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "approval_required",
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="completed",
-                        reason="decided",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(state_id="approval_required"),
-            _CanonicalStepPublicationSpec(state_id="completed"),
-        ),
-    ),
-    CONCEPT_SUGGESTION_PREFLIGHT_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="suggest",
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id="suggest",
-                action_id="preflight.specialised_suggest",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="completed",
-                        reason="evaluated",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(state_id="completed"),
-        ),
-    ),
-    TOOL_CALLING_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="preflight_requirements",
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id="preflight_requirements",
-                action_id="tool_calling.preflight_requirements",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="respond",
-                        reason="requirements_preflight_completed",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="respond",
-                action_id="tool_calling.respond",
-                execution_mode="llm",
-                llm_policy={
-                    "tool_mode": "allowed",
-                    "policy_stage": "tool_call",
-                    "prompt_text_context_key": "prompt",
-                },
-                mutation_authority={
-                    "schema_version": WORKFLOW_STEP_MUTATION_AUTHORITY_SCHEMA_VERSION,
-                    "maximum_level": "external_system_guarded",
-                },
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="postcondition_critic",
-                        reason="response_ready",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="postcondition_critic",
-                action_id="turn_execution.critic",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="completion_gate",
-                        reason="critic_completed",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="completion_gate",
-                action_id="turn_execution.completion_gate",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="respond",
-                        reason="completion_gate_repeat_iteration",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "completion_gate_repeat_iteration",
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="completed",
-                        reason="follow_up_required",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "completion_gate_requires_follow_up",
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="completed",
-                        reason="completion_gate_passed",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(state_id="completed"),
-            _CanonicalStepPublicationSpec(state_id="failed"),
-        ),
-    ),
-    KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="evaluate",
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id="evaluate",
-                action_id="turn_execution.critic",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="completed",
-                        reason="evaluated",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(state_id="completed"),
-        ),
-    ),
-    TURN_COMPLETION_GATE_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="decide",
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id="decide",
-                action_id="turn_execution.completion_gate",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="completed",
-                        reason="decided",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(state_id="completed"),
-        ),
-    ),
-    CONVERSATION_TURN_EXECUTION_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="critic",
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id="critic",
-                action_id="turn_execution.critic",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="completion_gate",
-                        reason="critic_completed",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="completion_gate",
-                action_id="turn_execution.completion_gate",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="completed",
-                        reason="completion_gate_decided",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(state_id="completed"),
-        ),
-    ),
-    FILE_COPY_TYPING_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="infer",
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id="infer",
-                action_id="file_copy_typing.infer",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="persist",
-                        reason="typing_inferred",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="persist",
-                action_id="file_copy_typing.persist",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="complete",
-                        reason="typing_persisted",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(state_id="complete"),
-            _CanonicalStepPublicationSpec(state_id="failed"),
-        ),
-    ),
-    FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="classify",
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id="classify",
-                action_id="file_copy_upload.classify",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="persist_decision",
-                        reason="classification_completed",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="persist_decision",
-                action_id="file_copy_upload.persist_decision",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="complete",
-                        reason="decision_persisted",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(state_id="complete"),
-            _CanonicalStepPublicationSpec(state_id="failed"),
-        ),
-    ),
-    FILE_COPY_UPLOAD_HANDLER_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="typing",
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id="typing",
-                action_id="workflow_invoke_subworkflow",
-                invoked_workflow_id=FILE_COPY_TYPING_WORKFLOW_ID,
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="classify",
-                        reason="typing_completed",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="classify",
-                action_id="workflow_invoke_subworkflow",
-                invoked_workflow_id=FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID,
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="fail_closed",
-                        reason="fail_closed_selected",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "upload_fail_closed",
-                            "expected": True,
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="specialised",
-                        reason="specialised_route_selected",
-                        condition_spec={
-                            "kind": "all",
-                            "conditions": [
-                                {
-                                    "kind": "context_value_equals",
-                                    "key": "upload_route_mode",
-                                    "value": "specialised",
-                                },
-                                {
-                                    "kind": "context_exists",
-                                    "key": "upload_target_workflow_id",
-                                    "expected": True,
-                                },
-                                {
-                                    "kind": "not",
-                                    "condition": {
-                                        "kind": "context_value_equals",
-                                        "key": "upload_target_workflow_id",
-                                        "value": "",
-                                    },
-                                },
-                            ],
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="interpret",
-                        reason="interpret_route_selected",
-                        condition_spec={
-                            "kind": "context_value_equals",
-                            "key": "upload_route_mode",
-                            "value": "interpret",
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="noop",
-                        reason="noop_route_selected",
-                        condition_spec={
-                            "kind": "context_value_equals",
-                            "key": "upload_route_mode",
-                            "value": "noop",
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="interpret",
-                        reason="fallback_interpret_default",
-                        condition_spec={
-                            "kind": "any",
-                            "conditions": [
-                                {
-                                    "kind": "context_exists",
-                                    "key": "upload_allow_interpret_fallback",
-                                    "expected": False,
-                                },
-                                {
-                                    "kind": "context_flag",
-                                    "key": "upload_allow_interpret_fallback",
-                                    "expected": True,
-                                },
-                            ],
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="noop",
-                        reason="fallback_noop_default",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="specialised",
-                action_id="workflow_invoke_subworkflow",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="specialised_failed",
-                        reason="specialised_child_failed",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "upload_specialised_child_failed",
-                            "expected": True,
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="record_outcome",
-                        reason="specialised_completed",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="specialised_failed",
-                action_id="file_copy_upload.mark_specialised_failure",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="interpret",
-                        reason="fallback_to_interpret",
-                        condition_spec={
-                            "kind": "any",
-                            "conditions": [
-                                {
-                                    "kind": "context_exists",
-                                    "key": "upload_allow_interpret_fallback",
-                                    "expected": False,
-                                },
-                                {
-                                    "kind": "context_flag",
-                                    "key": "upload_allow_interpret_fallback",
-                                    "expected": True,
-                                },
-                            ],
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="record_outcome",
-                        reason="no_fallback_after_specialised_failure",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="interpret",
-                action_id="workflow_invoke_subworkflow",
-                invoked_workflow_id=FILE_COPY_INTERPRETATION_WORKFLOW_ID,
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="record_outcome",
-                        reason="interpret_completed",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="noop",
-                action_id="file_copy_upload.mark_noop",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="record_outcome",
-                        reason="noop_recorded",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="fail_closed",
-                action_id="file_copy_upload.mark_fail_closed",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="record_outcome",
-                        reason="fail_closed_recorded",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="record_outcome",
-                action_id="file_copy_upload.persist_route_outcome",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="complete",
-                        reason="outcome_persisted",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(state_id="complete"),
-            _CanonicalStepPublicationSpec(state_id="failed"),
-        ),
-    ),
-    FILE_COPY_INTERPRETATION_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="interpret",
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id="interpret",
-                action_id="interpret_file_copy",
-                context_input_mappings=_FILE_COPY_WORKFLOW_CONTEXT_INPUT_MAPPINGS,
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="index",
-                        reason="index_enabled",
-                        condition_spec={
-                            "kind": "any",
-                            "conditions": [
-                                {
-                                    "kind": "context_exists",
-                                    "key": "index_in_rag",
-                                    "expected": False,
-                                },
-                                {
-                                    "kind": "context_flag",
-                                    "key": "index_in_rag",
-                                    "expected": True,
-                                },
-                            ],
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="complete",
-                        reason="index_skipped",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="index",
-                action_id="index_file_copy",
-                context_input_mappings=_FILE_COPY_WORKFLOW_CONTEXT_INPUT_MAPPINGS,
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="complete",
-                        reason="index_finished",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(state_id="complete"),
-            _CanonicalStepPublicationSpec(state_id="failed"),
-        ),
-    ),
-    PARENT_SPECIFICITY_DOSSIER_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="collect",
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id="collect",
-                action_id="parent_specificity.collect_dossier",
-                writes_context_keys=(
-                    "concept_dossier",
-                    "concept_dossier_summary",
-                    "concept_dossier_languages",
-                    "concept_dossier_relation_count",
-                ),
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="complete",
-                        reason="dossier_collected",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(state_id="complete"),
-            _CanonicalStepPublicationSpec(state_id="failed"),
-        ),
-    ),
-    PARENT_SPECIFICITY_RUMINATION_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="assess",
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id="assess",
-                action_id="parent_specificity.assess_candidates",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="prepare_candidate",
-                        reason="candidates_found",
-                        condition_spec={
-                            "kind": "context_cardinality",
-                            "key": "candidate_ids",
-                            "operator": "gte",
-                            "value": 1,
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="complete",
-                        reason="no_candidates",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="prepare_candidate",
-                action_id="parent_specificity.prepare_candidate",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="gather_dossier",
-                        reason="candidate_selected",
-                        condition_spec={
-                            "kind": "all",
-                            "conditions": [
-                                {
-                                    "kind": "context_exists",
-                                    "key": "current_candidate_id",
-                                    "expected": True,
-                                },
-                                {
-                                    "kind": "not",
-                                    "condition": {
-                                        "kind": "context_is_null",
-                                        "key": "current_candidate_id",
-                                        "expected": True,
-                                    },
-                                },
-                                {
-                                    "kind": "not",
-                                    "condition": {
-                                        "kind": "context_value_equals",
-                                        "key": "current_candidate_id",
-                                        "value": "",
-                                    },
-                                },
-                            ],
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="complete",
-                        reason="no_remaining_candidates",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="gather_dossier",
-                action_id="workflow_invoke_subworkflow",
-                invoked_workflow_id=PARENT_SPECIFICITY_DOSSIER_WORKFLOW_ID,
-                static_input_bindings=PARENT_SPECIFICITY_DOSSIER_FAILURE_MODE_BINDINGS,
-                context_input_mappings=_PARENT_SPECIFICITY_DOSSIER_CONTEXT_INPUT_MAPPINGS,
-                tool_output_context_mappings=tuple(
-                    item.concept_id
-                    for item in PARENT_SPECIFICITY_DOSSIER_TOOL_OUTPUT_MAPPINGS
-                ),
-                tool_output_mapping_specs=PARENT_SPECIFICITY_DOSSIER_TOOL_OUTPUT_MAPPINGS,
-                writes_context_keys=PARENT_SPECIFICITY_DOSSIER_WRITES_CONTEXT_KEYS,
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="analyse_candidate",
-                        reason="dossier_ready_or_failed_closed",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="analyse_candidate",
-                action_id="parent_specificity.analyse_candidate",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="apply_candidate",
-                        reason="analysis_complete",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="apply_candidate",
-                action_id="parent_specificity.apply_candidate",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="prepare_candidate",
-                        reason="more_candidates",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "has_remaining_candidates",
-                            "expected": True,
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="complete",
-                        reason="review_budget_exhausted",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="complete",
-                action_id="parent_specificity.finalise",
-            ),
-            _CanonicalStepPublicationSpec(state_id="failed"),
-        ),
-    ),
-    WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="collect_context",
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id="collect_context",
-                action_id=WORKFLOW_GAP_COLLECT_CONTEXT_ACTION_ID,
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="analyse_gap",
-                        reason="context_collected",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="analyse_gap",
-                action_id="workflow_gap.analyse_recovery",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="prepare_candidate",
-                        reason="candidate_needed",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "workflow_gap_should_create_candidate",
-                            "expected": True,
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="complete",
-                        reason="no_candidate_needed",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="prepare_candidate",
-                action_id=WORKFLOW_GAP_PREPARE_CANDIDATE_ACTION_ID,
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="create_candidate",
-                        reason="candidate_prepared",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="create_candidate",
-                action_id=WORKFLOW_SUBWORKFLOW_ACTION_ID,
-                invoked_workflow_id=WORKFLOW_CREATION_WORKFLOW_ID,
-                static_input_bindings=WORKFLOW_GAP_CREATION_FAILURE_MODE_BINDINGS,
-                context_input_mappings=(
-                    WORKFLOW_GAP_CREATE_WORKFLOW_SPEC_MAPPING_ID,
-                    WORKFLOW_GAP_CREATE_TEST_INPUTS_MAPPING_ID,
-                ),
-                tool_output_context_mappings=tuple(
-                    item.concept_id for item in WORKFLOW_GAP_CREATE_TOOL_OUTPUT_MAPPINGS
-                ),
-                tool_output_mapping_specs=WORKFLOW_GAP_CREATE_TOOL_OUTPUT_MAPPINGS,
-                writes_context_keys=WORKFLOW_GAP_CREATE_WRITES_CONTEXT_KEYS,
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="decide_test",
-                        reason="candidate_created_or_failed_closed",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="decide_test",
-                action_id=WORKFLOW_GAP_DECIDE_TEST_ACTION_ID,
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="test_candidate",
-                        reason="test_candidate_now",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "workflow_gap_should_test_candidate_now",
-                            "expected": True,
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="complete",
-                        reason="skip_test",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="test_candidate",
-                action_id=WORKFLOW_SUBWORKFLOW_ACTION_ID,
-                invoked_workflow_id=WORKFLOW_GAP_TEST_WORKFLOW_ID,
-                static_input_bindings=WORKFLOW_GAP_TEST_FAILURE_MODE_BINDINGS,
-                context_input_mappings=(
-                    WORKFLOW_GAP_TEST_WORKFLOW_ID_MAPPING_ID,
-                    WORKFLOW_GAP_TEST_PROMPT_MAPPING_ID,
-                    WORKFLOW_GAP_TEST_RECENT_TURNS_MAPPING_ID,
-                    WORKFLOW_GAP_TEST_ACCEPTANCE_MAPPING_ID,
-                    WORKFLOW_GAP_TEST_BASE_RESPONSE_MAPPING_ID,
-                    WORKFLOW_GAP_TEST_USER_CONCEPT_MAPPING_ID,
-                    WORKFLOW_GAP_TEST_ORG_CONCEPT_MAPPING_ID,
-                    WORKFLOW_GAP_TEST_SESSION_ID_MAPPING_ID,
-                    WORKFLOW_GAP_TEST_TURN_ID_MAPPING_ID,
-                ),
-                tool_output_context_mappings=tuple(
-                    item.concept_id for item in WORKFLOW_GAP_TEST_TOOL_OUTPUT_MAPPINGS
-                ),
-                tool_output_mapping_specs=WORKFLOW_GAP_TEST_TOOL_OUTPUT_MAPPINGS,
-                writes_context_keys=WORKFLOW_GAP_TEST_WRITES_CONTEXT_KEYS,
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="complete",
-                        reason="candidate_test_finished",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="complete",
-                action_id=WORKFLOW_GAP_FINALISE_RECOVERY_ACTION_ID,
-            ),
-            _CanonicalStepPublicationSpec(state_id="failed"),
-        ),
-    ),
-    WORKFLOW_GAP_TEST_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="run_test",
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id="run_test",
-                action_id=WORKFLOW_GAP_RUN_CANDIDATE_TEST_ACTION_ID,
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="complete",
-                        reason="test_evaluated",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(state_id="complete"),
-            _CanonicalStepPublicationSpec(state_id="failed"),
-        ),
-    ),
-    PLANNING_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="assess",
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id="assess",
-                action_id="planning.assess_context",
-                on_failure_state="failed",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="infer",
-                        reason="context_ready",
-                        condition_spec={
-                            "kind": "context_exists",
-                            "key": "planning_context",
-                            "expected": True,
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="failed",
-                        reason="missing_context",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="infer",
-                action_id="planning.infer_plan",
-                on_failure_state="failed",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="validate",
-                        reason="plan_inferred",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="validate",
-                action_id="planning.validate_plan",
-                on_failure_state="failed",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="complete",
-                        reason="validated",
-                        condition_spec={
-                            "kind": "context_exists",
-                            "key": "planning_validation",
-                            "expected": True,
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="failed",
-                        reason="validation_missing",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="complete",
-                action_id="planning.finalise",
-            ),
-            _CanonicalStepPublicationSpec(state_id="failed"),
-        ),
-    ),
-    RUMINATION_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="assess",
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id="assess",
-                action_id="rumination.assess_gaps",
-                on_true_state="plan",
-                on_false_state="complete",
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="plan",
-                action_id="rumination.plan_enrichment",
-                on_true_state="dispatch",
-                on_false_state="complete",
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="dispatch",
-                action_id="rumination.dispatch_enrichment",
-                on_true_state="dispatch",
-                on_false_state="complete",
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="complete",
-                action_id="rumination.finalise",
-            ),
-            _CanonicalStepPublicationSpec(state_id="failed"),
-        ),
-    ),
-    RAG_TEXT_RELATION_SYNC_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="collect",
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id="collect",
-                action_id="rag_sync.collect_docs",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="batch",
-                        reason="docs_collected",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "collected_docs",
-                            "expected": True,
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="complete",
-                        reason="no_docs_to_sync",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="batch",
-                action_id="rag_sync.prepare_batch",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="upsert",
-                        reason="batch_prepared",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "current_batch",
-                            "expected": True,
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="complete",
-                        reason="all_batches_processed",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="upsert",
-                action_id="rag_sync.upsert_batch",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="batch",
-                        reason="more_batches",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "has_more_batches",
-                            "expected": True,
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="complete",
-                        reason="all_batches_done",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="complete",
-                action_id="rag_sync.finalise",
-            ),
-            _CanonicalStepPublicationSpec(state_id="failed"),
-        ),
-    ),
-    ENRICHMENT_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="collect",
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id="collect",
-                action_id="enrichment.collect_candidates",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="batch",
-                        reason="candidates_found",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "candidate_ids",
-                            "expected": True,
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="complete",
-                        reason="no_candidates",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="batch",
-                action_id="enrichment.prepare_batch",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="generate",
-                        reason="batch_ready",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "current_batch",
-                            "expected": True,
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="complete",
-                        reason="all_processed",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="generate",
-                action_id="enrichment.process_batch",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="batch",
-                        reason="more_batches_pending",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "has_more_batches",
-                            "expected": True,
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="complete",
-                        reason="processing_complete",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="complete",
-                action_id="enrichment.finalise",
-            ),
-            _CanonicalStepPublicationSpec(state_id="failed"),
-        ),
-    ),
-    WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="assess",
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id="assess",
-                action_id="workflow_introspection.assess_context",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="failed",
-                        reason="on_failure",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "last_action_failed",
-                            "expected": True,
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="diagnose",
-                        reason="evidence_ready",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "maintenance_evidence",
-                            "expected": True,
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="failed",
-                        reason="missing_evidence",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="diagnose",
-                action_id="workflow_introspection.diagnose_conflation",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="failed",
-                        reason="on_failure",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "last_action_failed",
-                            "expected": True,
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="plan",
-                        reason="diagnosis_ready",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "maintenance_diagnosis",
-                            "expected": True,
-                        },
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="plan",
-                action_id="workflow_introspection.plan_repairs",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="failed",
-                        reason="on_failure",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "last_action_failed",
-                            "expected": True,
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="apply",
-                        reason="planned",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="apply",
-                action_id="workflow_introspection.apply_repairs",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="failed",
-                        reason="on_failure",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "last_action_failed",
-                            "expected": True,
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="verify",
-                        reason="applied_or_skipped",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="verify",
-                action_id="workflow_introspection.verify_repairs",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="failed",
-                        reason="on_failure",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "last_action_failed",
-                            "expected": True,
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="complete",
-                        reason="verified_or_noop",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="complete",
-                action_id="workflow_introspection.finalise",
-            ),
-            _CanonicalStepPublicationSpec(state_id="failed"),
-        ),
-    ),
-    ENTITY_IDENTITY_RESOLUTION_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="scan",
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id="scan",
-                action_id="identity_resolution.scan_candidates",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="apply",
-                        reason="recommendations_ready",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "duplicate_recommendations",
-                            "expected": True,
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="complete",
-                        reason="nothing_to_apply",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="apply",
-                action_id="identity_resolution.apply_resolutions",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="complete",
-                        reason="apply_complete",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id="complete",
-                action_id="identity_resolution.finalise",
-            ),
-            _CanonicalStepPublicationSpec(state_id="failed"),
-        ),
-    ),
-    JIRA_TASK_INCREMENTAL_IMPORT_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state="run_sync",
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id="run_sync",
-                action_id="jira_task_incremental_import.run_sync",
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="failed",
-                        reason="sync_failed",
-                        condition_spec={
-                            "kind": "context_flag",
-                            "key": "last_action_failed",
-                            "expected": True,
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state="complete",
-                        reason="sync_complete",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(state_id="complete"),
-            _CanonicalStepPublicationSpec(state_id="failed"),
-        ),
-    ),
-    WORKFLOW_AUTHORING_REPAIR_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state=WORKFLOW_AUTHORING_REPAIR_STEP_LOAD_EXISTING_WORKFLOW_SPEC,
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id=WORKFLOW_AUTHORING_REPAIR_STEP_LOAD_EXISTING_WORKFLOW_SPEC,
-                concept_id=WORKFLOW_AUTHORING_REPAIR_STEP_LOAD_EXISTING_WORKFLOW_SPEC,
-                action_id=WORKFLOW_AUTHORING_ACTION_EXTRACT_EXISTING_WORKFLOW_SPEC,
-                action_concept_id=WORKFLOW_AUTHORING_ACTION_CONCEPT_EXTRACT_EXISTING_WORKFLOW_SPEC,
-                next_state=WORKFLOW_AUTHORING_REPAIR_STEP_DESIGN_REPAIR_SPEC,
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id=WORKFLOW_AUTHORING_REPAIR_STEP_DESIGN_REPAIR_SPEC,
-                concept_id=WORKFLOW_AUTHORING_REPAIR_STEP_DESIGN_REPAIR_SPEC,
-                action_id=WORKFLOW_AUTHORING_ACTION_DESIGN_REPAIR_SPEC,
-                action_concept_id=WORKFLOW_AUTHORING_ACTION_CONCEPT_DESIGN_REPAIR_SPEC,
-                prompt_concept_ids=(WORKFLOW_AUTHORING_PROMPT_REPAIR_SPEC,),
-                execution_mode="llm",
-                llm_policy={
-                    "context_fields": [
-                        {
-                            "context_key": "prompt",
-                            "label": "Workflow repair request",
-                        },
-                        {
-                            "context_key": "target_workflow_id",
-                            "label": "Target workflow ID",
-                        },
-                        {
-                            "context_key": "existing_workflow_spec",
-                            "label": "Existing workflow authoring spec",
-                        },
-                    ],
-                    "response_contract_text": (
-                        'Return JSON with keys "target_workflow_id", '
-                        '"repair_summary", and "repaired_workflow_spec".'
-                    ),
-                },
-                validation_policy={"output_format": "json_value"},
-                writes_context_keys=(
-                    "target_workflow_id",
-                    "workflow_spec",
-                    "workflow_repair_summary",
-                ),
-                tool_output_mapping_specs=(
-                    _CanonicalToolOutputMappingSpec(
-                        concept_id="#V#workflow_authoring_repair_design_to_target_workflow_mapping",
-                        tool_output_field="validated_json.target_workflow_id",
-                        context_key="target_workflow_id",
-                    ),
-                    _CanonicalToolOutputMappingSpec(
-                        concept_id="#V#workflow_authoring_repair_design_to_workflow_spec_mapping",
-                        tool_output_field="validated_json.repaired_workflow_spec",
-                        context_key="workflow_spec",
-                    ),
-                    _CanonicalToolOutputMappingSpec(
-                        concept_id="#V#workflow_authoring_repair_design_to_summary_mapping",
-                        tool_output_field="validated_json.repair_summary",
-                        context_key="workflow_repair_summary",
-                    ),
-                ),
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state=WORKFLOW_AUTHORING_REPAIR_STEP_APPLY_REPAIR,
-                        reason="repair_spec_ready",
-                        condition_spec={
-                            "kind": "context_exists",
-                            "key": "workflow_spec",
-                            "expected": True,
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state=WORKFLOW_AUTHORING_REPAIR_STEP_FAILED,
-                        reason="repair_spec_missing",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id=WORKFLOW_AUTHORING_REPAIR_STEP_APPLY_REPAIR,
-                concept_id=WORKFLOW_AUTHORING_REPAIR_STEP_APPLY_REPAIR,
-                action_id="workflow_invoke_subworkflow",
-                invoked_workflow_id=WORKFLOW_CREATION_WORKFLOW_ID,
-                context_input_mapping_specs=(
-                    _CanonicalContextInputMappingSpec(
-                        concept_id="#V#workflow_authoring_repair_prompt_input_mapping",
-                        context_key="prompt",
-                        tool_param="prompt",
-                        required=False,
-                    ),
-                    _CanonicalContextInputMappingSpec(
-                        concept_id="#V#workflow_authoring_repair_target_workflow_input_mapping",
-                        context_key="target_workflow_id",
-                        tool_param="target_workflow_id",
-                    ),
-                    _CanonicalContextInputMappingSpec(
-                        concept_id="#V#workflow_authoring_repair_spec_input_mapping",
-                        context_key="workflow_spec",
-                        tool_param="workflow_spec",
-                    ),
-                ),
-                writes_context_keys=(
-                    "response_text",
-                    "workflow_concept_id",
-                    "workflow_discoverable",
-                    "workflow_authoring_repaired_workflow_id",
-                ),
-                tool_output_mapping_specs=(
-                    _CanonicalToolOutputMappingSpec(
-                        concept_id="#V#workflow_authoring_repair_apply_to_response_mapping",
-                        tool_output_field="result.response_text",
-                        context_key="response_text",
-                    ),
-                    _CanonicalToolOutputMappingSpec(
-                        concept_id="#V#workflow_authoring_repair_apply_to_concept_mapping",
-                        tool_output_field="result.workflow_concept_id",
-                        context_key="workflow_concept_id",
-                    ),
-                    _CanonicalToolOutputMappingSpec(
-                        concept_id="#V#workflow_authoring_repair_apply_to_discoverable_mapping",
-                        tool_output_field="result.workflow_discoverable",
-                        context_key="workflow_discoverable",
-                    ),
-                    _CanonicalToolOutputMappingSpec(
-                        concept_id="#V#workflow_authoring_repair_apply_to_repaired_workflow_mapping",
-                        tool_output_field="result.workflow_concept_id",
-                        context_key="workflow_authoring_repaired_workflow_id",
-                    ),
-                ),
-                on_failure_state=WORKFLOW_AUTHORING_REPAIR_STEP_FAILED,
-                next_state=WORKFLOW_AUTHORING_REPAIR_STEP_COMPLETED,
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id=WORKFLOW_AUTHORING_REPAIR_STEP_COMPLETED,
-                concept_id=WORKFLOW_AUTHORING_REPAIR_STEP_COMPLETED,
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id=WORKFLOW_AUTHORING_REPAIR_STEP_FAILED,
-                concept_id=WORKFLOW_AUTHORING_REPAIR_STEP_FAILED,
-            ),
-        ),
-    ),
-    WORKFLOW_AUTHORING_REPAIR_OR_CREATE_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_DISCOVER_EXISTING_WORKFLOWS,
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_DISCOVER_EXISTING_WORKFLOWS,
-                concept_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_DISCOVER_EXISTING_WORKFLOWS,
-                action_id=WORKFLOW_AUTHORING_ACTION_DISCOVER_EXISTING_WORKFLOWS,
-                action_concept_id=WORKFLOW_AUTHORING_ACTION_CONCEPT_DISCOVER_EXISTING_WORKFLOWS,
-                static_input_bindings=(
-                    ("max_results", "8"),
-                    (
-                        "exclude_workflow_ids",
-                        json.dumps(
-                            [
-                                WORKFLOW_AUTHORING_REPAIR_OR_CREATE_WORKFLOW_ID,
-                                WORKFLOW_AUTHORING_REPAIR_WORKFLOW_ID,
-                                WORKFLOW_CREATION_WORKFLOW_ID,
-                            ],
-                            ensure_ascii=True,
-                            sort_keys=True,
-                        ),
-                    ),
-                ),
-                next_state=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_DECIDE_PATH,
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_DECIDE_PATH,
-                concept_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_DECIDE_PATH,
-                action_id=WORKFLOW_AUTHORING_ACTION_DECIDE_REPAIR_OR_CREATE,
-                action_concept_id=WORKFLOW_AUTHORING_ACTION_CONCEPT_DECIDE_REPAIR_OR_CREATE,
-                prompt_concept_ids=(WORKFLOW_AUTHORING_PROMPT_REPAIR_OR_CREATE_DECISION,),
-                execution_mode="llm",
-                llm_policy={
-                    "context_fields": [
-                        {
-                            "context_key": "workflow_authoring_request_text",
-                            "label": "Workflow authoring request",
-                        },
-                        {
-                            "context_key": "workflow_authoring_candidate_workflows",
-                            "label": "Candidate workflows",
-                        },
-                    ],
-                    "response_contract_text": (
-                        'Return JSON with keys "decision", '
-                        '"target_workflow_id", "target_workflow_name", '
-                        '"reasoning", "evidence", and "response_text".'
-                    ),
-                },
-                validation_policy={"output_format": "json_value"},
-                writes_context_keys=(
-                    "workflow_authoring_preflight_decision",
-                    "workflow_authoring_target_workflow_id",
-                    "workflow_authoring_target_workflow_name",
-                    "workflow_authoring_preflight_reasoning",
-                    "workflow_authoring_preflight_evidence",
-                    "response_text",
-                ),
-                tool_output_mapping_specs=(
-                    _CanonicalToolOutputMappingSpec(
-                        concept_id="#V#workflow_authoring_preflight_decision_mapping",
-                        tool_output_field="validated_json.decision",
-                        context_key="workflow_authoring_preflight_decision",
-                    ),
-                    _CanonicalToolOutputMappingSpec(
-                        concept_id="#V#workflow_authoring_preflight_target_workflow_mapping",
-                        tool_output_field="validated_json.target_workflow_id",
-                        context_key="workflow_authoring_target_workflow_id",
-                    ),
-                    _CanonicalToolOutputMappingSpec(
-                        concept_id="#V#workflow_authoring_preflight_target_name_mapping",
-                        tool_output_field="validated_json.target_workflow_name",
-                        context_key="workflow_authoring_target_workflow_name",
-                    ),
-                    _CanonicalToolOutputMappingSpec(
-                        concept_id="#V#workflow_authoring_preflight_reasoning_mapping",
-                        tool_output_field="validated_json.reasoning",
-                        context_key="workflow_authoring_preflight_reasoning",
-                    ),
-                    _CanonicalToolOutputMappingSpec(
-                        concept_id="#V#workflow_authoring_preflight_evidence_mapping",
-                        tool_output_field="validated_json.evidence",
-                        context_key="workflow_authoring_preflight_evidence",
-                    ),
-                    _CanonicalToolOutputMappingSpec(
-                        concept_id="#V#workflow_authoring_preflight_response_mapping",
-                        tool_output_field="validated_json.response_text",
-                        context_key="response_text",
-                    ),
-                ),
-                conditional_transitions=(
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_REUSE_EXISTING_WORKFLOW,
-                        reason="reuse_existing_workflow",
-                        condition_spec={
-                            "kind": "context_value_equals",
-                            "key": "workflow_authoring_preflight_decision",
-                            "value": "reuse",
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_REPAIR_EXISTING_WORKFLOW,
-                        reason="repair_existing_workflow",
-                        condition_spec={
-                            "kind": "context_value_equals",
-                            "key": "workflow_authoring_preflight_decision",
-                            "value": "repair",
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_CREATE_NEW_WORKFLOW,
-                        reason="create_new_workflow",
-                        condition_spec={
-                            "kind": "context_value_equals",
-                            "key": "workflow_authoring_preflight_decision",
-                            "value": "create",
-                        },
-                    ),
-                    _CanonicalConditionalTransitionPublicationSpec(
-                        to_state=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_FAILED,
-                        reason="decision_failed_closed",
-                        condition_spec={"kind": "always"},
-                    ),
-                ),
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_REUSE_EXISTING_WORKFLOW,
-                concept_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_REUSE_EXISTING_WORKFLOW,
-                action_id=WORKFLOW_CREATION_ACTION_EMIT_MARKER,
-                action_concept_id=WORKFLOW_CREATION_ACTION_CONCEPT_EMIT_MARKER,
-                static_input_bindings=(
-                    ("marker_key", "workflow_concept_id"),
-                ),
-                context_input_mapping_specs=(
-                    _CanonicalContextInputMappingSpec(
-                        concept_id="#V#workflow_authoring_preflight_reuse_target_input_mapping",
-                        context_key="workflow_authoring_target_workflow_id",
-                        tool_param="marker_value",
-                    ),
-                ),
-                writes_context_keys=("workflow_concept_id",),
-                next_state=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_COMPLETED,
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_REPAIR_EXISTING_WORKFLOW,
-                concept_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_REPAIR_EXISTING_WORKFLOW,
-                action_id="workflow_invoke_subworkflow",
-                invoked_workflow_id=WORKFLOW_AUTHORING_REPAIR_WORKFLOW_ID,
-                context_input_mapping_specs=(
-                    _CanonicalContextInputMappingSpec(
-                        concept_id="#V#workflow_authoring_preflight_repair_prompt_input_mapping",
-                        context_key="prompt",
-                        tool_param="prompt",
-                        required=False,
-                    ),
-                    _CanonicalContextInputMappingSpec(
-                        concept_id="#V#workflow_authoring_preflight_repair_target_input_mapping",
-                        context_key="workflow_authoring_target_workflow_id",
-                        tool_param="target_workflow_id",
-                    ),
-                ),
-                writes_context_keys=(
-                    "response_text",
-                    "workflow_concept_id",
-                    "workflow_discoverable",
-                    "workflow_authoring_repaired_workflow_id",
-                ),
-                tool_output_mapping_specs=(
-                    _CanonicalToolOutputMappingSpec(
-                        concept_id="#V#workflow_authoring_preflight_repair_to_response_mapping",
-                        tool_output_field="result.response_text",
-                        context_key="response_text",
-                    ),
-                    _CanonicalToolOutputMappingSpec(
-                        concept_id="#V#workflow_authoring_preflight_repair_to_concept_mapping",
-                        tool_output_field="result.workflow_concept_id",
-                        context_key="workflow_concept_id",
-                    ),
-                    _CanonicalToolOutputMappingSpec(
-                        concept_id="#V#workflow_authoring_preflight_repair_to_discoverable_mapping",
-                        tool_output_field="result.workflow_discoverable",
-                        context_key="workflow_discoverable",
-                    ),
-                    _CanonicalToolOutputMappingSpec(
-                        concept_id="#V#workflow_authoring_preflight_repair_to_repaired_id_mapping",
-                        tool_output_field="result.workflow_authoring_repaired_workflow_id",
-                        context_key="workflow_authoring_repaired_workflow_id",
-                    ),
-                ),
-                on_failure_state=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_FAILED,
-                next_state=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_COMPLETED,
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_CREATE_NEW_WORKFLOW,
-                concept_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_CREATE_NEW_WORKFLOW,
-                action_id="workflow_invoke_subworkflow",
-                invoked_workflow_id=WORKFLOW_CREATION_WORKFLOW_ID,
-                context_input_mapping_specs=(
-                    _CanonicalContextInputMappingSpec(
-                        concept_id="#V#workflow_authoring_preflight_create_prompt_input_mapping",
-                        context_key="prompt",
-                        tool_param="prompt",
-                        required=False,
-                    ),
-                    _CanonicalContextInputMappingSpec(
-                        concept_id="#V#workflow_authoring_preflight_create_spec_input_mapping",
-                        context_key="workflow_spec",
-                        tool_param="workflow_spec",
-                        required=False,
-                    ),
-                    _CanonicalContextInputMappingSpec(
-                        concept_id="#V#workflow_authoring_preflight_create_target_input_mapping",
-                        context_key="workflow_authoring_target_workflow_id",
-                        tool_param="target_workflow_id",
-                        required=False,
-                    ),
-                ),
-                writes_context_keys=(
-                    "response_text",
-                    "workflow_concept_id",
-                    "workflow_discoverable",
-                ),
-                tool_output_mapping_specs=(
-                    _CanonicalToolOutputMappingSpec(
-                        concept_id="#V#workflow_authoring_preflight_create_to_response_mapping",
-                        tool_output_field="result.response_text",
-                        context_key="response_text",
-                    ),
-                    _CanonicalToolOutputMappingSpec(
-                        concept_id="#V#workflow_authoring_preflight_create_to_concept_mapping",
-                        tool_output_field="result.workflow_concept_id",
-                        context_key="workflow_concept_id",
-                    ),
-                    _CanonicalToolOutputMappingSpec(
-                        concept_id="#V#workflow_authoring_preflight_create_to_discoverable_mapping",
-                        tool_output_field="result.workflow_discoverable",
-                        context_key="workflow_discoverable",
-                    ),
-                ),
-                on_failure_state=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_FAILED,
-                next_state=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_COMPLETED,
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_COMPLETED,
-                concept_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_COMPLETED,
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_FAILED,
-                concept_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_FAILED,
-            ),
-        ),
-    ),
-    WORKFLOW_CREATION_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
-        initial_state=WORKFLOW_CREATION_STEP_IDENTIFY_NEED,
-        steps=(
-            _CanonicalStepPublicationSpec(
-                state_id=WORKFLOW_CREATION_STEP_IDENTIFY_NEED,
-                concept_id=WORKFLOW_CREATION_STEP_IDENTIFY_NEED,
-                action_id=WORKFLOW_CREATION_ACTION_IDENTIFY_NEED,
-                action_concept_id=WORKFLOW_CREATION_ACTION_CONCEPT_IDENTIFY_NEED,
-                next_state=WORKFLOW_CREATION_STEP_DESIGN_STRUCTURE,
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id=WORKFLOW_CREATION_STEP_DESIGN_STRUCTURE,
-                concept_id=WORKFLOW_CREATION_STEP_DESIGN_STRUCTURE,
-                action_id=WORKFLOW_CREATION_ACTION_DESIGN_STRUCTURE,
-                action_concept_id=WORKFLOW_CREATION_ACTION_CONCEPT_DESIGN_STRUCTURE,
-                next_state=WORKFLOW_CREATION_STEP_CREATE_WORKFLOW_TYPE,
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id=WORKFLOW_CREATION_STEP_CREATE_WORKFLOW_TYPE,
-                concept_id=WORKFLOW_CREATION_STEP_CREATE_WORKFLOW_TYPE,
-                action_id=WORKFLOW_AUTHORING_ACTION_ENSURE_WORKFLOW_IDENTITY,
-                action_concept_id=WORKFLOW_AUTHORING_ACTION_CONCEPT_ENSURE_WORKFLOW_IDENTITY,
-                next_state=WORKFLOW_CREATION_STEP_MATERIALISE_WORKFLOW_DEFINITION,
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id=WORKFLOW_CREATION_STEP_MATERIALISE_WORKFLOW_DEFINITION,
-                concept_id=WORKFLOW_CREATION_STEP_MATERIALISE_WORKFLOW_DEFINITION,
-                action_id=WORKFLOW_AUTHORING_ACTION_MATERIALISE_WORKFLOW_DEFINITION,
-                action_concept_id=WORKFLOW_AUTHORING_ACTION_CONCEPT_MATERIALISE_WORKFLOW_DEFINITION,
-                next_state=WORKFLOW_CREATION_STEP_VERIFY_DISCOVERABILITY,
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id=WORKFLOW_CREATION_STEP_VERIFY_DISCOVERABILITY,
-                concept_id=WORKFLOW_CREATION_STEP_VERIFY_DISCOVERABILITY,
-                action_id=WORKFLOW_AUTHORING_ACTION_VALIDATE_WORKFLOW_DEFINITION,
-                action_concept_id=WORKFLOW_AUTHORING_ACTION_CONCEPT_VALIDATE_WORKFLOW_DEFINITION,
-                next_state=WORKFLOW_CREATION_STEP_DOCUMENT_IN_JIRA,
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id=WORKFLOW_CREATION_STEP_DOCUMENT_IN_JIRA,
-                concept_id=WORKFLOW_CREATION_STEP_DOCUMENT_IN_JIRA,
-                action_id=WORKFLOW_AUTHORING_ACTION_PUBLISH_WORKFLOW_DEFINITION,
-                action_concept_id=WORKFLOW_AUTHORING_ACTION_CONCEPT_PUBLISH_WORKFLOW_DEFINITION,
-            ),
-        ),
-    ),
-}
+_CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSpec] = dict(
+    load_authored_workflow_source_bundle(
+        _CANONICAL_WORKFLOW_PUBLICATION_SOURCE_PATH
+    )["publication_specs"]
+)
 
 
 def _build_publication_transition(
