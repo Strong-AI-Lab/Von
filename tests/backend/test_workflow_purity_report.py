@@ -137,6 +137,8 @@ def test_build_workflow_purity_report_counts_runtime_and_code_impurity(
                         BUILTIN_WORKFLOW_CAPABILITIES
                     ),
                     "non_vontology_discoverable_workflow_count": 3,
+                    "repo_seed_authority_drift_path_count": 0,
+                    "vontology_first_seed_fallback_violation_count": 0,
                 },
             }
         ),
@@ -158,6 +160,8 @@ def test_build_workflow_purity_report_counts_runtime_and_code_impurity(
         "legacy_selector_mode_count": 1,
         "builtin_capability_override_count": len(BUILTIN_WORKFLOW_CAPABILITIES),
         "non_vontology_discoverable_workflow_count": 3,
+        "repo_seed_authority_drift_path_count": 0,
+        "vontology_first_seed_fallback_violation_count": 0,
     }
     assert (
         report["details"]["non_vontology_discoverable_workflow_ids"]
@@ -193,6 +197,10 @@ def test_build_workflow_purity_report_counts_runtime_and_code_impurity(
         "prepare_legacy_prompt",
         "parse_legacy_selection",
     ]
+    assert report["details"]["repo_seed_authority_drift"]["offending_paths"] == []
+    assert (
+        report["details"]["vontology_first_seed_fallback_contracts"]["violations"] == []
+    )
     assert report["baseline"]["comparison"]["regression_detected"] is False
 
 
@@ -228,6 +236,8 @@ def test_build_workflow_purity_report_flags_baseline_regressions(tmp_path: Path)
                     "legacy_selector_mode_count": 0,
                     "builtin_capability_override_count": 0,
                     "non_vontology_discoverable_workflow_count": 0,
+                    "repo_seed_authority_drift_path_count": 0,
+                    "vontology_first_seed_fallback_violation_count": 0,
                 },
             }
         ),
@@ -271,6 +281,8 @@ def test_build_workflow_purity_report_does_not_resolve_lazy_registrations(
                         BUILTIN_WORKFLOW_CAPABILITIES
                     ),
                     "non_vontology_discoverable_workflow_count": 0,
+                    "repo_seed_authority_drift_path_count": 0,
+                    "vontology_first_seed_fallback_violation_count": 0,
                 },
             }
         ),
@@ -301,3 +313,119 @@ def test_build_workflow_purity_report_does_not_resolve_lazy_registrations(
     assert report["details"]["registry_source_counts"] == {"vontology": 1}
     assert report["counters"]["built_in_registration_count"] == 0
     assert report["counters"]["non_vontology_discoverable_workflow_count"] == 0
+
+
+def test_build_workflow_purity_report_flags_repo_seed_authority_drift(
+    tmp_path: Path,
+) -> None:
+    _write(
+        "src/backend/services/rogue_workflow_service.py",
+        (
+            "from src.backend.workflows.workflow_concept_authority_service import "
+            "load_repo_seed_workflow_bundle\n"
+            "from src.backend.workflows.workflow_template_profile_service import "
+            "ensure_repo_seeded_workflow_template_bundle\n\n"
+            "def bootstrap_runtime_authority():\n"
+            "    load_repo_seed_workflow_bundle('bundle.json')\n"
+            "    ensure_repo_seeded_workflow_template_bundle()\n"
+        ),
+        root=tmp_path,
+    )
+    baseline_path = tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workflow_purity_baseline.v1",
+                "counters": {
+                    "built_in_registration_count": 0,
+                    "remaining_python_workflow_family_count": 0,
+                    "python_authored_canonical_workflow_source_count": 0,
+                    "direct_instance_create_callsite_count": 0,
+                    "env_event_binding_count": 0,
+                    "legacy_selector_mode_count": 0,
+                    "builtin_capability_override_count": 0,
+                    "non_vontology_discoverable_workflow_count": 0,
+                    "repo_seed_authority_drift_path_count": 0,
+                    "vontology_first_seed_fallback_violation_count": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = build_workflow_purity_report(
+        registry=None,
+        project_root=tmp_path,
+        baseline_path=baseline_path,
+    )
+
+    repo_seed_drift = report["details"]["repo_seed_authority_drift"]
+    assert report["counters"]["repo_seed_authority_drift_path_count"] == 1
+    assert repo_seed_drift["offending_paths"] == [
+        "src/backend/services/rogue_workflow_service.py"
+    ]
+    assert sorted(item["pattern"] for item in repo_seed_drift["offending_matches"]) == [
+        "repo_seed_bundle_loader",
+        "repo_seed_template_hydration",
+    ]
+
+
+def test_build_workflow_purity_report_flags_vontology_first_seed_contract_violations(
+    tmp_path: Path,
+) -> None:
+    _write(
+        "src/backend/workflows/workflow_template_profile_service.py",
+        (
+            "def load_workflow_template_bundle():\n"
+            "    ensure_repo_seeded_workflow_template_bundle()\n"
+            "    return _load_vontology_workflow_template_bundle_cached()\n"
+        ),
+        root=tmp_path,
+    )
+    _write(
+        "src/backend/workflows/workflow_concept_authority_service.py",
+        (
+            "def publish_canonical_chat_workflow_graphs():\n"
+            "    seed_canonical_workflow_publication_specs()\n"
+            "    seed_canonical_workflow_text_relations()\n"
+            "    _resolve_authoritative_publication_specs()\n"
+            "    _resolve_authoritative_workflow_text_relations()\n"
+        ),
+        root=tmp_path,
+    )
+    baseline_path = tmp_path / "tests" / "backend" / "fixtures" / "workflow_purity_baseline.json"
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workflow_purity_baseline.v1",
+                "counters": {
+                    "built_in_registration_count": 0,
+                    "remaining_python_workflow_family_count": 0,
+                    "python_authored_canonical_workflow_source_count": 0,
+                    "direct_instance_create_callsite_count": 0,
+                    "env_event_binding_count": 0,
+                    "legacy_selector_mode_count": 0,
+                    "builtin_capability_override_count": 0,
+                    "non_vontology_discoverable_workflow_count": 0,
+                    "repo_seed_authority_drift_path_count": 0,
+                    "vontology_first_seed_fallback_violation_count": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = build_workflow_purity_report(
+        registry=None,
+        project_root=tmp_path,
+        baseline_path=baseline_path,
+    )
+
+    contracts = report["details"]["vontology_first_seed_fallback_contracts"]
+    assert report["counters"]["vontology_first_seed_fallback_violation_count"] == 2
+    assert sorted(item["name"] for item in contracts["violations"]) == [
+        "canonical_workflow_publication_vontology_first",
+        "workflow_template_bundle_vontology_first",
+    ]

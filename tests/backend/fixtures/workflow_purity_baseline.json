@@ -7,9 +7,11 @@
     "legacy_selector_mode_count": 0,
     "non_vontology_discoverable_workflow_count": 0,
     "python_authored_canonical_workflow_source_count": 0,
-    "remaining_python_workflow_family_count": 0
+    "remaining_python_workflow_family_count": 0,
+    "repo_seed_authority_drift_path_count": 0,
+    "vontology_first_seed_fallback_violation_count": 0
   },
-  "generated_at_utc": "2026-03-18T04:29:40.719614+00:00",
+  "generated_at_utc": "2026-03-24T11:22:31.541010+00:00",
   "report_schema_version": "workflow_purity_report.v1",
   "schema_version": "workflow_purity_baseline.v1"
 }

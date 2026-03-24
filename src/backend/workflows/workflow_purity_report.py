@@ -84,6 +84,57 @@ CANONICAL_WORKFLOW_SOURCE_LITERAL_PATTERNS = {
     ),
 }
 
+REPO_SEED_AUTHORITY_SCAN_GLOBS = ("src/backend/**/*.py",)
+REPO_SEED_AUTHORITY_ALLOWED_PATHS = frozenset(
+    {
+        "src/backend/services/paper_representation_workflow_vontology_service.py",
+        "src/backend/services/talk_representation_workflow_vontology_service.py",
+        "src/backend/services/testing_workflow_vontology_service.py",
+        "src/backend/services/workflow_repo_seed_bootstrap.py",
+        "src/backend/workflows/workflow_concept_authority_service.py",
+        "src/backend/workflows/workflow_template_profile_service.py",
+    }
+)
+REPO_SEED_AUTHORITY_PATTERNS = {
+    "repo_seed_bootstrap_module": re.compile(r"\bworkflow_repo_seed_bootstrap\b"),
+    "repo_seed_bundle_loader": re.compile(r"\bload_repo_seed_workflow_bundle\s*\("),
+    "repo_seed_publication_specs": re.compile(
+        r"\bseed_canonical_workflow_publication_specs\s*\("
+    ),
+    "repo_seed_text_relations": re.compile(
+        r"\bseed_canonical_workflow_text_relations\s*\("
+    ),
+    "repo_seed_template_asset": re.compile(r"\bDEFAULT_REPO_SEED_TEMPLATE_ASSET_PATH\b"),
+    "repo_seed_template_hydration": re.compile(
+        r"\bensure_repo_seeded_workflow_template_bundle\s*\("
+    ),
+}
+
+SEED_FALLBACK_ORDER_CONTRACTS = (
+    {
+        "name": "workflow_template_bundle_vontology_first",
+        "path": "src/backend/workflows/workflow_template_profile_service.py",
+        "function": "load_workflow_template_bundle",
+        "authoritative_calls": (
+            "_load_vontology_workflow_template_bundle_cached",
+        ),
+        "fallback_calls": ("ensure_repo_seeded_workflow_template_bundle",),
+    },
+    {
+        "name": "canonical_workflow_publication_vontology_first",
+        "path": "src/backend/workflows/workflow_concept_authority_service.py",
+        "function": "publish_canonical_chat_workflow_graphs",
+        "authoritative_calls": (
+            "_resolve_authoritative_publication_specs",
+            "_resolve_authoritative_workflow_text_relations",
+        ),
+        "fallback_calls": (
+            "seed_canonical_workflow_publication_specs",
+            "seed_canonical_workflow_text_relations",
+        ),
+    },
+)
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -104,6 +155,43 @@ def _iter_files(project_root: Path, globs: Sequence[str]) -> list[Path]:
             if path.is_file():
                 matched[str(path.resolve())] = path
     return sorted(matched.values(), key=lambda item: str(item.resolve()))
+
+
+def _extract_top_level_function_source(
+    *,
+    path: Path,
+    project_root: Path,
+    function_name: str,
+) -> dict[str, Any] | None:
+    relative_path = _relative_path(path, project_root)
+    text = path.read_text(encoding="utf-8")
+    try:
+        tree = ast.parse(text, filename=relative_path)
+    except SyntaxError:
+        return None
+
+    lines = text.splitlines()
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name != function_name:
+            continue
+        end_lineno = getattr(node, "end_lineno", None)
+        if end_lineno is None:
+            return None
+        start_line = int(node.lineno)
+        end_line = int(end_lineno)
+        function_text = "\n".join(lines[start_line - 1 : end_line])
+        if function_text:
+            function_text += "\n"
+        return {
+            "path": relative_path,
+            "function_name": function_name,
+            "start_line": start_line,
+            "end_line": end_line,
+            "text": function_text,
+        }
+    return None
 
 
 def _scan_direct_instance_create_callsites(project_root: Path) -> dict[str, Any]:
@@ -266,6 +354,164 @@ def _scan_python_authored_canonical_workflow_sources(
         "source_count": sum(len(item["matched_symbols"]) for item in sources),
         "sources": sources,
         "file_globs": list(CANONICAL_WORKFLOW_SOURCE_SCAN_GLOBS),
+    }
+
+
+def _scan_repo_seed_authority_drift(project_root: Path) -> dict[str, Any]:
+    matches: list[dict[str, Any]] = []
+    for path in _iter_files(project_root, REPO_SEED_AUTHORITY_SCAN_GLOBS):
+        relative_path = _relative_path(path, project_root)
+        if relative_path == WORKFLOW_PURITY_SUPPORT_FILE:
+            continue
+        text = path.read_text(encoding="utf-8")
+        is_allowed = relative_path in REPO_SEED_AUTHORITY_ALLOWED_PATHS
+        for pattern_name, pattern in REPO_SEED_AUTHORITY_PATTERNS.items():
+            for match in pattern.finditer(text):
+                matches.append(
+                    {
+                        "path": relative_path,
+                        "line": _line_number(text, match.start()),
+                        "pattern": pattern_name,
+                        "allowed": is_allowed,
+                    }
+                )
+
+    offending_matches = [item for item in matches if not item["allowed"]]
+    offending_paths = sorted({item["path"] for item in offending_matches})
+    return {
+        "total_matches": len(matches),
+        "offending_match_count": len(offending_matches),
+        "offending_path_count": len(offending_paths),
+        "matches": matches,
+        "offending_matches": offending_matches,
+        "offending_paths": offending_paths,
+        "allowed_paths": sorted(REPO_SEED_AUTHORITY_ALLOWED_PATHS),
+        "patterns": sorted(REPO_SEED_AUTHORITY_PATTERNS),
+    }
+
+
+def _scan_vontology_first_seed_fallback_contracts(project_root: Path) -> dict[str, Any]:
+    contracts: list[dict[str, Any]] = []
+    violations: list[dict[str, Any]] = []
+
+    for contract in SEED_FALLBACK_ORDER_CONTRACTS:
+        relative_path = str(contract["path"])
+        function_name = str(contract["function"])
+        authoritative_calls = tuple(
+            str(item)
+            for item in contract.get("authoritative_calls", ())
+            if isinstance(item, str) and str(item).strip()
+        )
+        fallback_calls = tuple(
+            str(item)
+            for item in contract.get("fallback_calls", ())
+            if isinstance(item, str) and str(item).strip()
+        )
+        source_path = project_root / relative_path
+        if not source_path.exists():
+            contracts.append(
+                {
+                    "name": str(contract["name"]),
+                    "path": relative_path,
+                    "function": function_name,
+                    "status": "file_missing",
+                    "authoritative_calls": list(authoritative_calls),
+                    "fallback_calls": list(fallback_calls),
+                    "missing_authoritative_calls": [],
+                    "late_authoritative_calls": [],
+                    "first_fallback_line": None,
+                }
+            )
+            continue
+        function_record = _extract_top_level_function_source(
+            path=source_path,
+            project_root=project_root,
+            function_name=function_name,
+        )
+        if function_record is None:
+            contracts.append(
+                {
+                    "name": str(contract["name"]),
+                    "path": relative_path,
+                    "function": function_name,
+                    "status": "function_missing",
+                    "authoritative_calls": list(authoritative_calls),
+                    "fallback_calls": list(fallback_calls),
+                    "missing_authoritative_calls": [],
+                    "late_authoritative_calls": [],
+                    "first_fallback_line": None,
+                }
+            )
+            continue
+
+        function_text = str(function_record["text"])
+        start_line = int(function_record["start_line"])
+        authoritative_positions: dict[str, int] = {}
+        fallback_positions: dict[str, int] = {}
+        for call_name in authoritative_calls:
+            pattern = re.compile(rf"\b{re.escape(call_name)}\s*\(")
+            match = pattern.search(function_text)
+            if match is not None:
+                authoritative_positions[call_name] = match.start()
+        for call_name in fallback_calls:
+            pattern = re.compile(rf"\b{re.escape(call_name)}\s*\(")
+            match = pattern.search(function_text)
+            if match is not None:
+                fallback_positions[call_name] = match.start()
+
+        if fallback_positions:
+            first_fallback_offset = min(fallback_positions.values())
+            first_fallback_line = start_line + _line_number(
+                function_text,
+                first_fallback_offset,
+            ) - 1
+        else:
+            first_fallback_offset = None
+            first_fallback_line = None
+
+        missing_authoritative_calls = [
+            call_name
+            for call_name in authoritative_calls
+            if call_name not in authoritative_positions
+        ]
+        late_authoritative_calls = [
+            call_name
+            for call_name, offset in authoritative_positions.items()
+            if first_fallback_offset is not None and offset > first_fallback_offset
+        ]
+        violation = bool(
+            fallback_positions
+            and (missing_authoritative_calls or late_authoritative_calls)
+        )
+        status = (
+            "violation"
+            if violation
+            else "no_fallback_calls_present"
+            if not fallback_positions
+            else "ok"
+        )
+        contract_result = {
+            "name": str(contract["name"]),
+            "path": relative_path,
+            "function": function_name,
+            "status": status,
+            "authoritative_calls": list(authoritative_calls),
+            "fallback_calls": list(fallback_calls),
+            "found_authoritative_calls": sorted(authoritative_positions),
+            "found_fallback_calls": sorted(fallback_positions),
+            "missing_authoritative_calls": missing_authoritative_calls,
+            "late_authoritative_calls": late_authoritative_calls,
+            "first_fallback_line": first_fallback_line,
+        }
+        contracts.append(contract_result)
+        if violation:
+            violations.append(contract_result)
+
+    return {
+        "contract_count": len(contracts),
+        "violation_count": len(violations),
+        "contracts": contracts,
+        "violations": violations,
     }
 
 
@@ -434,6 +680,8 @@ def build_workflow_purity_report(
     canonical_workflow_sources = _scan_python_authored_canonical_workflow_sources(
         repo_root
     )
+    repo_seed_authority = _scan_repo_seed_authority_drift(repo_root)
+    seed_fallback_contracts = _scan_vontology_first_seed_fallback_contracts(repo_root)
     builtin_capability_overrides = sorted(BUILTIN_WORKFLOW_CAPABILITIES)
 
     counters = {
@@ -452,6 +700,12 @@ def build_workflow_purity_report(
         "builtin_capability_override_count": len(builtin_capability_overrides),
         "non_vontology_discoverable_workflow_count": len(
             non_vontology_discoverable_workflow_ids
+        ),
+        "repo_seed_authority_drift_path_count": int(
+            repo_seed_authority.get("offending_path_count", 0)
+        ),
+        "vontology_first_seed_fallback_violation_count": int(
+            seed_fallback_contracts.get("violation_count", 0)
         ),
     }
 
@@ -479,6 +733,8 @@ def build_workflow_purity_report(
             "python_authored_canonical_workflow_sources": copy.deepcopy(
                 canonical_workflow_sources.get("sources", [])
             ),
+            "repo_seed_authority_drift": repo_seed_authority,
+            "vontology_first_seed_fallback_contracts": seed_fallback_contracts,
             "direct_instance_create": direct_create,
             "env_event_binding_authority": env_event_binding,
             "legacy_selector_support": legacy_selector,
@@ -501,6 +757,9 @@ __all__ = [
     "ENV_EVENT_BINDING_AUTHORITY_PATTERNS",
     "LEGACY_SELECTOR_CONSTRUCT_PATTERNS",
     "LEGACY_SELECTOR_FILE",
+    "REPO_SEED_AUTHORITY_ALLOWED_PATHS",
+    "REPO_SEED_AUTHORITY_PATTERNS",
+    "SEED_FALLBACK_ORDER_CONTRACTS",
     "WORKFLOW_PURITY_BASELINE_PATH",
     "WORKFLOW_PURITY_BASELINE_REFRESH_COMMAND",
     "WORKFLOW_PURITY_BASELINE_SCHEMA_VERSION",

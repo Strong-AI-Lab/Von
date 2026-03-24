@@ -451,6 +451,12 @@ workflow authority:
 - workflow parity/purity checks are expected to fail closed on drift by default,
   and authoritative routing text is expected to come from `source=vontology`
   workflows with non-empty narrative text.
+- workflow purity checks MUST treat repo-seed workflow/template usage outside
+  the designated seed/bootstrap support paths as source-authority drift, and
+  the guarded seed-fallback counters
+  `repo_seed_authority_drift_path_count=0` and
+  `vontology_first_seed_fallback_violation_count=0` are expected in steady
+  state;
 - authoritative selector prompts for workflow routing MUST also come from
   Vontology prompt concepts; missing or malformed selector prompts MUST fail
   closed with explicit diagnostics instead of regenerating a code-authored
