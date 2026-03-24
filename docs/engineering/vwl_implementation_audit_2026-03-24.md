@@ -28,6 +28,12 @@ Update after `JVNAUTOSCI-1583`:
 - workflow-purity telemetry now also guards the two current Vontology-first seed-fallback paths via `vontology_first_seed_fallback_violation_count`;
 - deterministic tests now fail if production code introduces repo-seed workflow/template authority outside the designated seed/bootstrap support modules, or if the guarded authority loaders stop resolving Vontology before seed fallback.
 
+Update after `JVNAUTOSCI-1584`:
+
+- `scripts/workflow_authority_review_snapshot.py` now provides deterministic `export` and `diff` commands for workflow-authority review;
+- generated review snapshots now live under `docs/generated/workflow_authority_review_snapshots/`, with filenames explicitly marked as `.generated.json` and README guidance stating that they are non-authoritative derived artefacts;
+- the snapshot export reads the same Vontology-first workflow and template authority surfaces the runtime consumes, so review ergonomics improve without reintroducing repo-side workflow authority.
+
 Update after `JVNAUTOSCI-1576`:
 
 - canonical workflow publication sources were migrated out of Python workflow-family spec builders and into version-controlled repo seed bundles under `src/backend/workflows/repo_seed_bundles/*.json`
@@ -95,6 +101,8 @@ The workflow-purity counters are accurate for runtime purity and now also flag P
 
 They still do not fully measure all source-authoring drift. In particular, they do not yet count code-authored workflow prompt bodies, and they do not by themselves classify every hard-coded workflow-adjacent builder outside the canonical publication/template authority paths.
 
+`JVNAUTOSCI-1584` complements those counters by making the authoritative KB state easier to inspect directly. That matters because ergonomics was part of the original failure mode: if Vontology-first review is awkward, developers and agents will keep drifting back toward file-first local authority.
+
 So the zeroed runtime-authority counters plus zero canonical-source and repo-seed-drift counters should now be read as "runtime authority is Vontology-backed, canonical publication sources are no longer Python-authored, repo-seed authority drift is mechanically guarded, and the repo now names the remaining filesystem artefacts honestly as seed bundles". They should still not be read as "workflow-first convergence is complete", because file-copy routing, testing-workflow extensions, prompt-source migration, and snapshot/diff tooling still remain.
 
 ## Exhaustive Findings
@@ -126,7 +134,7 @@ These areas are not themselves contract failures and should not be deleted merel
 5. `P2`: Move remaining workflow prompt text out of Python and into Vontology prompt concepts as first-class authored artefacts.
 6. `P2`: Completed 2026-03-24 via `JVNAUTOSCI-1585`: rename and quarantine repo seed bundle paths, filenames, schema identifiers, and helper names so the repo layout itself no longer advertises file-first workflow authority.
 7. `P2`: Completed 2026-03-25 via `JVNAUTOSCI-1583`: add source-authority purity gates so repo-seed authority drift and Vontology-first fallback regressions now fail deterministically.
-8. `P2`: `JVNAUTOSCI-1584`: add Vontology-authored snapshot/diff tooling so the stronger authority model remains easy to inspect without drifting back to file-first authoring.
+8. `P2`: Completed 2026-03-25 via `JVNAUTOSCI-1584`: add Vontology-authored snapshot/diff tooling so the stronger authority model remains easy to inspect without drifting back to file-first authoring.
 
 ## Residual Uncertainty
 
