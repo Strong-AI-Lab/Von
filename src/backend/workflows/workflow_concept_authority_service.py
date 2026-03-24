@@ -84,9 +84,42 @@ from .workflow_action_contracts import (
     invalidate_workflow_action_contract_resolution_cache,
 )
 from .workflow_creation_contracts import (
+    WORKFLOW_AUTHORING_ACTION_CONCEPT_DECIDE_REPAIR_OR_CREATE,
+    WORKFLOW_AUTHORING_ACTION_CONCEPT_DESIGN_REPAIR_SPEC,
+    WORKFLOW_AUTHORING_ACTION_CONCEPT_DISCOVER_EXISTING_WORKFLOWS,
+    WORKFLOW_AUTHORING_ACTION_CONCEPT_ENSURE_WORKFLOW_IDENTITY,
+    WORKFLOW_AUTHORING_ACTION_CONCEPT_EXTRACT_EXISTING_WORKFLOW_SPEC,
+    WORKFLOW_AUTHORING_ACTION_CONCEPT_MATERIALISE_WORKFLOW_DEFINITION,
+    WORKFLOW_AUTHORING_ACTION_CONCEPT_PUBLISH_WORKFLOW_DEFINITION,
+    WORKFLOW_AUTHORING_ACTION_CONCEPT_VALIDATE_WORKFLOW_DEFINITION,
+    WORKFLOW_AUTHORING_ACTION_DECIDE_REPAIR_OR_CREATE,
+    WORKFLOW_AUTHORING_ACTION_DESIGN_REPAIR_SPEC,
+    WORKFLOW_AUTHORING_ACTION_DISCOVER_EXISTING_WORKFLOWS,
+    WORKFLOW_AUTHORING_ACTION_ENSURE_WORKFLOW_IDENTITY,
+    WORKFLOW_AUTHORING_ACTION_EXTRACT_EXISTING_WORKFLOW_SPEC,
+    WORKFLOW_AUTHORING_ACTION_MATERIALISE_WORKFLOW_DEFINITION,
+    WORKFLOW_AUTHORING_ACTION_PUBLISH_WORKFLOW_DEFINITION,
+    WORKFLOW_AUTHORING_PROMPT_REPAIR_OR_CREATE_DECISION,
+    WORKFLOW_AUTHORING_PROMPT_REPAIR_SPEC,
+    WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_COMPLETED,
+    WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_CREATE_NEW_WORKFLOW,
+    WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_DECIDE_PATH,
+    WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_DISCOVER_EXISTING_WORKFLOWS,
+    WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_FAILED,
+    WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_REPAIR_EXISTING_WORKFLOW,
+    WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_REUSE_EXISTING_WORKFLOW,
+    WORKFLOW_AUTHORING_REPAIR_OR_CREATE_WORKFLOW_ID,
+    WORKFLOW_AUTHORING_REPAIR_STEP_APPLY_REPAIR,
+    WORKFLOW_AUTHORING_REPAIR_STEP_COMPLETED,
+    WORKFLOW_AUTHORING_REPAIR_STEP_DESIGN_REPAIR_SPEC,
+    WORKFLOW_AUTHORING_REPAIR_STEP_FAILED,
+    WORKFLOW_AUTHORING_REPAIR_STEP_LOAD_EXISTING_WORKFLOW_SPEC,
+    WORKFLOW_AUTHORING_REPAIR_WORKFLOW_ID,
+    WORKFLOW_AUTHORING_ACTION_VALIDATE_WORKFLOW_DEFINITION,
     WORKFLOW_CREATION_ACTION_CONCEPT_CREATE_STEP_CONCEPTS,
     WORKFLOW_CREATION_ACTION_CONCEPT_CREATE_WORKFLOW_TYPE,
     WORKFLOW_CREATION_ACTION_CONCEPT_DESIGN_STRUCTURE,
+    WORKFLOW_CREATION_ACTION_CONCEPT_EMIT_MARKER,
     WORKFLOW_CREATION_ACTION_CONCEPT_ESTABLISH_RELATIONSHIPS,
     WORKFLOW_CREATION_ACTION_CONCEPT_FINALISE,
     WORKFLOW_CREATION_ACTION_CONCEPT_IDENTIFY_NEED,
@@ -95,6 +128,7 @@ from .workflow_creation_contracts import (
     WORKFLOW_CREATION_ACTION_CREATE_STEP_CONCEPTS,
     WORKFLOW_CREATION_ACTION_CREATE_WORKFLOW_TYPE,
     WORKFLOW_CREATION_ACTION_DESIGN_STRUCTURE,
+    WORKFLOW_CREATION_ACTION_EMIT_MARKER,
     WORKFLOW_CREATION_ACTION_ESTABLISH_RELATIONSHIPS,
     WORKFLOW_CREATION_ACTION_FINALISE,
     WORKFLOW_CREATION_ACTION_IDENTIFY_NEED,
@@ -105,6 +139,7 @@ from .workflow_creation_contracts import (
     WORKFLOW_CREATION_STEP_DOCUMENT_IN_JIRA,
     WORKFLOW_CREATION_STEP_ESTABLISH_RELATIONSHIPS,
     WORKFLOW_CREATION_STEP_IDENTIFY_NEED,
+    WORKFLOW_CREATION_STEP_MATERIALISE_WORKFLOW_DEFINITION,
     WORKFLOW_CREATION_STEP_VERIFY_DISCOVERABILITY,
     WORKFLOW_CREATION_WORKFLOW_ID,
 )
@@ -205,6 +240,8 @@ CANONICAL_DURABLE_WORKFLOW_IDS: tuple[str, ...] = (
 # Additional Vontology-authored governance workflows that should be repaired to
 # canonical executable graph form when present in the registry.
 CANONICAL_VONTOLOGY_GOVERNANCE_WORKFLOW_IDS: tuple[str, ...] = (
+    WORKFLOW_AUTHORING_REPAIR_OR_CREATE_WORKFLOW_ID,
+    WORKFLOW_AUTHORING_REPAIR_WORKFLOW_ID,
     WORKFLOW_CREATION_WORKFLOW_ID,
 )
 
@@ -1809,6 +1846,399 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
             _CanonicalStepPublicationSpec(state_id="failed"),
         ),
     ),
+    WORKFLOW_AUTHORING_REPAIR_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state=WORKFLOW_AUTHORING_REPAIR_STEP_LOAD_EXISTING_WORKFLOW_SPEC,
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id=WORKFLOW_AUTHORING_REPAIR_STEP_LOAD_EXISTING_WORKFLOW_SPEC,
+                concept_id=WORKFLOW_AUTHORING_REPAIR_STEP_LOAD_EXISTING_WORKFLOW_SPEC,
+                action_id=WORKFLOW_AUTHORING_ACTION_EXTRACT_EXISTING_WORKFLOW_SPEC,
+                action_concept_id=WORKFLOW_AUTHORING_ACTION_CONCEPT_EXTRACT_EXISTING_WORKFLOW_SPEC,
+                next_state=WORKFLOW_AUTHORING_REPAIR_STEP_DESIGN_REPAIR_SPEC,
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id=WORKFLOW_AUTHORING_REPAIR_STEP_DESIGN_REPAIR_SPEC,
+                concept_id=WORKFLOW_AUTHORING_REPAIR_STEP_DESIGN_REPAIR_SPEC,
+                action_id=WORKFLOW_AUTHORING_ACTION_DESIGN_REPAIR_SPEC,
+                action_concept_id=WORKFLOW_AUTHORING_ACTION_CONCEPT_DESIGN_REPAIR_SPEC,
+                prompt_concept_ids=(WORKFLOW_AUTHORING_PROMPT_REPAIR_SPEC,),
+                execution_mode="llm",
+                llm_policy={
+                    "context_fields": [
+                        {
+                            "context_key": "prompt",
+                            "label": "Workflow repair request",
+                        },
+                        {
+                            "context_key": "target_workflow_id",
+                            "label": "Target workflow ID",
+                        },
+                        {
+                            "context_key": "existing_workflow_spec",
+                            "label": "Existing workflow authoring spec",
+                        },
+                    ],
+                    "response_contract_text": (
+                        'Return JSON with keys "target_workflow_id", '
+                        '"repair_summary", and "repaired_workflow_spec".'
+                    ),
+                },
+                validation_policy={"output_format": "json_value"},
+                writes_context_keys=(
+                    "target_workflow_id",
+                    "workflow_spec",
+                    "workflow_repair_summary",
+                ),
+                tool_output_mapping_specs=(
+                    _CanonicalToolOutputMappingSpec(
+                        concept_id="#V#workflow_authoring_repair_design_to_target_workflow_mapping",
+                        tool_output_field="validated_json.target_workflow_id",
+                        context_key="target_workflow_id",
+                    ),
+                    _CanonicalToolOutputMappingSpec(
+                        concept_id="#V#workflow_authoring_repair_design_to_workflow_spec_mapping",
+                        tool_output_field="validated_json.repaired_workflow_spec",
+                        context_key="workflow_spec",
+                    ),
+                    _CanonicalToolOutputMappingSpec(
+                        concept_id="#V#workflow_authoring_repair_design_to_summary_mapping",
+                        tool_output_field="validated_json.repair_summary",
+                        context_key="workflow_repair_summary",
+                    ),
+                ),
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state=WORKFLOW_AUTHORING_REPAIR_STEP_APPLY_REPAIR,
+                        reason="repair_spec_ready",
+                        condition_spec={
+                            "kind": "context_exists",
+                            "key": "workflow_spec",
+                            "expected": True,
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state=WORKFLOW_AUTHORING_REPAIR_STEP_FAILED,
+                        reason="repair_spec_missing",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id=WORKFLOW_AUTHORING_REPAIR_STEP_APPLY_REPAIR,
+                concept_id=WORKFLOW_AUTHORING_REPAIR_STEP_APPLY_REPAIR,
+                action_id="workflow_invoke_subworkflow",
+                invoked_workflow_id=WORKFLOW_CREATION_WORKFLOW_ID,
+                context_input_mapping_specs=(
+                    _CanonicalContextInputMappingSpec(
+                        concept_id="#V#workflow_authoring_repair_prompt_input_mapping",
+                        context_key="prompt",
+                        tool_param="prompt",
+                        required=False,
+                    ),
+                    _CanonicalContextInputMappingSpec(
+                        concept_id="#V#workflow_authoring_repair_target_workflow_input_mapping",
+                        context_key="target_workflow_id",
+                        tool_param="target_workflow_id",
+                    ),
+                    _CanonicalContextInputMappingSpec(
+                        concept_id="#V#workflow_authoring_repair_spec_input_mapping",
+                        context_key="workflow_spec",
+                        tool_param="workflow_spec",
+                    ),
+                ),
+                writes_context_keys=(
+                    "response_text",
+                    "workflow_concept_id",
+                    "workflow_discoverable",
+                    "workflow_authoring_repaired_workflow_id",
+                ),
+                tool_output_mapping_specs=(
+                    _CanonicalToolOutputMappingSpec(
+                        concept_id="#V#workflow_authoring_repair_apply_to_response_mapping",
+                        tool_output_field="result.response_text",
+                        context_key="response_text",
+                    ),
+                    _CanonicalToolOutputMappingSpec(
+                        concept_id="#V#workflow_authoring_repair_apply_to_concept_mapping",
+                        tool_output_field="result.workflow_concept_id",
+                        context_key="workflow_concept_id",
+                    ),
+                    _CanonicalToolOutputMappingSpec(
+                        concept_id="#V#workflow_authoring_repair_apply_to_discoverable_mapping",
+                        tool_output_field="result.workflow_discoverable",
+                        context_key="workflow_discoverable",
+                    ),
+                    _CanonicalToolOutputMappingSpec(
+                        concept_id="#V#workflow_authoring_repair_apply_to_repaired_workflow_mapping",
+                        tool_output_field="result.workflow_concept_id",
+                        context_key="workflow_authoring_repaired_workflow_id",
+                    ),
+                ),
+                on_failure_state=WORKFLOW_AUTHORING_REPAIR_STEP_FAILED,
+                next_state=WORKFLOW_AUTHORING_REPAIR_STEP_COMPLETED,
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id=WORKFLOW_AUTHORING_REPAIR_STEP_COMPLETED,
+                concept_id=WORKFLOW_AUTHORING_REPAIR_STEP_COMPLETED,
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id=WORKFLOW_AUTHORING_REPAIR_STEP_FAILED,
+                concept_id=WORKFLOW_AUTHORING_REPAIR_STEP_FAILED,
+            ),
+        ),
+    ),
+    WORKFLOW_AUTHORING_REPAIR_OR_CREATE_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
+        initial_state=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_DISCOVER_EXISTING_WORKFLOWS,
+        steps=(
+            _CanonicalStepPublicationSpec(
+                state_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_DISCOVER_EXISTING_WORKFLOWS,
+                concept_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_DISCOVER_EXISTING_WORKFLOWS,
+                action_id=WORKFLOW_AUTHORING_ACTION_DISCOVER_EXISTING_WORKFLOWS,
+                action_concept_id=WORKFLOW_AUTHORING_ACTION_CONCEPT_DISCOVER_EXISTING_WORKFLOWS,
+                static_input_bindings=(
+                    ("max_results", "8"),
+                    (
+                        "exclude_workflow_ids",
+                        json.dumps(
+                            [
+                                WORKFLOW_AUTHORING_REPAIR_OR_CREATE_WORKFLOW_ID,
+                                WORKFLOW_AUTHORING_REPAIR_WORKFLOW_ID,
+                                WORKFLOW_CREATION_WORKFLOW_ID,
+                            ],
+                            ensure_ascii=True,
+                            sort_keys=True,
+                        ),
+                    ),
+                ),
+                next_state=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_DECIDE_PATH,
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_DECIDE_PATH,
+                concept_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_DECIDE_PATH,
+                action_id=WORKFLOW_AUTHORING_ACTION_DECIDE_REPAIR_OR_CREATE,
+                action_concept_id=WORKFLOW_AUTHORING_ACTION_CONCEPT_DECIDE_REPAIR_OR_CREATE,
+                prompt_concept_ids=(WORKFLOW_AUTHORING_PROMPT_REPAIR_OR_CREATE_DECISION,),
+                execution_mode="llm",
+                llm_policy={
+                    "context_fields": [
+                        {
+                            "context_key": "workflow_authoring_request_text",
+                            "label": "Workflow authoring request",
+                        },
+                        {
+                            "context_key": "workflow_authoring_candidate_workflows",
+                            "label": "Candidate workflows",
+                        },
+                    ],
+                    "response_contract_text": (
+                        'Return JSON with keys "decision", '
+                        '"target_workflow_id", "target_workflow_name", '
+                        '"reasoning", "evidence", and "response_text".'
+                    ),
+                },
+                validation_policy={"output_format": "json_value"},
+                writes_context_keys=(
+                    "workflow_authoring_preflight_decision",
+                    "workflow_authoring_target_workflow_id",
+                    "workflow_authoring_target_workflow_name",
+                    "workflow_authoring_preflight_reasoning",
+                    "workflow_authoring_preflight_evidence",
+                    "response_text",
+                ),
+                tool_output_mapping_specs=(
+                    _CanonicalToolOutputMappingSpec(
+                        concept_id="#V#workflow_authoring_preflight_decision_mapping",
+                        tool_output_field="validated_json.decision",
+                        context_key="workflow_authoring_preflight_decision",
+                    ),
+                    _CanonicalToolOutputMappingSpec(
+                        concept_id="#V#workflow_authoring_preflight_target_workflow_mapping",
+                        tool_output_field="validated_json.target_workflow_id",
+                        context_key="workflow_authoring_target_workflow_id",
+                    ),
+                    _CanonicalToolOutputMappingSpec(
+                        concept_id="#V#workflow_authoring_preflight_target_name_mapping",
+                        tool_output_field="validated_json.target_workflow_name",
+                        context_key="workflow_authoring_target_workflow_name",
+                    ),
+                    _CanonicalToolOutputMappingSpec(
+                        concept_id="#V#workflow_authoring_preflight_reasoning_mapping",
+                        tool_output_field="validated_json.reasoning",
+                        context_key="workflow_authoring_preflight_reasoning",
+                    ),
+                    _CanonicalToolOutputMappingSpec(
+                        concept_id="#V#workflow_authoring_preflight_evidence_mapping",
+                        tool_output_field="validated_json.evidence",
+                        context_key="workflow_authoring_preflight_evidence",
+                    ),
+                    _CanonicalToolOutputMappingSpec(
+                        concept_id="#V#workflow_authoring_preflight_response_mapping",
+                        tool_output_field="validated_json.response_text",
+                        context_key="response_text",
+                    ),
+                ),
+                conditional_transitions=(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_REUSE_EXISTING_WORKFLOW,
+                        reason="reuse_existing_workflow",
+                        condition_spec={
+                            "kind": "context_value_equals",
+                            "key": "workflow_authoring_preflight_decision",
+                            "value": "reuse",
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_REPAIR_EXISTING_WORKFLOW,
+                        reason="repair_existing_workflow",
+                        condition_spec={
+                            "kind": "context_value_equals",
+                            "key": "workflow_authoring_preflight_decision",
+                            "value": "repair",
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_CREATE_NEW_WORKFLOW,
+                        reason="create_new_workflow",
+                        condition_spec={
+                            "kind": "context_value_equals",
+                            "key": "workflow_authoring_preflight_decision",
+                            "value": "create",
+                        },
+                    ),
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_FAILED,
+                        reason="decision_failed_closed",
+                        condition_spec={"kind": "always"},
+                    ),
+                ),
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_REUSE_EXISTING_WORKFLOW,
+                concept_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_REUSE_EXISTING_WORKFLOW,
+                action_id=WORKFLOW_CREATION_ACTION_EMIT_MARKER,
+                action_concept_id=WORKFLOW_CREATION_ACTION_CONCEPT_EMIT_MARKER,
+                static_input_bindings=(
+                    ("marker_key", "workflow_concept_id"),
+                ),
+                context_input_mapping_specs=(
+                    _CanonicalContextInputMappingSpec(
+                        concept_id="#V#workflow_authoring_preflight_reuse_target_input_mapping",
+                        context_key="workflow_authoring_target_workflow_id",
+                        tool_param="marker_value",
+                    ),
+                ),
+                writes_context_keys=("workflow_concept_id",),
+                next_state=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_COMPLETED,
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_REPAIR_EXISTING_WORKFLOW,
+                concept_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_REPAIR_EXISTING_WORKFLOW,
+                action_id="workflow_invoke_subworkflow",
+                invoked_workflow_id=WORKFLOW_AUTHORING_REPAIR_WORKFLOW_ID,
+                context_input_mapping_specs=(
+                    _CanonicalContextInputMappingSpec(
+                        concept_id="#V#workflow_authoring_preflight_repair_prompt_input_mapping",
+                        context_key="prompt",
+                        tool_param="prompt",
+                        required=False,
+                    ),
+                    _CanonicalContextInputMappingSpec(
+                        concept_id="#V#workflow_authoring_preflight_repair_target_input_mapping",
+                        context_key="workflow_authoring_target_workflow_id",
+                        tool_param="target_workflow_id",
+                    ),
+                ),
+                writes_context_keys=(
+                    "response_text",
+                    "workflow_concept_id",
+                    "workflow_discoverable",
+                    "workflow_authoring_repaired_workflow_id",
+                ),
+                tool_output_mapping_specs=(
+                    _CanonicalToolOutputMappingSpec(
+                        concept_id="#V#workflow_authoring_preflight_repair_to_response_mapping",
+                        tool_output_field="result.response_text",
+                        context_key="response_text",
+                    ),
+                    _CanonicalToolOutputMappingSpec(
+                        concept_id="#V#workflow_authoring_preflight_repair_to_concept_mapping",
+                        tool_output_field="result.workflow_concept_id",
+                        context_key="workflow_concept_id",
+                    ),
+                    _CanonicalToolOutputMappingSpec(
+                        concept_id="#V#workflow_authoring_preflight_repair_to_discoverable_mapping",
+                        tool_output_field="result.workflow_discoverable",
+                        context_key="workflow_discoverable",
+                    ),
+                    _CanonicalToolOutputMappingSpec(
+                        concept_id="#V#workflow_authoring_preflight_repair_to_repaired_id_mapping",
+                        tool_output_field="result.workflow_authoring_repaired_workflow_id",
+                        context_key="workflow_authoring_repaired_workflow_id",
+                    ),
+                ),
+                on_failure_state=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_FAILED,
+                next_state=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_COMPLETED,
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_CREATE_NEW_WORKFLOW,
+                concept_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_CREATE_NEW_WORKFLOW,
+                action_id="workflow_invoke_subworkflow",
+                invoked_workflow_id=WORKFLOW_CREATION_WORKFLOW_ID,
+                context_input_mapping_specs=(
+                    _CanonicalContextInputMappingSpec(
+                        concept_id="#V#workflow_authoring_preflight_create_prompt_input_mapping",
+                        context_key="prompt",
+                        tool_param="prompt",
+                        required=False,
+                    ),
+                    _CanonicalContextInputMappingSpec(
+                        concept_id="#V#workflow_authoring_preflight_create_spec_input_mapping",
+                        context_key="workflow_spec",
+                        tool_param="workflow_spec",
+                        required=False,
+                    ),
+                    _CanonicalContextInputMappingSpec(
+                        concept_id="#V#workflow_authoring_preflight_create_target_input_mapping",
+                        context_key="workflow_authoring_target_workflow_id",
+                        tool_param="target_workflow_id",
+                        required=False,
+                    ),
+                ),
+                writes_context_keys=(
+                    "response_text",
+                    "workflow_concept_id",
+                    "workflow_discoverable",
+                ),
+                tool_output_mapping_specs=(
+                    _CanonicalToolOutputMappingSpec(
+                        concept_id="#V#workflow_authoring_preflight_create_to_response_mapping",
+                        tool_output_field="result.response_text",
+                        context_key="response_text",
+                    ),
+                    _CanonicalToolOutputMappingSpec(
+                        concept_id="#V#workflow_authoring_preflight_create_to_concept_mapping",
+                        tool_output_field="result.workflow_concept_id",
+                        context_key="workflow_concept_id",
+                    ),
+                    _CanonicalToolOutputMappingSpec(
+                        concept_id="#V#workflow_authoring_preflight_create_to_discoverable_mapping",
+                        tool_output_field="result.workflow_discoverable",
+                        context_key="workflow_discoverable",
+                    ),
+                ),
+                on_failure_state=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_FAILED,
+                next_state=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_COMPLETED,
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_COMPLETED,
+                concept_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_COMPLETED,
+            ),
+            _CanonicalStepPublicationSpec(
+                state_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_FAILED,
+                concept_id=WORKFLOW_AUTHORING_REPAIR_OR_CREATE_STEP_FAILED,
+            ),
+        ),
+    ),
     WORKFLOW_CREATION_WORKFLOW_ID: _CanonicalWorkflowPublicationSpec(
         initial_state=WORKFLOW_CREATION_STEP_IDENTIFY_NEED,
         steps=(
@@ -1829,36 +2259,29 @@ _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSp
             _CanonicalStepPublicationSpec(
                 state_id=WORKFLOW_CREATION_STEP_CREATE_WORKFLOW_TYPE,
                 concept_id=WORKFLOW_CREATION_STEP_CREATE_WORKFLOW_TYPE,
-                action_id=WORKFLOW_CREATION_ACTION_CREATE_WORKFLOW_TYPE,
-                action_concept_id=WORKFLOW_CREATION_ACTION_CONCEPT_CREATE_WORKFLOW_TYPE,
-                next_state=WORKFLOW_CREATION_STEP_CREATE_STEP_CONCEPTS,
+                action_id=WORKFLOW_AUTHORING_ACTION_ENSURE_WORKFLOW_IDENTITY,
+                action_concept_id=WORKFLOW_AUTHORING_ACTION_CONCEPT_ENSURE_WORKFLOW_IDENTITY,
+                next_state=WORKFLOW_CREATION_STEP_MATERIALISE_WORKFLOW_DEFINITION,
             ),
             _CanonicalStepPublicationSpec(
-                state_id=WORKFLOW_CREATION_STEP_CREATE_STEP_CONCEPTS,
-                concept_id=WORKFLOW_CREATION_STEP_CREATE_STEP_CONCEPTS,
-                action_id=WORKFLOW_CREATION_ACTION_CREATE_STEP_CONCEPTS,
-                action_concept_id=WORKFLOW_CREATION_ACTION_CONCEPT_CREATE_STEP_CONCEPTS,
-                next_state=WORKFLOW_CREATION_STEP_ESTABLISH_RELATIONSHIPS,
-            ),
-            _CanonicalStepPublicationSpec(
-                state_id=WORKFLOW_CREATION_STEP_ESTABLISH_RELATIONSHIPS,
-                concept_id=WORKFLOW_CREATION_STEP_ESTABLISH_RELATIONSHIPS,
-                action_id=WORKFLOW_CREATION_ACTION_ESTABLISH_RELATIONSHIPS,
-                action_concept_id=WORKFLOW_CREATION_ACTION_CONCEPT_ESTABLISH_RELATIONSHIPS,
+                state_id=WORKFLOW_CREATION_STEP_MATERIALISE_WORKFLOW_DEFINITION,
+                concept_id=WORKFLOW_CREATION_STEP_MATERIALISE_WORKFLOW_DEFINITION,
+                action_id=WORKFLOW_AUTHORING_ACTION_MATERIALISE_WORKFLOW_DEFINITION,
+                action_concept_id=WORKFLOW_AUTHORING_ACTION_CONCEPT_MATERIALISE_WORKFLOW_DEFINITION,
                 next_state=WORKFLOW_CREATION_STEP_VERIFY_DISCOVERABILITY,
             ),
             _CanonicalStepPublicationSpec(
                 state_id=WORKFLOW_CREATION_STEP_VERIFY_DISCOVERABILITY,
                 concept_id=WORKFLOW_CREATION_STEP_VERIFY_DISCOVERABILITY,
-                action_id=WORKFLOW_CREATION_ACTION_VERIFY_DISCOVERABILITY,
-                action_concept_id=WORKFLOW_CREATION_ACTION_CONCEPT_VERIFY_DISCOVERABILITY,
+                action_id=WORKFLOW_AUTHORING_ACTION_VALIDATE_WORKFLOW_DEFINITION,
+                action_concept_id=WORKFLOW_AUTHORING_ACTION_CONCEPT_VALIDATE_WORKFLOW_DEFINITION,
                 next_state=WORKFLOW_CREATION_STEP_DOCUMENT_IN_JIRA,
             ),
             _CanonicalStepPublicationSpec(
                 state_id=WORKFLOW_CREATION_STEP_DOCUMENT_IN_JIRA,
                 concept_id=WORKFLOW_CREATION_STEP_DOCUMENT_IN_JIRA,
-                action_id=WORKFLOW_CREATION_ACTION_FINALISE,
-                action_concept_id=WORKFLOW_CREATION_ACTION_CONCEPT_FINALISE,
+                action_id=WORKFLOW_AUTHORING_ACTION_PUBLISH_WORKFLOW_DEFINITION,
+                action_concept_id=WORKFLOW_AUTHORING_ACTION_CONCEPT_PUBLISH_WORKFLOW_DEFINITION,
             ),
         ),
     ),
@@ -1877,6 +2300,150 @@ def _build_publication_transition(
         condition=compiled_condition,
         condition_spec=normalised_spec,
         reason=reason,
+    )
+
+
+def _extract_publication_prompt_concept_ids(action: Any) -> tuple[str, ...]:
+    prompt_contract = getattr(action, "prompt_contract", None)
+    if not isinstance(prompt_contract, Mapping):
+        return ()
+
+    prompt_ids: list[str] = []
+    resolved_prompt_concept_id = str(
+        prompt_contract.get("resolved_prompt_concept_id") or ""
+    ).strip()
+    if resolved_prompt_concept_id:
+        prompt_ids.append(resolved_prompt_concept_id)
+
+    requested_prompt_concept_ids = prompt_contract.get("requested_prompt_concept_ids")
+    if isinstance(requested_prompt_concept_ids, Sequence) and not isinstance(
+        requested_prompt_concept_ids,
+        str,
+    ):
+        for item in requested_prompt_concept_ids:
+            item_text = str(item or "").strip()
+            if item_text:
+                prompt_ids.append(item_text)
+    return tuple(dict.fromkeys(prompt_ids))
+
+
+def _build_publication_spec_from_definition(
+    definition: WorkflowDefinition,
+) -> _CanonicalWorkflowPublicationSpec:
+    states = getattr(definition, "states", None)
+    if not isinstance(states, Mapping) or not states:
+        raise ValueError("workflow_definition_states_missing")
+
+    steps: list[_CanonicalStepPublicationSpec] = []
+    for state_id, state_spec in states.items():
+        state_id_text = str(state_id or "").strip()
+        if not state_id_text or not isinstance(state_spec, WorkflowStateSpec):
+            continue
+
+        actions = tuple(getattr(state_spec, "actions", ()) or ())
+        if len(actions) > 1:
+            raise ValueError(
+                f"workflow_definition_multiple_actions_unsupported:{definition.workflow_id}:{state_id_text}"
+            )
+        action = actions[0] if actions else None
+
+        action_id: str | None = None
+        action_concept_id: str | None = None
+        execution_mode: str | None = None
+        invoked_workflow_id: str | None = None
+        prompt_concept_ids: tuple[str, ...] = ()
+        if action is not None:
+            action_id_text = str(getattr(action, "action_id", "") or "").strip()
+            action_id = action_id_text or None
+            action_concept_id_text = str(
+                getattr(action, "contract_concept_id", "") or ""
+            ).strip()
+            action_concept_id = action_concept_id_text or None
+            execution_mode_text = str(
+                getattr(action, "execution_mode", "") or ""
+            ).strip()
+            execution_mode = execution_mode_text or None
+            invoked_workflow_id_text = str(
+                getattr(action, "subworkflow_id", "") or ""
+            ).strip()
+            invoked_workflow_id = invoked_workflow_id_text or None
+            if invoked_workflow_id and not action_id:
+                action_id = WORKFLOW_SUBWORKFLOW_ACTION_ID
+            prompt_concept_ids = _extract_publication_prompt_concept_ids(action)
+
+        next_state: str | None = None
+        on_true_state: str | None = None
+        on_false_state: str | None = None
+        on_failure_state: str | None = None
+        on_unknown_state: str | None = None
+        on_approval_required_state: str | None = None
+        on_break_state: str | None = None
+        on_continue_state: str | None = None
+        conditional_transitions: list[_CanonicalConditionalTransitionPublicationSpec] = []
+
+        for transition in tuple(getattr(state_spec, "transitions", ()) or ()):
+            to_state = str(getattr(transition, "to_state", "") or "").strip()
+            if not to_state:
+                continue
+            reason = str(getattr(transition, "reason", "") or "").strip()
+            condition_spec = getattr(transition, "condition_spec", None)
+            if not isinstance(condition_spec, Mapping):
+                condition_spec = {"kind": "always"}
+            if reason == "next_step":
+                next_state = to_state
+            elif reason == "on_true":
+                on_true_state = to_state
+            elif reason == "on_false":
+                on_false_state = to_state
+            elif reason == "on_failure":
+                on_failure_state = to_state
+            elif reason == "on_unknown":
+                on_unknown_state = to_state
+            elif reason == "on_approval_required":
+                on_approval_required_state = to_state
+            elif reason == "on_break":
+                on_break_state = to_state
+            elif reason == "on_continue":
+                on_continue_state = to_state
+            else:
+                conditional_transitions.append(
+                    _CanonicalConditionalTransitionPublicationSpec(
+                        to_state=to_state,
+                        condition_spec=dict(condition_spec),
+                        reason=reason or None,
+                    )
+                )
+
+        steps.append(
+            _CanonicalStepPublicationSpec(
+                state_id=state_id_text,
+                action_id=action_id,
+                action_concept_id=action_concept_id,
+                prompt_concept_ids=prompt_concept_ids,
+                execution_mode=execution_mode,
+                invoked_workflow_id=invoked_workflow_id,
+                next_state=next_state,
+                on_true_state=on_true_state,
+                on_false_state=on_false_state,
+                on_failure_state=on_failure_state,
+                on_unknown_state=on_unknown_state,
+                on_approval_required_state=on_approval_required_state,
+                on_break_state=on_break_state,
+                on_continue_state=on_continue_state,
+                conditional_transitions=tuple(conditional_transitions),
+            )
+        )
+
+    if not steps:
+        raise ValueError("workflow_definition_publication_steps_missing")
+
+    initial_state = str(getattr(definition, "initial_state", "") or "").strip()
+    if not initial_state:
+        initial_state = steps[0].state_id
+
+    return _CanonicalWorkflowPublicationSpec(
+        initial_state=initial_state,
+        steps=tuple(steps),
     )
 
 
@@ -3454,6 +4021,33 @@ def publish_canonical_chat_workflow_graphs(
         "validation_failures_by_workflow_id": validation_failures_by_workflow_id,
         "errors_by_workflow_id": errors_by_workflow_id,
     }
+
+
+def publish_workflow_definition_from_definition(
+    *,
+    definition: WorkflowDefinition,
+    create_missing: bool = True,
+    purpose: str | None = None,
+) -> Dict[str, Any]:
+    """Publish one arbitrary workflow definition through the canonical graph path."""
+
+    workflow_id = str(getattr(definition, "workflow_id", "") or "").strip()
+    if not workflow_id:
+        raise ValueError("workflow_definition_id_missing")
+
+    publication_spec = _build_publication_spec_from_definition(definition)
+    publication_purposes = (
+        {workflow_id: purpose.strip()}
+        if isinstance(purpose, str) and purpose.strip()
+        else None
+    )
+    return publish_canonical_chat_workflow_graphs(
+        create_missing=create_missing,
+        target_workflow_ids=[workflow_id],
+        publication_specs={workflow_id: publication_spec},
+        publication_definitions={workflow_id: definition},
+        publication_purposes=publication_purposes,
+    )
 
 
 def _titleise_workflow_id(workflow_id: str) -> str:

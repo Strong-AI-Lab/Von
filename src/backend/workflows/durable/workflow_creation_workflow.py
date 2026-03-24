@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, Mapping
 from ...services import concept_search_service, concept_service
 from ...services.concept_service import ConceptNotFoundError
 from ...services.relationship_write_service import add_relationship
+from ...services.workflow_discovery_service import discover_workflows
 from ...services.text_value_service import (
     get_texts_for_concept,
     upsert_text_for_concept,
@@ -24,6 +25,14 @@ from ..action_registry import (
 from ..engine import WorkflowEnvironment, WorkflowExecutor
 from ..vontology_loader import discover_workflow_ids, load_workflow_definition_from_vontology
 from ..workflow_creation_contracts import (
+    WORKFLOW_AUTHORING_ACTION_DECIDE_REPAIR_OR_CREATE,
+    WORKFLOW_AUTHORING_ACTION_DESIGN_REPAIR_SPEC,
+    WORKFLOW_AUTHORING_ACTION_DISCOVER_EXISTING_WORKFLOWS,
+    WORKFLOW_AUTHORING_ACTION_ENSURE_WORKFLOW_IDENTITY,
+    WORKFLOW_AUTHORING_ACTION_EXTRACT_EXISTING_WORKFLOW_SPEC,
+    WORKFLOW_AUTHORING_ACTION_MATERIALISE_WORKFLOW_DEFINITION,
+    WORKFLOW_AUTHORING_ACTION_PUBLISH_WORKFLOW_DEFINITION,
+    WORKFLOW_AUTHORING_ACTION_VALIDATE_WORKFLOW_DEFINITION,
     WORKFLOW_CREATION_ACTION_ASSERT_PHD_STUDENT_RELATIONSHIPS,
     WORKFLOW_CREATION_ACTION_CONTRACT_BY_ACTION_ID,
     WORKFLOW_CREATION_ACTION_CREATE_STEP_CONCEPTS,
@@ -37,12 +46,11 @@ from ..workflow_creation_contracts import (
     WORKFLOW_CREATION_ACTION_RESOLVE_PHD_STUDENT_CANDIDATE,
     WORKFLOW_CREATION_ACTION_RESOLVE_SCHOLARLY_AUTHORS,
     WORKFLOW_CREATION_ACTION_VERIFY_DISCOVERABILITY,
-    WORKFLOW_CREATION_STEP_CREATE_STEP_CONCEPTS,
     WORKFLOW_CREATION_STEP_CREATE_WORKFLOW_TYPE,
     WORKFLOW_CREATION_STEP_DESIGN_STRUCTURE,
     WORKFLOW_CREATION_STEP_DOCUMENT_IN_JIRA,
-    WORKFLOW_CREATION_STEP_ESTABLISH_RELATIONSHIPS,
     WORKFLOW_CREATION_STEP_IDENTIFY_NEED,
+    WORKFLOW_CREATION_STEP_MATERIALISE_WORKFLOW_DEFINITION,
     WORKFLOW_CREATION_STEP_VERIFY_DISCOVERABILITY,
     WORKFLOW_CREATION_WORKFLOW_ID,
     workflow_creation_action_target,
@@ -50,6 +58,10 @@ from ..workflow_creation_contracts import (
 from ..workflow_definition_identity_service import (
     collect_workflow_action_ids,
     validate_workflow_definition_contract,
+)
+from ..workflow_authoring_service import (
+    build_workflow_definition_from_authoring_spec,
+    serialise_workflow_definition_to_authoring_spec,
 )
 from .workflow_gap_recovery_workflow import register_workflow_gap_recovery_actions
 
@@ -803,22 +815,28 @@ def _build_phd_student_workflow_spec(
     }
 
 
-def _normalise_input_mapping(inputs: Mapping[str, Any]) -> Dict[str, str]:
-    encoded: Dict[str, str] = {}
+def _normalise_input_mapping(inputs: Mapping[str, Any]) -> Dict[str, Any]:
+    encoded: Dict[str, Any] = {}
     for key, value in inputs.items():
         key_text = _clean_text(key)
         if not key_text:
             continue
-        if isinstance(value, str):
+        if isinstance(value, Mapping):
+            encoded[key_text] = {
+                str(child_key): child_value
+                for child_key, child_value in value.items()
+                if isinstance(child_key, str) and str(child_key).strip()
+            }
+            continue
+        if isinstance(value, list):
+            encoded[key_text] = list(value)
+            continue
+        if value is None or isinstance(value, (str, int, float, bool)):
             encoded[key_text] = value
             continue
-        if value is None:
-            encoded[key_text] = "null"
-            continue
-        if isinstance(value, (int, float, bool)):
-            encoded[key_text] = str(value)
-            continue
-        encoded[key_text] = json.dumps(value, sort_keys=True, ensure_ascii=True)
+        encoded[key_text] = json.loads(
+            json.dumps(value, sort_keys=True, ensure_ascii=True)
+        )
     return encoded
 
 
@@ -835,21 +853,112 @@ def _build_step_rows(
             if not isinstance(raw, Mapping):
                 continue
             state_key = _normalise_slug(
-                raw.get("state_id") or raw.get("name"),
+                raw.get("state_key") or raw.get("state_id") or raw.get("name"),
                 fallback=f"step_{index + 1}",
             )
             action_id = _clean_text(raw.get("action_id")) or None
+            subworkflow_id = _clean_text(raw.get("subworkflow_id")) or None
+            execution_mode = _clean_text(raw.get("execution_mode")) or None
             next_state = _normalise_slug(
-                raw.get("next_state") or raw.get("next"),
+                raw.get("next_state")
+                or raw.get("next_state_key")
+                or raw.get("next"),
                 fallback="",
             )
-            on_true_state = _normalise_slug(raw.get("on_true_state"), fallback="")
-            on_false_state = _normalise_slug(raw.get("on_false_state"), fallback="")
-            on_failure_state = _normalise_slug(raw.get("on_failure_state"), fallback="")
-            on_unknown_state = _normalise_slug(raw.get("on_unknown_state"), fallback="")
+            on_true_state = _normalise_slug(
+                raw.get("on_true_state") or raw.get("on_true_state_key"),
+                fallback="",
+            )
+            on_false_state = _normalise_slug(
+                raw.get("on_false_state") or raw.get("on_false_state_key"),
+                fallback="",
+            )
+            on_failure_state = _normalise_slug(
+                raw.get("on_failure_state") or raw.get("on_failure_state_key"),
+                fallback="",
+            )
+            on_unknown_state = _normalise_slug(
+                raw.get("on_unknown_state") or raw.get("on_unknown_state_key"),
+                fallback="",
+            )
+            on_approval_required_state = _normalise_slug(
+                raw.get("on_approval_required_state")
+                or raw.get("on_approval_required_state_key"),
+                fallback="",
+            )
+            on_break_state = _normalise_slug(
+                raw.get("on_break_state") or raw.get("on_break_state_key"),
+                fallback="",
+            )
+            on_continue_state = _normalise_slug(
+                raw.get("on_continue_state") or raw.get("on_continue_state_key"),
+                fallback="",
+            )
             terminal = bool(raw.get("terminal", False))
             inputs_raw = raw.get("inputs")
             inputs = dict(inputs_raw) if isinstance(inputs_raw, Mapping) else {}
+            prompt_contract_raw = raw.get("prompt_contract")
+            prompt_contract = (
+                dict(prompt_contract_raw)
+                if isinstance(prompt_contract_raw, Mapping)
+                else None
+            )
+            llm_policy_raw = raw.get("llm_policy")
+            llm_policy = (
+                dict(llm_policy_raw) if isinstance(llm_policy_raw, Mapping) else None
+            )
+            validation_policy_raw = raw.get("validation_policy")
+            validation_policy = (
+                dict(validation_policy_raw)
+                if isinstance(validation_policy_raw, Mapping)
+                else None
+            )
+            mutation_authority_raw = raw.get("mutation_authority")
+            mutation_authority = (
+                dict(mutation_authority_raw)
+                if isinstance(mutation_authority_raw, Mapping)
+                else None
+            )
+            action_concept_id = _clean_text(raw.get("action_concept_id")) or None
+            writes_context_keys = [
+                str(item).strip()
+                for item in (raw.get("writes_context_keys") or [])
+                if isinstance(item, str) and str(item).strip()
+            ]
+            tool_output_context_mappings = [
+                {
+                    str(key): value
+                    for key, value in item.items()
+                    if isinstance(key, str) and str(key).strip()
+                }
+                for item in (raw.get("tool_output_context_mappings") or [])
+                if isinstance(item, Mapping)
+            ]
+            conditional_transitions: list[dict[str, Any]] = []
+            raw_conditional_transitions = raw.get("conditional_transitions")
+            if isinstance(raw_conditional_transitions, list):
+                for transition in raw_conditional_transitions:
+                    if not isinstance(transition, Mapping):
+                        continue
+                    target_state = _normalise_slug(
+                        transition.get("to_state")
+                        or transition.get("to_state_key")
+                        or transition.get("to")
+                        or transition.get("next"),
+                        fallback="",
+                    )
+                    if not target_state:
+                        continue
+                    transition_row: dict[str, Any] = {"to_state": target_state}
+                    reason = _clean_text(transition.get("reason"))
+                    if reason:
+                        transition_row["reason"] = reason
+                    condition_spec = transition.get("condition_spec") or transition.get(
+                        "condition"
+                    )
+                    if isinstance(condition_spec, Mapping):
+                        transition_row["condition_spec"] = dict(condition_spec)
+                    conditional_transitions.append(transition_row)
             rows.append(
                 {
                     "state_key": state_key,
@@ -858,13 +967,26 @@ def _build_step_rows(
                         fallback_slug=f"workflow_step_{workflow_slug}_{state_key}",
                     ),
                     "action_id": action_id,
+                    "action_concept_id": action_concept_id,
+                    "subworkflow_id": subworkflow_id,
+                    "execution_mode": execution_mode,
                     "next_state_key": next_state or None,
                     "on_true_state_key": on_true_state or None,
                     "on_false_state_key": on_false_state or None,
                     "on_failure_state_key": on_failure_state or None,
                     "on_unknown_state_key": on_unknown_state or None,
+                    "on_approval_required_state_key": on_approval_required_state or None,
+                    "on_break_state_key": on_break_state or None,
+                    "on_continue_state_key": on_continue_state or None,
                     "terminal": terminal,
                     "inputs": _normalise_input_mapping(inputs),
+                    "prompt_contract": prompt_contract,
+                    "llm_policy": llm_policy,
+                    "validation_policy": validation_policy,
+                    "mutation_authority": mutation_authority,
+                    "writes_context_keys": writes_context_keys,
+                    "tool_output_context_mappings": tool_output_context_mappings,
+                    "conditional_transitions": conditional_transitions,
                 }
             )
 
@@ -909,7 +1031,11 @@ def _build_step_rows(
     state_keys = [row["state_key"] for row in rows]
     key_set = set(state_keys)
     for index, row in enumerate(rows):
-        if not row.get("terminal") and not row.get("action_id"):
+        if (
+            not row.get("terminal")
+            and not row.get("action_id")
+            and not row.get("subworkflow_id")
+        ):
             row["action_id"] = WORKFLOW_CREATION_ACTION_EMIT_MARKER
             row["inputs"] = row.get("inputs") or {
                 "marker_key": f"{row['state_key']}_marker",
@@ -921,6 +1047,9 @@ def _build_step_rows(
             row["on_false_state_key"] = None
             row["on_failure_state_key"] = None
             row["on_unknown_state_key"] = None
+            row["on_approval_required_state_key"] = None
+            row["on_break_state_key"] = None
+            row["on_continue_state_key"] = None
             continue
 
         for transition_key in (
@@ -928,6 +1057,9 @@ def _build_step_rows(
             "on_false_state_key",
             "on_failure_state_key",
             "on_unknown_state_key",
+            "on_approval_required_state_key",
+            "on_break_state_key",
+            "on_continue_state_key",
         ):
             target = row.get(transition_key)
             if not isinstance(target, str) or target not in key_set:
@@ -943,6 +1075,9 @@ def _build_step_rows(
                 "on_false_state_key",
                 "on_failure_state_key",
                 "on_unknown_state_key",
+                "on_approval_required_state_key",
+                "on_break_state_key",
+                "on_continue_state_key",
             )
         ):
             row["next_state_key"] = None
@@ -1017,10 +1152,14 @@ def _normalise_workflow_spec(context: Mapping[str, Any]) -> dict[str, Any]:
                 workflow_id=workflow_id,
             )
 
-    workflow_name = _clean_text(raw_spec.get("name")) or _titleise(
+    workflow_name = _clean_text(
+        raw_spec.get("name") or raw_spec.get("workflow_name")
+    ) or _titleise(
         workflow_id[3:] if workflow_id.startswith("#V#") else workflow_id
     )
-    workflow_description = _clean_text(raw_spec.get("description")) or request_text
+    workflow_description = _clean_text(
+        raw_spec.get("description") or raw_spec.get("workflow_description")
+    ) or request_text
     parent_type_id = _normalise_concept_id(
         raw_spec.get("parent_type_id")
         or context.get("parent_type_id")
@@ -1202,6 +1341,120 @@ def _write_workflow_publication_lifecycle(
     )
 
 
+def _coerce_string_sequence(value: Any) -> list[str]:
+    if isinstance(value, str):
+        cleaned = _clean_text(value)
+        if not cleaned:
+            return []
+        if cleaned.startswith("["):
+            try:
+                parsed = json.loads(cleaned)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, list):
+                return _coerce_string_sequence(parsed)
+        if "," in cleaned:
+            return _coerce_string_sequence(
+                [item.strip() for item in cleaned.split(",") if item.strip()]
+            )
+        return [cleaned]
+    if not isinstance(value, Iterable) or isinstance(value, (bytes, bytearray, Mapping)):
+        return []
+    results: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        cleaned = _clean_text(item)
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        results.append(cleaned)
+    return results
+
+
+def _normalise_workflow_candidate_rows(
+    rows: Any,
+    *,
+    exclude_ids: set[str],
+) -> list[dict[str, Any]]:
+    if not isinstance(rows, list):
+        return []
+    payload: list[dict[str, Any]] = []
+    for item in rows:
+        if not isinstance(item, Mapping):
+            continue
+        workflow_id = _clean_text(item.get("concept_id") or item.get("workflow_id"))
+        if not workflow_id or workflow_id in exclude_ids:
+            continue
+        row = {str(key): value for key, value in item.items() if isinstance(key, str)}
+        row["concept_id"] = workflow_id
+        payload.append(row)
+    return payload
+
+
+def _handle_discover_existing_workflows(
+    request: WorkflowActionRequest,
+) -> WorkflowActionResult:
+    inputs = dict(request.inputs) if isinstance(request.inputs, Mapping) else {}
+    request_text = _extract_request_text({**request.data, **inputs})
+    if not request_text:
+        return WorkflowActionResult(
+            status="failed",
+            error="workflow_authoring_request_text_missing",
+        )
+
+    max_results_raw = inputs.get("max_results", request.data.get("max_results", 8))
+    try:
+        max_results = max(1, min(12, int(max_results_raw)))
+    except (TypeError, ValueError):
+        max_results = 8
+
+    exclude_ids = set(
+        _coerce_string_sequence(
+            inputs.get("exclude_workflow_ids") or request.data.get("exclude_workflow_ids")
+        )
+    )
+    exclude_ids.update(
+        _coerce_string_sequence(
+            request.data.get("workflow_authoring_exclude_workflow_ids")
+        )
+    )
+
+    discovery_result = discover_workflows(
+        request_text,
+        max_results=max_results,
+        allow_non_executable=True,
+    )
+    discovery_payload = discovery_result.to_dict()
+    candidate_rows = _normalise_workflow_candidate_rows(
+        discovery_payload.get("candidates") or discovery_payload.get("matches"),
+        exclude_ids=exclude_ids,
+    )
+    routing_rows = _normalise_workflow_candidate_rows(
+        discovery_payload.get("matches"),
+        exclude_ids=exclude_ids,
+    )
+    discovery_payload["candidates"] = candidate_rows
+    discovery_payload["matches"] = routing_rows
+    discovery_payload["candidate_count"] = len(candidate_rows)
+    discovery_payload["match_count"] = len(routing_rows)
+    discovery_payload["excluded_workflow_ids"] = sorted(exclude_ids)
+
+    outputs = {
+        "workflow_authoring_request_text": request_text,
+        "workflow_authoring_discovery_result": discovery_payload,
+        "workflow_authoring_candidate_workflows": candidate_rows,
+        "workflow_authoring_candidate_workflow_ids": [
+            str(item.get("concept_id") or "").strip()
+            for item in candidate_rows
+            if isinstance(item, Mapping)
+            and isinstance(item.get("concept_id"), str)
+            and str(item.get("concept_id")).strip()
+        ],
+        "workflow_authoring_candidate_count": len(candidate_rows),
+    }
+    return WorkflowActionResult(status="success", outputs=outputs)
+
+
 def _handle_identify_need(request: WorkflowActionRequest) -> WorkflowActionResult:
     spec = _normalise_workflow_spec(request.data)
     parent_type_id = str(spec.get("parent_type_id") or DEFAULT_WORKFLOW_PARENT_TYPE_ID)
@@ -1263,6 +1516,12 @@ def _handle_create_workflow_type(request: WorkflowActionRequest) -> WorkflowActi
     return WorkflowActionResult(status="success", outputs=outputs)
 
 
+def _handle_ensure_workflow_identity(
+    request: WorkflowActionRequest,
+) -> WorkflowActionResult:
+    return _handle_create_workflow_type(request)
+
+
 def _handle_create_step_concepts(request: WorkflowActionRequest) -> WorkflowActionResult:
     spec = _normalise_workflow_spec(request.data)
     parent_type_id = str(spec.get("parent_type_id") or DEFAULT_WORKFLOW_PARENT_TYPE_ID)
@@ -1290,6 +1549,108 @@ def _handle_create_step_concepts(request: WorkflowActionRequest) -> WorkflowActi
         outputs={
             "workflow_creation_spec": spec,
             "workflow_step_concept_ids": created_step_ids,
+        },
+        validated_type_name=parent_type_id,
+    )
+    return WorkflowActionResult(status="success", outputs=outputs)
+
+
+def _handle_materialise_workflow_definition(
+    request: WorkflowActionRequest,
+) -> WorkflowActionResult:
+    from .. import workflow_concept_authority_service as workflow_authority_service
+
+    spec = _normalise_workflow_spec(request.data)
+    parent_type_id = str(spec.get("parent_type_id") or DEFAULT_WORKFLOW_PARENT_TYPE_ID)
+    workflow_id = str(spec["workflow_id"])
+    workflow_name = str(spec["workflow_name"])
+    workflow_description = _clean_text(spec.get("workflow_description"))
+
+    _ensure_type_concept(parent_type_id, name=_titleise(parent_type_id))
+    _ensure_instance_concept(
+        concept_id=workflow_id,
+        name=workflow_name,
+        parent_type_id=parent_type_id,
+        description=workflow_description or None,
+    )
+    _write_workflow_publication_lifecycle(
+        workflow_id=workflow_id,
+        phase="draft",
+        published=False,
+        validation_passed=False,
+        postconditions_verified=False,
+    )
+
+    try:
+        definition = build_workflow_definition_from_authoring_spec(spec)
+        publication_report = workflow_authority_service.publish_workflow_definition_from_definition(
+            definition=definition,
+            create_missing=True,
+            purpose=workflow_description or workflow_name,
+        )
+    except Exception as exc:
+        return WorkflowActionResult(
+            status="failed",
+            error=f"workflow_definition_materialisation_failed:{workflow_id}:{exc}",
+            outputs={
+                "workflow_creation_spec": spec,
+                "workflow_concept_id": workflow_id,
+                "workflow_structure_written": False,
+            },
+        )
+
+    errors_by_workflow_id = publication_report.get("errors_by_workflow_id") or {}
+    workflow_error = (
+        str(errors_by_workflow_id.get(workflow_id) or "").strip()
+        if isinstance(errors_by_workflow_id, Mapping)
+        else ""
+    )
+    validation_failures = publication_report.get("validation_failures_by_workflow_id") or {}
+    validation_failure = (
+        validation_failures.get(workflow_id)
+        if isinstance(validation_failures, Mapping)
+        else None
+    )
+    if workflow_error or validation_failure:
+        outputs = _add_contract_output(
+            outputs={
+                "workflow_creation_spec": spec,
+                "workflow_concept_id": workflow_id,
+                "workflow_structure_written": False,
+                "workflow_graph_publication_report": publication_report,
+            },
+            validated_type_name=parent_type_id,
+        )
+        return WorkflowActionResult(
+            status="failed",
+            error=workflow_error
+            or f"workflow_definition_materialisation_validation_failed:{workflow_id}",
+            outputs=outputs,
+        )
+
+    step_ids = [
+        str(row.get("step_concept_id") or "").strip()
+        for row in (spec.get("steps") or [])
+        if isinstance(row, Mapping) and str(row.get("step_concept_id") or "").strip()
+    ]
+    outputs = _add_contract_output(
+        outputs={
+            "workflow_creation_spec": spec,
+            "workflow_structure_written": True,
+            "workflow_concept_id": workflow_id,
+            "workflow_step_concept_ids": step_ids,
+            "workflow_action_contract_concept_ids": list(
+                dict.fromkeys(
+                    [
+                        str(item).strip()
+                        for item in (
+                            publication_report.get("created_action_concept_ids") or []
+                        )
+                        if isinstance(item, str) and str(item).strip()
+                    ]
+                )
+            ),
+            "workflow_graph_publication_report": publication_report,
         },
         validated_type_name=parent_type_id,
     )
@@ -1465,6 +1826,54 @@ def _handle_establish_relationships(request: WorkflowActionRequest) -> WorkflowA
         },
         validated_type_name=parent_type_id,
     )
+    return WorkflowActionResult(status="success", outputs=outputs)
+
+
+def _handle_validate_workflow_definition(
+    request: WorkflowActionRequest,
+) -> WorkflowActionResult:
+    return _handle_verify_discoverability(request)
+
+
+def _handle_extract_existing_workflow_spec(
+    request: WorkflowActionRequest,
+) -> WorkflowActionResult:
+    inputs = dict(request.inputs) if isinstance(request.inputs, Mapping) else {}
+    target_workflow_id = _clean_text(
+        inputs.get("target_workflow_id")
+        or request.data.get("target_workflow_id")
+        or request.data.get("workflow_authoring_target_workflow_id")
+    )
+    if not target_workflow_id:
+        return WorkflowActionResult(
+            status="failed",
+            error="workflow_authoring_target_workflow_id_missing",
+        )
+
+    definition = load_workflow_definition_from_vontology(target_workflow_id)
+    if definition is None:
+        return WorkflowActionResult(
+            status="failed",
+            error=f"workflow_authoring_existing_workflow_not_found:{target_workflow_id}",
+        )
+
+    try:
+        authoring_spec = serialise_workflow_definition_to_authoring_spec(definition)
+    except Exception as exc:
+        return WorkflowActionResult(
+            status="failed",
+            error=(
+                "workflow_authoring_existing_workflow_serialisation_failed:"
+                f"{target_workflow_id}:{exc}"
+            ),
+        )
+
+    outputs = {
+        "target_workflow_id": target_workflow_id,
+        "existing_workflow_spec": authoring_spec,
+        "existing_workflow_state_count": len(definition.states or {}),
+        "existing_workflow_action_ids": list(collect_workflow_action_ids(definition)),
+    }
     return WorkflowActionResult(status="success", outputs=outputs)
 
 
@@ -2289,6 +2698,12 @@ def _handle_finalise(request: WorkflowActionRequest) -> WorkflowActionResult:
     return WorkflowActionResult(status="success", outputs=outputs)
 
 
+def _handle_publish_workflow_definition(
+    request: WorkflowActionRequest,
+) -> WorkflowActionResult:
+    return _handle_finalise(request)
+
+
 def _handle_emit_marker(request: WorkflowActionRequest) -> WorkflowActionResult:
     marker_key = _clean_text(
         request.inputs.get("marker_key") if isinstance(request.inputs, Mapping) else ""
@@ -2396,6 +2811,60 @@ def register_workflow_creation_actions(registry: ActionRegistry) -> None:
             ),
         ),
         ActionSpec(
+            action_id=WORKFLOW_AUTHORING_ACTION_ENSURE_WORKFLOW_IDENTITY,
+            handler=_handle_ensure_workflow_identity,
+            description="Ensure workflow identity, typing, and draft lifecycle metadata for an authored workflow.",
+            **_workflow_creation_action_spec_kwargs(
+                WORKFLOW_AUTHORING_ACTION_ENSURE_WORKFLOW_IDENTITY
+            ),
+        ),
+        ActionSpec(
+            action_id=WORKFLOW_AUTHORING_ACTION_DISCOVER_EXISTING_WORKFLOWS,
+            handler=_handle_discover_existing_workflows,
+            description=(
+                "Discover semantically relevant existing workflows so authoring "
+                "workflows can decide whether to reuse, repair, or create."
+            ),
+            **_workflow_creation_action_spec_kwargs(
+                WORKFLOW_AUTHORING_ACTION_DISCOVER_EXISTING_WORKFLOWS
+            ),
+        ),
+        ActionSpec(
+            action_id=WORKFLOW_AUTHORING_ACTION_EXTRACT_EXISTING_WORKFLOW_SPEC,
+            handler=_handle_extract_existing_workflow_spec,
+            description=(
+                "Load an existing workflow definition and render it as a "
+                "declarative authoring spec for repair/improvement workflows."
+            ),
+            **_workflow_creation_action_spec_kwargs(
+                WORKFLOW_AUTHORING_ACTION_EXTRACT_EXISTING_WORKFLOW_SPEC
+            ),
+        ),
+        ActionSpec(
+            action_id=WORKFLOW_AUTHORING_ACTION_MATERIALISE_WORKFLOW_DEFINITION,
+            handler=_handle_materialise_workflow_definition,
+            description="Materialise a declarative workflow definition into authoritative workflow graph concepts and bindings.",
+            **_workflow_creation_action_spec_kwargs(
+                WORKFLOW_AUTHORING_ACTION_MATERIALISE_WORKFLOW_DEFINITION
+            ),
+        ),
+        ActionSpec(
+            action_id=WORKFLOW_AUTHORING_ACTION_VALIDATE_WORKFLOW_DEFINITION,
+            handler=_handle_validate_workflow_definition,
+            description="Validate an authored draft workflow definition structurally and by bounded execution.",
+            **_workflow_creation_action_spec_kwargs(
+                WORKFLOW_AUTHORING_ACTION_VALIDATE_WORKFLOW_DEFINITION
+            ),
+        ),
+        ActionSpec(
+            action_id=WORKFLOW_AUTHORING_ACTION_PUBLISH_WORKFLOW_DEFINITION,
+            handler=_handle_publish_workflow_definition,
+            description="Publish a validated draft workflow definition when the completion gate passes.",
+            **_workflow_creation_action_spec_kwargs(
+                WORKFLOW_AUTHORING_ACTION_PUBLISH_WORKFLOW_DEFINITION
+            ),
+        ),
+        ActionSpec(
             action_id=WORKFLOW_CREATION_ACTION_EMIT_MARKER,
             handler=_handle_emit_marker,
             description="Emit deterministic marker output for created workflow tasks.",
@@ -2455,8 +2924,7 @@ WORKFLOW_CREATION_STEP_SEQUENCE: tuple[str, ...] = (
     WORKFLOW_CREATION_STEP_IDENTIFY_NEED,
     WORKFLOW_CREATION_STEP_DESIGN_STRUCTURE,
     WORKFLOW_CREATION_STEP_CREATE_WORKFLOW_TYPE,
-    WORKFLOW_CREATION_STEP_CREATE_STEP_CONCEPTS,
-    WORKFLOW_CREATION_STEP_ESTABLISH_RELATIONSHIPS,
+    WORKFLOW_CREATION_STEP_MATERIALISE_WORKFLOW_DEFINITION,
     WORKFLOW_CREATION_STEP_VERIFY_DISCOVERABILITY,
     WORKFLOW_CREATION_STEP_DOCUMENT_IN_JIRA,
 )
@@ -2464,11 +2932,10 @@ WORKFLOW_CREATION_STEP_SEQUENCE: tuple[str, ...] = (
 WORKFLOW_CREATION_STEP_ACTIONS: dict[str, str] = {
     WORKFLOW_CREATION_STEP_IDENTIFY_NEED: WORKFLOW_CREATION_ACTION_IDENTIFY_NEED,
     WORKFLOW_CREATION_STEP_DESIGN_STRUCTURE: WORKFLOW_CREATION_ACTION_DESIGN_STRUCTURE,
-    WORKFLOW_CREATION_STEP_CREATE_WORKFLOW_TYPE: WORKFLOW_CREATION_ACTION_CREATE_WORKFLOW_TYPE,
-    WORKFLOW_CREATION_STEP_CREATE_STEP_CONCEPTS: WORKFLOW_CREATION_ACTION_CREATE_STEP_CONCEPTS,
-    WORKFLOW_CREATION_STEP_ESTABLISH_RELATIONSHIPS: WORKFLOW_CREATION_ACTION_ESTABLISH_RELATIONSHIPS,
-    WORKFLOW_CREATION_STEP_VERIFY_DISCOVERABILITY: WORKFLOW_CREATION_ACTION_VERIFY_DISCOVERABILITY,
-    WORKFLOW_CREATION_STEP_DOCUMENT_IN_JIRA: WORKFLOW_CREATION_ACTION_FINALISE,
+    WORKFLOW_CREATION_STEP_CREATE_WORKFLOW_TYPE: WORKFLOW_AUTHORING_ACTION_ENSURE_WORKFLOW_IDENTITY,
+    WORKFLOW_CREATION_STEP_MATERIALISE_WORKFLOW_DEFINITION: WORKFLOW_AUTHORING_ACTION_MATERIALISE_WORKFLOW_DEFINITION,
+    WORKFLOW_CREATION_STEP_VERIFY_DISCOVERABILITY: WORKFLOW_AUTHORING_ACTION_VALIDATE_WORKFLOW_DEFINITION,
+    WORKFLOW_CREATION_STEP_DOCUMENT_IN_JIRA: WORKFLOW_AUTHORING_ACTION_PUBLISH_WORKFLOW_DEFINITION,
 }
 
 
@@ -2481,6 +2948,14 @@ __all__ = [
     "WORKFLOW_CREATION_ACTION_ESTABLISH_RELATIONSHIPS",
     "WORKFLOW_CREATION_ACTION_VERIFY_DISCOVERABILITY",
     "WORKFLOW_CREATION_ACTION_FINALISE",
+    "WORKFLOW_AUTHORING_ACTION_ENSURE_WORKFLOW_IDENTITY",
+    "WORKFLOW_AUTHORING_ACTION_DISCOVER_EXISTING_WORKFLOWS",
+    "WORKFLOW_AUTHORING_ACTION_EXTRACT_EXISTING_WORKFLOW_SPEC",
+    "WORKFLOW_AUTHORING_ACTION_MATERIALISE_WORKFLOW_DEFINITION",
+    "WORKFLOW_AUTHORING_ACTION_VALIDATE_WORKFLOW_DEFINITION",
+    "WORKFLOW_AUTHORING_ACTION_PUBLISH_WORKFLOW_DEFINITION",
+    "WORKFLOW_AUTHORING_ACTION_DECIDE_REPAIR_OR_CREATE",
+    "WORKFLOW_AUTHORING_ACTION_DESIGN_REPAIR_SPEC",
     "WORKFLOW_CREATION_ACTION_EMIT_MARKER",
     "WORKFLOW_CREATION_ACTION_RESOLVE_SCHOLARLY_AUTHORS",
     "WORKFLOW_CREATION_ACTION_RESOLVE_PHD_STUDENT_CANDIDATE",

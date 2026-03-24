@@ -32,6 +32,9 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..vontology.utils_vontology import get_concept_description
+from ..workflows.workflow_creation_contracts import (
+    WORKFLOW_AUTHORING_REPAIR_OR_CREATE_WORKFLOW_ID,
+)
 from .file_copy_reference_service import extract_file_copy_concept_ids_from_text
 from .file_copy_typing_service import build_file_copy_typing_context
 from .arxiv_paper_link_service import extract_arxiv_id_candidates
@@ -47,7 +50,7 @@ WORKFLOW_TYPE_IDS = (
     "#V#durable_workflow",
 )
 
-WORKFLOW_CREATION_WORKFLOW_ID = "#V#von_workflow_creation_workflow"
+WORKFLOW_CREATION_WORKFLOW_ID = WORKFLOW_AUTHORING_REPAIR_OR_CREATE_WORKFLOW_ID
 
 # Default relevance threshold (0.0-1.0)
 DEFAULT_RELEVANCE_THRESHOLD = 0.70
@@ -923,9 +926,11 @@ def _seed_workflow_creation_candidate(query: str) -> list[WorkflowMatch]:
     return [
         WorkflowMatch(
             concept_id=WORKFLOW_CREATION_WORKFLOW_ID,
-            name="Von Workflow Creation Workflow",
+            name="Workflow Repair Or Create Workflow",
             description=(
-                "Create and verify executable workflows from a workflow description/request."
+                "Preflight a workflow-authoring request by deciding whether to "
+                "reuse an existing workflow, repair one, or create a new "
+                "executable workflow."
             ),
             relevance_score=1.0,
             match_source="intent_seed",

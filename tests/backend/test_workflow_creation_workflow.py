@@ -16,6 +16,7 @@ from src.backend.services.text_value_service import (
 from src.backend.services.workflow_discovery_service import (
     EXECUTABILITY_EXECUTABLE_NOW,
     WORKFLOW_CREATION_WORKFLOW_ID as DISCOVERY_WORKFLOW_CREATION_WORKFLOW_ID,
+    WorkflowDiscoveryResult,
     WorkflowMatch,
     discover_workflows,
     discover_workflows_for_turn,
@@ -24,6 +25,10 @@ from src.backend.workflows import workflow_concept_authority_service as authorit
 from src.backend.workflows.action_registry import WorkflowEnvironment
 from src.backend.workflows.durable.registry_factory import build_durable_action_registry
 from src.backend.workflows.durable.workflow_creation_workflow import (
+    WORKFLOW_AUTHORING_ACTION_ENSURE_WORKFLOW_IDENTITY,
+    WORKFLOW_AUTHORING_ACTION_MATERIALISE_WORKFLOW_DEFINITION,
+    WORKFLOW_AUTHORING_ACTION_PUBLISH_WORKFLOW_DEFINITION,
+    WORKFLOW_AUTHORING_ACTION_VALIDATE_WORKFLOW_DEFINITION,
     WORKFLOW_CONTEXT_KEY_VALIDATED_TYPE_NAME,
     WORKFLOW_CREATION_ACTION_CREATE_STEP_CONCEPTS,
     WORKFLOW_CREATION_ACTION_CREATE_WORKFLOW_TYPE,
@@ -48,6 +53,14 @@ from src.backend.workflows.vontology_loader import (
     resolve_workflow_publication_lifecycle,
 )
 from src.backend.workflows.workflow_creation_contracts import (
+    WORKFLOW_AUTHORING_ACTION_CONCEPT_ENSURE_WORKFLOW_IDENTITY,
+    WORKFLOW_AUTHORING_ACTION_CONCEPT_MATERIALISE_WORKFLOW_DEFINITION,
+    WORKFLOW_AUTHORING_ACTION_CONCEPT_PUBLISH_WORKFLOW_DEFINITION,
+    WORKFLOW_AUTHORING_ACTION_CONCEPT_VALIDATE_WORKFLOW_DEFINITION,
+    WORKFLOW_AUTHORING_PROMPT_REPAIR_OR_CREATE_DECISION,
+    WORKFLOW_AUTHORING_PROMPT_REPAIR_SPEC,
+    WORKFLOW_AUTHORING_REPAIR_OR_CREATE_WORKFLOW_ID,
+    WORKFLOW_AUTHORING_REPAIR_WORKFLOW_ID,
     WORKFLOW_CREATION_ACTION_CONCEPT_CREATE_STEP_CONCEPTS,
     WORKFLOW_CREATION_ACTION_CONCEPT_CREATE_WORKFLOW_TYPE,
     WORKFLOW_CREATION_ACTION_CONCEPT_DESIGN_STRUCTURE,
@@ -80,6 +93,24 @@ PHD_STUDENT_WORKFLOW_REQUEST_PROMPT = (
     "core person/student/research relationship assertions, text grounding with "
     "provenance, and fail-closed ambiguity diagnostics."
 )
+
+
+class _QueuedLLM:
+    def __init__(self, responses: list[str]) -> None:
+        self._responses = list(responses)
+        self.calls: list[dict[str, Any]] = []
+
+    def generate(self, prompt, context=None, model=None, llm_params=None) -> str:
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "context": context,
+                "model": model,
+            }
+        )
+        if not self._responses:
+            raise AssertionError("queued_llm_exhausted")
+        return self._responses.pop(0)
 
 
 @pytest.fixture(autouse=True)
@@ -207,6 +238,56 @@ def _seed_workflow_creation_synthesis_policy() -> None:
     )
 
 
+def _seed_workflow_authoring_prompts() -> None:
+    _ensure_type("#V#prompt_for_llm", "Prompt For LLM")
+    prompt_specs = (
+        (
+            WORKFLOW_AUTHORING_PROMPT_REPAIR_OR_CREATE_DECISION,
+            "Workflow authoring repair-or-create decision prompt",
+            (
+                "Decide whether the request should reuse an existing workflow, "
+                "repair one, or create a new one. Return JSON only."
+            ),
+        ),
+        (
+            WORKFLOW_AUTHORING_PROMPT_REPAIR_SPEC,
+            "Workflow authoring repair spec prompt",
+            (
+                "Produce a repaired declarative workflow spec for the target "
+                "workflow. Return JSON only."
+            ),
+        ),
+    )
+    for prompt_concept_id, name, text in prompt_specs:
+        try:
+            concept_service.create_concept(
+                name=name,
+                concept_id=prompt_concept_id,
+                parent_concept_ids=["#V#prompt_for_llm"],
+                create_as_instance=True,
+                visibility_scope_mode="global_general",
+            )
+        except Exception:
+            pass
+        upsert_text_for_concept(
+            subject_concept_id=prompt_concept_id,
+            predicate="hasContent",
+            text=text,
+            lang="en-NZ",
+        )
+
+
+def _publish_workflow_authoring_governance_workflows() -> None:
+    _seed_workflow_authoring_prompts()
+    authority_service.publish_canonical_chat_workflow_graphs(
+        target_workflow_ids=[
+            WORKFLOW_CREATION_WORKFLOW_ID,
+            WORKFLOW_AUTHORING_REPAIR_WORKFLOW_ID,
+            WORKFLOW_AUTHORING_REPAIR_OR_CREATE_WORKFLOW_ID,
+        ]
+    )
+
+
 def test_publish_repair_adds_executable_actions_to_workflow_creation_workflow() -> None:
     _seed_workflow_creation_graph_without_actions()
 
@@ -231,11 +312,10 @@ def test_publish_repair_adds_executable_actions_to_workflow_creation_workflow() 
     assert set(report.get("created_action_concept_ids") or []) == {
         WORKFLOW_CREATION_ACTION_CONCEPT_IDENTIFY_NEED,
         WORKFLOW_CREATION_ACTION_CONCEPT_DESIGN_STRUCTURE,
-        WORKFLOW_CREATION_ACTION_CONCEPT_CREATE_WORKFLOW_TYPE,
-        WORKFLOW_CREATION_ACTION_CONCEPT_CREATE_STEP_CONCEPTS,
-        WORKFLOW_CREATION_ACTION_CONCEPT_ESTABLISH_RELATIONSHIPS,
-        WORKFLOW_CREATION_ACTION_CONCEPT_VERIFY_DISCOVERABILITY,
-        WORKFLOW_CREATION_ACTION_CONCEPT_FINALISE,
+        WORKFLOW_AUTHORING_ACTION_CONCEPT_ENSURE_WORKFLOW_IDENTITY,
+        WORKFLOW_AUTHORING_ACTION_CONCEPT_MATERIALISE_WORKFLOW_DEFINITION,
+        WORKFLOW_AUTHORING_ACTION_CONCEPT_VALIDATE_WORKFLOW_DEFINITION,
+        WORKFLOW_AUTHORING_ACTION_CONCEPT_PUBLISH_WORKFLOW_DEFINITION,
     }
 
     repaired = load_workflow_definition_from_vontology(WORKFLOW_CREATION_WORKFLOW_ID)
@@ -243,11 +323,10 @@ def test_publish_repair_adds_executable_actions_to_workflow_creation_workflow() 
     action_ids = set(collect_workflow_action_ids(repaired))
     assert WORKFLOW_CREATION_ACTION_IDENTIFY_NEED in action_ids
     assert WORKFLOW_CREATION_ACTION_DESIGN_STRUCTURE in action_ids
-    assert WORKFLOW_CREATION_ACTION_CREATE_WORKFLOW_TYPE in action_ids
-    assert WORKFLOW_CREATION_ACTION_CREATE_STEP_CONCEPTS in action_ids
-    assert WORKFLOW_CREATION_ACTION_ESTABLISH_RELATIONSHIPS in action_ids
-    assert WORKFLOW_CREATION_ACTION_VERIFY_DISCOVERABILITY in action_ids
-    assert WORKFLOW_CREATION_ACTION_FINALISE in action_ids
+    assert WORKFLOW_AUTHORING_ACTION_ENSURE_WORKFLOW_IDENTITY in action_ids
+    assert WORKFLOW_AUTHORING_ACTION_MATERIALISE_WORKFLOW_DEFINITION in action_ids
+    assert WORKFLOW_AUTHORING_ACTION_VALIDATE_WORKFLOW_DEFINITION in action_ids
+    assert WORKFLOW_AUTHORING_ACTION_PUBLISH_WORKFLOW_DEFINITION in action_ids
 
     graph, warnings = build_workflow_process_graph(WORKFLOW_CREATION_WORKFLOW_ID)
     assert graph is not None
@@ -267,23 +346,19 @@ def test_publish_repair_adds_executable_actions_to_workflow_creation_workflow() 
     )
     assert (
         step_targets.get("#V#workflow_creation_step_create_workflow_type")
-        == WORKFLOW_CREATION_ACTION_CONCEPT_CREATE_WORKFLOW_TYPE
+        == WORKFLOW_AUTHORING_ACTION_CONCEPT_ENSURE_WORKFLOW_IDENTITY
     )
     assert (
-        step_targets.get("#V#workflow_creation_step_create_step_concepts")
-        == WORKFLOW_CREATION_ACTION_CONCEPT_CREATE_STEP_CONCEPTS
-    )
-    assert (
-        step_targets.get("#V#workflow_creation_step_establish_relationships")
-        == WORKFLOW_CREATION_ACTION_CONCEPT_ESTABLISH_RELATIONSHIPS
+        step_targets.get("#V#workflow_creation_step_materialise_workflow_definition")
+        == WORKFLOW_AUTHORING_ACTION_CONCEPT_MATERIALISE_WORKFLOW_DEFINITION
     )
     assert (
         step_targets.get("#V#workflow_creation_step_verify_discoverability")
-        == WORKFLOW_CREATION_ACTION_CONCEPT_VERIFY_DISCOVERABILITY
+        == WORKFLOW_AUTHORING_ACTION_CONCEPT_VALIDATE_WORKFLOW_DEFINITION
     )
     assert (
         step_targets.get("#V#workflow_creation_step_document_in_jira")
-        == WORKFLOW_CREATION_ACTION_CONCEPT_FINALISE
+        == WORKFLOW_AUTHORING_ACTION_CONCEPT_PUBLISH_WORKFLOW_DEFINITION
     )
 
 
@@ -317,10 +392,9 @@ def test_workflow_creation_actions_individual_then_end_to_end() -> None:
     pre_publication_actions = (
         WORKFLOW_CREATION_ACTION_IDENTIFY_NEED,
         WORKFLOW_CREATION_ACTION_DESIGN_STRUCTURE,
-        WORKFLOW_CREATION_ACTION_CREATE_WORKFLOW_TYPE,
-        WORKFLOW_CREATION_ACTION_CREATE_STEP_CONCEPTS,
-        WORKFLOW_CREATION_ACTION_ESTABLISH_RELATIONSHIPS,
-        WORKFLOW_CREATION_ACTION_VERIFY_DISCOVERABILITY,
+        WORKFLOW_AUTHORING_ACTION_ENSURE_WORKFLOW_IDENTITY,
+        WORKFLOW_AUTHORING_ACTION_MATERIALISE_WORKFLOW_DEFINITION,
+        WORKFLOW_AUTHORING_ACTION_VALIDATE_WORKFLOW_DEFINITION,
     )
     for action_id in pre_publication_actions:
         result = action_registry.execute(
@@ -346,7 +420,7 @@ def test_workflow_creation_actions_individual_then_end_to_end() -> None:
     assert target_workflow_id not in set(discover_workflow_ids())
 
     finalise_result = action_registry.execute(
-        WORKFLOW_CREATION_ACTION_FINALISE,
+        WORKFLOW_AUTHORING_ACTION_PUBLISH_WORKFLOW_DEFINITION,
         inputs={},
         context=context,
         env=env,
@@ -878,3 +952,238 @@ def test_generated_phd_student_workflow_fails_closed_for_ambiguous_student() -> 
     assert "Pat Lee" in failure_error
     assert "#V#person_pat_lee_a" in failure_error
     assert "#V#person_pat_lee_b" in failure_error
+
+
+def test_workflow_authoring_preflight_create_routes_through_wrapper_workflow() -> None:
+    _publish_workflow_authoring_governance_workflows()
+
+    action_registry = build_durable_action_registry()
+    llm = _QueuedLLM(
+        responses=[
+            (
+                '{"decision":"create","target_workflow_id":"'
+                '#V#wrapper_created_workflow",'
+                '"target_workflow_name":"Wrapper Created Workflow",'
+                '"reasoning":"No close existing workflow matches the request.",'
+                '"evidence":[{"kind":"candidate_count","value":0}],'
+                '"response_text":"Creating a new workflow."}'
+            )
+        ]
+    )
+    env = WorkflowEnvironment(llm_client=llm, user_namespace="#V#test_user")
+    wrapper_definition = load_workflow_definition_from_vontology(
+        WORKFLOW_AUTHORING_REPAIR_OR_CREATE_WORKFLOW_ID
+    )
+    assert wrapper_definition is not None
+
+    with patch(
+        "src.backend.workflows.durable.workflow_creation_workflow.discover_workflows",
+        return_value=WorkflowDiscoveryResult(
+            matches=[],
+            routing_matches=[],
+            query="Create a workflow from this description request for wrapper create.",
+            requested_query=(
+                "Create a workflow from this description request for wrapper create."
+            ),
+            allow_non_executable=True,
+        ),
+    ):
+        run_result = WorkflowExecutor(registry=action_registry, max_transitions=30).run(
+            wrapper_definition,
+            environment=env,
+            data={
+                "prompt": (
+                    "Create a workflow from this description request for wrapper "
+                    "create."
+                )
+            },
+        )
+
+    assert run_result.completed is True
+    assert run_result.data.get("workflow_authoring_preflight_decision") == "create"
+    assert run_result.data.get("workflow_concept_id") == "#V#wrapper_created_workflow"
+    assert run_result.data.get("workflow_discoverable") is True
+
+    generated_definition = load_workflow_definition_from_vontology(
+        "#V#wrapper_created_workflow"
+    )
+    assert generated_definition is not None
+    generated_run = WorkflowExecutor(registry=action_registry, max_transitions=20).run(
+        generated_definition,
+        environment=WorkflowEnvironment(llm_client=None, user_namespace="#V#test_user"),
+    )
+    assert generated_run.completed is True
+    assert generated_run.data.get("workflow_request_summary")
+
+
+def test_workflow_authoring_preflight_repair_updates_existing_workflow() -> None:
+    _publish_workflow_authoring_governance_workflows()
+
+    action_registry = build_durable_action_registry()
+    base_env = WorkflowEnvironment(llm_client=None, user_namespace="#V#test_user")
+    creation_definition = load_workflow_definition_from_vontology(
+        WORKFLOW_CREATION_WORKFLOW_ID
+    )
+    assert creation_definition is not None
+
+    existing_workflow_id = "#V#existing_marker_workflow"
+    create_existing = WorkflowExecutor(registry=action_registry, max_transitions=30).run(
+        creation_definition,
+        environment=base_env,
+        data={
+            "prompt": "Create a workflow from this description request.",
+            "workflow_spec": _workflow_spec(
+                existing_workflow_id,
+                "repair_marker",
+                "before_repair",
+            ),
+        },
+    )
+    assert create_existing.completed is True
+
+    wrapper_definition = load_workflow_definition_from_vontology(
+        WORKFLOW_AUTHORING_REPAIR_OR_CREATE_WORKFLOW_ID
+    )
+    assert wrapper_definition is not None
+    llm = _QueuedLLM(
+        responses=[
+            (
+                '{"decision":"repair","target_workflow_id":"'
+                '#V#existing_marker_workflow",'
+                '"target_workflow_name":"Existing Marker Workflow",'
+                '"reasoning":"The request closely matches the existing workflow but '
+                'needs an update.",'
+                '"evidence":[{"kind":"candidate","concept_id":"'
+                '#V#existing_marker_workflow"}],'
+                '"response_text":"Repairing the existing workflow."}'
+            ),
+            (
+                '{"target_workflow_id":"#V#existing_marker_workflow",'
+                '"repair_summary":"Update the emitted marker value.",'
+                '"repaired_workflow_spec":'
+                '{"workflow_id":"#V#existing_marker_workflow",'
+                '"name":"Generated Marker Workflow",'
+                '"description":"Generated by workflow creation integration test.",'
+                '"parent_type_id":"#V#ai_workflow",'
+                '"required_effects":["context:repair_marker=after_repair"],'
+                '"postcondition_probe":{"repair_marker":"after_repair"},'
+                '"steps":['
+                '{"state_id":"emit","action_id":"workflow_authoring.emit_marker",'
+                '"inputs":{"marker_key":"repair_marker","marker_value":"after_repair"},'
+                '"next_state":"completed"},'
+                '{"state_id":"completed","terminal":true}'
+                "]}}"
+            ),
+        ]
+    )
+    repair_env = WorkflowEnvironment(llm_client=llm, user_namespace="#V#test_user")
+
+    discovery_result = WorkflowDiscoveryResult(
+        matches=[
+            WorkflowMatch(
+                concept_id=existing_workflow_id,
+                name="Existing Marker Workflow",
+                description="Existing workflow candidate for repair.",
+                relevance_score=0.97,
+                match_source="test",
+            )
+        ],
+        routing_matches=[
+            WorkflowMatch(
+                concept_id=existing_workflow_id,
+                name="Existing Marker Workflow",
+                description="Existing workflow candidate for repair.",
+                relevance_score=0.97,
+                match_source="test",
+            )
+        ],
+        query="Repair the existing marker workflow.",
+        requested_query="Repair the existing marker workflow.",
+        allow_non_executable=True,
+    )
+    with patch(
+        "src.backend.workflows.durable.workflow_creation_workflow.discover_workflows",
+        return_value=discovery_result,
+    ):
+        repair_run = WorkflowExecutor(registry=action_registry, max_transitions=40).run(
+            wrapper_definition,
+            environment=repair_env,
+            data={"prompt": "Repair the existing marker workflow."},
+        )
+
+    assert repair_run.completed is True
+    assert repair_run.data.get("workflow_authoring_preflight_decision") == "repair"
+    assert repair_run.data.get("workflow_concept_id") == existing_workflow_id
+    assert repair_run.data.get("workflow_authoring_repaired_workflow_id") == (
+        existing_workflow_id
+    )
+    assert repair_run.data.get("workflow_discoverable") is True
+
+    repaired_definition = load_workflow_definition_from_vontology(existing_workflow_id)
+    assert repaired_definition is not None
+    repaired_run = WorkflowExecutor(registry=action_registry, max_transitions=20).run(
+        repaired_definition,
+        environment=base_env,
+    )
+    assert repaired_run.completed is True
+    assert repaired_run.data.get("repair_marker") == "after_repair"
+
+
+def test_workflow_authoring_preflight_reuse_returns_existing_workflow_id() -> None:
+    _publish_workflow_authoring_governance_workflows()
+
+    wrapper_definition = load_workflow_definition_from_vontology(
+        WORKFLOW_AUTHORING_REPAIR_OR_CREATE_WORKFLOW_ID
+    )
+    assert wrapper_definition is not None
+    llm = _QueuedLLM(
+        responses=[
+            (
+                '{"decision":"reuse","target_workflow_id":"'
+                '#V#existing_reusable_workflow",'
+                '"target_workflow_name":"Existing Reusable Workflow",'
+                '"reasoning":"The existing workflow already satisfies the request.",'
+                '"evidence":[{"kind":"candidate","concept_id":"'
+                '#V#existing_reusable_workflow"}],'
+                '"response_text":"Reusing the existing workflow."}'
+            )
+        ]
+    )
+    env = WorkflowEnvironment(llm_client=llm, user_namespace="#V#test_user")
+    discovery_result = WorkflowDiscoveryResult(
+        matches=[
+            WorkflowMatch(
+                concept_id="#V#existing_reusable_workflow",
+                name="Existing Reusable Workflow",
+                description="Existing workflow candidate for reuse.",
+                relevance_score=0.99,
+                match_source="test",
+            )
+        ],
+        routing_matches=[
+            WorkflowMatch(
+                concept_id="#V#existing_reusable_workflow",
+                name="Existing Reusable Workflow",
+                description="Existing workflow candidate for reuse.",
+                relevance_score=0.99,
+                match_source="test",
+            )
+        ],
+        query="Reuse the existing workflow.",
+        requested_query="Reuse the existing workflow.",
+        allow_non_executable=True,
+    )
+    with patch(
+        "src.backend.workflows.durable.workflow_creation_workflow.discover_workflows",
+        return_value=discovery_result,
+    ):
+        reuse_run = WorkflowExecutor(registry=build_durable_action_registry(), max_transitions=20).run(
+            wrapper_definition,
+            environment=env,
+            data={"prompt": "Reuse the existing workflow."},
+        )
+
+    assert reuse_run.completed is True
+    assert reuse_run.data.get("workflow_authoring_preflight_decision") == "reuse"
+    assert reuse_run.data.get("workflow_concept_id") == "#V#existing_reusable_workflow"
+    assert reuse_run.data.get("response_text") == "Reusing the existing workflow."

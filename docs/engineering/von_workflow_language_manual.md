@@ -1,7 +1,7 @@
 # Von Workflow Language (VWL) Manual
 
 Status: Draft (current implementation-aligned)
-Last updated: 2026-03-19 (Pacific/Auckland)
+Last updated: 2026-03-24 (Pacific/Auckland)
 Audience: Human engineers and AI agents
 
 ## 1. Purpose and Scope
@@ -200,6 +200,42 @@ Current routing/discovery rule:
 - workflows with explicit lifecycle metadata where `published=false` MUST remain loadable for validation and repair;
 - those workflows MUST NOT be returned by workflow discovery or treated as executable for routing;
 - only workflows with `published=true`, or workflows with no explicit lifecycle metadata, are discoverable.
+
+### 4.1a Generic Workflow Authoring Primitives
+
+When workflow authoring can be expressed as a reusable VWL/runtime capability, that capability MUST be added first and the workflow MUST then use the generic surface rather than leaving the logic hidden in bespoke Python handlers.
+
+Current generic authoring action IDs:
+
+- `workflow_authoring.ensure_workflow_identity`
+- `workflow_authoring.discover_existing_workflows`
+- `workflow_authoring.extract_existing_workflow_spec`
+- `workflow_authoring.decide_repair_or_create`
+- `workflow_authoring.design_repair_spec`
+- `workflow_authoring.materialise_workflow_definition`
+- `workflow_authoring.validate_workflow_definition`
+- `workflow_authoring.publish_workflow_definition`
+
+Current intent:
+
+- `ensure_workflow_identity` creates or updates the target workflow concept and draft lifecycle metadata;
+- `discover_existing_workflows` gathers existing workflow candidates so authoring can make explicit reuse-versus-repair-versus-create decisions in VWL;
+- `extract_existing_workflow_spec` renders an authoritative existing workflow into declarative authoring-spec form so repair workflows can remain generic rather than editing graph links imperatively;
+- `decide_repair_or_create` is the prompt-driven preflight decision step that MUST emit explicit structured decision evidence rather than hiding duplicate/repair logic in handler code;
+- `design_repair_spec` is the prompt-driven repair-design step that produces an updated declarative workflow spec for the shared materialisation/validation/publication pathway;
+- `materialise_workflow_definition` turns a declarative authoring spec into authoritative workflow graph concepts, step bindings, and transitions through the canonical publication pathway;
+- `validate_workflow_definition` performs structural validation plus bounded execution against declared postconditions while the workflow is still unpublished;
+- `publish_workflow_definition` promotes the draft only when the validation/completion gate passes.
+
+Current canonical workflow-authoring composition:
+
+- `#V#workflow_repair_or_create_workflow` is the discover-and-decide wrapper that routes to `reuse`, `repair`, or `create`;
+- `#V#workflow_authoring_repair_workflow` loads the existing workflow, designs a repaired declarative spec, and then reuses the shared creation/materialisation workflow;
+- `#V#von_workflow_creation_workflow` remains the shared identity/materialise/validate/publish pipeline rather than owning duplicate-versus-repair policy internally.
+
+Authoring-policy rule:
+
+- if a new behaviour would require a context-specific Python patch but can instead be represented as a genuine reusable VWL/runtime extension, implement the extension first and then express the workflow through these generic authoring surfaces.
 
 ### 4.2 Workflow Routing Profile
 
