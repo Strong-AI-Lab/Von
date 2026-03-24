@@ -470,6 +470,116 @@ def test_execute_workflow_materialises_terminal_effect_evidence_on_gateway_path(
     assert outputs.get("completed") is True
 
 
+def test_execute_workflow_stamps_execution_summary_into_result_and_durable_outputs(
+    monkeypatch,
+) -> None:
+    orchestrator = _build_orchestrator()
+    fake_manager = _FakeWorkflowInstanceManager()
+    _patch_submit_verified_instance(monkeypatch)
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: fake_manager,
+    )
+
+    workflow_id = "#V#summary_gateway_workflow"
+    _register_test_workflow(
+        orchestrator,
+        workflow_id=workflow_id,
+        initial_state="done",
+        terminal=True,
+    )
+
+    monkeypatch.setattr(
+        orchestrator._workflow_executor,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            completed=True,
+            final_state="done",
+            error=None,
+            data={
+                "response_text": "Workflow created.",
+                "created_workflow_ids": ["#V#wf_new"],
+                "alignment": {"updated_type_ids": ["#V#durable_workflow"]},
+                "workflow_step_result_envelopes": [
+                    {
+                        "state_id": "prepare",
+                        "action_id": "tool.prepare",
+                        "action_outcome": "success",
+                    },
+                    {
+                        "state_id": "persist",
+                        "action_id": "tool.persist",
+                        "action_outcome": "success",
+                    },
+                ],
+                "workflow_terminal_effect_events": [
+                    {
+                        "state_id": "done",
+                        "symbol": "#V#workflow_effect_summary_gateway_done_terminal",
+                        "alias": "workflow_effect_summary_gateway_done_terminal",
+                        "applied": True,
+                    }
+                ],
+                "workflow_control_flow_events": [
+                    {"status": "entered_state", "state_id": "prepare"},
+                    {"status": "entered_state", "state_id": "persist"},
+                ],
+            },
+        ),
+    )
+
+    result = orchestrator.execute_workflow(
+        workflow_id,
+        data={
+            "prompt": "Create the workflow definition.",
+            "user_concept_id": "#V#user",
+            "org_concept_id": "#V#org",
+            "conversation_session_id": "chat-summary",
+            "turn_id": "turn-summary",
+        },
+        llm_client=object(),
+        model="test-model",
+        user_namespace="#V#user@org",
+        conversation_session_id="chat-summary",
+        turn_id="turn-summary",
+        episode_source="chat_turn_workflow",
+    )
+
+    assert result is not None
+    execution_summary = result.data.get("workflow_execution_summary")
+    assert isinstance(execution_summary, dict)
+    assert execution_summary["workflow_id"] == workflow_id
+    assert execution_summary["step_result_envelope_count"] == 2
+    assert execution_summary["action_success_count"] == 2
+    assert execution_summary["terminal_effect_count"] == 1
+    assert execution_summary["durable_side_effect_count"] == 2
+    assert execution_summary["durable_side_effects"] == [
+        {
+            "mutation_kind": "created",
+            "artefact_type": "workflow",
+            "source_key": "created_workflow_ids",
+            "source_path": "created_workflow_ids",
+            "artefact_count": 1,
+            "artefact_ids": ["#V#wf_new"],
+        },
+        {
+            "mutation_kind": "updated",
+            "artefact_type": "type",
+            "source_key": "updated_type_ids",
+            "source_path": "alignment.updated_type_ids",
+            "artefact_count": 1,
+            "artefact_ids": ["#V#durable_workflow"],
+        },
+    ]
+
+    outputs = fake_manager.mark_completed_calls[0].get("outputs")
+    assert isinstance(outputs, dict)
+    persisted_execution_summary = outputs.get("workflow_execution_summary")
+    assert isinstance(persisted_execution_summary, dict)
+    assert persisted_execution_summary["workflow_id"] == workflow_id
+    assert persisted_execution_summary["durable_side_effect_count"] == 2
+
+
 def test_execute_workflow_applies_launch_input_contract_before_run(
     monkeypatch,
 ) -> None:

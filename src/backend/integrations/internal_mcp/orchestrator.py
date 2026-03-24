@@ -54,6 +54,11 @@ from ...workflows.action_registry import (
     WorkflowActionResult,
     WorkflowEnvironment,
 )
+from ...workflows.execution_contracts import (
+    WORKFLOW_RESULT_ENVELOPE_KEY,
+    WORKFLOW_RUNTIME_EVENTS_KEY,
+    WORKFLOW_STEP_RESULT_ENVELOPES_KEY,
+)
 from ...workflows.mcp_tool_bridge import workflow_action_result_from_mcp_payload
 from ...workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
@@ -70,7 +75,11 @@ from ...workflows.conversation_turn_stage_model import (
     build_conversation_turn_stage_model_snapshot,
     build_conversation_turn_stage_path,
 )
-from ...workflows.engine import WorkflowExecutor, WorkflowResult
+from ...workflows.engine import (
+    WORKFLOW_TERMINAL_EFFECT_EVENTS_KEY,
+    WorkflowExecutor,
+    WorkflowResult,
+)
 from ...workflows.metadata_validation import validate_state_metadata_pre_action
 from ...workflows.workflow_launch_input_contracts import (
     resolve_workflow_launch_inputs,
@@ -253,6 +262,307 @@ class _PromptRequirementEvaluation:
             or self.missing_read_file_copy_ids
             or self.missing_scholarly_representation_file_copy_ids
         )
+
+
+_WORKFLOW_EXECUTION_SUMMARY_SCHEMA_VERSION = "workflow_execution_summary.v1"
+_WORKFLOW_EXECUTION_SUMMARY_MAX_TERMINAL_EFFECTS = 20
+_WORKFLOW_EXECUTION_SUMMARY_MAX_SIDE_EFFECTS = 24
+_WORKFLOW_EXECUTION_SUMMARY_MAX_IDS_PER_EFFECT = 50
+_WORKFLOW_EXECUTION_SUMMARY_MAX_SCAN_DEPTH = 3
+_WORKFLOW_EXECUTION_SUMMARY_IGNORED_KEYS: frozenset[str] = frozenset(
+    {
+        "aux_llm_calls",
+        "extra_messages",
+        "llm_calls",
+        "tool_invocations",
+        "turn_execution_diagnostics",
+        "turn_execution_record",
+        "workflow_execution_summary",
+        "workflow_result_envelope",
+        "workflow_step_result_envelopes",
+        "workflow_terminal_effect_events",
+        "workflow_control_flow_events",
+    }
+)
+_WORKFLOW_MUTATION_ID_FIELD_PATTERN = re.compile(
+    r"^(created|updated|upserted|materialised|materialized|deleted|removed|linked|bound|scheduled|promoted|merged)_(.+?)_ids?$",
+    flags=re.IGNORECASE,
+)
+
+
+def _workflow_execution_summary_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _workflow_execution_summary_mapping_list(value: Any) -> list[Mapping[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        return []
+    return [cast(Mapping[str, Any], item) for item in value if isinstance(item, Mapping)]
+
+
+def _extract_workflow_execution_identifier_values(value: Any) -> list[str]:
+    candidate_values: list[str] = []
+    seen: set[str] = set()
+
+    def _append(raw_value: Any) -> None:
+        if len(candidate_values) >= _WORKFLOW_EXECUTION_SUMMARY_MAX_IDS_PER_EFFECT:
+            return
+        cleaned = _workflow_execution_summary_text(raw_value)
+        if not cleaned:
+            return
+        lowered = cleaned.lower()
+        if lowered in seen:
+            return
+        seen.add(lowered)
+        candidate_values.append(cleaned)
+
+    if isinstance(value, str):
+        _append(value)
+        return candidate_values
+
+    if isinstance(value, Mapping):
+        for candidate_key in ("concept_id", "workflow_id", "id", "instance_id"):
+            if candidate_key in value:
+                _append(value.get(candidate_key))
+        return candidate_values
+
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for item in value:
+            if isinstance(item, Mapping):
+                for candidate_key in ("concept_id", "workflow_id", "id", "instance_id"):
+                    if candidate_key in item:
+                        _append(item.get(candidate_key))
+                        break
+            else:
+                _append(item)
+        return candidate_values
+
+    return candidate_values
+
+
+def _normalise_workflow_mutation_kind(value: str) -> str:
+    cleaned = str(value or "").strip().lower()
+    if cleaned == "materialized":
+        return "materialised"
+    return cleaned
+
+
+def _normalise_workflow_artefact_type(value: str) -> str:
+    cleaned = str(value or "").strip().lower().strip("_")
+    return re.sub(r"_+", "_", cleaned)
+
+
+def _collect_workflow_durable_side_effects(
+    payload: Any,
+    *,
+    path: tuple[str, ...] = (),
+    depth: int = 0,
+    collected: list[dict[str, Any]] | None = None,
+    seen: set[tuple[str, str, str, tuple[str, ...]]] | None = None,
+) -> list[dict[str, Any]]:
+    if collected is None:
+        collected = []
+    if seen is None:
+        seen = set()
+    if not isinstance(payload, Mapping) or depth > _WORKFLOW_EXECUTION_SUMMARY_MAX_SCAN_DEPTH:
+        return collected
+
+    for key, value in payload.items():
+        if len(collected) >= _WORKFLOW_EXECUTION_SUMMARY_MAX_SIDE_EFFECTS:
+            break
+        if not isinstance(key, str):
+            continue
+        key_text = key.strip()
+        if not key_text:
+            continue
+        lowered_key = key_text.lower()
+        if lowered_key in _WORKFLOW_EXECUTION_SUMMARY_IGNORED_KEYS:
+            continue
+
+        match = _WORKFLOW_MUTATION_ID_FIELD_PATTERN.match(lowered_key)
+        if match:
+            artefact_ids = _extract_workflow_execution_identifier_values(value)
+            if artefact_ids:
+                mutation_kind = _normalise_workflow_mutation_kind(match.group(1))
+                artefact_type = _normalise_workflow_artefact_type(match.group(2))
+                source_path = ".".join((*path, key_text))
+                fingerprint = (
+                    mutation_kind,
+                    artefact_type,
+                    source_path,
+                    tuple(artefact_ids),
+                )
+                if fingerprint not in seen:
+                    seen.add(fingerprint)
+                    collected.append(
+                        {
+                            "mutation_kind": mutation_kind,
+                            "artefact_type": artefact_type,
+                            "source_key": key_text,
+                            "source_path": source_path,
+                            "artefact_count": len(artefact_ids),
+                            "artefact_ids": artefact_ids,
+                        }
+                    )
+            continue
+
+        if isinstance(value, Mapping):
+            _collect_workflow_durable_side_effects(
+                value,
+                path=(*path, key_text),
+                depth=depth + 1,
+                collected=collected,
+                seen=seen,
+            )
+            continue
+
+        if isinstance(value, Sequence) and not isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            for index, item in enumerate(value):
+                if len(collected) >= _WORKFLOW_EXECUTION_SUMMARY_MAX_SIDE_EFFECTS:
+                    break
+                if not isinstance(item, Mapping):
+                    continue
+                _collect_workflow_durable_side_effects(
+                    item,
+                    path=(*path, f"{key_text}[{index}]"),
+                    depth=depth + 1,
+                    collected=collected,
+                    seen=seen,
+                )
+
+    return collected
+
+
+def _build_workflow_execution_summary(
+    *,
+    workflow_id: str,
+    workflow_result: Any,
+) -> dict[str, Any]:
+    result_data = getattr(workflow_result, "data", None)
+    workflow_data: Mapping[str, Any] = (
+        result_data if isinstance(result_data, Mapping) else {}
+    )
+
+    step_envelopes = _workflow_execution_summary_mapping_list(
+        workflow_data.get(WORKFLOW_STEP_RESULT_ENVELOPES_KEY)
+    )
+    success_count = 0
+    failure_count = 0
+    unknown_count = 0
+    first_failing_state_id: str | None = None
+    first_failing_action_id: str | None = None
+    for envelope in step_envelopes:
+        action_outcome = _workflow_execution_summary_text(
+            envelope.get("action_outcome")
+        ) or _workflow_execution_summary_text(envelope.get("action_status"))
+        lowered_outcome = (action_outcome or "").lower()
+        if lowered_outcome == "success":
+            success_count += 1
+        elif lowered_outcome in {"failed", "failure"}:
+            failure_count += 1
+            if first_failing_state_id is None:
+                first_failing_state_id = _workflow_execution_summary_text(
+                    envelope.get("state_id")
+                )
+            if first_failing_action_id is None:
+                first_failing_action_id = _workflow_execution_summary_text(
+                    envelope.get("action_id")
+                )
+        else:
+            unknown_count += 1
+
+    launch_resolution = workflow_data.get("workflow_launch_input_resolution")
+    if isinstance(launch_resolution, Mapping):
+        if first_failing_state_id is None:
+            first_failing_state_id = _workflow_execution_summary_text(
+                launch_resolution.get("failing_state_id")
+            )
+        if first_failing_action_id is None:
+            first_failing_action_id = _workflow_execution_summary_text(
+                launch_resolution.get("failing_action_id")
+            )
+
+    terminal_effect_events = _workflow_execution_summary_mapping_list(
+        workflow_data.get(WORKFLOW_TERMINAL_EFFECT_EVENTS_KEY)
+    )
+    terminal_effects: list[dict[str, Any]] = []
+    for event in terminal_effect_events[:_WORKFLOW_EXECUTION_SUMMARY_MAX_TERMINAL_EFFECTS]:
+        terminal_effects.append(
+            {
+                "state_id": _workflow_execution_summary_text(event.get("state_id")),
+                "symbol": _workflow_execution_summary_text(event.get("symbol")),
+                "alias": _workflow_execution_summary_text(event.get("alias")),
+                "applied": bool(event.get("applied")),
+            }
+        )
+
+    runtime_event_count = len(
+        _workflow_execution_summary_mapping_list(
+            workflow_data.get(WORKFLOW_RUNTIME_EVENTS_KEY)
+        )
+    )
+    durable_side_effects = _collect_workflow_durable_side_effects(workflow_data)
+    durable_side_effect_count = sum(
+        int(entry.get("artefact_count") or 0) for entry in durable_side_effects
+    )
+
+    final_state = _workflow_execution_summary_text(getattr(workflow_result, "final_state", None))
+    completed = bool(getattr(workflow_result, "completed", False))
+
+    return {
+        "schema_version": _WORKFLOW_EXECUTION_SUMMARY_SCHEMA_VERSION,
+        "workflow_id": workflow_id,
+        "completed": completed,
+        "final_state": final_state,
+        "step_result_envelope_count": len(step_envelopes),
+        "action_started_count": len(step_envelopes),
+        "action_completed_count": len(step_envelopes),
+        "action_success_count": success_count,
+        "action_failure_count": failure_count,
+        "action_unknown_count": unknown_count,
+        "first_failing_state_id": first_failing_state_id,
+        "first_failing_action_id": first_failing_action_id,
+        "runtime_event_count": runtime_event_count,
+        "terminal_effect_count": len(terminal_effect_events),
+        "terminal_effects": terminal_effects,
+        "durable_side_effect_count": durable_side_effect_count,
+        "durable_side_effects": durable_side_effects,
+    }
+
+
+def _build_workflow_execution_aux_entry(
+    *,
+    workflow_id: str,
+    workflow_result: Any,
+) -> dict[str, Any]:
+    result_data = getattr(workflow_result, "data", None)
+    execution_summary = (
+        result_data.get("workflow_execution_summary")
+        if isinstance(result_data, Mapping)
+        else None
+    )
+    if not isinstance(execution_summary, Mapping):
+        execution_summary = _build_workflow_execution_summary(
+            workflow_id=workflow_id,
+            workflow_result=workflow_result,
+        )
+
+    return {
+        "type": "workflow_execution",
+        "workflow_id": workflow_id,
+        "final_state": _workflow_execution_summary_text(
+            getattr(workflow_result, "final_state", None)
+        ),
+        "completed": bool(getattr(workflow_result, "completed", False)),
+        "execution_summary": dict(execution_summary),
+    }
 
 
 def _derive_workflow_selection_rationale(
@@ -19448,7 +19758,7 @@ class InternalMCPChatOrchestrator:
                 )
                 if failing_action_id:
                     message += f" Initial action: {failing_action_id}."
-                return WorkflowResult(
+                launch_failure_result = WorkflowResult(
                     data={
                         "response_text": message,
                         "summary": message,
@@ -19461,6 +19771,13 @@ class InternalMCPChatOrchestrator:
                         + ",".join(unresolved_required_inputs)
                     ),
                 )
+                launch_failure_result.data["workflow_execution_summary"] = (
+                    _build_workflow_execution_summary(
+                        workflow_id=workflow_id,
+                        workflow_result=launch_failure_result,
+                    )
+                )
+                return launch_failure_result
 
         def _build_durable_inputs_snapshot() -> dict[str, Any]:
             prompt = data.get("prompt")
@@ -19558,6 +19875,15 @@ class InternalMCPChatOrchestrator:
             if isinstance(workflow_launch_input_resolution, Mapping):
                 payload["workflow_launch_input_resolution"] = _safe_mapping_snapshot(
                     workflow_launch_input_resolution
+                )
+            workflow_execution_summary = workflow_data.get(
+                "workflow_execution_summary"
+            )
+            if isinstance(workflow_execution_summary, Mapping):
+                payload["workflow_execution_summary"] = _safe_mapping_snapshot(
+                    workflow_execution_summary,
+                    max_depth=3,
+                    max_items=40,
                 )
 
             turn_execution_outcome = _build_turn_execution_outcome(
@@ -19907,6 +20233,13 @@ class InternalMCPChatOrchestrator:
                 data=data,
                 trace=trace,
             )
+            if isinstance(getattr(result, "data", None), dict):
+                result.data["workflow_execution_summary"] = (
+                    _build_workflow_execution_summary(
+                        workflow_id=workflow_id,
+                        workflow_result=result,
+                    )
+                )
             completed = bool(getattr(result, "completed", False))
             final_state = (
                 str(result.final_state)
@@ -27372,12 +27705,10 @@ class InternalMCPChatOrchestrator:
                         wf_result.data.get("tool_invocations")
                     )
                     aux_llm_calls.append(
-                        {
-                            "type": "workflow_execution",
-                            "workflow_id": selected_workflow_id_text,
-                            "final_state": wf_result.final_state,
-                            "completed": wf_result.completed,
-                        }
+                        _build_workflow_execution_aux_entry(
+                            workflow_id=selected_workflow_id_text,
+                            workflow_result=wf_result,
+                        )
                     )
                     result = OrchestratorResult(
                         response_text=wf_response,

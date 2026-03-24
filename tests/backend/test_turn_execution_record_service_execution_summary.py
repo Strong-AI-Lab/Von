@@ -1,4 +1,5 @@
 from src.backend.services.turn_execution_record_service import (
+    build_turn_execution_record,
     build_workflow_routing_diagnostics,
     _summarise_tool_execution_context,
 )
@@ -268,6 +269,31 @@ def test_tool_execution_summary_preserves_custom_workflow_first_step_failure_loc
                 "failing_state_id": "prepare_spec",
                 "failing_action_id": "tool.prepare_spec",
             },
+            {
+                "type": "workflow_execution",
+                "workflow_id": "#V#meeting_invitation_testing_workflow",
+                "final_state": "prepare_spec",
+                "completed": False,
+                "execution_summary": {
+                    "schema_version": "workflow_execution_summary.v1",
+                    "workflow_id": "#V#meeting_invitation_testing_workflow",
+                    "completed": False,
+                    "final_state": "prepare_spec",
+                    "step_result_envelope_count": 0,
+                    "action_started_count": 0,
+                    "action_completed_count": 0,
+                    "action_success_count": 0,
+                    "action_failure_count": 0,
+                    "action_unknown_count": 0,
+                    "first_failing_state_id": "prepare_spec",
+                    "first_failing_action_id": "tool.prepare_spec",
+                    "runtime_event_count": 0,
+                    "terminal_effect_count": 0,
+                    "terminal_effects": [],
+                    "durable_side_effect_count": 0,
+                    "durable_side_effects": [],
+                },
+            },
         ],
         serialised_invocations=[],
     )
@@ -291,8 +317,262 @@ def test_tool_execution_summary_preserves_custom_workflow_first_step_failure_loc
     ]
     assert summary["dispatch_terminal_failing_state_id"] == "prepare_spec"
     assert summary["dispatch_terminal_failing_action_id"] == "tool.prepare_spec"
+    assert summary["custom_workflow_execution"] == {
+        "observed": True,
+        "schema_version": "workflow_execution_summary.v1",
+        "workflow_id": "#V#meeting_invitation_testing_workflow",
+        "completed": False,
+        "final_state": "prepare_spec",
+        "step_result_envelope_count": 0,
+        "action_started_count": 0,
+        "action_completed_count": 0,
+        "action_success_count": 0,
+        "action_failure_count": 0,
+        "action_unknown_count": 0,
+        "first_failing_state_id": "prepare_spec",
+        "first_failing_action_id": "tool.prepare_spec",
+        "runtime_event_count": 0,
+        "terminal_effect_count": 0,
+        "terminal_effects": [],
+        "durable_side_effect_count": 0,
+        "durable_side_effects": [],
+    }
     assert summary["zero_tools_executed"] is True
     assert summary["failure_codes"] == []
+    assert summary["zero_tool_reason_code"] == (
+        "custom_workflow_failed_before_tool_invocation"
+    )
+    assert summary["zero_tool_execution_expected"] is False
+
+
+def test_tool_execution_summary_records_custom_workflow_action_and_side_effect_evidence() -> None:
+    summary = _summarise_tool_execution_context(
+        workflow_routing={
+            "workflow_id": "#V#workflow_creation_workflow",
+            "verdict": "rag_selected",
+        },
+        turn_execution_diagnostics={
+            "latest_progress": {
+                "counters": {"tools_started": 0, "tools_completed": 0},
+                "diagnostic_events": [],
+            }
+        },
+        aux_llm_calls=[
+            {
+                "type": "workflow_dispatch_boundary",
+                "boundary": "execution_mode_selected",
+                "status": "selected",
+                "selected_execution_mode": "custom_workflow",
+                "selected_workflow_id": "#V#workflow_creation_workflow",
+                "dispatch_workflow_id": "#V#workflow_creation_workflow",
+            },
+            {
+                "type": "workflow_dispatch_boundary",
+                "boundary": "workflow_handoff",
+                "status": "started",
+                "selected_execution_mode": "custom_workflow",
+                "selected_workflow_id": "#V#workflow_creation_workflow",
+                "dispatch_workflow_id": "#V#workflow_creation_workflow",
+            },
+            {
+                "type": "workflow_dispatch_boundary",
+                "boundary": "workflow_terminal",
+                "status": "completed",
+                "selected_execution_mode": "custom_workflow",
+                "selected_workflow_id": "#V#workflow_creation_workflow",
+                "dispatch_workflow_id": "#V#workflow_creation_workflow",
+                "final_state": "done",
+                "completed": True,
+            },
+            {
+                "type": "workflow_execution",
+                "workflow_id": "#V#workflow_creation_workflow",
+                "final_state": "done",
+                "completed": True,
+                "execution_summary": {
+                    "schema_version": "workflow_execution_summary.v1",
+                    "workflow_id": "#V#workflow_creation_workflow",
+                    "completed": True,
+                    "final_state": "done",
+                    "step_result_envelope_count": 2,
+                    "action_started_count": 2,
+                    "action_completed_count": 2,
+                    "action_success_count": 2,
+                    "action_failure_count": 0,
+                    "action_unknown_count": 0,
+                    "runtime_event_count": 4,
+                    "terminal_effect_count": 1,
+                    "terminal_effects": [
+                        {
+                            "state_id": "done",
+                            "symbol": "#V#workflow_effect_workflow_creation_done_terminal",
+                            "alias": "workflow_effect_workflow_creation_done_terminal",
+                            "applied": True,
+                        }
+                    ],
+                    "durable_side_effect_count": 2,
+                    "durable_side_effects": [
+                        {
+                            "mutation_kind": "created",
+                            "artefact_type": "workflow",
+                            "source_key": "created_workflow_ids",
+                            "source_path": "created_workflow_ids",
+                            "artefact_count": 1,
+                            "artefact_ids": ["#V#wf_new"],
+                        },
+                        {
+                            "mutation_kind": "updated",
+                            "artefact_type": "type",
+                            "source_key": "updated_type_ids",
+                            "source_path": "alignment.updated_type_ids",
+                            "artefact_count": 1,
+                            "artefact_ids": ["#V#durable_workflow"],
+                        },
+                    ],
+                },
+            },
+        ],
+        serialised_invocations=[],
+    )
+
+    custom_execution = summary["custom_workflow_execution"]
+    assert custom_execution["observed"] is True
+    assert custom_execution["workflow_id"] == "#V#workflow_creation_workflow"
+    assert custom_execution["action_completed_count"] == 2
+    assert custom_execution["action_success_count"] == 2
+    assert custom_execution["terminal_effect_count"] == 1
+    assert custom_execution["durable_side_effect_count"] == 2
+    assert custom_execution["durable_side_effects"] == [
+        {
+            "mutation_kind": "created",
+            "artefact_type": "workflow",
+            "source_key": "created_workflow_ids",
+            "source_path": "created_workflow_ids",
+            "artefact_count": 1,
+            "artefact_ids": ["#V#wf_new"],
+        },
+        {
+            "mutation_kind": "updated",
+            "artefact_type": "type",
+            "source_key": "updated_type_ids",
+            "source_path": "alignment.updated_type_ids",
+            "artefact_count": 1,
+            "artefact_ids": ["#V#durable_workflow"],
+        },
+    ]
+    assert summary["zero_tools_executed"] is True
+    assert summary["zero_tool_reason_code"] == "custom_workflow_actions_handled_turn"
+    assert summary["zero_tool_execution_expected"] is True
+
+
+def test_turn_execution_record_keeps_custom_workflow_execution_consistent_across_surfaces() -> None:
+    aux_llm_calls = [
+        {
+            "type": "workflow_dispatch_boundary",
+            "boundary": "execution_mode_selected",
+            "status": "selected",
+            "selected_execution_mode": "custom_workflow",
+            "selected_workflow_id": "#V#workflow_creation_workflow",
+            "dispatch_workflow_id": "#V#workflow_creation_workflow",
+        },
+        {
+            "type": "workflow_dispatch_boundary",
+            "boundary": "workflow_handoff",
+            "status": "started",
+            "selected_execution_mode": "custom_workflow",
+            "selected_workflow_id": "#V#workflow_creation_workflow",
+            "dispatch_workflow_id": "#V#workflow_creation_workflow",
+        },
+        {
+            "type": "workflow_dispatch_boundary",
+            "boundary": "workflow_terminal",
+            "status": "completed",
+            "selected_execution_mode": "custom_workflow",
+            "selected_workflow_id": "#V#workflow_creation_workflow",
+            "dispatch_workflow_id": "#V#workflow_creation_workflow",
+            "final_state": "done",
+            "completed": True,
+        },
+        {
+            "type": "workflow_execution",
+            "workflow_id": "#V#workflow_creation_workflow",
+            "final_state": "done",
+            "completed": True,
+            "execution_summary": {
+                "schema_version": "workflow_execution_summary.v1",
+                "workflow_id": "#V#workflow_creation_workflow",
+                "completed": True,
+                "final_state": "done",
+                "step_result_envelope_count": 1,
+                "action_started_count": 1,
+                "action_completed_count": 1,
+                "action_success_count": 1,
+                "action_failure_count": 0,
+                "action_unknown_count": 0,
+                "runtime_event_count": 2,
+                "terminal_effect_count": 1,
+                "terminal_effects": [
+                    {
+                        "state_id": "done",
+                        "symbol": "#V#workflow_effect_workflow_creation_done_terminal",
+                        "alias": "workflow_effect_workflow_creation_done_terminal",
+                        "applied": True,
+                    }
+                ],
+                "durable_side_effect_count": 1,
+                "durable_side_effects": [
+                    {
+                        "mutation_kind": "created",
+                        "artefact_type": "workflow",
+                        "source_key": "created_workflow_ids",
+                        "source_path": "created_workflow_ids",
+                        "artefact_count": 1,
+                        "artefact_ids": ["#V#wf_new"],
+                    }
+                ],
+            },
+        },
+    ]
+    record = build_turn_execution_record(
+        request_id="req-custom-1",
+        session_id="session-custom-1",
+        namespace="#V#user@org",
+        user_id="#V#user",
+        org_id="#V#org",
+        prompt_text="Create the workflow definition.",
+        response_text="Workflow created.",
+        interaction_timestamp_utc="2026-03-24T01:00:00Z",
+        workflow_discovery={"matches": [{"concept_id": "#V#workflow_creation_workflow"}]},
+        workflow_routing={
+            "workflow_id": "#V#workflow_creation_workflow",
+            "verdict": "rag_selected",
+            "source": "selector",
+        },
+        tool_invocations=[],
+        turn_execution_diagnostics={
+            "latest_progress": {
+                "counters": {"tools_started": 0, "tools_completed": 0},
+                "diagnostic_events": [],
+            }
+        },
+        aux_llm_calls=aux_llm_calls,
+    )
+
+    summary = record["execution"]["summary"]
+    dispatch = record["workflow_routing_diagnostics"]["dispatch"]
+    assert summary["custom_workflow_execution"] == dispatch["custom_workflow_execution"]
+    assert summary["zero_tool_reason_code"] == "custom_workflow_actions_handled_turn"
+    assert dispatch["zero_tool_reason_code"] == "custom_workflow_actions_handled_turn"
+    assert dispatch["custom_workflow_execution"]["durable_side_effects"] == [
+        {
+            "mutation_kind": "created",
+            "artefact_type": "workflow",
+            "source_key": "created_workflow_ids",
+            "source_path": "created_workflow_ids",
+            "artefact_count": 1,
+            "artefact_ids": ["#V#wf_new"],
+        }
+    ]
 
 
 def test_build_workflow_routing_diagnostics_preserves_selector_exchange_and_dispatch_events() -> None:

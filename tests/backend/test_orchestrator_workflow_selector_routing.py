@@ -3066,6 +3066,117 @@ def test_non_standard_workflow_routes_via_execute_workflow(monkeypatch):
     assert execution_entry["completed"] is True
 
 
+def test_non_standard_workflow_emits_custom_workflow_execution_summary(monkeypatch):
+    import src.backend.services.workflow_selection_policy_service as policy_module
+
+    monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = "#V#custom_summary_workflow"
+
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=selected_workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=selected_workflow_id,
+                initial_state="done",
+                states={"done": WorkflowStateSpec(state_id="done", terminal=True)},
+            ),
+            purpose="Workflow execution summary regression test.",
+            source="test",
+        )
+    )
+
+    def _run_workflow(_workflow_def: Any, **_kwargs: Any):
+        return SimpleNamespace(
+            completed=True,
+            final_state="done",
+            error=None,
+            data={
+                "response_text": "Workflow created.",
+                "created_workflow_ids": ["#V#wf_new"],
+                "alignment": {"updated_type_ids": ["#V#durable_workflow"]},
+                "workflow_step_result_envelopes": [
+                    {
+                        "state_id": "prepare",
+                        "action_id": "tool.prepare",
+                        "action_outcome": "success",
+                    },
+                    {
+                        "state_id": "persist",
+                        "action_id": "tool.persist",
+                        "action_outcome": "success",
+                    },
+                ],
+                "workflow_terminal_effect_events": [
+                    {
+                        "state_id": "done",
+                        "symbol": "#V#workflow_effect_custom_summary_done_terminal",
+                        "alias": "workflow_effect_custom_summary_done_terminal",
+                        "applied": True,
+                    }
+                ],
+                "workflow_control_flow_events": [
+                    {"status": "entered_state", "state_id": "prepare"},
+                    {"status": "entered_state", "state_id": "persist"},
+                ],
+            },
+        )
+
+    monkeypatch.setattr(orchestrator._workflow_executor, "run", _run_workflow)
+
+    llm = _CapturingLLM([selected_workflow_id.lower()])
+    result = orchestrator.run(
+        prompt="Create the workflow definition.",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result={
+            "matches": [{"concept_id": selected_workflow_id}],
+            "match_count": 1,
+        },
+    )
+
+    execution_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict) and entry.get("type") == "workflow_execution"
+        ),
+        None,
+    )
+    assert execution_entry is not None
+    assert execution_entry["workflow_id"] == selected_workflow_id
+    assert execution_entry["completed"] is True
+
+    execution_summary = execution_entry.get("execution_summary")
+    assert isinstance(execution_summary, dict)
+    assert execution_summary["workflow_id"] == selected_workflow_id
+    assert execution_summary["step_result_envelope_count"] == 2
+    assert execution_summary["action_completed_count"] == 2
+    assert execution_summary["action_success_count"] == 2
+    assert execution_summary["terminal_effect_count"] == 1
+    assert execution_summary["durable_side_effect_count"] == 2
+    assert execution_summary["durable_side_effects"] == [
+        {
+            "mutation_kind": "created",
+            "artefact_type": "workflow",
+            "source_key": "created_workflow_ids",
+            "source_path": "created_workflow_ids",
+            "artefact_count": 1,
+            "artefact_ids": ["#V#wf_new"],
+        },
+        {
+            "mutation_kind": "updated",
+            "artefact_type": "type",
+            "source_key": "updated_type_ids",
+            "source_path": "alignment.updated_type_ids",
+            "artefact_count": 1,
+            "artefact_ids": ["#V#durable_workflow"],
+        },
+    ]
+
+
 def test_custom_workflow_run_applies_launch_contract_without_workflow_specific_glue(
     monkeypatch,
 ):

@@ -640,6 +640,292 @@ def _sorted_count_entries(counts: Mapping[str, int] | None) -> list[dict[str, An
     ]
 
 
+def _normalise_workflow_execution_terminal_effects(
+    raw_effects: Any,
+) -> list[dict[str, Any]]:
+    if not isinstance(raw_effects, list):
+        return []
+    normalised: list[dict[str, Any]] = []
+    for raw in raw_effects:
+        if not isinstance(raw, Mapping):
+            continue
+        normalised.append(
+            {
+                "state_id": _safe_str(raw.get("state_id")),
+                "symbol": _safe_str(raw.get("symbol")),
+                "alias": _safe_str(raw.get("alias")),
+                "applied": bool(raw.get("applied")),
+            }
+        )
+    return normalised
+
+
+def _normalise_workflow_execution_side_effects(
+    raw_effects: Any,
+) -> list[dict[str, Any]]:
+    if not isinstance(raw_effects, list):
+        return []
+    normalised: list[dict[str, Any]] = []
+    for raw in raw_effects:
+        if not isinstance(raw, Mapping):
+            continue
+        artefact_ids = _dedupe_string_sequence(raw.get("artefact_ids") or [])
+        normalised.append(
+            {
+                "mutation_kind": _safe_str(raw.get("mutation_kind")),
+                "artefact_type": _safe_str(raw.get("artefact_type")),
+                "source_key": _safe_str(raw.get("source_key")),
+                "source_path": _safe_str(raw.get("source_path")),
+                "artefact_count": (
+                    _safe_non_negative_int(raw.get("artefact_count"))
+                    or len(artefact_ids)
+                ),
+                "artefact_ids": artefact_ids,
+            }
+        )
+    return normalised
+
+
+def _build_custom_workflow_execution_summary(
+    *,
+    aux_llm_calls: Sequence[Mapping[str, Any]] | None,
+    selected_execution_mode: str,
+    selected_workflow_id: str,
+    dispatch_workflow_id: str,
+    dispatch_terminal_completed: bool | None,
+    dispatch_terminal_final_state: str,
+    dispatch_terminal_failing_state_id: str,
+    dispatch_terminal_failing_action_id: str,
+) -> dict[str, Any] | None:
+    workflow_execution_entries = _collect_aux_entries(
+        aux_llm_calls,
+        entry_type="workflow_execution",
+    )
+    if selected_execution_mode != "custom_workflow" and not workflow_execution_entries:
+        return None
+
+    selected_entry: Mapping[str, Any] | None = None
+    selected_dispatch_workflow_id = _safe_str(dispatch_workflow_id) or ""
+    selected_workflow_id_text = _safe_str(selected_workflow_id) or ""
+    for candidate in reversed(workflow_execution_entries):
+        candidate_workflow_id = _safe_str(candidate.get("workflow_id")) or ""
+        if (
+            selected_dispatch_workflow_id
+            and candidate_workflow_id.lower() == selected_dispatch_workflow_id.lower()
+        ):
+            selected_entry = candidate
+            break
+        if (
+            selected_workflow_id_text
+            and candidate_workflow_id.lower() == selected_workflow_id_text.lower()
+        ):
+            selected_entry = candidate
+            break
+    if selected_entry is None and workflow_execution_entries:
+        selected_entry = workflow_execution_entries[-1]
+
+    summary_payload = (
+        selected_entry.get("execution_summary")
+        if isinstance(selected_entry, Mapping)
+        else None
+    )
+    if not isinstance(summary_payload, Mapping):
+        summary_payload = {}
+
+    terminal_effects = _normalise_workflow_execution_terminal_effects(
+        summary_payload.get("terminal_effects")
+    )
+    durable_side_effects = _normalise_workflow_execution_side_effects(
+        summary_payload.get("durable_side_effects")
+    )
+
+    step_result_envelope_count = _safe_non_negative_int(
+        summary_payload.get("step_result_envelope_count")
+    )
+    action_started_count = _safe_non_negative_int(
+        summary_payload.get("action_started_count"),
+        default=step_result_envelope_count,
+    )
+    action_completed_count = _safe_non_negative_int(
+        summary_payload.get("action_completed_count"),
+        default=step_result_envelope_count,
+    )
+    action_success_count = _safe_non_negative_int(
+        summary_payload.get("action_success_count")
+    )
+    action_failure_count = _safe_non_negative_int(
+        summary_payload.get("action_failure_count")
+    )
+    action_unknown_count = _safe_non_negative_int(
+        summary_payload.get("action_unknown_count")
+    )
+    runtime_event_count = _safe_non_negative_int(
+        summary_payload.get("runtime_event_count")
+    )
+    terminal_effect_count = _safe_non_negative_int(
+        summary_payload.get("terminal_effect_count"),
+        default=len(terminal_effects),
+    )
+    durable_side_effect_count = _safe_non_negative_int(
+        summary_payload.get("durable_side_effect_count"),
+        default=sum(
+            _safe_non_negative_int(item.get("artefact_count"))
+            for item in durable_side_effects
+        ),
+    )
+
+    completed_value = summary_payload.get("completed")
+    if not isinstance(completed_value, bool) and isinstance(selected_entry, Mapping):
+        entry_completed = selected_entry.get("completed")
+        if isinstance(entry_completed, bool):
+            completed_value = entry_completed
+    if not isinstance(completed_value, bool):
+        completed_value = (
+            dispatch_terminal_completed
+            if isinstance(dispatch_terminal_completed, bool)
+            else None
+        )
+
+    final_state = _safe_str(summary_payload.get("final_state"))
+    if not final_state and isinstance(selected_entry, Mapping):
+        final_state = _safe_str(selected_entry.get("final_state"))
+    if not final_state:
+        final_state = _safe_str(dispatch_terminal_final_state)
+
+    first_failing_state_id = _safe_str(summary_payload.get("first_failing_state_id"))
+    if not first_failing_state_id:
+        first_failing_state_id = _safe_str(dispatch_terminal_failing_state_id)
+    first_failing_action_id = _safe_str(
+        summary_payload.get("first_failing_action_id")
+    )
+    if not first_failing_action_id:
+        first_failing_action_id = _safe_str(dispatch_terminal_failing_action_id)
+
+    observed = selected_entry is not None
+    workflow_id = _safe_str(summary_payload.get("workflow_id"))
+    if not workflow_id and isinstance(selected_entry, Mapping):
+        workflow_id = _safe_str(selected_entry.get("workflow_id"))
+    if not workflow_id:
+        workflow_id = _safe_str(dispatch_workflow_id) or _safe_str(selected_workflow_id)
+
+    return {
+        "observed": observed,
+        "schema_version": _safe_str(summary_payload.get("schema_version"))
+        or "workflow_execution_summary.v1",
+        "workflow_id": workflow_id,
+        "completed": completed_value if isinstance(completed_value, bool) else None,
+        "final_state": final_state,
+        "step_result_envelope_count": step_result_envelope_count,
+        "action_started_count": action_started_count,
+        "action_completed_count": action_completed_count,
+        "action_success_count": action_success_count,
+        "action_failure_count": action_failure_count,
+        "action_unknown_count": action_unknown_count,
+        "first_failing_state_id": first_failing_state_id,
+        "first_failing_action_id": first_failing_action_id,
+        "runtime_event_count": runtime_event_count,
+        "terminal_effect_count": terminal_effect_count,
+        "terminal_effects": terminal_effects,
+        "durable_side_effect_count": durable_side_effect_count,
+        "durable_side_effects": durable_side_effects,
+    }
+
+
+def _derive_zero_tool_execution_reason(
+    *,
+    selected_execution_mode: str,
+    tool_route_selected: bool,
+    tool_executed_count: int,
+    failure_codes: Sequence[str],
+    dispatch_terminal_status: str,
+    dispatch_terminal_completed: bool | None,
+    custom_workflow_execution: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    if tool_executed_count > 0:
+        return {
+            "zero_tool_reason_code": None,
+            "zero_tool_reason": None,
+            "zero_tool_execution_expected": None,
+        }
+
+    custom_execution = (
+        custom_workflow_execution
+        if isinstance(custom_workflow_execution, Mapping)
+        else {}
+    )
+    if (selected_execution_mode or "").lower() == "custom_workflow":
+        action_completed_count = _safe_non_negative_int(
+            custom_execution.get("action_completed_count")
+        )
+        terminal_effect_count = _safe_non_negative_int(
+            custom_execution.get("terminal_effect_count")
+        )
+        durable_side_effect_count = _safe_non_negative_int(
+            custom_execution.get("durable_side_effect_count")
+        )
+        if (
+            action_completed_count > 0
+            or terminal_effect_count > 0
+            or durable_side_effect_count > 0
+        ):
+            return {
+                "zero_tool_reason_code": "custom_workflow_actions_handled_turn",
+                "zero_tool_reason": (
+                    "No tools were required because custom-workflow actions handled the turn."
+                ),
+                "zero_tool_execution_expected": True,
+            }
+        if (
+            isinstance(dispatch_terminal_completed, bool) and dispatch_terminal_completed
+        ) or (dispatch_terminal_status or "").lower() == "completed":
+            return {
+                "zero_tool_reason_code": "custom_workflow_completed_without_tool_invocations",
+                "zero_tool_reason": (
+                    "No tools were required because the custom workflow completed without tool invocations."
+                ),
+                "zero_tool_execution_expected": True,
+            }
+        if (dispatch_terminal_status or "").lower() == "failed":
+            return {
+                "zero_tool_reason_code": "custom_workflow_failed_before_tool_invocation",
+                "zero_tool_reason": (
+                    "No tools started because the custom workflow failed before any tool invocation."
+                ),
+                "zero_tool_execution_expected": False,
+            }
+        return {
+            "zero_tool_reason_code": "custom_workflow_telemetry_incomplete",
+            "zero_tool_reason": (
+                "No tools started and custom-workflow execution evidence was incomplete."
+            ),
+            "zero_tool_execution_expected": False,
+        }
+
+    if (selected_execution_mode or "").lower() == "direct_response":
+        return {
+            "zero_tool_reason_code": "direct_response_no_tools_required",
+            "zero_tool_reason": "No tools were required for this direct response.",
+            "zero_tool_execution_expected": True,
+        }
+
+    if tool_route_selected:
+        primary_failure_code = _safe_str(failure_codes[0]) if failure_codes else None
+        return {
+            "zero_tool_reason_code": primary_failure_code or "tool_dispatch_zero_execution",
+            "zero_tool_reason": _TOOL_EXECUTION_FAILURE_REASON_MAP.get(
+                primary_failure_code or "",
+                "Tool-calling workflow selected but no tool execution was observed.",
+            ),
+            "zero_tool_execution_expected": False,
+        }
+
+    return {
+        "zero_tool_reason_code": "no_tool_execution_observed",
+        "zero_tool_reason": "No tool execution was observed.",
+        "zero_tool_execution_expected": False,
+    }
+
+
 def _normalise_prompt_provenance(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, Mapping):
         return None
@@ -1091,6 +1377,28 @@ def build_workflow_routing_diagnostics(
         if isinstance(raw_dispatch_terminal_unresolved_required_inputs, list)
         else []
     )
+    tool_execution_payload_raw = execution_summary_payload.get("tool_execution")
+    tool_execution_payload = (
+        tool_execution_payload_raw if isinstance(tool_execution_payload_raw, Mapping) else {}
+    )
+    custom_workflow_execution_payload_raw = execution_summary_payload.get(
+        "custom_workflow_execution"
+    )
+    custom_workflow_execution_payload = (
+        custom_workflow_execution_payload_raw
+        if isinstance(custom_workflow_execution_payload_raw, Mapping)
+        else None
+    )
+    custom_workflow_terminal_effects = _normalise_workflow_execution_terminal_effects(
+        custom_workflow_execution_payload.get("terminal_effects")
+        if isinstance(custom_workflow_execution_payload, Mapping)
+        else None
+    )
+    custom_workflow_side_effects = _normalise_workflow_execution_side_effects(
+        custom_workflow_execution_payload.get("durable_side_effects")
+        if isinstance(custom_workflow_execution_payload, Mapping)
+        else None
+    )
     first_dispatch_boundary = (
         _safe_str(dispatch_events[0].get("boundary")) if dispatch_events else None
     )
@@ -1284,9 +1592,120 @@ def build_workflow_routing_diagnostics(
             "zero_tools_executed": bool(
                 execution_summary_payload.get("zero_tools_executed")
             ),
+            "zero_tool_reason_code": _safe_str(
+                execution_summary_payload.get("zero_tool_reason_code")
+            ),
+            "zero_tool_reason": _safe_str(
+                execution_summary_payload.get("zero_tool_reason")
+            ),
+            "zero_tool_execution_expected": (
+                execution_summary_payload.get("zero_tool_execution_expected")
+                if isinstance(
+                    execution_summary_payload.get("zero_tool_execution_expected"),
+                    bool,
+                )
+                else None
+            ),
             "failure_codes": dispatch_failure_codes,
             "zero_execution_primary_failure_code": dispatch_primary_failure_code,
             "zero_execution_primary_failure_reason": dispatch_primary_failure_reason,
+            "tool_execution": {
+                "planned_count": _safe_non_negative_int(
+                    tool_execution_payload.get("planned_count")
+                ),
+                "started_count": _safe_non_negative_int(
+                    tool_execution_payload.get("started_count")
+                ),
+                "executed_count": _safe_non_negative_int(
+                    tool_execution_payload.get("executed_count")
+                ),
+                "invocation_count": _safe_non_negative_int(
+                    tool_execution_payload.get("invocation_count")
+                ),
+                "worker_unavailable_event_count": _safe_non_negative_int(
+                    tool_execution_payload.get("worker_unavailable_event_count")
+                ),
+                "tool_plan_stage_event_count": _safe_non_negative_int(
+                    tool_execution_payload.get("tool_plan_stage_event_count")
+                ),
+                "tool_execute_stage_event_count": _safe_non_negative_int(
+                    tool_execution_payload.get("tool_execute_stage_event_count")
+                ),
+                "parse_error_invocation_count": _safe_non_negative_int(
+                    tool_execution_payload.get("parse_error_invocation_count")
+                ),
+                "validation_error_invocation_count": _safe_non_negative_int(
+                    tool_execution_payload.get("validation_error_invocation_count")
+                ),
+                "zero_tools_executed": bool(
+                    tool_execution_payload.get("zero_tools_executed")
+                ),
+                "failure_codes": _dedupe_string_sequence(
+                    tool_execution_payload.get("failure_codes") or []
+                ),
+            },
+            "custom_workflow_execution": (
+                {
+                    "observed": bool(custom_workflow_execution_payload.get("observed")),
+                    "schema_version": _safe_str(
+                        custom_workflow_execution_payload.get("schema_version")
+                    ),
+                    "workflow_id": _safe_str(
+                        custom_workflow_execution_payload.get("workflow_id")
+                    ),
+                    "completed": (
+                        custom_workflow_execution_payload.get("completed")
+                        if isinstance(
+                            custom_workflow_execution_payload.get("completed"), bool
+                        )
+                        else None
+                    ),
+                    "final_state": _safe_str(
+                        custom_workflow_execution_payload.get("final_state")
+                    ),
+                    "step_result_envelope_count": _safe_non_negative_int(
+                        custom_workflow_execution_payload.get(
+                            "step_result_envelope_count"
+                        )
+                    ),
+                    "action_started_count": _safe_non_negative_int(
+                        custom_workflow_execution_payload.get("action_started_count")
+                    ),
+                    "action_completed_count": _safe_non_negative_int(
+                        custom_workflow_execution_payload.get("action_completed_count")
+                    ),
+                    "action_success_count": _safe_non_negative_int(
+                        custom_workflow_execution_payload.get("action_success_count")
+                    ),
+                    "action_failure_count": _safe_non_negative_int(
+                        custom_workflow_execution_payload.get("action_failure_count")
+                    ),
+                    "action_unknown_count": _safe_non_negative_int(
+                        custom_workflow_execution_payload.get("action_unknown_count")
+                    ),
+                    "first_failing_state_id": _safe_str(
+                        custom_workflow_execution_payload.get("first_failing_state_id")
+                    ),
+                    "first_failing_action_id": _safe_str(
+                        custom_workflow_execution_payload.get("first_failing_action_id")
+                    ),
+                    "runtime_event_count": _safe_non_negative_int(
+                        custom_workflow_execution_payload.get("runtime_event_count")
+                    ),
+                    "terminal_effect_count": _safe_non_negative_int(
+                        custom_workflow_execution_payload.get("terminal_effect_count")
+                    ),
+                    "terminal_effects": custom_workflow_terminal_effects,
+                    "durable_side_effect_count": _safe_non_negative_int(
+                        custom_workflow_execution_payload.get(
+                            "durable_side_effect_count"
+                        )
+                    ),
+                    "durable_side_effects": custom_workflow_side_effects,
+                }
+                if isinstance(custom_workflow_execution_payload, Mapping)
+                else None
+            ),
             "last_successful_boundary": _safe_str(
                 execution_summary_payload.get("last_successful_boundary")
             ),
@@ -1689,6 +2108,16 @@ def _summarise_tool_execution_context(
         "custom_workflow",
     }:
         dispatch_workflow_id = selected_workflow_id or ""
+    custom_workflow_execution = _build_custom_workflow_execution_summary(
+        aux_llm_calls=aux_llm_calls,
+        selected_execution_mode=selected_execution_mode,
+        selected_workflow_id=selected_workflow_id or "",
+        dispatch_workflow_id=dispatch_workflow_id,
+        dispatch_terminal_completed=dispatch_terminal_completed,
+        dispatch_terminal_final_state=dispatch_terminal_final_state,
+        dispatch_terminal_failing_state_id=dispatch_terminal_failing_state_id,
+        dispatch_terminal_failing_action_id=dispatch_terminal_failing_action_id,
+    )
 
     failure_codes: list[str] = []
     worker_unavailable_with_tool_expectation = (
@@ -1754,7 +2183,31 @@ def _summarise_tool_execution_context(
     planned_count = max(
         observed_started_count,
         invocation_count,
-        1 if (tool_route_selected and (deduped_failure_codes or dispatch_boundary_events)) else 0,
+        1
+        if (tool_route_selected and (deduped_failure_codes or dispatch_boundary_events))
+        else 0,
+    )
+    tool_execution = {
+        "planned_count": planned_count,
+        "started_count": observed_started_count,
+        "executed_count": observed_executed_count,
+        "invocation_count": invocation_count,
+        "worker_unavailable_event_count": worker_unavailable_event_count,
+        "tool_plan_stage_event_count": tool_plan_stage_event_count,
+        "tool_execute_stage_event_count": tool_execute_stage_event_count,
+        "parse_error_invocation_count": parse_error_invocation_count,
+        "validation_error_invocation_count": validation_error_invocation_count,
+        "failure_codes": list(deduped_failure_codes),
+        "zero_tools_executed": observed_executed_count <= 0,
+    }
+    zero_tool_reason = _derive_zero_tool_execution_reason(
+        selected_execution_mode=selected_execution_mode,
+        tool_route_selected=tool_route_selected,
+        tool_executed_count=observed_executed_count,
+        failure_codes=deduped_failure_codes,
+        dispatch_terminal_status=dispatch_terminal_status,
+        dispatch_terminal_completed=dispatch_terminal_completed,
+        custom_workflow_execution=custom_workflow_execution,
     )
 
     last_successful_boundary = ""
@@ -1809,17 +2262,32 @@ def _summarise_tool_execution_context(
             dispatch_terminal_launch_input_resolution_status or None
         ),
         "last_successful_boundary": last_successful_boundary or None,
-        "planned_count": planned_count,
-        "started_count": observed_started_count,
-        "executed_count": observed_executed_count,
-        "invocation_count": invocation_count,
-        "worker_unavailable_event_count": worker_unavailable_event_count,
-        "tool_plan_stage_event_count": tool_plan_stage_event_count,
-        "tool_execute_stage_event_count": tool_execute_stage_event_count,
-        "failure_codes": list(deduped_failure_codes),
-        "zero_tools_executed": observed_executed_count <= 0,
-        "parse_error_invocation_count": parse_error_invocation_count,
-        "validation_error_invocation_count": validation_error_invocation_count,
+        "planned_count": tool_execution["planned_count"],
+        "started_count": tool_execution["started_count"],
+        "executed_count": tool_execution["executed_count"],
+        "invocation_count": tool_execution["invocation_count"],
+        "worker_unavailable_event_count": tool_execution[
+            "worker_unavailable_event_count"
+        ],
+        "tool_plan_stage_event_count": tool_execution["tool_plan_stage_event_count"],
+        "tool_execute_stage_event_count": tool_execution[
+            "tool_execute_stage_event_count"
+        ],
+        "failure_codes": list(tool_execution["failure_codes"]),
+        "zero_tools_executed": tool_execution["zero_tools_executed"],
+        "parse_error_invocation_count": tool_execution[
+            "parse_error_invocation_count"
+        ],
+        "validation_error_invocation_count": tool_execution[
+            "validation_error_invocation_count"
+        ],
+        "tool_execution": tool_execution,
+        "custom_workflow_execution": custom_workflow_execution,
+        "zero_tool_reason_code": zero_tool_reason["zero_tool_reason_code"],
+        "zero_tool_reason": zero_tool_reason["zero_tool_reason"],
+        "zero_tool_execution_expected": zero_tool_reason[
+            "zero_tool_execution_expected"
+        ],
     }
 
 
