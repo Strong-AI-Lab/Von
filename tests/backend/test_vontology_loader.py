@@ -45,6 +45,7 @@ from src.backend.workflows.vontology_loader import (
     resolve_workflow_narrative_text,
     resolve_workflow_publication_lifecycle,
     resolve_workflow_step_runtime_policies,
+    resolve_workflow_typed_subworkflow_route_map,
 )
 from src.backend.workflows.workflow_action_contracts import (
     build_workflow_action_contract_payload,
@@ -351,6 +352,53 @@ class TestFetchConceptProjection:
 
 
 class TestWorkflowDescriptionResolution:
+    def test_resolve_workflow_typed_subworkflow_route_map_prefers_canonical_text_relation(
+        self,
+    ):
+        with patch(
+            "src.backend.workflows.vontology_loader.get_texts_for_concept",
+            return_value=[
+                {
+                    "predicate": "#V#hasWorkflowTypedSubworkflowRouteMapJson",
+                    "text": json.dumps(
+                        {
+                            "schema_version": "workflow_typed_subworkflow_route_map.v1",
+                            "default_route_key": "interpret",
+                            "minimum_route_score": 0.58,
+                            "minimum_mutation_confidence": 0.84,
+                            "allow_interpret_fallback": True,
+                            "routes": [
+                                {
+                                    "route_key": "scholarly",
+                                    "selected_route_mode": "specialised",
+                                    "mutation_route": True,
+                                    "candidate_workflow_ids": [
+                                        "#V#scholarly_paper_representation_workflow"
+                                    ],
+                                },
+                                {
+                                    "route_key": "interpret",
+                                    "selected_route_mode": "interpret",
+                                    "mutation_route": False,
+                                },
+                            ],
+                        }
+                    ),
+                }
+            ],
+        ):
+            route_map, source = resolve_workflow_typed_subworkflow_route_map(
+                "#V#demo_workflow"
+            )
+
+        assert route_map is not None
+        assert route_map["default_route_key"] == "interpret"
+        assert route_map["routes"][0]["route_key"] == "scholarly"
+        assert (
+            source
+            == "text_relation:#V#hasWorkflowTypedSubworkflowRouteMapJson"
+        )
+
     def test_resolve_workflow_discovery_exemplars_prefers_canonical_text_relation(self):
         with patch(
             "src.backend.workflows.vontology_loader.get_texts_for_concept",
@@ -1319,6 +1367,53 @@ class TestInitialStepKey:
         assert (
             metadata["routing_profile_source"]
             == "text_relation:#V#hasWorkflowRoutingProfileJson"
+        )
+
+    def test_load_definition_carries_typed_subworkflow_route_map_metadata(self):
+        graph = _make_graph(
+            initial_step="#V#start",
+            steps=[_make_step("#V#start", invokes_action="test.action")],
+        )
+
+        with _stub_fetch_concepts(), _stub_narrative():
+            with patch(
+                "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+                return_value=(graph, []),
+            ):
+                with patch(
+                    "src.backend.workflows.vontology_loader.resolve_workflow_background_launch_policy",
+                    return_value=(None, "none"),
+                ):
+                    with patch(
+                        "src.backend.workflows.vontology_loader.resolve_workflow_routing_profile",
+                        return_value=(None, "none"),
+                    ):
+                        with patch(
+                            "src.backend.workflows.vontology_loader.resolve_workflow_typed_subworkflow_route_map",
+                            return_value=(
+                                {
+                                    "schema_version": "workflow_typed_subworkflow_route_map.v1",
+                                    "default_route_key": "interpret",
+                                    "routes": [
+                                        {
+                                            "route_key": "interpret",
+                                            "selected_route_mode": "interpret",
+                                        }
+                                    ],
+                                },
+                                "text_relation:#V#hasWorkflowTypedSubworkflowRouteMapJson",
+                            ),
+                        ):
+                            defn = load_workflow_definition_from_vontology(
+                                "#V#test_workflow"
+                            )
+
+        assert defn is not None
+        metadata = dict(defn.metadata)
+        assert metadata["typed_subworkflow_route_map"]["default_route_key"] == "interpret"
+        assert (
+            metadata["typed_subworkflow_route_map_source"]
+            == "text_relation:#V#hasWorkflowTypedSubworkflowRouteMapJson"
         )
 
     def test_load_definition_carries_discovery_exemplar_metadata(self):

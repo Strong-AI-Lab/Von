@@ -216,6 +216,10 @@ WORKFLOW_BACKGROUND_LAUNCH_POLICY_SCHEMA_VERSION = (
 )
 WORKFLOW_ROUTING_PROFILE_SOURCE_NONE = "none"
 WORKFLOW_ROUTING_PROFILE_SCHEMA_VERSION = "workflow_routing_profile.v1"
+WORKFLOW_TYPED_SUBWORKFLOW_ROUTE_MAP_SOURCE_NONE = "none"
+WORKFLOW_TYPED_SUBWORKFLOW_ROUTE_MAP_SCHEMA_VERSION = (
+    "workflow_typed_subworkflow_route_map.v1"
+)
 WORKFLOW_DISCOVERY_EXEMPLARS_SOURCE_NONE = "none"
 WORKFLOW_DISCOVERY_EXEMPLARS_SCHEMA_VERSION = (
     "workflow_discovery_exemplars.v1"
@@ -309,6 +313,16 @@ WORKFLOW_ROUTING_PROFILE_TEXT_PREDICATE_PRECEDENCE: Tuple[Tuple[str, ...], ...] 
         "hasWorkflowRoutingProfileJson",
         "#V#has_workflow_routing_profile_json",
         "has_workflow_routing_profile_json",
+    ),
+)
+WORKFLOW_TYPED_SUBWORKFLOW_ROUTE_MAP_TEXT_PREDICATE_PRECEDENCE: Tuple[
+    Tuple[str, ...], ...
+] = (
+    (
+        "#V#hasWorkflowTypedSubworkflowRouteMapJson",
+        "hasWorkflowTypedSubworkflowRouteMapJson",
+        "#V#has_workflow_typed_subworkflow_route_map_json",
+        "has_workflow_typed_subworkflow_route_map_json",
     ),
 )
 WORKFLOW_DISCOVERY_EXEMPLARS_TEXT_PREDICATE_PRECEDENCE: Tuple[
@@ -1406,6 +1420,26 @@ def _coerce_positive_int(value: Any) -> int | None:
     return None
 
 
+def _coerce_probability(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+    elif isinstance(value, str):
+        token = value.strip()
+        if not token:
+            return None
+        try:
+            parsed = float(token)
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed < 0.0 or parsed > 1.0:
+        return None
+    return round(parsed, 4)
+
+
 def _normalise_background_launch_scope(value: Any) -> str:
     token = str(value or "").strip().lower()
     if token in {"global", "global_per_server", "server", "per_server"}:
@@ -1617,6 +1651,242 @@ def resolve_workflow_routing_profile(
                 return profile, f"text_relation:{predicate}"
 
     return None, WORKFLOW_ROUTING_PROFILE_SOURCE_NONE
+
+
+def _normalise_typed_subworkflow_route_mode(value: Any) -> str | None:
+    token = str(value or "").strip().lower().replace("-", "_")
+    aliases = {
+        "specialised": "specialised",
+        "specialized": "specialised",
+        "subworkflow": "specialised",
+        "specialised_subworkflow": "specialised",
+        "interpret": "interpret",
+        "noop": "noop",
+        "no_op": "noop",
+        "fail_closed": "fail_closed",
+        "failclosed": "fail_closed",
+    }
+    return aliases.get(token)
+
+
+def _normalise_typed_subworkflow_fallback_mode(value: Any) -> str | None:
+    token = str(value or "").strip().lower().replace("-", "_")
+    aliases = {
+        "interpret_if_allowed_else_noop": "interpret_if_allowed_else_noop",
+        "interpret_or_noop": "interpret_if_allowed_else_noop",
+        "interpret_if_allowed": "interpret_if_allowed_else_noop",
+        "interpret": "interpret",
+        "noop": "noop",
+        "no_op": "noop",
+        "fail_closed": "fail_closed",
+        "failclosed": "fail_closed",
+        "specialised": "specialised",
+        "specialized": "specialised",
+    }
+    return aliases.get(token)
+
+
+def _normalise_typed_subworkflow_candidate_ids(value: Any) -> list[str]:
+    if isinstance(value, str):
+        token = value.strip()
+        return [token] if token else []
+    if not isinstance(value, Sequence) or isinstance(value, str):
+        return []
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        token = _normalise_non_empty_text(item)
+        if token is None or token in seen:
+            continue
+        seen.add(token)
+        ordered.append(token)
+    return ordered
+
+
+def _normalise_typed_subworkflow_route_entry(
+    *,
+    route_key: str,
+    raw_route: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    candidate_workflow_ids = _normalise_typed_subworkflow_candidate_ids(
+        raw_route.get("candidate_workflow_ids")
+        or raw_route.get("target_workflow_ids")
+        or raw_route.get("workflow_ids")
+    )
+    selected_route_mode = _normalise_typed_subworkflow_route_mode(
+        raw_route.get("selected_route_mode")
+        or raw_route.get("route_mode")
+        or raw_route.get("mode")
+    )
+    if selected_route_mode is None:
+        if candidate_workflow_ids:
+            selected_route_mode = "specialised"
+        elif route_key == "noop":
+            selected_route_mode = "noop"
+        elif route_key == "fail_closed":
+            selected_route_mode = "fail_closed"
+        else:
+            selected_route_mode = "interpret"
+
+    mutation_route = _coerce_bool(raw_route.get("mutation_route"))
+    if mutation_route is None:
+        mutation_route = selected_route_mode == "specialised"
+
+    if selected_route_mode == "specialised" and not candidate_workflow_ids:
+        return None
+    if selected_route_mode != "specialised":
+        candidate_workflow_ids = []
+
+    on_workflow_unavailable = _normalise_typed_subworkflow_fallback_mode(
+        raw_route.get("on_workflow_unavailable")
+        or raw_route.get("unavailable_mode")
+        or raw_route.get("fallback_mode")
+    )
+    if on_workflow_unavailable is None:
+        if selected_route_mode == "specialised":
+            on_workflow_unavailable = "interpret_if_allowed_else_noop"
+        else:
+            on_workflow_unavailable = selected_route_mode
+
+    on_low_confidence = _normalise_typed_subworkflow_fallback_mode(
+        raw_route.get("on_low_confidence")
+        or raw_route.get("low_confidence_mode")
+    )
+    if on_low_confidence is None:
+        if mutation_route:
+            on_low_confidence = "fail_closed"
+        else:
+            on_low_confidence = selected_route_mode
+
+    unsupported_reason = (
+        _normalise_non_empty_text(
+            raw_route.get("unsupported_reason")
+            or raw_route.get("unavailable_reason")
+            or raw_route.get("fallback_reason")
+        )
+        or "specialised_workflow_unavailable"
+    )
+    return {
+        "route_key": route_key,
+        "selected_route_mode": selected_route_mode,
+        "mutation_route": bool(mutation_route),
+        "candidate_workflow_ids": candidate_workflow_ids,
+        "on_workflow_unavailable": on_workflow_unavailable,
+        "on_low_confidence": on_low_confidence,
+        "unsupported_reason": unsupported_reason,
+    }
+
+
+def _normalise_workflow_typed_subworkflow_route_map(
+    raw_payload: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if not isinstance(raw_payload, Mapping):
+        return None
+
+    raw_routes = raw_payload.get("routes") or raw_payload.get("route_map")
+    normalised_routes: list[dict[str, Any]] = []
+    if isinstance(raw_routes, Mapping):
+        for raw_route_key, raw_route in raw_routes.items():
+            route_key = _normalise_non_empty_text(raw_route_key)
+            if route_key is None or not isinstance(raw_route, Mapping):
+                continue
+            route = _normalise_typed_subworkflow_route_entry(
+                route_key=route_key,
+                raw_route=raw_route,
+            )
+            if route is not None:
+                normalised_routes.append(route)
+    elif isinstance(raw_routes, Sequence) and not isinstance(raw_routes, str):
+        for item in raw_routes:
+            if not isinstance(item, Mapping):
+                continue
+            route_key = _normalise_non_empty_text(item.get("route_key"))
+            if route_key is None:
+                continue
+            route = _normalise_typed_subworkflow_route_entry(
+                route_key=route_key,
+                raw_route=item,
+            )
+            if route is not None:
+                normalised_routes.append(route)
+
+    if not normalised_routes:
+        return None
+
+    route_keys = [str(item["route_key"]) for item in normalised_routes]
+    default_route_key = _normalise_non_empty_text(raw_payload.get("default_route_key"))
+    if default_route_key not in route_keys:
+        default_route_key = "interpret" if "interpret" in route_keys else route_keys[0]
+
+    minimum_route_score = _coerce_probability(raw_payload.get("minimum_route_score"))
+    if minimum_route_score is None:
+        minimum_route_score = 0.58
+    minimum_mutation_confidence = _coerce_probability(
+        raw_payload.get("minimum_mutation_confidence")
+    )
+    if minimum_mutation_confidence is None:
+        minimum_mutation_confidence = 0.84
+    allow_interpret_fallback = _coerce_bool(
+        raw_payload.get("allow_interpret_fallback")
+    )
+    if allow_interpret_fallback is None:
+        allow_interpret_fallback = True
+
+    return {
+        "schema_version": WORKFLOW_TYPED_SUBWORKFLOW_ROUTE_MAP_SCHEMA_VERSION,
+        "default_route_key": default_route_key,
+        "minimum_route_score": minimum_route_score,
+        "minimum_mutation_confidence": minimum_mutation_confidence,
+        "allow_interpret_fallback": bool(allow_interpret_fallback),
+        "routes": normalised_routes,
+    }
+
+
+def _parse_workflow_typed_subworkflow_route_map_text_value(
+    text_value: Any,
+) -> dict[str, Any] | None:
+    text = _normalise_non_empty_text(text_value)
+    if not text:
+        return None
+
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return None
+
+    if isinstance(parsed, Mapping):
+        return _normalise_workflow_typed_subworkflow_route_map(parsed)
+    return None
+
+
+def resolve_workflow_typed_subworkflow_route_map(
+    workflow_id: str,
+) -> tuple[dict[str, Any] | None, str]:
+    """Resolve declarative typed-subworkflow route-map metadata from Vontology."""
+
+    if not isinstance(workflow_id, str) or not workflow_id.strip():
+        return None, WORKFLOW_TYPED_SUBWORKFLOW_ROUTE_MAP_SOURCE_NONE
+
+    texts: list[dict[str, Any]] = []
+    try:
+        raw_texts = get_texts_for_concept(workflow_id)
+    except Exception:
+        raw_texts = []
+    if isinstance(raw_texts, list):
+        texts = [item for item in raw_texts if isinstance(item, dict)]
+
+    for predicate_aliases in WORKFLOW_TYPED_SUBWORKFLOW_ROUTE_MAP_TEXT_PREDICATE_PRECEDENCE:
+        for item in texts:
+            predicate = str(item.get("predicate") or "").strip()
+            if predicate not in predicate_aliases:
+                continue
+            route_map = _parse_workflow_typed_subworkflow_route_map_text_value(
+                item.get("text")
+            )
+            if route_map is not None:
+                return route_map, f"text_relation:{predicate}"
+
+    return None, WORKFLOW_TYPED_SUBWORKFLOW_ROUTE_MAP_SOURCE_NONE
 
 
 def _normalise_non_empty_text_tuple(value: Any, *, max_items: int = 16) -> tuple[str, ...]:
@@ -3276,6 +3546,9 @@ def load_workflow_definition_from_vontology(
     routing_profile, routing_profile_source = resolve_workflow_routing_profile(
         workflow_id
     )
+    typed_subworkflow_route_map, typed_subworkflow_route_map_source = (
+        resolve_workflow_typed_subworkflow_route_map(workflow_id)
+    )
     discovery_exemplars, discovery_exemplars_source = (
         resolve_workflow_discovery_exemplars(workflow_id)
     )
@@ -3304,6 +3577,19 @@ def load_workflow_definition_from_vontology(
         and routing_profile_source != WORKFLOW_ROUTING_PROFILE_SOURCE_NONE
     ):
         workflow_metadata["routing_profile_source"] = routing_profile_source
+    if typed_subworkflow_route_map is not None:
+        workflow_metadata["typed_subworkflow_route_map"] = (
+            typed_subworkflow_route_map
+        )
+    if (
+        isinstance(typed_subworkflow_route_map_source, str)
+        and typed_subworkflow_route_map_source
+        and typed_subworkflow_route_map_source
+        != WORKFLOW_TYPED_SUBWORKFLOW_ROUTE_MAP_SOURCE_NONE
+    ):
+        workflow_metadata["typed_subworkflow_route_map_source"] = (
+            typed_subworkflow_route_map_source
+        )
     if discovery_exemplars is not None:
         workflow_metadata["discovery_exemplars"] = discovery_exemplars
     if (

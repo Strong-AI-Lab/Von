@@ -127,6 +127,8 @@ def test_persist_route_outcome_writes_singleton_text_relation(monkeypatch) -> No
         "upload_target_workflow_id": "#V#scholarly_paper_representation_workflow",
         "upload_target_workflow_available": True,
         "upload_effective_route_mode": "fail_closed",
+        "upload_typed_subworkflow_route_map_source": "text_relation:#V#hasWorkflowTypedSubworkflowRouteMapJson",
+        "upload_typed_subworkflow_route_map_schema_version": "workflow_typed_subworkflow_route_map.v1",
     }
     result = registry.execute(
         "file_copy_upload.persist_route_outcome",
@@ -146,6 +148,10 @@ def test_persist_route_outcome_writes_singleton_text_relation(monkeypatch) -> No
     assert payload["effective_route_mode"] == "fail_closed"
     assert payload["route_success"] is False
     assert payload["route_terminal_reason"] == "mutation_route_confidence_below_threshold"
+    assert (
+        payload["typed_subworkflow_route_map_source"]
+        == "text_relation:#V#hasWorkflowTypedSubworkflowRouteMapJson"
+    )
 
 
 def test_persist_route_outcome_marks_interpret_fallback_success(monkeypatch) -> None:

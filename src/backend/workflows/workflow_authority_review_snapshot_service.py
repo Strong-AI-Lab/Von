@@ -22,6 +22,7 @@ from .vontology_loader import (
     resolve_workflow_launch_input_contract,
     resolve_workflow_publication_lifecycle,
     resolve_workflow_routing_profile,
+    resolve_workflow_typed_subworkflow_route_map,
 )
 from .workflow_definition_identity_service import build_workflow_definition_identity_from_graph
 from .workflow_template_profile_service import load_workflow_template_bundle
@@ -127,6 +128,9 @@ def _build_workflow_review_entry(workflow_id: str) -> dict[str, Any]:
     routing_profile, routing_profile_source = resolve_workflow_routing_profile(
         workflow_id_text
     )
+    typed_subworkflow_route_map, typed_subworkflow_route_map_source = (
+        resolve_workflow_typed_subworkflow_route_map(workflow_id_text)
+    )
     discovery_exemplars, discovery_exemplars_source = (
         resolve_workflow_discovery_exemplars(workflow_id_text)
     )
@@ -149,6 +153,12 @@ def _build_workflow_review_entry(workflow_id: str) -> dict[str, Any]:
             ),
             "routing_profile": _stable_json_like(routing_profile),
             "routing_profile_source": str(routing_profile_source or "").strip() or None,
+            "typed_subworkflow_route_map": _stable_json_like(
+                typed_subworkflow_route_map
+            ),
+            "typed_subworkflow_route_map_source": (
+                str(typed_subworkflow_route_map_source or "").strip() or None
+            ),
             "discovery_exemplars": _stable_json_like(discovery_exemplars),
             "discovery_exemplars_source": (
                 str(discovery_exemplars_source or "").strip() or None

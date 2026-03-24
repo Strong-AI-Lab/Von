@@ -4,12 +4,92 @@ import json
 
 from src.backend.workflows.action_registry import ActionRegistry, WorkflowEnvironment
 from src.backend.workflows.durable.file_copy_upload_classification_workflow import (
-    DEFAULT_SCHOLARLY_WORKFLOW_ID,
     FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID,
     FILE_COPY_UPLOAD_ROUTE_DECISION_PREDICATE,
     build_file_copy_upload_classification_workflow_test_definition,
     register_file_copy_upload_classification_actions,
 )
+
+_USE_DEFAULT_ROUTE_MAP = object()
+
+
+def _seed_route_map() -> dict[str, object]:
+    return {
+        "schema_version": "workflow_typed_subworkflow_route_map.v1",
+        "default_route_key": "interpret",
+        "minimum_route_score": 0.58,
+        "minimum_mutation_confidence": 0.84,
+        "allow_interpret_fallback": True,
+        "routes": [
+            {
+                "route_key": "scholarly",
+                "selected_route_mode": "specialised",
+                "mutation_route": True,
+                "candidate_workflow_ids": ["#V#scholarly_paper_representation_workflow"],
+                "on_workflow_unavailable": "interpret_if_allowed_else_noop",
+                "on_low_confidence": "fail_closed",
+                "unsupported_reason": "specialised_workflow_unavailable",
+            },
+            {
+                "route_key": "cv",
+                "selected_route_mode": "specialised",
+                "mutation_route": True,
+                "candidate_workflow_ids": ["#V#file_copy_cv_representation_workflow"],
+                "on_workflow_unavailable": "interpret_if_allowed_else_noop",
+                "on_low_confidence": "fail_closed",
+                "unsupported_reason": "specialised_workflow_unavailable",
+            },
+            {
+                "route_key": "business_card",
+                "selected_route_mode": "specialised",
+                "mutation_route": True,
+                "candidate_workflow_ids": [
+                    "#V#file_copy_business_card_representation_workflow"
+                ],
+                "on_workflow_unavailable": "interpret_if_allowed_else_noop",
+                "on_low_confidence": "fail_closed",
+                "unsupported_reason": "specialised_workflow_unavailable",
+            },
+            {
+                "route_key": "meeting",
+                "selected_route_mode": "specialised",
+                "mutation_route": True,
+                "candidate_workflow_ids": ["#V#file_copy_meeting_representation_workflow"],
+                "on_workflow_unavailable": "interpret_if_allowed_else_noop",
+                "on_low_confidence": "fail_closed",
+                "unsupported_reason": "specialised_workflow_unavailable",
+            },
+            {
+                "route_key": "interpret",
+                "selected_route_mode": "interpret",
+                "mutation_route": False,
+            },
+            {
+                "route_key": "noop",
+                "selected_route_mode": "noop",
+                "mutation_route": False,
+            },
+        ],
+    }
+
+
+def _patch_route_map(
+    monkeypatch,
+    route_map: dict[str, object] | None | object = _USE_DEFAULT_ROUTE_MAP,
+) -> None:
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.file_copy_upload_classification_workflow.resolve_workflow_typed_subworkflow_route_map",
+        lambda _workflow_id: (
+            (
+                route_map
+                if route_map is not _USE_DEFAULT_ROUTE_MAP
+                else _seed_route_map(),
+                "text_relation:#V#hasWorkflowTypedSubworkflowRouteMapJson",
+            )
+            if route_map is not None
+            else (None, "none")
+        ),
+    )
 
 
 def test_build_file_copy_upload_classification_workflow_test_definition_definition_shape() -> None:
@@ -33,9 +113,10 @@ def test_build_file_copy_upload_classification_workflow_test_definition_definiti
 
 
 def test_classification_selects_specialised_route_when_confident(monkeypatch) -> None:
+    _patch_route_map(monkeypatch)
     monkeypatch.setattr(
         "src.backend.workflows.durable.file_copy_upload_classification_workflow._resolve_available_workflow_ids",
-        lambda _payload: (DEFAULT_SCHOLARLY_WORKFLOW_ID,),
+        lambda _payload: ("#V#scholarly_paper_representation_workflow",),
     )
     registry = ActionRegistry()
     register_file_copy_upload_classification_actions(registry)
@@ -58,7 +139,7 @@ def test_classification_selects_specialised_route_when_confident(monkeypatch) ->
     assert result.outputs["route_mode"] == "specialised"
     assert result.outputs["mutation_route"] is True
     assert result.outputs["target_workflow_available"] is True
-    assert result.outputs["target_workflow_id"] == DEFAULT_SCHOLARLY_WORKFLOW_ID
+    assert result.outputs["target_workflow_id"] == "#V#scholarly_paper_representation_workflow"
     assert (
         result.outputs["typing_primary_type_concept_id"]
         == "#V#scholarly_paper_file_copy"
@@ -72,9 +153,10 @@ def test_classification_selects_specialised_route_when_confident(monkeypatch) ->
 
 
 def test_classification_fail_closes_low_confidence_mutation_route(monkeypatch) -> None:
+    _patch_route_map(monkeypatch)
     monkeypatch.setattr(
         "src.backend.workflows.durable.file_copy_upload_classification_workflow._resolve_available_workflow_ids",
-        lambda _payload: (DEFAULT_SCHOLARLY_WORKFLOW_ID,),
+        lambda _payload: ("#V#scholarly_paper_representation_workflow",),
     )
     registry = ActionRegistry()
     register_file_copy_upload_classification_actions(registry)
@@ -102,6 +184,7 @@ def test_classification_fail_closes_low_confidence_mutation_route(monkeypatch) -
 def test_classification_marks_unsupported_specialised_route_when_unavailable(
     monkeypatch,
 ) -> None:
+    _patch_route_map(monkeypatch)
     monkeypatch.setattr(
         "src.backend.workflows.durable.file_copy_upload_classification_workflow._resolve_available_workflow_ids",
         lambda _payload: ("#V#scholarly_paper_representation_workflow",),
@@ -133,6 +216,7 @@ def test_classification_marks_unsupported_specialised_route_when_unavailable(
 def test_classification_prefers_supplied_typing_result_for_meeting_route(
     monkeypatch,
 ) -> None:
+    _patch_route_map(monkeypatch)
     registry = ActionRegistry()
     register_file_copy_upload_classification_actions(registry)
 
@@ -140,7 +224,6 @@ def test_classification_prefers_supplied_typing_result_for_meeting_route(
         "file_copy_concept_id": "#V#file_copy_meeting_1",
         "original_filename": "generic-upload.bin",
         "content_type": "application/octet-stream",
-        "meeting_workflow_id": "#V#file_copy_meeting_representation_workflow",
         "available_workflow_ids": ["#V#file_copy_meeting_representation_workflow"],
         "typing_result": {
             "schema_version": "file_copy_typing.v1",
@@ -170,6 +253,33 @@ def test_classification_prefers_supplied_typing_result_for_meeting_route(
         "#V#file_copy_meeting_representation_workflow"
     )
     assert "typed_file_copy_context" in result.outputs["route_reasons"]
+    assert result.outputs["typed_subworkflow_route_map_schema_version"] == (
+        "workflow_typed_subworkflow_route_map.v1"
+    )
+
+
+def test_classification_noops_when_route_map_missing(monkeypatch) -> None:
+    _patch_route_map(monkeypatch, route_map=None)
+    registry = ActionRegistry()
+    register_file_copy_upload_classification_actions(registry)
+
+    context: dict[str, object] = {
+        "file_copy_concept_id": "#V#file_copy_missing_route_map",
+        "original_filename": "2502.14996.pdf",
+        "content_type": "application/pdf",
+    }
+    result = registry.execute(
+        "file_copy_upload.classify",
+        inputs={},
+        context=context,
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    assert result.outputs["route_mode"] == "noop"
+    assert result.outputs["unsupported_route_reason"] == "typed_subworkflow_route_map_missing"
+    assert "typed_subworkflow_route_map_missing" in result.outputs["route_reasons"]
+    assert result.outputs["target_workflow_id"] is None
 
 
 def test_persist_route_decision_writes_singleton_text_relation(monkeypatch) -> None:
@@ -204,6 +314,8 @@ def test_persist_route_decision_writes_singleton_text_relation(monkeypatch) -> N
             "#V#curriculum_vitae_file_copy",
             "#V#pdf_computer_file_copy",
         ],
+        "typed_subworkflow_route_map_source": "text_relation:#V#hasWorkflowTypedSubworkflowRouteMapJson",
+        "typed_subworkflow_route_map_schema_version": "workflow_typed_subworkflow_route_map.v1",
     }
     result = registry.execute(
         "file_copy_upload.persist_decision",
@@ -224,3 +336,11 @@ def test_persist_route_decision_writes_singleton_text_relation(monkeypatch) -> N
     assert persisted["typing_schema_version"] == "file_copy_typing.v1"
     assert persisted["typing_primary_type_concept_id"] == "#V#curriculum_vitae_file_copy"
     assert persisted["typing_format_type_concept_id"] == "#V#pdf_computer_file_copy"
+    assert (
+        persisted["typed_subworkflow_route_map_source"]
+        == "text_relation:#V#hasWorkflowTypedSubworkflowRouteMapJson"
+    )
+    assert (
+        persisted["typed_subworkflow_route_map_schema_version"]
+        == "workflow_typed_subworkflow_route_map.v1"
+    )

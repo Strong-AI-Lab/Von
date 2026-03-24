@@ -998,6 +998,43 @@ def test_bootstrap_publishes_file_copy_upload_handler_dynamic_subworkflow_contra
     assert "file_copy_concept_id" in interpret_contract["provided_inputs"]
 
 
+def test_bootstrap_publishes_file_copy_upload_classification_route_map_metadata(
+    _reset_mock_workflow_graph_db,
+):
+    from src.backend.workflows.durable.file_copy_upload_classification_workflow import (
+        FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID,
+    )
+    from src.backend.workflows.vontology_loader import (
+        load_workflow_definition_from_vontology,
+    )
+    from workflow_test_support import bootstrap_authoritative_file_copy_workflows
+
+    report = bootstrap_authoritative_file_copy_workflows()
+    graph_publication = report.get("graph_publication") or {}
+    errors = graph_publication.get("errors_by_workflow_id") or {}
+    assert FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID not in errors
+
+    loaded_definition = load_workflow_definition_from_vontology(
+        FILE_COPY_UPLOAD_CLASSIFICATION_WORKFLOW_ID
+    )
+    assert loaded_definition is not None
+    metadata = dict(loaded_definition.metadata)
+    route_map = metadata["typed_subworkflow_route_map"]
+    assert route_map["default_route_key"] == "interpret"
+    route_by_key = {
+        item["route_key"]: item for item in route_map.get("routes") or []
+    }
+    assert route_by_key["scholarly"]["candidate_workflow_ids"] == [
+        "#V#scholarly_paper_representation_workflow"
+    ]
+    assert route_by_key["cv"]["selected_route_mode"] == "specialised"
+    assert route_by_key["interpret"]["selected_route_mode"] == "interpret"
+    assert (
+        metadata["typed_subworkflow_route_map_source"]
+        == "text_relation:#V#hasWorkflowTypedSubworkflowRouteMapJson"
+    )
+
+
 def test_canonical_workflow_runtime_identity_matches_authoritative_loader(
     _reset_mock_workflow_graph_db,
 ):

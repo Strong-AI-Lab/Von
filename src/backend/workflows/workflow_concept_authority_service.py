@@ -2028,6 +2028,77 @@ def _resolve_authoritative_workflow_text_relations(
     return relation_map
 
 
+def _workflow_text_relation_slot(
+    spec: Mapping[str, Any],
+) -> tuple[str, str] | None:
+    predicate = str(spec.get("predicate") or "").strip()
+    lang = str(spec.get("lang") or "en-NZ").strip() or "en-NZ"
+    if not predicate:
+        return None
+    return predicate, lang
+
+
+def _merge_workflow_text_relations(
+    base_relations: Mapping[str, Sequence[Mapping[str, Any]]] | None,
+    incoming_relations: Mapping[str, Sequence[Mapping[str, Any]]] | None,
+    *,
+    replace_existing_slots: bool,
+) -> Dict[str, tuple[dict[str, Any], ...]]:
+    merged: Dict[str, tuple[dict[str, Any], ...]] = {
+        str(workflow_id).strip(): tuple(
+            dict(spec)
+            for spec in relation_specs or ()
+            if isinstance(workflow_id, str)
+            and str(workflow_id).strip()
+            and isinstance(spec, Mapping)
+        )
+        for workflow_id, relation_specs in (base_relations or {}).items()
+        if isinstance(workflow_id, str) and str(workflow_id).strip()
+    }
+    for workflow_id, relation_specs in (incoming_relations or {}).items():
+        workflow_id_text = str(workflow_id).strip() if isinstance(workflow_id, str) else ""
+        if not workflow_id_text:
+            continue
+        current_specs = list(merged.get(workflow_id_text) or ())
+        if not current_specs:
+            cleaned_specs = [
+                dict(spec) for spec in relation_specs or () if isinstance(spec, Mapping)
+            ]
+            if cleaned_specs:
+                merged[workflow_id_text] = tuple(cleaned_specs)
+            continue
+
+        current_by_slot: Dict[tuple[str, str], dict[str, Any]] = {}
+        ordered_slots: list[tuple[str, str]] = []
+        passthrough_specs: list[dict[str, Any]] = []
+        for spec in current_specs:
+            slot = _workflow_text_relation_slot(spec)
+            if slot is None:
+                passthrough_specs.append(dict(spec))
+                continue
+            if slot not in current_by_slot:
+                ordered_slots.append(slot)
+            current_by_slot[slot] = dict(spec)
+
+        for spec in relation_specs or ():
+            if not isinstance(spec, Mapping):
+                continue
+            slot = _workflow_text_relation_slot(spec)
+            if slot is None:
+                passthrough_specs.append(dict(spec))
+                continue
+            if slot in current_by_slot and not replace_existing_slots:
+                continue
+            if slot not in current_by_slot:
+                ordered_slots.append(slot)
+            current_by_slot[slot] = dict(spec)
+
+        merged[workflow_id_text] = tuple(
+            [*passthrough_specs, *(current_by_slot[slot] for slot in ordered_slots)]
+        )
+    return merged
+
+
 def publish_canonical_chat_workflow_graphs(
     *,
     registry: WorkflowRegistry | None = None,
@@ -2145,12 +2216,20 @@ def publish_canonical_chat_workflow_graphs(
             or not _publication_spec_has_executable_actions(current_spec)
         ):
             available_publication_specs[workflow_id] = seed_spec
-        if workflow_id not in available_workflow_text_relations:
-            seed_relation_specs = seed_workflow_text_relations.get(workflow_id)
-            if seed_relation_specs:
-                available_workflow_text_relations[workflow_id] = tuple(seed_relation_specs)
+    available_workflow_text_relations = _merge_workflow_text_relations(
+        available_workflow_text_relations,
+        {
+            workflow_id: seed_workflow_text_relations.get(workflow_id) or ()
+            for workflow_id in target_workflow_ids
+        },
+        replace_existing_slots=False,
+    )
     available_publication_specs.update(explicit_publication_specs)
-    available_workflow_text_relations.update(explicit_workflow_text_relations)
+    available_workflow_text_relations = _merge_workflow_text_relations(
+        available_workflow_text_relations,
+        explicit_workflow_text_relations,
+        replace_existing_slots=True,
+    )
     registry_workflow_ids = (
         {
             str(item).strip()

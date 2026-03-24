@@ -43,6 +43,18 @@ def test_build_workflow_authority_review_snapshot_documents_is_deterministic(
     )
     monkeypatch.setattr(
         service,
+        "resolve_workflow_typed_subworkflow_route_map",
+        lambda workflow_id: (
+            {
+                "schema_version": "workflow_typed_subworkflow_route_map.v1",
+                "default_route_key": "interpret",
+                "routes": [{"route_key": "interpret", "selected_route_mode": "interpret"}],
+            },
+            "text_relation:#V#route_map",
+        ),
+    )
+    monkeypatch.setattr(
+        service,
         "resolve_workflow_discovery_exemplars",
         lambda workflow_id: (
             {"keywords": [workflow_id], "examples": [f"Example {workflow_id}"]},
@@ -95,6 +107,7 @@ def test_build_workflow_authority_review_snapshot_documents_is_deterministic(
         "#V#a_workflow",
         "#V#b_workflow",
     ]
+    assert workflows["workflows"][0]["typed_subworkflow_route_map"]["default_route_key"] == "interpret"
     assert templates["template_ids"] == ["workflow_creation.default_marker"]
     rendered = service.render_workflow_authority_review_snapshot_documents()
     assert rendered[service.WORKFLOW_AUTHORITY_REVIEW_MANIFEST_FILENAME].endswith("\n")

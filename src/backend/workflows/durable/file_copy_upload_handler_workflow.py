@@ -303,6 +303,12 @@ def _handle_persist_route_outcome(request: WorkflowActionRequest) -> WorkflowAct
         "specialised_fallback_triggered": bool(
             request.data.get("upload_specialised_fallback_triggered")
         ),
+        "typed_subworkflow_route_map_source": request.data.get(
+            "upload_typed_subworkflow_route_map_source"
+        ),
+        "typed_subworkflow_route_map_schema_version": request.data.get(
+            "upload_typed_subworkflow_route_map_schema_version"
+        ),
     }
 
     try:
@@ -448,6 +454,14 @@ def build_file_copy_upload_handler_workflow_test_definition() -> WorkflowDefinit
             "context_key": "upload_unsupported_route_reason",
         },
         {"tool_output_field": "result.allow_interpret_fallback", "context_key": "upload_allow_interpret_fallback"},
+        {
+            "tool_output_field": "result.typed_subworkflow_route_map_source",
+            "context_key": "upload_typed_subworkflow_route_map_source",
+        },
+        {
+            "tool_output_field": "result.typed_subworkflow_route_map_schema_version",
+            "context_key": "upload_typed_subworkflow_route_map_schema_version",
+        },
         {"tool_output_field": "result.route_decision_persisted", "context_key": "upload_route_decision_persisted"},
         {"tool_output_field": "child_workflow_failed", "context_key": "upload_classifier_child_failed"},
         {"tool_output_field": "subworkflow_error", "context_key": "upload_classifier_error"},

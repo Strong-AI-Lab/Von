@@ -640,6 +640,9 @@ Normative semantics:
 - completion gates MUST fail closed before terminal success when required plan items or required context keys are not satisfied;
 - launch input contracts MAY map invocation-context values into workflow context keys before the initial state executes;
 - launch input contracts MUST remain declarative, so reusable extractors such as quoted-text extraction or workflow-ID list extraction are configured in metadata rather than hard-coded for specific workflow IDs.
+- typed-subworkflow route maps MAY be published on workflow concepts via `#V#hasWorkflowTypedSubworkflowRouteMapJson` using schema `workflow_typed_subworkflow_route_map.v1`;
+- typed-subworkflow route maps define supported route keys, candidate subworkflow lists, threshold defaults, and unavailable/low-confidence fallback semantics declaratively;
+- runtimes that depend on typed-subworkflow route maps MUST resolve them from Vontology authority and fail closed with explicit diagnostics when the required metadata is missing or invalid.
 
 Validation phases:
 
@@ -848,15 +851,18 @@ Canonical workflow IDs:
 
 Classification outputs (persisted and propagated to the handler) include:
 
-- `route_key` (`scholarly|cv|business_card|interpret|noop`)
+- `route_key` (`scholarly|cv|business_card|meeting|interpret|noop`)
 - `route_mode` (`specialised|interpret|fail_closed|noop`)
 - `route_confidence`, `route_reasons`, `target_workflow_id`, `target_workflow_available`
 - `unsupported_specialised_route` and `unsupported_route_reason` when a mutation-class route was selected but no specialised workflow is available.
+- `typed_subworkflow_route_map_source` and `typed_subworkflow_route_map_schema_version` so route decisions remain traceable to the authoritative VWL metadata surface that governed them.
 
 Safety semantics:
 
+- `#V#file_copy_upload_classification_workflow` now resolves its default routing policy from `#V#hasWorkflowTypedSubworkflowRouteMapJson` rather than from Python-owned route maps or hard-coded downstream workflow IDs.
 - Low-confidence mutation routes MUST fail closed (`route_mode=fail_closed`) rather than invoking mutation workflows.
 - When specialised CV/business-card workflows are not available, classification MUST emit explicit unsupported-route diagnostics (`unsupported_specialised_route=true`) and route to non-mutation handling (`interpret` or `noop` per fallback policy).
+- Missing or invalid typed-subworkflow route-map metadata MUST no-op classification with explicit diagnostics rather than silently recreating routing policy in code.
 - Handler outcome persistence (`#V#has_file_copy_upload_route_outcome_json`) records selected/effective route mode, success, reasons, and unsupported-route diagnostics for post-run inspection.
 
 Event-launch semantics:
