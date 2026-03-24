@@ -2,10 +2,10 @@
   "family_id": "testing_workflow_seed_bundle",
   "managed_by": "testing_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "source_tag": "JVNAUTOSCI-1535",
+  "source_tag": "JVNAUTOSCI-1579",
   "supported_action_ids": [
     "llm.action",
-    "testing.prepare_meeting_invitation_spec",
+    "testing.prepare_experiment_spec",
     "theory.create_slice",
     "theory.assert_local_claim",
     "theory.compute_diff",
@@ -213,7 +213,7 @@
         "steps": [
           {
             "action_concept_id": null,
-            "action_id": "testing.prepare_meeting_invitation_spec",
+            "action_id": "testing.prepare_experiment_spec",
             "concept_id": null,
             "conditional_transitions": [],
             "context_input_mapping_specs": [
@@ -262,6 +262,89 @@
               [
                 "candidate_workflow_ids",
                 "#V#meeting_invitation_candidate_workflow"
+              ],
+              [
+                "scenario_template",
+                {
+                  "schema_version": "testing_experiment_scenario_template.v1",
+                  "name": "Meeting invitation workflow derivation and validation",
+                  "description": "Testing spec for deriving, selecting, and validating a meeting-invitation workflow.",
+                  "fixture_payload": {
+                    "invitation_text": {
+                      "$input": "invitation_text"
+                    }
+                  },
+                  "expected_outcomes": [
+                    {
+                      "label": "meeting_type_classification",
+                      "expected": {
+                        "$input": "expected_meeting_type",
+                        "$default": "meeting_workflow_candidate"
+                      }
+                    },
+                    {
+                      "label": "structured_meeting_fields",
+                      "expected_fields": {
+                        "$input": "expected_structure_fields",
+                        "$default": [
+                          "title",
+                          "time",
+                          "participants"
+                        ]
+                      }
+                    },
+                    {
+                      "label": "mutation_safety",
+                      "expected": "no_canonical_mutations_without_gate"
+                    },
+                    {
+                      "$if_input": "expected_downstream_actions",
+                      "then": {
+                        "label": "downstream_actions",
+                        "expected_actions": {
+                          "$input": "expected_downstream_actions"
+                        }
+                      }
+                    }
+                  ],
+                  "theory_setup": {
+                    "seed_claims": [
+                      {
+                        "source_id": "#V#meeting_invitation_testing_workflow",
+                        "predicate": "#V#has_hypothesis",
+                        "target": {
+                          "$input": "expected_meeting_type",
+                          "$default": "meeting invitation should resolve to a safe workflow candidate"
+                        },
+                        "target_kind": "text"
+                      },
+                      {
+                        "source_id": "#V#meeting_invitation_testing_workflow",
+                        "predicate": "#V#has_assumption",
+                        "target": "No canonical calendar or task mutation is permitted during testing.",
+                        "target_kind": "text"
+                      }
+                    ]
+                  },
+                  "forbidden_side_effects": [
+                    "canonical_calendar_mutation",
+                    "canonical_task_mutation",
+                    "external_action_without_gate"
+                  ],
+                  "verdict_rules": {
+                    "require_all_expected_outcomes": true
+                  },
+                  "replay_policy": {
+                    "retain_failing_cases": true,
+                    "retain_passing_cases": false
+                  },
+                  "promotion_policy": {
+                    "requires_manual_gate": true
+                  },
+                  "metadata": {
+                    "scenario": "meeting_invitation_testing"
+                  }
+                }
               ]
             ],
             "tool_output_context_mappings": [],
@@ -272,23 +355,23 @@
                 "tool_output_field": "experiment_spec_id"
               },
               {
-                "concept_id": "#V#workflow_mapping_tool_field_meeting_invitation_testing_workflow_prepare_spec_theory_slice_inputs_name_to_meeting_theory_name",
-                "context_key": "meeting_theory_name",
+                "concept_id": "#V#workflow_mapping_tool_field_meeting_invitation_testing_workflow_prepare_spec_theory_slice_inputs_name_to_testing_theory_name",
+                "context_key": "testing_theory_name",
                 "tool_output_field": "theory_slice_inputs.name"
               },
               {
-                "concept_id": "#V#workflow_mapping_tool_field_meeting_invitation_testing_workflow_prepare_spec_theory_slice_inputs_expected_observations_to_meeting_theory_expected_observations",
-                "context_key": "meeting_theory_expected_observations",
+                "concept_id": "#V#workflow_mapping_tool_field_meeting_invitation_testing_workflow_prepare_spec_theory_slice_inputs_expected_observations_to_testing_theory_expected_observations",
+                "context_key": "testing_theory_expected_observations",
                 "tool_output_field": "theory_slice_inputs.expected_observations"
               },
               {
-                "concept_id": "#V#workflow_mapping_tool_field_meeting_invitation_testing_workflow_prepare_spec_theory_slice_inputs_promotion_policy_to_meeting_theory_promotion_policy",
-                "context_key": "meeting_theory_promotion_policy",
+                "concept_id": "#V#workflow_mapping_tool_field_meeting_invitation_testing_workflow_prepare_spec_theory_slice_inputs_promotion_policy_to_testing_theory_promotion_policy",
+                "context_key": "testing_theory_promotion_policy",
                 "tool_output_field": "theory_slice_inputs.promotion_policy"
               },
               {
-                "concept_id": "#V#workflow_mapping_tool_field_meeting_invitation_testing_workflow_prepare_spec_seed_claims_to_meeting_seed_claims",
-                "context_key": "meeting_seed_claims",
+                "concept_id": "#V#workflow_mapping_tool_field_meeting_invitation_testing_workflow_prepare_spec_seed_claims_to_testing_seed_claims",
+                "context_key": "testing_seed_claims",
                 "tool_output_field": "seed_claims"
               }
             ],
@@ -308,20 +391,20 @@
                 "tool_param": "experiment_spec_id"
               },
               {
-                "concept_id": "#V#workflow_mapping_meeting_invitation_testing_workflow_create_theory_slice_meeting_theory_name_to_name_parameter",
-                "context_key": "meeting_theory_name",
+                "concept_id": "#V#workflow_mapping_meeting_invitation_testing_workflow_create_theory_slice_testing_theory_name_to_name_parameter",
+                "context_key": "testing_theory_name",
                 "required": true,
                 "tool_param": "name"
               },
               {
-                "concept_id": "#V#workflow_mapping_meeting_invitation_testing_workflow_create_theory_slice_meeting_theory_expected_observations_to_expected_observations_parameter",
-                "context_key": "meeting_theory_expected_observations",
+                "concept_id": "#V#workflow_mapping_meeting_invitation_testing_workflow_create_theory_slice_testing_theory_expected_observations_to_expected_observations_parameter",
+                "context_key": "testing_theory_expected_observations",
                 "required": true,
                 "tool_param": "expected_observations"
               },
               {
-                "concept_id": "#V#workflow_mapping_meeting_invitation_testing_workflow_create_theory_slice_meeting_theory_promotion_policy_to_promotion_policy_parameter",
-                "context_key": "meeting_theory_promotion_policy",
+                "concept_id": "#V#workflow_mapping_meeting_invitation_testing_workflow_create_theory_slice_testing_theory_promotion_policy_to_promotion_policy_parameter",
+                "context_key": "testing_theory_promotion_policy",
                 "required": true,
                 "tool_param": "promotion_policy"
               }
@@ -367,8 +450,8 @@
                 "tool_param": "theory_id"
               },
               {
-                "concept_id": "#V#workflow_mapping_meeting_invitation_testing_workflow_assert_seed_claims_meeting_seed_claims_to_claims_parameter",
-                "context_key": "meeting_seed_claims",
+                "concept_id": "#V#workflow_mapping_meeting_invitation_testing_workflow_assert_seed_claims_testing_seed_claims_to_claims_parameter",
+                "context_key": "testing_seed_claims",
                 "required": true,
                 "tool_param": "claims"
               }
@@ -936,7 +1019,30 @@
             "on_unknown_state": null,
             "prompt_concept_ids": [],
             "state_id": "execute_regression_suite",
-            "static_input_bindings": [],
+            "static_input_bindings": [
+              [
+                "suite_policy",
+                {
+                  "schema_version": "testing_regression_suite_policy.v1",
+                  "default_execution_tier": "tier1",
+                  "tiers": {
+                    "tier1": {
+                      "mode": "cases"
+                    },
+                    "tier2": {
+                      "mode": "benchmark",
+                      "output_root_default": "data/testing_workflows/benchmarks"
+                    },
+                    "benchmark": {
+                      "alias_for": "tier2"
+                    },
+                    "tier_2": {
+                      "alias_for": "tier2"
+                    }
+                  }
+                }
+              ]
+            ],
             "tool_output_context_mappings": [],
             "tool_output_mapping_specs": [],
             "validation_policy": null,
@@ -1068,11 +1174,6 @@
             "validation_policy": null,
             "writes_context_keys": []
           }
-        ]
-      },
-      "step_notes": {
-        "execute_regression_suite": [
-          "Capability-gap note generated by Codex on behalf of the user: VWL can express the regression-suite control flow, but it cannot yet encode a first-class escalation policy between Tier 1 theory-slice cases and the Tier 2 KB-clone harness. The reusable Python control surface added here is experiment.execute_regression_suite, which accepts explicit tier and benchmark inputs and records suite evidence. This note applies to the #V#synthetic_workflow_regression_suite_workflow execute_regression_suite step. VWL should later gain declarative test-tier and escalation semantics so the suite-selection logic can live entirely in workflow metadata."
         ]
       },
       "type_ids": [

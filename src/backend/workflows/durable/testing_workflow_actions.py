@@ -10,6 +10,7 @@ from ...services.experiment_run_service import (
     create_experiment_spec,
     emit_experiment_learning_signal,
     execute_regression_suite,
+    prepare_experiment_spec_from_template,
     prepare_meeting_invitation_experiment_spec,
     record_experiment_observation,
     start_experiment_run,
@@ -32,6 +33,7 @@ from ...services.testing_workflow_contracts import (
     EXPERIMENT_EXECUTE_TARGET_WORKFLOW_ACTION_ID,
     EXPERIMENT_RECORD_OBSERVATION_ACTION_ID,
     EXPERIMENT_START_RUN_ACTION_ID,
+    TESTING_PREPARE_EXPERIMENT_SPEC_ACTION_ID,
     TESTING_PREPARE_MEETING_INVITATION_SPEC_ACTION_ID,
     THEORY_ASSERT_LOCAL_CLAIM_ACTION_ID,
     THEORY_COMPUTE_DIFF_ACTION_ID,
@@ -471,6 +473,36 @@ def _handle_experiment_execute_regression_suite(
         benchmark_scenario=inputs.get("benchmark_scenario"),
         output_root=_safe_str(inputs.get("output_root")) or None,
         run_id=_safe_str(inputs.get("run_id")) or None,
+        suite_policy=inputs.get("suite_policy"),
+    )
+    return _result_from_payload(result)
+
+
+def _handle_testing_prepare_experiment_spec(
+    request: WorkflowActionRequest,
+) -> WorkflowActionResult:
+    inputs = dict(request.inputs or {})
+    actor = _derive_actor_context(request)
+    result = prepare_experiment_spec_from_template(
+        scenario_template=inputs.get("scenario_template"),
+        template_inputs={
+            key: value
+            for key, value in inputs.items()
+            if key
+            not in {
+                "scenario_template",
+                "experiment_spec_id",
+                "name",
+                "namespace",
+                "user_id",
+                "org_id",
+            }
+        },
+        experiment_spec_id=_safe_str(inputs.get("experiment_spec_id")) or None,
+        name=_safe_str(inputs.get("name")) or None,
+        namespace=actor["namespace"],
+        user_id=actor["user_id"],
+        org_id=actor["org_id"],
     )
     return _result_from_payload(result)
 
@@ -563,6 +595,12 @@ def register_testing_workflow_actions(registry: ActionRegistry) -> None:
         ActionSpec(
             action_id=EXPERIMENT_EXECUTE_REGRESSION_SUITE_ACTION_ID,
             handler=_handle_experiment_execute_regression_suite,
+        )
+    )
+    registry.register_if_absent(
+        ActionSpec(
+            action_id=TESTING_PREPARE_EXPERIMENT_SPEC_ACTION_ID,
+            handler=_handle_testing_prepare_experiment_spec,
         )
     )
     registry.register_if_absent(

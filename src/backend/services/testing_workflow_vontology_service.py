@@ -177,7 +177,10 @@ def _ensure_meeting_invitation_prompt_support() -> dict[str, Any]:
     }
 
 
-def bootstrap_canonical_testing_workflows() -> dict[str, Any]:
+def bootstrap_canonical_testing_workflows(
+    *,
+    force_republish: bool = False,
+) -> dict[str, Any]:
     """Publish and validate the canonical Testing Workflows family."""
 
     prompt_support = _ensure_meeting_invitation_prompt_support()
@@ -198,6 +201,7 @@ def bootstrap_canonical_testing_workflows() -> dict[str, Any]:
     report = bootstrap_repo_seed_workflow_bundle(
         asset_path=_REPO_SEED_ASSET_PATH,
         publish_context_manager_factory=suspend_event_workflow_integration,
+        force_republish=force_republish,
     )
     report["prompt_support"] = prompt_support
     return report

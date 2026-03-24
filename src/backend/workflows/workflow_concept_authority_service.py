@@ -72,6 +72,11 @@ from .workflow_gap_workflow_contracts import (
     WORKFLOW_GAP_TEST_WRITES_CONTEXT_KEYS,
     WorkflowGapOutputMappingSpec,
 )
+from .static_input_binding_utils import (
+    coerce_static_input_binding,
+    dedupe_static_input_bindings,
+    serialise_static_input_binding_value,
+)
 from .vontology_loader import (
     WORKFLOW_GRAPH_PREDICATE_ALIASES,
     WORKFLOW_STEP_CONTROL_FLOW_CONCEPT_DATA_KEY,
@@ -322,7 +327,7 @@ class _CanonicalStepPublicationSpec:
     validation_policy: Mapping[str, Any] | None = None
     mutation_authority: Mapping[str, Any] | None = None
     invoked_workflow_id: str | None = None
-    static_input_bindings: tuple[tuple[str, str], ...] = ()
+    static_input_bindings: tuple[tuple[str, Any], ...] = ()
     context_input_mappings: tuple[str, ...] = ()
     context_input_mapping_specs: tuple[_CanonicalContextInputMappingSpec, ...] = ()
     tool_output_context_mappings: tuple[str, ...] = ()
@@ -361,7 +366,7 @@ class _RuntimeStepPublicationDetails:
     validation_policy: Mapping[str, Any] | None = None
     mutation_authority: Mapping[str, Any] | None = None
     invoked_workflow_id: str | None = None
-    static_input_bindings: tuple[tuple[str, str], ...] = ()
+    static_input_bindings: tuple[tuple[str, Any], ...] = ()
     context_input_mapping_specs: tuple[_CanonicalContextInputMappingSpec, ...] = ()
     tool_output_mapping_specs: tuple[_CanonicalToolOutputMappingSpec, ...] = ()
     writes_context_keys: tuple[str, ...] = ()
@@ -400,8 +405,8 @@ def _normalise_seed_bundle_string_tuple(value: Any) -> tuple[str, ...]:
 
 def _parse_static_input_bindings_payload(
     raw_payload: Any,
-) -> tuple[tuple[str, str], ...]:
-    bindings: list[tuple[str, str]] = []
+) -> tuple[tuple[str, Any], ...]:
+    bindings: list[tuple[str, Any]] = []
     if isinstance(raw_payload, Mapping):
         iterable = raw_payload.items()
     elif isinstance(raw_payload, Sequence) and not isinstance(raw_payload, str):
@@ -414,14 +419,15 @@ def _parse_static_input_bindings_payload(
             key = _normalise_seed_bundle_text(
                 item.get("tool_param") or item.get("key")
             )
-            value = _normalise_seed_bundle_text(item.get("value"))
+            value = item.get("value")
         elif isinstance(item, Sequence) and not isinstance(item, str) and len(item) == 2:
             key = _normalise_seed_bundle_text(item[0])
-            value = _normalise_seed_bundle_text(item[1])
+            value = item[1]
         else:
             continue
-        if key and value:
-            bindings.append((key, value))
+        binding = coerce_static_input_binding(key, value)
+        if binding is not None:
+            bindings.append(binding)
     return tuple(bindings)
 
 
@@ -1091,8 +1097,6 @@ def _build_definition_from_publication_spec(
                     for key, value in step.static_input_bindings
                     if isinstance(key, str)
                     and key.strip()
-                    and isinstance(value, str)
-                    and value.strip()
                 }
             )
         if step.context_input_mapping_specs:
@@ -1456,7 +1460,7 @@ def _extract_runtime_step_publication_details(
         registration_definition=registration_definition,
         state_id=state_id,
     )
-    static_input_bindings: list[tuple[str, str]] = []
+    static_input_bindings: list[tuple[str, Any]] = []
     context_input_mapping_specs: list[_CanonicalContextInputMappingSpec] = []
     execution_mode: str | None = None
     llm_policy: Mapping[str, Any] | None = None
@@ -1481,39 +1485,38 @@ def _extract_runtime_step_publication_details(
             child_input_key_text = str(child_input_key or "").strip()
             if not child_input_key_text:
                 continue
-            if isinstance(raw_value, Mapping):
-                context_key = str(raw_value.get("$context_key") or "").strip()
-                if not context_key:
-                    continue
-                mapping_concept_id = str(
-                    raw_value.get("$mapping_concept_id") or ""
-                ).strip() or _runtime_context_input_mapping_concept_id(
-                    workflow_id=workflow_id,
-                    state_id=state_id,
-                    tool_param=child_input_key_text,
-                    context_key=context_key,
-                )
-                context_input_mapping_specs.append(
-                    _CanonicalContextInputMappingSpec(
-                        concept_id=mapping_concept_id,
-                        context_key=context_key,
-                        tool_param=child_input_key_text,
-                        required=bool(
-                            raw_value.get("$required", raw_value.get("required", True))
-                        ),
-                    )
-                )
-                continue
-            if not isinstance(raw_value, str):
-                continue
-            value_text = raw_value.strip()
-            if not value_text:
-                continue
             if child_input_key_text == "workflow_id" and invoked_workflow_id:
                 continue
             if child_input_key_text.startswith("__parent_"):
                 continue
-            static_input_bindings.append((child_input_key_text, value_text))
+            if isinstance(raw_value, Mapping):
+                context_key = str(raw_value.get("$context_key") or "").strip()
+                if context_key:
+                    mapping_concept_id = str(
+                        raw_value.get("$mapping_concept_id") or ""
+                    ).strip() or _runtime_context_input_mapping_concept_id(
+                        workflow_id=workflow_id,
+                        state_id=state_id,
+                        tool_param=child_input_key_text,
+                        context_key=context_key,
+                    )
+                    context_input_mapping_specs.append(
+                        _CanonicalContextInputMappingSpec(
+                            concept_id=mapping_concept_id,
+                            context_key=context_key,
+                            tool_param=child_input_key_text,
+                            required=bool(
+                                raw_value.get(
+                                    "$required",
+                                    raw_value.get("required", True),
+                                )
+                            ),
+                        )
+                    )
+                    continue
+            binding = coerce_static_input_binding(child_input_key_text, raw_value)
+            if binding is not None:
+                static_input_bindings.append(binding)
 
     metadata = getattr(state_spec, "metadata", None)
     tool_output_mapping_specs: list[_CanonicalToolOutputMappingSpec] = []
@@ -1568,7 +1571,7 @@ def _extract_runtime_step_publication_details(
             else None
         ),
         invoked_workflow_id=invoked_workflow_id or None,
-        static_input_bindings=tuple(dict.fromkeys(static_input_bindings)),
+        static_input_bindings=dedupe_static_input_bindings(static_input_bindings),
         context_input_mapping_specs=tuple(
             {
                 (item.concept_id, item.context_key, item.tool_param): item
@@ -2560,12 +2563,13 @@ def publish_canonical_chat_workflow_graphs(
                 ] = list(dict.fromkeys(prompt_concept_ids))
             if static_input_bindings:
                 step_relationships[_CANONICAL_GRAPH_PREDICATES["hasInputMap"]] = [
-                    f"{key}={value}"
+                    f"{key}={encoded_value}"
                     for key, value in static_input_bindings
+                    for encoded_value in [serialise_static_input_binding_value(value)]
                     if isinstance(key, str)
                     and key.strip()
-                    and isinstance(value, str)
-                    and value.strip()
+                    and isinstance(encoded_value, str)
+                    and encoded_value.strip()
                 ]
             runtime_input_maps = list(
                 step_relationships.get(_CANONICAL_GRAPH_PREDICATES["hasInputMap"]) or []

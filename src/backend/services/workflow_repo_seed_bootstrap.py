@@ -14,6 +14,7 @@ from .workflow_discovery_service import (
 )
 from .workflow_vontology_materialisation_helpers import ensure_instance_typing
 from ..workflows import workflow_concept_authority_service as authority_service
+from ..workflows.static_input_binding_utils import stable_static_input_bindings
 from ..workflows.vontology_loader import (
     build_workflow_process_graph,
     load_workflow_definition_from_vontology,
@@ -65,14 +66,9 @@ def _normalise_mapping_spec_signatures(
 
 
 def _normalise_static_input_bindings(
-    bindings: tuple[tuple[str, str], ...],
-) -> tuple[tuple[str, str], ...]:
-    cleaned = [
-        (str(key or "").strip(), str(value or "").strip())
-        for key, value in bindings
-        if str(key or "").strip() and str(value or "").strip()
-    ]
-    return tuple(sorted(dict.fromkeys(cleaned)))
+    bindings: tuple[tuple[str, Any], ...],
+) -> tuple[tuple[str, Any], ...]:
+    return stable_static_input_bindings(bindings)
 
 
 def _normalise_string_tuple(values: tuple[str, ...]) -> tuple[str, ...]:
@@ -89,9 +85,9 @@ def _normalise_string_tuple(values: tuple[str, ...]) -> tuple[str, ...]:
 
 def _prune_shadowed_static_input_bindings(
     *,
-    static_input_bindings: tuple[tuple[str, str], ...],
+    static_input_bindings: tuple[tuple[str, Any], ...],
     context_input_mapping_specs: tuple[tuple[str, str, str], ...],
-) -> tuple[tuple[str, str], ...]:
+) -> tuple[tuple[str, Any], ...]:
     mapped_tool_params = {tool_param for _concept_id, tool_param, _context_key in context_input_mapping_specs}
     if not mapped_tool_params:
         return static_input_bindings
@@ -610,6 +606,7 @@ def bootstrap_repo_seed_workflow_bundle(
     *,
     asset_path: str | Path,
     publish_context_manager_factory: Callable[[], Any] | None = None,
+    force_republish: bool = False,
 ) -> dict[str, Any]:
     """Publish and validate one repo-side workflow seed bundle."""
 
@@ -634,13 +631,13 @@ def bootstrap_repo_seed_workflow_bundle(
     typed_workflow_ids: list[str] = []
     typed_step_ids: list[str] = []
     validation_by_workflow_id: dict[str, dict[str, Any]] = {}
-    if already_current:
+    if already_current and not force_republish:
         validation_by_workflow_id.update(existing_validation_by_workflow_id)
 
     context_manager_factory = publish_context_manager_factory or nullcontext
     with context_manager_factory():
         publication_report: dict[str, Any]
-        if already_current:
+        if already_current and not force_republish:
             publication_report = {
                 "counts": {
                     "workflows_targeted": len(target_workflow_ids),
@@ -657,6 +654,7 @@ def bootstrap_repo_seed_workflow_bundle(
                 "skipped_due_to_current_materialisation": list(target_workflow_ids),
                 "skip_reason": "existing_materialisation_valid",
                 "skipped": True,
+                "forced_republish": False,
             }
         else:
             publication_report = authority_service.publish_canonical_chat_workflow_graphs(
@@ -667,6 +665,7 @@ def bootstrap_repo_seed_workflow_bundle(
                 ),
                 publication_purposes=publication_purposes,
             )
+            publication_report["forced_republish"] = bool(force_republish)
 
         for workflow_id, spec in publication_specs.items():
             type_ids = tuple(workflow_type_ids.get(workflow_id) or ())
@@ -726,7 +725,7 @@ def bootstrap_repo_seed_workflow_bundle(
                     )
 
             validation = validation_by_workflow_id.get(workflow_id)
-            if already_current:
+            if already_current and not force_republish:
                 if not isinstance(validation, dict):
                     raise RuntimeError(
                         "repo_seed_workflow_validation_missing_after_short_circuit:"

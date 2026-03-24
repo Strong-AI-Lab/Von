@@ -143,6 +143,9 @@ from src.backend.integrations.internal_mcp.catalogue import _experiment_run_get
 from src.backend.integrations.internal_mcp.catalogue import _experiment_run_list
 from src.backend.integrations.internal_mcp.catalogue import _experiment_start_run
 from src.backend.integrations.internal_mcp.catalogue import (
+    _testing_prepare_experiment_spec,
+)
+from src.backend.integrations.internal_mcp.catalogue import (
     _testing_prepare_meeting_invitation_spec,
 )
 from src.backend.integrations.internal_mcp.catalogue import (
@@ -3098,6 +3101,16 @@ async def _handle_testing_prepare_meeting_invitation_spec(
     )
 
 
+async def _handle_testing_prepare_experiment_spec(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _testing_prepare_experiment_spec,
+        arguments,
+        tool_family_label="TestingWorkflow",
+    )
+
+
 # Task management handlers (JVNAUTOSCI-1040)
 async def _handle_create_task(arguments: dict[str, Any]) -> list[TextContent]:
     title = arguments.get("title")
@@ -3283,6 +3296,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "experiment_emit_learning_signal": _handle_experiment_emit_learning_signal,
     "experiment_execute_target_workflow": _handle_experiment_execute_target_workflow,
     "experiment_execute_regression_suite": _handle_experiment_execute_regression_suite,
+    "testing_prepare_experiment_spec": _handle_testing_prepare_experiment_spec,
     "testing_prepare_meeting_invitation_spec": _handle_testing_prepare_meeting_invitation_spec,
     "turn_execution_list": _handle_turn_execution_list,
     "turn_execution_get": _handle_turn_execution_get,

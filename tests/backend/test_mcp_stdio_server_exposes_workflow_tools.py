@@ -39,6 +39,7 @@ WORKFLOW_TOOL_NAMES = {
     "experiment_execute_regression_suite",
     "experiment_run_list",
     "experiment_run_get",
+    "testing_prepare_experiment_spec",
     "testing_prepare_meeting_invitation_spec",
 }
 

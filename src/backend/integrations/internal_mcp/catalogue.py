@@ -9136,6 +9136,33 @@ def _experiment_execute_regression_suite(**kwargs):
         benchmark_scenario=kwargs.get("benchmark_scenario"),
         output_root=kwargs.get("output_root"),
         run_id=str(kwargs.get("run_id") or "").strip() or None,
+        suite_policy=kwargs.get("suite_policy"),
+    )
+
+
+def _testing_prepare_experiment_spec(**kwargs):
+    from ...services.experiment_run_service import prepare_experiment_spec_from_template
+
+    return prepare_experiment_spec_from_template(
+        scenario_template=kwargs.get("scenario_template"),
+        template_inputs={
+            key: value
+            for key, value in kwargs.items()
+            if key
+            not in {
+                "scenario_template",
+                "experiment_spec_id",
+                "name",
+                "namespace",
+                "user_id",
+                "org_id",
+            }
+        },
+        experiment_spec_id=kwargs.get("experiment_spec_id"),
+        name=kwargs.get("name"),
+        namespace=kwargs.get("namespace"),
+        user_id=kwargs.get("user_id"),
+        org_id=kwargs.get("org_id"),
     )
 
 
@@ -21011,13 +21038,33 @@ def build_default_catalogue() -> MethodCatalogue:
                     "cases": (list,),
                     "benchmark_scenario": (dict,),
                     "output_root": (str, type(None)),
+                    "suite_policy": (dict,),
                 },
                 allow_unknown=True,
-                description="Execute a synthetic regression suite in Tier 1 or escalate to the Tier 2 benchmark harness. When run_id is provided, record the suite result as experiment-run evidence.",
+                description="Execute a synthetic regression suite according to a workflow-authored suite policy. When run_id is provided, record the suite result as experiment-run evidence.",
             ),
             output_schema=None,
             category="write",
-            description="Run a synthetic workflow-regression suite, including Tier 2 benchmark escalation when requested.",
+            description="Run a synthetic workflow-regression suite using declarative tier and escalation policy metadata.",
+        ),
+        MethodDefinition(
+            name="testing_prepare_experiment_spec",
+            handler=_testing_prepare_experiment_spec,
+            input_schema=Schema(
+                required={"scenario_template": dict},
+                optional={
+                    "experiment_spec_id": (str, type(None)),
+                    "name": (str, type(None)),
+                    "namespace": (str, type(None)),
+                    "user_id": (str, type(None)),
+                    "org_id": (str, type(None)),
+                },
+                allow_unknown=True,
+                description="Create an experiment spec and suggested theory-slice inputs from a workflow-authored scenario template.",
+            ),
+            output_schema=None,
+            category="write",
+            description="Resolve a generic testing scenario template into an experiment spec, theory-slice inputs, and seed claims.",
         ),
         MethodDefinition(
             name="testing_prepare_meeting_invitation_spec",

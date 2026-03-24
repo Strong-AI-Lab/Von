@@ -12,6 +12,7 @@ from src.backend.services.testing_workflow_contracts import (
     EXPERIMENT_EXECUTE_TARGET_WORKFLOW_ACTION_ID,
     EXPERIMENT_RECORD_OBSERVATION_ACTION_ID,
     EXPERIMENT_START_RUN_ACTION_ID,
+    TESTING_PREPARE_EXPERIMENT_SPEC_ACTION_ID,
     TESTING_PREPARE_MEETING_INVITATION_SPEC_ACTION_ID,
     THEORY_ASSERT_LOCAL_CLAIM_ACTION_ID,
     THEORY_COMPUTE_DIFF_ACTION_ID,
@@ -142,6 +143,7 @@ def test_register_testing_workflow_actions_exposes_all_expected_action_ids():
         EXPERIMENT_EMIT_LEARNING_SIGNAL_ACTION_ID,
         EXPERIMENT_EXECUTE_TARGET_WORKFLOW_ACTION_ID,
         EXPERIMENT_EXECUTE_REGRESSION_SUITE_ACTION_ID,
+        TESTING_PREPARE_EXPERIMENT_SPEC_ACTION_ID,
         TESTING_PREPARE_MEETING_INVITATION_SPEC_ACTION_ID,
     }
 
@@ -228,6 +230,79 @@ def test_execute_target_workflow_action_launches_durable_instance(monkeypatch):
         },
         "max_retries": 2,
     }
+
+
+def test_prepare_experiment_spec_action_resolves_actor_context(monkeypatch):
+    from src.backend.workflows.durable import testing_workflow_actions as mod
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        mod,
+        "prepare_experiment_spec_from_template",
+        lambda **kwargs: captured.update(kwargs)
+        or {"success": True, "experiment_spec_id": "#V#scenario_spec"},
+    )
+
+    registry = ActionRegistry()
+    register_testing_workflow_actions(registry)
+    spec = registry.get(TESTING_PREPARE_EXPERIMENT_SPEC_ACTION_ID)
+    assert spec is not None
+
+    result = spec.handler(
+        WorkflowActionRequest(
+            action_id=TESTING_PREPARE_EXPERIMENT_SPEC_ACTION_ID,
+            inputs={
+                "scenario_template": {"schema_version": "testing_experiment_scenario_template.v1"},
+                "invitation_text": "Meet tomorrow",
+                "candidate_workflow_ids": ["#V#wf_candidate"],
+            },
+            environment=WorkflowEnvironment(
+                llm_client=None,
+                user_namespace="#V#user@org",
+            ),
+            data={},
+        )
+    )
+
+    assert result.ok is True
+    assert captured["namespace"] == "#V#user@org"
+    assert captured["user_id"] == "#V#user"
+    assert captured["org_id"] == "#V#org"
+    assert captured["template_inputs"] == {
+        "invitation_text": "Meet tomorrow",
+        "candidate_workflow_ids": ["#V#wf_candidate"],
+    }
+
+
+def test_execute_regression_suite_action_forwards_suite_policy(monkeypatch):
+    from src.backend.workflows.durable import testing_workflow_actions as mod
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        mod,
+        "execute_regression_suite",
+        lambda **kwargs: captured.update(kwargs) or {"success": True},
+    )
+
+    registry = ActionRegistry()
+    register_testing_workflow_actions(registry)
+    spec = registry.get(EXPERIMENT_EXECUTE_REGRESSION_SUITE_ACTION_ID)
+    assert spec is not None
+
+    result = spec.handler(
+        WorkflowActionRequest(
+            action_id=EXPERIMENT_EXECUTE_REGRESSION_SUITE_ACTION_ID,
+            inputs={
+                "execution_tier": "tier2",
+                "suite_policy": {"tiers": {"tier2": {"mode": "benchmark"}}},
+            },
+            environment=WorkflowEnvironment(llm_client=None),
+            data={},
+        )
+    )
+
+    assert result.ok is True
+    assert captured["suite_policy"] == {"tiers": {"tier2": {"mode": "benchmark"}}}
 
 
 def test_execute_target_workflow_action_can_await_terminal_and_record_observation(

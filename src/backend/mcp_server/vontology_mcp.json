@@ -509,7 +509,7 @@
         },
         {
             "name": "experiment_execute_regression_suite",
-            "description": "Run a synthetic workflow-regression suite, including Tier 2 benchmark escalation when requested.",
+            "description": "Run a synthetic workflow-regression suite using declarative tier and escalation policy metadata.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -538,11 +538,15 @@
                             "string",
                             "null"
                         ]
+                    },
+                    "suite_policy": {
+                        "type": "object",
+                        "additionalProperties": true
                     }
                 },
                 "required": [],
                 "additionalProperties": true,
-                "description": "Execute a synthetic regression suite in Tier 1 or escalate to the Tier 2 benchmark harness. When run_id is provided, record the suite result as experiment-run evidence."
+                "description": "Execute a synthetic regression suite according to a workflow-authored suite policy. When run_id is provided, record the suite result as experiment-run evidence."
             }
         },
         {
@@ -2361,6 +2365,54 @@
                 ],
                 "additionalProperties": true,
                 "description": "search_web input: query (str, required), max_results (int, default 10), search_depth (str, 'basic'|'advanced', default 'basic'), include_domains (list of str, domain whitelist), exclude_domains (list of str, domain blacklist), include_answer (bool, AI-generated answer), include_raw_content (bool, full page content), include_images (bool, image URLs)"
+            }
+        },
+        {
+            "name": "testing_prepare_experiment_spec",
+            "description": "Resolve a generic testing scenario template into an experiment spec, theory-slice inputs, and seed claims.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "scenario_template": {
+                        "type": "object",
+                        "additionalProperties": true
+                    },
+                    "experiment_spec_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "name": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "user_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "org_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "scenario_template"
+                ],
+                "additionalProperties": true,
+                "description": "Create an experiment spec and suggested theory-slice inputs from a workflow-authored scenario template."
             }
         },
         {

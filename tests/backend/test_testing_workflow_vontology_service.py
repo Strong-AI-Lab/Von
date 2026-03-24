@@ -153,6 +153,10 @@ def test_bootstrap_materialises_testing_workflow_family(
     synthetic_types = _relationship_targets(synthetic_concept, "is_an_instance_of")
     assert "#V#testing_workflow" in synthetic_types
     assert "#V#clone_benchmark_test_workflow" in synthetic_types
+    synthetic_definition = load_workflow_definition_from_vontology(
+        SYNTHETIC_WORKFLOW_REGRESSION_SUITE_WORKFLOW_ID
+    )
+    assert synthetic_definition is not None
 
     promotion_concept = concept_service.get_concept_by_concept_id(
         PROMOTION_GATE_WORKFLOW_ID
@@ -205,20 +209,97 @@ def test_bootstrap_materialises_testing_workflow_family(
         state_id="prepare_spec",
     )
     meeting_prepare_step = meeting_definition.states[meeting_prepare_step_id]
+    meeting_prepare_action = meeting_prepare_step.actions[0]
+    assert meeting_prepare_action.action_id == "testing.prepare_experiment_spec"
     assert meeting_prepare_step.metadata.get("reads_context_keys") == [
         "invitation_text"
     ]
-
-    synthetic_note_rows = get_texts_for_concept(
-        subject_concept_id=suite_execute_step_id,
-        predicate="hasNote",
-        limit=10,
-    )
-    assert any(
-        "experiment.execute_regression_suite" in str(row.get("text") or "")
-        for row in synthetic_note_rows
-        if isinstance(row, dict)
-    )
+    assert meeting_prepare_action.inputs.get("scenario_template") == {
+        "schema_version": "testing_experiment_scenario_template.v1",
+        "name": "Meeting invitation workflow derivation and validation",
+        "description": "Testing spec for deriving, selecting, and validating a meeting-invitation workflow.",
+        "fixture_payload": {
+            "invitation_text": {"$input": "invitation_text"},
+        },
+        "expected_outcomes": [
+            {
+                "label": "meeting_type_classification",
+                "expected": {
+                    "$input": "expected_meeting_type",
+                    "$default": "meeting_workflow_candidate",
+                },
+            },
+            {
+                "label": "structured_meeting_fields",
+                "expected_fields": {
+                    "$input": "expected_structure_fields",
+                    "$default": ["title", "time", "participants"],
+                },
+            },
+            {
+                "label": "mutation_safety",
+                "expected": "no_canonical_mutations_without_gate",
+            },
+            {
+                "$if_input": "expected_downstream_actions",
+                "then": {
+                    "label": "downstream_actions",
+                    "expected_actions": {"$input": "expected_downstream_actions"},
+                },
+            },
+        ],
+        "theory_setup": {
+            "seed_claims": [
+                {
+                    "source_id": "#V#meeting_invitation_testing_workflow",
+                    "predicate": "#V#has_hypothesis",
+                    "target": {
+                        "$input": "expected_meeting_type",
+                        "$default": "meeting invitation should resolve to a safe workflow candidate",
+                    },
+                    "target_kind": "text",
+                },
+                {
+                    "source_id": "#V#meeting_invitation_testing_workflow",
+                    "predicate": "#V#has_assumption",
+                    "target": "No canonical calendar or task mutation is permitted during testing.",
+                    "target_kind": "text",
+                },
+            ]
+        },
+        "forbidden_side_effects": [
+            "canonical_calendar_mutation",
+            "canonical_task_mutation",
+            "external_action_without_gate",
+        ],
+        "verdict_rules": {
+            "require_all_expected_outcomes": True,
+        },
+        "replay_policy": {
+            "retain_failing_cases": True,
+            "retain_passing_cases": False,
+        },
+        "promotion_policy": {
+            "requires_manual_gate": True,
+        },
+        "metadata": {
+            "scenario": "meeting_invitation_testing",
+        },
+    }
+    suite_execute_action = synthetic_definition.states[suite_execute_step_id].actions[0]
+    assert suite_execute_action.inputs.get("suite_policy") == {
+        "schema_version": "testing_regression_suite_policy.v1",
+        "default_execution_tier": "tier1",
+        "tiers": {
+            "tier1": {"mode": "cases"},
+            "tier2": {
+                "mode": "benchmark",
+                "output_root_default": "data/testing_workflows/benchmarks",
+            },
+            "benchmark": {"alias_for": "tier2"},
+            "tier_2": {"alias_for": "tier2"},
+        },
+    }
     structure_prompt_rows = get_texts_for_concept(
         subject_concept_id="#V#meeting_invitation_structure_prompt",
         predicate="hasContent",
@@ -260,6 +341,21 @@ def test_bootstrap_skips_republication_when_testing_workflow_family_is_current(
     assert second_counts.get("errors") == 0
     assert second_report.get("typed_workflow_ids") == []
     assert second_report.get("typed_step_ids") == []
+
+
+def test_bootstrap_can_force_republish_when_testing_workflow_family_is_current(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_testing_workflows()
+
+    forced_report = bootstrap_canonical_testing_workflows(force_republish=True)
+    publication = forced_report.get("publication") or {}
+    counts = publication.get("counts") or {}
+
+    assert publication.get("skipped") is not True
+    assert publication.get("forced_republish") is True
+    assert counts.get("workflows_published") == 5
+    assert counts.get("errors") == 0
 
 
 def test_bootstrap_preserves_authoritative_vontology_mapping_edits_when_family_remains_valid(

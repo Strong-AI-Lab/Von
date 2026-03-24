@@ -129,6 +129,7 @@ def test_testing_and_turn_execution_tools_are_exposed_on_vontology_stdio_surface
         "experiment_execute_regression_suite",
         "experiment_run_list",
         "experiment_run_get",
+        "testing_prepare_experiment_spec",
         "testing_prepare_meeting_invitation_spec",
     }
     assert expected.issubset(names)

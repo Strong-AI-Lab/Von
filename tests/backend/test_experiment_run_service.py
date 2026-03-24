@@ -152,7 +152,7 @@ def _patch_runtime(monkeypatch):
     monkeypatch.setattr(mod, "_RUN_INDEXES_READY", False)
     monkeypatch.setattr(mod.concept_service, "create_concept", store.create_concept)
     monkeypatch.setattr(mod.concept_service, "update_concept", store.update_concept)
-    monkeypatch.setattr(mod, "get_concept_by_concept_id", store.get_concept)
+    monkeypatch.setattr(mod, "get_concept_by_concept_id_exact", store.get_concept)
     monkeypatch.setattr(mod, "get_db", lambda: _DB(run_collection))
     monkeypatch.setattr(mod, "add_relationship", _add_relationship)
     monkeypatch.setattr(mod, "upsert_text_for_concept", _upsert_text_for_concept)
@@ -409,6 +409,105 @@ def test_prepare_meeting_invitation_experiment_spec_normalises_single_candidate_
     ]
 
 
+def test_prepare_experiment_spec_from_template_resolves_optional_inputs(monkeypatch):
+    from src.backend.services import experiment_run_service as mod
+
+    captured: dict[str, Any] = {}
+
+    def _create_experiment_spec(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {
+            "success": True,
+            "experiment_spec_id": "#V#scenario_spec",
+            "experiment_spec": {"experiment_spec_id": "#V#scenario_spec"},
+        }
+
+    monkeypatch.setattr(mod, "create_experiment_spec", _create_experiment_spec)
+
+    result = mod.prepare_experiment_spec_from_template(
+        scenario_template={
+            "schema_version": "testing_experiment_scenario_template.v1",
+            "name": "Scenario-driven workflow validation",
+            "description": "Generic testing scenario authored in workflow metadata.",
+            "fixture_payload": {
+                "invitation_text": {"$input": "invitation_text"},
+            },
+            "expected_outcomes": [
+                {
+                    "label": "structured_fields",
+                    "expected_fields": {
+                        "$input": "expected_structure_fields",
+                        "$default": ["title", "time"],
+                    },
+                },
+                {
+                    "$if_input": "expected_downstream_actions",
+                    "then": {
+                        "label": "downstream_actions",
+                        "expected_actions": {"$input": "expected_downstream_actions"},
+                    },
+                },
+            ],
+            "theory_setup": {
+                "seed_claims": [
+                    {
+                        "source_id": "#V#meeting_invitation_testing_workflow",
+                        "predicate": "#V#has_hypothesis",
+                        "target": {
+                            "$input": "expected_meeting_type",
+                            "$default": "safe workflow candidate",
+                        },
+                        "target_kind": "text",
+                    }
+                ]
+            },
+            "verdict_rules": {
+                "require_all_expected_outcomes": True,
+            },
+            "promotion_policy": {
+                "requires_manual_gate": True,
+            },
+        },
+        template_inputs={
+            "invitation_text": "Meet on Tuesday to discuss the roadmap.",
+            "candidate_workflow_ids": ["#V#wf_candidate", "#V#wf_backup"],
+            "expected_meeting_type": "project_meeting",
+        },
+    )
+
+    assert result["success"] is True
+    assert result["scenario_template_schema_version"] == (
+        "testing_experiment_scenario_template.v1"
+    )
+    assert result["theory_slice_inputs"]["experiment_spec_id"] == "#V#scenario_spec"
+    assert result["theory_slice_inputs"]["expected_observations"] == [
+        {
+            "label": "structured_fields",
+            "expected_fields": ["title", "time"],
+        }
+    ]
+    assert result["theory_slice_inputs"]["promotion_policy"] == {
+        "requires_manual_gate": True,
+    }
+    assert result["seed_claims"] == [
+        {
+            "source_id": "#V#meeting_invitation_testing_workflow",
+            "predicate": "#V#has_hypothesis",
+            "target": "project_meeting",
+            "target_kind": "text",
+        }
+    ]
+    assert captured["candidate_workflow_ids"] == ["#V#wf_candidate", "#V#wf_backup"]
+    assert captured["target_workflow_ids"] == ["#V#wf_candidate"]
+    assert captured["fixture_payload"] == {
+        "invitation_text": "Meet on Tuesday to discuss the roadmap."
+    }
+    assert captured["verdict_rules"] == {
+        "require_all_expected_outcomes": True,
+        "minimum_pass_count": 1,
+    }
+
+
 def test_execute_regression_suite_tier2_delegates_to_benchmark_harness(monkeypatch):
     from src.backend.services import experiment_run_service as mod
 
@@ -464,6 +563,15 @@ def test_execute_regression_suite_tier2_delegates_to_benchmark_harness(monkeypat
         benchmark_scenario={"scenario_id": "suite-1"},
         output_root="data/testing_workflows/benchmarks/test-suite",
         run_id="#V#run_suite",
+        suite_policy={
+            "schema_version": "testing_regression_suite_policy.v1",
+            "default_execution_tier": "tier1",
+            "tiers": {
+                "tier1": {"mode": "cases"},
+                "tier2": {"mode": "benchmark"},
+                "benchmark": {"alias_for": "tier2"},
+            },
+        },
     )
 
     assert result["success"] is True
@@ -493,4 +601,31 @@ def test_execute_regression_suite_tier2_delegates_to_benchmark_harness(monkeypat
         "output_root": "data/testing_workflows/benchmarks/test-suite",
         "app": "benchmark-app",
         "mongo_client": "mongo-client",
+    }
+
+
+def test_execute_regression_suite_resolves_aliases_from_suite_policy() -> None:
+    from src.backend.services import experiment_run_service as mod
+
+    result = mod.execute_regression_suite(
+        execution_tier="benchmark",
+        cases=(),
+        suite_policy={
+            "schema_version": "testing_regression_suite_policy.v1",
+            "default_execution_tier": "tier1",
+            "tiers": {
+                "tier1": {"mode": "cases"},
+                "tier2": {
+                    "mode": "benchmark",
+                    "output_root_default": "data/custom_benchmarks",
+                },
+                "benchmark": {"alias_for": "tier2"},
+            },
+        },
+    )
+
+    assert result == {
+        "success": False,
+        "error": "benchmark_scenario_required_for_benchmark_suite",
+        "execution_tier": "tier2",
     }

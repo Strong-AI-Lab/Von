@@ -44,6 +44,8 @@ from .testing_workflow_contracts import (
     HAS_EXPECTED_OUTCOME_PREDICATE_ID,
     HAS_OBSERVED_OUTCOME_PREDICATE_ID,
     INCLUDES_THEORY_PREDICATE_ID,
+    TESTING_EXPERIMENT_SCENARIO_TEMPLATE_SCHEMA_VERSION,
+    TESTING_REGRESSION_SUITE_POLICY_SCHEMA_VERSION,
     TESTS_CAPABILITY_PREDICATE_ID,
     TESTS_WORKFLOW_PREDICATE_ID,
 )
@@ -54,6 +56,94 @@ from .workflow_vontology_materialisation_helpers import stable_named_instance_co
 logger = logging.getLogger(__name__)
 
 _RUN_INDEXES_READY = False
+_SCENARIO_TEMPLATE_OMIT = object()
+_DEFAULT_REGRESSION_SUITE_POLICY: dict[str, Any] = {
+    "schema_version": TESTING_REGRESSION_SUITE_POLICY_SCHEMA_VERSION,
+    "default_execution_tier": "tier1",
+    "tiers": {
+        "tier1": {"mode": "cases"},
+        "tier2": {
+            "mode": "benchmark",
+            "output_root_default": "data/testing_workflows/benchmarks",
+        },
+        "benchmark": {"alias_for": "tier2"},
+        "tier_2": {"alias_for": "tier2"},
+    },
+}
+_MEETING_INVITATION_SCENARIO_TEMPLATE: dict[str, Any] = {
+    "schema_version": TESTING_EXPERIMENT_SCENARIO_TEMPLATE_SCHEMA_VERSION,
+    "name": "Meeting invitation workflow derivation and validation",
+    "description": (
+        "Testing spec for deriving, selecting, and validating a meeting-invitation workflow."
+    ),
+    "fixture_payload": {
+        "invitation_text": {"$input": "invitation_text"},
+    },
+    "expected_outcomes": [
+        {
+            "label": "meeting_type_classification",
+            "expected": {
+                "$input": "expected_meeting_type",
+                "$default": "meeting_workflow_candidate",
+            },
+        },
+        {
+            "label": "structured_meeting_fields",
+            "expected_fields": {
+                "$input": "expected_structure_fields",
+                "$default": ["title", "time", "participants"],
+            },
+        },
+        {
+            "label": "mutation_safety",
+            "expected": "no_canonical_mutations_without_gate",
+        },
+        {
+            "$if_input": "expected_downstream_actions",
+            "then": {
+                "label": "downstream_actions",
+                "expected_actions": {"$input": "expected_downstream_actions"},
+            },
+        },
+    ],
+    "theory_setup": {
+        "seed_claims": [
+            {
+                "source_id": "#V#meeting_invitation_testing_workflow",
+                "predicate": "#V#has_hypothesis",
+                "target": {
+                    "$input": "expected_meeting_type",
+                    "$default": "meeting invitation should resolve to a safe workflow candidate",
+                },
+                "target_kind": "text",
+            },
+            {
+                "source_id": "#V#meeting_invitation_testing_workflow",
+                "predicate": "#V#has_assumption",
+                "target": "No canonical calendar or task mutation is permitted during testing.",
+                "target_kind": "text",
+            },
+        ],
+    },
+    "forbidden_side_effects": [
+        "canonical_calendar_mutation",
+        "canonical_task_mutation",
+        "external_action_without_gate",
+    ],
+    "verdict_rules": {
+        "require_all_expected_outcomes": True,
+    },
+    "replay_policy": {
+        "retain_failing_cases": True,
+        "retain_passing_cases": False,
+    },
+    "promotion_policy": {
+        "requires_manual_gate": True,
+    },
+    "metadata": {
+        "scenario": "meeting_invitation_testing",
+    },
+}
 
 
 def _utcnow() -> datetime:
@@ -136,6 +226,165 @@ def _normalise_verdict(value: Any) -> str | None:
     if verdict in EXPERIMENT_VERDICTS:
         return verdict
     return None
+
+
+def _has_template_input_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, Mapping):
+        return bool(value)
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return len(value) > 0
+    return True
+
+
+def _resolve_testing_template_value(
+    value: Any,
+    *,
+    inputs: Mapping[str, Any],
+) -> Any:
+    if isinstance(value, Mapping):
+        if "$input" in value:
+            input_key = _safe_str(value.get("$input"))
+            if input_key and _has_template_input_value(inputs.get(input_key)):
+                return copy.deepcopy(inputs.get(input_key))
+            if "$default" in value:
+                return _resolve_testing_template_value(
+                    value.get("$default"),
+                    inputs=inputs,
+                )
+            return _SCENARIO_TEMPLATE_OMIT
+        if "$if_input" in value and "then" in value:
+            input_key = _safe_str(value.get("$if_input"))
+            if input_key and _has_template_input_value(inputs.get(input_key)):
+                return _resolve_testing_template_value(
+                    value.get("then"),
+                    inputs=inputs,
+                )
+            return _SCENARIO_TEMPLATE_OMIT
+        resolved_mapping: dict[str, Any] = {}
+        for key, item in value.items():
+            resolved_item = _resolve_testing_template_value(item, inputs=inputs)
+            if resolved_item is _SCENARIO_TEMPLATE_OMIT:
+                continue
+            resolved_mapping[str(key)] = resolved_item
+        return resolved_mapping
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        resolved_items: list[Any] = []
+        for item in value:
+            resolved_item = _resolve_testing_template_value(item, inputs=inputs)
+            if resolved_item is _SCENARIO_TEMPLATE_OMIT:
+                continue
+            resolved_items.append(resolved_item)
+        return resolved_items
+    return copy.deepcopy(value)
+
+
+def _normalise_regression_suite_policy(
+    suite_policy: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    policy = copy.deepcopy(_DEFAULT_REGRESSION_SUITE_POLICY)
+    if not isinstance(suite_policy, Mapping):
+        return policy
+
+    schema_version = _safe_str(suite_policy.get("schema_version"))
+    if schema_version:
+        policy["schema_version"] = schema_version
+    default_execution_tier = _safe_str(suite_policy.get("default_execution_tier"))
+    if default_execution_tier:
+        policy["default_execution_tier"] = default_execution_tier.lower()
+
+    raw_tiers = suite_policy.get("tiers")
+    if isinstance(raw_tiers, Mapping):
+        merged_tiers = dict(policy.get("tiers") or {})
+        for raw_tier_key, raw_tier_policy in raw_tiers.items():
+            tier_key = _safe_str(raw_tier_key).lower()
+            if not tier_key or not isinstance(raw_tier_policy, Mapping):
+                continue
+            existing_tier_policy = merged_tiers.get(tier_key)
+            baseline = (
+                dict(existing_tier_policy)
+                if isinstance(existing_tier_policy, Mapping)
+                else {}
+            )
+            baseline.update(copy.deepcopy(dict(raw_tier_policy)))
+            merged_tiers[tier_key] = baseline
+        policy["tiers"] = merged_tiers
+    return policy
+
+
+def _resolve_regression_suite_mode(
+    *,
+    execution_tier: str,
+    suite_policy: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    resolved_policy = _normalise_regression_suite_policy(suite_policy)
+    schema_version = _safe_str(resolved_policy.get("schema_version"))
+    if (
+        schema_version
+        and schema_version != TESTING_REGRESSION_SUITE_POLICY_SCHEMA_VERSION
+    ):
+        return None, {
+            "success": False,
+            "error": "invalid_suite_policy_schema_version",
+            "suite_policy_schema_version": schema_version,
+        }
+
+    tiers = resolved_policy.get("tiers")
+    if not isinstance(tiers, Mapping):
+        return None, {"success": False, "error": "suite_policy_tiers_required"}
+
+    default_tier = (
+        _safe_str(resolved_policy.get("default_execution_tier")).lower() or "tier1"
+    )
+    candidate_tier = _safe_str(execution_tier).lower() or default_tier
+    visited: set[str] = set()
+    resolved_tier = candidate_tier
+    tier_policy: Mapping[str, Any] | None = None
+    while resolved_tier:
+        if resolved_tier in visited:
+            return None, {
+                "success": False,
+                "error": "suite_policy_alias_cycle",
+                "execution_tier": resolved_tier,
+            }
+        visited.add(resolved_tier)
+        tier_policy = tiers.get(resolved_tier)
+        if not isinstance(tier_policy, Mapping):
+            if resolved_tier != default_tier:
+                resolved_tier = default_tier
+                continue
+            return None, {
+                "success": False,
+                "error": "unknown_execution_tier",
+                "execution_tier": candidate_tier,
+            }
+        alias_for = _safe_str(tier_policy.get("alias_for")).lower()
+        if alias_for:
+            resolved_tier = alias_for
+            continue
+        break
+
+    if not isinstance(tier_policy, Mapping):
+        return None, {
+            "success": False,
+            "error": "unknown_execution_tier",
+            "execution_tier": candidate_tier,
+        }
+
+    suite_mode = _safe_str(tier_policy.get("mode")).lower() or "cases"
+    return {
+        "resolved_policy": resolved_policy,
+        "execution_tier": resolved_tier,
+        "suite_mode": suite_mode,
+        "tier_policy": dict(tier_policy),
+        "suite_policy_schema_version": (
+            _safe_str(resolved_policy.get("schema_version"))
+            or TESTING_REGRESSION_SUITE_POLICY_SCHEMA_VERSION
+        ),
+    }, None
 
 
 def _coerce_datetime_string(value: Any) -> str | None:
@@ -1343,6 +1592,114 @@ def emit_experiment_learning_signal(
     }
 
 
+def prepare_experiment_spec_from_template(
+    *,
+    scenario_template: Mapping[str, Any] | None,
+    template_inputs: Mapping[str, Any] | None = None,
+    experiment_spec_id: str | None = None,
+    name: str | None = None,
+    namespace: str | None = None,
+    user_id: str | None = None,
+    org_id: str | None = None,
+) -> dict[str, Any]:
+    if not isinstance(scenario_template, Mapping):
+        return {"success": False, "error": "scenario_template_required"}
+
+    schema_version = (
+        _safe_str(scenario_template.get("schema_version"))
+        or TESTING_EXPERIMENT_SCENARIO_TEMPLATE_SCHEMA_VERSION
+    )
+    if schema_version != TESTING_EXPERIMENT_SCENARIO_TEMPLATE_SCHEMA_VERSION:
+        return {
+            "success": False,
+            "error": "invalid_scenario_template_schema_version",
+            "scenario_template_schema_version": schema_version,
+        }
+
+    resolved_template = _resolve_testing_template_value(
+        scenario_template,
+        inputs=dict(template_inputs or {}),
+    )
+    if not isinstance(resolved_template, Mapping):
+        return {"success": False, "error": "scenario_template_resolution_failed"}
+
+    spec_name = (
+        _safe_str(name, limit=200)
+        or _safe_str(resolved_template.get("name"), limit=200)
+        or "Testing experiment"
+    )
+    expected_outcomes = _clone_sequence(resolved_template.get("expected_outcomes"))
+    theory_setup = _clone_mapping(resolved_template.get("theory_setup"))
+    if expected_outcomes and not theory_setup.get("expected_observations"):
+        theory_setup["expected_observations"] = copy.deepcopy(expected_outcomes)
+
+    verdict_rules = _clone_mapping(resolved_template.get("verdict_rules"))
+    if (
+        verdict_rules.get("require_all_expected_outcomes") is True
+        and not verdict_rules.get("minimum_pass_count")
+    ):
+        verdict_rules["minimum_pass_count"] = len(expected_outcomes)
+
+    promotion_policy = _clone_mapping(resolved_template.get("promotion_policy"))
+    theory_slice_inputs = _clone_mapping(resolved_template.get("theory_slice_inputs"))
+    if not _safe_str(theory_slice_inputs.get("name"), limit=200):
+        theory_slice_inputs["name"] = f"{spec_name} theory slice"
+    if expected_outcomes and not theory_slice_inputs.get("expected_observations"):
+        theory_slice_inputs["expected_observations"] = copy.deepcopy(expected_outcomes)
+    if promotion_policy and not theory_slice_inputs.get("promotion_policy"):
+        theory_slice_inputs["promotion_policy"] = copy.deepcopy(promotion_policy)
+
+    candidate_workflow_ids = _normalise_strings(
+        resolved_template.get("candidate_workflow_ids")
+    ) or _normalise_strings((template_inputs or {}).get("candidate_workflow_ids"))
+    target_workflow_ids = _normalise_strings(
+        resolved_template.get("target_workflow_ids")
+    ) or candidate_workflow_ids[:1]
+
+    result = create_experiment_spec(
+        name=spec_name,
+        experiment_spec_id=experiment_spec_id,
+        namespace=namespace,
+        user_id=user_id,
+        org_id=org_id,
+        description=_safe_str(resolved_template.get("description")) or None,
+        target_workflow_ids=target_workflow_ids,
+        target_capability_ids=_normalise_strings(
+            resolved_template.get("target_capability_ids")
+        ),
+        candidate_workflow_ids=candidate_workflow_ids,
+        theory_id=_safe_str(resolved_template.get("theory_id")) or None,
+        experiment_suite_id=_safe_str(resolved_template.get("experiment_suite_id"))
+        or None,
+        fixture_payload=copy.deepcopy(resolved_template.get("fixture_payload")),
+        theory_setup=theory_setup or None,
+        expected_outcomes=expected_outcomes,
+        allowed_side_effects=_normalise_strings(
+            resolved_template.get("allowed_side_effects")
+        ),
+        forbidden_side_effects=_normalise_strings(
+            resolved_template.get("forbidden_side_effects")
+        ),
+        verdict_rules=verdict_rules or None,
+        replay_policy=_clone_mapping(resolved_template.get("replay_policy")) or None,
+        promotion_policy=promotion_policy or None,
+        metadata=_clone_mapping(resolved_template.get("metadata")) or None,
+    )
+    if not result.get("success"):
+        return {
+            **result,
+            "scenario_template_schema_version": schema_version,
+        }
+
+    theory_slice_inputs["experiment_spec_id"] = result.get("experiment_spec_id")
+    return {
+        **result,
+        "scenario_template_schema_version": schema_version,
+        "theory_slice_inputs": theory_slice_inputs,
+        "seed_claims": _clone_sequence(theory_setup.get("seed_claims")),
+    }
+
+
 def prepare_meeting_invitation_experiment_spec(
     *,
     invitation_text: str,
@@ -1360,91 +1717,21 @@ def prepare_meeting_invitation_experiment_spec(
     if not invitation:
         return {"success": False, "error": "invitation_text_required"}
 
-    resolved_candidate_workflow_ids = _normalise_strings(candidate_workflow_ids)
-    spec_name = (
-        _safe_str(name, limit=200)
-        or "Meeting invitation workflow derivation and validation"
-    )
-    expected_outcomes: list[dict[str, Any]] = [
-        {
-            "label": "meeting_type_classification",
-            "expected": _safe_str(expected_meeting_type) or "meeting_workflow_candidate",
+    return prepare_experiment_spec_from_template(
+        scenario_template=_MEETING_INVITATION_SCENARIO_TEMPLATE,
+        template_inputs={
+            "invitation_text": invitation,
+            "candidate_workflow_ids": candidate_workflow_ids,
+            "expected_meeting_type": expected_meeting_type,
+            "expected_structure_fields": expected_structure_fields,
+            "expected_downstream_actions": expected_downstream_actions,
         },
-        {
-            "label": "structured_meeting_fields",
-            "expected_fields": _normalise_strings(expected_structure_fields)
-            or ["title", "time", "participants"],
-        },
-        {
-            "label": "mutation_safety",
-            "expected": "no_canonical_mutations_without_gate",
-        },
-    ]
-    if expected_downstream_actions:
-        expected_outcomes.append(
-            {
-                "label": "downstream_actions",
-                "expected_actions": _normalise_strings(expected_downstream_actions),
-            }
-        )
-
-    theory_setup = {
-        "seed_claims": [
-            {
-                "source_id": "#V#meeting_invitation_testing_workflow",
-                "predicate": "#V#has_hypothesis",
-                "target": _safe_str(expected_meeting_type)
-                or "meeting invitation should resolve to a safe workflow candidate",
-                "target_kind": "text",
-            },
-            {
-                "source_id": "#V#meeting_invitation_testing_workflow",
-                "predicate": "#V#has_assumption",
-                "target": "No canonical calendar or task mutation is permitted during testing.",
-                "target_kind": "text",
-            },
-        ],
-        "expected_observations": expected_outcomes,
-    }
-    result = create_experiment_spec(
-        name=spec_name,
         experiment_spec_id=experiment_spec_id,
+        name=name,
         namespace=namespace,
         user_id=user_id,
         org_id=org_id,
-        description=(
-            "Testing spec for deriving, selecting, and validating a meeting-invitation workflow."
-        ),
-        candidate_workflow_ids=resolved_candidate_workflow_ids,
-        target_workflow_ids=resolved_candidate_workflow_ids[:1],
-        fixture_payload={"invitation_text": invitation},
-        theory_setup=theory_setup,
-        expected_outcomes=expected_outcomes,
-        forbidden_side_effects=[
-            "canonical_calendar_mutation",
-            "canonical_task_mutation",
-            "external_action_without_gate",
-        ],
-        verdict_rules={
-            "require_all_expected_outcomes": True,
-            "minimum_pass_count": len(expected_outcomes),
-        },
-        replay_policy={"retain_failing_cases": True, "retain_passing_cases": False},
-        promotion_policy={"requires_manual_gate": True},
-        metadata={"scenario": "meeting_invitation_testing"},
     )
-    if not result.get("success"):
-        return result
-    return {
-        **result,
-        "theory_slice_inputs": {
-            "name": f"{spec_name} theory slice",
-            "experiment_spec_id": result.get("experiment_spec_id"),
-            "expected_observations": expected_outcomes,
-            "promotion_policy": {"requires_manual_gate": True},
-        },
-        "seed_claims": theory_setup["seed_claims"],
-    }
 
 
 def execute_regression_suite(
@@ -1454,11 +1741,32 @@ def execute_regression_suite(
     benchmark_scenario: Mapping[str, Any] | None = None,
     output_root: str | None = None,
     run_id: str | None = None,
+    suite_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    tier = _safe_str(execution_tier).lower() or "tier1"
-    if tier in {"tier2", "benchmark", "tier_2"}:
+    suite_resolution, suite_error = _resolve_regression_suite_mode(
+        execution_tier=execution_tier,
+        suite_policy=suite_policy,
+    )
+    if suite_error is not None:
+        return suite_error
+    assert suite_resolution is not None
+
+    tier = str(suite_resolution.get("execution_tier") or "tier1")
+    suite_mode = str(suite_resolution.get("suite_mode") or "cases")
+    tier_policy = suite_resolution.get("tier_policy")
+    tier_output_root_default = (
+        _safe_str(tier_policy.get("output_root_default"))
+        if isinstance(tier_policy, Mapping)
+        else ""
+    )
+
+    if suite_mode == "benchmark":
         if not isinstance(benchmark_scenario, Mapping):
-            return {"success": False, "error": "benchmark_scenario_required_for_tier2"}
+            return {
+                "success": False,
+                "error": "benchmark_scenario_required_for_benchmark_suite",
+                "execution_tier": tier,
+            }
         try:
             from .kb_clone_benchmark_service import (
                 build_default_benchmark_app,
@@ -1471,7 +1779,7 @@ def execute_regression_suite(
                 return {"success": False, "error": "mongo_client_unavailable"}
             result = run_kb_clone_benchmark(
                 scenario=benchmark_scenario,
-                output_root=output_root or "data/testing_workflows/benchmarks",
+                output_root=output_root or tier_output_root_default or "data/testing_workflows/benchmarks",
                 app=build_default_benchmark_app(),
                 mongo_client=mongo_client,
             )
@@ -1481,7 +1789,11 @@ def execute_regression_suite(
         aggregate = result.get("metrics", {}).get("aggregate", {})
         result = {
             "success": True,
-            "execution_tier": "tier2",
+            "execution_tier": tier,
+            "suite_mode": suite_mode,
+            "suite_policy_schema_version": suite_resolution.get(
+                "suite_policy_schema_version"
+            ),
             "suite_result": result,
             "verdict": (
                 EXPERIMENT_VERDICT_PASS
@@ -1494,9 +1806,21 @@ def execute_regression_suite(
             run_id=run_id,
         )
 
+    if suite_mode != "cases":
+        return {
+            "success": False,
+            "error": "unsupported_regression_suite_mode",
+            "execution_tier": tier,
+            "suite_mode": suite_mode,
+        }
+
     case_rows = [dict(item) for item in cases if isinstance(item, Mapping)]
     if not case_rows:
-        return {"success": False, "error": "cases_required_for_tier1_suite"}
+        return {
+            "success": False,
+            "error": "cases_required_for_case_suite",
+            "execution_tier": tier,
+        }
 
     pass_count = 0
     fail_count = 0
@@ -1522,7 +1846,11 @@ def execute_regression_suite(
     )
     result = {
         "success": True,
-        "execution_tier": "tier1",
+        "execution_tier": tier,
+        "suite_mode": suite_mode,
+        "suite_policy_schema_version": suite_resolution.get(
+            "suite_policy_schema_version"
+        ),
         "suite_result": {
             "case_count": len(case_rows),
             "pass_count": pass_count,
@@ -1596,6 +1924,7 @@ __all__ = [
     "get_experiment_run_state",
     "get_experiment_runs_collection",
     "get_experiment_spec_state",
+    "prepare_experiment_spec_from_template",
     "prepare_meeting_invitation_experiment_spec",
     "record_experiment_observation",
     "start_experiment_run",

@@ -669,6 +669,11 @@ Two mechanisms:
 - text mapping in `hasInputMap` (`key=value` or `key:value`),
 - semantic mapping via `workflow_step_maps_context_key_to_tool_param` concepts.
 
+Static step-local defaults that are not plain strings MUST be encoded as
+`key=json:<json>`. The loader restores the JSON payload as a structured action
+input so workflows can carry authored dict/list/scalar policy data without
+falling back to Python-owned branching.
+
 Semantic mappings bind:
 
 - a workflow context key,
@@ -1198,7 +1203,7 @@ Testing Workflows are now a first-class reusable VWL action family rather than a
 
 - Theory-slice control: `testing_theory_create_slice`, `testing_theory_import_canonical_context`, `testing_theory_assert_local_claims`, `testing_theory_compute_diff`, `testing_theory_rollback_local_writes`, `testing_theory_promote_validated_claims`, `testing_theory_gc_expired`
 - Experiment control: `experiment_create_spec`, `experiment_start_run`, `experiment_record_observation`, `experiment_compute_verdict`, `experiment_emit_learning_signal`, `experiment_execute_target_workflow`, `experiment_execute_regression_suite`
-- Scenario helper: `testing_prepare_meeting_invitation_spec`
+- Scenario helper: `testing_prepare_experiment_spec`
 - Evidence inspection: `experiment_run_list`, `experiment_run_get`
 
 Semantic rules:
@@ -1207,7 +1212,10 @@ Semantic rules:
 - `experiment_compute_verdict` is the canonical promotion-gate precursor. A passing verdict MAY recommend promotion-ready assertions, but canonical writes MUST still pass through an explicit promotion gate step or workflow.
 - `experiment_emit_learning_signal` is the canonical bridge from experiment evidence into workflow-selection learning loops and retained-case replay.
 - `experiment_execute_target_workflow` MAY run in awaited mode (`await_terminal=true`). In that mode it SHOULD poll the launched durable child instance to a terminal state or timeout, surface final-status evidence under `workflow_execution`, and record a generic experiment observation when a `run_id` is supplied.
-- `testing_prepare_meeting_invitation_spec` MUST default to conservative verdict rules. Meeting-invitation experiments require all declared expected outcomes to be evidenced before a passing verdict is allowed; a pure execution-only observation is intentionally insufficient for promotion.
+- `testing_prepare_experiment_spec` resolves a workflow-authored `testing_experiment_scenario_template.v1` payload into `experiment.create_spec` inputs plus suggested `theory_slice_inputs` and `seed_claims`.
+- `experiment_execute_regression_suite` MAY consume a workflow-authored `testing_regression_suite_policy.v1` payload so tier aliases, suite mode, and benchmark defaults are carried in workflow metadata rather than Python branches.
+- New workflows SHOULD use `testing_prepare_experiment_spec`. `testing_prepare_meeting_invitation_spec` remains a compatibility alias for the legacy meeting fixture and MUST NOT be used as the primary authoring surface for new testing workflows.
+- Meeting-invitation scenarios SHOULD still default to conservative verdict rules. All declared expected outcomes should be evidenced before a passing verdict is allowed; a pure execution-only observation is intentionally insufficient for promotion.
 - Outcome text predicates such as `#V#has_expected_outcome` and `#V#has_observed_outcome` are multi-valued evidence surfaces and MUST NOT be collapsed to singleton semantics.
 
 ## 15. Conformance Checklist for Workflow Authors

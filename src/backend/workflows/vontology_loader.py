@@ -33,6 +33,7 @@ from .workflow_action_contracts import resolve_workflow_action_target
 from .write_tool_policy import (
     normalise_workflow_step_mutation_authority_spec,
 )
+from .static_input_binding_utils import parse_static_input_binding_value
 from .engine import (
     WorkflowDefinition,
     WorkflowStateSpec,
@@ -1044,7 +1045,9 @@ def _parse_step_input_map(step_relationships: Mapping[str, Any]) -> Dict[str, An
         key = key.strip()
         value = value.strip()
         if key:
-            input_map[key] = value
+            parsed_value = parse_static_input_binding_value(value)
+            if parsed_value is not None:
+                input_map[key] = parsed_value
     return input_map
 
 

@@ -31,6 +31,7 @@ def test_internal_mcp_catalogue_builds_and_includes_relationship_tools():
     assert "experiment_execute_regression_suite" in methods
     assert "experiment_run_list" in methods
     assert "experiment_run_get" in methods
+    assert "testing_prepare_experiment_spec" in methods
     assert "testing_prepare_meeting_invitation_spec" in methods
 
 

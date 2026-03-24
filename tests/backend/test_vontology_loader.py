@@ -1960,6 +1960,44 @@ class TestInputMapping:
         action = defn.states["#V#step"].actions[0]
         assert action.inputs == {"timeout": "30"}
 
+    def test_reads_input_map_json_prefixed_structured_values(self):
+        """json:-prefixed hasInputMap values should restore structured inputs."""
+        step_docs = {
+            "#V#step": {
+                "concept_id": "#V#step",
+                "relationships": {
+                    "hasInputMap": [
+                        "scenario_template=json:{\"schema_version\":\"testing_experiment_scenario_template.v1\",\"fixture_payload\":{\"invitation_text\":{\"$input\":\"invitation_text\"}}}",
+                        "suite_policy=json:{\"schema_version\":\"testing_regression_suite_policy.v1\",\"tiers\":{\"tier1\":{\"mode\":\"cases\"}}}",
+                    ],
+                },
+            }
+        }
+        steps = [_make_step("#V#step", invokes_action="act")]
+        graph = _make_graph(initial_step="#V#step", steps=steps)
+
+        with _stub_fetch_concepts(step_docs), _stub_narrative():
+            with patch(
+                "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+                return_value=(graph, []),
+            ):
+                defn = load_workflow_definition_from_vontology("#V#test_workflow")
+
+        assert defn is not None
+        action = defn.states["#V#step"].actions[0]
+        assert action.inputs == {
+            "scenario_template": {
+                "schema_version": "testing_experiment_scenario_template.v1",
+                "fixture_payload": {
+                    "invitation_text": {"$input": "invitation_text"},
+                },
+            },
+            "suite_policy": {
+                "schema_version": "testing_regression_suite_policy.v1",
+                "tiers": {"tier1": {"mode": "cases"}},
+            },
+        }
+
     def test_no_input_map_gives_empty_dict(self):
         """Steps without hasInputMap should have empty inputs."""
         steps = [_make_step("#V#step", invokes_action="act")]

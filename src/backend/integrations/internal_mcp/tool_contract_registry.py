@@ -114,6 +114,7 @@ VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES: tuple[str, ...] = (
     "experiment_execute_regression_suite",
     "experiment_run_list",
     "experiment_run_get",
+    "testing_prepare_experiment_spec",
     "testing_prepare_meeting_invitation_spec",
     "turn_execution_list",
     "turn_execution_get",
