@@ -134,10 +134,9 @@ def build_db_independent_orchestrator(
     def _build_test_registry(*, defer_parity_work: bool = True) -> WorkflowRegistry:
         assert defer_parity_work is True
         registry = WorkflowRegistry()
+        seed_specs = authority_service.seed_canonical_workflow_publication_specs()
         for workflow_id in CONVERSATION_TURN_WORKFLOW_IDS:
-            spec = authority_service._CANONICAL_WORKFLOW_PUBLICATION_SPECS.get(
-                workflow_id
-            )
+            spec = seed_specs.get(workflow_id)
             if spec is None:
                 continue
             registry.register(

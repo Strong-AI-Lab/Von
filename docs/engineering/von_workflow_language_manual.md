@@ -77,8 +77,9 @@ Some repo-side workflow artefacts currently exist while the stronger authority m
 
 Current transitional examples include:
 
-- `src/backend/workflows/authored_sources/*.json`
-- `src/backend/workflows/authored_sources/workflow_template_profiles.json`
+- `src/backend/workflows/repo_seed_bundles/*.json`
+- `src/backend/workflows/repo_seed_bundles/workflow_template_seed_bundle.json`
+- `src/backend/workflows/repo_seed_bundles/README.md`
 
 Permitted roles for such artefacts:
 
@@ -95,7 +96,7 @@ Supporting code notes:
 - generic publication/materialisation helpers, validators, and export tooling remain valid runtime support;
 - `workflow_concept_authority_service.py` now derives canonical publication specs/text from authoritative Vontology workflow state where present, and only falls back to repo-side seed bundles when a canonical workflow is missing or clearly incomplete;
 - `workflow_template_profile_service.py` now resolves workflow-template concepts and template/profile text relations from Vontology, and only hydrates them from the seed bundle when the authoritative template concepts are absent;
-- `workflow_authored_source_bootstrap.py` now treats repo-side workflow bundles as seed fixtures only: a valid current Vontology workflow family is preserved rather than being overwritten back to seed parity;
+- `workflow_repo_seed_bootstrap.py` now treats repo-side workflow bundles as seed fixtures only: a valid current Vontology workflow family is preserved rather than being overwritten back to seed parity;
 - future review/export tooling should make Vontology-authored workflow logic easy to inspect without restoring file authority.
 
 ## 3. VWL Ontology Vocabulary
@@ -337,9 +338,9 @@ Current discovery rule:
 
 When a workflow authoring path needs to synthesise a new workflow definition from declarative authored assets, the template-selection policy MAY be represented as a workflow template profile.
 
-Canonical repository-side surface:
+Current repo-seed surface:
 
-- bundle schema: `authored_workflow_template_bundle.v1`
+- bundle schema: `repo_seed_workflow_template_bundle.v1`
 - profile schema: `workflow_template_profile.v1`
 
 Current fields:

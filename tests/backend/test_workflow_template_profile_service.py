@@ -1,4 +1,4 @@
-"""Tests for authored workflow-template profile selection and rendering."""
+"""Tests for workflow-template profile selection and repo-seed affordances."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from src.backend.workflows.workflow_template_profile_service import (
+    DEFAULT_REPO_SEED_TEMPLATE_ASSET_PATH,
     WORKFLOW_CREATION_DEFAULT_TEMPLATE_ID,
     WORKFLOW_CREATION_PHD_STUDENT_TEMPLATE_ID,
     WORKFLOW_CREATION_SCHOLARLY_TEMPLATE_ID,
@@ -14,7 +15,7 @@ from src.backend.workflows.workflow_template_profile_service import (
     WORKFLOW_TEMPLATE_PROFILE_PREDICATE,
     WORKFLOW_TEMPLATE_SPEC_PREDICATE,
     WORKFLOW_TEMPLATE_TYPE_ID,
-    clear_authored_workflow_template_bundle_cache,
+    clear_workflow_template_bundle_cache,
     resolve_workflow_spec_template,
     select_workflow_template,
 )
@@ -25,7 +26,7 @@ from src.backend.services.text_value_service import get_texts_for_concept
 @pytest.fixture
 def _reset_mock_db(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setenv("VON_USE_MOCK_DB", "1")
-    clear_authored_workflow_template_bundle_cache()
+    clear_workflow_template_bundle_cache()
 
     from src.backend.db.mongo_client import get_db
 
@@ -39,7 +40,14 @@ def _reset_mock_db(monkeypatch: pytest.MonkeyPatch) -> Any:
 
     yield
 
-    clear_authored_workflow_template_bundle_cache()
+    clear_workflow_template_bundle_cache()
+
+
+def test_workflow_template_repo_seed_path_is_named_honestly() -> None:
+    seed_path = str(DEFAULT_REPO_SEED_TEMPLATE_ASSET_PATH).replace("\\", "/")
+    assert "repo_seed_bundles" in seed_path
+    assert "workflow_template_seed_bundle.json" in seed_path
+    assert "authored_sources" not in seed_path
 
 
 def test_select_workflow_template_prefers_scholarly_profile(

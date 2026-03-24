@@ -375,19 +375,19 @@ _PARENT_SPECIFICITY_DOSSIER_CONTEXT_INPUT_MAPPINGS: tuple[str, ...] = (
     PARENT_SPECIFICITY_DOSSIER_CONTEXT_INPUT_MAPPING_CONCEPT_ID,
 )
 
-AUTHORED_WORKFLOW_SOURCE_BUNDLE_SCHEMA_VERSION = "authored_workflow_source_bundle.v1"
-AUTHORED_WORKFLOW_SOURCE_DIR = Path(__file__).with_name("authored_sources")
-_CANONICAL_WORKFLOW_PUBLICATION_SOURCE_PATH = (
-    AUTHORED_WORKFLOW_SOURCE_DIR / "canonical_workflow_publication_specs.json"
+REPO_SEED_WORKFLOW_BUNDLE_SCHEMA_VERSION = "repo_seed_workflow_bundle.v1"
+REPO_SEED_WORKFLOW_BUNDLE_DIR = Path(__file__).with_name("repo_seed_bundles")
+_CANONICAL_WORKFLOW_PUBLICATION_SEED_BUNDLE_PATH = (
+    REPO_SEED_WORKFLOW_BUNDLE_DIR / "canonical_workflow_publication_seed_bundle.json"
 )
 
 
-def _normalise_authored_source_text(value: Any) -> str | None:
+def _normalise_seed_bundle_text(value: Any) -> str | None:
     text = str(value or "").strip()
     return text or None
 
 
-def _normalise_authored_source_string_tuple(value: Any) -> tuple[str, ...]:
+def _normalise_seed_bundle_string_tuple(value: Any) -> tuple[str, ...]:
     if not isinstance(value, Sequence) or isinstance(value, str):
         return ()
     cleaned: list[str] = []
@@ -411,13 +411,13 @@ def _parse_static_input_bindings_payload(
 
     for item in iterable:
         if isinstance(item, Mapping):
-            key = _normalise_authored_source_text(
+            key = _normalise_seed_bundle_text(
                 item.get("tool_param") or item.get("key")
             )
-            value = _normalise_authored_source_text(item.get("value"))
+            value = _normalise_seed_bundle_text(item.get("value"))
         elif isinstance(item, Sequence) and not isinstance(item, str) and len(item) == 2:
-            key = _normalise_authored_source_text(item[0])
-            value = _normalise_authored_source_text(item[1])
+            key = _normalise_seed_bundle_text(item[0])
+            value = _normalise_seed_bundle_text(item[1])
         else:
             continue
         if key and value:
@@ -434,9 +434,9 @@ def _parse_context_input_mapping_specs_payload(
     for item in raw_payload:
         if not isinstance(item, Mapping):
             continue
-        concept_id = _normalise_authored_source_text(item.get("concept_id"))
-        context_key = _normalise_authored_source_text(item.get("context_key"))
-        tool_param = _normalise_authored_source_text(item.get("tool_param"))
+        concept_id = _normalise_seed_bundle_text(item.get("concept_id"))
+        context_key = _normalise_seed_bundle_text(item.get("context_key"))
+        tool_param = _normalise_seed_bundle_text(item.get("tool_param"))
         if not concept_id or not context_key or not tool_param:
             continue
         specs.append(
@@ -468,12 +468,12 @@ def _parse_tool_output_mapping_specs_payload(
     for item in raw_payload:
         if not isinstance(item, Mapping):
             continue
-        concept_id = _normalise_authored_source_text(item.get("concept_id"))
-        tool_output_field = _normalise_authored_source_text(item.get("tool_output_field"))
-        context_key = _normalise_authored_source_text(item.get("context_key"))
+        concept_id = _normalise_seed_bundle_text(item.get("concept_id"))
+        tool_output_field = _normalise_seed_bundle_text(item.get("tool_output_field"))
+        context_key = _normalise_seed_bundle_text(item.get("context_key"))
         if not concept_id or not tool_output_field or not context_key:
             continue
-        child_output_field = _normalise_authored_source_text(
+        child_output_field = _normalise_seed_bundle_text(
             item.get("child_output_field")
         )
         if child_output_field is not None:
@@ -504,7 +504,7 @@ def _parse_conditional_transition_payload(
     for item in raw_payload:
         if not isinstance(item, Mapping):
             continue
-        to_state = _normalise_authored_source_text(item.get("to_state"))
+        to_state = _normalise_seed_bundle_text(item.get("to_state"))
         if not to_state:
             continue
         condition_spec = item.get("condition_spec")
@@ -516,7 +516,7 @@ def _parse_conditional_transition_payload(
                     if isinstance(condition_spec, Mapping)
                     else {"kind": "always"}
                 ),
-                reason=_normalise_authored_source_text(item.get("reason")),
+                reason=_normalise_seed_bundle_text(item.get("reason")),
             )
         )
     return tuple(transitions)
@@ -526,24 +526,24 @@ def _parse_publication_step_payload(
     raw_payload: Any,
 ) -> _CanonicalStepPublicationSpec:
     if not isinstance(raw_payload, Mapping):
-        raise ValueError("authored_workflow_step_payload_missing")
-    state_id = _normalise_authored_source_text(raw_payload.get("state_id"))
+        raise ValueError("repo_seed_workflow_step_payload_missing")
+    state_id = _normalise_seed_bundle_text(raw_payload.get("state_id"))
     if not state_id:
-        raise ValueError("authored_workflow_step_state_id_missing")
+        raise ValueError("repo_seed_workflow_step_state_id_missing")
     llm_policy = raw_payload.get("llm_policy")
     validation_policy = raw_payload.get("validation_policy")
     mutation_authority = raw_payload.get("mutation_authority")
     return _CanonicalStepPublicationSpec(
         state_id=state_id,
-        concept_id=_normalise_authored_source_text(raw_payload.get("concept_id")),
-        action_id=_normalise_authored_source_text(raw_payload.get("action_id")),
-        action_concept_id=_normalise_authored_source_text(
+        concept_id=_normalise_seed_bundle_text(raw_payload.get("concept_id")),
+        action_id=_normalise_seed_bundle_text(raw_payload.get("action_id")),
+        action_concept_id=_normalise_seed_bundle_text(
             raw_payload.get("action_concept_id")
         ),
-        prompt_concept_ids=_normalise_authored_source_string_tuple(
+        prompt_concept_ids=_normalise_seed_bundle_string_tuple(
             raw_payload.get("prompt_concept_ids")
         ),
-        execution_mode=_normalise_authored_source_text(
+        execution_mode=_normalise_seed_bundle_text(
             raw_payload.get("execution_mode")
         ),
         llm_policy=dict(llm_policy) if isinstance(llm_policy, Mapping) else None,
@@ -557,53 +557,53 @@ def _parse_publication_step_payload(
             if isinstance(mutation_authority, Mapping)
             else None
         ),
-        invoked_workflow_id=_normalise_authored_source_text(
+        invoked_workflow_id=_normalise_seed_bundle_text(
             raw_payload.get("invoked_workflow_id")
         ),
         static_input_bindings=_parse_static_input_bindings_payload(
             raw_payload.get("static_input_bindings")
         ),
-        context_input_mappings=_normalise_authored_source_string_tuple(
+        context_input_mappings=_normalise_seed_bundle_string_tuple(
             raw_payload.get("context_input_mappings")
         ),
         context_input_mapping_specs=_parse_context_input_mapping_specs_payload(
             raw_payload.get("context_input_mapping_specs")
         ),
-        tool_output_context_mappings=_normalise_authored_source_string_tuple(
+        tool_output_context_mappings=_normalise_seed_bundle_string_tuple(
             raw_payload.get("tool_output_context_mappings")
         ),
         tool_output_mapping_specs=_parse_tool_output_mapping_specs_payload(
             raw_payload.get("tool_output_mapping_specs")
         ),
-        writes_context_keys=_normalise_authored_source_string_tuple(
+        writes_context_keys=_normalise_seed_bundle_string_tuple(
             raw_payload.get("writes_context_keys")
         ),
-        next_state=_normalise_authored_source_text(raw_payload.get("next_state")),
-        on_true_state=_normalise_authored_source_text(
+        next_state=_normalise_seed_bundle_text(raw_payload.get("next_state")),
+        on_true_state=_normalise_seed_bundle_text(
             raw_payload.get("on_true_state")
         ),
-        on_false_state=_normalise_authored_source_text(
+        on_false_state=_normalise_seed_bundle_text(
             raw_payload.get("on_false_state")
         ),
-        on_failure_state=_normalise_authored_source_text(
+        on_failure_state=_normalise_seed_bundle_text(
             raw_payload.get("on_failure_state")
         ),
-        on_unknown_state=_normalise_authored_source_text(
+        on_unknown_state=_normalise_seed_bundle_text(
             raw_payload.get("on_unknown_state")
         ),
-        on_approval_required_state=_normalise_authored_source_text(
+        on_approval_required_state=_normalise_seed_bundle_text(
             raw_payload.get("on_approval_required_state")
         ),
-        on_break_state=_normalise_authored_source_text(
+        on_break_state=_normalise_seed_bundle_text(
             raw_payload.get("on_break_state")
         ),
-        on_continue_state=_normalise_authored_source_text(
+        on_continue_state=_normalise_seed_bundle_text(
             raw_payload.get("on_continue_state")
         ),
         conditional_transitions=_parse_conditional_transition_payload(
             raw_payload.get("conditional_transitions")
         ),
-        effects=_normalise_authored_source_string_tuple(raw_payload.get("effects")),
+        effects=_normalise_seed_bundle_string_tuple(raw_payload.get("effects")),
     )
 
 
@@ -611,14 +611,14 @@ def _parse_publication_spec_payload(
     raw_payload: Any,
 ) -> _CanonicalWorkflowPublicationSpec:
     if not isinstance(raw_payload, Mapping):
-        raise ValueError("authored_workflow_publication_spec_missing")
+        raise ValueError("repo_seed_workflow_publication_spec_missing")
     steps_payload = raw_payload.get("steps")
     if not isinstance(steps_payload, Sequence) or isinstance(steps_payload, str):
-        raise ValueError("authored_workflow_publication_steps_missing")
+        raise ValueError("repo_seed_workflow_publication_steps_missing")
     steps = tuple(_parse_publication_step_payload(item) for item in steps_payload)
     if not steps:
-        raise ValueError("authored_workflow_publication_steps_missing")
-    initial_state = _normalise_authored_source_text(raw_payload.get("initial_state"))
+        raise ValueError("repo_seed_workflow_publication_steps_missing")
+    initial_state = _normalise_seed_bundle_text(raw_payload.get("initial_state"))
     if not initial_state:
         initial_state = steps[0].state_id
     return _CanonicalWorkflowPublicationSpec(
@@ -627,7 +627,7 @@ def _parse_publication_spec_payload(
     )
 
 
-def _append_authored_text_relation_spec(
+def _append_seed_bundle_text_relation_spec(
     *,
     target: list[dict[str, Any]],
     predicate: str,
@@ -645,16 +645,16 @@ def _append_authored_text_relation_spec(
     )
 
 
-def _append_authored_text_relation_mapping(
+def _append_seed_bundle_text_relation_mapping(
     *,
     target: list[dict[str, Any]],
     raw_item: Any,
 ) -> None:
     if not isinstance(raw_item, Mapping):
         return
-    predicate = _normalise_authored_source_text(raw_item.get("predicate"))
-    text = _normalise_authored_source_text(raw_item.get("text"))
-    lang = _normalise_authored_source_text(raw_item.get("lang")) or "en-NZ"
+    predicate = _normalise_seed_bundle_text(raw_item.get("predicate"))
+    text = _normalise_seed_bundle_text(raw_item.get("text"))
+    lang = _normalise_seed_bundle_text(raw_item.get("lang")) or "en-NZ"
     if not predicate or not text:
         return
     target.append(
@@ -667,17 +667,17 @@ def _append_authored_text_relation_mapping(
 
 
 @lru_cache(maxsize=None)
-def _load_authored_workflow_source_bundle_cached(
+def _load_repo_seed_workflow_bundle_cached(
     asset_path: str,
 ) -> dict[str, Any]:
     path = Path(asset_path).resolve()
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, Mapping):
-        raise ValueError("authored_workflow_source_bundle_not_mapping")
-    schema_version = _normalise_authored_source_text(payload.get("schema_version"))
-    if schema_version != AUTHORED_WORKFLOW_SOURCE_BUNDLE_SCHEMA_VERSION:
+        raise ValueError("repo_seed_workflow_bundle_not_mapping")
+    schema_version = _normalise_seed_bundle_text(payload.get("schema_version"))
+    if schema_version != REPO_SEED_WORKFLOW_BUNDLE_SCHEMA_VERSION:
         raise ValueError(
-            "authored_workflow_source_bundle_schema_unsupported:"
+            "repo_seed_workflow_bundle_schema_unsupported:"
             f"{schema_version or 'missing'}"
         )
 
@@ -686,7 +686,7 @@ def _load_authored_workflow_source_bundle_cached(
         workflows_payload,
         str,
     ):
-        raise ValueError("authored_workflow_source_bundle_workflows_missing")
+        raise ValueError("repo_seed_workflow_bundle_workflows_missing")
 
     publication_specs: dict[str, _CanonicalWorkflowPublicationSpec] = {}
     publication_purposes: dict[str, str] = {}
@@ -698,42 +698,42 @@ def _load_authored_workflow_source_bundle_cached(
     for item in workflows_payload:
         if not isinstance(item, Mapping):
             continue
-        workflow_id = _normalise_authored_source_text(item.get("workflow_id"))
+        workflow_id = _normalise_seed_bundle_text(item.get("workflow_id"))
         if not workflow_id:
-            raise ValueError("authored_workflow_source_workflow_id_missing")
+            raise ValueError("repo_seed_workflow_source_workflow_id_missing")
         publication_specs[workflow_id] = _parse_publication_spec_payload(
             item.get("publication_spec")
         )
 
-        publication_purpose = _normalise_authored_source_text(
+        publication_purpose = _normalise_seed_bundle_text(
             item.get("publication_purpose")
-        ) or _normalise_authored_source_text(item.get("content"))
+        ) or _normalise_seed_bundle_text(item.get("content"))
         if publication_purpose:
             publication_purposes[workflow_id] = publication_purpose
 
-        type_ids = _normalise_authored_source_string_tuple(item.get("type_ids"))
+        type_ids = _normalise_seed_bundle_string_tuple(item.get("type_ids"))
         if type_ids:
             workflow_type_ids[workflow_id] = type_ids
 
         workflow_text_specs: list[dict[str, Any]] = []
-        _append_authored_text_relation_spec(
+        _append_seed_bundle_text_relation_spec(
             target=workflow_text_specs,
             predicate="hasDescription",
-            text=_normalise_authored_source_text(item.get("description")),
+            text=_normalise_seed_bundle_text(item.get("description")),
         )
-        _append_authored_text_relation_spec(
+        _append_seed_bundle_text_relation_spec(
             target=workflow_text_specs,
             predicate="hasContent",
-            text=_normalise_authored_source_text(item.get("content")),
+            text=_normalise_seed_bundle_text(item.get("content")),
         )
         for note in item.get("workflow_notes") or ():
-            _append_authored_text_relation_spec(
+            _append_seed_bundle_text_relation_spec(
                 target=workflow_text_specs,
                 predicate="hasNote",
-                text=_normalise_authored_source_text(note),
+                text=_normalise_seed_bundle_text(note),
             )
         for raw_relation in item.get("text_relations") or ():
-            _append_authored_text_relation_mapping(
+            _append_seed_bundle_text_relation_mapping(
                 target=workflow_text_specs,
                 raw_item=raw_relation,
             )
@@ -747,15 +747,15 @@ def _load_authored_workflow_source_bundle_cached(
         raw_step_notes = item.get("step_notes")
         if isinstance(raw_step_notes, Mapping):
             for state_id, notes in raw_step_notes.items():
-                state_id_text = _normalise_authored_source_text(state_id)
+                state_id_text = _normalise_seed_bundle_text(state_id)
                 if not state_id_text:
                     continue
                 step_text_specs: list[dict[str, Any]] = []
                 for note in notes or ():
-                    _append_authored_text_relation_spec(
+                    _append_seed_bundle_text_relation_spec(
                         target=step_text_specs,
                         predicate="hasNote",
-                        text=_normalise_authored_source_text(note),
+                        text=_normalise_seed_bundle_text(note),
                     )
                 if not step_text_specs:
                     continue
@@ -768,10 +768,10 @@ def _load_authored_workflow_source_bundle_cached(
 
     return {
         "asset_path": str(path),
-        "family_id": _normalise_authored_source_text(payload.get("family_id")),
-        "managed_by": _normalise_authored_source_text(payload.get("managed_by")),
-        "source_tag": _normalise_authored_source_text(payload.get("source_tag")),
-        "supported_action_ids": _normalise_authored_source_string_tuple(
+        "family_id": _normalise_seed_bundle_text(payload.get("family_id")),
+        "managed_by": _normalise_seed_bundle_text(payload.get("managed_by")),
+        "source_tag": _normalise_seed_bundle_text(payload.get("source_tag")),
+        "supported_action_ids": _normalise_seed_bundle_string_tuple(
             payload.get("supported_action_ids")
         ),
         "publication_specs": publication_specs,
@@ -783,34 +783,34 @@ def _load_authored_workflow_source_bundle_cached(
     }
 
 
-def load_authored_workflow_source_bundle(asset_path: str | Path) -> dict[str, Any]:
-    """Load one version-controlled authored workflow source bundle."""
+def load_repo_seed_workflow_bundle(asset_path: str | Path) -> dict[str, Any]:
+    """Load one repo-side workflow seed bundle."""
 
-    return _load_authored_workflow_source_bundle_cached(str(Path(asset_path).resolve()))
+    return _load_repo_seed_workflow_bundle_cached(str(Path(asset_path).resolve()))
 
 
-def clear_authored_workflow_source_bundle_cache() -> None:
-    _load_authored_workflow_source_bundle_cached.cache_clear()
+def clear_repo_seed_workflow_bundle_cache() -> None:
+    _load_repo_seed_workflow_bundle_cached.cache_clear()
 
 
 @lru_cache(maxsize=1)
-def _load_seed_canonical_workflow_source_bundle() -> dict[str, Any]:
-    return load_authored_workflow_source_bundle(
-        _CANONICAL_WORKFLOW_PUBLICATION_SOURCE_PATH
+def _load_repo_seed_canonical_workflow_bundle() -> dict[str, Any]:
+    return load_repo_seed_workflow_bundle(
+        _CANONICAL_WORKFLOW_PUBLICATION_SEED_BUNDLE_PATH
     )
 
 
 def seed_canonical_workflow_publication_specs() -> Dict[str, _CanonicalWorkflowPublicationSpec]:
     """Return the repo-side seed publication specs for canonical workflows."""
 
-    return dict(_load_seed_canonical_workflow_source_bundle()["publication_specs"])
+    return dict(_load_repo_seed_canonical_workflow_bundle()["publication_specs"])
 
 
 def seed_canonical_workflow_text_relations() -> Dict[str, tuple[dict[str, Any], ...]]:
     """Return repo-side seed workflow text relations for canonical workflows."""
 
     return dict(
-        _load_seed_canonical_workflow_source_bundle().get("workflow_text_relations")
+        _load_repo_seed_canonical_workflow_bundle().get("workflow_text_relations")
         or {}
     )
 
@@ -849,7 +849,7 @@ def _publication_spec_has_executable_actions(
     )
 
 
-def upsert_authored_text_relations(
+def upsert_seed_bundle_text_relations(
     *,
     subject_concept_id: str,
     relation_specs: Sequence[Mapping[str, Any]],
@@ -2256,7 +2256,7 @@ def publish_canonical_chat_workflow_graphs(
         relation_specs = tuple(available_workflow_text_relations.get(workflow_id) or ())
         if relation_specs:
             try:
-                upsert_authored_text_relations(
+                upsert_seed_bundle_text_relations(
                     subject_concept_id=workflow_id,
                     relation_specs=relation_specs,
                     workflow_id=workflow_id,

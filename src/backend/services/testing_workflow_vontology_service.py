@@ -1,4 +1,4 @@
-"""Materialise canonical Testing Workflows from authored sources."""
+"""Materialise canonical Testing Workflows from repo seed bundles."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from typing import Any
 
 from . import concept_service
 from .text_value_service import upsert_singleton_text_relation
-from .workflow_authored_source_bootstrap import (
-    bootstrap_authored_workflow_source_bundle,
+from .workflow_repo_seed_bootstrap import (
+    bootstrap_repo_seed_workflow_bundle,
 )
 from .workflow_vontology_materialisation_helpers import (
     suspend_event_workflow_integration,
@@ -93,11 +93,11 @@ _MEETING_INVITATION_EVALUATION_PROMPTS: tuple[dict[str, str], ...] = (
     },
 )
 
-_AUTHORED_SOURCE_ASSET_PATH = (
+_REPO_SEED_ASSET_PATH = (
     Path(__file__).resolve().parents[1]
     / "workflows"
-    / "authored_sources"
-    / "testing_workflows.json"
+    / "repo_seed_bundles"
+    / "testing_workflow_seed_bundle.json"
 )
 
 
@@ -195,8 +195,8 @@ def bootstrap_canonical_testing_workflows() -> dict[str, Any]:
             + ",".join(error_items or ["unknown"])
         )
 
-    report = bootstrap_authored_workflow_source_bundle(
-        asset_path=_AUTHORED_SOURCE_ASSET_PATH,
+    report = bootstrap_repo_seed_workflow_bundle(
+        asset_path=_REPO_SEED_ASSET_PATH,
         publish_context_manager_factory=suspend_event_workflow_integration,
     )
     report["prompt_support"] = prompt_support

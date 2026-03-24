@@ -1,4 +1,4 @@
-"""Generic bootstrap helpers for authored workflow source assets."""
+"""Generic bootstrap helpers for repo-side workflow seed bundles."""
 
 from __future__ import annotations
 
@@ -606,14 +606,14 @@ def _validate_existing_materialisation(
     return True, validation_by_workflow_id
 
 
-def bootstrap_authored_workflow_source_bundle(
+def bootstrap_repo_seed_workflow_bundle(
     *,
     asset_path: str | Path,
     publish_context_manager_factory: Callable[[], Any] | None = None,
 ) -> dict[str, Any]:
-    """Publish and validate one authored workflow source bundle."""
+    """Publish and validate one repo-side workflow seed bundle."""
 
-    bundle = authority_service.load_authored_workflow_source_bundle(asset_path)
+    bundle = authority_service.load_repo_seed_workflow_bundle(asset_path)
     managed_by = str(bundle.get("managed_by") or "").strip() or None
     source_tag = str(bundle.get("source_tag") or "").strip() or None
     publication_specs = dict(bundle.get("publication_specs") or {})
@@ -679,7 +679,7 @@ def bootstrap_authored_workflow_source_bundle(
 
             relation_specs = tuple(workflow_text_relations.get(workflow_id) or ())
             if relation_specs:
-                authority_service.upsert_authored_text_relations(
+                authority_service.upsert_seed_bundle_text_relations(
                     subject_concept_id=workflow_id,
                     relation_specs=relation_specs,
                     workflow_id=workflow_id,
@@ -716,7 +716,7 @@ def bootstrap_authored_workflow_source_bundle(
                     typed_step_ids.append(step_concept_id)
                 step_relation_specs = tuple(step_text_relations.get(step_concept_id) or ())
                 if step_relation_specs:
-                    authority_service.upsert_authored_text_relations(
+                    authority_service.upsert_seed_bundle_text_relations(
                         subject_concept_id=step_concept_id,
                         relation_specs=step_relation_specs,
                         workflow_id=workflow_id,
@@ -729,14 +729,14 @@ def bootstrap_authored_workflow_source_bundle(
             if already_current:
                 if not isinstance(validation, dict):
                     raise RuntimeError(
-                        "authored_workflow_validation_missing_after_short_circuit:"
+                        "repo_seed_workflow_validation_missing_after_short_circuit:"
                         f"{workflow_id}"
                     )
             else:
                 graph, graph_warnings = build_workflow_process_graph(workflow_id)
                 if not isinstance(graph, dict):
                     raise RuntimeError(
-                        f"authored_workflow_graph_missing:{workflow_id}"
+                        f"repo_seed_workflow_graph_missing:{workflow_id}"
                     )
                 warning_items = [
                     str(item).strip()
@@ -745,7 +745,7 @@ def bootstrap_authored_workflow_source_bundle(
                 ]
                 if warning_items:
                     raise RuntimeError(
-                        "authored_workflow_graph_warnings_present:"
+                        "repo_seed_workflow_graph_warnings_present:"
                         f"{workflow_id}:"
                         + ",".join(warning_items)
                     )
@@ -753,7 +753,7 @@ def bootstrap_authored_workflow_source_bundle(
                 definition = load_workflow_definition_from_vontology(workflow_id)
                 if definition is None:
                     raise RuntimeError(
-                        f"authored_workflow_definition_not_loadable:{workflow_id}"
+                        f"repo_seed_workflow_definition_not_loadable:{workflow_id}"
                     )
                 validation = validate_workflow_definition_contract(
                     definition=definition,
@@ -765,7 +765,7 @@ def bootstrap_authored_workflow_source_bundle(
 
                 if not bool(validation.get("valid")):
                     raise RuntimeError(
-                        "authored_workflow_definition_invalid:"
+                        "repo_seed_workflow_definition_invalid:"
                         f"{workflow_id}:"
                         + ",".join(
                             str(item).strip()
@@ -786,4 +786,4 @@ def bootstrap_authored_workflow_source_bundle(
     }
 
 
-__all__ = ["bootstrap_authored_workflow_source_bundle"]
+__all__ = ["bootstrap_repo_seed_workflow_bundle"]

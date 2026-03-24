@@ -501,7 +501,7 @@ def _workflow_template_id_from_context(context: Mapping[str, Any]) -> str | None
     return None
 
 
-def _resolve_authored_workflow_template_spec(
+def _resolve_workflow_template_spec(
     *,
     context: Mapping[str, Any],
     request_text: str,
@@ -860,7 +860,7 @@ def _normalise_workflow_spec(context: Mapping[str, Any]) -> dict[str, Any]:
     )
 
     if not raw_spec:
-        raw_spec, template_resolution = _resolve_authored_workflow_template_spec(
+        raw_spec, template_resolution = _resolve_workflow_template_spec(
             context=context,
             request_text=request_text,
             workflow_id=workflow_id,

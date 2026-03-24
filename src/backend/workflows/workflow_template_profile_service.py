@@ -1,8 +1,9 @@
 """Vontology-backed workflow-template selection and rendering helpers.
 
 Workflow creation and gap recovery should resolve reusable workflow-spec
-templates from first-class Vontology artefacts. Repo-side JSON bundles remain
-seed fixtures only and are used only to hydrate missing template concepts.
+templates from first-class Vontology artefacts. Repo-side workflow template
+bundles remain seed fixtures only and are used only to hydrate missing
+template concepts.
 """
 
 from __future__ import annotations
@@ -22,13 +23,13 @@ from ..services.text_value_service import (
     upsert_singleton_text_relation,
 )
 
-AUTHORED_WORKFLOW_TEMPLATE_BUNDLE_SCHEMA_VERSION = (
-    "authored_workflow_template_bundle.v1"
+REPO_SEED_WORKFLOW_TEMPLATE_BUNDLE_SCHEMA_VERSION = (
+    "repo_seed_workflow_template_bundle.v1"
 )
 WORKFLOW_TEMPLATE_PROFILE_SCHEMA_VERSION = "workflow_template_profile.v1"
-WORKFLOW_TEMPLATE_SOURCE_DIR = Path(__file__).with_name("authored_sources")
-DEFAULT_TEMPLATE_ASSET_PATH = (
-    WORKFLOW_TEMPLATE_SOURCE_DIR / "workflow_template_profiles.json"
+WORKFLOW_TEMPLATE_REPO_SEED_DIR = Path(__file__).with_name("repo_seed_bundles")
+DEFAULT_REPO_SEED_TEMPLATE_ASSET_PATH = (
+    WORKFLOW_TEMPLATE_REPO_SEED_DIR / "workflow_template_seed_bundle.json"
 )
 
 WORKFLOW_CREATION_DEFAULT_TEMPLATE_ID = "workflow_creation.default_marker"
@@ -351,22 +352,22 @@ def _concept_display_name(concept_doc: Mapping[str, Any], fallback: str) -> str:
 
 
 @lru_cache(maxsize=None)
-def _load_seed_workflow_template_bundle_cached(asset_path: str) -> dict[str, Any]:
+def _load_repo_seed_workflow_template_bundle_cached(asset_path: str) -> dict[str, Any]:
     path = Path(asset_path).resolve()
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, Mapping):
-        raise ValueError("authored_workflow_template_bundle_not_mapping")
+        raise ValueError("repo_seed_workflow_template_bundle_not_mapping")
 
     schema_version = _clean_text(payload.get("schema_version"))
-    if schema_version != AUTHORED_WORKFLOW_TEMPLATE_BUNDLE_SCHEMA_VERSION:
+    if schema_version != REPO_SEED_WORKFLOW_TEMPLATE_BUNDLE_SCHEMA_VERSION:
         raise ValueError(
-            "authored_workflow_template_bundle_schema_unsupported:"
+            "repo_seed_workflow_template_bundle_schema_unsupported:"
             f"{schema_version or 'missing'}"
         )
 
     raw_templates = payload.get("templates")
     if not isinstance(raw_templates, Sequence) or isinstance(raw_templates, str):
-        raise ValueError("authored_workflow_template_bundle_templates_missing")
+        raise ValueError("repo_seed_workflow_template_bundle_templates_missing")
 
     templates: dict[str, dict[str, Any]] = {}
     profiles: dict[str, dict[str, Any]] = {}
@@ -376,11 +377,11 @@ def _load_seed_workflow_template_bundle_cached(asset_path: str) -> dict[str, Any
             continue
         template_id = _clean_text(item.get("template_id"))
         if not template_id:
-            raise ValueError("authored_workflow_template_id_missing")
+            raise ValueError("repo_seed_workflow_template_id_missing")
         raw_template = item.get("workflow_spec_template")
         if not isinstance(raw_template, Mapping):
             raise ValueError(
-                f"authored_workflow_template_spec_missing:{template_id}"
+                f"repo_seed_workflow_template_spec_missing:{template_id}"
             )
         profile = _normalise_template_profile(
             item.get("template_profile"),
@@ -402,7 +403,7 @@ def _load_seed_workflow_template_bundle_cached(asset_path: str) -> dict[str, Any
     return {
         "asset_path": str(path),
         "family_id": _clean_text(payload.get("family_id")),
-        "source": "seed_bundle",
+        "source": "repo_seed_bundle",
         "templates": templates,
         "profiles": profiles,
     }
@@ -449,14 +450,14 @@ def _ensure_template_instance_typing(concept_id: str) -> bool:
     return True
 
 
-def ensure_seeded_workflow_template_bundle(
+def ensure_repo_seeded_workflow_template_bundle(
     *,
-    asset_path: str | Path = DEFAULT_TEMPLATE_ASSET_PATH,
+    asset_path: str | Path = DEFAULT_REPO_SEED_TEMPLATE_ASSET_PATH,
     template_ids: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    """Hydrate missing workflow-template concepts from the seed bundle."""
+    """Hydrate missing workflow-template concepts from the repo seed bundle."""
 
-    seed_bundle = _load_seed_workflow_template_bundle_cached(
+    seed_bundle = _load_repo_seed_workflow_template_bundle_cached(
         str(Path(asset_path).resolve())
     )
     templates = dict(seed_bundle.get("templates") or {})
@@ -574,7 +575,7 @@ def ensure_seeded_workflow_template_bundle(
                 f"workflow_template_seed_persist_failed:{exc}"
             )
 
-    clear_authored_workflow_template_bundle_cache()
+    clear_workflow_template_bundle_cache()
     return {
         "success": not errors_by_template_id,
         "requested_template_ids": list(requested_ids),
@@ -673,8 +674,8 @@ def _load_vontology_workflow_template_bundle_cached() -> dict[str, Any]:
     }
 
 
-def load_authored_workflow_template_bundle(
-    asset_path: str | Path = DEFAULT_TEMPLATE_ASSET_PATH,
+def load_workflow_template_bundle(
+    asset_path: str | Path = DEFAULT_REPO_SEED_TEMPLATE_ASSET_PATH,
     *,
     auto_seed: bool = True,
     required_template_ids: Sequence[str] | None = None,
@@ -699,7 +700,7 @@ def load_authored_workflow_template_bundle(
         return bundle
 
     if auto_seed:
-        seed_report = ensure_seeded_workflow_template_bundle(
+        seed_report = ensure_repo_seeded_workflow_template_bundle(
             asset_path=asset_path,
             template_ids=missing_required_ids or None,
         )
@@ -712,8 +713,8 @@ def load_authored_workflow_template_bundle(
     return bundle
 
 
-def clear_authored_workflow_template_bundle_cache() -> None:
-    _load_seed_workflow_template_bundle_cached.cache_clear()
+def clear_workflow_template_bundle_cache() -> None:
+    _load_repo_seed_workflow_template_bundle_cached.cache_clear()
     _load_vontology_workflow_template_bundle_cached.cache_clear()
 
 
@@ -721,9 +722,9 @@ def select_workflow_template(
     *,
     request_text: str,
     explicit_template_id: str | None = None,
-    asset_path: str | Path = DEFAULT_TEMPLATE_ASSET_PATH,
+    asset_path: str | Path = DEFAULT_REPO_SEED_TEMPLATE_ASSET_PATH,
 ) -> dict[str, Any]:
-    bundle = load_authored_workflow_template_bundle(
+    bundle = load_workflow_template_bundle(
         asset_path,
         required_template_ids=[explicit_template_id] if explicit_template_id else None,
     )
@@ -808,9 +809,9 @@ def render_workflow_spec_template(
     *,
     template_id: str,
     variables: Mapping[str, Any],
-    asset_path: str | Path = DEFAULT_TEMPLATE_ASSET_PATH,
+    asset_path: str | Path = DEFAULT_REPO_SEED_TEMPLATE_ASSET_PATH,
 ) -> dict[str, Any]:
-    bundle = load_authored_workflow_template_bundle(
+    bundle = load_workflow_template_bundle(
         asset_path,
         required_template_ids=[template_id],
     )
@@ -833,7 +834,7 @@ def resolve_workflow_spec_template(
     request_text: str,
     variables: Mapping[str, Any],
     explicit_template_id: str | None = None,
-    asset_path: str | Path = DEFAULT_TEMPLATE_ASSET_PATH,
+    asset_path: str | Path = DEFAULT_REPO_SEED_TEMPLATE_ASSET_PATH,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     selection = select_workflow_template(
         request_text=request_text,
@@ -865,8 +866,8 @@ def resolve_workflow_spec_template(
 
 
 __all__ = [
-    "AUTHORED_WORKFLOW_TEMPLATE_BUNDLE_SCHEMA_VERSION",
-    "DEFAULT_TEMPLATE_ASSET_PATH",
+    "DEFAULT_REPO_SEED_TEMPLATE_ASSET_PATH",
+    "REPO_SEED_WORKFLOW_TEMPLATE_BUNDLE_SCHEMA_VERSION",
     "WORKFLOW_CREATION_DEFAULT_TEMPLATE_ID",
     "WORKFLOW_CREATION_PHD_STUDENT_TEMPLATE_ID",
     "WORKFLOW_CREATION_SCHOLARLY_TEMPLATE_ID",
@@ -877,9 +878,9 @@ __all__ = [
     "WORKFLOW_TEMPLATE_PROFILE_SCHEMA_VERSION",
     "WORKFLOW_TEMPLATE_SPEC_PREDICATE",
     "WORKFLOW_TEMPLATE_TYPE_ID",
-    "clear_authored_workflow_template_bundle_cache",
-    "ensure_seeded_workflow_template_bundle",
-    "load_authored_workflow_template_bundle",
+    "clear_workflow_template_bundle_cache",
+    "ensure_repo_seeded_workflow_template_bundle",
+    "load_workflow_template_bundle",
     "render_workflow_spec_template",
     "resolve_workflow_spec_template",
     "select_workflow_template",
