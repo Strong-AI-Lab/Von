@@ -560,7 +560,6 @@ def _validate_existing_materialisation(
     *,
     target_workflow_ids: tuple[str, ...],
     supported_action_ids: tuple[str, ...],
-    publication_specs: dict[str, Any],
 ) -> tuple[bool, dict[str, dict[str, Any]]]:
     if not target_workflow_ids:
         return False, {}
@@ -592,14 +591,6 @@ def _validate_existing_materialisation(
 
         definition = _cached_loader(workflow_id)
         if definition is None:
-            return False, {}
-
-        publication_spec = publication_specs.get(workflow_id)
-        if publication_spec is not None and not _materialisation_matches_publication_spec(
-            loaded_definition=definition,
-            workflow_id=workflow_id,
-            publication_spec=publication_spec,
-        ):
             return False, {}
 
         validation = validate_workflow_definition_contract(
@@ -637,7 +628,6 @@ def bootstrap_authored_workflow_source_bundle(
         _validate_existing_materialisation(
             target_workflow_ids=target_workflow_ids,
             supported_action_ids=supported_action_ids,
-            publication_specs=publication_specs,
         )
     )
 

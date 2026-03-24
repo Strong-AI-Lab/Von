@@ -2,17 +2,49 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+import pytest
+
 from src.backend.workflows.workflow_template_profile_service import (
     WORKFLOW_CREATION_DEFAULT_TEMPLATE_ID,
     WORKFLOW_CREATION_PHD_STUDENT_TEMPLATE_ID,
     WORKFLOW_CREATION_SCHOLARLY_TEMPLATE_ID,
     WORKFLOW_GAP_CANDIDATE_EXECUTION_TEMPLATE_ID,
+    WORKFLOW_TEMPLATE_PROFILE_PREDICATE,
+    WORKFLOW_TEMPLATE_SPEC_PREDICATE,
+    WORKFLOW_TEMPLATE_TYPE_ID,
+    clear_authored_workflow_template_bundle_cache,
     resolve_workflow_spec_template,
     select_workflow_template,
 )
+from src.backend.services import concept_service
+from src.backend.services.text_value_service import get_texts_for_concept
 
 
-def test_select_workflow_template_prefers_scholarly_profile() -> None:
+@pytest.fixture
+def _reset_mock_db(monkeypatch: pytest.MonkeyPatch) -> Any:
+    monkeypatch.setenv("VON_USE_MOCK_DB", "1")
+    clear_authored_workflow_template_bundle_cache()
+
+    from src.backend.db.mongo_client import get_db
+
+    db = get_db()
+    if db is not None:
+        for collection_name in ("concepts", "text_relations", "text_values"):
+            try:
+                db.drop_collection(collection_name)
+            except Exception:
+                pass
+
+    yield
+
+    clear_authored_workflow_template_bundle_cache()
+
+
+def test_select_workflow_template_prefers_scholarly_profile(
+    _reset_mock_db: Any,
+) -> None:
     selection = select_workflow_template(
         request_text=(
             "Create a workflow from this description request: represent scholarly "
@@ -23,9 +55,12 @@ def test_select_workflow_template_prefers_scholarly_profile() -> None:
     assert selection["template_id"] == WORKFLOW_CREATION_SCHOLARLY_TEMPLATE_ID
     assert selection["selection_source"] == "automatic"
     assert selection["profile"]["requires_synthesis_policy"] is True
+    assert str(selection["template"]["concept_id"]).startswith("#V#workflow_template_")
 
 
-def test_select_workflow_template_prefers_phd_student_profile() -> None:
+def test_select_workflow_template_prefers_phd_student_profile(
+    _reset_mock_db: Any,
+) -> None:
     selection = select_workflow_template(
         request_text=(
             "Create a workflow from this description request: represent a PhD "
@@ -38,7 +73,9 @@ def test_select_workflow_template_prefers_phd_student_profile() -> None:
     assert selection["profile"]["requires_synthesis_policy"] is True
 
 
-def test_select_workflow_template_uses_fallback_for_generic_request() -> None:
+def test_select_workflow_template_uses_fallback_for_generic_request(
+    _reset_mock_db: Any,
+) -> None:
     selection = select_workflow_template(
         request_text="Create a workflow from this description request."
     )
@@ -47,7 +84,9 @@ def test_select_workflow_template_uses_fallback_for_generic_request() -> None:
     assert selection["selection_source"] == "fallback"
 
 
-def test_resolve_workflow_spec_template_renders_gap_candidate_template() -> None:
+def test_resolve_workflow_spec_template_renders_gap_candidate_template(
+    _reset_mock_db: Any,
+) -> None:
     rendered_spec, diagnostics = resolve_workflow_spec_template(
         request_text="Recover the missing workflow for this request.",
         explicit_template_id=WORKFLOW_GAP_CANDIDATE_EXECUTION_TEMPLATE_ID,
@@ -73,3 +112,33 @@ def test_resolve_workflow_spec_template_renders_gap_candidate_template() -> None
     assert rendered_spec["steps"][0]["inputs"]["prompt_concept_id"] == (
         "#V#candidate_gap_prompt"
     )
+
+
+def test_select_workflow_template_materialises_first_class_template_concepts(
+    _reset_mock_db: Any,
+) -> None:
+    selection = select_workflow_template(
+        request_text="Create a workflow from this description request."
+    )
+
+    concept_id = str(selection["template"]["concept_id"] or "").strip()
+    assert concept_id
+
+    concept_doc = concept_service.get_concept_by_concept_id(concept_id)
+    assert concept_doc is not None
+    instance_of = (concept_doc.get("relationships") or {}).get("is_an_instance_of") or []
+    assert WORKFLOW_TEMPLATE_TYPE_ID in instance_of
+
+    profile_rows = get_texts_for_concept(
+        concept_id,
+        predicate=WORKFLOW_TEMPLATE_PROFILE_PREDICATE,
+        limit=5,
+    )
+    assert profile_rows
+
+    spec_rows = get_texts_for_concept(
+        concept_id,
+        predicate=WORKFLOW_TEMPLATE_SPEC_PREDICATE,
+        limit=5,
+    )
+    assert spec_rows

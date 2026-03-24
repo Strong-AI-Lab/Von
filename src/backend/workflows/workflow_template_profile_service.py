@@ -1,8 +1,8 @@
-"""Authored workflow-template profile loading and selection helpers.
+"""Vontology-backed workflow-template selection and rendering helpers.
 
-Workflow creation and gap recovery should resolve reusable workflow spec
-templates through declarative authored metadata rather than workflow-family-
-specific Python branches.
+Workflow creation and gap recovery should resolve reusable workflow-spec
+templates from first-class Vontology artefacts. Repo-side JSON bundles remain
+seed fixtures only and are used only to hydrate missing template concepts.
 """
 
 from __future__ import annotations
@@ -14,6 +14,13 @@ from functools import lru_cache
 from pathlib import Path
 from string import Formatter
 from typing import Any, Mapping, Sequence
+
+from ..services import concept_search_service, concept_service
+from ..services.concept_service import ConceptNotFoundError
+from ..services.text_value_service import (
+    get_texts_for_concept,
+    upsert_singleton_text_relation,
+)
 
 AUTHORED_WORKFLOW_TEMPLATE_BUNDLE_SCHEMA_VERSION = (
     "authored_workflow_template_bundle.v1"
@@ -33,7 +40,49 @@ WORKFLOW_GAP_CANDIDATE_EXECUTION_TEMPLATE_ID = (
     "workflow_gap_recovery.candidate_execution"
 )
 
+WORKFLOW_TEMPLATE_TYPE_ID = "#V#workflow_definition_template"
+WORKFLOW_TEMPLATE_ID_PREDICATE = "#V#hasWorkflowTemplateId"
+WORKFLOW_TEMPLATE_PROFILE_PREDICATE = "#V#hasWorkflowTemplateProfileJson"
+WORKFLOW_TEMPLATE_SPEC_PREDICATE = "#V#hasWorkflowSpecTemplateJson"
+WORKFLOW_TEMPLATE_DEFAULT_DESCRIPTION_PREDICATE = (
+    "#V#hasWorkflowTemplateDefaultDescription"
+)
+
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+_DESCRIPTION_PREDICATES = ("hasDescription", "#V#hasDescription")
+_TEMPLATE_ID_PREDICATES = (
+    WORKFLOW_TEMPLATE_ID_PREDICATE,
+    "hasWorkflowTemplateId",
+    "has_workflow_template_id",
+)
+_TEMPLATE_PROFILE_PREDICATES = (
+    WORKFLOW_TEMPLATE_PROFILE_PREDICATE,
+    "hasWorkflowTemplateProfileJson",
+    "has_workflow_template_profile_json",
+)
+_TEMPLATE_SPEC_PREDICATES = (
+    WORKFLOW_TEMPLATE_SPEC_PREDICATE,
+    "hasWorkflowSpecTemplateJson",
+    "has_workflow_spec_template_json",
+)
+_TEMPLATE_DEFAULT_DESCRIPTION_PREDICATES = (
+    WORKFLOW_TEMPLATE_DEFAULT_DESCRIPTION_PREDICATE,
+    "hasWorkflowTemplateDefaultDescription",
+    "has_workflow_template_default_description",
+)
+_CANONICAL_TEMPLATE_CONCEPT_IDS = {
+    WORKFLOW_CREATION_DEFAULT_TEMPLATE_ID: "#V#workflow_template_workflow_creation_default_marker",
+    WORKFLOW_CREATION_SCHOLARLY_TEMPLATE_ID: (
+        "#V#workflow_template_workflow_creation_scholarly_representation"
+    ),
+    WORKFLOW_CREATION_PHD_STUDENT_TEMPLATE_ID: (
+        "#V#workflow_template_workflow_creation_phd_student_representation"
+    ),
+    WORKFLOW_GAP_CANDIDATE_EXECUTION_TEMPLATE_ID: (
+        "#V#workflow_template_workflow_gap_recovery_candidate_execution"
+    ),
+}
 
 
 def _clean_text(value: Any) -> str:
@@ -137,7 +186,9 @@ def _lexical_score(
 
     score = min(
         1.0,
-        len(overlap) * 0.12 + len(keyword_hits) * 0.18 + len(phrase_hits) * 0.28
+        len(overlap) * 0.12
+        + len(keyword_hits) * 0.18
+        + len(phrase_hits) * 0.28
         + len(exemplar_hits) * 0.34,
     )
     return (
@@ -238,8 +289,69 @@ def _render_template_value(value: Any, variables: Mapping[str, Any]) -> Any:
     return copy.deepcopy(value)
 
 
+def _safe_get_concept(concept_id: str) -> Mapping[str, Any] | None:
+    try:
+        concept = concept_service.get_concept_by_concept_id(concept_id)
+    except ConceptNotFoundError:
+        return None
+    except Exception:
+        return None
+    return concept if isinstance(concept, Mapping) else None
+
+
+def _text_value_for_predicates(
+    concept_id: str,
+    predicates: Sequence[str],
+) -> str | None:
+    for predicate in predicates:
+        rows = get_texts_for_concept(concept_id, predicate=predicate, limit=10)
+        for row in rows:
+            text = _clean_text((row or {}).get("text"))
+            if text:
+                return text
+    return None
+
+
+def _parse_json_mapping_text(
+    text: str | None,
+    *,
+    error_code: str,
+) -> dict[str, Any]:
+    if not text:
+        raise ValueError(error_code)
+    try:
+        parsed = json.loads(text)
+    except Exception as exc:
+        raise ValueError(error_code) from exc
+    if not isinstance(parsed, Mapping):
+        raise ValueError(error_code)
+    return dict(parsed)
+
+
+def _template_concept_id(template_id: str) -> str:
+    override = _CANONICAL_TEMPLATE_CONCEPT_IDS.get(template_id)
+    if override:
+        return override
+    slug = _SLUG_RE.sub("_", template_id.strip().lower()).strip("_")
+    if not slug:
+        raise ValueError("workflow_template_id_missing")
+    return f"#V#workflow_template_{slug}"
+
+
+def _concept_display_name(concept_doc: Mapping[str, Any], fallback: str) -> str:
+    names = concept_doc.get("names")
+    if isinstance(names, list):
+        for name_row in names:
+            if not isinstance(name_row, Mapping):
+                continue
+            name_text = _clean_text(name_row.get("name"))
+            if name_text and str(name_row.get("type") or "NL").upper() == "NL":
+                return name_text
+    return fallback
+
+
 @lru_cache(maxsize=None)
-def _load_authored_workflow_template_bundle_cached(asset_path: str) -> dict[str, Any]:
+def _load_seed_workflow_template_bundle_cached(asset_path: str) -> dict[str, Any]:
     path = Path(asset_path).resolve()
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, Mapping):
@@ -258,6 +370,7 @@ def _load_authored_workflow_template_bundle_cached(asset_path: str) -> dict[str,
 
     templates: dict[str, dict[str, Any]] = {}
     profiles: dict[str, dict[str, Any]] = {}
+
     for item in raw_templates:
         if not isinstance(item, Mapping):
             continue
@@ -282,27 +395,326 @@ def _load_authored_workflow_template_bundle_cached(asset_path: str) -> dict[str,
             ),
             "workflow_spec_template": copy.deepcopy(dict(raw_template)),
             "required_variables": _iter_required_template_variables(raw_template),
+            "concept_id": _template_concept_id(template_id),
         }
         profiles[template_id] = profile
 
     return {
         "asset_path": str(path),
         "family_id": _clean_text(payload.get("family_id")),
+        "source": "seed_bundle",
         "templates": templates,
         "profiles": profiles,
     }
 
 
-def load_authored_workflow_template_bundle(
+def _ensure_template_type_surface() -> str:
+    concept_doc = _safe_get_concept(WORKFLOW_TEMPLATE_TYPE_ID)
+    if concept_doc is not None:
+        return WORKFLOW_TEMPLATE_TYPE_ID
+
+    concept_service.create_concept(
+        name="Workflow Definition Template",
+        concept_id=WORKFLOW_TEMPLATE_TYPE_ID,
+        description=(
+            "Reusable declarative workflow authoring template stored as a first-class "
+            "Vontology artefact."
+        ),
+        parent_concept_ids=["#V#workflow_definition"],
+        create_as_instance=False,
+        visibility_scope_mode="global_general",
+    )
+    return WORKFLOW_TEMPLATE_TYPE_ID
+
+
+def _ensure_template_instance_typing(concept_id: str) -> bool:
+    concept_doc = _safe_get_concept(concept_id)
+    if concept_doc is None:
+        return False
+    relationships = dict(concept_doc.get("relationships") or {})
+    instance_of = relationships.get("is_an_instance_of") or []
+    if isinstance(instance_of, str):
+        instance_of = [instance_of]
+    else:
+        instance_of = [
+            str(item).strip()
+            for item in instance_of
+            if isinstance(item, str) and str(item).strip()
+        ]
+    if WORKFLOW_TEMPLATE_TYPE_ID in instance_of:
+        return False
+    instance_of.append(WORKFLOW_TEMPLATE_TYPE_ID)
+    relationships["is_an_instance_of"] = list(dict.fromkeys(instance_of))
+    concept_service.update_concept(concept_id, {"relationships": relationships})
+    return True
+
+
+def ensure_seeded_workflow_template_bundle(
+    *,
     asset_path: str | Path = DEFAULT_TEMPLATE_ASSET_PATH,
+    template_ids: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    return _load_authored_workflow_template_bundle_cached(
+    """Hydrate missing workflow-template concepts from the seed bundle."""
+
+    seed_bundle = _load_seed_workflow_template_bundle_cached(
         str(Path(asset_path).resolve())
     )
+    templates = dict(seed_bundle.get("templates") or {})
+    profiles = dict(seed_bundle.get("profiles") or {})
+    requested_ids = (
+        tuple(
+            str(item).strip()
+            for item in template_ids
+            if isinstance(item, str) and str(item).strip()
+        )
+        if template_ids is not None
+        else tuple(templates.keys())
+    )
+
+    _ensure_template_type_surface()
+
+    created_concept_ids: list[str] = []
+    typed_concept_ids: list[str] = []
+    persisted_template_ids: list[str] = []
+    errors_by_template_id: dict[str, str] = {}
+
+    for template_id in requested_ids:
+        template = templates.get(template_id)
+        profile = profiles.get(template_id)
+        if not isinstance(template, Mapping) or not isinstance(profile, Mapping):
+            errors_by_template_id[template_id] = "workflow_template_seed_missing"
+            continue
+
+        concept_id = _template_concept_id(template_id)
+        concept_doc = _safe_get_concept(concept_id)
+        if concept_doc is None:
+            try:
+                concept_service.create_concept(
+                    name=_clean_text(template.get("name")) or template_id,
+                    concept_id=concept_id,
+                    description=_clean_text(template.get("description")),
+                    parent_concept_ids=[WORKFLOW_TEMPLATE_TYPE_ID],
+                    create_as_instance=True,
+                    visibility_scope_mode="global_general",
+                )
+                created_concept_ids.append(concept_id)
+            except Exception as exc:
+                errors_by_template_id[template_id] = (
+                    f"workflow_template_concept_create_failed:{exc}"
+                )
+                continue
+        else:
+            try:
+                if _ensure_template_instance_typing(concept_id):
+                    typed_concept_ids.append(concept_id)
+            except Exception as exc:
+                errors_by_template_id[template_id] = (
+                    f"workflow_template_type_enforcement_failed:{exc}"
+                )
+                continue
+
+        try:
+            context = {
+                "template_id": template_id,
+                "source": str(seed_bundle.get("family_id") or "workflow_template_seed"),
+            }
+            upsert_singleton_text_relation(
+                subject_concept_id=concept_id,
+                predicate=WORKFLOW_TEMPLATE_ID_PREDICATE,
+                text=template_id,
+                lang="en-NZ",
+                context=dict(context),
+                garbage_collect=True,
+            )
+            upsert_singleton_text_relation(
+                subject_concept_id=concept_id,
+                predicate=WORKFLOW_TEMPLATE_PROFILE_PREDICATE,
+                text=json.dumps(dict(profile), ensure_ascii=True, sort_keys=True),
+                lang="en-NZ",
+                context=dict(context),
+                garbage_collect=True,
+            )
+            upsert_singleton_text_relation(
+                subject_concept_id=concept_id,
+                predicate=WORKFLOW_TEMPLATE_SPEC_PREDICATE,
+                text=json.dumps(
+                    dict(template.get("workflow_spec_template") or {}),
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
+                lang="en-NZ",
+                context=dict(context),
+                garbage_collect=True,
+            )
+            description = _clean_text(template.get("description"))
+            if description:
+                upsert_singleton_text_relation(
+                    subject_concept_id=concept_id,
+                    predicate="hasDescription",
+                    text=description,
+                    lang="en-NZ",
+                    context=dict(context),
+                    garbage_collect=True,
+                )
+            default_description = _clean_text(
+                template.get("default_workflow_description")
+            )
+            if default_description:
+                upsert_singleton_text_relation(
+                    subject_concept_id=concept_id,
+                    predicate=WORKFLOW_TEMPLATE_DEFAULT_DESCRIPTION_PREDICATE,
+                    text=default_description,
+                    lang="en-NZ",
+                    context=dict(context),
+                    garbage_collect=True,
+                )
+            persisted_template_ids.append(template_id)
+        except Exception as exc:
+            errors_by_template_id[template_id] = (
+                f"workflow_template_seed_persist_failed:{exc}"
+            )
+
+    clear_authored_workflow_template_bundle_cache()
+    return {
+        "success": not errors_by_template_id,
+        "requested_template_ids": list(requested_ids),
+        "created_concept_ids": created_concept_ids,
+        "typed_concept_ids": typed_concept_ids,
+        "persisted_template_ids": persisted_template_ids,
+        "errors_by_template_id": errors_by_template_id,
+        "counts": {
+            "requested_templates": len(requested_ids),
+            "created_concepts": len(created_concept_ids),
+            "typed_concepts": len(typed_concept_ids),
+            "persisted_templates": len(persisted_template_ids),
+            "errors": len(errors_by_template_id),
+        },
+    }
+
+
+def _load_template_entry_from_vontology(
+    concept_id: str,
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    concept_doc = _safe_get_concept(concept_id)
+    if concept_doc is None:
+        raise ValueError(f"workflow_template_concept_missing:{concept_id}")
+
+    template_id = _text_value_for_predicates(concept_id, _TEMPLATE_ID_PREDICATES)
+    if not template_id:
+        raise ValueError(f"workflow_template_id_missing:{concept_id}")
+
+    raw_profile = _parse_json_mapping_text(
+        _text_value_for_predicates(concept_id, _TEMPLATE_PROFILE_PREDICATES),
+        error_code=f"workflow_template_profile_missing_or_invalid:{template_id}",
+    )
+    raw_template = _parse_json_mapping_text(
+        _text_value_for_predicates(concept_id, _TEMPLATE_SPEC_PREDICATES),
+        error_code=f"workflow_template_spec_missing_or_invalid:{template_id}",
+    )
+    profile = _normalise_template_profile(raw_profile, template_id=template_id)
+    template = {
+        "template_id": template_id,
+        "concept_id": concept_id,
+        "name": _concept_display_name(concept_doc, template_id),
+        "description": _text_value_for_predicates(concept_id, _DESCRIPTION_PREDICATES)
+        or _clean_text(concept_doc.get("description")),
+        "default_workflow_description": _text_value_for_predicates(
+            concept_id,
+            _TEMPLATE_DEFAULT_DESCRIPTION_PREDICATES,
+        )
+        or _clean_text(raw_profile.get("default_workflow_description")),
+        "workflow_spec_template": copy.deepcopy(raw_template),
+        "required_variables": _iter_required_template_variables(raw_template),
+    }
+    return template_id, template, profile
+
+
+@lru_cache(maxsize=1)
+def _load_vontology_workflow_template_bundle_cached() -> dict[str, Any]:
+    search_result = concept_search_service.search_concepts(
+        "",
+        filter_kind=["individual"],
+        instance_of=WORKFLOW_TEMPLATE_TYPE_ID,
+        direct_instances_only=True,
+        limit=200,
+    )
+    concept_ids = tuple(
+        sorted(
+            str(item.get("concept_id") or "").strip()
+            for item in (search_result.get("results") or [])
+            if isinstance(item, Mapping)
+            and isinstance(item.get("concept_id"), str)
+            and str(item.get("concept_id")).strip()
+        )
+    )
+
+    templates: dict[str, dict[str, Any]] = {}
+    profiles: dict[str, dict[str, Any]] = {}
+    errors_by_concept_id: dict[str, str] = {}
+
+    for concept_id in concept_ids:
+        try:
+            template_id, template, profile = _load_template_entry_from_vontology(
+                concept_id
+            )
+        except Exception as exc:
+            errors_by_concept_id[concept_id] = str(exc)
+            continue
+        templates[template_id] = template
+        profiles[template_id] = profile
+
+    return {
+        "source": "vontology",
+        "family_id": "workflow_template_profiles",
+        "template_concept_ids": list(concept_ids),
+        "templates": templates,
+        "profiles": profiles,
+        "errors_by_concept_id": errors_by_concept_id,
+    }
+
+
+def load_authored_workflow_template_bundle(
+    asset_path: str | Path = DEFAULT_TEMPLATE_ASSET_PATH,
+    *,
+    auto_seed: bool = True,
+    required_template_ids: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    """Load the authoritative workflow-template bundle from Vontology.
+
+    If the authoritative template concepts are missing, hydrate them from the
+    repo-side seed bundle and retry once.
+    """
+
+    bundle = _load_vontology_workflow_template_bundle_cached()
+    templates = dict(bundle.get("templates") or {})
+    required_ids = tuple(
+        str(item).strip()
+        for item in (required_template_ids or ())
+        if isinstance(item, str) and str(item).strip()
+    )
+    missing_required_ids = [
+        template_id for template_id in required_ids if template_id not in templates
+    ]
+    if templates and not missing_required_ids:
+        return bundle
+
+    if auto_seed:
+        seed_report = ensure_seeded_workflow_template_bundle(
+            asset_path=asset_path,
+            template_ids=missing_required_ids or None,
+        )
+        bundle = _load_vontology_workflow_template_bundle_cached()
+        enriched_bundle = dict(bundle)
+        enriched_bundle["seed_report"] = seed_report
+        templates = dict(enriched_bundle.get("templates") or {})
+        return enriched_bundle if templates else enriched_bundle
+
+    return bundle
 
 
 def clear_authored_workflow_template_bundle_cache() -> None:
-    _load_authored_workflow_template_bundle_cached.cache_clear()
+    _load_seed_workflow_template_bundle_cached.cache_clear()
+    _load_vontology_workflow_template_bundle_cached.cache_clear()
 
 
 def select_workflow_template(
@@ -311,7 +723,10 @@ def select_workflow_template(
     explicit_template_id: str | None = None,
     asset_path: str | Path = DEFAULT_TEMPLATE_ASSET_PATH,
 ) -> dict[str, Any]:
-    bundle = load_authored_workflow_template_bundle(asset_path)
+    bundle = load_authored_workflow_template_bundle(
+        asset_path,
+        required_template_ids=[explicit_template_id] if explicit_template_id else None,
+    )
     templates = dict(bundle.get("templates") or {})
     profiles = dict(bundle.get("profiles") or {})
 
@@ -395,7 +810,10 @@ def render_workflow_spec_template(
     variables: Mapping[str, Any],
     asset_path: str | Path = DEFAULT_TEMPLATE_ASSET_PATH,
 ) -> dict[str, Any]:
-    bundle = load_authored_workflow_template_bundle(asset_path)
+    bundle = load_authored_workflow_template_bundle(
+        asset_path,
+        required_template_ids=[template_id],
+    )
     templates = dict(bundle.get("templates") or {})
     template = templates.get(_clean_text(template_id))
     if not isinstance(template, Mapping):
@@ -434,6 +852,7 @@ def resolve_workflow_spec_template(
         "selection_score": selection.get("selection_score"),
         "selection_signals": dict(selection.get("selection_signals") or {}),
         "profile": dict(selection.get("profile") or {}),
+        "template_concept_id": selection.get("template", {}).get("concept_id"),
         "default_workflow_description": str(
             selection.get("template", {}).get("default_workflow_description") or ""
         ).strip()
@@ -447,12 +866,19 @@ def resolve_workflow_spec_template(
 
 __all__ = [
     "AUTHORED_WORKFLOW_TEMPLATE_BUNDLE_SCHEMA_VERSION",
+    "DEFAULT_TEMPLATE_ASSET_PATH",
     "WORKFLOW_CREATION_DEFAULT_TEMPLATE_ID",
     "WORKFLOW_CREATION_PHD_STUDENT_TEMPLATE_ID",
     "WORKFLOW_CREATION_SCHOLARLY_TEMPLATE_ID",
     "WORKFLOW_GAP_CANDIDATE_EXECUTION_TEMPLATE_ID",
+    "WORKFLOW_TEMPLATE_DEFAULT_DESCRIPTION_PREDICATE",
+    "WORKFLOW_TEMPLATE_ID_PREDICATE",
+    "WORKFLOW_TEMPLATE_PROFILE_PREDICATE",
     "WORKFLOW_TEMPLATE_PROFILE_SCHEMA_VERSION",
+    "WORKFLOW_TEMPLATE_SPEC_PREDICATE",
+    "WORKFLOW_TEMPLATE_TYPE_ID",
     "clear_authored_workflow_template_bundle_cache",
+    "ensure_seeded_workflow_template_bundle",
     "load_authored_workflow_template_bundle",
     "render_workflow_spec_template",
     "resolve_workflow_spec_template",

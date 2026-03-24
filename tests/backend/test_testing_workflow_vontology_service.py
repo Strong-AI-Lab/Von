@@ -262,7 +262,7 @@ def test_bootstrap_skips_republication_when_testing_workflow_family_is_current(
     assert second_report.get("typed_step_ids") == []
 
 
-def test_bootstrap_republishes_when_existing_mapping_materialisation_drifts(
+def test_bootstrap_preserves_authoritative_vontology_mapping_edits_when_family_remains_valid(
     _reset_mock_db: Any,
 ) -> None:
     bootstrap_canonical_testing_workflows()
@@ -278,11 +278,11 @@ def test_bootstrap_republishes_when_existing_mapping_materialisation_drifts(
         {"concept_data.workflow_mapping_spec.required": True},
     )
 
-    republished_report = bootstrap_canonical_testing_workflows()
-    publication = republished_report.get("publication") or {}
+    follow_up_report = bootstrap_canonical_testing_workflows()
+    publication = follow_up_report.get("publication") or {}
 
-    assert publication.get("skipped") is not True
-    assert (publication.get("counts") or {}).get("workflows_published", 0) > 0
+    assert publication.get("skipped") is True
+    assert publication.get("skip_reason") == "existing_materialisation_valid"
 
     meeting_definition = load_workflow_definition_from_vontology(
         MEETING_INVITATION_TESTING_WORKFLOW_ID
@@ -293,7 +293,10 @@ def test_bootstrap_republishes_when_existing_mapping_materialisation_drifts(
         state_id="prepare_spec",
     )
     prepare_step = meeting_definition.states[prepare_step_id]
-    assert prepare_step.metadata.get("reads_context_keys") == ["invitation_text"]
+    assert set(prepare_step.metadata.get("reads_context_keys") or []) == {
+        "expected_meeting_type",
+        "invitation_text",
+    }
 
 
 def test_meeting_invitation_testing_workflow_executes_end_to_end_via_vontology(

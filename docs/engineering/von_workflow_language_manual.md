@@ -93,7 +93,9 @@ Non-permitted role:
 Supporting code notes:
 
 - generic publication/materialisation helpers, validators, and export tooling remain valid runtime support;
-- the current file-backed helpers under `workflow_concept_authority_service.py`, `workflow_authored_source_bootstrap.py`, and `workflow_template_profile_service.py` should be understood as transitional debt until they read authoritative Vontology-native artefacts instead of repo-side authored bundles;
+- `workflow_concept_authority_service.py` now derives canonical publication specs/text from authoritative Vontology workflow state where present, and only falls back to repo-side seed bundles when a canonical workflow is missing or clearly incomplete;
+- `workflow_template_profile_service.py` now resolves workflow-template concepts and template/profile text relations from Vontology, and only hydrates them from the seed bundle when the authoritative template concepts are absent;
+- `workflow_authored_source_bootstrap.py` now treats repo-side workflow bundles as seed fixtures only: a valid current Vontology workflow family is preserved rather than being overwritten back to seed parity;
 - future review/export tooling should make Vontology-authored workflow logic easy to inspect without restoring file authority.
 
 ## 3. VWL Ontology Vocabulary
@@ -596,6 +598,13 @@ Workflow-level long-horizon policy payloads are stored as singleton text relatio
 - `#V#hasWorkflowCompletionGateJson`
 - `#V#hasWorkflowLaunchInputContractJson`
 
+Workflow-template authoring metadata is stored as first-class Vontology text relations on template concepts:
+
+- `#V#hasWorkflowTemplateId`
+- `#V#hasWorkflowTemplateProfileJson`
+- `#V#hasWorkflowSpecTemplateJson`
+- `#V#hasWorkflowTemplateDefaultDescription`
+
 Current schema versions:
 
 - `workflow_step_retry_policy.v1`
@@ -606,6 +615,7 @@ Current schema versions:
 - `workflow_plan_state_policy.v1`
 - `workflow_completion_gate.v1`
 - `workflow_launch_input_contract.v1`
+- `workflow_template_profile.v1`
 
 Normative semantics:
 

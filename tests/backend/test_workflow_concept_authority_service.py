@@ -694,10 +694,11 @@ def test_bootstrap_publishes_canonical_chat_graphs_with_loader_runtime_parity(
     from workflow_test_support import build_authoritative_test_workflow_definition
 
     registry = build_workflow_registry_read_only()
+    seed_spec_ids = set(authority_service.seed_canonical_workflow_publication_specs())
     expected_published_ids = {
         workflow_id
         for workflow_id in authority_service.CANONICAL_CHAT_WORKFLOW_IDS
-        if workflow_id in authority_service._CANONICAL_WORKFLOW_PUBLICATION_SPECS
+        if workflow_id in seed_spec_ids
     }
 
     report = authority_service.bootstrap_workflow_concepts(registry=cast(Any, registry))

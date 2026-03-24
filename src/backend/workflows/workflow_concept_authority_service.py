@@ -21,6 +21,7 @@ from ..services import concept_service
 from ..services.concept_service import ConceptNotFoundError
 from ..services.effort_unit_ontology_service import ensure_effort_unit_ontology
 from ..services.text_value_service import (
+    get_texts_for_concept,
     upsert_singleton_text_relation,
     upsert_text_for_concept,
 )
@@ -792,6 +793,28 @@ def clear_authored_workflow_source_bundle_cache() -> None:
     _load_authored_workflow_source_bundle_cached.cache_clear()
 
 
+@lru_cache(maxsize=1)
+def _load_seed_canonical_workflow_source_bundle() -> dict[str, Any]:
+    return load_authored_workflow_source_bundle(
+        _CANONICAL_WORKFLOW_PUBLICATION_SOURCE_PATH
+    )
+
+
+def seed_canonical_workflow_publication_specs() -> Dict[str, _CanonicalWorkflowPublicationSpec]:
+    """Return the repo-side seed publication specs for canonical workflows."""
+
+    return dict(_load_seed_canonical_workflow_source_bundle()["publication_specs"])
+
+
+def seed_canonical_workflow_text_relations() -> Dict[str, tuple[dict[str, Any], ...]]:
+    """Return repo-side seed workflow text relations for canonical workflows."""
+
+    return dict(
+        _load_seed_canonical_workflow_source_bundle().get("workflow_text_relations")
+        or {}
+    )
+
+
 def publication_spec_step_concept_ids(
     *,
     workflow_id: str,
@@ -810,6 +833,20 @@ def publication_spec_step_concept_ids(
             else _step_concept_id(workflow_id=workflow_id, state_id=step.state_id)
         )
     return tuple(ordered_ids)
+
+
+def _publication_spec_has_executable_actions(
+    spec: _CanonicalWorkflowPublicationSpec,
+) -> bool:
+    return any(
+        (
+            isinstance(step.action_id, str)
+            and step.action_id.strip()
+            or isinstance(step.invoked_workflow_id, str)
+            and step.invoked_workflow_id.strip()
+        )
+        for step in spec.steps
+    )
 
 
 def upsert_authored_text_relations(
@@ -846,18 +883,6 @@ def upsert_authored_text_relations(
             context=dict(context),
             garbage_collect=True,
         )
-
-
-# Keep this mapping deterministic so publication is stable across runs.
-_CANONICAL_WORKFLOW_SOURCE_BUNDLE = load_authored_workflow_source_bundle(
-    _CANONICAL_WORKFLOW_PUBLICATION_SOURCE_PATH
-)
-_CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSpec] = dict(
-    _CANONICAL_WORKFLOW_SOURCE_BUNDLE["publication_specs"]
-)
-_CANONICAL_WORKFLOW_TEXT_RELATIONS: Dict[str, tuple[dict[str, Any], ...]] = dict(
-    _CANONICAL_WORKFLOW_SOURCE_BUNDLE.get("workflow_text_relations") or {}
-)
 
 
 def _build_publication_transition(
@@ -1918,6 +1943,91 @@ def _invalidate_runnable_verification_for_workflow(
         )
 
 
+def _normalise_vontology_workflow_text_relation_specs(
+    rows: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    relation_specs: list[dict[str, Any]] = []
+    for row in rows:
+        predicate = str(row.get("predicate") or "").strip()
+        text = str(row.get("text") or "").strip()
+        lang = str(row.get("lang") or "en-NZ").strip() or "en-NZ"
+        if not predicate or not text:
+            continue
+        if predicate in {"hasName", "#V#hasName"}:
+            continue
+        relation_specs.append(
+            {
+                "predicate": predicate,
+                "text": text,
+                "lang": lang,
+            }
+        )
+    return tuple(relation_specs)
+
+
+def resolve_authoritative_workflow_publication_spec(
+    workflow_id: str,
+    *,
+    fallback_definition: WorkflowDefinition | None = None,
+) -> _CanonicalWorkflowPublicationSpec | None:
+    workflow_id_text = str(workflow_id or "").strip()
+    if not workflow_id_text:
+        return None
+    authoritative_definition = load_workflow_definition_from_vontology(workflow_id_text)
+    definition = authoritative_definition or fallback_definition
+    if definition is None:
+        return None
+    return _build_publication_spec_from_definition(definition)
+
+
+def _resolve_authoritative_publication_specs(
+    *,
+    workflow_ids: Sequence[str],
+    registry: WorkflowRegistry | None = None,
+    explicit_publication_definitions: Mapping[str, WorkflowDefinition] | None = None,
+) -> Dict[str, _CanonicalWorkflowPublicationSpec]:
+    resolved: Dict[str, _CanonicalWorkflowPublicationSpec] = {}
+    explicit_definition_map = (
+        {
+            str(workflow_id).strip(): definition
+            for workflow_id, definition in (explicit_publication_definitions or {}).items()
+            if isinstance(workflow_id, str) and str(workflow_id).strip()
+        }
+        if explicit_publication_definitions
+        else {}
+    )
+    for workflow_id in workflow_ids:
+        workflow_id_text = str(workflow_id or "").strip()
+        if not workflow_id_text:
+            continue
+        fallback_definition = explicit_definition_map.get(workflow_id_text)
+        if fallback_definition is None and registry is not None:
+            fallback_definition = registry.get(workflow_id_text)
+        spec = resolve_authoritative_workflow_publication_spec(
+            workflow_id_text,
+            fallback_definition=fallback_definition,
+        )
+        if spec is not None:
+            resolved[workflow_id_text] = spec
+    return resolved
+
+
+def _resolve_authoritative_workflow_text_relations(
+    workflow_ids: Sequence[str],
+) -> Dict[str, tuple[dict[str, Any], ...]]:
+    relation_map: Dict[str, tuple[dict[str, Any], ...]] = {}
+    for workflow_id in workflow_ids:
+        workflow_id_text = str(workflow_id or "").strip()
+        if not workflow_id_text:
+            continue
+        relation_specs = _normalise_vontology_workflow_text_relation_specs(
+            get_texts_for_concept(workflow_id_text, limit=250)
+        )
+        if relation_specs:
+            relation_map[workflow_id_text] = relation_specs
+    return relation_map
+
+
 def publish_canonical_chat_workflow_graphs(
     *,
     registry: WorkflowRegistry | None = None,
@@ -1984,14 +2094,6 @@ def publish_canonical_chat_workflow_graphs(
             )
         if cleaned_specs:
             explicit_workflow_text_relations[workflow_id_text] = tuple(cleaned_specs)
-    available_publication_specs: Dict[str, _CanonicalWorkflowPublicationSpec] = dict(
-        _CANONICAL_WORKFLOW_PUBLICATION_SPECS
-    )
-    available_publication_specs.update(explicit_publication_specs)
-    available_workflow_text_relations: Dict[str, tuple[dict[str, Any], ...]] = dict(
-        _CANONICAL_WORKFLOW_TEXT_RELATIONS
-    )
-    available_workflow_text_relations.update(explicit_workflow_text_relations)
 
     published: list[str] = []
     skipped_missing_registration: list[str] = []
@@ -2023,6 +2125,32 @@ def publish_canonical_chat_workflow_graphs(
             if isinstance(item, str) and str(item).strip()
         ]
     target_workflow_ids = list(dict.fromkeys(target_workflow_ids))
+    available_publication_specs: Dict[str, _CanonicalWorkflowPublicationSpec] = (
+        _resolve_authoritative_publication_specs(
+            workflow_ids=target_workflow_ids,
+            registry=registry,
+            explicit_publication_definitions=explicit_publication_definitions,
+        )
+    )
+    available_workflow_text_relations: Dict[str, tuple[dict[str, Any], ...]] = (
+        _resolve_authoritative_workflow_text_relations(target_workflow_ids)
+    )
+    seed_publication_specs = seed_canonical_workflow_publication_specs()
+    seed_workflow_text_relations = seed_canonical_workflow_text_relations()
+    for workflow_id in target_workflow_ids:
+        seed_spec = seed_publication_specs.get(workflow_id)
+        current_spec = available_publication_specs.get(workflow_id)
+        if seed_spec is not None and (
+            current_spec is None
+            or not _publication_spec_has_executable_actions(current_spec)
+        ):
+            available_publication_specs[workflow_id] = seed_spec
+        if workflow_id not in available_workflow_text_relations:
+            seed_relation_specs = seed_workflow_text_relations.get(workflow_id)
+            if seed_relation_specs:
+                available_workflow_text_relations[workflow_id] = tuple(seed_relation_specs)
+    available_publication_specs.update(explicit_publication_specs)
+    available_workflow_text_relations.update(explicit_workflow_text_relations)
     registry_workflow_ids = (
         {
             str(item).strip()
@@ -2082,6 +2210,13 @@ def publish_canonical_chat_workflow_graphs(
                     str,
                 ):
                     workflow_purpose = str(registration.purpose).strip() or None
+        if spec is None:
+            spec = resolve_authoritative_workflow_publication_spec(
+                workflow_id,
+                fallback_definition=registration_definition,
+            )
+            if spec is not None:
+                available_publication_specs[workflow_id] = spec
         if spec is None:
             skipped_missing_registration.append(workflow_id)
             continue

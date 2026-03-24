@@ -288,7 +288,7 @@ def register_test_conversation_turn_workflows(
 
 
 def build_authoritative_test_workflow_definition(workflow_id: str) -> Any:
-    spec = authority_service._CANONICAL_WORKFLOW_PUBLICATION_SPECS[workflow_id]
+    spec = authority_service.seed_canonical_workflow_publication_specs()[workflow_id]
     return authority_service._build_definition_from_publication_spec(
         workflow_id=workflow_id,
         spec=spec,
