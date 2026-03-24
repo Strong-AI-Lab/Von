@@ -46,6 +46,10 @@ from ..subworkflow_contracts import (
     WORKFLOW_SUBWORKFLOW_FAILURE_MODE_CAPTURE,
     build_subworkflow_contract,
 )
+from ..workflow_template_profile_service import (
+    WORKFLOW_GAP_CANDIDATE_EXECUTION_TEMPLATE_ID,
+    resolve_workflow_spec_template,
+)
 from ..vontology_loader import load_workflow_definition_from_vontology
 from ..workflow_gap_workflow_contracts import (
     WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
@@ -80,7 +84,6 @@ from ..workflow_registry import WorkflowRegistration
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_WORKFLOW_PARENT_TYPE_ID = "#V#ai_workflow"
 WORKFLOW_CREATION_WORKFLOW_ID = "#V#von_workflow_creation_workflow"
 DEFAULT_RECENT_TURN_LIMIT = 6
 DEFAULT_RECENT_CONTEXT_LIMIT = 8
@@ -479,55 +482,6 @@ def _link_candidate_prompt_to_workflow(
     return None
 
 
-def _build_candidate_workflow_spec(
-    *,
-    workflow_id: str,
-    workflow_name: str,
-    workflow_description: str,
-    prompt_concept_id: str,
-    request_text: str,
-    recent_turns_json: str,
-    base_response_text: str,
-    workflow_guidance: Sequence[str],
-    acceptance_requirements: Sequence[str],
-    intent_summary: str,
-    gap_summary: str,
-) -> dict[str, Any]:
-    return {
-        "workflow_id": workflow_id,
-        "name": workflow_name,
-        "description": workflow_description,
-        "parent_type_id": DEFAULT_WORKFLOW_PARENT_TYPE_ID,
-        "required_effects": ["context:candidate_response_present=True"],
-        "postcondition_probe": {"candidate_response_present": True},
-        "verification_inputs": {"workflow_gap_dry_run": True},
-        "steps": [
-            {
-                "state_id": "execute_candidate",
-                "action_id": WORKFLOW_GAP_EXECUTE_CANDIDATE_ACTION_ID,
-                "inputs": {
-                    "prompt_concept_id": prompt_concept_id,
-                    "workflow_name": workflow_name,
-                    "workflow_description": workflow_description,
-                    "default_request_text": request_text,
-                    "default_recent_turns_json": recent_turns_json,
-                    "default_base_response_text": base_response_text,
-                    "workflow_guidance_json": _json_text(list(workflow_guidance)),
-                    "acceptance_requirements_json": _json_text(
-                        list(acceptance_requirements)
-                    ),
-                    "intent_summary": intent_summary,
-                    "gap_summary": gap_summary,
-                },
-                "next_state": "completed",
-                "on_failure_state": "failed",
-            },
-            {"state_id": "completed", "terminal": True},
-            {"state_id": "failed", "terminal": True},
-        ],
-    }
-
-
 def _candidate_recent_turns(
     request: WorkflowActionRequest,
     *,
@@ -803,19 +757,35 @@ def _handle_prepare_candidate_spec(request: WorkflowActionRequest) -> WorkflowAc
 
     recent_turns_json = _clean_text(context.get("workflow_gap_recent_turns_json"))
     base_response_text = _clean_text(context.get("workflow_gap_base_response_text"))
-    candidate_workflow_spec = _build_candidate_workflow_spec(
-        workflow_id=candidate_workflow_id,
-        workflow_name=workflow_name,
-        workflow_description=workflow_description,
-        prompt_concept_id=prompt_concept_id,
-        request_text=request_text,
-        recent_turns_json=recent_turns_json,
-        base_response_text=base_response_text,
-        workflow_guidance=workflow_guidance,
-        acceptance_requirements=acceptance_requirements,
-        intent_summary=intent_summary,
-        gap_summary=gap_summary,
-    )
+    try:
+        candidate_workflow_spec, template_resolution = resolve_workflow_spec_template(
+            request_text=request_text,
+            explicit_template_id=WORKFLOW_GAP_CANDIDATE_EXECUTION_TEMPLATE_ID,
+            variables={
+                "workflow_id": candidate_workflow_id,
+                "workflow_name": workflow_name,
+                "workflow_description": workflow_description,
+                "prompt_concept_id": prompt_concept_id,
+                "request_text": request_text,
+                "recent_turns_json": recent_turns_json,
+                "base_response_text": base_response_text,
+                "workflow_guidance_json": _json_text(list(workflow_guidance)),
+                "acceptance_requirements_json": _json_text(
+                    list(acceptance_requirements)
+                ),
+                "intent_summary": intent_summary,
+                "gap_summary": gap_summary,
+            },
+        )
+    except Exception as exc:
+        return WorkflowActionResult(
+            status="failed",
+            error=f"workflow_gap_candidate_template_render_failed:{exc}",
+            outputs={
+                "candidate_workflow_id": candidate_workflow_id,
+                "candidate_prompt_concept_id": prompt_concept_id,
+            },
+        )
     return WorkflowActionResult(
         status="success",
         outputs={
@@ -834,6 +804,7 @@ def _handle_prepare_candidate_spec(request: WorkflowActionRequest) -> WorkflowAc
             ),
             "workflow_gap_guidance": workflow_guidance,
             "workflow_gap_guidance_json": _json_text(workflow_guidance),
+            "workflow_gap_candidate_template_resolution": template_resolution,
         },
     )
 

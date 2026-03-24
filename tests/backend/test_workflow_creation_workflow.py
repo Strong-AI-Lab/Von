@@ -15,7 +15,6 @@ from src.backend.services.text_value_service import (
 )
 from src.backend.services.workflow_discovery_service import (
     EXECUTABILITY_EXECUTABLE_NOW,
-    WORKFLOW_CREATION_WORKFLOW_ID as DISCOVERY_WORKFLOW_CREATION_WORKFLOW_ID,
     WorkflowDiscoveryResult,
     WorkflowMatch,
     discover_workflows,
@@ -75,6 +74,8 @@ from src.backend.workflows.workflow_definition_identity_service import (
     collect_workflow_action_ids,
 )
 from src.backend.workflows.workflow_registry import WorkflowRegistration, WorkflowRegistry
+
+DISCOVERY_WORKFLOW_CREATION_WORKFLOW_ID = WORKFLOW_CREATION_WORKFLOW_ID
 
 SCHOLARLY_WORKFLOW_REQUEST_PROMPT = (
     "Create a workflow from this description request: represent scholarly works "

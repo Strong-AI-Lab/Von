@@ -40,6 +40,7 @@ from src.backend.workflows.vontology_loader import (
     _all_relationship_targets,
     resolve_workflow_background_launch_policy,
     resolve_workflow_description,
+    resolve_workflow_discovery_exemplars,
     resolve_workflow_long_horizon_policies,
     resolve_workflow_narrative_text,
     resolve_workflow_publication_lifecycle,
@@ -350,6 +351,35 @@ class TestFetchConceptProjection:
 
 
 class TestWorkflowDescriptionResolution:
+    def test_resolve_workflow_discovery_exemplars_prefers_canonical_text_relation(self):
+        with patch(
+            "src.backend.workflows.vontology_loader.get_texts_for_concept",
+            return_value=[
+                {
+                    "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
+                    "text": json.dumps(
+                        {
+                            "schema_version": "workflow_discovery_exemplars.v1",
+                            "keywords": ["workflow creation"],
+                            "examples": [
+                                "Create a workflow from this description request."
+                            ],
+                        }
+                    ),
+                }
+            ],
+        ):
+            exemplars, source = resolve_workflow_discovery_exemplars(
+                "#V#demo_workflow"
+            )
+
+        assert exemplars is not None
+        assert exemplars["keywords"] == ["workflow creation"]
+        assert exemplars["examples"] == [
+            "Create a workflow from this description request."
+        ]
+        assert source == "text_relation:#V#hasWorkflowDiscoveryExemplarsJson"
+
     def test_resolve_narrative_prefers_has_definition_precedence(self):
         with patch(
             "src.backend.workflows.vontology_loader.get_preferred_text_for_concept",
@@ -1289,6 +1319,55 @@ class TestInitialStepKey:
         assert (
             metadata["routing_profile_source"]
             == "text_relation:#V#hasWorkflowRoutingProfileJson"
+        )
+
+    def test_load_definition_carries_discovery_exemplar_metadata(self):
+        graph = _make_graph(
+            initial_step="#V#start",
+            steps=[_make_step("#V#start", invokes_action="test.action")],
+        )
+
+        with _stub_fetch_concepts(), _stub_narrative():
+            with patch(
+                "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+                return_value=(graph, []),
+            ):
+                with patch(
+                    "src.backend.workflows.vontology_loader.resolve_workflow_background_launch_policy",
+                    return_value=(None, "none"),
+                ):
+                    with patch(
+                        "src.backend.workflows.vontology_loader.resolve_workflow_routing_profile",
+                        return_value=(None, "none"),
+                    ):
+                        with patch(
+                            "src.backend.workflows.vontology_loader.resolve_workflow_discovery_exemplars",
+                            return_value=(
+                                {
+                                    "schema_version": "workflow_discovery_exemplars.v1",
+                                    "keywords": ["workflow creation"],
+                                    "examples": [
+                                        "Create a workflow from this description request."
+                                    ],
+                                },
+                                "text_relation:#V#hasWorkflowDiscoveryExemplarsJson",
+                            ),
+                        ):
+                            defn = load_workflow_definition_from_vontology(
+                                "#V#test_workflow"
+                            )
+
+        assert defn is not None
+        metadata = dict(defn.metadata)
+        assert metadata["discovery_exemplars"]["keywords"] == [
+            "workflow creation"
+        ]
+        assert metadata["discovery_exemplars"]["examples"] == [
+            "Create a workflow from this description request."
+        ]
+        assert (
+            metadata["discovery_exemplars_source"]
+            == "text_relation:#V#hasWorkflowDiscoveryExemplarsJson"
         )
 
     def test_load_definition_carries_long_horizon_metadata(self):

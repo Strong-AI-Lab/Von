@@ -216,6 +216,10 @@ WORKFLOW_BACKGROUND_LAUNCH_POLICY_SCHEMA_VERSION = (
 )
 WORKFLOW_ROUTING_PROFILE_SOURCE_NONE = "none"
 WORKFLOW_ROUTING_PROFILE_SCHEMA_VERSION = "workflow_routing_profile.v1"
+WORKFLOW_DISCOVERY_EXEMPLARS_SOURCE_NONE = "none"
+WORKFLOW_DISCOVERY_EXEMPLARS_SCHEMA_VERSION = (
+    "workflow_discovery_exemplars.v1"
+)
 WORKFLOW_PUBLICATION_LIFECYCLE_SOURCE_NONE = "none"
 WORKFLOW_PUBLICATION_LIFECYCLE_SCHEMA_VERSION = (
     "workflow_publication_lifecycle.v1"
@@ -305,6 +309,16 @@ WORKFLOW_ROUTING_PROFILE_TEXT_PREDICATE_PRECEDENCE: Tuple[Tuple[str, ...], ...] 
         "hasWorkflowRoutingProfileJson",
         "#V#has_workflow_routing_profile_json",
         "has_workflow_routing_profile_json",
+    ),
+)
+WORKFLOW_DISCOVERY_EXEMPLARS_TEXT_PREDICATE_PRECEDENCE: Tuple[
+    Tuple[str, ...], ...
+] = (
+    (
+        "#V#hasWorkflowDiscoveryExemplarsJson",
+        "hasWorkflowDiscoveryExemplarsJson",
+        "#V#has_workflow_discovery_exemplars_json",
+        "has_workflow_discovery_exemplars_json",
     ),
 )
 WORKFLOW_PLAN_STATE_POLICY_TEXT_PREDICATE_PRECEDENCE: Tuple[Tuple[str, ...], ...] = (
@@ -1603,6 +1617,91 @@ def resolve_workflow_routing_profile(
                 return profile, f"text_relation:{predicate}"
 
     return None, WORKFLOW_ROUTING_PROFILE_SOURCE_NONE
+
+
+def _normalise_non_empty_text_tuple(value: Any, *, max_items: int = 16) -> tuple[str, ...]:
+    if not isinstance(value, Sequence) or isinstance(value, str):
+        return ()
+    items: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = _normalise_non_empty_text(item)
+        lowered = str(text or "").lower()
+        if text is None or lowered in seen:
+            continue
+        seen.add(lowered)
+        items.append(text)
+        if len(items) >= max_items:
+            break
+    return tuple(items)
+
+
+def _normalise_workflow_discovery_exemplars(
+    raw_payload: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if not isinstance(raw_payload, Mapping):
+        return None
+
+    keywords = _normalise_non_empty_text_tuple(raw_payload.get("keywords"))
+    examples = _normalise_non_empty_text_tuple(
+        raw_payload.get("examples") or raw_payload.get("exemplars"),
+        max_items=24,
+    )
+    if not keywords and not examples:
+        return None
+
+    return {
+        "schema_version": WORKFLOW_DISCOVERY_EXEMPLARS_SCHEMA_VERSION,
+        "keywords": list(keywords),
+        "examples": list(examples),
+    }
+
+
+def _parse_workflow_discovery_exemplars_text_value(
+    text_value: Any,
+) -> dict[str, Any] | None:
+    text = _normalise_non_empty_text(text_value)
+    if not text:
+        return None
+
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        parsed = None
+
+    if isinstance(parsed, Mapping):
+        return _normalise_workflow_discovery_exemplars(parsed)
+    return None
+
+
+def resolve_workflow_discovery_exemplars(
+    workflow_id: str,
+) -> tuple[dict[str, Any] | None, str]:
+    """Resolve workflow discovery exemplars from authoritative text relations."""
+
+    if not isinstance(workflow_id, str) or not workflow_id.strip():
+        return None, WORKFLOW_DISCOVERY_EXEMPLARS_SOURCE_NONE
+
+    texts: list[dict[str, Any]] = []
+    try:
+        raw_texts = get_texts_for_concept(workflow_id)
+    except Exception:
+        raw_texts = []
+    if isinstance(raw_texts, list):
+        texts = [item for item in raw_texts if isinstance(item, dict)]
+
+    for predicate_aliases in WORKFLOW_DISCOVERY_EXEMPLARS_TEXT_PREDICATE_PRECEDENCE:
+        for item in texts:
+            predicate = str(item.get("predicate") or "").strip()
+            if predicate not in predicate_aliases:
+                continue
+            exemplars = _parse_workflow_discovery_exemplars_text_value(
+                item.get("text")
+            )
+            if exemplars is not None:
+                return exemplars, f"text_relation:{predicate}"
+
+    return None, WORKFLOW_DISCOVERY_EXEMPLARS_SOURCE_NONE
 
 
 def resolve_workflow_background_launch_policy(
@@ -3177,6 +3276,9 @@ def load_workflow_definition_from_vontology(
     routing_profile, routing_profile_source = resolve_workflow_routing_profile(
         workflow_id
     )
+    discovery_exemplars, discovery_exemplars_source = (
+        resolve_workflow_discovery_exemplars(workflow_id)
+    )
     launch_input_contract, launch_input_contract_source = (
         resolve_workflow_launch_input_contract(workflow_id)
     )
@@ -3202,6 +3304,16 @@ def load_workflow_definition_from_vontology(
         and routing_profile_source != WORKFLOW_ROUTING_PROFILE_SOURCE_NONE
     ):
         workflow_metadata["routing_profile_source"] = routing_profile_source
+    if discovery_exemplars is not None:
+        workflow_metadata["discovery_exemplars"] = discovery_exemplars
+    if (
+        isinstance(discovery_exemplars_source, str)
+        and discovery_exemplars_source
+        and discovery_exemplars_source != WORKFLOW_DISCOVERY_EXEMPLARS_SOURCE_NONE
+    ):
+        workflow_metadata["discovery_exemplars_source"] = (
+            discovery_exemplars_source
+        )
     if launch_input_contract is not None:
         workflow_metadata["launch_input_contract"] = launch_input_contract
     if (

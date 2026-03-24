@@ -259,6 +259,59 @@ class TestIndexFromRegistry:
         assert count == 0
         assert index.search("workflow purpose text") == []
 
+    def test_index_from_registry_includes_discovery_exemplars_in_capability_text(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from src.backend.workflows import WorkflowRegistry
+        from src.backend.workflows.workflow_registry import LazyWorkflowRegistration
+
+        registry = WorkflowRegistry()
+        registry.register_lazy(
+            LazyWorkflowRegistration(
+                workflow_id="#V#workflow_repair_or_create_workflow",
+                purpose="Repair existing workflows or create new ones from requests.",
+                source="vontology",
+            )
+        )
+        monkeypatch.setattr(
+            "src.backend.workflows.vontology_loader.resolve_workflow_description",
+            lambda _workflow_id, **_kwargs: (
+                "Repair existing workflows or create new ones from requests.",
+                "text_relation:#V#hasDescription",
+            ),
+        )
+        monkeypatch.setattr(
+            "src.backend.workflows.vontology_loader.resolve_workflow_discovery_exemplars",
+            lambda _workflow_id: (
+                {
+                    "schema_version": "workflow_discovery_exemplars.v1",
+                    "keywords": ["workflow creation", "workflow repair"],
+                    "examples": [
+                        "Create a workflow from this description request."
+                    ],
+                },
+                "text_relation:#V#hasWorkflowDiscoveryExemplarsJson",
+            ),
+        )
+
+        index = WorkflowCapabilityIndex()
+        count = index.index_from_registry(registry)
+
+        assert count == 1
+        capability_text = index._entries[
+            "#V#workflow_repair_or_create_workflow"
+        ].text
+        assert "Keywords: workflow creation, workflow repair" in capability_text
+        assert (
+            "Example requests: Create a workflow from this description request."
+            in capability_text
+        )
+
+        results = index.search("Create a workflow from this description request.")
+        assert results
+        assert results[0].workflow_id == "#V#workflow_repair_or_create_workflow"
+
 
 # ---------------------------------------------------------------------------
 # Conversation-turn capabilities from authoritative purpose text

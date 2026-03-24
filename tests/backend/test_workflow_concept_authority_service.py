@@ -4,6 +4,7 @@ from typing import Any, cast
 import pytest
 
 from src.backend.workflows import workflow_concept_authority_service as authority_service
+from src.backend.workflows.vontology_loader import load_workflow_definition_from_vontology
 from src.backend.workflows.workflow_definition_identity_service import (
     build_workflow_definition_identity,
 )
@@ -1352,4 +1353,29 @@ def test_publish_canonical_graphs_reports_validation_failures(
     assert all(
         str(errors.get(workflow_id, "")).startswith("publication_validation_failed:")
         for workflow_id in authority_service.CANONICAL_CHAT_WORKFLOW_IDS
+    )
+
+
+def test_publish_canonical_graphs_materialises_routing_and_discovery_metadata(
+    _reset_mock_workflow_graph_db,
+) -> None:
+    report = authority_service.publish_canonical_chat_workflow_graphs(
+        target_workflow_ids=[authority_service.WORKFLOW_CREATION_WORKFLOW_ID]
+    )
+
+    assert authority_service.WORKFLOW_CREATION_WORKFLOW_ID in (
+        report.get("published_workflow_ids") or []
+    )
+
+    definition = load_workflow_definition_from_vontology(
+        authority_service.WORKFLOW_CREATION_WORKFLOW_ID
+    )
+    assert definition is not None
+    metadata = dict(definition.metadata)
+    assert metadata["routing_profile"]["role"] == "authoring"
+    assert metadata["routing_profile"]["authoring_intent_required"] is True
+    examples = metadata["discovery_exemplars"]["examples"]
+    assert any(
+        "Create a workflow from this description request" in example
+        for example in examples
     )

@@ -76,10 +76,30 @@ Bundle intent:
 - carry workflow-level text relations, launch-input contracts, and step-level notes alongside the workflow graph source;
 - allow deterministic re-publication and short-circuit validation against the materialised Vontology workflow graph.
 
+Current bundle surface:
+
+- workflow entries MAY include generic `text_relations` payloads in addition to description/content/notes convenience fields;
+- these authored workflow text relations are the preferred repository-side source for metadata such as routing profiles and discovery exemplars when the workflow is not being authored directly in Vontology first.
+
 Normative authoring rule:
 
 - If a canonical workflow family is not authored directly in Vontology graph data, it SHOULD be authored in one of these version-controlled workflow source bundles.
 - Workflow-family-specific Python functions that assemble canonical workflow specs are a contract failure unless they are implementing a genuinely reusable VWL/runtime extension that does not yet exist elsewhere.
+
+### 2.2 Version-Controlled Workflow Template Bundles
+
+Reusable authored workflow-spec templates MAY be stored as a separate bundle family when the runtime needs to materialise a concrete workflow definition from declarative metadata rather than from a pre-existing canonical workflow graph.
+
+Current template bundle contract:
+
+- schema version: `authored_workflow_template_bundle.v1`
+- canonical repository location: `src/backend/workflows/authored_sources/workflow_template_profiles.json`
+- generic loader/render path: `src/backend/workflows/workflow_template_profile_service.py`
+
+Normative authoring rule:
+
+- workflow-family-specific Python template-builder functions MUST NOT be introduced for cases that can instead be expressed as authored workflow-spec templates plus generic rendering/materialisation support;
+- if automatic template choice is needed, it MUST be driven by declarative template-profile metadata rather than workflow-family-specific request regexes.
 
 ## 3. VWL Ontology Vocabulary
 
@@ -289,6 +309,59 @@ Current override-policy rule:
 - when no discovered launchable custom workflow remains suitable after applying
   semantic-fit and role checks, routing MUST preserve the non-custom fallback
   path and record an explicit decline reason in routing diagnostics.
+
+Current fallback discipline:
+
+- generic fallback role inference MAY remain only for legacy workflows whose routing metadata has not yet been backfilled;
+- workflow-family-specific authoring/maintenance hint lists or request-shape regexes MUST NOT be reintroduced for migrated workflows once explicit routing metadata exists.
+
+### 4.3 Workflow Discovery Exemplars
+
+Workflow concepts MAY attach explicit discovery metadata so capability-index and selector retrieval can match realistic requests without relying on workflow-family-specific discovery seeds.
+
+Canonical storage:
+
+- `#V#hasWorkflowDiscoveryExemplarsJson` text (primary `en-NZ`)
+
+Canonical schema: `workflow_discovery_exemplars.v1`
+
+Current fields:
+
+- `keywords`: ordered list of compact lexical anchors
+- `examples`: ordered list of representative request texts
+
+Current discovery rule:
+
+- authoritative workflow-capability text MAY be augmented with discovery keywords and example requests when this metadata is present;
+- discovery exemplars are a retrieval aid, not an execution permission grant;
+- discovery SHOULD prefer explicit exemplar metadata over workflow-family-specific capability-seeding code.
+
+### 4.4 Workflow Template Profiles
+
+When a workflow authoring path needs to synthesise a new workflow definition from declarative authored assets, the template-selection policy MAY be represented as a workflow template profile.
+
+Canonical repository-side surface:
+
+- bundle schema: `authored_workflow_template_bundle.v1`
+- profile schema: `workflow_template_profile.v1`
+
+Current fields:
+
+- `selection_mode`: `automatic` | `explicit_only` | `fallback`
+- `priority`: integer preference weight within a selection pool
+- `keywords`: lexical anchors for retrieval-time scoring
+- `exemplars`: representative request texts for applicability scoring
+- `required_terms_all`
+- `required_terms_any`
+- `forbidden_terms_any`
+- `requires_synthesis_policy`
+
+Current selection rule:
+
+- explicit template IDs MUST win over automatic selection;
+- automatic selection MUST be driven by authored template-profile metadata and generic scoring logic;
+- fallback templates MAY exist for broad request classes, but only as declarative authored assets;
+- if a selected template requires synthesis-policy text, the runtime MUST fail closed when that policy cannot be resolved.
 
 ## 5. Condition Language (Transition Expressions)
 

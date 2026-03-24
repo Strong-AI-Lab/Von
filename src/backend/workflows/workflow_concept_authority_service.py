@@ -644,6 +644,27 @@ def _append_authored_text_relation_spec(
     )
 
 
+def _append_authored_text_relation_mapping(
+    *,
+    target: list[dict[str, Any]],
+    raw_item: Any,
+) -> None:
+    if not isinstance(raw_item, Mapping):
+        return
+    predicate = _normalise_authored_source_text(raw_item.get("predicate"))
+    text = _normalise_authored_source_text(raw_item.get("text"))
+    lang = _normalise_authored_source_text(raw_item.get("lang")) or "en-NZ"
+    if not predicate or not text:
+        return
+    target.append(
+        {
+            "predicate": predicate,
+            "text": text,
+            "lang": lang,
+        }
+    )
+
+
 @lru_cache(maxsize=None)
 def _load_authored_workflow_source_bundle_cached(
     asset_path: str,
@@ -709,6 +730,11 @@ def _load_authored_workflow_source_bundle_cached(
                 target=workflow_text_specs,
                 predicate="hasNote",
                 text=_normalise_authored_source_text(note),
+            )
+        for raw_relation in item.get("text_relations") or ():
+            _append_authored_text_relation_mapping(
+                target=workflow_text_specs,
+                raw_item=raw_relation,
             )
         if workflow_text_specs:
             workflow_text_relations[workflow_id] = tuple(workflow_text_specs)
@@ -786,11 +812,51 @@ def publication_spec_step_concept_ids(
     return tuple(ordered_ids)
 
 
+def upsert_authored_text_relations(
+    *,
+    subject_concept_id: str,
+    relation_specs: Sequence[Mapping[str, Any]],
+    workflow_id: str,
+    source_tag: str | None = None,
+    managed_by: str | None = None,
+    state_id: str | None = None,
+) -> None:
+    context: dict[str, str] = {"workflow_id": workflow_id}
+    if source_tag:
+        context["source"] = source_tag
+    if managed_by:
+        context["managed_by"] = managed_by
+    if state_id:
+        context["state_id"] = state_id
+        context["workflow_step_id"] = subject_concept_id
+
+    for spec in relation_specs:
+        if not isinstance(spec, Mapping):
+            continue
+        predicate = str(spec.get("predicate") or "").strip()
+        text = str(spec.get("text") or "").strip()
+        lang = str(spec.get("lang") or "en-NZ").strip() or "en-NZ"
+        if not predicate or not text:
+            continue
+        upsert_singleton_text_relation(
+            subject_concept_id=subject_concept_id,
+            predicate=predicate,
+            text=text,
+            lang=lang,
+            context=dict(context),
+            garbage_collect=True,
+        )
+
+
 # Keep this mapping deterministic so publication is stable across runs.
+_CANONICAL_WORKFLOW_SOURCE_BUNDLE = load_authored_workflow_source_bundle(
+    _CANONICAL_WORKFLOW_PUBLICATION_SOURCE_PATH
+)
 _CANONICAL_WORKFLOW_PUBLICATION_SPECS: Dict[str, _CanonicalWorkflowPublicationSpec] = dict(
-    load_authored_workflow_source_bundle(
-        _CANONICAL_WORKFLOW_PUBLICATION_SOURCE_PATH
-    )["publication_specs"]
+    _CANONICAL_WORKFLOW_SOURCE_BUNDLE["publication_specs"]
+)
+_CANONICAL_WORKFLOW_TEXT_RELATIONS: Dict[str, tuple[dict[str, Any], ...]] = dict(
+    _CANONICAL_WORKFLOW_SOURCE_BUNDLE.get("workflow_text_relations") or {}
 )
 
 
@@ -1860,6 +1926,7 @@ def publish_canonical_chat_workflow_graphs(
     publication_specs: Mapping[str, _CanonicalWorkflowPublicationSpec] | None = None,
     publication_definitions: Mapping[str, WorkflowDefinition] | None = None,
     publication_purposes: Mapping[str, str] | None = None,
+    workflow_text_relations: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
 ) -> Dict[str, Any]:
     """Publish canonical chat workflows as Vontology process graphs.
 
@@ -1867,9 +1934,10 @@ def publish_canonical_chat_workflow_graphs(
     workflow topology must be published into Vontology so graph loading and
     introspection surfaces use the same authority.
 
-    ``publication_specs`` / ``publication_definitions`` / ``publication_purposes``
-    allow explicit workflow families to publish authoritative graphs without
-    temporarily registering built-in runtime workflows.
+    ``publication_specs`` / ``publication_definitions`` / ``publication_purposes`` /
+    ``workflow_text_relations`` allow explicit workflow families to publish
+    authoritative graphs without temporarily registering built-in runtime
+    workflows.
     """
     explicit_publication_specs: Dict[str, _CanonicalWorkflowPublicationSpec] = {
         str(workflow_id).strip(): spec
@@ -1893,10 +1961,37 @@ def publish_canonical_chat_workflow_graphs(
         and isinstance(purpose, str)
         and str(purpose).strip()
     }
+    explicit_workflow_text_relations: Dict[str, tuple[dict[str, Any], ...]] = {}
+    for workflow_id, relation_specs in (workflow_text_relations or {}).items():
+        workflow_id_text = str(workflow_id).strip() if isinstance(workflow_id, str) else ""
+        if not workflow_id_text:
+            continue
+        cleaned_specs: list[dict[str, Any]] = []
+        for spec in relation_specs or ():
+            if not isinstance(spec, Mapping):
+                continue
+            predicate = str(spec.get("predicate") or "").strip()
+            text = str(spec.get("text") or "").strip()
+            lang = str(spec.get("lang") or "en-NZ").strip() or "en-NZ"
+            if not predicate or not text:
+                continue
+            cleaned_specs.append(
+                {
+                    "predicate": predicate,
+                    "text": text,
+                    "lang": lang,
+                }
+            )
+        if cleaned_specs:
+            explicit_workflow_text_relations[workflow_id_text] = tuple(cleaned_specs)
     available_publication_specs: Dict[str, _CanonicalWorkflowPublicationSpec] = dict(
         _CANONICAL_WORKFLOW_PUBLICATION_SPECS
     )
     available_publication_specs.update(explicit_publication_specs)
+    available_workflow_text_relations: Dict[str, tuple[dict[str, Any], ...]] = dict(
+        _CANONICAL_WORKFLOW_TEXT_RELATIONS
+    )
+    available_workflow_text_relations.update(explicit_workflow_text_relations)
 
     published: list[str] = []
     skipped_missing_registration: list[str] = []
@@ -2022,6 +2117,20 @@ def publish_canonical_chat_workflow_graphs(
                     "workflow_authority: created canonical workflow concept %s",
                     workflow_id,
                 )
+
+        relation_specs = tuple(available_workflow_text_relations.get(workflow_id) or ())
+        if relation_specs:
+            try:
+                upsert_authored_text_relations(
+                    subject_concept_id=workflow_id,
+                    relation_specs=relation_specs,
+                    workflow_id=workflow_id,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                errors_by_workflow_id[workflow_id] = (
+                    f"workflow_text_relation_upsert_failed:{workflow_id}:{exc}"
+                )
+                continue
 
         step_id_by_state: Dict[str, str] = {}
         for step in spec.steps:

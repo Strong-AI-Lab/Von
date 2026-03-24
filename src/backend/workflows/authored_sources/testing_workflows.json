@@ -180,6 +180,13 @@
         "#V#ai_workflow",
         "#V#durable_workflow"
       ],
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"execution\",\"authoring_intent_required\":false,\"prefer_existing_capability\":false}",
+          "lang": "en-NZ"
+        }
+      ],
       "workflow_id": "#V#meeting_invitation_candidate_workflow"
     },
     {
@@ -745,6 +752,13 @@
         "#V#testing_workflow",
         "#V#theory_slice_test_workflow"
       ],
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"execution\",\"authoring_intent_required\":false,\"prefer_existing_capability\":false}",
+          "lang": "en-NZ"
+        }
+      ],
       "workflow_id": "#V#meeting_invitation_testing_workflow"
     },
     {
@@ -1067,6 +1081,13 @@
         "#V#testing_workflow",
         "#V#clone_benchmark_test_workflow"
       ],
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"maintenance\",\"authoring_intent_required\":false,\"prefer_existing_capability\":false}",
+          "lang": "en-NZ"
+        }
+      ],
       "workflow_id": "#V#synthetic_workflow_regression_suite_workflow"
     },
     {
@@ -1232,6 +1253,13 @@
         "#V#durable_workflow",
         "#V#testing_workflow"
       ],
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"maintenance\",\"authoring_intent_required\":false,\"prefer_existing_capability\":false}",
+          "lang": "en-NZ"
+        }
+      ],
       "workflow_id": "#V#promotion_gate_workflow"
     },
     {
@@ -1344,6 +1372,13 @@
         "#V#ai_workflow",
         "#V#durable_workflow",
         "#V#testing_workflow"
+      ],
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"maintenance\",\"authoring_intent_required\":false,\"prefer_existing_capability\":false}",
+          "lang": "en-NZ"
+        }
       ],
       "workflow_id": "#V#ephemeral_theory_gc_workflow"
     }

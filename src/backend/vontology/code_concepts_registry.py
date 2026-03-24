@@ -164,6 +164,10 @@ _WORKFLOW_ROUTING_PROFILE_PREDICATE_IDS = [
     "#V#hasWorkflowRoutingProfileJson",
     "#V#has_workflow_routing_profile_json",
 ]
+_WORKFLOW_DISCOVERY_EXEMPLARS_PREDICATE_IDS = [
+    "#V#hasWorkflowDiscoveryExemplarsJson",
+    "#V#has_workflow_discovery_exemplars_json",
+]
 
 _RELATION_META_PREDICATE_IDS = [
     "#V#salient_binary_predicate_for_type",
@@ -235,6 +239,7 @@ _CODE_PREDICATE_IDS = _unique_ids(
         *_SKILL_INTEROP_PREDICATE_IDS,
         *_WORKFLOW_BACKGROUND_POLICY_PREDICATE_IDS,
         *_WORKFLOW_ROUTING_PROFILE_PREDICATE_IDS,
+        *_WORKFLOW_DISCOVERY_EXEMPLARS_PREDICATE_IDS,
         *_RELATION_META_PREDICATE_IDS,
         *_STRUCTURAL_PREDICATE_IDS,
         *_OTHER_PREDICATE_IDS,

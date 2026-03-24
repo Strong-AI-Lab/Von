@@ -3241,6 +3241,18 @@
           }
         ]
       },
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"maintenance\",\"authoring_intent_required\":false,\"prefer_existing_capability\":false}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
+          "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"workflow gap recovery\",\"recover missing workflow\",\"workflow discovery miss\"],\"examples\":[\"Recover from a missing applicable workflow by creating and testing a candidate workflow.\",\"Analyse this workflow discovery miss and retry with a candidate workflow.\"]}",
+          "lang": "en-NZ"
+        }
+      ],
       "workflow_id": "#V#workflow_discovery_gap_recovery_workflow"
     },
     {
@@ -3341,6 +3353,13 @@
           }
         ]
       },
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"maintenance\",\"authoring_intent_required\":false,\"prefer_existing_capability\":false}",
+          "lang": "en-NZ"
+        }
+      ],
       "workflow_id": "#V#workflow_gap_test_workflow"
     },
     {
@@ -4377,6 +4396,18 @@
           }
         ]
       },
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"maintenance\",\"authoring_intent_required\":false,\"prefer_existing_capability\":false}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
+          "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"workflow maintenance\",\"workflow introspection\",\"repair prompt drift\"],\"examples\":[\"Diagnose this workflow incident and plan a bounded repair.\",\"Inspect workflow and prompt drift for this failure.\"]}",
+          "lang": "en-NZ"
+        }
+      ],
       "workflow_id": "#V#workflow_introspection_maintenance_workflow"
     },
     {
@@ -4881,6 +4912,18 @@
           }
         ]
       },
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"authoring\",\"authoring_intent_required\":true,\"prefer_existing_capability\":true}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
+          "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"workflow repair\",\"repair existing workflow\",\"update workflow definition\"],\"examples\":[\"Repair the existing workflow so it emits the updated marker.\",\"Update this workflow definition without creating a duplicate.\"]}",
+          "lang": "en-NZ"
+        }
+      ],
       "workflow_id": "#V#workflow_authoring_repair_workflow"
     },
     {
@@ -5275,6 +5318,18 @@
           }
         ]
       },
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"authoring\",\"authoring_intent_required\":true,\"prefer_existing_capability\":true}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
+          "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"workflow creation\",\"workflow authoring\",\"repair or create workflow\"],\"examples\":[\"Create a workflow from this description request.\",\"Is there already a workflow for this request, or should we create one?\",\"Repair or create a workflow for this description.\"]}",
+          "lang": "en-NZ"
+        }
+      ],
       "workflow_id": "#V#workflow_repair_or_create_workflow"
     },
     {
@@ -5451,6 +5506,18 @@
           }
         ]
       },
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"authoring\",\"authoring_intent_required\":true,\"prefer_existing_capability\":true}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
+          "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"workflow creation\",\"create workflow\",\"scholarly paper workflow\",\"phd student workflow\"],\"examples\":[\"Create a workflow from this description request: represent scholarly works from uploaded PDFs in Vontology.\",\"Create a workflow from this description request: represent a PhD student from text description in Vontology.\",\"Build a workflow for this request and publish it when validated.\"]}",
+          "lang": "en-NZ"
+        }
+      ],
       "workflow_id": "#V#von_workflow_creation_workflow"
     }
   ]

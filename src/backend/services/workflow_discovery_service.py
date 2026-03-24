@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -32,9 +31,6 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..vontology.utils_vontology import get_concept_description
-from ..workflows.workflow_creation_contracts import (
-    WORKFLOW_AUTHORING_REPAIR_OR_CREATE_WORKFLOW_ID,
-)
 from .file_copy_reference_service import extract_file_copy_concept_ids_from_text
 from .file_copy_typing_service import build_file_copy_typing_context
 from .arxiv_paper_link_service import extract_arxiv_id_candidates
@@ -49,8 +45,6 @@ WORKFLOW_TYPE_IDS = (
     "#V#workflow",
     "#V#durable_workflow",
 )
-
-WORKFLOW_CREATION_WORKFLOW_ID = WORKFLOW_AUTHORING_REPAIR_OR_CREATE_WORKFLOW_ID
 
 # Default relevance threshold (0.0-1.0)
 DEFAULT_RELEVANCE_THRESHOLD = 0.70
@@ -905,39 +899,6 @@ def _count_executable_matches(matches: List[WorkflowMatch]) -> int:
     return sum(1 for match in matches if bool(match.is_executable))
 
 
-_WORKFLOW_CREATION_INTENT_RE = re.compile(
-    r"\b(create|build|generate)\b[\s\w]{0,64}\bworkflow\b",
-    re.IGNORECASE,
-)
-
-
-def _looks_like_workflow_creation_request(query: str) -> bool:
-    text = str(query or "").strip()
-    if not text:
-        return False
-    if not _WORKFLOW_CREATION_INTENT_RE.search(text):
-        return False
-    return "description" in text.lower() or "request" in text.lower()
-
-
-def _seed_workflow_creation_candidate(query: str) -> list[WorkflowMatch]:
-    if not _looks_like_workflow_creation_request(query):
-        return []
-    return [
-        WorkflowMatch(
-            concept_id=WORKFLOW_CREATION_WORKFLOW_ID,
-            name="Workflow Repair Or Create Workflow",
-            description=(
-                "Preflight a workflow-authoring request by deciding whether to "
-                "reuse an existing workflow, repair one, or create a new "
-                "executable workflow."
-            ),
-            relevance_score=1.0,
-            match_source="intent_seed",
-        )
-    ]
-
-
 def _search_workflow_capabilities(
     query: str,
     *,
@@ -1018,7 +979,7 @@ def discover_workflows(
         )
 
     start_time = time.perf_counter()
-    all_matches: List[WorkflowMatch] = _seed_workflow_creation_candidate(query)
+    all_matches: List[WorkflowMatch] = []
     errors: List[str] = []
     search_sources: List[str] = []
     file_copy_contexts, context_errors = _resolve_query_file_copy_contexts(query)

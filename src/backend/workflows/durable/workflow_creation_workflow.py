@@ -63,6 +63,9 @@ from ..workflow_authoring_service import (
     build_workflow_definition_from_authoring_spec,
     serialise_workflow_definition_to_authoring_spec,
 )
+from ..workflow_template_profile_service import (
+    resolve_workflow_spec_template,
+)
 from .workflow_gap_recovery_workflow import register_workflow_gap_recovery_actions
 
 WORKFLOW_CONTEXT_KEY_VALIDATED_TYPE_NAME = "#V#workflow_context_key_validated_type_name"
@@ -86,18 +89,6 @@ WORKFLOW_GRAPH_PREDICATE_ON_FALSE_NEXT_STEP = "#V#onFalseNextStep"
 WORKFLOW_GRAPH_PREDICATE_ON_FAILURE_NEXT_STEP = "#V#onFailureNextStep"
 WORKFLOW_GRAPH_PREDICATE_ON_UNKNOWN_NEXT_STEP = "#V#onUnknownNextStep"
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
-_WORKFLOW_CREATION_INTENT_RE = re.compile(
-    r"\b(create|build|generate)\b[\s\w]{0,80}\bworkflow\b",
-    re.IGNORECASE,
-)
-_SCHOLARLY_INTENT_RE = re.compile(
-    r"\b(scholarly|paper|arxiv|pdf)\b",
-    re.IGNORECASE,
-)
-_PHD_STUDENT_INTENT_RE = re.compile(
-    r"\b(phd|doctoral|doctorate|student|supervisor|advisor)\b",
-    re.IGNORECASE,
-)
 
 WORKFLOW_CREATION_AUTONOMY_POLICY_VALUE = "only_when_vital_info_missing"
 WORKFLOW_CREATION_SYNTHESIS_POLICY_MISSING_ERROR = (
@@ -157,36 +148,6 @@ def _extract_workflow_spec(context: Mapping[str, Any]) -> Mapping[str, Any]:
     if isinstance(raw, Mapping):
         return dict(raw)
     return {}
-
-
-def _looks_like_workflow_creation_request(request_text: str) -> bool:
-    text = _clean_text(request_text)
-    if not text:
-        return False
-    if not _WORKFLOW_CREATION_INTENT_RE.search(text):
-        return False
-    return "description" in text.lower() or "request" in text.lower()
-
-
-def _looks_like_scholarly_workflow_request(request_text: str) -> bool:
-    text = _clean_text(request_text)
-    if not text:
-        return False
-    return _looks_like_workflow_creation_request(text) and bool(
-        _SCHOLARLY_INTENT_RE.search(text)
-    )
-
-
-def _looks_like_phd_student_workflow_request(request_text: str) -> bool:
-    text = _clean_text(request_text)
-    if not text:
-        return False
-    if not _looks_like_workflow_creation_request(text):
-        return False
-    lowered = text.lower()
-    if "student" not in lowered:
-        return False
-    return bool(_PHD_STUDENT_INTENT_RE.search(text))
 
 
 def _load_synthesis_policy_text() -> str | None:
@@ -528,291 +489,61 @@ def _resolve_or_create_research_topic_concept_id(
     )
 
 
-def _build_default_workflow_spec(
+def _workflow_template_id_from_context(context: Mapping[str, Any]) -> str | None:
+    for key in (
+        "workflow_template_id",
+        "workflow_template_profile_id",
+        "template_id",
+    ):
+        value = _clean_text(context.get(key))
+        if value:
+            return value
+    return None
+
+
+def _resolve_authored_workflow_template_spec(
     *,
+    context: Mapping[str, Any],
     request_text: str,
     workflow_id: str,
-) -> dict[str, Any]:
-    marker_value = _clean_text(request_text[:160]) if request_text else "workflow_created"
-    return {
-        "workflow_id": workflow_id,
-        "name": _titleise(workflow_id[3:] if workflow_id.startswith("#V#") else workflow_id),
-        "description": request_text
-        or "Workflow created from a natural-language workflow request.",
-        "parent_type_id": DEFAULT_WORKFLOW_PARENT_TYPE_ID,
-        "required_effects": [
-            f"context:user_affirmation_policy={WORKFLOW_CREATION_AUTONOMY_POLICY_VALUE}",
-            "context:requires_user_affirmation=False",
-            f"context:workflow_request_summary={marker_value}",
-        ],
-        "postcondition_probe": {
-            "user_affirmation_policy": WORKFLOW_CREATION_AUTONOMY_POLICY_VALUE,
-            "requires_user_affirmation": False,
-            "workflow_request_summary": marker_value,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    explicit_template_id = _workflow_template_id_from_context(context)
+    workflow_name = _titleise(
+        workflow_id[3:] if workflow_id.startswith("#V#") else workflow_id
+    )
+    request_summary = _clean_text(request_text[:160]) if request_text else "workflow_created"
+    workflow_description = request_text
+    rendered_spec, template_resolution = resolve_workflow_spec_template(
+        request_text=request_text,
+        explicit_template_id=explicit_template_id,
+        variables={
+            "workflow_id": workflow_id,
+            "workflow_name": workflow_name,
+            "workflow_description": workflow_description,
+            "request_summary": request_summary,
         },
-        "steps": [
-            {
-                "state_id": "set_autonomy_policy",
-                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
-                "inputs": {
-                    "marker_key": "user_affirmation_policy",
-                    "marker_value": WORKFLOW_CREATION_AUTONOMY_POLICY_VALUE,
-                },
-                "next_state": "set_affirmation_default",
-            },
-            {
-                "state_id": "set_affirmation_default",
-                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
-                "inputs": {
-                    "marker_key": "requires_user_affirmation",
-                    "marker_value": "false",
-                },
-                "next_state": "record_request",
-            },
-            {
-                "state_id": "record_request",
-                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
-                "inputs": {
-                    "marker_key": "workflow_request_summary",
-                    "marker_value": marker_value,
-                },
-                "next_state": "completed",
-            },
-            {"state_id": "completed", "terminal": True},
-        ],
-    }
+    )
+    profile = (
+        dict(template_resolution.get("profile") or {})
+        if isinstance(template_resolution.get("profile"), Mapping)
+        else {}
+    )
+    fallback_description = _clean_text(
+        rendered_spec.get("description") or workflow_description
+    )
+    if not fallback_description:
+        fallback_description = _clean_text(
+            template_resolution.get("default_workflow_description")
+        ) or "Workflow created from a natural-language workflow request."
+    rendered_spec["description"] = fallback_description
 
+    if bool(profile.get("requires_synthesis_policy")):
+        policy_text = _load_synthesis_policy_text()
+        if not policy_text:
+            raise ValueError(WORKFLOW_CREATION_SYNTHESIS_POLICY_MISSING_ERROR)
+        rendered_spec["synthesis_policy_text"] = policy_text
 
-def _build_scholarly_workflow_spec(
-    *,
-    request_text: str,
-    workflow_id: str,
-) -> dict[str, Any]:
-    summary_value = _clean_text(request_text[:160]) if request_text else "scholarly_workflow"
-    return {
-        "workflow_id": workflow_id,
-        "name": _titleise(workflow_id[3:] if workflow_id.startswith("#V#") else workflow_id),
-        "description": request_text
-        or "Executable scholarly paper representation workflow created from text intent.",
-        "parent_type_id": DEFAULT_WORKFLOW_PARENT_TYPE_ID,
-        "required_effects": [
-            f"context:user_affirmation_policy={WORKFLOW_CREATION_AUTONOMY_POLICY_VALUE}",
-            "context:requires_user_affirmation=False",
-            "context:upload_eligibility_passed=True",
-            "context:file_copy_interpreted=True",
-            "context:scholarly_representation_asserted=True",
-            "context:author_resolution_completed=True",
-            "context:scholarly_representation_verified=True",
-        ],
-        "postcondition_probe": {
-            "user_affirmation_policy": WORKFLOW_CREATION_AUTONOMY_POLICY_VALUE,
-            "requires_user_affirmation": False,
-            "upload_eligibility_passed": True,
-            "file_copy_interpreted": True,
-            "scholarly_representation_asserted": True,
-            "author_resolution_completed": True,
-            "scholarly_representation_verified": True,
-            "workflow_request_summary": summary_value,
-        },
-        "steps": [
-            {
-                "state_id": "set_autonomy_policy",
-                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
-                "inputs": {
-                    "marker_key": "user_affirmation_policy",
-                    "marker_value": WORKFLOW_CREATION_AUTONOMY_POLICY_VALUE,
-                },
-                "next_state": "set_affirmation_default",
-                "on_failure_state": "failed",
-            },
-            {
-                "state_id": "set_affirmation_default",
-                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
-                "inputs": {
-                    "marker_key": "requires_user_affirmation",
-                    "marker_value": "false",
-                },
-                "next_state": "upload_eligibility_gate",
-                "on_failure_state": "failed",
-            },
-            {
-                "state_id": "upload_eligibility_gate",
-                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
-                "inputs": {
-                    "marker_key": "upload_eligibility_passed",
-                    "marker_value": "true",
-                },
-                "next_state": "interpret_file_copy",
-                "on_failure_state": "failed",
-            },
-            {
-                "state_id": "interpret_file_copy",
-                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
-                "inputs": {
-                    "marker_key": "file_copy_interpreted",
-                    "marker_value": "true",
-                },
-                "next_state": "assert_scholarly_representation",
-                "on_failure_state": "failed",
-            },
-            {
-                "state_id": "assert_scholarly_representation",
-                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
-                "inputs": {
-                    "marker_key": "scholarly_representation_asserted",
-                    "marker_value": "true",
-                },
-                "next_state": "resolve_scholarly_authors",
-                "on_failure_state": "failed",
-            },
-            {
-                "state_id": "resolve_scholarly_authors",
-                "action_id": WORKFLOW_CREATION_ACTION_RESOLVE_SCHOLARLY_AUTHORS,
-                "inputs": {
-                    "person_type_id": DEFAULT_PERSON_TYPE_ID,
-                    "scholarly_author_predicate_id": DEFAULT_AUTHORED_BY_PREDICATE_ID,
-                },
-                "next_state": "verify_scholarly_representation",
-                "on_failure_state": "failed",
-            },
-            {
-                "state_id": "verify_scholarly_representation",
-                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
-                "inputs": {
-                    "marker_key": "scholarly_representation_verified",
-                    "marker_value": "true",
-                },
-                "next_state": "record_request",
-                "on_failure_state": "failed",
-            },
-            {
-                "state_id": "record_request",
-                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
-                "inputs": {
-                    "marker_key": "workflow_request_summary",
-                    "marker_value": summary_value,
-                },
-                "next_state": "completed",
-                "on_failure_state": "failed",
-            },
-            {"state_id": "completed", "terminal": True},
-            {"state_id": "failed", "terminal": True},
-        ],
-    }
-
-
-def _build_phd_student_workflow_spec(
-    *,
-    request_text: str,
-    workflow_id: str,
-) -> dict[str, Any]:
-    summary_value = _clean_text(request_text[:160]) if request_text else "phd_student_workflow"
-    return {
-        "workflow_id": workflow_id,
-        "name": _titleise(workflow_id[3:] if workflow_id.startswith("#V#") else workflow_id),
-        "description": request_text
-        or "Executable PhD-student representation workflow created from text intent.",
-        "parent_type_id": DEFAULT_WORKFLOW_PARENT_TYPE_ID,
-        "required_effects": [
-            f"context:user_affirmation_policy={WORKFLOW_CREATION_AUTONOMY_POLICY_VALUE}",
-            "context:requires_user_affirmation=False",
-            "context:phd_student_candidate_resolved=True",
-            "context:phd_student_relationships_asserted=True",
-            "context:phd_student_text_grounded=True",
-            "context:phd_student_representation_verified=True",
-        ],
-        "postcondition_probe": {
-            "user_affirmation_policy": WORKFLOW_CREATION_AUTONOMY_POLICY_VALUE,
-            "requires_user_affirmation": False,
-            "phd_student_candidate_resolved": True,
-            "phd_student_relationships_asserted": True,
-            "phd_student_text_grounded": True,
-            "phd_student_representation_verified": True,
-            "workflow_request_summary": summary_value,
-        },
-        "verification_inputs": {
-            "phd_student_description": (
-                "Student Name: Verification Student\n"
-                "Supervisors: Verification Supervisor\n"
-                "Research Topic: Verification Topic\n"
-                "Institution: Verification University"
-            )
-        },
-        "steps": [
-            {
-                "state_id": "set_autonomy_policy",
-                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
-                "inputs": {
-                    "marker_key": "user_affirmation_policy",
-                    "marker_value": WORKFLOW_CREATION_AUTONOMY_POLICY_VALUE,
-                },
-                "next_state": "set_affirmation_default",
-                "on_failure_state": "failed",
-            },
-            {
-                "state_id": "set_affirmation_default",
-                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
-                "inputs": {
-                    "marker_key": "requires_user_affirmation",
-                    "marker_value": "false",
-                },
-                "next_state": "resolve_phd_student_candidate",
-                "on_failure_state": "failed",
-            },
-            {
-                "state_id": "resolve_phd_student_candidate",
-                "action_id": WORKFLOW_CREATION_ACTION_RESOLVE_PHD_STUDENT_CANDIDATE,
-                "inputs": {
-                    "person_type_id": DEFAULT_PERSON_TYPE_ID,
-                },
-                "next_state": "assert_phd_student_relationships",
-                "on_failure_state": "failed",
-            },
-            {
-                "state_id": "assert_phd_student_relationships",
-                "action_id": WORKFLOW_CREATION_ACTION_ASSERT_PHD_STUDENT_RELATIONSHIPS,
-                "inputs": {
-                    "person_type_id": DEFAULT_PERSON_TYPE_ID,
-                    "student_type_id": DEFAULT_STUDENT_TYPE_ID,
-                    "phd_student_type_id": DEFAULT_PHD_STUDENT_TYPE_ID,
-                    "research_topic_type_id": DEFAULT_RESEARCH_TOPIC_TYPE_ID,
-                    "supervised_by_predicate_id": DEFAULT_SUPERVISED_BY_PREDICATE_ID,
-                    "researches_predicate_id": DEFAULT_RESEARCHES_PREDICATE_ID,
-                },
-                "next_state": "ground_phd_student_text",
-                "on_failure_state": "failed",
-            },
-            {
-                "state_id": "ground_phd_student_text",
-                "action_id": WORKFLOW_CREATION_ACTION_GROUND_PHD_STUDENT_TEXT,
-                "inputs": {},
-                "next_state": "verify_phd_student_representation",
-                "on_failure_state": "failed",
-            },
-            {
-                "state_id": "verify_phd_student_representation",
-                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
-                "inputs": {
-                    "marker_key": "phd_student_representation_verified",
-                    "marker_value": "true",
-                },
-                "next_state": "record_request",
-                "on_failure_state": "failed",
-            },
-            {
-                "state_id": "record_request",
-                "action_id": WORKFLOW_CREATION_ACTION_EMIT_MARKER,
-                "inputs": {
-                    "marker_key": "workflow_request_summary",
-                    "marker_value": summary_value,
-                },
-                "next_state": "completed",
-                "on_failure_state": "failed",
-            },
-            {"state_id": "completed", "terminal": True},
-            {"state_id": "failed", "terminal": True},
-        ],
-    }
+    return rendered_spec, template_resolution
 
 
 def _normalise_input_mapping(inputs: Mapping[str, Any]) -> Dict[str, Any]:
@@ -1113,6 +844,7 @@ def _infer_postcondition_probe(step_rows: Iterable[Mapping[str, Any]]) -> dict[s
 def _normalise_workflow_spec(context: Mapping[str, Any]) -> dict[str, Any]:
     request_text = _extract_request_text(context)
     raw_spec = _extract_workflow_spec(context)
+    template_resolution: dict[str, Any] = {}
     candidate_workflow_id = (
         _clean_text(raw_spec.get("workflow_id"))
         or _clean_text(context.get("target_workflow_id"))
@@ -1128,29 +860,11 @@ def _normalise_workflow_spec(context: Mapping[str, Any]) -> dict[str, Any]:
     )
 
     if not raw_spec:
-        if _looks_like_phd_student_workflow_request(request_text):
-            policy_text = _load_synthesis_policy_text()
-            if not policy_text:
-                raise ValueError(WORKFLOW_CREATION_SYNTHESIS_POLICY_MISSING_ERROR)
-            raw_spec = _build_phd_student_workflow_spec(
-                request_text=request_text,
-                workflow_id=workflow_id,
-            )
-            raw_spec["synthesis_policy_text"] = policy_text
-        elif _looks_like_scholarly_workflow_request(request_text):
-            policy_text = _load_synthesis_policy_text()
-            if not policy_text:
-                raise ValueError(WORKFLOW_CREATION_SYNTHESIS_POLICY_MISSING_ERROR)
-            raw_spec = _build_scholarly_workflow_spec(
-                request_text=request_text,
-                workflow_id=workflow_id,
-            )
-            raw_spec["synthesis_policy_text"] = policy_text
-        else:
-            raw_spec = _build_default_workflow_spec(
-                request_text=request_text,
-                workflow_id=workflow_id,
-            )
+        raw_spec, template_resolution = _resolve_authored_workflow_template_spec(
+            context=context,
+            request_text=request_text,
+            workflow_id=workflow_id,
+        )
 
     workflow_name = _clean_text(
         raw_spec.get("name") or raw_spec.get("workflow_name")
@@ -1218,6 +932,7 @@ def _normalise_workflow_spec(context: Mapping[str, Any]) -> dict[str, Any]:
         "postcondition_probe": postcondition_probe,
         "verification_inputs": verification_inputs,
         "synthesis_policy_text": _clean_text(raw_spec.get("synthesis_policy_text")),
+        "template_resolution": template_resolution,
     }
 
 

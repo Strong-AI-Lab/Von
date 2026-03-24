@@ -1,0 +1,421 @@
+{
+  "family_id": "workflow_template_profiles",
+  "schema_version": "authored_workflow_template_bundle.v1",
+  "templates": [
+    {
+      "template_id": "workflow_creation.default_marker",
+      "name": "Workflow Creation Default Marker Template",
+      "description": "Fallback authored workflow template for generic workflow creation requests.",
+      "default_workflow_description": "Workflow created from a natural-language workflow request.",
+      "template_profile": {
+        "schema_version": "workflow_template_profile.v1",
+        "selection_mode": "fallback",
+        "priority": 0,
+        "keywords": [
+          "workflow creation",
+          "create workflow",
+          "generate workflow"
+        ],
+        "exemplars": [
+          "Create a workflow from this description request.",
+          "Please build a workflow for this request."
+        ],
+        "requires_synthesis_policy": false
+      },
+      "workflow_spec_template": {
+        "workflow_id": "{workflow_id}",
+        "name": "{workflow_name}",
+        "description": "{workflow_description}",
+        "parent_type_id": "#V#ai_workflow",
+        "required_effects": [
+          "context:user_affirmation_policy=only_when_vital_info_missing",
+          "context:requires_user_affirmation=False",
+          "context:workflow_request_summary={request_summary}"
+        ],
+        "postcondition_probe": {
+          "user_affirmation_policy": "only_when_vital_info_missing",
+          "requires_user_affirmation": false,
+          "workflow_request_summary": "{request_summary}"
+        },
+        "steps": [
+          {
+            "state_id": "set_autonomy_policy",
+            "action_id": "workflow_authoring.emit_marker",
+            "inputs": {
+              "marker_key": "user_affirmation_policy",
+              "marker_value": "only_when_vital_info_missing"
+            },
+            "next_state": "set_affirmation_default"
+          },
+          {
+            "state_id": "set_affirmation_default",
+            "action_id": "workflow_authoring.emit_marker",
+            "inputs": {
+              "marker_key": "requires_user_affirmation",
+              "marker_value": "false"
+            },
+            "next_state": "record_request"
+          },
+          {
+            "state_id": "record_request",
+            "action_id": "workflow_authoring.emit_marker",
+            "inputs": {
+              "marker_key": "workflow_request_summary",
+              "marker_value": "{request_summary}"
+            },
+            "next_state": "completed"
+          },
+          {
+            "state_id": "completed",
+            "terminal": true
+          }
+        ]
+      }
+    },
+    {
+      "template_id": "workflow_creation.scholarly_representation",
+      "name": "Workflow Creation Scholarly Representation Template",
+      "description": "Authored workflow template for text-driven scholarly-paper representation workflows.",
+      "default_workflow_description": "Executable scholarly paper representation workflow created from text intent.",
+      "template_profile": {
+        "schema_version": "workflow_template_profile.v1",
+        "selection_mode": "automatic",
+        "priority": 40,
+        "keywords": [
+          "scholarly paper",
+          "paper representation",
+          "arxiv",
+          "pdf upload",
+          "scholarly article"
+        ],
+        "exemplars": [
+          "Create a workflow from this description request: represent scholarly works from uploaded PDFs in Vontology.",
+          "Build a workflow for arXiv paper representation from uploaded PDFs."
+        ],
+        "required_terms_any": [
+          "scholarly",
+          "paper",
+          "arxiv",
+          "pdf"
+        ],
+        "requires_synthesis_policy": true
+      },
+      "workflow_spec_template": {
+        "workflow_id": "{workflow_id}",
+        "name": "{workflow_name}",
+        "description": "{workflow_description}",
+        "parent_type_id": "#V#ai_workflow",
+        "required_effects": [
+          "context:user_affirmation_policy=only_when_vital_info_missing",
+          "context:requires_user_affirmation=False",
+          "context:upload_eligibility_passed=True",
+          "context:file_copy_interpreted=True",
+          "context:scholarly_representation_asserted=True",
+          "context:author_resolution_completed=True",
+          "context:scholarly_representation_verified=True"
+        ],
+        "postcondition_probe": {
+          "user_affirmation_policy": "only_when_vital_info_missing",
+          "requires_user_affirmation": false,
+          "upload_eligibility_passed": true,
+          "file_copy_interpreted": true,
+          "scholarly_representation_asserted": true,
+          "author_resolution_completed": true,
+          "scholarly_representation_verified": true,
+          "workflow_request_summary": "{request_summary}"
+        },
+        "steps": [
+          {
+            "state_id": "set_autonomy_policy",
+            "action_id": "workflow_authoring.emit_marker",
+            "inputs": {
+              "marker_key": "user_affirmation_policy",
+              "marker_value": "only_when_vital_info_missing"
+            },
+            "next_state": "set_affirmation_default",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "set_affirmation_default",
+            "action_id": "workflow_authoring.emit_marker",
+            "inputs": {
+              "marker_key": "requires_user_affirmation",
+              "marker_value": "false"
+            },
+            "next_state": "upload_eligibility_gate",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "upload_eligibility_gate",
+            "action_id": "workflow_authoring.emit_marker",
+            "inputs": {
+              "marker_key": "upload_eligibility_passed",
+              "marker_value": "true"
+            },
+            "next_state": "interpret_file_copy",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "interpret_file_copy",
+            "action_id": "workflow_authoring.emit_marker",
+            "inputs": {
+              "marker_key": "file_copy_interpreted",
+              "marker_value": "true"
+            },
+            "next_state": "assert_scholarly_representation",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "assert_scholarly_representation",
+            "action_id": "workflow_authoring.emit_marker",
+            "inputs": {
+              "marker_key": "scholarly_representation_asserted",
+              "marker_value": "true"
+            },
+            "next_state": "resolve_scholarly_authors",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "resolve_scholarly_authors",
+            "action_id": "workflow_authoring.resolve_scholarly_authors",
+            "inputs": {
+              "person_type_id": "#V#person",
+              "scholarly_author_predicate_id": "#V#authored_by"
+            },
+            "next_state": "verify_scholarly_representation",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "verify_scholarly_representation",
+            "action_id": "workflow_authoring.emit_marker",
+            "inputs": {
+              "marker_key": "scholarly_representation_verified",
+              "marker_value": "true"
+            },
+            "next_state": "record_request",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "record_request",
+            "action_id": "workflow_authoring.emit_marker",
+            "inputs": {
+              "marker_key": "workflow_request_summary",
+              "marker_value": "{request_summary}"
+            },
+            "next_state": "completed",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "completed",
+            "terminal": true
+          },
+          {
+            "state_id": "failed",
+            "terminal": true
+          }
+        ]
+      }
+    },
+    {
+      "template_id": "workflow_creation.phd_student_representation",
+      "name": "Workflow Creation PhD Student Representation Template",
+      "description": "Authored workflow template for text-driven PhD-student representation workflows.",
+      "default_workflow_description": "Executable PhD-student representation workflow created from text intent.",
+      "template_profile": {
+        "schema_version": "workflow_template_profile.v1",
+        "selection_mode": "automatic",
+        "priority": 45,
+        "keywords": [
+          "phd student",
+          "doctoral student",
+          "student representation",
+          "supervisor",
+          "advisor"
+        ],
+        "exemplars": [
+          "Create a workflow from this description request: represent a PhD student from text description in Vontology.",
+          "Build a workflow that represents a doctoral student, supervisors, and research topic."
+        ],
+        "required_terms_all": [
+          "student"
+        ],
+        "required_terms_any": [
+          "phd",
+          "doctoral",
+          "doctorate",
+          "supervisor",
+          "advisor"
+        ],
+        "requires_synthesis_policy": true
+      },
+      "workflow_spec_template": {
+        "workflow_id": "{workflow_id}",
+        "name": "{workflow_name}",
+        "description": "{workflow_description}",
+        "parent_type_id": "#V#ai_workflow",
+        "required_effects": [
+          "context:user_affirmation_policy=only_when_vital_info_missing",
+          "context:requires_user_affirmation=False",
+          "context:phd_student_candidate_resolved=True",
+          "context:phd_student_relationships_asserted=True",
+          "context:phd_student_text_grounded=True",
+          "context:phd_student_representation_verified=True"
+        ],
+        "postcondition_probe": {
+          "user_affirmation_policy": "only_when_vital_info_missing",
+          "requires_user_affirmation": false,
+          "phd_student_candidate_resolved": true,
+          "phd_student_relationships_asserted": true,
+          "phd_student_text_grounded": true,
+          "phd_student_representation_verified": true,
+          "workflow_request_summary": "{request_summary}"
+        },
+        "verification_inputs": {
+          "phd_student_description": "Student Name: Verification Student\nSupervisors: Verification Supervisor\nResearch Topic: Verification Topic\nInstitution: Verification University"
+        },
+        "steps": [
+          {
+            "state_id": "set_autonomy_policy",
+            "action_id": "workflow_authoring.emit_marker",
+            "inputs": {
+              "marker_key": "user_affirmation_policy",
+              "marker_value": "only_when_vital_info_missing"
+            },
+            "next_state": "set_affirmation_default",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "set_affirmation_default",
+            "action_id": "workflow_authoring.emit_marker",
+            "inputs": {
+              "marker_key": "requires_user_affirmation",
+              "marker_value": "false"
+            },
+            "next_state": "resolve_phd_student_candidate",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "resolve_phd_student_candidate",
+            "action_id": "workflow_authoring.resolve_phd_student_candidate",
+            "inputs": {
+              "person_type_id": "#V#person"
+            },
+            "next_state": "assert_phd_student_relationships",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "assert_phd_student_relationships",
+            "action_id": "workflow_authoring.assert_phd_student_relationships",
+            "inputs": {
+              "person_type_id": "#V#person",
+              "student_type_id": "#V#student",
+              "phd_student_type_id": "#V#phd_student",
+              "research_topic_type_id": "#V#research_topic",
+              "supervised_by_predicate_id": "#V#supervised_by",
+              "researches_predicate_id": "#V#researches"
+            },
+            "next_state": "ground_phd_student_text",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "ground_phd_student_text",
+            "action_id": "workflow_authoring.ground_phd_student_text",
+            "inputs": {},
+            "next_state": "verify_phd_student_representation",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "verify_phd_student_representation",
+            "action_id": "workflow_authoring.emit_marker",
+            "inputs": {
+              "marker_key": "phd_student_representation_verified",
+              "marker_value": "true"
+            },
+            "next_state": "record_request",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "record_request",
+            "action_id": "workflow_authoring.emit_marker",
+            "inputs": {
+              "marker_key": "workflow_request_summary",
+              "marker_value": "{request_summary}"
+            },
+            "next_state": "completed",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "completed",
+            "terminal": true
+          },
+          {
+            "state_id": "failed",
+            "terminal": true
+          }
+        ]
+      }
+    },
+    {
+      "template_id": "workflow_gap_recovery.candidate_execution",
+      "name": "Workflow Gap Recovery Candidate Execution Template",
+      "description": "Authored workflow template for workflow-gap candidate execution workflows.",
+      "default_workflow_description": "Candidate workflow created from workflow-gap recovery.",
+      "template_profile": {
+        "schema_version": "workflow_template_profile.v1",
+        "selection_mode": "explicit_only",
+        "priority": 100,
+        "keywords": [
+          "workflow gap candidate",
+          "gap recovery"
+        ],
+        "exemplars": [
+          "Create a candidate workflow to recover from a missing applicable workflow."
+        ],
+        "requires_synthesis_policy": false
+      },
+      "workflow_spec_template": {
+        "workflow_id": "{workflow_id}",
+        "name": "{workflow_name}",
+        "description": "{workflow_description}",
+        "parent_type_id": "#V#ai_workflow",
+        "required_effects": [
+          "context:candidate_response_present=True"
+        ],
+        "postcondition_probe": {
+          "candidate_response_present": true
+        },
+        "verification_inputs": {
+          "workflow_gap_dry_run": true
+        },
+        "steps": [
+          {
+            "state_id": "execute_candidate",
+            "action_id": "workflow_gap.execute_candidate",
+            "inputs": {
+              "prompt_concept_id": "{prompt_concept_id}",
+              "workflow_name": "{workflow_name}",
+              "workflow_description": "{workflow_description}",
+              "default_request_text": "{request_text}",
+              "default_recent_turns_json": "{recent_turns_json}",
+              "default_base_response_text": "{base_response_text}",
+              "workflow_guidance_json": "{workflow_guidance_json}",
+              "acceptance_requirements_json": "{acceptance_requirements_json}",
+              "intent_summary": "{intent_summary}",
+              "gap_summary": "{gap_summary}"
+            },
+            "next_state": "completed",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "completed",
+            "terminal": true
+          },
+          {
+            "state_id": "failed",
+            "terminal": true
+          }
+        ]
+      }
+    }
+  ]
+}

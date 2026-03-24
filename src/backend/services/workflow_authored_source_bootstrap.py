@@ -615,42 +615,6 @@ def _validate_existing_materialisation(
     return True, validation_by_workflow_id
 
 
-def _upsert_text_relations(
-    *,
-    subject_concept_id: str,
-    relation_specs: tuple[dict[str, Any], ...],
-    source_tag: str | None,
-    managed_by: str | None,
-    workflow_id: str,
-    state_id: str | None = None,
-) -> None:
-    shared_context = {
-        "workflow_id": workflow_id,
-    }
-    if source_tag:
-        shared_context["source"] = source_tag
-    if managed_by:
-        shared_context["managed_by"] = managed_by
-    if state_id:
-        shared_context["state_id"] = state_id
-        shared_context["workflow_step_id"] = subject_concept_id
-
-    for spec in relation_specs:
-        predicate = str(spec.get("predicate") or "").strip()
-        text = str(spec.get("text") or "").strip()
-        lang = str(spec.get("lang") or "en-NZ").strip() or "en-NZ"
-        if not predicate or not text:
-            continue
-        upsert_singleton_text_relation(
-            subject_concept_id=subject_concept_id,
-            predicate=predicate,
-            text=text,
-            lang=lang,
-            context=dict(shared_context),
-            garbage_collect=True,
-        )
-
-
 def bootstrap_authored_workflow_source_bundle(
     *,
     asset_path: str | Path,
@@ -725,12 +689,12 @@ def bootstrap_authored_workflow_source_bundle(
 
             relation_specs = tuple(workflow_text_relations.get(workflow_id) or ())
             if relation_specs:
-                _upsert_text_relations(
+                authority_service.upsert_authored_text_relations(
                     subject_concept_id=workflow_id,
                     relation_specs=relation_specs,
+                    workflow_id=workflow_id,
                     source_tag=source_tag,
                     managed_by=managed_by,
-                    workflow_id=workflow_id,
                 )
 
             launch_contract = workflow_launch_contracts.get(workflow_id)
@@ -762,12 +726,12 @@ def bootstrap_authored_workflow_source_bundle(
                     typed_step_ids.append(step_concept_id)
                 step_relation_specs = tuple(step_text_relations.get(step_concept_id) or ())
                 if step_relation_specs:
-                    _upsert_text_relations(
+                    authority_service.upsert_authored_text_relations(
                         subject_concept_id=step_concept_id,
                         relation_specs=step_relation_specs,
+                        workflow_id=workflow_id,
                         source_tag=source_tag,
                         managed_by=managed_by,
-                        workflow_id=workflow_id,
                         state_id=str(getattr(step, "state_id", "") or "").strip() or None,
                     )
 

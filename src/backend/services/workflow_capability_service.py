@@ -402,15 +402,49 @@ def _resolve_authoritative_capability_text(
         return None, "non_authoritative_source"
 
     try:
-        from ..workflows.vontology_loader import resolve_workflow_description
+        from ..workflows.vontology_loader import (
+            resolve_workflow_description,
+            resolve_workflow_discovery_exemplars,
+        )
 
         relation_text, relation_source = resolve_workflow_description(
             workflow_id,
             workflow_source="vontology",
             registration_purpose=purpose,
         )
+        discovery_exemplars, discovery_exemplars_source = (
+            resolve_workflow_discovery_exemplars(workflow_id)
+        )
         if relation_text and relation_source.startswith("text_relation:"):
-            return relation_text, relation_source
+            capability_parts = [relation_text]
+            if isinstance(discovery_exemplars, Mapping):
+                keywords = discovery_exemplars.get("keywords") or []
+                if isinstance(keywords, Sequence) and not isinstance(keywords, str):
+                    keyword_text = ", ".join(
+                        str(item).strip()
+                        for item in keywords
+                        if isinstance(item, str) and str(item).strip()
+                    )
+                    if keyword_text:
+                        capability_parts.append(f"Keywords: {keyword_text}")
+                examples = discovery_exemplars.get("examples") or []
+                if isinstance(examples, Sequence) and not isinstance(examples, str):
+                    example_lines = [
+                        str(item).strip()
+                        for item in examples
+                        if isinstance(item, str) and str(item).strip()
+                    ]
+                    if example_lines:
+                        capability_parts.append(
+                            "Example requests: " + " | ".join(example_lines)
+                        )
+            source_parts = [relation_source]
+            if (
+                isinstance(discovery_exemplars_source, str)
+                and discovery_exemplars_source.startswith("text_relation:")
+            ):
+                source_parts.append(discovery_exemplars_source)
+            return "\n\n".join(capability_parts), "+".join(source_parts)
     except Exception:
         pass
 

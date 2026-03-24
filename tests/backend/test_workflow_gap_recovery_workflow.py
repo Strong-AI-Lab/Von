@@ -18,6 +18,12 @@ from src.backend.workflows.durable.workflow_gap_recovery_workflow import (
     build_workflow_gap_test_definition,
     register_workflow_gap_recovery_actions,
 )
+from src.backend.workflows.workflow_gap_workflow_contracts import (
+    WORKFLOW_GAP_PREPARE_CANDIDATE_ACTION_ID,
+)
+from src.backend.workflows.workflow_template_profile_service import (
+    WORKFLOW_GAP_CANDIDATE_EXECUTION_TEMPLATE_ID,
+)
 
 
 def test_build_workflow_gap_recovery_definition_shape() -> None:
@@ -232,6 +238,52 @@ def test_execute_candidate_uses_canonical_cap_default_when_env_cap_missing(
     assert (
         captured["max_tool_invocations"]
         == mod.INTERNAL_MCP_MAX_TOOL_INVOCATIONS_DEFAULT
+    )
+
+
+def test_prepare_candidate_spec_uses_authored_gap_candidate_template(
+    monkeypatch,
+) -> None:
+    import src.backend.workflows.durable.workflow_gap_recovery_workflow as mod
+
+    monkeypatch.setattr(
+        mod,
+        "_ensure_candidate_prompt_concept",
+        lambda **_kwargs: (True, None),
+    )
+
+    registry = ActionRegistry()
+    register_workflow_gap_recovery_actions(registry)
+    result = registry.execute(
+        WORKFLOW_GAP_PREPARE_CANDIDATE_ACTION_ID,
+        inputs={},
+        context={
+            "prompt": "Recover this missing workflow.",
+            "workflow_gap_request_text": "Recover this missing workflow.",
+            "workflow_gap_should_create_candidate": True,
+            "workflow_gap_base_response_text": "Fallback reply.",
+            "workflow_gap_recent_turns_json": "[]",
+            "workflow_gap_analysis_result": {
+                "workflow_name": "Candidate Gap Workflow",
+                "workflow_description": "Recover this missing workflow.",
+                "gap_summary": "No suitable workflow matched.",
+                "intent_summary": "workflow gap recovery",
+                "workflow_guidance": ["Prefer reusable workflow surfaces."],
+                "acceptance_requirements": ["Produce a better routed response."],
+            },
+        },
+        env=WorkflowEnvironment(llm_client=None),
+    )
+
+    assert result.status == "success"
+    template_resolution = result.outputs["workflow_gap_candidate_template_resolution"]
+    assert template_resolution["template_id"] == (
+        WORKFLOW_GAP_CANDIDATE_EXECUTION_TEMPLATE_ID
+    )
+    candidate_spec = result.outputs["candidate_workflow_spec"]
+    assert candidate_spec["steps"][0]["action_id"] == "workflow_gap.execute_candidate"
+    assert candidate_spec["steps"][0]["inputs"]["prompt_concept_id"] == (
+        result.outputs["candidate_prompt_concept_id"]
     )
 
 
