@@ -214,6 +214,8 @@ WORKFLOW_BACKGROUND_LAUNCH_POLICY_SOURCE_NONE = "none"
 WORKFLOW_BACKGROUND_LAUNCH_POLICY_SCHEMA_VERSION = (
     "workflow_background_launch_policy.v1"
 )
+WORKFLOW_ROUTING_PROFILE_SOURCE_NONE = "none"
+WORKFLOW_ROUTING_PROFILE_SCHEMA_VERSION = "workflow_routing_profile.v1"
 WORKFLOW_PUBLICATION_LIFECYCLE_SOURCE_NONE = "none"
 WORKFLOW_PUBLICATION_LIFECYCLE_SCHEMA_VERSION = (
     "workflow_publication_lifecycle.v1"
@@ -295,6 +297,14 @@ WORKFLOW_BACKGROUND_LAUNCH_POLICY_TEXT_PREDICATE_PRECEDENCE: Tuple[
         "hasBackgroundRunPolicyJson",
         "#V#has_background_run_policy_json",
         "has_background_run_policy_json",
+    ),
+)
+WORKFLOW_ROUTING_PROFILE_TEXT_PREDICATE_PRECEDENCE: Tuple[Tuple[str, ...], ...] = (
+    (
+        "#V#hasWorkflowRoutingProfileJson",
+        "hasWorkflowRoutingProfileJson",
+        "#V#has_workflow_routing_profile_json",
+        "has_workflow_routing_profile_json",
     ),
 )
 WORKFLOW_PLAN_STATE_POLICY_TEXT_PREDICATE_PRECEDENCE: Tuple[Tuple[str, ...], ...] = (
@@ -1501,6 +1511,98 @@ def _parse_background_launch_policy_text_value(text_value: Any) -> dict[str, Any
             {"min_interval_seconds": seconds_value}
         )
     return None
+
+
+def _normalise_workflow_routing_profile(
+    raw_profile: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if not isinstance(raw_profile, Mapping):
+        return None
+
+    role_aliases = {
+        "execution": "execution",
+        "executor": "execution",
+        "task_execution": "execution",
+        "authoring": "authoring",
+        "author": "authoring",
+        "workflow_authoring": "authoring",
+        "workflow_creation": "authoring",
+        "creation": "authoring",
+        "maintenance": "maintenance",
+        "repair": "maintenance",
+        "testing": "maintenance",
+        "analysis": "maintenance",
+        "meta": "maintenance",
+    }
+    raw_role = _normalise_non_empty_text(
+        raw_profile.get("role") or raw_profile.get("workflow_role")
+    )
+    role = role_aliases.get(str(raw_role or "").strip().lower().replace("-", "_"))
+    if role is None:
+        return None
+
+    authoring_intent_required = _coerce_bool(
+        raw_profile.get("authoring_intent_required")
+    )
+    prefer_existing_capability = _coerce_bool(
+        raw_profile.get("prefer_existing_capability")
+    )
+    if authoring_intent_required is None:
+        authoring_intent_required = role == "authoring"
+    if prefer_existing_capability is None:
+        prefer_existing_capability = role == "authoring"
+
+    return {
+        "schema_version": WORKFLOW_ROUTING_PROFILE_SCHEMA_VERSION,
+        "role": role,
+        "authoring_intent_required": bool(authoring_intent_required),
+        "prefer_existing_capability": bool(prefer_existing_capability),
+    }
+
+
+def _parse_workflow_routing_profile_text_value(
+    text_value: Any,
+) -> dict[str, Any] | None:
+    text = _normalise_non_empty_text(text_value)
+    if not text:
+        return None
+
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        parsed = None
+
+    if isinstance(parsed, Mapping):
+        return _normalise_workflow_routing_profile(parsed)
+    return None
+
+
+def resolve_workflow_routing_profile(
+    workflow_id: str,
+) -> tuple[dict[str, Any] | None, str]:
+    """Resolve workflow routing-role hints from Vontology text relations."""
+
+    if not isinstance(workflow_id, str) or not workflow_id.strip():
+        return None, WORKFLOW_ROUTING_PROFILE_SOURCE_NONE
+
+    texts: list[dict[str, Any]] = []
+    try:
+        raw_texts = get_texts_for_concept(workflow_id)
+    except Exception:
+        raw_texts = []
+    if isinstance(raw_texts, list):
+        texts = [item for item in raw_texts if isinstance(item, dict)]
+
+    for predicate_aliases in WORKFLOW_ROUTING_PROFILE_TEXT_PREDICATE_PRECEDENCE:
+        for item in texts:
+            predicate = str(item.get("predicate") or "").strip()
+            if predicate not in predicate_aliases:
+                continue
+            profile = _parse_workflow_routing_profile_text_value(item.get("text"))
+            if profile is not None:
+                return profile, f"text_relation:{predicate}"
+
+    return None, WORKFLOW_ROUTING_PROFILE_SOURCE_NONE
 
 
 def resolve_workflow_background_launch_policy(
@@ -3072,6 +3174,9 @@ def load_workflow_definition_from_vontology(
     background_launch_policy, background_launch_policy_source = (
         resolve_workflow_background_launch_policy(workflow_id)
     )
+    routing_profile, routing_profile_source = resolve_workflow_routing_profile(
+        workflow_id
+    )
     launch_input_contract, launch_input_contract_source = (
         resolve_workflow_launch_input_contract(workflow_id)
     )
@@ -3089,6 +3194,14 @@ def load_workflow_definition_from_vontology(
         workflow_metadata["background_launch_policy_source"] = (
             background_launch_policy_source
         )
+    if routing_profile is not None:
+        workflow_metadata["routing_profile"] = routing_profile
+    if (
+        isinstance(routing_profile_source, str)
+        and routing_profile_source
+        and routing_profile_source != WORKFLOW_ROUTING_PROFILE_SOURCE_NONE
+    ):
+        workflow_metadata["routing_profile_source"] = routing_profile_source
     if launch_input_contract is not None:
         workflow_metadata["launch_input_contract"] = launch_input_contract
     if (

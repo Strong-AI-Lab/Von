@@ -44,6 +44,10 @@ from ...languagemodels.structured_tool_calling import (
     ToolCall,
 )
 from src.backend.services.prompt_template_service import PromptTemplateService
+from src.backend.services.workflow_override_policy_service import (
+    WorkflowOverrideDecision,
+    choose_custom_workflow_override_candidate,
+)
 from ...workflows.action_registry import (
     ActionRegistry,
     ActionSpec,
@@ -21077,6 +21081,7 @@ class InternalMCPChatOrchestrator:
 
         def _copy_workflow_routing_aux_entries() -> list[dict[str, Any]]:
             relevant_types = {
+                "custom_workflow_override_policy",
                 "workflow_selector_prompt",
                 "workflow_selector",
                 "workflow_selector_override",
@@ -26633,10 +26638,52 @@ class InternalMCPChatOrchestrator:
                 "pre_action_validation": pre_action_summary,
             }
 
-        def _find_first_launchable_discovered_custom_workflow(
+        custom_workflow_launchability_probe_cache: dict[str, dict[str, Any]] = {}
+
+        def _get_cached_custom_workflow_launchability_probe(
+            workflow_id: str | None,
+        ) -> dict[str, Any]:
+            clean_workflow_id = (
+                workflow_id.strip()
+                if isinstance(workflow_id, str) and workflow_id.strip()
+                else None
+            )
+            if not clean_workflow_id:
+                return _probe_custom_workflow_launchability(workflow_id)
+
+            cached_probe = custom_workflow_launchability_probe_cache.get(
+                clean_workflow_id
+            )
+            if isinstance(cached_probe, Mapping):
+                return dict(cached_probe)
+
+            probe = _probe_custom_workflow_launchability(clean_workflow_id)
+            custom_workflow_launchability_probe_cache[clean_workflow_id] = dict(probe)
+            return dict(probe)
+
+        def _collect_workflow_action_ids(workflow_definition: Any) -> tuple[str, ...]:
+            states = getattr(workflow_definition, "states", None)
+            if not isinstance(states, Mapping):
+                return ()
+
+            action_ids: list[str] = []
+            seen_action_ids: set[str] = set()
+            for state_spec in states.values():
+                for action in getattr(state_spec, "actions", ()) or ():
+                    action_id = str(getattr(action, "action_id", "") or "").strip()
+                    if not action_id:
+                        continue
+                    lowered_action_id = action_id.lower()
+                    if lowered_action_id in seen_action_ids:
+                        continue
+                    seen_action_ids.add(lowered_action_id)
+                    action_ids.append(action_id)
+            return tuple(action_ids)
+
+        def _build_custom_workflow_override_candidates(
             *,
             exclude_workflow_ids: Sequence[str] = (),
-        ) -> dict[str, Any] | None:
+        ) -> list[dict[str, Any]]:
             excluded = {
                 str(workflow_id).strip().lower()
                 for workflow_id in exclude_workflow_ids
@@ -26647,6 +26694,7 @@ class InternalMCPChatOrchestrator:
                 CHAT_NARRATION_WORKFLOW_ID.lower(),
                 TOOL_CALLING_WORKFLOW_ID.lower(),
             }
+            candidates: list[dict[str, Any]] = []
             for match in discovered_matches:
                 if not isinstance(match, Mapping):
                     continue
@@ -26659,12 +26707,86 @@ class InternalMCPChatOrchestrator:
                     or lowered_candidate_workflow_id in excluded
                 ):
                     continue
-                candidate_probe = _probe_custom_workflow_launchability(
+
+                registration = self._workflow_registry.get_registration(
                     candidate_workflow_id
                 )
-                if bool(candidate_probe.get("launchable")):
-                    return candidate_probe
-            return None
+                workflow_definition = self._workflow_registry.get(candidate_workflow_id)
+                definition_metadata = getattr(workflow_definition, "metadata", None)
+                workflow_purpose = str(
+                    getattr(registration, "purpose", None)
+                    or getattr(workflow_definition, "purpose", None)
+                    or match.get("description")
+                    or ""
+                ).strip()
+
+                candidates.append(
+                    {
+                        "concept_id": candidate_workflow_id,
+                        "name": str(match.get("name") or candidate_workflow_id).strip(),
+                        "description": str(match.get("description") or "").strip(),
+                        "relevance_score": match.get("relevance_score"),
+                        "confidence_score": match.get("confidence_score"),
+                        "workflow_purpose": workflow_purpose,
+                        "routing_profile": (
+                            definition_metadata.get("routing_profile")
+                            if isinstance(definition_metadata, Mapping)
+                            else None
+                        ),
+                        "workflow_action_ids": _collect_workflow_action_ids(
+                            workflow_definition
+                        ),
+                    }
+                )
+            return candidates
+
+        def _evaluate_custom_workflow_override_policy(
+            *,
+            override_context: str,
+            exclude_workflow_ids: Sequence[str] = (),
+        ) -> WorkflowOverrideDecision:
+            override_candidates = _build_custom_workflow_override_candidates(
+                exclude_workflow_ids=exclude_workflow_ids
+            )
+            launchability_probes = {
+                str(candidate.get("concept_id")): _get_cached_custom_workflow_launchability_probe(
+                    str(candidate.get("concept_id"))
+                )
+                for candidate in override_candidates
+                if isinstance(candidate.get("concept_id"), str)
+                and str(candidate.get("concept_id")).strip()
+            }
+            return choose_custom_workflow_override_candidate(
+                turn_text=prompt,
+                context=override_context,
+                candidates=override_candidates,
+                launchability_probes=launchability_probes,
+            )
+
+        def _record_custom_workflow_override_policy(
+            *,
+            decision: WorkflowOverrideDecision,
+            prior_selected_workflow_id: str | None = None,
+            preserved_execution_mode: str | None = None,
+        ) -> None:
+            payload = decision.to_dict()
+            payload.update(
+                {
+                    "type": "custom_workflow_override_policy",
+                    "prior_selected_workflow_id": prior_selected_workflow_id,
+                    "preserved_execution_mode": preserved_execution_mode,
+                    "candidate_count": len(decision.candidate_assessments),
+                }
+            )
+            aux_llm_calls.append(payload)
+            if trace_enabled and trace is not None:
+                raw_events = trace.metadata.get("custom_workflow_override_policy")
+                if isinstance(raw_events, list):
+                    events = raw_events
+                else:
+                    events = []
+                    trace.metadata["custom_workflow_override_policy"] = events
+                events.append(dict(payload))
 
         def _promote_selected_workflow_to_custom_dispatch(
             *,
@@ -26779,7 +26901,22 @@ class InternalMCPChatOrchestrator:
             and mutative_intent_requires_tool_routing
             and not selected_uses_tool_pipeline_contract
         ):
-            replacement_probe = _find_first_launchable_discovered_custom_workflow()
+            override_policy = _evaluate_custom_workflow_override_policy(
+                override_context="mutative_intent_direct_response_override"
+            )
+            _record_custom_workflow_override_policy(
+                decision=override_policy,
+                prior_selected_workflow_id=selected_workflow_id_text,
+                preserved_execution_mode="tool_pipeline",
+            )
+            replacement_probe = (
+                _get_cached_custom_workflow_launchability_probe(
+                    override_policy.chosen_workflow_id
+                )
+                if isinstance(override_policy.chosen_workflow_id, str)
+                and override_policy.chosen_workflow_id.strip()
+                else None
+            )
             promoted_to_custom_workflow = False
             if replacement_probe is not None:
                 promoted_to_custom_workflow = (
@@ -26789,10 +26926,9 @@ class InternalMCPChatOrchestrator:
                         verdict="custom_workflow_override",
                         reasoning=(
                             "Mutative/tool-using turn selected a direct-response "
-                            "pathway, but a discovered custom workflow was "
-                            "launchable from the current turn inputs, so the "
-                            "launchable custom workflow was used instead of the "
-                            "generic tool pipeline."
+                            "pathway, but a discovered custom workflow was both "
+                            "launchable and a better semantic fit for the current "
+                            "turn than the generic tool pipeline."
                         ),
                         extra_payload={
                             "write_policy_reason": write_routing_policy_reason,
@@ -26805,6 +26941,9 @@ class InternalMCPChatOrchestrator:
                             "launch_viability_probe": {
                                 "replacement_workflow": dict(replacement_probe),
                             },
+                            "custom_workflow_override_reason": (
+                                override_policy.reason_code
+                            ),
                         },
                     )
                 )
@@ -26820,6 +26959,7 @@ class InternalMCPChatOrchestrator:
                         "write_tool_candidates": write_tool_candidates_for_routing[
                             :12
                         ],
+                        "custom_workflow_override_reason": override_policy.reason_code,
                     },
                 )
 
@@ -26833,14 +26973,28 @@ class InternalMCPChatOrchestrator:
             }:
                 return
 
-            selected_probe = _probe_custom_workflow_launchability(
+            selected_probe = _get_cached_custom_workflow_launchability_probe(
                 selected_workflow_id_text
             )
             if bool(selected_probe.get("launchable")):
                 return
 
-            replacement_probe = _find_first_launchable_discovered_custom_workflow(
+            override_policy = _evaluate_custom_workflow_override_policy(
+                override_context="selected_custom_workflow_launchability_replacement",
                 exclude_workflow_ids=(selected_workflow_id_text,)
+            )
+            _record_custom_workflow_override_policy(
+                decision=override_policy,
+                prior_selected_workflow_id=selected_workflow_id_text,
+                preserved_execution_mode="custom_workflow",
+            )
+            replacement_probe = (
+                _get_cached_custom_workflow_launchability_probe(
+                    override_policy.chosen_workflow_id
+                )
+                if isinstance(override_policy.chosen_workflow_id, str)
+                and override_policy.chosen_workflow_id.strip()
+                else None
             )
             if replacement_probe is None:
                 return
@@ -26852,7 +27006,8 @@ class InternalMCPChatOrchestrator:
             reasoning = (
                 "Selected custom workflow could not launch from the current turn "
                 "inputs after launch-contract resolution and initial-state metadata "
-                "validation, so the first discovered launchable custom workflow was used."
+                "validation, so a semantically better launchable discovered custom "
+                "workflow was used instead."
             )
             _promote_selected_workflow_to_custom_dispatch(
                 replacement_probe=replacement_probe,
@@ -26866,6 +27021,7 @@ class InternalMCPChatOrchestrator:
                         "prior_selected_workflow": dict(selected_probe),
                         "replacement_workflow": dict(replacement_probe),
                     },
+                    "custom_workflow_override_reason": override_policy.reason_code,
                 },
             )
 

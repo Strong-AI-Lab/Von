@@ -201,6 +201,36 @@ Current routing/discovery rule:
 - those workflows MUST NOT be returned by workflow discovery or treated as executable for routing;
 - only workflows with `published=true`, or workflows with no explicit lifecycle metadata, are discoverable.
 
+### 4.2 Workflow Routing Profile
+
+Workflow concepts MAY attach explicit routing-role metadata that helps
+selector-override policy distinguish execution workflows from authoring or
+maintenance/meta workflows when several discovered candidates are launchable.
+
+Canonical storage:
+
+- `#V#hasWorkflowRoutingProfileJson` text (primary `en-NZ`)
+
+Canonical schema: `workflow_routing_profile.v1`
+
+Current fields:
+
+- `role`: `execution` | `authoring` | `maintenance`
+- `authoring_intent_required`: bool
+- `prefer_existing_capability`: bool
+
+Current override-policy rule:
+
+- launchability remains necessary but is not sufficient for promotion;
+- routing-time promotion MUST prefer semantically closer launchable workflows
+  over authoring/meta workflows that are only generically related;
+- authoring workflows SHOULD set `authoring_intent_required=true` so exploratory
+  workflow questions do not get reinterpreted as permission to author new
+  workflows;
+- when no discovered launchable custom workflow remains suitable after applying
+  semantic-fit and role checks, routing MUST preserve the non-custom fallback
+  path and record an explicit decline reason in routing diagnostics.
+
 ## 5. Condition Language (Transition Expressions)
 
 Transition condition specs are JSON-like objects normalised by runtime code.

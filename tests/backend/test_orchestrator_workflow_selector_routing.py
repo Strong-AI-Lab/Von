@@ -3395,6 +3395,258 @@ def test_custom_workflow_routing_prefers_launchable_discovered_candidate(monkeyp
     assert dispatch_boundaries[-1].get("selected_workflow_id") == launchable_workflow_id
 
 
+def test_custom_workflow_override_prefers_semantically_fit_execution_candidate(
+    monkeypatch,
+):
+    import src.backend.services.workflow_selection_policy_service as policy_module
+
+    monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
+    monkeypatch.setattr(
+        "src.backend.workflows.workflow_selector.recommend_workflow_with_policy",
+        lambda **_kwargs: {
+            "policy_active": False,
+            "guidance_mode": "none",
+            "candidate_scores": [],
+            "ranked_candidate_ids": [],
+        },
+    )
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = "#V#non_launchable_custom_workflow"
+    authoring_workflow_id = "#V#launchable_authoring_workflow"
+    execution_workflow_id = "#V#meeting_invitation_testing_workflow"
+    monkeypatch.setenv("VON_WORKFLOW_SELECTOR_ALLOW_POLICY_UNSAFE", "1")
+
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=selected_workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=selected_workflow_id,
+                initial_state="prepare_spec",
+                states={
+                    "prepare_spec": WorkflowStateSpec(
+                        state_id="prepare_spec",
+                        actions=(WorkflowActionInvocation(action_id="tool.prepare_spec"),),
+                        terminal=True,
+                        metadata={"reads_context_keys": ["target_workflow_ids"]},
+                    )
+                },
+            ),
+            purpose="Generic non-launchable custom workflow for selector override tests.",
+            source="test",
+        )
+    )
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=authoring_workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=authoring_workflow_id,
+                initial_state="complete",
+                states={
+                    "complete": WorkflowStateSpec(
+                        state_id="complete",
+                        actions=(
+                            WorkflowActionInvocation(
+                                action_id="workflow_authoring.identify_need"
+                            ),
+                        ),
+                        terminal=True,
+                    )
+                },
+                metadata={
+                    "routing_profile": {
+                        "role": "authoring",
+                        "authoring_intent_required": True,
+                        "prefer_existing_capability": True,
+                    }
+                },
+            ),
+            purpose=(
+                "Create and verify executable workflows from a workflow "
+                "description request."
+            ),
+            source="test",
+        )
+    )
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=execution_workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=execution_workflow_id,
+                initial_state="prepare_spec",
+                states={
+                    "prepare_spec": WorkflowStateSpec(
+                        state_id="prepare_spec",
+                        actions=(WorkflowActionInvocation(action_id="tool.prepare_spec"),),
+                        terminal=True,
+                        metadata={"reads_context_keys": ["invitation_text"]},
+                    )
+                },
+                metadata={
+                    "launch_input_contract": {
+                        "schema_version": "workflow_launch_input_contract.v1",
+                        "required_inputs": ["invitation_text"],
+                        "input_mappings": [
+                            {
+                                "target_context_key": "invitation_text",
+                                "source_expression": "inputs.prompt",
+                                "extractor": "first_quoted_text",
+                                "required": True,
+                            }
+                        ],
+                    },
+                    "launch_input_contract_source": "test_contract",
+                },
+            ),
+            purpose="Run meeting invitation testing against an invitation specimen.",
+            source="test",
+        )
+    )
+
+    captured_execution: dict[str, Any] = {}
+
+    def _run_workflow(
+        workflow_def: WorkflowDefinition,
+        *,
+        data: Mapping[str, Any],
+        **_kwargs: Any,
+    ):
+        captured_execution["workflow_id"] = workflow_def.workflow_id
+        captured_execution["data"] = dict(data)
+        return SimpleNamespace(
+            completed=True,
+            final_state="prepare_spec",
+            error=None,
+            data={"response_text": "Prepared via meeting invitation workflow."},
+        )
+
+    monkeypatch.setattr(orchestrator._workflow_executor, "run", _run_workflow)
+
+    result = orchestrator.run(
+        prompt=(
+            'Run a meeting invitation test on this invitation text:\n\n'
+            '"Kia ora team, please join us on Tuesday at 2:00pm in Room 4 '
+            'for a project planning meeting about the Q2 roadmap."'
+        ),
+        context=[],
+        llm_client=_CapturingLLM([selected_workflow_id]),
+        model=None,
+        user_namespace="#V#user@org",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Non-launchable custom workflow",
+                    "description": "Generic workflow with missing launch inputs.",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "relevance_score": 0.41,
+                    "confidence_score": 0.41,
+                },
+                {
+                    "concept_id": authoring_workflow_id,
+                    "name": "Workflow creation workflow",
+                    "description": (
+                        "Create and verify executable workflows from a "
+                        "workflow description request."
+                    ),
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "relevance_score": 0.58,
+                    "confidence_score": 0.58,
+                },
+                {
+                    "concept_id": execution_workflow_id,
+                    "name": "Meeting invitation testing workflow",
+                    "description": "Run meeting invitation testing against an invitation specimen.",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "relevance_score": 0.87,
+                    "confidence_score": 0.87,
+                },
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Non-launchable custom workflow",
+                    "description": "Generic workflow with missing launch inputs.",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "relevance_score": 0.41,
+                    "confidence_score": 0.41,
+                },
+                {
+                    "concept_id": authoring_workflow_id,
+                    "name": "Workflow creation workflow",
+                    "description": (
+                        "Create and verify executable workflows from a "
+                        "workflow description request."
+                    ),
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "relevance_score": 0.58,
+                    "confidence_score": 0.58,
+                },
+                {
+                    "concept_id": execution_workflow_id,
+                    "name": "Meeting invitation testing workflow",
+                    "description": "Run meeting invitation testing against an invitation specimen.",
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "relevance_score": 0.87,
+                    "confidence_score": 0.87,
+                },
+            ],
+            "match_count": 3,
+        },
+        conversation_session_id="chat-launch-semantic-override",
+        turn_id="turn-launch-semantic-override",
+    )
+
+    assert result.response_text == "Prepared via meeting invitation workflow."
+    assert captured_execution["workflow_id"] == execution_workflow_id
+
+    override_policy_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "custom_workflow_override_policy"
+        ),
+        None,
+    )
+    assert override_policy_entry is not None
+    assert override_policy_entry.get("outcome") == "promote"
+    assert override_policy_entry.get("chosen_workflow_id") == execution_workflow_id
+
+    candidate_assessments = override_policy_entry.get("candidate_assessments")
+    assert isinstance(candidate_assessments, list)
+
+    authoring_assessment = next(
+        (
+            item
+            for item in candidate_assessments
+            if isinstance(item, dict) and item.get("workflow_id") == authoring_workflow_id
+        ),
+        None,
+    )
+    assert isinstance(authoring_assessment, dict)
+    assert authoring_assessment.get("role") == "authoring"
+    assert authoring_assessment.get("suitable") is False
+    assert authoring_assessment.get("suitability_reason") == "existing_capability_preferred"
+
+    execution_assessment = next(
+        (
+            item
+            for item in candidate_assessments
+            if isinstance(item, dict) and item.get("workflow_id") == execution_workflow_id
+        ),
+        None,
+    )
+    assert isinstance(execution_assessment, dict)
+    assert execution_assessment.get("role") in {"execution", "maintenance"}
+    assert execution_assessment.get("suitable") is True
+
+
 def test_custom_workflow_first_step_failure_projects_terminal_locality(monkeypatch):
     import src.backend.services.workflow_selection_policy_service as policy_module
 
@@ -4097,6 +4349,155 @@ def test_mutative_intent_prefers_launchable_discovered_custom_workflow(monkeypat
     ]
     assert dispatch_boundaries[-3].get("selected_execution_mode") == "custom_workflow"
     assert dispatch_boundaries[-3].get("selected_workflow_id") == selected_workflow_id
+
+
+def test_mutative_override_declines_authoring_workflow_for_workflow_query(monkeypatch):
+    import src.backend.services.workflow_selection_policy_service as policy_module
+
+    monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.prompt_has_low_risk_additive_write_evidence",
+        lambda _prompt: True,
+    )
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    authoring_workflow_id = "#V#launchable_authoring_workflow"
+
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=authoring_workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=authoring_workflow_id,
+                initial_state="complete",
+                states={
+                    "complete": WorkflowStateSpec(
+                        state_id="complete",
+                        actions=(
+                            WorkflowActionInvocation(
+                                action_id="workflow_authoring.identify_need"
+                            ),
+                        ),
+                        terminal=True,
+                    )
+                },
+                metadata={
+                    "routing_profile": {
+                        "role": "authoring",
+                        "authoring_intent_required": True,
+                        "prefer_existing_capability": True,
+                    }
+                },
+            ),
+            purpose=(
+                "Create and verify executable workflows from a workflow "
+                "description request."
+            ),
+            source="test",
+        )
+    )
+
+    monkeypatch.setattr(
+        orchestrator._gateway,
+        "describe_methods",
+        lambda: {"add_relationship": {"category": "write"}},
+    )
+
+    execute_calls: list[dict[str, Any]] = []
+
+    def _run_workflow(
+        workflow_def: WorkflowDefinition,
+        *,
+        data: Mapping[str, Any],
+        **_kwargs: Any,
+    ):
+        execute_calls.append(
+            {"workflow_id": workflow_def.workflow_id, "data": dict(data)}
+        )
+        return SimpleNamespace(
+            completed=True,
+            final_state="complete",
+            error=None,
+            data={"response_text": "Executed via workflow."},
+        )
+
+    monkeypatch.setattr(orchestrator._workflow_executor, "run", _run_workflow)
+
+    result = orchestrator.run(
+        prompt="Is there already a workflow for creating a meeting instance?",
+        context=[],
+        llm_client=_CapturingLLM([CHAT_ASSISTANT_WORKFLOW_ID]),
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": authoring_workflow_id,
+                    "name": "Workflow creation workflow",
+                    "description": (
+                        "Create and verify executable workflows from a "
+                        "workflow description request."
+                    ),
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "relevance_score": 0.93,
+                    "confidence_score": 0.93,
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": authoring_workflow_id,
+                    "name": "Workflow creation workflow",
+                    "description": (
+                        "Create and verify executable workflows from a "
+                        "workflow description request."
+                    ),
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "relevance_score": 0.93,
+                    "confidence_score": 0.93,
+                }
+            ],
+            "match_count": 1,
+        },
+        conversation_session_id="session-mutative-authoring-decline",
+        turn_id="turn-mutative-authoring-decline",
+    )
+
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.verdict == "tool_contract_override"
+    assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
+    assert execute_calls
+    assert execute_calls[0]["workflow_id"] == TOOL_CALLING_WORKFLOW_ID
+
+    override_policy_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "custom_workflow_override_policy"
+        ),
+        None,
+    )
+    assert override_policy_entry is not None
+    assert override_policy_entry.get("outcome") == "decline"
+    assert override_policy_entry.get("reason_code") == "authoring_override_declined"
+
+    candidate_assessments = override_policy_entry.get("candidate_assessments")
+    assert isinstance(candidate_assessments, list)
+    authoring_assessment = candidate_assessments[0]
+    assert authoring_assessment.get("role") == "authoring"
+    assert authoring_assessment.get("suitable") is False
+    assert (
+        authoring_assessment.get("suitability_reason")
+        == "authoring_declined_for_workflow_query"
+    )
+
+    override_reasons = {
+        entry.get("reason")
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict) and entry.get("type") == "workflow_selector_override"
+    }
+    assert "mutative_intent_prefers_launchable_custom_workflow" not in override_reasons
+    assert "mutative_intent_requires_tool_pipeline" in override_reasons
 
 
 def test_plain_response_overridden_when_prompt_requires_tool_verification(monkeypatch):

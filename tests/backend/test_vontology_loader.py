@@ -1251,6 +1251,46 @@ class TestInitialStepKey:
             == "text_relation:#V#hasBackgroundLaunchPolicyJson"
         )
 
+    def test_load_definition_carries_routing_profile_metadata(self):
+        graph = _make_graph(
+            initial_step="#V#start",
+            steps=[_make_step("#V#start", invokes_action="test.action")],
+        )
+
+        with _stub_fetch_concepts(), _stub_narrative():
+            with patch(
+                "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+                return_value=(graph, []),
+            ):
+                with patch(
+                    "src.backend.workflows.vontology_loader.resolve_workflow_background_launch_policy",
+                    return_value=(None, "none"),
+                ):
+                    with patch(
+                        "src.backend.workflows.vontology_loader.resolve_workflow_routing_profile",
+                        return_value=(
+                            {
+                                "schema_version": "workflow_routing_profile.v1",
+                                "role": "authoring",
+                                "authoring_intent_required": True,
+                                "prefer_existing_capability": True,
+                            },
+                            "text_relation:#V#hasWorkflowRoutingProfileJson",
+                        ),
+                    ):
+                        defn = load_workflow_definition_from_vontology(
+                            "#V#test_workflow"
+                        )
+
+        assert defn is not None
+        metadata = dict(defn.metadata)
+        assert metadata["routing_profile"]["role"] == "authoring"
+        assert metadata["routing_profile"]["authoring_intent_required"] is True
+        assert (
+            metadata["routing_profile_source"]
+            == "text_relation:#V#hasWorkflowRoutingProfileJson"
+        )
+
     def test_load_definition_carries_long_horizon_metadata(self):
         graph = _make_graph(
             initial_step="#V#start",

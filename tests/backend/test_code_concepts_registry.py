@@ -17,6 +17,13 @@ def test_background_launch_policy_predicates_are_registered():
     assert "#V#hasMinimumBackgroundLaunchIntervalMinutes" in ids
 
 
+def test_workflow_routing_profile_predicates_are_registered():
+    ids = set(list_code_predicate_ids())
+
+    assert "#V#hasWorkflowRoutingProfileJson" in ids
+    assert "#V#has_workflow_routing_profile_json" in ids
+
+
 def test_background_launch_policy_virtual_doc_is_predicate_instance():
     doc = build_virtual_concept_doc("#V#hasBackgroundLaunchPolicyJson")
 
