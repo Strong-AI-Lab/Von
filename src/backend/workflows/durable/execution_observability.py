@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from time import monotonic, sleep
 from typing import Any
 
+from ...db.transient_errors import run_with_transient_mongo_retry
 from ..execution_contracts import (
     LAST_WORKFLOW_STEP_RESULT_ENVELOPE_KEY,
     WORKFLOW_RESULT_ENVELOPE_KEY,
@@ -69,7 +70,10 @@ def await_workflow_terminal_state(
     deadline = monotonic() + max(0.0, float(timeout_seconds))
 
     while True:
-        latest_instance = manager.get_instance(instance_id)
+        latest_instance = run_with_transient_mongo_retry(
+            lambda: manager.get_instance(instance_id),
+            operation_name=f"await_workflow_terminal_state:{instance_id}",
+        )
         poll_count += 1
         if latest_instance is not None and is_terminal_workflow_status(
             getattr(latest_instance, "status", None)

@@ -10,6 +10,7 @@ from ...services import concept_service
 from ...services.arxiv_paper_link_service import (
     extract_arxiv_id_candidates,
     extract_scholarly_author_names,
+    extract_scholarly_metadata_publication_date,
     extract_scholarly_metadata_summary,
     extract_scholarly_metadata_title,
     extract_scholarly_topic_labels,
@@ -27,6 +28,7 @@ from ..action_registry import (
 )
 
 logger = logging.getLogger(__name__)
+_PUBLICATION_DATE_PREDICATE_ID = "#V#has_publication_date"
 
 SCHOLARLY_PAPER_NORMALISE_INPUTS_ACTION_ID = "scholarly_paper.normalise_inputs"
 SCHOLARLY_PAPER_MATERIALISE_ACTION_ID = "scholarly_paper.materialise_from_file_copy"
@@ -98,7 +100,7 @@ def _get_concept(concept_id: str) -> dict[str, Any] | None:
     if not concept_id_clean:
         return None
     try:
-        concept = concept_service.get_concept_by_concept_id(concept_id_clean)
+        concept = concept_service.get_concept_by_concept_id_exact(concept_id_clean)
     except Exception:
         return None
     return concept if isinstance(concept, Mapping) else None
@@ -152,6 +154,9 @@ def _extract_metadata_from_context(request: WorkflowActionRequest) -> dict[str, 
         topic_labels = _coerce_string_list(scholarly_representation.get("topic_labels"))
         if topic_labels:
             derived["categories"] = topic_labels
+        publication_date = _clean_text(scholarly_representation.get("publication_date"))
+        if publication_date:
+            derived["publication_date"] = publication_date
         if derived:
             return derived
 
@@ -181,6 +186,12 @@ def _extract_metadata_from_context(request: WorkflowActionRequest) -> dict[str, 
         derived["title"] = title
     if summary:
         derived["summary"] = summary
+    publication_date = _first_non_empty_text(
+        request.inputs.get("publication_date"),
+        request.data.get("publication_date"),
+    )
+    if publication_date:
+        derived["publication_date"] = publication_date
     if author_names:
         derived["authors"] = author_names
     if topic_labels:
@@ -231,6 +242,17 @@ def _extract_summary_from_request(request: WorkflowActionRequest) -> str | None:
         request.inputs.get("abstract"),
         request.data.get("abstract"),
         extract_scholarly_metadata_summary(metadata),
+    )
+
+
+def _extract_publication_date_from_request(
+    request: WorkflowActionRequest,
+) -> str | None:
+    metadata = _extract_metadata_from_context(request)
+    return _first_non_empty_text(
+        request.inputs.get("publication_date"),
+        request.data.get("publication_date"),
+        extract_scholarly_metadata_publication_date(metadata),
     )
 
 
@@ -299,6 +321,7 @@ def _build_normalise_inputs_handler():
             "topic_labels": _extract_topic_labels_from_request(request),
             "title": _extract_title_from_request(request),
             "summary": _extract_summary_from_request(request),
+            "publication_date": _extract_publication_date_from_request(request),
             "normalised_scholarly_inputs": True,
         }
         return WorkflowActionResult(status="success", outputs=outputs)
@@ -360,6 +383,11 @@ def _build_materialise_from_file_copy_handler():
             "paper_concept_id": paper_concept_id,
             "file_copy_concept_id": file_copy_concept_id,
             "arxiv_id": arxiv_id,
+            "publication_date": _first_non_empty_text(
+                report.get("publication_date"),
+                request.inputs.get("publication_date"),
+                request.data.get("publication_date"),
+            ),
             "scholarly_representation": dict(report),
             "representation_mode": _first_non_empty_text(
                 report.get("representation_mode"),
@@ -387,6 +415,7 @@ def _build_enrich_from_metadata_handler():
         title = _extract_title_from_request(request)
         summary = _extract_summary_from_request(request)
         topic_labels = _extract_topic_labels_from_request(request)
+        publication_date = _extract_publication_date_from_request(request)
         arxiv_id = _extract_arxiv_id_from_request(request)
         source_uri = _first_non_empty_text(
             request.inputs.get("source_uri"),
@@ -419,6 +448,16 @@ def _build_enrich_from_metadata_handler():
                 subject_concept_id=paper_concept_id,
                 predicate="#V#has_topic_labels",
                 text=", ".join(topic_labels),
+                lang="en-NZ",
+                context={"source": "scholarly_workflow_enrichment"},
+            )
+            applied = True
+
+        if publication_date:
+            upsert_text_for_concept(
+                subject_concept_id=paper_concept_id,
+                predicate=_PUBLICATION_DATE_PREDICATE_ID,
+                text=publication_date,
                 lang="en-NZ",
                 context={"source": "scholarly_workflow_enrichment"},
             )
@@ -458,6 +497,7 @@ def _build_enrich_from_metadata_handler():
                 "title": title,
                 "summary": summary,
                 "topic_labels": topic_labels,
+                "publication_date": publication_date,
                 "metadata_enrichment_applied": applied,
             },
         )
@@ -555,6 +595,7 @@ def _build_verify_representation_handler():
         )
         verification_profile = _resolve_verification_profile(request)
         arxiv_id = _extract_arxiv_id_from_request(request)
+        expected_publication_date = _extract_publication_date_from_request(request)
 
         verification_failures: list[str] = []
         paper_doc = _get_concept(paper_concept_id or "")
@@ -578,6 +619,15 @@ def _build_verify_representation_handler():
                 subject_concept_id=paper_concept_id,
                 predicate="hasDescription",
                 limit=50,
+            )
+            if paper_concept_id
+            else []
+        )
+        publication_date_rows = (
+            get_texts_for_concept(
+                subject_concept_id=paper_concept_id,
+                predicate=_PUBLICATION_DATE_PREDICATE_ID,
+                limit=10,
             )
             if paper_concept_id
             else []
@@ -652,6 +702,21 @@ def _build_verify_representation_handler():
             if not description_rows:
                 verification_failures.append("summary_missing")
 
+            represented_publication_dates = [
+                _clean_text(row.get("text"))
+                for row in publication_date_rows
+                if isinstance(row, Mapping)
+            ]
+            represented_publication_dates = [
+                item for item in represented_publication_dates if item
+            ]
+            if not represented_publication_dates:
+                verification_failures.append("publication_date_missing")
+            elif expected_publication_date and expected_publication_date not in (
+                represented_publication_dates
+            ):
+                verification_failures.append("publication_date_mismatch")
+
             if not author_concept_ids:
                 verification_failures.append("authors_missing")
 
@@ -672,6 +737,11 @@ def _build_verify_representation_handler():
                 "verification_failures": verification_failures,
                 "author_concept_ids": author_concept_ids,
                 "topic_concept_ids": topic_concept_ids,
+                "publication_date": (
+                    _clean_text(publication_date_rows[0].get("text"))
+                    if publication_date_rows and isinstance(publication_date_rows[0], Mapping)
+                    else None
+                ),
                 "type_asserted": type_asserted,
                 "file_link_verified": file_link_verified,
             },

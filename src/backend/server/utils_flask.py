@@ -248,25 +248,49 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             recover_orphaned_instances,
             get_system_status,
         )
+        from ..services.paper_representation_workflow_vontology_service import (
+            bootstrap_canonical_paper_representation_workflows,
+        )
         from ..services.testing_workflow_vontology_service import (
             bootstrap_canonical_testing_workflows,
         )
+        from ..services.talk_representation_workflow_vontology_service import (
+            bootstrap_canonical_talk_representation_workflows,
+        )
 
-        testing_workflow_bootstrap_report: dict[str, Any]
-        try:
-            testing_workflow_bootstrap_report = dict(
-                bootstrap_canonical_testing_workflows()
-            )
-            testing_workflow_bootstrap_report.setdefault("success", True)
-        except Exception as bootstrap_exc:
-            testing_workflow_bootstrap_report = {
-                "success": False,
-                "error": str(bootstrap_exc),
-            }
-            app_logger.warning(
-                "[durable_workflows] testing workflow bootstrap error: %s",
-                bootstrap_exc,
-            )
+        def _run_workflow_family_bootstrap(
+            *,
+            label: str,
+            bootstrap_fn: Callable[[], dict[str, Any]],
+        ) -> dict[str, Any]:
+            try:
+                report = dict(bootstrap_fn())
+                report.setdefault("success", True)
+                return report
+            except Exception as bootstrap_exc:
+                report = {
+                    "success": False,
+                    "error": str(bootstrap_exc),
+                }
+                app_logger.warning(
+                    "[durable_workflows] %s bootstrap error: %s",
+                    label,
+                    bootstrap_exc,
+                )
+                return report
+
+        paper_workflow_bootstrap_report = _run_workflow_family_bootstrap(
+            label="paper workflow",
+            bootstrap_fn=bootstrap_canonical_paper_representation_workflows,
+        )
+        talk_workflow_bootstrap_report = _run_workflow_family_bootstrap(
+            label="talk workflow",
+            bootstrap_fn=bootstrap_canonical_talk_representation_workflows,
+        )
+        testing_workflow_bootstrap_report = _run_workflow_family_bootstrap(
+            label="testing workflow",
+            bootstrap_fn=bootstrap_canonical_testing_workflows,
+        )
 
         workflow_authority_bootstrap_report = _bootstrap_workflow_authority_for_startup(
             app_logger
@@ -298,8 +322,20 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
                 os.getenv("VON_DURABLE_SCHEDULER_CHECK_INTERVAL", "60.0")
             ),
         )
+        result["paper_workflow_bootstrap"] = paper_workflow_bootstrap_report
+        result["talk_workflow_bootstrap"] = talk_workflow_bootstrap_report
         result["testing_workflow_bootstrap"] = testing_workflow_bootstrap_report
         result["workflow_authority_bootstrap"] = workflow_authority_bootstrap_report
+        if not bool(paper_workflow_bootstrap_report.get("success", False)):
+            app_logger.warning(
+                "[durable_workflows] paper workflow bootstrap failed: %s",
+                paper_workflow_bootstrap_report,
+            )
+        if not bool(talk_workflow_bootstrap_report.get("success", False)):
+            app_logger.warning(
+                "[durable_workflows] talk workflow bootstrap failed: %s",
+                talk_workflow_bootstrap_report,
+            )
         if not bool(testing_workflow_bootstrap_report.get("success", False)):
             app_logger.warning(
                 "[durable_workflows] testing workflow bootstrap failed: %s",
@@ -2483,12 +2519,23 @@ def create_flask_app(
         session_user = None
         effective_user = None
         header_user = None
+        normalised_header_user = None
+        header_user_validation = None
+        header_user_raw_exact_exists = None
+        header_user_normalised_exact_exists = None
         user_visibility_sample = None
         try:
             from flask import session as _session
 
             session_user = _session.get("user_concept_id")
-            from ..security.access_control import get_effective_user_concept_id  # type: ignore
+            from ..security.access_control import (
+                _normalise_concept_id,  # type: ignore
+                _validate_person_concept,  # type: ignore
+                get_effective_user_concept_id,
+            )
+            from ..services.concept_service import (
+                _find_raw_concept_by_exact_concept_id,  # type: ignore
+            )
 
             # Peek raw headers for fallback diagnostic (do not validate here)
             try:
@@ -2498,6 +2545,16 @@ def create_flask_app(
             except Exception:
                 header_user = None
             effective_user = get_effective_user_concept_id()
+            if header_user:
+                normalised_header_user = _normalise_concept_id(header_user)
+                header_user_validation = _validate_person_concept(header_user)
+                header_user_raw_exact_exists = bool(
+                    _find_raw_concept_by_exact_concept_id(header_user)
+                )
+                if normalised_header_user:
+                    header_user_normalised_exact_exists = bool(
+                        _find_raw_concept_by_exact_concept_id(normalised_header_user)
+                    )
             # Sample: count how many user-specific concepts would be visible for current effective user
             try:
                 from ..db.mongo_client import get_concepts_collection  # type: ignore
@@ -2574,6 +2631,10 @@ def create_flask_app(
             "session_user_concept_id": session_user,
             "effective_user_concept_id": effective_user,
             "header_user_concept_id": header_user,
+            "normalised_header_user_concept_id": normalised_header_user,
+            "header_user_validation": header_user_validation,
+            "header_user_raw_exact_exists": header_user_raw_exact_exists,
+            "header_user_normalised_exact_exists": header_user_normalised_exact_exists,
             "user_visibility_sample": user_visibility_sample,
             "model_cache": model_cache_summary,
             "tree_cache": tree_cache,

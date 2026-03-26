@@ -1,20 +1,21 @@
-"""E2E write-tool safety tests through InternalMCPGateway.invoke()."""
+"""Gateway-backed write-tool safety tests through InternalMCPGateway.invoke()."""
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence, cast
+
+from orchestrator_test_harness import build_db_independent_orchestrator
 
 from src.backend.integrations.internal_mcp.gateway import (
     InternalMCPGateway,
     MethodCatalogue,
     MethodDefinition,
 )
-from src.backend.integrations.internal_mcp.orchestrator import (
-    InternalMCPChatOrchestrator,
-)
 from src.backend.integrations.internal_mcp.schemas import Schema
 from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
 from src.backend.services import settings_service
+
+_TOOL_NAME = "create_dummy_concept"
 
 
 class _CapturingLLM:
@@ -50,7 +51,7 @@ def _build_gateway_with_write_tool() -> tuple[InternalMCPGateway, list[dict[str,
 
     catalogue.register(
         MethodDefinition(
-            name="write_dummy_concept",
+            name=_TOOL_NAME,
             handler=_write_handler,
             input_schema=Schema(
                 required={"value": str},
@@ -85,10 +86,14 @@ def test_orchestrator_blocks_write_tool_on_read_only_prompt_with_real_gateway(
     )
 
     gateway, captured_payloads = _build_gateway_with_write_tool()
-    orchestrator = InternalMCPChatOrchestrator(gateway=gateway, max_tool_invocations=1)
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, gateway),
+        max_tool_invocations=1,
+    )
     llm = _CapturingLLM(
         [
-            '{"action":"call_tool","tool":"write_dummy_concept","payload":{"value":"should-not-write"}}',
+            f'{{"action":"call_tool","tool":"{_TOOL_NAME}","payload":{{"value":"should-not-write"}}}}',
             "Understood.",
         ]
     )
@@ -105,14 +110,17 @@ def test_orchestrator_blocks_write_tool_on_read_only_prompt_with_real_gateway(
     blocked = [
         record
         for record in result.tool_invocations
-        if record.get("tool") == "write_dummy_concept"
+        if record.get("tool") == _TOOL_NAME
     ]
     assert blocked, "Expected blocked write-tool record"
     assert all(record.get("blocked") for record in blocked)
-    assert all("read-only" in record.get("error", "") for record in blocked)
+    assert all(
+        record.get("write_policy_blocked_reason") == "explicit_write_denial_detected"
+        for record in blocked
+    )
 
     diagnostics = gateway.get_diagnostics()
-    assert diagnostics["methods"]["write_dummy_concept"]["calls"] == 0
+    assert diagnostics["methods"][_TOOL_NAME]["calls"] == 0
 
 
 def test_orchestrator_allows_write_tool_when_user_requests_vontology_mutation(
@@ -123,10 +131,14 @@ def test_orchestrator_allows_write_tool_when_user_requests_vontology_mutation(
     )
 
     gateway, captured_payloads = _build_gateway_with_write_tool()
-    orchestrator = InternalMCPChatOrchestrator(gateway=gateway, max_tool_invocations=1)
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=cast(Any, gateway),
+        max_tool_invocations=1,
+    )
     llm = _CapturingLLM(
         [
-            '{"action":"call_tool","tool":"write_dummy_concept","payload":{"value":"allowed-write"}}',
+            f'{{"action":"call_tool","tool":"{_TOOL_NAME}","payload":{{"value":"allowed-write"}}}}',
             "Done.",
         ]
     )
@@ -144,12 +156,12 @@ def test_orchestrator_allows_write_tool_when_user_requests_vontology_mutation(
     records = [
         record
         for record in result.tool_invocations
-        if record.get("tool") == "write_dummy_concept"
+        if record.get("tool") == _TOOL_NAME
     ]
     assert records, "Expected write-tool invocation record"
     assert all(not record.get("blocked", False) for record in records)
 
     diagnostics = gateway.get_diagnostics()
-    method_metrics = diagnostics["methods"]["write_dummy_concept"]
+    method_metrics = diagnostics["methods"][_TOOL_NAME]
     assert method_metrics["calls"] == 1
     assert method_metrics["failures"] == 0

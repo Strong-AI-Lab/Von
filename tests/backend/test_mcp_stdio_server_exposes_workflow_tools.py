@@ -41,6 +41,9 @@ WORKFLOW_TOOL_NAMES = {
     "experiment_run_get",
     "testing_prepare_experiment_spec",
     "testing_prepare_meeting_invitation_spec",
+    "testing_prepare_arxiv_paper_ingestion_fixture",
+    "testing_verify_arxiv_paper_ingestion_result",
+    "testing_cleanup_arxiv_paper_ingestion_artifacts",
 }
 
 

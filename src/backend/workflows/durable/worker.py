@@ -14,6 +14,7 @@ import threading
 import time
 from typing import Any, Callable
 
+from ...db.transient_errors import run_with_transient_mongo_retry
 from ..engine import WorkflowDefinition
 from ..action_registry import ActionRegistry
 from .instance_manager import WorkflowInstanceManager
@@ -243,6 +244,13 @@ class DurableWorkflowWorker:
             instance.workflow_id,
         )
 
+        def _retry_store_call(operation_name: str, operation):
+            return run_with_transient_mongo_retry(
+                operation,
+                operation_name=f"durable_worker.{operation_name}:{instance_id}",
+                logger_obj=logger,
+            )
+
         def _best_effort_mark_failed(
             *,
             error: str,
@@ -282,7 +290,10 @@ class DurableWorkflowWorker:
                     pass
 
             # Load workflow definition
-            definition = self._definition_loader(instance.workflow_id)
+            definition = _retry_store_call(
+                "load_definition",
+                lambda: self._definition_loader(instance.workflow_id),
+            )
             if definition is None:
                 error = f"workflow_definition_not_found:{instance.workflow_id}"
                 _best_effort_mark_failed(
@@ -306,11 +317,14 @@ class DurableWorkflowWorker:
 
             # Update status based on result
             if result.completed:
-                self._instance_manager.mark_completed(
-                    instance_id,
-                    outputs=result.data,
-                    final_state=result.final_state,
-                    execution_trace_id=result.execution_trace_id,
+                _retry_store_call(
+                    "mark_completed",
+                    lambda: self._instance_manager.mark_completed(
+                        instance_id,
+                        outputs=result.data,
+                        final_state=result.final_state,
+                        execution_trace_id=result.execution_trace_id,
+                    ),
                 )
                 if self._on_instance_completed:
                     try:

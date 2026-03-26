@@ -2050,6 +2050,7 @@ class TestSemanticContextMapping:
             "concept_id": {
                 "$context_key": "target_type_id",
                 "$mapping_concept_id": mapping_id,
+                "$required": True,
             }
         }
         assert defn.states["#V#step"].metadata["reads_context_keys"] == [
@@ -2101,6 +2102,7 @@ class TestSemanticContextMapping:
             "concept_id": {
                 "$context_key": "target_type_id",
                 "$mapping_concept_id": mapping_id,
+                "$required": True,
             }
         }
 
@@ -2148,6 +2150,7 @@ class TestSemanticContextMapping:
             "concept_id": {
                 "$context_key": "target_type_id",
                 "$mapping_concept_id": mapping_id,
+                "$required": True,
             }
         }
         assert defn.states["#V#step"].metadata["reads_context_keys"] == [
@@ -2199,6 +2202,7 @@ class TestSemanticContextMapping:
             "concept_id": {
                 "$context_key": "target_type_id",
                 "$mapping_concept_id": mapping_id,
+                "$required": False,
             }
         }
         assert "reads_context_keys" not in defn.states["#V#step"].metadata
@@ -2530,6 +2534,7 @@ class TestSubworkflowCompositionContracts:
         assert state.actions[0].inputs["child_input"] == {
             "$context_key": "parent_input",
             "$mapping_concept_id": input_mapping_id,
+            "$required": True,
         }
 
         metadata = state.metadata
@@ -2756,6 +2761,7 @@ class TestSubworkflowCompositionContracts:
         assert state.actions[0].inputs["workflow_id"] == {
             "$context_key": "selected_workflow_id",
             "$mapping_concept_id": workflow_id_mapping_id,
+            "$required": True,
         }
         metadata = state.metadata
         assert "invokes_workflow" not in metadata

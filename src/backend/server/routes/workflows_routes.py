@@ -17,6 +17,7 @@ from pymongo.errors import (
     ServerSelectionTimeoutError,
 )
 
+from ...db.transient_errors import is_transient_mongo_error
 from ...db.repositories.concepts_repository import ConceptsRepository
 from ...services.text_value_service import get_texts_for_concept
 from ...services.workflow_episode_service import (
@@ -72,25 +73,10 @@ _WORKFLOW_DEFINITIONS_EXECUTABILITY_PENDING_DETAIL = "lazy_definition_not_loaded
 
 
 def _is_transient_workflow_instances_error(exc: Exception) -> bool:
-    if isinstance(
-        exc,
-        (
-            NetworkTimeout,
-            ServerSelectionTimeoutError,
-            AutoReconnect,
-            ConnectionFailure,
-            PyMongoError,
-        ),
-    ):
+    if is_transient_mongo_error(exc):
         return True
     message = str(exc).lower()
     transient_markers = (
-        "timed out",
-        "no primary",
-        "replicasetnoprimary",
-        "connection pool paused",
-        "server selection timeout",
-        "networktimeout",
         "temporarily unavailable",
     )
     return any(marker in message for marker in transient_markers)
@@ -997,7 +983,20 @@ def api_retry_workflow_instance(instance_id: str):
     manager = _get_instance_manager()
 
     # Verify instance exists
-    instance = manager.get_instance(instance_id)
+    try:
+        instance = manager.get_instance(instance_id)
+    except Exception as exc:
+        if _is_transient_workflow_instances_error(exc):
+            logger.warning(
+                "Workflow retry degraded due to transient store error: %s",
+                exc,
+            )
+            return _build_retryable_workflow_instances_response(
+                error="Workflow retry temporarily unavailable; please retry.",
+                detail=str(exc),
+                payload={"instance_id": instance_id},
+            )
+        raise
     if not instance:
         return (
             jsonify(
@@ -1020,7 +1019,20 @@ def api_retry_workflow_instance(instance_id: str):
             400,
         )
 
-    success = manager.reset_for_retry(instance_id)
+    try:
+        success = manager.reset_for_retry(instance_id)
+    except Exception as exc:
+        if _is_transient_workflow_instances_error(exc):
+            logger.warning(
+                "Workflow retry reset degraded due to transient store error: %s",
+                exc,
+            )
+            return _build_retryable_workflow_instances_response(
+                error="Workflow retry temporarily unavailable; please retry.",
+                detail=str(exc),
+                payload={"instance_id": instance_id},
+            )
+        raise
     if success:
         return jsonify(
             {

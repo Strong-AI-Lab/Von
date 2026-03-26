@@ -143,10 +143,19 @@ from src.backend.integrations.internal_mcp.catalogue import _experiment_run_get
 from src.backend.integrations.internal_mcp.catalogue import _experiment_run_list
 from src.backend.integrations.internal_mcp.catalogue import _experiment_start_run
 from src.backend.integrations.internal_mcp.catalogue import (
+    _testing_cleanup_arxiv_paper_ingestion_artifacts,
+)
+from src.backend.integrations.internal_mcp.catalogue import (
+    _testing_prepare_arxiv_paper_ingestion_fixture,
+)
+from src.backend.integrations.internal_mcp.catalogue import (
     _testing_prepare_experiment_spec,
 )
 from src.backend.integrations.internal_mcp.catalogue import (
     _testing_prepare_meeting_invitation_spec,
+)
+from src.backend.integrations.internal_mcp.catalogue import (
+    _testing_verify_arxiv_paper_ingestion_result,
 )
 from src.backend.integrations.internal_mcp.catalogue import (
     _testing_theory_assert_local_claims,
@@ -3111,6 +3120,36 @@ async def _handle_testing_prepare_experiment_spec(
     )
 
 
+async def _handle_testing_prepare_arxiv_paper_ingestion_fixture(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _testing_prepare_arxiv_paper_ingestion_fixture,
+        arguments,
+        tool_family_label="TestingWorkflow",
+    )
+
+
+async def _handle_testing_verify_arxiv_paper_ingestion_result(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _testing_verify_arxiv_paper_ingestion_result,
+        arguments,
+        tool_family_label="TestingWorkflow",
+    )
+
+
+async def _handle_testing_cleanup_arxiv_paper_ingestion_artifacts(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _testing_cleanup_arxiv_paper_ingestion_artifacts,
+        arguments,
+        tool_family_label="TestingWorkflow",
+    )
+
+
 # Task management handlers (JVNAUTOSCI-1040)
 async def _handle_create_task(arguments: dict[str, Any]) -> list[TextContent]:
     title = arguments.get("title")
@@ -3298,6 +3337,9 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "experiment_execute_regression_suite": _handle_experiment_execute_regression_suite,
     "testing_prepare_experiment_spec": _handle_testing_prepare_experiment_spec,
     "testing_prepare_meeting_invitation_spec": _handle_testing_prepare_meeting_invitation_spec,
+    "testing_prepare_arxiv_paper_ingestion_fixture": _handle_testing_prepare_arxiv_paper_ingestion_fixture,
+    "testing_verify_arxiv_paper_ingestion_result": _handle_testing_verify_arxiv_paper_ingestion_result,
+    "testing_cleanup_arxiv_paper_ingestion_artifacts": _handle_testing_cleanup_arxiv_paper_ingestion_artifacts,
     "turn_execution_list": _handle_turn_execution_list,
     "turn_execution_get": _handle_turn_execution_get,
     "turn_execution_search_failures": _handle_turn_execution_search_failures,

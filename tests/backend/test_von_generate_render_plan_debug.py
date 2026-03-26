@@ -1467,3 +1467,63 @@ def test_task_result_omits_render_plan_when_absent(monkeypatch):
     result = body.get("result")
     assert isinstance(result, dict)
     assert "render_plan" not in result
+
+
+def test_task_result_preserves_workflow_telemetry_for_background_generate(monkeypatch):
+    from src.backend.integrations.internal_mcp.orchestrator import (
+        OrchestratorResult,
+        WorkflowRoutingInfo,
+    )
+
+    aux_entry = {
+        "type": "workflow_execution",
+        "workflow_id": "#V#arxiv_paper_ingestion_testing_workflow",
+        "completed": True,
+        "result_snapshot": {
+            "verdict": "pass",
+            "workflow_execution": {
+                "workflow_id": "#V#arxiv_paper_representation_workflow",
+                "final_status": "completed",
+            },
+        },
+    }
+    routing = WorkflowRoutingInfo(
+        workflow_id="#V#arxiv_paper_ingestion_testing_workflow",
+        verdict="custom_workflow_override",
+        prompt_id=None,
+        discovered_workflow_ids=("#V#arxiv_paper_ingestion_testing_workflow",),
+        source="selector_override",
+    )
+    orchestrator_result = OrchestratorResult(
+        response_text="ok",
+        extra_messages=(),
+        tool_invocations=(),
+        aux_llm_calls=(aux_entry,),
+        workflow_routing=routing,
+    )
+    registry = _StubTaskRegistry(
+        _StubTaskStatus(status="completed", result=orchestrator_result)
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.background_task_registry",
+        registry,
+    )
+    app = _make_app(monkeypatch, _StubOrchestrator(orchestrator_result))
+
+    client = app.test_client()
+    response = client.get("/von/api/task/result/task-3")
+    assert response.status_code == 200
+    body = response.get_json()
+    assert isinstance(body, dict)
+    result = body.get("result")
+    assert isinstance(result, dict)
+    assert result.get("aux_llm_calls") == [aux_entry]
+    assert result.get("workflow_routing", {}).get("workflow_id") == (
+        "#V#arxiv_paper_ingestion_testing_workflow"
+    )
+    llm_debug = result.get("llm_debug")
+    assert isinstance(llm_debug, dict)
+    assert llm_debug.get("aux_llm_calls") == [aux_entry]
+    assert llm_debug.get("workflow_routing", {}).get("workflow_id") == (
+        "#V#arxiv_paper_ingestion_testing_workflow"
+    )

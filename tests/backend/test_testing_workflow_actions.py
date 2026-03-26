@@ -12,8 +12,11 @@ from src.backend.services.testing_workflow_contracts import (
     EXPERIMENT_EXECUTE_TARGET_WORKFLOW_ACTION_ID,
     EXPERIMENT_RECORD_OBSERVATION_ACTION_ID,
     EXPERIMENT_START_RUN_ACTION_ID,
+    TESTING_CLEANUP_ARXIV_PAPER_INGESTION_ARTIFACTS_ACTION_ID,
+    TESTING_PREPARE_ARXIV_PAPER_INGESTION_FIXTURE_ACTION_ID,
     TESTING_PREPARE_EXPERIMENT_SPEC_ACTION_ID,
     TESTING_PREPARE_MEETING_INVITATION_SPEC_ACTION_ID,
+    TESTING_VERIFY_ARXIV_PAPER_INGESTION_RESULT_ACTION_ID,
     THEORY_ASSERT_LOCAL_CLAIM_ACTION_ID,
     THEORY_COMPUTE_DIFF_ACTION_ID,
     THEORY_CREATE_SLICE_ACTION_ID,
@@ -46,7 +49,7 @@ def _patch_submit_verified_instance_success(monkeypatch, manager: _StubWorkflowM
             namespace=str(kwargs.get("namespace") or "#V#anonymous@default").strip()
             or "#V#anonymous@default",
             inputs=dict(kwargs.get("inputs") or {}),
-            max_retries=int(kwargs.get("max_retries", 1) or 1),
+            max_retries=int(kwargs.get("max_retries", 3) or 3),
         )
         return WorkflowInstanceSubmissionResult(
             success=True,
@@ -82,7 +85,7 @@ class _StubWorkflowManager:
         org_id: str,
         namespace: str,
         inputs: dict[str, Any] | None = None,
-        max_retries: int = 1,
+        max_retries: int = 3,
         **_kwargs: Any,
     ) -> str:
         self.last_call = {
@@ -107,6 +110,7 @@ class _StubWorkflowInstance:
     current_state: str = "complete"
     inputs: dict[str, Any] | None = None
     outputs: dict[str, Any] | None = None
+    workflow_data: dict[str, Any] | None = None
     error: str | None = None
     error_step: str | None = None
     user_id: str = "#V#user"
@@ -145,6 +149,9 @@ def test_register_testing_workflow_actions_exposes_all_expected_action_ids():
         EXPERIMENT_EXECUTE_REGRESSION_SUITE_ACTION_ID,
         TESTING_PREPARE_EXPERIMENT_SPEC_ACTION_ID,
         TESTING_PREPARE_MEETING_INVITATION_SPEC_ACTION_ID,
+        TESTING_PREPARE_ARXIV_PAPER_INGESTION_FIXTURE_ACTION_ID,
+        TESTING_VERIFY_ARXIV_PAPER_INGESTION_RESULT_ACTION_ID,
+        TESTING_CLEANUP_ARXIV_PAPER_INGESTION_ARTIFACTS_ACTION_ID,
     }
 
     for action_id in expected:
@@ -232,6 +239,39 @@ def test_execute_target_workflow_action_launches_durable_instance(monkeypatch):
     }
 
 
+def test_execute_target_workflow_action_defaults_to_three_retries(monkeypatch):
+    manager = _StubWorkflowManager()
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    _patch_submit_verified_instance_success(monkeypatch, manager)
+
+    registry = ActionRegistry()
+    register_testing_workflow_actions(registry)
+    spec = registry.get(EXPERIMENT_EXECUTE_TARGET_WORKFLOW_ACTION_ID)
+    assert spec is not None
+
+    result = spec.handler(
+        WorkflowActionRequest(
+            action_id=EXPERIMENT_EXECUTE_TARGET_WORKFLOW_ACTION_ID,
+            inputs={
+                "workflow_id": "#V#arxiv_paper_representation_workflow",
+                "workflow_inputs": {"prompt": "test"},
+            },
+            environment=WorkflowEnvironment(
+                llm_client=None,
+                user_namespace="#V#user@org",
+            ),
+            data={},
+        )
+    )
+
+    assert result.ok is True
+    assert manager.last_call is not None
+    assert manager.last_call["max_retries"] == 3
+
+
 def test_prepare_experiment_spec_action_resolves_actor_context(monkeypatch):
     from src.backend.workflows.durable import testing_workflow_actions as mod
 
@@ -274,6 +314,133 @@ def test_prepare_experiment_spec_action_resolves_actor_context(monkeypatch):
     }
 
 
+def test_prepare_arxiv_fixture_action_resolves_prompt_and_actor_context(monkeypatch):
+    from src.backend.workflows.durable import testing_workflow_actions as mod
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        mod,
+        "prepare_arxiv_paper_ingestion_test_fixture",
+        lambda **kwargs: captured.update(kwargs)
+        or {"success": True, "arxiv_id": "2603.21702"},
+    )
+
+    registry = ActionRegistry()
+    register_testing_workflow_actions(registry)
+    spec = registry.get(TESTING_PREPARE_ARXIV_PAPER_INGESTION_FIXTURE_ACTION_ID)
+    assert spec is not None
+
+    result = spec.handler(
+        WorkflowActionRequest(
+            action_id=TESTING_PREPARE_ARXIV_PAPER_INGESTION_FIXTURE_ACTION_ID,
+            inputs={
+                "prompt_text": "Run the ingestion test on https://arxiv.org/abs/2603.21702",
+                "repair_existing_artifacts": True,
+            },
+            environment=WorkflowEnvironment(
+                llm_client=None,
+                user_namespace="#V#user@org",
+            ),
+            data={},
+        )
+    )
+
+    assert result.ok is True
+    assert captured["prompt_text"] == "Run the ingestion test on https://arxiv.org/abs/2603.21702"
+    assert captured["user_concept_id"] == "#V#user"
+    assert captured["timeout_seconds"] == 15.0
+    assert captured["repair_existing_artifacts"] is True
+
+
+def test_verify_arxiv_ingestion_result_action_forwards_expected_metadata(monkeypatch):
+    from src.backend.workflows.durable import testing_workflow_actions as mod
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        mod,
+        "verify_arxiv_paper_ingestion_test_result",
+        lambda **kwargs: captured.update(kwargs)
+        or {"success": True, "verification_passed": True},
+    )
+
+    registry = ActionRegistry()
+    register_testing_workflow_actions(registry)
+    spec = registry.get(TESTING_VERIFY_ARXIV_PAPER_INGESTION_RESULT_ACTION_ID)
+    assert spec is not None
+
+    result = spec.handler(
+        WorkflowActionRequest(
+            action_id=TESTING_VERIFY_ARXIV_PAPER_INGESTION_RESULT_ACTION_ID,
+            inputs={
+                "workflow_execution": {"outputs": {"paper_concept_id": "#V#paper_2603_21702"}},
+                "arxiv_id": "2603.21702",
+                "source_uri": "https://arxiv.org/abs/2603.21702",
+                "expected_title": "Example title",
+                "expected_summary": "Example abstract",
+                "expected_publication_date": "2026-03-25",
+                "expected_author_names": ["Author One"],
+                "expected_author_concept_ids": ["#V#author_one"],
+                "expected_topic_labels": ["cs.AI"],
+                "expected_topic_concept_ids": ["#V#topic_cs_ai"],
+                "paper_concept_id": "#V#paper_2603_21702",
+            },
+            environment=WorkflowEnvironment(llm_client=None),
+            data={},
+        )
+    )
+
+    assert result.ok is True
+    assert captured["arxiv_id"] == "2603.21702"
+    assert captured["expected_publication_date"] == "2026-03-25"
+    assert captured["expected_author_concept_ids"] == ["#V#author_one"]
+
+
+def test_cleanup_arxiv_ingestion_artifacts_action_forwards_cleanup_targets(monkeypatch):
+    from src.backend.workflows.durable import testing_workflow_actions as mod
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        mod,
+        "cleanup_arxiv_paper_ingestion_test_artifacts",
+        lambda **kwargs: captured.update(kwargs)
+        or {"success": True, "cleanup_passed": True},
+    )
+
+    registry = ActionRegistry()
+    register_testing_workflow_actions(registry)
+    spec = registry.get(TESTING_CLEANUP_ARXIV_PAPER_INGESTION_ARTIFACTS_ACTION_ID)
+    assert spec is not None
+
+    result = spec.handler(
+        WorkflowActionRequest(
+            action_id=TESTING_CLEANUP_ARXIV_PAPER_INGESTION_ARTIFACTS_ACTION_ID,
+            inputs={
+                "paper_concept_id": "#V#paper_2603_21702",
+                "file_copy_concept_id": "#V#file_copy_2603_21702",
+                "file_copy_concept_ids": [
+                    "#V#file_copy_2603_21702",
+                    "#V#markdown_file_copy_2603_21702",
+                ],
+                "author_concept_ids": ["#V#author_one"],
+                "topic_concept_ids": ["#V#topic_cs_ai"],
+                "preexisting_author_concept_ids": ["#V#author_one"],
+                "preexisting_topic_concept_ids": [],
+            },
+            environment=WorkflowEnvironment(llm_client=None),
+            data={},
+        )
+    )
+
+    assert result.ok is True
+    assert captured["paper_concept_id"] == "#V#paper_2603_21702"
+    assert captured["file_copy_concept_id"] == "#V#file_copy_2603_21702"
+    assert captured["file_copy_concept_ids"] == [
+        "#V#file_copy_2603_21702",
+        "#V#markdown_file_copy_2603_21702",
+    ]
+    assert captured["preexisting_author_concept_ids"] == ["#V#author_one"]
+
+
 def test_execute_regression_suite_action_forwards_suite_policy(monkeypatch):
     from src.backend.workflows.durable import testing_workflow_actions as mod
 
@@ -305,6 +472,103 @@ def test_execute_regression_suite_action_forwards_suite_policy(monkeypatch):
     assert captured["suite_policy"] == {"tiers": {"tier2": {"mode": "benchmark"}}}
 
 
+def test_start_run_action_returns_compact_summary(monkeypatch):
+    from src.backend.workflows.durable import testing_workflow_actions as mod
+
+    monkeypatch.setattr(
+        mod,
+        "start_experiment_run",
+        lambda **_kwargs: {
+            "success": True,
+            "run_id": "#V#run_1",
+            "experiment_run": {
+                "experiment_spec_id": "#V#spec_1",
+                "status": "running",
+                "theory_id": "#V#theory_1",
+                "target_workflow_ids": ["#V#arxiv_paper_representation_workflow"],
+                "candidate_workflow_ids": ["#V#arxiv_paper_representation_workflow"],
+                "benchmark_tier": "tier1",
+                "large_payload": "x" * 4096,
+            },
+            "projection": {"large_payload": "y" * 4096},
+        },
+    )
+
+    registry = ActionRegistry()
+    register_testing_workflow_actions(registry)
+    spec = registry.get(EXPERIMENT_START_RUN_ACTION_ID)
+    assert spec is not None
+
+    result = spec.handler(
+        WorkflowActionRequest(
+            action_id=EXPERIMENT_START_RUN_ACTION_ID,
+            inputs={"experiment_spec_id": "#V#spec_1"},
+            environment=WorkflowEnvironment(llm_client=None),
+            data={},
+        )
+    )
+
+    assert result.ok is True
+    assert result.outputs["run_id"] == "#V#run_1"
+    assert result.outputs["experiment_spec_id"] == "#V#spec_1"
+    assert result.outputs["status"] == "running"
+    assert "projection" not in result.outputs
+    assert "large_payload" not in result.outputs
+
+
+def test_record_observation_action_returns_compact_summary(monkeypatch):
+    from src.backend.workflows.durable import testing_workflow_actions as mod
+
+    monkeypatch.setattr(
+        mod,
+        "record_experiment_observation",
+        lambda **_kwargs: {
+            "success": True,
+            "run_id": "#V#run_1",
+            "recorded_observations": [
+                {"label": "metadata_representation", "verdict": "pass"}
+            ],
+            "experiment_run": {
+                "observations": [
+                    {"label": "target_workflow_execution", "verdict": "pass"},
+                    {"label": "metadata_representation", "verdict": "pass"},
+                ],
+                "large_payload": "x" * 4096,
+            },
+            "projection": {"large_payload": "y" * 4096},
+        },
+    )
+
+    registry = ActionRegistry()
+    register_testing_workflow_actions(registry)
+    spec = registry.get(EXPERIMENT_RECORD_OBSERVATION_ACTION_ID)
+    assert spec is not None
+
+    result = spec.handler(
+        WorkflowActionRequest(
+            action_id=EXPERIMENT_RECORD_OBSERVATION_ACTION_ID,
+            inputs={
+                "run_id": "#V#run_1",
+                "observations": [{"label": "metadata_representation", "verdict": "pass"}],
+            },
+            environment=WorkflowEnvironment(llm_client=None),
+            data={},
+        )
+    )
+
+    assert result.ok is True
+    assert result.outputs["run_id"] == "#V#run_1"
+    assert result.outputs["recorded_observation_count"] == 1
+    assert result.outputs["recorded_observation_labels"] == ["metadata_representation"]
+    assert result.outputs["observation_count"] == 2
+    assert result.outputs["observations"] == [
+        {"label": "target_workflow_execution", "verdict": "pass"},
+        {"label": "metadata_representation", "verdict": "pass"},
+    ]
+    assert "experiment_run" not in result.outputs
+    assert "projection" not in result.outputs
+
+
 def test_execute_target_workflow_action_can_await_terminal_and_record_observation(
     monkeypatch,
 ):
@@ -316,7 +580,28 @@ def test_execute_target_workflow_action_can_await_terminal_and_record_observatio
                 instance_id="#V#wf_instance_testing",
                 workflow_id="#V#meeting_invitation_testing_workflow",
                 status=WorkflowInstanceStatus.COMPLETED,
-                outputs={"meeting_type": "project_meeting"},
+                outputs={
+                    "meeting_type": "project_meeting",
+                    "nested_payload": {"detail": "should be omitted"},
+                },
+                workflow_data={
+                    "workflow_step_result_envelopes": [
+                        {"step_id": "prepare", "ok": True, "payload": {"detail": "x" * 1024}}
+                    ],
+                    "last_workflow_step_result_envelope": {
+                        "step_id": "complete",
+                        "ok": True,
+                    },
+                    "workflow_result_envelope": {"ok": True},
+                    "workflow_metadata_validation_events": [
+                        {"phase": "verify", "ok": True, "enforced": True}
+                    ],
+                    "last_metadata_validation": {
+                        "phase": "verify",
+                        "ok": True,
+                        "enforced": True,
+                    },
+                },
             )
         }
     )
@@ -330,7 +615,13 @@ def test_execute_target_workflow_action_can_await_terminal_and_record_observatio
         mod,
         "record_experiment_observation",
         lambda **kwargs: recorded.update(kwargs)
-        or {"success": True, "run_id": kwargs["run_id"]},
+        or {
+            "success": True,
+            "run_id": kwargs["run_id"],
+            "recorded_observations": list(kwargs["observations"]),
+            "experiment_run": {"large_payload": "x" * 4096},
+            "projection": {"large_payload": "y" * 4096},
+        },
     )
 
     registry = ActionRegistry()
@@ -361,12 +652,21 @@ def test_execute_target_workflow_action_can_await_terminal_and_record_observatio
     assert result.outputs["final_status"] == "completed"
     assert result.outputs["workflow_execution"]["await_terminal"] is True
     assert result.outputs["workflow_execution"]["outputs"] == {
-        "meeting_type": "project_meeting"
+        "meeting_type": "project_meeting",
+        "omitted_output_keys": ["nested_payload"],
     }
+    assert "step_result_envelopes" not in result.outputs["workflow_execution"]
+    assert "workflow_instance" not in result.outputs
     assert result.outputs["observation_recording"]["success"] is True
+    assert result.outputs["observation_recording"]["recorded_observation_count"] == 1
+    assert result.outputs["observation_recording"]["recorded_observation_labels"] == [
+        "target_workflow_execution"
+    ]
+    assert "experiment_run" not in result.outputs["observation_recording"]
     assert recorded["run_id"] == "#V#run_1"
     observation = recorded["observations"][0]
     assert observation["label"] == "target_workflow_execution"
     assert observation["verdict"] == "pass"
     assert observation["observed_outcome"] == "completed"
     assert observation["workflow_execution"]["final_status"] == "completed"
+    assert "step_result_envelopes" not in observation["workflow_execution"]

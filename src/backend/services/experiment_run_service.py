@@ -1436,6 +1436,7 @@ def compute_experiment_verdict(
         "verdict": verdict,
         "verdict_summary": summary,
         "promotion_recommendation": promotion_recommendation,
+        "observations": _clone_sequence(persisted.get("observations")),
         "experiment_run": persisted,
         "projection": projection,
     }
@@ -1695,6 +1696,13 @@ def prepare_experiment_spec_from_template(
     return {
         **result,
         "scenario_template_schema_version": schema_version,
+        "theory_slice_name": _safe_str(theory_slice_inputs.get("name")) or None,
+        "theory_slice_expected_observations": _clone_sequence(
+            theory_slice_inputs.get("expected_observations")
+        ),
+        "theory_slice_promotion_policy": _clone_mapping(
+            theory_slice_inputs.get("promotion_policy")
+        ),
         "theory_slice_inputs": theory_slice_inputs,
         "seed_claims": _clone_sequence(theory_setup.get("seed_claims")),
     }

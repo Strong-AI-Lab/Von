@@ -62,6 +62,7 @@ _FILE_METADATA_PREDICATE_IDS = [
     "#V#has_sha256",
     "#V#has_size_bytes",
     "#V#has_upload_timestamp",
+    "#V#has_publication_date",
     "#V#has_mime_type",
     "#V#has_blob_backend",
     "#V#has_blob_key",

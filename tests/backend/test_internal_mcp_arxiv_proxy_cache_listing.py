@@ -111,6 +111,46 @@ def test_arxiv_store_downloaded_pdf_falls_back_to_cached_pdf_when_missing_path(
     assert stored["storage"]["uri"]
 
 
+def test_arxiv_store_downloaded_pdf_waits_for_async_cache_settlement(
+    monkeypatch, tmp_path
+):
+    from src.backend.integrations.internal_mcp import arxiv_proxy_mcp as mod
+
+    blob_root = tmp_path / "blob_store"
+    monkeypatch.setenv("VON_BLOB_STORE_BACKEND", "local")
+    monkeypatch.setenv("VON_BLOB_STORE_LOCAL_ROOT", str(blob_root))
+
+    cache_dir = tmp_path / "arxiv_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = cache_dir / "2603.21702.pdf"
+    data = b"%PDF-1.4\n%async\n"
+    attempts = {"count": 0}
+
+    def _fake_find_cached_pdf_for_arxiv_id(storage_path, arxiv_id):
+        attempts["count"] += 1
+        if attempts["count"] >= 3 and not pdf_path.exists():
+            pdf_path.write_bytes(data)
+        return pdf_path if pdf_path.exists() else None
+
+    monkeypatch.setattr(mod, "_find_cached_pdf_for_arxiv_id", _fake_find_cached_pdf_for_arxiv_id)
+    monkeypatch.setattr(mod, "_find_recent_pdf_in_cache", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
+
+    proxy = mod.ArxivMCPProxy(mod.ArxivProxyConfig(storage_path=cache_dir, timeout_sec=1.0))
+
+    stored = proxy._store_downloaded_pdf(
+        result={"status": "converting", "message": "Paper downloaded, conversion started"},
+        arxiv_id="2603.21702",
+        download_started_at=mod.time.time(),
+    )
+
+    assert stored["success"] is True
+    assert stored["file_path"] == str(pdf_path)
+    assert stored["size_bytes"] == len(data)
+    assert stored["sha256"] == hashlib.sha256(data).hexdigest()
+    assert attempts["count"] >= 3
+
+
 def test_arxiv_list_papers_includes_durable_blob_store_objects(monkeypatch, tmp_path):
     import asyncio
 

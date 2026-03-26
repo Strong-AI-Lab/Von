@@ -25,6 +25,7 @@ See JVNAUTOSCI-1044 for an example of namespace rejection breaking tool calls.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import re
@@ -240,6 +241,10 @@ def _get_client_capabilities(**kwargs):
 def _get_paper_metadata(**kwargs):
     import asyncio
     from .arxiv_proxy_mcp import get_arxiv_proxy, ArxivProxyError
+    from ...services.arxiv_metadata_service import (
+        ArxivMetadataError,
+        fetch_arxiv_metadata,
+    )
 
     arxiv_id = kwargs.get("arxiv_id")
     if not arxiv_id:
@@ -253,20 +258,57 @@ def _get_paper_metadata(**kwargs):
         )
 
     async def _async_metadata():
+        proxy_error: str | None = None
         try:
             proxy = await get_arxiv_proxy()
-            return await proxy.get_paper_metadata(arxiv_id=arxiv_id)
+            get_metadata = getattr(proxy, "get_paper_metadata", None)
+            if callable(get_metadata):
+                proxy_result = get_metadata(arxiv_id=arxiv_id)
+                if inspect.isawaitable(proxy_result):
+                    proxy_result = await proxy_result
+                if isinstance(proxy_result, Mapping):
+                    if proxy_result.get("success") is False:
+                        proxy_error = str(
+                            proxy_result.get("error")
+                            or proxy_result.get("message")
+                            or "arxiv_proxy_metadata_failed"
+                        )
+                    else:
+                        proxy_metadata_record, proxy_metadata_error = (
+                            _coerce_arxiv_metadata_record(proxy_result)
+                        )
+                        if proxy_metadata_record is not None:
+                            return proxy_result
+                        proxy_error = (
+                            proxy_metadata_error or "arxiv_proxy_metadata_unusable"
+                        )
+                else:
+                    proxy_error = (
+                        f"arxiv_proxy_metadata_unusable:{type(proxy_result).__name__}"
+                    )
+            else:
+                proxy_error = "arxiv_proxy_metadata_unsupported"
         except ArxivProxyError as e:
-            return make_error_response(
-                "arxiv_proxy_error",
-                str(e),
-                details={"arxiv_id": arxiv_id, "exception_type": "ArxivProxyError"},
-            )
+            proxy_error = str(e)
         except Exception as e:
+            proxy_error = f"{type(e).__name__}:{e}"
+
+        try:
+            metadata = fetch_arxiv_metadata(arxiv_id=arxiv_id)
+            payload = dict(metadata)
+            payload["success"] = True
+            if proxy_error:
+                payload["metadata_fallback_reason"] = proxy_error
+            return payload
+        except ArxivMetadataError as e:
             return make_error_response(
-                "exception",
-                f"Unexpected error: {e}",
-                details={"arxiv_id": arxiv_id, "exception_type": type(e).__name__},
+                "arxiv_metadata_unavailable",
+                str(e),
+                details={
+                    "arxiv_id": arxiv_id,
+                    "exception_type": "ArxivMetadataError",
+                    "proxy_error": proxy_error,
+                },
             )
 
     return _run_async_compat(_async_metadata)
@@ -340,7 +382,10 @@ def _materialise_arxiv_file_copy_representation(
                     "response_type": type(arxiv_report).__name__,
                 }
             materialised["attempted"] = True
-            materialised["metadata_source"] = "get_paper_metadata"
+            materialised["metadata_source"] = (
+                str(metadata_record.get("metadata_source") or "").strip()
+                or "get_paper_metadata"
+            )
             materialised["metadata_available"] = True
             if metadata_error:
                 materialised["metadata_error"] = metadata_error
@@ -377,8 +422,11 @@ def _materialise_arxiv_file_copy_representation(
         materialised["attempted"] = True
         materialised["arxiv_id"] = arxiv_id
         materialised["fallback_mode"] = "from_arxiv_path"
-        materialised["metadata_source"] = "get_paper_metadata"
-        materialised["metadata_available"] = bool(metadata_record)
+        materialised["metadata_source"] = (
+            str(generic_metadata.get("metadata_source") or "").strip()
+            or "get_paper_metadata"
+        )
+        materialised["metadata_available"] = bool(generic_metadata)
         if metadata_error:
             materialised["metadata_error"] = metadata_error
         return materialised
@@ -1828,6 +1876,9 @@ def _download_paper(**kwargs):
         )
 
     namespace_override = _normalise_namespace_override(kwargs.get("namespace"))
+    materialise_scholarly_representation = (
+        _should_materialise_scholarly_representation(kwargs)
+    )
 
     # If the PDF is already present in the local arXiv cache, prefer finalise_cached_paper so
     # we can upload to durable storage and register the Computer File Copy without calling
@@ -1840,7 +1891,8 @@ def _download_paper(**kwargs):
 
         from .arxiv_proxy_mcp import _find_cached_pdf_for_arxiv_id
 
-        user_concept_id = get_effective_user_concept_id()
+        with _with_namespace_actor_override(namespace_override):
+            user_concept_id = get_effective_user_concept_id()
         if user_concept_id:
             workspace_root = Path(__file__).parent.parent.parent.parent.parent
             storage_path = workspace_root / "data" / "arxiv_cache"
@@ -1856,6 +1908,7 @@ def _download_paper(**kwargs):
                     arxiv_id=arxiv_id,
                     name=kwargs.get("filename"),
                     delete_local_cache=kwargs.get("delete_local_cache"),
+                    materialise_scholarly_representation=materialise_scholarly_representation,
                 )
                 if isinstance(finalised, dict) and finalised.get("success") is True:
                     return finalised
@@ -1871,97 +1924,179 @@ def _download_paper(**kwargs):
                 arxiv_id=arxiv_id,
                 filename=kwargs.get("filename"),
             )
+            if isinstance(stored, Mapping):
+                stored = dict(stored)
+                if _download_result_is_materially_successful(stored):
+                    stored.setdefault("success", True)
 
             # If authenticated, always register the Computer File Copy (even on a fresh
             # download). The proxy already stores the PDF in durable blob storage.
             try:
                 from pathlib import Path
 
-                from src.backend.security.access_control import (
-                    get_effective_user_concept_id,
-                )
+                from src.backend.security.access_control import get_effective_user_concept_id
                 from src.backend.services.computer_file_copy_service import (
                     create_computer_file_copy_instance,
                 )
 
-                user_concept_id = get_effective_user_concept_id()
-                if (
-                    user_concept_id
-                    and isinstance(stored, dict)
-                    and stored.get("success") is True
-                ):
-                    storage = stored.get("storage")
-                    if isinstance(storage, dict):
-                        record = create_computer_file_copy_instance(
-                            type_concept_id="#V#arxiv_pdf_file",
-                            user_concept_id=str(user_concept_id),
-                            name=str(
-                                kwargs.get("filename")
-                                or Path(str(stored.get("file_path") or "")).name
-                                or f"{arxiv_id}.pdf"
-                            ),
-                            sha256=str(stored.get("sha256") or ""),
-                            size_bytes=int(stored.get("size_bytes") or 0),
-                            content_type="application/pdf",
-                            blob_backend=str(storage.get("backend") or ""),
-                            blob_key=str(storage.get("key") or ""),
-                            blob_uri=str(storage.get("uri") or ""),
-                            metadata={
-                                "source": "arxiv",
-                                "arxiv_id": str(stored.get("arxiv_id") or arxiv_id),
-                                "original_path": str(stored.get("file_path") or ""),
+                with _with_namespace_actor_override(namespace_override):
+                    user_concept_id = get_effective_user_concept_id()
+                    if isinstance(stored, dict):
+                        stored.setdefault(
+                            "computer_file_copy_registration",
+                            {
+                                "attempted": False,
+                                "succeeded": False,
+                                "status": "not_attempted",
                             },
                         )
-                        stored = dict(stored)
-                        stored["computer_file_copy_concept_id"] = record.concept_id
-                        stored["uploaded_at"] = record.uploaded_at
 
-                        # Best-effort: link this file copy to a stable Paper-on-arXiv instance.
-                        try:
-                            from src.backend.services.arxiv_paper_link_service import (
-                                link_file_copy_to_arxiv_paper,
-                            )
-
-                            link_result = link_file_copy_to_arxiv_paper(
-                                user_concept_id=str(user_concept_id),
-                                arxiv_id=str(stored.get("arxiv_id") or arxiv_id),
-                                file_copy_concept_id=str(record.concept_id),
-                            )
-                            if isinstance(link_result, dict) and link_result.get(
-                                "paper_concept_id"
-                            ):
-                                stored["paper_concept_id"] = link_result.get(
-                                    "paper_concept_id"
+                    if not isinstance(stored, dict):
+                        logger.warning(
+                            "[catalogue] download_paper returned non-mapping result; "
+                            "skipping file-copy registration for arxiv_id=%s result_type=%s",
+                            arxiv_id,
+                            type(stored).__name__,
+                        )
+                    elif not user_concept_id:
+                        stored["computer_file_copy_registration"] = {
+                            "attempted": False,
+                            "succeeded": False,
+                            "status": "skipped_missing_user_context",
+                        }
+                    elif not _download_result_is_materially_successful(stored):
+                        stored["computer_file_copy_registration"] = {
+                            "attempted": False,
+                            "succeeded": False,
+                            "status": "skipped_unusable_download_payload",
+                        }
+                        logger.warning(
+                            "[catalogue] download_paper returned unusable payload for file-copy "
+                            "registration arxiv_id=%s keys=%s",
+                            arxiv_id,
+                            sorted(stored.keys()),
+                        )
+                    else:
+                        stored["computer_file_copy_registration"] = {
+                            "attempted": True,
+                            "succeeded": False,
+                            "status": "attempting",
+                        }
+                        storage = stored.get("storage")
+                        if isinstance(storage, dict):
+                            try:
+                                record = create_computer_file_copy_instance(
+                                    type_concept_id="#V#arxiv_pdf_file",
+                                    user_concept_id=str(user_concept_id),
+                                    name=str(
+                                        kwargs.get("filename")
+                                        or Path(str(stored.get("file_path") or "")).name
+                                        or f"{arxiv_id}.pdf"
+                                    ),
+                                    sha256=str(stored.get("sha256") or ""),
+                                    size_bytes=int(stored.get("size_bytes") or 0),
+                                    content_type="application/pdf",
+                                    blob_backend=str(storage.get("backend") or ""),
+                                    blob_key=str(storage.get("key") or ""),
+                                    blob_uri=str(storage.get("uri") or ""),
+                                    metadata={
+                                        "source": "arxiv",
+                                        "arxiv_id": str(stored.get("arxiv_id") or arxiv_id),
+                                        "original_path": str(stored.get("file_path") or ""),
+                                    },
                                 )
-                        except Exception:
-                            pass
-
-                        try:
-                            filename_override = kwargs.get("filename")
-                            fallback_title = (
-                                filename_override.strip()
-                                if isinstance(filename_override, str)
-                                and filename_override.strip()
-                                else None
-                            )
-                            representation = _materialise_arxiv_file_copy_representation(
-                                user_concept_id=str(user_concept_id),
-                                arxiv_id=str(stored.get("arxiv_id") or arxiv_id),
-                                file_copy_concept_id=str(record.concept_id),
-                                fallback_title=fallback_title,
-                                namespace=namespace_override,
-                            )
-                            stored["scholarly_representation"] = representation
-                            if (
-                                not stored.get("paper_concept_id")
-                                and isinstance(representation, Mapping)
-                                and representation.get("paper_concept_id")
-                            ):
-                                stored["paper_concept_id"] = representation.get(
-                                    "paper_concept_id"
+                            except Exception as exc:
+                                stored["computer_file_copy_registration"] = {
+                                    "attempted": True,
+                                    "succeeded": False,
+                                    "status": "failed_create_computer_file_copy",
+                                    "error": str(exc),
+                                }
+                                logger.exception(
+                                    "[catalogue] download_paper file-copy registration failed for "
+                                    "arxiv_id=%s user=%s",
+                                    arxiv_id,
+                                    user_concept_id,
                                 )
-                        except Exception:
-                            pass
+                            else:
+                                stored["computer_file_copy_concept_id"] = record.concept_id
+                                stored["uploaded_at"] = record.uploaded_at
+                                stored["computer_file_copy_registration"] = {
+                                    "attempted": True,
+                                    "succeeded": True,
+                                    "status": "registered",
+                                    "computer_file_copy_concept_id": record.concept_id,
+                                }
+
+                                # Best-effort: link this file copy to a stable Paper-on-arXiv instance.
+                                try:
+                                    from src.backend.services.arxiv_paper_link_service import (
+                                        link_file_copy_to_arxiv_paper,
+                                    )
+
+                                    link_result = link_file_copy_to_arxiv_paper(
+                                        user_concept_id=str(user_concept_id),
+                                        arxiv_id=str(stored.get("arxiv_id") or arxiv_id),
+                                        file_copy_concept_id=str(record.concept_id),
+                                    )
+                                    if isinstance(link_result, dict) and link_result.get(
+                                        "paper_concept_id"
+                                    ):
+                                        stored["paper_concept_id"] = link_result.get(
+                                            "paper_concept_id"
+                                        )
+                                except Exception:
+                                    pass
+
+                                if materialise_scholarly_representation:
+                                    try:
+                                        filename_override = kwargs.get("filename")
+                                        fallback_title = (
+                                            filename_override.strip()
+                                            if isinstance(filename_override, str)
+                                            and filename_override.strip()
+                                            else None
+                                        )
+                                        representation = (
+                                            _materialise_arxiv_file_copy_representation(
+                                                user_concept_id=str(user_concept_id),
+                                                arxiv_id=str(
+                                                    stored.get("arxiv_id") or arxiv_id
+                                                ),
+                                                file_copy_concept_id=str(record.concept_id),
+                                                fallback_title=fallback_title,
+                                                namespace=namespace_override,
+                                            )
+                                        )
+                                        stored["scholarly_representation"] = representation
+                                        if (
+                                            not stored.get("paper_concept_id")
+                                            and isinstance(representation, Mapping)
+                                            and representation.get("paper_concept_id")
+                                        ):
+                                            stored["paper_concept_id"] = representation.get(
+                                                "paper_concept_id"
+                                            )
+                                    except Exception:
+                                        pass
+                                else:
+                                    stored["scholarly_representation"] = {
+                                        "attempted": False,
+                                        "status": "skipped_by_request",
+                                        "reason": (
+                                            "materialise_scholarly_representation_disabled"
+                                        ),
+                                    }
+                        else:
+                            stored["computer_file_copy_registration"] = {
+                                "attempted": False,
+                                "succeeded": False,
+                                "status": "skipped_missing_storage_record",
+                            }
+                            logger.warning(
+                                "[catalogue] download_paper missing storage payload for arxiv_id=%s",
+                                arxiv_id,
+                            )
 
                     # Best-effort cache cleanup (delete local cached PDF) after durable upload.
                     delete_local_cache = kwargs.get("delete_local_cache")
@@ -2058,7 +2193,12 @@ def _finalise_cached_paper(**kwargs):
             _normalise_arxiv_id,
         )
 
-        user_concept_id = get_effective_user_concept_id()
+        namespace_override = _normalise_namespace_override(kwargs.get("namespace"))
+        materialise_scholarly_representation = (
+            _should_materialise_scholarly_representation(kwargs)
+        )
+        with _with_namespace_actor_override(namespace_override):
+            user_concept_id = get_effective_user_concept_id()
         if not user_concept_id:
             return {
                 "success": False,
@@ -2087,7 +2227,6 @@ def _finalise_cached_paper(**kwargs):
         sha256 = hashlib.sha256(data).hexdigest()
         storage_key = _arxiv_pdf_blob_key(str(arxiv_id))
         stable_id = _normalise_arxiv_id(str(arxiv_id))
-        namespace_override = _normalise_namespace_override(kwargs.get("namespace"))
 
         stored = put_bytes_durable(
             key=storage_key,
@@ -2104,22 +2243,23 @@ def _finalise_cached_paper(**kwargs):
 
         ref = stored.ref
 
-        record = create_computer_file_copy_instance(
-            type_concept_id="#V#arxiv_pdf_file",
-            user_concept_id=str(user_concept_id),
-            name=str(kwargs.get("name") or cached.name),
-            sha256=sha256,
-            size_bytes=size_bytes,
-            content_type="application/pdf",
-            blob_backend=str(ref.backend),
-            blob_key=str(ref.key),
-            blob_uri=str(ref.uri),
-            metadata={
-                "source": "arxiv",
-                "arxiv_id": stable_id,
-                "original_path": str(cached),
-            },
-        )
+        with _with_namespace_actor_override(namespace_override):
+            record = create_computer_file_copy_instance(
+                type_concept_id="#V#arxiv_pdf_file",
+                user_concept_id=str(user_concept_id),
+                name=str(kwargs.get("name") or cached.name),
+                sha256=sha256,
+                size_bytes=size_bytes,
+                content_type="application/pdf",
+                blob_backend=str(ref.backend),
+                blob_key=str(ref.key),
+                blob_uri=str(ref.uri),
+                metadata={
+                    "source": "arxiv",
+                    "arxiv_id": stable_id,
+                    "original_path": str(cached),
+                },
+            )
 
         paper_concept_id = None
         try:
@@ -2144,19 +2284,26 @@ def _finalise_cached_paper(**kwargs):
             else str(cached.stem)
         )
 
-        scholarly_representation = _materialise_arxiv_file_copy_representation(
-            user_concept_id=str(user_concept_id),
-            arxiv_id=stable_id,
-            file_copy_concept_id=str(record.concept_id),
-            fallback_title=fallback_title,
-            namespace=namespace_override,
-        )
-        if (
-            paper_concept_id is None
-            and isinstance(scholarly_representation, Mapping)
-            and scholarly_representation.get("paper_concept_id")
-        ):
-            paper_concept_id = scholarly_representation.get("paper_concept_id")
+        if materialise_scholarly_representation:
+            scholarly_representation = _materialise_arxiv_file_copy_representation(
+                user_concept_id=str(user_concept_id),
+                arxiv_id=stable_id,
+                file_copy_concept_id=str(record.concept_id),
+                fallback_title=fallback_title,
+                namespace=namespace_override,
+            )
+            if (
+                paper_concept_id is None
+                and isinstance(scholarly_representation, Mapping)
+                and scholarly_representation.get("paper_concept_id")
+            ):
+                paper_concept_id = scholarly_representation.get("paper_concept_id")
+        else:
+            scholarly_representation = {
+                "attempted": False,
+                "status": "skipped_by_request",
+                "reason": "materialise_scholarly_representation_disabled",
+            }
 
         include_markdown = kwargs.get("include_markdown")
         if include_markdown is None:
@@ -2298,6 +2445,12 @@ def _finalise_cached_paper(**kwargs):
                 "uri": ref.uri,
             },
             "computer_file_copy_concept_id": record.concept_id,
+            "computer_file_copy_registration": {
+                "attempted": True,
+                "succeeded": True,
+                "status": "registered",
+                "computer_file_copy_concept_id": record.concept_id,
+            },
             "paper_concept_id": paper_concept_id,
             "uploaded_at": record.uploaded_at,
             "local_cache_deleted": local_deleted,
@@ -2428,6 +2581,44 @@ def _with_namespace_actor_override(namespace: str | None):
             yield
         return
     yield
+
+
+def _download_result_is_materially_successful(payload: Any) -> bool:
+    """Return True when a download payload is usable for file-copy registration."""
+
+    if not isinstance(payload, Mapping):
+        return False
+    if payload.get("success") is True:
+        return True
+
+    file_path = str(payload.get("file_path") or "").strip()
+    storage = payload.get("storage")
+    if not file_path or not isinstance(storage, Mapping):
+        return False
+
+    backend = str(storage.get("backend") or "").strip()
+    key = str(storage.get("key") or "").strip()
+    uri = str(storage.get("uri") or "").strip()
+    return bool(backend and (key or uri))
+
+
+def _should_materialise_scholarly_representation(kwargs: Mapping[str, Any]) -> bool:
+    """Return whether download/finalise should eagerly build scholarly representation."""
+
+    raw_value = kwargs.get("materialise_scholarly_representation")
+    if raw_value is None:
+        return True
+    if isinstance(raw_value, bool):
+        return raw_value
+    if isinstance(raw_value, (int, float)):
+        return bool(raw_value)
+    if isinstance(raw_value, str):
+        lowered = raw_value.strip().lower()
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+    return True
 
 
 # Blob/file-copy retrieval
@@ -6655,11 +6846,13 @@ def _download_paper_input_schema() -> Schema:
         optional={
             "filename": (str, type(None)),
             "delete_local_cache": (bool, type(None)),
+            "materialise_scholarly_representation": (bool, type(None)),
         },
         allow_unknown=True,
         description=(
             "download_paper input: arxiv_id (str, e.g., '2506.16596'), filename (str, optional custom name), "
-            "delete_local_cache (bool, optional; default true when authenticated)"
+            "delete_local_cache (bool, optional; default true when authenticated), "
+            "materialise_scholarly_representation (bool, optional; default true)"
         ),
     )
 
@@ -6676,6 +6869,7 @@ def _download_paper_output_schema() -> Schema:
             "sha256": (str, type(None)),
             "storage": (dict, type(None)),
             "computer_file_copy_concept_id": (str, type(None)),
+            "computer_file_copy_registration": (dict, type(None)),
             "uploaded_at": (str, type(None)),
             "local_cache_deleted": (bool, type(None)),
             "local_cache_delete_error": (str, type(None)),
@@ -6686,7 +6880,9 @@ def _download_paper_output_schema() -> Schema:
             "download_paper output: success (bool), file_path (str, local cache path), "
             "storage (dict with backend/key/uri for durable blob-store location), arxiv_id (str), "
             "version (int, optional), size_bytes (int, optional), sha256 (str, optional), "
-            "computer_file_copy_concept_id (str, optional when authenticated), uploaded_at (iso str, optional), "
+            "computer_file_copy_concept_id (str, optional when authenticated), "
+            "computer_file_copy_registration (dict telemetry about registration outcome), "
+            "uploaded_at (iso str, optional), "
             "local_cache_deleted (bool, optional), local_cache_delete_error (str, optional), "
             "or error (str) if failed"
         ),
@@ -6702,13 +6898,15 @@ def _finalise_cached_paper_input_schema() -> Schema:
             "name": (str, type(None)),
             "delete_local_cache": (bool, type(None)),
             "include_markdown": (bool, type(None)),
+            "materialise_scholarly_representation": (bool, type(None)),
         },
         allow_unknown=True,
         description=(
             "finalise_cached_paper input: arxiv_id (str, e.g., '2506.16596v2'); "
             "name (str, optional concept/display name override); "
             "delete_local_cache (bool, optional; default true); "
-            "include_markdown (bool, optional; default true)"
+            "include_markdown (bool, optional; default true); "
+            "materialise_scholarly_representation (bool, optional; default true)"
         ),
     )
 
@@ -9119,7 +9317,7 @@ def _experiment_execute_target_workflow(**kwargs):
         namespace=str(kwargs.get("namespace") or "#V#anonymous@default").strip()
         or "#V#anonymous@default",
         inputs=dict(workflow_inputs),
-        max_retries=int(kwargs.get("max_retries", 1)),
+        max_retries=int(kwargs.get("max_retries", 3)),
     )
     return build_verified_instance_launch_payload(
         submission,
@@ -9182,6 +9380,68 @@ def _testing_prepare_meeting_invitation_spec(**kwargs):
         expected_meeting_type=kwargs.get("expected_meeting_type"),
         expected_structure_fields=kwargs.get("expected_structure_fields") or (),
         expected_downstream_actions=kwargs.get("expected_downstream_actions") or (),
+    )
+
+
+def _testing_prepare_arxiv_paper_ingestion_fixture(**kwargs):
+    from ...services.arxiv_ingestion_testing_service import (
+        prepare_arxiv_paper_ingestion_test_fixture,
+    )
+
+    return prepare_arxiv_paper_ingestion_test_fixture(
+        prompt_text=str(kwargs.get("prompt_text") or kwargs.get("prompt") or "").strip()
+        or None,
+        arxiv_source=str(kwargs.get("arxiv_source") or "").strip() or None,
+        source_uri=str(kwargs.get("source_uri") or "").strip() or None,
+        arxiv_id=str(kwargs.get("arxiv_id") or "").strip() or None,
+        user_concept_id=str(kwargs.get("user_concept_id") or kwargs.get("user_id") or "").strip()
+        or None,
+        timeout_seconds=float(kwargs.get("timeout_seconds") or 15.0),
+        repair_existing_artifacts=_coerce_bool_input(
+            kwargs.get("repair_existing_artifacts"),
+            default=False,
+        ),
+    )
+
+
+def _testing_verify_arxiv_paper_ingestion_result(**kwargs):
+    from ...services.arxiv_ingestion_testing_service import (
+        verify_arxiv_paper_ingestion_test_result,
+    )
+
+    return verify_arxiv_paper_ingestion_test_result(
+        workflow_execution=kwargs.get("workflow_execution"),
+        arxiv_id=str(kwargs.get("arxiv_id") or "").strip() or None,
+        source_uri=str(kwargs.get("source_uri") or "").strip() or None,
+        expected_title=str(kwargs.get("expected_title") or "").strip() or None,
+        expected_summary=str(kwargs.get("expected_summary") or "").strip() or None,
+        expected_publication_date=(
+            str(kwargs.get("expected_publication_date") or "").strip() or None
+        ),
+        expected_author_names=kwargs.get("expected_author_names") or (),
+        expected_author_concept_ids=kwargs.get("expected_author_concept_ids") or (),
+        expected_topic_labels=kwargs.get("expected_topic_labels") or (),
+        expected_topic_concept_ids=kwargs.get("expected_topic_concept_ids") or (),
+        paper_concept_id=str(kwargs.get("paper_concept_id") or "").strip() or None,
+    )
+
+
+def _testing_cleanup_arxiv_paper_ingestion_artifacts(**kwargs):
+    from ...services.arxiv_ingestion_testing_service import (
+        cleanup_arxiv_paper_ingestion_test_artifacts,
+    )
+
+    return cleanup_arxiv_paper_ingestion_test_artifacts(
+        paper_concept_id=str(kwargs.get("paper_concept_id") or "").strip() or None,
+        file_copy_concept_id=str(kwargs.get("file_copy_concept_id") or "").strip()
+        or None,
+        file_copy_concept_ids=kwargs.get("file_copy_concept_ids") or (),
+        author_concept_ids=kwargs.get("author_concept_ids") or (),
+        topic_concept_ids=kwargs.get("topic_concept_ids") or (),
+        preexisting_author_concept_ids=kwargs.get("preexisting_author_concept_ids")
+        or (),
+        preexisting_topic_concept_ids=kwargs.get("preexisting_topic_concept_ids")
+        or (),
     )
 
 
@@ -20639,6 +20899,9 @@ def build_default_catalogue() -> MethodCatalogue:
                 "Execute approved Jira hygiene operations in batches with bounded retry/backoff and "
                 "checkpoint telemetry for partial-progress safety."
             ),
+            write_guardrail={
+                "workflow_execution_explicit_request": True,
+            },
         ),
         MethodDefinition(
             name="jira_hygiene_emit_audit",
@@ -20651,6 +20914,9 @@ def build_default_catalogue() -> MethodCatalogue:
                 "Emit structured Jira hygiene audit output and, when enabled, post concise per-epic "
                 "audit comments after execution."
             ),
+            write_guardrail={
+                "workflow_execution_explicit_request": True,
+            },
         ),
         MethodDefinition(
             name="rag_get_status",
@@ -21090,6 +21356,77 @@ def build_default_catalogue() -> MethodCatalogue:
             description="Prepare the first concrete Testing Workflow scenario for meeting-invitation derivation and validation.",
         ),
         MethodDefinition(
+            name="testing_prepare_arxiv_paper_ingestion_fixture",
+            handler=_testing_prepare_arxiv_paper_ingestion_fixture,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "prompt_text": (str, type(None)),
+                    "prompt": (str, type(None)),
+                    "arxiv_source": (str, type(None)),
+                    "source_uri": (str, type(None)),
+                    "arxiv_id": (str, type(None)),
+                    "user_concept_id": (str, type(None)),
+                    "user_id": (str, type(None)),
+                    "timeout_seconds": (int, float, type(None)),
+                    "repair_existing_artifacts": (bool, type(None)),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description="Resolve an arXiv identifier, fetch authoritative metadata, and prepare an isolated ingestion-test fixture plus cleanup plan. Optionally reclaim stale prior-run artefacts for the same deterministic test target.",
+            ),
+            output_schema=None,
+            category="write",
+            description="Prepare a workflow-driven live arXiv paper-ingestion test fixture with expected metadata and cleanup targets.",
+        ),
+        MethodDefinition(
+            name="testing_verify_arxiv_paper_ingestion_result",
+            handler=_testing_verify_arxiv_paper_ingestion_result,
+            input_schema=Schema(
+                required={"workflow_execution": dict},
+                optional={
+                    "arxiv_id": (str, type(None)),
+                    "source_uri": (str, type(None)),
+                    "expected_title": (str, type(None)),
+                    "expected_summary": (str, type(None)),
+                    "expected_publication_date": (str, type(None)),
+                    "expected_author_names": (list,),
+                    "expected_author_concept_ids": (list,),
+                    "expected_topic_labels": (list,),
+                    "expected_topic_concept_ids": (list,),
+                    "paper_concept_id": (str, type(None)),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description="Verify that the target ingestion workflow represented paper metadata, author/topic links, provenance, and file-copy linkage.",
+            ),
+            output_schema=None,
+            category="write",
+            description="Verify live arXiv ingestion workflow telemetry and represented scholarly metadata against the prepared fixture.",
+        ),
+        MethodDefinition(
+            name="testing_cleanup_arxiv_paper_ingestion_artifacts",
+            handler=_testing_cleanup_arxiv_paper_ingestion_artifacts,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "paper_concept_id": (str, type(None)),
+                    "file_copy_concept_id": (str, type(None)),
+                    "file_copy_concept_ids": (list,),
+                    "author_concept_ids": (list,),
+                    "topic_concept_ids": (list,),
+                    "preexisting_author_concept_ids": (list,),
+                    "preexisting_topic_concept_ids": (list,),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description="Delete transient paper/file-copy/author/topic artefacts created by an isolated arXiv ingestion test while preserving pre-existing concepts. When multiple linked file copies exist, delete all of them.",
+            ),
+            output_schema=None,
+            category="write",
+            description="Clean up transient artefacts created by the arXiv paper-ingestion testing workflow.",
+        ),
+        MethodDefinition(
             name="turn_execution_get",
             handler=_turn_execution_get,
             input_schema=Schema(
@@ -21420,6 +21757,10 @@ def build_default_catalogue() -> MethodCatalogue:
                 "participant concept preservation outcomes, source-label sync outcomes, "
                 "and pilot validation recommendations."
             ),
+            write_guardrail={
+                "preview_safe_dry_run_param": "dry_run",
+                "preview_safe_dry_run_default": True,
+            },
         ),
         MethodDefinition(
             name="task_update_fields",

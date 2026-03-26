@@ -101,6 +101,7 @@ def test_materialise_scholarly_representation_adds_metadata_authors_and_topics()
         "authors": ["Jane Example", "Alan Example"],
         "summary": "A deterministic pipeline for scholarly paper representation.",
         "categories": ["cs.AI", "cs.CL"],
+        "publication_date": "2025-02-21",
     }
     report = materialise_scholarly_representation_for_arxiv_file_copy(
         user_concept_id="#V#user_test",
@@ -127,6 +128,32 @@ def test_materialise_scholarly_representation_adds_metadata_authors_and_topics()
     assert len(rel.get("#V#authored_by") or []) >= 2
     assert len(rel.get("#V#about") or []) >= 1
 
+    author_ids = list(rel.get("#V#authored_by") or [])
+    assert author_ids
+    for author_name, author_id in zip(metadata["authors"], author_ids, strict=False):
+        author_name_texts = get_texts_for_concept(
+            subject_concept_id=author_id,
+            predicate="hasName",
+            limit=20,
+        )
+        assert any(
+            isinstance(item, dict) and item.get("text") == author_name
+            for item in author_name_texts
+        )
+
+    topic_ids = list(rel.get("#V#about") or [])
+    assert topic_ids
+    for topic_label, topic_id in zip(metadata["categories"], topic_ids, strict=False):
+        topic_name_texts = get_texts_for_concept(
+            subject_concept_id=topic_id,
+            predicate="hasName",
+            limit=20,
+        )
+        assert any(
+            isinstance(item, dict) and item.get("text") == topic_label
+            for item in topic_name_texts
+        )
+
     name_texts = get_texts_for_concept(
         subject_concept_id=paper_id,
         predicate="hasName",
@@ -152,6 +179,18 @@ def test_materialise_scholarly_representation_adds_metadata_authors_and_topics()
         and item.get("text") == metadata["summary"]
         for item in summary_texts
     )
+    publication_date_texts = get_texts_for_concept(
+        subject_concept_id=paper_id,
+        predicate="#V#has_publication_date",
+        limit=10,
+    )
+    assert any(
+        isinstance(item, dict)
+        and item.get("text") == metadata["publication_date"]
+        for item in publication_date_texts
+    )
+    assert report["publication_date"] == metadata["publication_date"]
+    assert report["publication_date_asserted"] is True
 
 
 def test_materialise_generic_scholarly_representation_for_file_copy():
@@ -182,6 +221,7 @@ def test_materialise_generic_scholarly_representation_for_file_copy():
         metadata={
             "title": "Evaluating the Inductive",
             "summary": "A structured account of inductive reasoning evaluation.",
+            "publication_date": "2024-09-12",
         },
     )
 
@@ -201,3 +241,116 @@ def test_materialise_generic_scholarly_representation_for_file_copy():
     assert record.concept_id in list(
         relationships.get("#V#propositional_information_thing_has_computer_file") or []
     )
+    assert report["publication_date"] == "2024-09-12"
+    assert report["publication_date_present"] is True
+
+
+def test_predict_helpers_return_stable_expected_concept_ids() -> None:
+    from src.backend.services.arxiv_paper_link_service import (
+        predict_arxiv_paper_concept_id,
+        predict_scholarly_author_concept_id,
+        predict_scholarly_topic_concept_id,
+    )
+
+    paper_id = predict_arxiv_paper_concept_id(arxiv_id="2603.21702")
+    author_id = predict_scholarly_author_concept_id(
+        user_concept_id="#V#user_test",
+        author_name="Amit Kanujia",
+    )
+    topic_id = predict_scholarly_topic_concept_id(
+        user_concept_id="#V#user_test",
+        topic_label="cs.AI",
+    )
+
+    assert paper_id.startswith("#V#paper_on_arxiv_2603_21702_")
+    assert author_id.startswith("#V#person_amit_kanujia_")
+    assert topic_id.startswith("#V#research_topic_cs_ai_")
+
+
+def test_existing_author_concept_still_reasserts_name_metadata(monkeypatch) -> None:
+    from src.backend.services import arxiv_paper_link_service as mod
+
+    ensured: dict[str, object] = {}
+    monkeypatch.setattr(
+        mod,
+        "predict_scholarly_author_concept_id",
+        lambda **_kwargs: "#V#person_jane_example",
+    )
+    monkeypatch.setattr(mod, "_concept_exists", lambda concept_id: bool(concept_id))
+    monkeypatch.setattr(
+        mod,
+        "_ensure_name_text_relation",
+        lambda **kwargs: ensured.update(kwargs),
+    )
+
+    concept_id = mod.resolve_or_create_scholarly_author_concept_id(
+        user_concept_id="#V#user_test",
+        author_name="Jane Example",
+    )
+
+    assert concept_id == "#V#person_jane_example"
+    assert ensured == {
+        "concept_id": "#V#person_jane_example",
+        "text": "Jane Example",
+        "source": "arxiv_author_metadata",
+        "logger": None,
+    }
+
+
+def test_existing_topic_concept_still_reasserts_name_metadata(monkeypatch) -> None:
+    from src.backend.services import arxiv_paper_link_service as mod
+
+    ensured: dict[str, object] = {}
+    monkeypatch.setattr(
+        mod,
+        "predict_scholarly_topic_concept_id",
+        lambda **_kwargs: "#V#research_topic_cs_ai",
+    )
+    monkeypatch.setattr(mod, "_concept_exists", lambda concept_id: bool(concept_id))
+    monkeypatch.setattr(
+        mod,
+        "_ensure_name_text_relation",
+        lambda **kwargs: ensured.update(kwargs),
+    )
+
+    concept_id = mod._resolve_or_create_topic_concept_id(
+        user_concept_id="#V#user_test",
+        topic_label="cs.AI",
+    )
+
+    assert concept_id == "#V#research_topic_cs_ai"
+    assert ensured == {
+        "concept_id": "#V#research_topic_cs_ai",
+        "text": "cs.AI",
+        "source": "arxiv_topic_metadata",
+        "logger": None,
+    }
+
+
+def test_exact_existence_checks_do_not_use_recursive_concept_resolution(
+    monkeypatch,
+) -> None:
+    from src.backend.services import arxiv_paper_link_service as mod
+    from src.backend.services import concept_service
+
+    monkeypatch.setattr(
+        concept_service,
+        "get_concept_by_concept_id",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("arXiv link helpers should use exact concept lookup")
+        ),
+    )
+
+    def _fake_exact_lookup(concept_id: str):
+        if concept_id == "#V#paper_on_arxiv":
+            return {"concept_id": concept_id}
+        raise concept_service.ConceptNotFoundError("missing")
+
+    monkeypatch.setattr(
+        concept_service,
+        "get_concept_by_concept_id_exact",
+        _fake_exact_lookup,
+    )
+
+    assert mod._concept_exists("#V#paper_on_arxiv") is True
+    assert mod._concept_exists("#V#paper_on_arxiv_missing") is False

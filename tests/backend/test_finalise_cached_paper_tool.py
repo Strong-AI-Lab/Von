@@ -99,13 +99,15 @@ def test_finalise_cached_paper_uploads_cached_pdf_and_registers_file_copy(
     assert md_kwargs["size_bytes"] == len(markdown_data)
     assert md_kwargs["blob_key"].endswith("arxiv/papers/2506.16596v2.md")
 
-    assert len(linked_calls) == 2
-    assert linked_calls[0]["user_concept_id"] == "#V#user_test"
-    assert linked_calls[0]["arxiv_id"] == "2506.16596v2"
-    assert linked_calls[0]["file_copy_concept_id"] == pdf_record.concept_id
-    assert linked_calls[1]["user_concept_id"] == "#V#user_test"
-    assert linked_calls[1]["arxiv_id"] == "2506.16596v2"
-    assert linked_calls[1]["file_copy_concept_id"] == md_record.concept_id
+    assert len(linked_calls) >= 2
+    linked_file_copy_ids = {
+        call["file_copy_concept_id"]
+        for call in linked_calls
+        if call.get("user_concept_id") == "#V#user_test"
+        and call.get("arxiv_id") == "2506.16596v2"
+    }
+    assert pdf_record.concept_id in linked_file_copy_ids
+    assert md_record.concept_id in linked_file_copy_ids
 
 
 def test_finalise_cached_paper_errors_when_cache_missing(monkeypatch, tmp_path):
@@ -205,3 +207,55 @@ def test_finalise_cached_paper_materialises_scholarly_representation(
         materialise_calls[0]["file_copy_concept_id"]
         == "#V#computer_file_copy_test"
     )
+
+
+def test_finalise_cached_paper_can_skip_eager_scholarly_materialisation(
+    monkeypatch, tmp_path
+):
+    from src.backend.integrations.internal_mcp import catalogue
+
+    cache_dir = tmp_path / "arxiv_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = cache_dir / "2603.21702.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%fake\n")
+
+    monkeypatch.setenv("ARXIV_CACHE_PATH", str(cache_dir))
+    monkeypatch.setenv("VON_BLOB_STORE_BACKEND", "local")
+    monkeypatch.setenv("VON_BLOB_STORE_LOCAL_ROOT", str(tmp_path / "blob_store"))
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#user_test",
+    )
+
+    class _FakeRecord:
+        concept_id = "#V#computer_file_copy_test"
+        uploaded_at = "2026-01-01T00:00:00+00:00"
+
+    monkeypatch.setattr(
+        "src.backend.services.computer_file_copy_service.create_computer_file_copy_instance",
+        lambda **_kwargs: _FakeRecord(),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.arxiv_paper_link_service.link_file_copy_to_arxiv_paper",
+        lambda **_kwargs: {"paper_concept_id": "#V#paper_on_arxiv_2603_21702_deadbeef"},
+    )
+
+    def _boom(**_kwargs):  # pragma: no cover - defensive
+        raise AssertionError(
+            "eager scholarly materialisation should be skipped when disabled"
+        )
+
+    monkeypatch.setattr(catalogue, "_materialise_arxiv_file_copy_representation", _boom)
+
+    result = catalogue._finalise_cached_paper(
+        arxiv_id="2603.21702",
+        include_markdown=False,
+        materialise_scholarly_representation=False,
+    )
+
+    assert result["success"] is True
+    scholarly = result.get("scholarly_representation") or {}
+    assert scholarly.get("attempted") is False
+    assert scholarly.get("status") == "skipped_by_request"
+    assert scholarly.get("reason") == "materialise_scholarly_representation_disabled"

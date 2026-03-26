@@ -8,6 +8,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Callable
 
+from . import concept_service
 from .text_value_service import upsert_singleton_text_relation
 from .workflow_discovery_service import (
     invalidate_workflow_discovery_executability_caches,
@@ -45,23 +46,33 @@ def _stable_state_metadata_subset(state: Any) -> dict[str, Any]:
     return comparable
 
 
-def _normalise_mapping_spec_signatures(
+def _normalise_context_input_mapping_spec_signatures(
     mapping_specs: tuple[Any, ...],
-) -> tuple[tuple[str, str, str], ...]:
-    signatures: list[tuple[str, str, str]] = []
+) -> tuple[tuple[str, str, bool], ...]:
+    signatures: list[tuple[str, str, bool]] = []
     for spec in mapping_specs:
-        concept_id = str(getattr(spec, "concept_id", "") or "").strip()
-        left = str(
-            getattr(spec, "tool_param", None)
-            or getattr(spec, "tool_output_field", None)
-            or ""
-        ).strip()
-        right = str(
-            getattr(spec, "context_key", None)
-            or ""
-        ).strip()
-        if concept_id and left and right:
-            signatures.append((concept_id, left, right))
+        tool_param = str(getattr(spec, "tool_param", None) or "").strip()
+        context_key = str(getattr(spec, "context_key", None) or "").strip()
+        if tool_param and context_key:
+            signatures.append(
+                (
+                    tool_param,
+                    context_key,
+                    bool(getattr(spec, "required", True)),
+                )
+            )
+    return tuple(sorted(dict.fromkeys(signatures)))
+
+
+def _normalise_tool_output_mapping_spec_signatures(
+    mapping_specs: tuple[Any, ...],
+) -> tuple[tuple[str, str], ...]:
+    signatures: list[tuple[str, str]] = []
+    for spec in mapping_specs:
+        tool_output_field = str(getattr(spec, "tool_output_field", None) or "").strip()
+        context_key = str(getattr(spec, "context_key", None) or "").strip()
+        if tool_output_field and context_key:
+            signatures.append((tool_output_field, context_key))
     return tuple(sorted(dict.fromkeys(signatures)))
 
 
@@ -86,9 +97,12 @@ def _normalise_string_tuple(values: tuple[str, ...]) -> tuple[str, ...]:
 def _prune_shadowed_static_input_bindings(
     *,
     static_input_bindings: tuple[tuple[str, Any], ...],
-    context_input_mapping_specs: tuple[tuple[str, str, str], ...],
+    context_input_mapping_specs: tuple[tuple[str, str, bool], ...],
 ) -> tuple[tuple[str, Any], ...]:
-    mapped_tool_params = {tool_param for _concept_id, tool_param, _context_key in context_input_mapping_specs}
+    mapped_tool_params = {
+        tool_param
+        for tool_param, _context_key, _required in context_input_mapping_specs
+    }
     if not mapped_tool_params:
         return static_input_bindings
     return tuple(
@@ -96,6 +110,16 @@ def _prune_shadowed_static_input_bindings(
         for binding in static_input_bindings
         if binding[0] not in mapped_tool_params
     )
+
+
+def _extract_context_binding_key(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    for key in ("$context_key", "context_key", "workflow_context_key", "from_context_key"):
+        candidate = str(value.get(key) or "").strip()
+        if candidate:
+            return candidate
+    return None
 
 
 def _step_concept_id_by_state(
@@ -165,7 +189,7 @@ def _stable_loaded_action_surface(
         state_id=state_id,
         registration_definition=loaded_definition,
     )
-    context_input_mapping_specs = _normalise_mapping_spec_signatures(
+    context_input_mapping_specs = _normalise_context_input_mapping_spec_signatures(
         runtime_details.context_input_mapping_specs
     )
     static_input_bindings = _prune_shadowed_static_input_bindings(
@@ -173,6 +197,11 @@ def _stable_loaded_action_surface(
             runtime_details.static_input_bindings
         ),
         context_input_mapping_specs=context_input_mapping_specs,
+    )
+    static_input_bindings = tuple(
+        binding
+        for binding in static_input_bindings
+        if binding[0] != "__prompt_resolution_diagnostics"
     )
     return {
         "action_id": (
@@ -215,7 +244,7 @@ def _stable_loaded_action_surface(
         ),
         "static_input_bindings": static_input_bindings,
         "context_input_mapping_specs": context_input_mapping_specs,
-        "tool_output_mapping_specs": _normalise_mapping_spec_signatures(
+        "tool_output_mapping_specs": _normalise_tool_output_mapping_spec_signatures(
             runtime_details.tool_output_mapping_specs
         ),
         "writes_context_keys": _normalise_string_tuple(
@@ -229,13 +258,27 @@ def _stable_expected_action_surface(step: Any) -> dict[str, Any]:
     execution_mode = str(getattr(step, "execution_mode", "") or "").strip() or None
     if action_id and not execution_mode:
         execution_mode = "deterministic"
-    context_input_mapping_specs = _normalise_mapping_spec_signatures(
-        getattr(step, "context_input_mapping_specs", ()) or ()
+    context_input_mapping_specs = list(
+        _normalise_context_input_mapping_spec_signatures(
+            getattr(step, "context_input_mapping_specs", ()) or ()
+        )
+    )
+    static_input_bindings_raw = _normalise_static_input_bindings(
+        getattr(step, "static_input_bindings", ()) or ()
+    )
+    lifted_context_bindings: list[tuple[str, str, bool]] = []
+    remaining_static_input_bindings: list[tuple[str, Any]] = []
+    for tool_param, value in static_input_bindings_raw:
+        context_key = _extract_context_binding_key(value)
+        if context_key:
+            lifted_context_bindings.append((tool_param, context_key, True))
+            continue
+        remaining_static_input_bindings.append((tool_param, value))
+    context_input_mapping_specs = tuple(
+        sorted(dict.fromkeys([*context_input_mapping_specs, *lifted_context_bindings]))
     )
     static_input_bindings = _prune_shadowed_static_input_bindings(
-        static_input_bindings=_normalise_static_input_bindings(
-            getattr(step, "static_input_bindings", ()) or ()
-        ),
+        static_input_bindings=tuple(remaining_static_input_bindings),
         context_input_mapping_specs=context_input_mapping_specs,
     )
     return {
@@ -271,7 +314,7 @@ def _stable_expected_action_surface(step: Any) -> dict[str, Any]:
         ),
         "static_input_bindings": static_input_bindings,
         "context_input_mapping_specs": context_input_mapping_specs,
-        "tool_output_mapping_specs": _normalise_mapping_spec_signatures(
+        "tool_output_mapping_specs": _normalise_tool_output_mapping_spec_signatures(
             getattr(step, "tool_output_mapping_specs", ()) or ()
         ),
         "writes_context_keys": _normalise_string_tuple(
@@ -300,6 +343,7 @@ def _action_surfaces_match(
     *,
     loaded_surface: dict[str, Any],
     expected_surface: dict[str, Any],
+    step: Any,
 ) -> bool:
     exact_match_keys = (
         "action_id",
@@ -308,13 +352,19 @@ def _action_surfaces_match(
         "prompt_concept_ids",
         "invoked_workflow_id",
         "static_input_bindings",
-        "context_input_mapping_specs",
         "tool_output_mapping_specs",
         "writes_context_keys",
     )
     for key in exact_match_keys:
         if loaded_surface.get(key) != expected_surface.get(key):
             return False
+
+    if not _context_input_mapping_specs_match(
+        loaded_specs=loaded_surface.get("context_input_mapping_specs"),
+        expected_specs=expected_surface.get("context_input_mapping_specs"),
+        step=step,
+    ):
+        return False
 
     subset_match_keys = (
         "llm_policy",
@@ -475,6 +525,99 @@ def _materialisation_value_matches(*, loaded_value: Any, expected_value: Any) ->
     return False
 
 
+def _context_input_mapping_specs_match(
+    *,
+    loaded_specs: Any,
+    expected_specs: Any,
+    step: Any,
+) -> bool:
+    loaded_mapping = {
+        (str(tool_param), str(context_key)): bool(required)
+        for tool_param, context_key, required in (loaded_specs or ())
+    }
+    expected_mapping: dict[tuple[str, str], tuple[bool, str | None]] = {}
+    for tool_param, context_key, required in (expected_specs or ()):
+        key = (str(tool_param), str(context_key))
+        if not key[0] or not key[1]:
+            continue
+        expected_mapping[key] = (bool(required), None)
+    for spec in getattr(step, "context_input_mapping_specs", ()) or ():
+        key = (
+            str(getattr(spec, "tool_param", "") or "").strip(),
+            str(getattr(spec, "context_key", "") or "").strip(),
+        )
+        if not key[0] or not key[1]:
+            continue
+        expected_mapping[key] = (
+            bool(getattr(spec, "required", True)),
+            str(getattr(spec, "concept_id", "") or "").strip() or None,
+        )
+    if set(loaded_mapping.keys()) != set(expected_mapping.keys()):
+        return False
+
+    for key, (expected_required, concept_id) in expected_mapping.items():
+        loaded_required = bool(loaded_mapping.get(key))
+        mapping_doc = None
+        if concept_id:
+            try:
+                mapping_doc = concept_service.get_concept_by_concept_id(concept_id)
+            except Exception:
+                return False
+        mapping_spec = (
+            ((mapping_doc or {}).get("concept_data") or {}).get("workflow_mapping_spec")
+            or {}
+        )
+        stored_required = (
+            mapping_spec.get("required")
+            if isinstance(mapping_spec, dict)
+            else None
+        )
+
+        if expected_required:
+            if not loaded_required:
+                return False
+            continue
+
+        if loaded_required:
+            if stored_required is not True:
+                return False
+            continue
+
+        if stored_required is True:
+            return False
+    return True
+
+
+def _state_metadata_subset_matches(
+    *,
+    loaded_metadata: dict[str, Any],
+    expected_metadata: dict[str, Any],
+) -> bool:
+    for key, value in expected_metadata.items():
+        if key not in loaded_metadata:
+            return False
+        if key == "reads_context_keys":
+            expected_keys = {
+                str(item).strip()
+                for item in (value or [])
+                if str(item).strip()
+            }
+            loaded_keys = {
+                str(item).strip()
+                for item in (loaded_metadata.get(key) or [])
+                if str(item).strip()
+            }
+            if not loaded_keys.issuperset(expected_keys):
+                return False
+            continue
+        if not _materialisation_value_matches(
+            loaded_value=loaded_metadata.get(key),
+            expected_value=value,
+        ):
+            return False
+    return True
+
+
 def _materialisation_matches_publication_spec(
     *,
     loaded_definition: Any,
@@ -523,6 +666,7 @@ def _materialisation_matches_publication_spec(
         if not _action_surfaces_match(
             loaded_surface=loaded_surface,
             expected_surface=expected_publication,
+            step=step,
         ):
             return False
         expected = _stable_expected_state_metadata_subset(
@@ -533,13 +677,9 @@ def _materialisation_matches_publication_spec(
         if not expected:
             expected = {}
         loaded_metadata = _stable_state_metadata_subset(loaded_state)
-        if expected and any(
-            key not in loaded_metadata
-            or not _materialisation_value_matches(
-                loaded_value=loaded_metadata.get(key),
-                expected_value=value,
-            )
-            for key, value in expected.items()
+        if expected and not _state_metadata_subset_matches(
+            loaded_metadata=loaded_metadata,
+            expected_metadata=expected,
         ):
             return False
         if not _transition_surfaces_match(
@@ -556,6 +696,7 @@ def _validate_existing_materialisation(
     *,
     target_workflow_ids: tuple[str, ...],
     supported_action_ids: tuple[str, ...],
+    publication_specs: dict[str, Any],
 ) -> tuple[bool, dict[str, dict[str, Any]]]:
     if not target_workflow_ids:
         return False, {}
@@ -587,6 +728,16 @@ def _validate_existing_materialisation(
 
         definition = _cached_loader(workflow_id)
         if definition is None:
+            return False, {}
+
+        publication_spec = publication_specs.get(workflow_id)
+        if publication_spec is None:
+            return False, {}
+        if not _materialisation_matches_publication_spec(
+            loaded_definition=definition,
+            workflow_id=workflow_id,
+            publication_spec=publication_spec,
+        ):
             return False, {}
 
         validation = validate_workflow_definition_contract(
@@ -625,6 +776,7 @@ def bootstrap_repo_seed_workflow_bundle(
         _validate_existing_materialisation(
             target_workflow_ids=target_workflow_ids,
             supported_action_ids=supported_action_ids,
+            publication_specs=publication_specs,
         )
     )
 

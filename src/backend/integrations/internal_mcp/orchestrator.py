@@ -284,6 +284,31 @@ _WORKFLOW_EXECUTION_SUMMARY_IGNORED_KEYS: frozenset[str] = frozenset(
         "workflow_control_flow_events",
     }
 )
+_WORKFLOW_EXECUTION_AUX_RESULT_SNAPSHOT_KEYS: tuple[str, ...] = (
+    "run_id",
+    "experiment_spec_id",
+    "theory_id",
+    "verdict",
+    "verdict_summary",
+    "promotion_recommendation",
+    "observations",
+    "metadata_verification",
+    "cleanup_summary",
+    "cleanup_passed",
+    "verification_passed",
+    "workflow_execution",
+    "target_workflow_execution",
+    "paper_concept_id",
+    "file_copy_concept_id",
+    "learning_signal",
+)
+_WORKFLOW_EXECUTION_AUX_RESULT_SNAPSHOT_FALLBACK_KEYS: dict[str, tuple[str, ...]] = {
+    # Older and workflow-family-specific result payloads may expose evidence
+    # under a specialised key. Preserve a canonical `observations` field in the
+    # aux snapshot so downstream telemetry checks do not need workflow-specific
+    # branching.
+    "observations": ("meeting_candidate_observations",),
+}
 _WORKFLOW_MUTATION_ID_FIELD_PATTERN = re.compile(
     r"^(created|updated|upserted|materialised|materialized|deleted|removed|linked|bound|scheduled|promoted|merged)_(.+?)_ids?$",
     flags=re.IGNORECASE,
@@ -303,6 +328,75 @@ def _workflow_execution_summary_mapping_list(value: Any) -> list[Mapping[str, An
     ):
         return []
     return [cast(Mapping[str, Any], item) for item in value if isinstance(item, Mapping)]
+
+
+def _safe_workflow_execution_aux_snapshot_value(
+    value: Any,
+    *,
+    depth: int = 0,
+    max_depth: int = 3,
+    max_items: int = 20,
+) -> Any:
+    if depth >= max_depth:
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(type(value).__name__)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, Mapping):
+        snapshot: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= max_items:
+                break
+            if not isinstance(key, str) or callable(item):
+                continue
+            snapshot[key] = _safe_workflow_execution_aux_snapshot_value(
+                item,
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_items=max_items,
+            )
+        return snapshot
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        items: list[Any] = []
+        for index, item in enumerate(value):
+            if index >= max_items:
+                break
+            items.append(
+                _safe_workflow_execution_aux_snapshot_value(
+                    item,
+                    depth=depth + 1,
+                    max_depth=max_depth,
+                    max_items=max_items,
+                )
+            )
+        return items
+    return str(value)
+
+
+def _build_workflow_execution_aux_result_snapshot(
+    workflow_result: Any,
+) -> dict[str, Any] | None:
+    result_data = getattr(workflow_result, "data", None)
+    if not isinstance(result_data, Mapping):
+        return None
+
+    snapshot: dict[str, Any] = {}
+    for key in _WORKFLOW_EXECUTION_AUX_RESULT_SNAPSHOT_KEYS:
+        if key in result_data:
+            raw_value = result_data.get(key)
+        else:
+            raw_value = None
+            for fallback_key in _WORKFLOW_EXECUTION_AUX_RESULT_SNAPSHOT_FALLBACK_KEYS.get(
+                key, ()
+            ):
+                if fallback_key in result_data:
+                    raw_value = result_data.get(fallback_key)
+                    break
+            if raw_value is None:
+                continue
+        snapshot[key] = _safe_workflow_execution_aux_snapshot_value(raw_value)
+    return snapshot or None
 
 
 def _extract_workflow_execution_identifier_values(value: Any) -> list[str]:
@@ -554,7 +648,7 @@ def _build_workflow_execution_aux_entry(
             workflow_result=workflow_result,
         )
 
-    return {
+    payload = {
         "type": "workflow_execution",
         "workflow_id": workflow_id,
         "final_state": _workflow_execution_summary_text(
@@ -563,6 +657,10 @@ def _build_workflow_execution_aux_entry(
         "completed": bool(getattr(workflow_result, "completed", False)),
         "execution_summary": dict(execution_summary),
     }
+    result_snapshot = _build_workflow_execution_aux_result_snapshot(workflow_result)
+    if isinstance(result_snapshot, Mapping):
+        payload["result_snapshot"] = dict(result_snapshot)
+    return payload
 
 
 def _derive_workflow_selection_rationale(
@@ -1491,6 +1589,35 @@ class InternalMCPChatOrchestrator:
                 max_value=20,
             )
 
+    def _ensure_workflow_runtime_surfaces(self) -> None:
+        """Materialise workflow runtime helpers for partially initialised instances.
+
+        Some unit tests patch ``__init__`` to construct a minimal orchestrator with
+        only a gateway and logger. Keep workflow execution entry points resilient by
+        lazily restoring the shared workflow registry and executor when those tests
+        invoke workflow-backed tool actions directly.
+        """
+
+        if getattr(self, "_workflow_registry", None) is None:
+            self._workflow_registry = get_shared_workflow_registry_read_only(
+                defer_parity_work=True
+            )
+        if getattr(self, "_action_registry", None) is None:
+            self._action_registry = self._build_action_registry()
+        if getattr(self, "_workflow_executor", None) is None:
+            self._workflow_executor = WorkflowExecutor(
+                registry=self._action_registry,
+                max_transitions=50,
+            )
+        if not hasattr(self, "_default_gmail_profile"):
+            self._default_gmail_profile = None
+        if not hasattr(self, "_max_tool_invocations"):
+            self._max_tool_invocations = 0
+        if not hasattr(self, "_max_tool_result_chars"):
+            self._max_tool_result_chars = 20_000
+        if not hasattr(self, "_max_tool_result_field_chars"):
+            self._max_tool_result_field_chars = 8_000
+
     def get_execution_caps(self) -> dict[str, int]:
         return {
             "max_tool_invocations": int(self._max_tool_invocations),
@@ -1931,6 +2058,7 @@ class InternalMCPChatOrchestrator:
             mcp_duration_ms (float): Execution time in milliseconds.
             result (Any): Alias of mcp_result for condition evaluation.
         """
+        self._ensure_workflow_runtime_surfaces()
         tool_name = request.action_id
         env = request.environment
         gateway = self._gateway
@@ -2008,7 +2136,17 @@ class InternalMCPChatOrchestrator:
                 ),
                 aux_llm_calls=request.data.get("aux_llm_calls"),
             )
+            write_override_reason = None
             if tool_name not in resolved_write_policy.allowed_tools:
+                write_override_reason = self._resolve_write_guardrail_override_reason(
+                    tool_name=tool_name,
+                    payload=payload,
+                    method_catalogue=method_catalogue,
+                    blocked_reason=resolved_write_policy.blocked_reasons.get(tool_name),
+                    workflow_id=request.workflow_id,
+                    workflow_step_id=request.workflow_state_id,
+                )
+            if tool_name not in resolved_write_policy.allowed_tools and not write_override_reason:
                 message = self._build_blocked_write_message(
                     tool_name=tool_name,
                     reason=resolved_write_policy.blocked_reasons.get(tool_name),
@@ -5520,8 +5658,22 @@ class InternalMCPChatOrchestrator:
                 write_policy_blocked_reasons.get(tool_name) or write_policy_reason or ""
             ).strip()
             tool_requires_confirmation = tool_name in write_policy_requires_confirmation
-
+            write_override_reason = None
             if tool_category == "write" and tool_name not in allowed_write_tools:
+                write_override_reason = self._resolve_write_guardrail_override_reason(
+                    tool_name=tool_name,
+                    payload=payload,
+                    method_catalogue=method_catalogue,
+                    blocked_reason=tool_blocked_reason or None,
+                    workflow_id=request.workflow_id,
+                    workflow_step_id=request.workflow_state_id,
+                )
+
+            if (
+                tool_category == "write"
+                and tool_name not in allowed_write_tools
+                and not write_override_reason
+            ):
                 _record_write_gate_decision(
                     tool_name=tool_name,
                     allowed=False,
@@ -5598,7 +5750,12 @@ class InternalMCPChatOrchestrator:
                     _record_write_gate_decision(
                         tool_name=tool_name,
                         allowed=True,
-                        reason=tool_blocked_reason or write_policy_reason or "allowed",
+                        reason=(
+                            write_override_reason
+                            or tool_blocked_reason
+                            or write_policy_reason
+                            or "allowed"
+                        ),
                     )
                 payload_before_invoke = dict(payload)
                 schema = self._tool_schema_for_name(tool_name, method_catalogue)
@@ -13054,6 +13211,90 @@ class InternalMCPChatOrchestrator:
         )
 
     @staticmethod
+    def _coerce_write_guardrail_bool(value: Any, *, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "1", "yes", "y", "on"}:
+                return True
+            if lowered in {"false", "0", "no", "n", "off"}:
+                return False
+        return bool(value)
+
+    @staticmethod
+    def _tool_write_guardrail_hint(
+        *,
+        tool_name: str,
+        method_catalogue: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        if not isinstance(method_catalogue, Mapping):
+            return {}
+        tool_meta = method_catalogue.get(tool_name)
+        if not isinstance(tool_meta, Mapping):
+            return {}
+        raw_hint = tool_meta.get("write_guardrail")
+        return dict(raw_hint) if isinstance(raw_hint, Mapping) else {}
+
+    def _resolve_write_guardrail_override_reason(
+        self,
+        *,
+        tool_name: str,
+        payload: Mapping[str, Any] | None,
+        method_catalogue: Mapping[str, Any] | None,
+        blocked_reason: str | None,
+        workflow_id: str | None,
+        workflow_step_id: str | None,
+    ) -> str | None:
+        reason = str(blocked_reason or "").strip()
+        if reason not in {
+            "external_write_requires_explicit_request",
+            "mutative_non_destructive_request_required",
+        }:
+            return None
+
+        hint = self._tool_write_guardrail_hint(
+            tool_name=tool_name,
+            method_catalogue=method_catalogue,
+        )
+        if not hint:
+            return None
+
+        preview_dry_run_param = str(
+            hint.get("preview_safe_dry_run_param") or ""
+        ).strip()
+        if preview_dry_run_param:
+            preview_dry_run_default = self._coerce_write_guardrail_bool(
+                hint.get("preview_safe_dry_run_default"),
+                default=False,
+            )
+            raw_dry_run = (
+                payload.get(preview_dry_run_param)
+                if isinstance(payload, Mapping)
+                else None
+            )
+            effective_dry_run = self._coerce_write_guardrail_bool(
+                raw_dry_run,
+                default=preview_dry_run_default,
+            )
+            if effective_dry_run:
+                return "preview_safe_dry_run"
+
+        if self._coerce_write_guardrail_bool(
+            hint.get("workflow_execution_explicit_request"),
+            default=False,
+        ) and isinstance(workflow_id, str) and workflow_id.strip() and isinstance(
+            workflow_step_id, str
+        ) and workflow_step_id.strip():
+            return "workflow_defined_explicit_request"
+
+        return None
+
+    @staticmethod
     def _classify_write_gate_state(
         *,
         allowed: bool,
@@ -18885,6 +19126,7 @@ class InternalMCPChatOrchestrator:
         turn_id: str | None = None,
         episode_source: str | None = None,
     ):
+        self._ensure_workflow_runtime_surfaces()
         if not isinstance(data, dict):
             data = dict(data) if isinstance(data, Mapping) else {}
 
@@ -27228,6 +27470,80 @@ class InternalMCPChatOrchestrator:
                 }
             )
             return True
+
+        if (
+            selected_uses_tool_pipeline_contract
+            and selected_workflow_id_text == TOOL_CALLING_WORKFLOW_ID
+            and routing_prompt_requirements.has_missing_requirements
+            and discovered_matches
+        ):
+            override_policy = _evaluate_custom_workflow_override_policy(
+                override_context="prompt_requirements_tool_pipeline_override"
+            )
+            _record_custom_workflow_override_policy(
+                decision=override_policy,
+                prior_selected_workflow_id=selected_workflow_id_text,
+                preserved_execution_mode="tool_pipeline",
+            )
+            replacement_probe = (
+                _get_cached_custom_workflow_launchability_probe(
+                    override_policy.chosen_workflow_id
+                )
+                if isinstance(override_policy.chosen_workflow_id, str)
+                and override_policy.chosen_workflow_id.strip()
+                else None
+            )
+            if replacement_probe is not None:
+                _promote_selected_workflow_to_custom_dispatch(
+                    replacement_probe=replacement_probe,
+                    reason="required_prompt_tools_satisfied_by_launchable_custom_workflow",
+                    verdict="custom_workflow_override",
+                    reasoning=(
+                        "Prompt-tool preselection identified required tool usage, but a "
+                        "discovered KB-authored workflow was both launchable and a better "
+                        "semantic fit for the turn than the generic tool pipeline."
+                    ),
+                    extra_payload={
+                        "required_prompt_tools": list(
+                            routing_prompt_requirements.required_tools
+                        ),
+                        "missing_prompt_tools": list(
+                            routing_prompt_requirements.missing_tools
+                        ),
+                        "required_prompt_fetch_concept_ids": list(
+                            routing_prompt_requirements.required_fetch_concept_ids
+                        ),
+                        "missing_prompt_fetch_concept_ids": list(
+                            routing_prompt_requirements.missing_fetch_concept_ids
+                        ),
+                        "required_prompt_read_file_copy_ids": list(
+                            routing_prompt_requirements.required_read_file_copy_ids
+                        ),
+                        "missing_prompt_read_file_copy_ids": list(
+                            routing_prompt_requirements.missing_read_file_copy_ids
+                        ),
+                        "required_prompt_scholarly_representation_for_file_copy_ids": list(
+                            routing_prompt_requirements.required_scholarly_representation_file_copy_ids
+                        ),
+                        "missing_prompt_scholarly_representation_for_file_copy_ids": list(
+                            routing_prompt_requirements.missing_scholarly_representation_file_copy_ids
+                        ),
+                        "required_prompt_url_extraction_tool": (
+                            routing_prompt_requirements.required_url_extraction_tool
+                        ),
+                        "required_prompt_url_extraction_url": (
+                            routing_prompt_requirements.required_url_extraction_url
+                        ),
+                        "prompt_requirement_url_policy": dict(routing_url_requirement),
+                        "retry_reason": routing_prompt_requirements.missing_retry_reason,
+                        "launch_viability_probe": {
+                            "replacement_workflow": dict(replacement_probe),
+                        },
+                        "custom_workflow_override_reason": (
+                            override_policy.reason_code
+                        ),
+                    },
+                )
 
         if (
             selected_prefers_direct_response

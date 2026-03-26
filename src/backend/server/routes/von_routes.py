@@ -6,6 +6,7 @@ from flask import (
     current_app,
     session,
     send_file,
+    make_response,
 )
 import os
 import re
@@ -23,7 +24,14 @@ from ...workflows.durable.startup import get_instance_manager
 from ...workflows.durable.workflow_instance_submission_service import (
     submit_verified_workflow_instance,
 )
-from ...languagemodels.llm_interface import get_llm_client, get_active_model_name
+from ...languagemodels.llm_interface import (
+    _extract_ollama_model_id,
+    _extract_openai_model_id,
+    _looks_like_ollama_model,
+    _looks_like_openai_model,
+    get_active_model_name,
+    get_llm_client,
+)
 from .settings_routes import get_all_settings_data
 from ...integrations.internal_mcp import ProgressTracker, ToolCallParsingError
 from ...integrations.internal_mcp.orchestrator import InternalMCPChatOrchestrator
@@ -3095,6 +3103,136 @@ def get_task_status(task_id: str):
     return jsonify(status.to_dict()), 200
 
 
+def _serialise_background_orchestrator_result(result: Any) -> dict[str, Any]:
+    """Return a stable background-task payload for OrchestratorResult values.
+
+    Background `/von/generate` calls should preserve the same workflow-routing
+    and workflow-execution telemetry that the synchronous route exposes under
+    `llm_debug`, so long-running UI flows can be validated without relying on a
+    single open HTTP request.
+    """
+
+    tool_invocations = (
+        list(result.tool_invocations) if getattr(result, "tool_invocations", None) else []
+    )
+    aux_llm_calls = (
+        list(result.aux_llm_calls) if getattr(result, "aux_llm_calls", None) else []
+    )
+    workflow_routing = _normalise_workflow_routing_payload(
+        getattr(result, "workflow_routing", None)
+    )
+
+    serialised: dict[str, Any] = {
+        "response_text": result.response_text,
+        "extra_messages": (
+            list(result.extra_messages) if getattr(result, "extra_messages", None) else []
+        ),
+        "tool_invocations": tool_invocations,
+        "aux_llm_calls": aux_llm_calls,
+    }
+
+    llm_debug: dict[str, Any] = {
+        "response": result.response_text,
+        "tool_invocations": tool_invocations,
+        "aux_llm_calls": aux_llm_calls,
+    }
+
+    if workflow_routing is not None:
+        serialised["workflow_routing"] = workflow_routing
+        llm_debug["workflow_routing"] = workflow_routing
+
+    if hasattr(result, "llm_calls"):
+        llm_calls = list(result.llm_calls)
+        serialised["llm_calls"] = llm_calls
+        llm_debug["llm_calls"] = llm_calls
+    if hasattr(result, "llm_usage"):
+        serialised["llm_usage"] = result.llm_usage
+        llm_debug["llm_usage"] = result.llm_usage
+    orchestrator_duration_ms = getattr(result, "orchestrator_duration_ms", None)
+    if isinstance(orchestrator_duration_ms, (int, float)):
+        serialised["orchestrator_duration_ms"] = float(orchestrator_duration_ms)
+        llm_debug["orchestrator_duration_ms"] = float(orchestrator_duration_ms)
+    if hasattr(result, "render_plan") and isinstance(result.render_plan, dict):
+        render_plan = dict(result.render_plan)
+        serialised["render_plan"] = render_plan
+        llm_debug["render_plan"] = render_plan
+
+    serialised["llm_debug"] = llm_debug
+    return serialised
+
+
+def _normalise_background_generate_result(result: Any) -> dict[str, Any]:
+    """Materialise a `/von/generate` view result into a JSON payload.
+
+    Background UI turns should execute the same synchronous generate logic
+    inside the worker, then persist the final JSON body as the task result.
+    This keeps the background path behaviourally aligned with the foreground
+    route without requiring the HTTP request to stay open for the full turn.
+    """
+
+    response = make_response(result)
+    payload = response.get_json(silent=True)
+    if not isinstance(payload, dict):
+        payload = {
+            "response_text": response.get_data(as_text=True),
+        }
+    status_code = int(getattr(response, "status_code", 200) or 200)
+    if status_code >= 400:
+        raise RuntimeError(
+            f"/von/generate background execution failed with status {status_code}: "
+            f"{json.dumps(payload, ensure_ascii=True, sort_keys=True)}"
+        )
+    return payload
+
+
+def _resolve_generate_requested_model(
+    data: Mapping[str, Any] | None,
+    *,
+    user_concept_id: str | None,
+    org_concept_id: str | None,
+    configured_model: Any,
+) -> tuple[str | None, str | None]:
+    """Resolve the effective model name and optional explicit provider override.
+
+    Precedence:
+    1. Scoped user/org LLM setting
+    2. Explicit request model sent by the UI
+    3. Legacy app-config model value
+
+    The explicit request model is important for browser-local UI selections,
+    especially when the user is not authenticated and therefore has no scoped
+    persisted model setting to resolve.
+    """
+
+    requested_model_name = data.get("model") if isinstance(data, Mapping) else None
+    if isinstance(requested_model_name, str):
+        requested_model_name = requested_model_name.strip() or None
+    else:
+        requested_model_name = None
+
+    resolved_model_name = get_active_model_name(
+        user_concept_id=user_concept_id,
+        org_concept_id=org_concept_id,
+    )
+    explicit_client_type = None
+    model_name = resolved_model_name
+    if not model_name and requested_model_name:
+        requested_openai_model = _extract_openai_model_id(requested_model_name)
+        requested_ollama_model = _extract_ollama_model_id(requested_model_name)
+        if requested_openai_model and _looks_like_openai_model(requested_openai_model):
+            explicit_client_type = "openai"
+            model_name = requested_openai_model
+        elif requested_ollama_model and _looks_like_ollama_model(requested_model_name):
+            explicit_client_type = "ollama"
+            model_name = requested_ollama_model
+        else:
+            model_name = requested_model_name
+    if not model_name and isinstance(configured_model, str) and configured_model.strip():
+        model_name = configured_model.strip()
+
+    return model_name, explicit_client_type
+
+
 @von_bp.route("/api/task/result/<task_id>", methods=["GET"])
 def get_task_result(task_id: str):
     """Get the result of a completed background task.
@@ -3139,23 +3277,15 @@ def get_task_result(task_id: str):
     # Serialise OrchestratorResult if that's what we have
     result = status.result
     if hasattr(result, "response_text"):
-        # It's an OrchestratorResult
-        serialised = {
-            "response_text": result.response_text,
-            "extra_messages": (
-                list(result.extra_messages) if result.extra_messages else []
+        return (
+            jsonify(
+                {
+                    "task_id": task_id,
+                    "result": _serialise_background_orchestrator_result(result),
+                }
             ),
-            "tool_invocations": (
-                list(result.tool_invocations) if result.tool_invocations else []
-            ),
-        }
-        if hasattr(result, "llm_calls"):
-            serialised["llm_calls"] = list(result.llm_calls)
-        if hasattr(result, "llm_usage"):
-            serialised["llm_usage"] = result.llm_usage
-        if hasattr(result, "render_plan") and isinstance(result.render_plan, dict):
-            serialised["render_plan"] = dict(result.render_plan)
-        return jsonify({"task_id": task_id, "result": serialised}), 200
+            200,
+        )
 
     # Generic result
     return jsonify({"task_id": task_id, "result": result}), 200
@@ -6098,6 +6228,70 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             ),
         )
 
+    if background_mode:
+        app = current_app._get_current_object()
+        background_payload = dict(data) if isinstance(data, dict) else {}
+        background_payload["background"] = False
+        background_payload["client_request_id"] = request_id
+        background_headers: dict[str, str] = {}
+        for header_name in (
+            "X-Von-Window-Session",
+            "X-User-Concept-ID",
+            "X-User-Client-ID",
+        ):
+            header_value = request.headers.get(header_name)
+            if isinstance(header_value, str) and header_value.strip():
+                background_headers[header_name] = header_value.strip()
+        session_snapshot = dict(session)
+        background_session_id = (
+            str(session_snapshot.get("session_id")).strip()
+            if session_snapshot.get("session_id")
+            else None
+        )
+        background_user_id = (
+            str(session_snapshot.get("user_concept_id")).strip()
+            if session_snapshot.get("user_concept_id")
+            else (
+                str(session_snapshot.get("user_id")).strip()
+                if session_snapshot.get("user_id")
+                else None
+            )
+        )
+
+        def _run_generate_request_in_background() -> dict[str, Any]:
+            with app.test_request_context(
+                "/von/generate",
+                method="POST",
+                json=background_payload,
+                headers=background_headers,
+            ):
+                session.clear()
+                session.update(session_snapshot)
+                session.modified = True
+                return _normalise_background_generate_result(generate())
+
+        task_status = background_task_registry.submit_task(
+            task_id=request_id,
+            callable=_run_generate_request_in_background,
+            progress_callback=None,
+            session_id=background_session_id,
+            user_id=background_user_id,
+        )
+
+        return (
+            jsonify(
+                {
+                    "background": True,
+                    "task_id": request_id,
+                    "status": task_status.status,
+                    "message": "Task submitted for background execution",
+                    "status_url": f"/von/api/task/status/{request_id}",
+                    "result_url": f"/von/api/task/result/{request_id}",
+                }
+            ),
+            202,
+        )
+
     # Get user/org context from request body (sent by frontend from localStorage)
     request_user_id = data.get("user_id")
     request_org_id = data.get("org_id")
@@ -6363,11 +6557,19 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
     else:
         progress_goal_label = None
 
+    model_name, explicit_client_type = _resolve_generate_requested_model(
+        data,
+        user_concept_id=user_concept_id,
+        org_concept_id=org_concept_id,
+        configured_model=current_app.config.get("MODEL"),
+    )
+
     try:
         llm_client = get_llm_client(
-            user_concept_id=user_concept_id, org_concept_id=org_concept_id
+            client_type=explicit_client_type,
+            user_concept_id=user_concept_id,
+            org_concept_id=org_concept_id,
         )
-        model_name = get_active_model_name()
     except Exception as e:
         if show_tool_use_progress:
             _set_tool_progress(
@@ -10858,8 +11060,9 @@ def set_user_concept():
     """
     try:
         from ...services.namespace_service import derive_namespace
+        from ...security.access_control import get_effective_user_concept_id
 
-        authenticated_id = (
+        authenticated_id = get_effective_user_concept_id() or (
             session.get("user_id")
             or session.get("user_concept_id")
             or session.get("user_email")

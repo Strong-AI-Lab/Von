@@ -17,6 +17,7 @@ from .workflow_prompt_authority_service import (
     ensure_prompt_concept_support,
 )
 from .testing_workflow_contracts import (
+    ARXIV_PAPER_INGESTION_TESTING_WORKFLOW_ID,
     CANONICAL_TESTING_WORKFLOW_IDS,
     EPHEMERAL_THEORY_GC_WORKFLOW_ID,
     MEETING_INVITATION_CANDIDATE_WORKFLOW_ID,
@@ -47,12 +48,65 @@ _MEETING_INVITATION_PROMPT_SPECS: tuple[WorkflowPromptConceptSpec, ...] = (
     ),
 )
 
-_REPO_SEED_ASSET_PATH = (
+_REPO_SEED_ASSET_PATHS = (
     Path(__file__).resolve().parents[1]
     / "workflows"
     / "repo_seed_bundles"
-    / "testing_workflow_seed_bundle.json"
+    / "testing_workflow_seed_bundle.json",
+    Path(__file__).resolve().parents[1]
+    / "workflows"
+    / "repo_seed_bundles"
+    / "arxiv_paper_ingestion_testing_workflow_seed_bundle.json",
 )
+
+
+def _merge_bundle_publication_reports(
+    bundle_reports: list[dict[str, Any]],
+    *,
+    force_republish: bool,
+) -> tuple[dict[str, Any], list[str], list[str]]:
+    counts: dict[str, int] = {}
+    typed_workflow_ids: list[str] = []
+    typed_step_ids: list[str] = []
+    skip_reasons: list[str] = []
+    all_skipped = bool(bundle_reports)
+
+    for report in bundle_reports:
+        publication = report.get("publication") or {}
+        publication_counts = publication.get("counts") or {}
+        for raw_key, raw_value in publication_counts.items():
+            key = str(raw_key).strip()
+            if not key:
+                continue
+            counts[key] = counts.get(key, 0) + int(raw_value or 0)
+
+        typed_workflow_ids.extend(report.get("typed_workflow_ids") or [])
+        typed_step_ids.extend(report.get("typed_step_ids") or [])
+
+        if publication.get("skipped") is True:
+            reason = str(publication.get("skip_reason") or "").strip()
+            if reason:
+                skip_reasons.append(reason)
+        else:
+            all_skipped = False
+
+    merged_publication: dict[str, Any] = {
+        "bundle_reports": bundle_reports,
+        "counts": counts,
+        "forced_republish": bool(force_republish),
+    }
+    if all_skipped:
+        merged_publication["skipped"] = True
+        if len(set(skip_reasons)) == 1 and skip_reasons:
+            merged_publication["skip_reason"] = skip_reasons[0]
+        elif skip_reasons:
+            merged_publication["skip_reason"] = "all_bundles_current"
+
+    return (
+        merged_publication,
+        list(dict.fromkeys(typed_workflow_ids)),
+        list(dict.fromkeys(typed_step_ids)),
+    )
 
 
 def _ensure_meeting_invitation_prompt_support() -> dict[str, Any]:
@@ -72,13 +126,26 @@ def bootstrap_canonical_testing_workflows(
     """Publish and validate the canonical Testing Workflows family."""
 
     prompt_support = _ensure_meeting_invitation_prompt_support()
-    report = bootstrap_repo_seed_workflow_bundle(
-        asset_path=_REPO_SEED_ASSET_PATH,
-        publish_context_manager_factory=suspend_event_workflow_integration,
+    bundle_reports: list[dict[str, Any]] = []
+    for asset_path in _REPO_SEED_ASSET_PATHS:
+        bundle_reports.append(
+            bootstrap_repo_seed_workflow_bundle(
+                asset_path=asset_path,
+                publish_context_manager_factory=suspend_event_workflow_integration,
+                force_republish=force_republish,
+            )
+        )
+    publication, typed_workflow_ids, typed_step_ids = _merge_bundle_publication_reports(
+        bundle_reports,
         force_republish=force_republish,
     )
-    publication_counts = (report.get("publication") or {}).get("counts") or {}
-    report["prompt_support"] = prompt_support
+    publication_counts = publication.get("counts") or {}
+    report: dict[str, Any] = {
+        "publication": publication,
+        "prompt_support": prompt_support,
+        "typed_workflow_ids": typed_workflow_ids,
+        "typed_step_ids": typed_step_ids,
+    }
     report["success"] = bool(prompt_support.get("success")) and int(
         publication_counts.get("errors") or 0
     ) == 0
@@ -86,6 +153,7 @@ def bootstrap_canonical_testing_workflows(
 
 
 __all__ = [
+    "ARXIV_PAPER_INGESTION_TESTING_WORKFLOW_ID",
     "CANONICAL_TESTING_WORKFLOW_IDS",
     "EPHEMERAL_THEORY_GC_WORKFLOW_ID",
     "MEETING_INVITATION_CANDIDATE_WORKFLOW_ID",

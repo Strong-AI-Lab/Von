@@ -33,6 +33,9 @@ def test_internal_mcp_catalogue_builds_and_includes_relationship_tools():
     assert "experiment_run_get" in methods
     assert "testing_prepare_experiment_spec" in methods
     assert "testing_prepare_meeting_invitation_spec" in methods
+    assert "testing_prepare_arxiv_paper_ingestion_fixture" in methods
+    assert "testing_verify_arxiv_paper_ingestion_result" in methods
+    assert "testing_cleanup_arxiv_paper_ingestion_artifacts" in methods
 
 
 def test_internal_mcp_gmail_list_messages_accepts_max_results_aliases():

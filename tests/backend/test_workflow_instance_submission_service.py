@@ -35,7 +35,11 @@ def _clear_runnable_cache_between_tests():
     invalidate_shared_durable_action_registry()
 
 
-def _make_definition(*, include_action: bool) -> WorkflowDefinition:
+def _make_definition(
+    *,
+    include_action: bool,
+    metadata: dict[str, object] | None = None,
+) -> WorkflowDefinition:
     states = {
         "#V#start": WorkflowStateSpec(
             state_id="#V#start",
@@ -52,6 +56,7 @@ def _make_definition(*, include_action: bool) -> WorkflowDefinition:
         initial_state="#V#start",
         states=states,
         termination_states=("#V#start",),
+        metadata=dict(metadata or {}),
     )
 
 
@@ -440,6 +445,69 @@ def test_verify_workflow_runnable_accepts_shared_conversation_actions_via_fallba
     assert verification.contract_validation.get("valid") is True
 
 
+def test_verify_workflow_runnable_accepts_dot_named_actions_via_internal_tool_alias() -> None:
+    workflow_action_ids = (
+        "testing.prepare_arxiv_paper_ingestion_fixture",
+        "testing.verify_arxiv_paper_ingestion_result",
+        "testing.cleanup_arxiv_paper_ingestion_artifacts",
+    )
+    graph = {
+        "workflow_id": "#V#candidate_workflow",
+        "initial_step": "#V#start",
+        "steps": [
+            {
+                "step_id": "#V#start",
+                "name": "Start",
+                "invokes_action": workflow_action_ids[0],
+            }
+        ],
+        "edges": [],
+        "warnings": [],
+    }
+    definition = WorkflowDefinition(
+        workflow_id="#V#candidate_workflow",
+        initial_state="#V#start",
+        states={
+            "#V#start": WorkflowStateSpec(
+                state_id="#V#start",
+                actions=tuple(
+                    WorkflowActionInvocation(action_id=action_id)
+                    for action_id in workflow_action_ids
+                ),
+                terminal=True,
+            )
+        },
+        termination_states=("#V#start",),
+    )
+
+    with patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_process_graph_from_definition",
+        return_value=graph,
+    ), patch(
+        "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
+        return_value=_make_registry(definition),
+    ), patch(
+        "src.backend.workflows.durable.registry_factory.get_shared_durable_action_registry",
+        return_value=_make_action_registry(supports_action=False, fallback=True),
+    ), patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service._internal_mcp_method_names",
+        return_value=frozenset(
+            {
+                "testing_prepare_arxiv_paper_ingestion_fixture",
+                "testing_verify_arxiv_paper_ingestion_result",
+                "testing_cleanup_arxiv_paper_ingestion_artifacts",
+            }
+        ),
+    ):
+        verification = verify_workflow_runnable("#V#candidate_workflow")
+
+    assert verification.runnable_verification_success is True
+    assert set(verification.discovered_action_ids) == set(workflow_action_ids)
+    assert verification.unsupported_action_ids == ()
+    assert verification.contract_validation is not None
+    assert verification.contract_validation.get("valid") is True
+
+
 def test_verify_workflow_runnable_caches_for_identical_definition() -> None:
     graph = {
         "workflow_id": "#V#candidate_workflow",
@@ -704,11 +772,15 @@ def test_submit_verified_workflow_instance_uses_event_idempotent_creation() -> N
     manager = MagicMock()
     manager.create_instance_for_event.return_value = ("instance-evt-1", True)
     verification = _make_verification()
+    definition = _make_definition(include_action=True)
 
     with patch(
         "src.backend.workflows.durable.workflow_instance_submission_service.verify_workflow_runnable",
         side_effect=[verification, verification],
-    ) as mock_verify:
+    ) as mock_verify, patch(
+        "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
+        return_value=_make_registry(definition),
+    ):
         result = submit_verified_workflow_instance(
             manager=manager,
             workflow_id="#V#candidate_workflow",
@@ -739,11 +811,15 @@ def test_submit_verified_workflow_instance_preserves_idempotent_reuse_without_po
     manager = MagicMock()
     manager.create_instance_for_event.return_value = ("instance-evt-existing", False)
     verification = _make_verification()
+    definition = _make_definition(include_action=True)
 
     with patch(
         "src.backend.workflows.durable.workflow_instance_submission_service.verify_workflow_runnable",
         return_value=verification,
-    ) as mock_verify:
+    ) as mock_verify, patch(
+        "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
+        return_value=_make_registry(definition),
+    ):
         result = submit_verified_workflow_instance(
             manager=manager,
             workflow_id="#V#candidate_workflow",
@@ -786,5 +862,105 @@ def test_submit_verified_workflow_instance_rejects_unresolvable_namespace() -> N
     assert result.success is False
     assert result.status == "rejected_preflight"
     assert result.error_code == "invalid_namespace"
+    manager.create_instance_for_event.assert_not_called()
+    manager.create_instance.assert_not_called()
+
+
+def test_submit_verified_workflow_instance_applies_launch_input_contract() -> None:
+    manager = MagicMock()
+    manager.create_instance.return_value = "instance-1"
+    verification = _make_verification()
+    definition = _make_definition(
+        include_action=True,
+        metadata={
+            "launch_input_contract": {
+                "schema_version": "workflow_launch_input_contract.v1",
+                "input_mappings": [
+                    {
+                        "target_context_key": "prompt_text",
+                        "source_expression": "inputs.prompt",
+                        "extractor": "identity",
+                        "required": True,
+                    }
+                ],
+            },
+            "launch_input_contract_source": "test_contract",
+        },
+    )
+
+    with patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.verify_workflow_runnable",
+        side_effect=[verification, verification],
+    ), patch(
+        "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
+        return_value=_make_registry(definition),
+    ):
+        result = submit_verified_workflow_instance(
+            manager=manager,
+            workflow_id="#V#candidate_workflow",
+            user_id="#V#user_alice",
+            org_id="#V#org_nao",
+            namespace="#V#user_alice/#V#org_nao",
+            inputs={"prompt": "Represent this paper."},
+        )
+
+    assert result.success is True
+    assert result.status == "pending"
+    create_inputs = manager.create_instance.call_args.kwargs["inputs"]
+    assert create_inputs["prompt"] == "Represent this paper."
+    assert create_inputs["prompt_text"] == "Represent this paper."
+    resolution = create_inputs["workflow_launch_input_resolution"]
+    assert resolution["status"] == "resolved"
+    assert resolution["contract_source"] == "test_contract"
+    assert resolution["resolved_inputs"] == ["prompt_text"]
+    assert (
+        result.verification["workflow_launch_input_resolution"]["resolved_inputs"]
+        == ["prompt_text"]
+    )
+
+
+def test_submit_verified_workflow_instance_rejects_unresolved_required_launch_input() -> None:
+    manager = MagicMock()
+    verification = _make_verification()
+    definition = _make_definition(
+        include_action=True,
+        metadata={
+            "launch_input_contract": {
+                "schema_version": "workflow_launch_input_contract.v1",
+                "input_mappings": [
+                    {
+                        "target_context_key": "prompt_text",
+                        "source_expression": "inputs.prompt",
+                        "extractor": "identity",
+                        "required": True,
+                    }
+                ],
+            },
+            "launch_input_contract_source": "test_contract",
+        },
+    )
+
+    with patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.verify_workflow_runnable",
+        return_value=verification,
+    ), patch(
+        "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
+        return_value=_make_registry(definition),
+    ):
+        result = submit_verified_workflow_instance(
+            manager=manager,
+            workflow_id="#V#candidate_workflow",
+            user_id="#V#user_alice",
+            org_id="#V#org_nao",
+            namespace="#V#user_alice/#V#org_nao",
+            inputs={"seed": "abc-123"},
+        )
+
+    assert result.success is False
+    assert result.status == "rejected_launch_input_contract"
+    assert result.error_code == "workflow_launch_input_resolution_failed"
+    launch_resolution = result.verification["workflow_launch_input_resolution"]
+    assert launch_resolution["status"] == "failed"
+    assert launch_resolution["unresolved_required_inputs"] == ["prompt_text"]
     manager.create_instance_for_event.assert_not_called()
     manager.create_instance.assert_not_called()

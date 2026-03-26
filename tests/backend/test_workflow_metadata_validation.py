@@ -339,6 +339,84 @@ def test_engine_resolves_dynamic_action_inputs_from_context() -> None:
     assert result.data["fixed"] == "literal"
 
 
+def test_engine_resolves_nested_dynamic_action_inputs_from_context() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#nested_dynamic_input_resolution_workflow",
+        initial_state="resolve",
+        states={
+            "resolve": WorkflowStateSpec(
+                state_id="resolve",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id="tool.fetch",
+                        inputs={
+                            "workflow_inputs": {
+                                "source_uri": {
+                                    "$context_key": "source_uri",
+                                },
+                                "metadata": {
+                                    "arxiv_id": {"$context_key": "arxiv_id"},
+                                    "publication_date": {
+                                        "$context_key": "publication_date",
+                                    },
+                                },
+                                "authors": [
+                                    {"$context_key": "primary_author"},
+                                    {"$context_key": "secondary_author"},
+                                ],
+                            },
+                        },
+                    ),
+                ),
+                terminal=True,
+                metadata={
+                    "reads_context_keys": [
+                        "source_uri",
+                        "arxiv_id",
+                        "publication_date",
+                        "primary_author",
+                        "secondary_author",
+                    ]
+                },
+            )
+        },
+    )
+    registry = ActionRegistry()
+
+    def handler(request: WorkflowActionRequest) -> WorkflowActionResult:
+        return WorkflowActionResult(
+            outputs={
+                "resolved_workflow_inputs": request.inputs.get("workflow_inputs"),
+            }
+        )
+
+    registry.register(ActionSpec(action_id="tool.fetch", handler=handler))
+    executor = WorkflowExecutor(registry=registry, max_transitions=5)
+
+    result = executor.run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={
+            "source_uri": "https://arxiv.org/abs/2603.21702",
+            "arxiv_id": "2603.21702",
+            "publication_date": "2026-03-23",
+            "primary_author": "Amit Kanujia",
+            "secondary_author": "Bonan Min",
+        },
+    )
+
+    assert result.completed is True
+    assert result.error is None
+    assert result.data["resolved_workflow_inputs"] == {
+        "source_uri": "https://arxiv.org/abs/2603.21702",
+        "metadata": {
+            "arxiv_id": "2603.21702",
+            "publication_date": "2026-03-23",
+        },
+        "authors": ["Amit Kanujia", "Bonan Min"],
+    }
+
+
 def test_metadata_validation_writes_context_keys_accepts_symbol_aliases() -> None:
     definition = WorkflowDefinition(
         workflow_id="#V#writes_context_key_validation_workflow",

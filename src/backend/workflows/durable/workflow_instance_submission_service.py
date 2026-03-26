@@ -35,6 +35,7 @@ from ...services.feature_flags import (
 )
 from ...services.namespace_service import resolve_canonical_namespace
 from ..engine import WorkflowDefinition
+from ..mcp_tool_bridge import candidate_internal_mcp_tool_names
 from ..vontology_loader import (
     build_workflow_process_graph,
     build_workflow_process_graph_from_definition,
@@ -45,6 +46,10 @@ from ..workflow_definition_identity_service import (
     build_workflow_definition_identity,
     collect_workflow_action_ids,
     validate_workflow_definition_contract,
+)
+from ..workflow_launch_input_contracts import (
+    WorkflowLaunchInputResolution,
+    resolve_workflow_launch_inputs,
 )
 from .instance_manager import WorkflowInstanceManager
 
@@ -269,6 +274,102 @@ def _build_runnable_feature_signature() -> dict[str, Any]:
         ),
         "internal_mcp_enabled": _truthy_env("VON_INTERNAL_MCP_ENABLE", default=False),
     }
+
+
+def _resolve_registered_workflow_runtime(
+    workflow_id: str,
+) -> tuple[Any, WorkflowDefinition | None, str, tuple[str, ...]]:
+    from .registry_factory import (
+        get_shared_workflow_registry_read_only,
+        register_workflow_from_vontology,
+    )
+
+    registry = get_shared_workflow_registry_read_only(defer_parity_work=True)
+    definition = registry.get(workflow_id)
+    if definition is None:
+        try:
+            registered, _error_code = register_workflow_from_vontology(
+                registry=registry,
+                workflow_id=workflow_id,
+            )
+            if registered:
+                definition = registry.get(workflow_id)
+        except Exception:
+            # Keep submission/verification fail-closed. Callers handle a missing
+            # definition explicitly after the shared lookup path completes.
+            definition = None
+    registration = getattr(registry, "get_registration", lambda _wid: None)(workflow_id)
+    registration_source = (
+        str(getattr(registration, "source", "") or "").strip()
+        if registration
+        else "unknown"
+    )
+    known_workflow_ids = tuple(
+        sorted(
+            {
+                str(item).strip()
+                for item in getattr(registry, "all_workflow_ids", lambda: [])()
+                if isinstance(item, str) and str(item).strip()
+            }
+        )
+    )
+    return registry, definition, registration_source, known_workflow_ids
+
+
+def _resolve_submission_launch_inputs(
+    *,
+    workflow_id: str,
+    inputs: Mapping[str, Any],
+) -> tuple[WorkflowDefinition | None, WorkflowLaunchInputResolution]:
+    workflow_definition: WorkflowDefinition | None = None
+    try:
+        _registry, workflow_definition, _source, _known_workflow_ids = (
+            _resolve_registered_workflow_runtime(workflow_id)
+        )
+    except Exception:
+        workflow_definition = None
+
+    if workflow_definition is None:
+        diagnostics = {
+            "schema_version": "workflow_launch_input_resolution.v1",
+            "workflow_id": str(workflow_id or "").strip(),
+            "status": "definition_unavailable",
+            "contract_source": None,
+            "required_inputs": [],
+            "resolved_inputs": [],
+            "unresolved_required_inputs": [],
+            "unresolved_optional_inputs": [],
+            "mappings": [],
+        }
+        return workflow_definition, WorkflowLaunchInputResolution(
+            resolved_inputs={},
+            unresolved_required_inputs=(),
+            unresolved_optional_inputs=(),
+            diagnostics=diagnostics,
+        )
+
+    workflow_metadata = getattr(workflow_definition, "metadata", None)
+    launch_contract = (
+        workflow_metadata.get("launch_input_contract")
+        if isinstance(workflow_metadata, Mapping)
+        else None
+    )
+    launch_contract_source = (
+        workflow_metadata.get("launch_input_contract_source")
+        if isinstance(workflow_metadata, Mapping)
+        else None
+    )
+    resolution = resolve_workflow_launch_inputs(
+        workflow_id=workflow_id,
+        contract=launch_contract if isinstance(launch_contract, Mapping) else None,
+        inputs=inputs,
+        contract_source=(
+            str(launch_contract_source).strip()
+            if isinstance(launch_contract_source, str) and launch_contract_source.strip()
+            else None
+        ),
+    )
+    return workflow_definition, resolution
 
 
 def _with_verification_telemetry(
@@ -617,7 +718,13 @@ def _verify_workflow_runnable_uncached(
         if action_registry.has(action_id):
             supported_actions.add(action_id)
             continue
-        if fallback_enabled and (not fallback_tool_names or action_id in fallback_tool_names):
+        if fallback_enabled and (
+            not fallback_tool_names
+            or any(
+                candidate in fallback_tool_names
+                for candidate in candidate_internal_mcp_tool_names(action_id)
+            )
+        ):
             supported_actions.add(action_id)
 
     contract_started = perf_counter()
@@ -699,44 +806,14 @@ def verify_workflow_runnable(workflow_id: str) -> WorkflowRunnableVerification:
         _invalidate_cache_if_feature_signature_changed(feature_signature)
 
         prep_started = perf_counter()
-        from .registry_factory import (
-            get_shared_durable_action_registry,
-            get_shared_workflow_registry_read_only,
-            register_workflow_from_vontology,
-        )
+        from .registry_factory import get_shared_durable_action_registry
 
         # Reuse the startup/shared registry rather than rebuilding the lazy
         # registry graph on every launch verification. This keeps verified
         # submission aligned with the authoritative runtime registry that the
         # worker itself will use once the instance starts executing.
-        registry = get_shared_workflow_registry_read_only(defer_parity_work=True)
-        definition = registry.get(workflow_id)
-        if definition is None:
-            try:
-                registered, _error_code = register_workflow_from_vontology(
-                    registry=registry,
-                    workflow_id=workflow_id,
-                )
-                if registered:
-                    definition = registry.get(workflow_id)
-            except Exception:
-                # Fail closed later through the normal verification pathway if
-                # Vontology-backed refresh cannot repair the missing entry.
-                definition = None
-        registration = getattr(registry, "get_registration", lambda _wid: None)(workflow_id)
-        registration_source = (
-            str(getattr(registration, "source", "") or "").strip()
-            if registration
-            else "unknown"
-        )
-        known_workflow_ids = tuple(
-            sorted(
-                {
-                    str(item).strip()
-                    for item in getattr(registry, "all_workflow_ids", lambda: [])()
-                    if isinstance(item, str) and str(item).strip()
-                }
-            )
+        registry, definition, registration_source, known_workflow_ids = (
+            _resolve_registered_workflow_runtime(workflow_id)
         )
 
         def _resolve_workflow_definition_for_validation(
@@ -967,6 +1044,54 @@ def submit_verified_workflow_instance(
             created_new=None,
         )
 
+    workflow_definition, launch_resolution = _resolve_submission_launch_inputs(
+        workflow_id=workflow_id,
+        inputs=inputs_payload,
+    )
+    launch_diagnostics = dict(launch_resolution.diagnostics)
+    verification_payload["workflow_launch_input_resolution"] = launch_diagnostics
+    inputs_payload["workflow_launch_input_resolution"] = dict(launch_diagnostics)
+
+    if workflow_definition is None:
+        return WorkflowInstanceSubmissionResult(
+            success=False,
+            workflow_id=workflow_id,
+            status="rejected_launch_input_contract",
+            instance_id=None,
+            error_code="workflow_launch_input_resolution_failed",
+            error=(
+                f"Workflow '{workflow_id}' could not resolve launch inputs because "
+                "its executable definition was unavailable."
+            ),
+            verification=verification_payload,
+            created_new=None,
+        )
+
+    for key, value in launch_resolution.resolved_inputs.items():
+        inputs_payload.setdefault(key, value)
+
+    unresolved_required_inputs = tuple(
+        item
+        for item in launch_resolution.unresolved_required_inputs
+        if isinstance(item, str) and item.strip()
+    )
+    if unresolved_required_inputs:
+        return WorkflowInstanceSubmissionResult(
+            success=False,
+            workflow_id=workflow_id,
+            status="rejected_launch_input_contract",
+            instance_id=None,
+            error_code="workflow_launch_input_resolution_failed",
+            error=(
+                f"Workflow '{workflow_id}' could not start because required launch "
+                "inputs were unresolved: "
+                + ", ".join(unresolved_required_inputs)
+                + "."
+            ),
+            verification=verification_payload,
+            created_new=None,
+        )
+
     use_event_idempotency_submission = all(
         isinstance(value, str) and value.strip()
         for value in (
@@ -1010,6 +1135,7 @@ def submit_verified_workflow_instance(
         preflight=preflight,
         postflight=postflight,
     )
+    verification_payload["workflow_launch_input_resolution"] = launch_diagnostics
     if created_new and not postflight.runnable_verification_success:
         manager.mark_failed(
             instance_id,

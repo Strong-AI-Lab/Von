@@ -795,6 +795,28 @@ def test_get_workflow_instance_returns_retryable_degraded_payload_for_mongo_time
     assert payload["error"] == "Workflow instance temporarily unavailable; please retry."
 
 
+def test_retry_workflow_instance_returns_retryable_degraded_payload_for_mongo_timeout(
+    monkeypatch, app_client
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    manager = types.SimpleNamespace(
+        get_instance=lambda _instance_id: (_ for _ in ()).throw(
+            PyMongoError("server selection timeout while reading workflow_instances")
+        )
+    )
+    monkeypatch.setattr(workflows_routes, "_get_instance_manager", lambda: manager)
+
+    response = app_client.post("/api/workflows/instances/inst-timeout/retry")
+
+    assert response.status_code == 503
+    payload = response.get_json()
+    assert payload["degraded"] is True
+    assert payload["retryable"] is True
+    assert payload["instance_id"] == "inst-timeout"
+    assert payload["error"] == "Workflow retry temporarily unavailable; please retry."
+
+
 def test_list_workflow_instances_accepts_comma_separated_status_filters(
     monkeypatch, app_client
 ):

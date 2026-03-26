@@ -23,7 +23,10 @@ from typing import Any, Dict, List
 from .. import WorkflowRegistry
 from ..workflow_registry import LazyWorkflowRegistration
 from ..action_registry import ActionRegistry, WorkflowActionResult
-from ..mcp_tool_bridge import workflow_action_result_from_mcp_payload
+from ..mcp_tool_bridge import (
+    resolve_internal_mcp_tool_name,
+    workflow_action_result_from_mcp_payload,
+)
 from ..vontology_loader import (
     build_workflow_process_graph,
     discover_workflow_ids,
@@ -292,7 +295,15 @@ def _durable_mcp_fallback_action(request: Any) -> WorkflowActionResult:
 
     try:
         gateway = _get_or_build_durable_mcp_gateway()
-        result = gateway.invoke(tool_name, payload)
+        available_tool_names = tuple(gateway.describe_methods().keys())
+        resolved_tool_name = (
+            resolve_internal_mcp_tool_name(
+                tool_name,
+                available_tool_names=available_tool_names,
+            )
+            or tool_name
+        )
+        result = gateway.invoke(resolved_tool_name, payload)
         try:
             from ..workflow_baseline_telemetry import (
                 record_generic_fallback_mcp_invocation,

@@ -67,8 +67,68 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
     assert "file_copy_concept_id" in contract["provided_inputs"]
     assert "paper_concept_id" in contract["provided_inputs"]
     assert "arxiv_id" in contract["provided_inputs"]
+    assert "publication_date" in contract["provided_inputs"]
     assert "author_names" in contract["provided_inputs"]
     assert "topic_labels" in contract["provided_inputs"]
+    delegate_action = delegate_state.actions[0]
+    assert delegate_action.inputs.get("paper_concept_id") == {
+        "$context_key": "paper_concept_id",
+        "$mapping_concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_delegate_to_general_paper_workflow_paper_concept_id_to_paper_concept_id_parameter",
+        "$required": False,
+    }
+
+    fetch_metadata_state_id = authority_service._step_concept_id(
+        workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        state_id="fetch_arxiv_metadata",
+    )
+    fetch_metadata_action = arxiv_definition.states[fetch_metadata_state_id].actions[0]
+    assert fetch_metadata_action.action_id == "get_paper_metadata"
+    assert fetch_metadata_action.inputs.get("arxiv_id") == {
+        "$context_key": "arxiv_id",
+        "$mapping_concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_fetch_arxiv_metadata_arxiv_id_to_arxiv_id_parameter",
+        "$required": True,
+    }
+    download_state_id = authority_service._step_concept_id(
+        workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        state_id="download_or_finalise",
+    )
+    download_action = arxiv_definition.states[download_state_id].actions[0]
+    assert download_action.inputs.get("materialise_scholarly_representation") is False
+    decide_acquisition_mode_state_id = authority_service._step_concept_id(
+        workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        state_id="decide_acquisition_mode",
+    )
+    decide_acquisition_mode_action = arxiv_definition.states[
+        decide_acquisition_mode_state_id
+    ].actions[0]
+    assert decide_acquisition_mode_action.inputs.get("file_copy_concept_id") == {
+        "$context_key": "file_copy_concept_id",
+        "$mapping_concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_decide_acquisition_mode_file_copy_concept_id_to_file_copy_concept_id_parameter",
+        "$required": False,
+    }
+
+    scholarly_verify_state_id = authority_service._step_concept_id(
+        workflow_id=SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID,
+        state_id="verify_representation",
+    )
+    scholarly_verify_action = scholarly_definition.states[scholarly_verify_state_id].actions[0]
+    assert scholarly_verify_action.inputs.get("publication_date") == {
+        "$context_key": "publication_date",
+        "$mapping_concept_id": "#V#workflow_mapping_scholarly_paper_representation_workflow_verify_representation_publication_date_to_publication_date_parameter",
+        "$required": True,
+    }
+    scholarly_normalise_state_id = authority_service._step_concept_id(
+        workflow_id=SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID,
+        state_id="normalise_inputs",
+    )
+    scholarly_normalise_action = scholarly_definition.states[
+        scholarly_normalise_state_id
+    ].actions[0]
+    assert scholarly_normalise_action.inputs.get("paper_concept_id") == {
+        "$context_key": "paper_concept_id",
+        "$mapping_concept_id": "#V#workflow_mapping_scholarly_paper_representation_workflow_normalise_inputs_paper_concept_id_to_paper_concept_id_parameter",
+        "$required": False,
+    }
 
     scholarly_concept = concept_service.get_concept_by_concept_id(
         SCHOLARLY_PAPER_REPRESENTATION_WORKFLOW_ID
@@ -103,3 +163,58 @@ def test_bootstrap_skips_republication_when_workflow_family_is_current(
     assert second_counts.get("errors") == 0
     assert second_report.get("typed_workflow_ids") == []
     assert second_report.get("typed_step_ids") == []
+
+
+def test_bootstrap_repairs_optional_input_mapping_drift(
+    _reset_mock_db: Any,
+) -> None:
+    bootstrap_canonical_paper_representation_workflows()
+
+    mapping_concept_id = (
+        "#V#workflow_mapping_arxiv_paper_representation_workflow_"
+        "decide_acquisition_mode_file_copy_concept_id_to_file_copy_concept_id_parameter"
+    )
+    mapping_doc = concept_service.get_concept_by_concept_id(mapping_concept_id)
+    assert mapping_doc is not None
+    mapping_spec = dict(
+        ((mapping_doc.get("concept_data") or {}).get("workflow_mapping_spec") or {})
+    )
+    mapping_spec.pop("required", None)
+    concept_service.update_concept(
+        mapping_concept_id,
+        {"concept_data.workflow_mapping_spec": mapping_spec},
+    )
+
+    drifted_definition = load_workflow_definition_from_vontology(
+        ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+    )
+    assert drifted_definition is not None
+    drifted_state_id = authority_service._step_concept_id(
+        workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        state_id="decide_acquisition_mode",
+    )
+    drifted_action = drifted_definition.states[drifted_state_id].actions[0]
+    assert drifted_action.inputs.get("file_copy_concept_id") == {
+        "$context_key": "file_copy_concept_id",
+        "$mapping_concept_id": mapping_concept_id,
+        "$required": True,
+    }
+
+    repair_report = bootstrap_canonical_paper_representation_workflows()
+    repair_publication = repair_report.get("publication") or {}
+    repair_counts = repair_publication.get("counts") or {}
+
+    assert repair_publication.get("skipped") is not True
+    assert repair_counts.get("workflows_published") == 2
+    assert repair_counts.get("errors") == 0
+
+    repaired_definition = load_workflow_definition_from_vontology(
+        ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
+    )
+    assert repaired_definition is not None
+    repaired_action = repaired_definition.states[drifted_state_id].actions[0]
+    assert repaired_action.inputs.get("file_copy_concept_id") == {
+        "$context_key": "file_copy_concept_id",
+        "$mapping_concept_id": mapping_concept_id,
+        "$required": False,
+    }

@@ -1,0 +1,597 @@
+{
+  "family_id": "arxiv_paper_ingestion_testing_workflow_seed_bundle",
+  "managed_by": "testing_workflow_vontology_service",
+  "schema_version": "repo_seed_workflow_bundle.v1",
+  "source_tag": "JVNAUTOSCI-1570",
+  "supported_action_ids": [
+    "testing.prepare_arxiv_paper_ingestion_fixture",
+    "testing.prepare_experiment_spec",
+    "theory.create_slice",
+    "theory.assert_local_claim",
+    "experiment.start_run",
+    "experiment.execute_target_workflow",
+    "testing.verify_arxiv_paper_ingestion_result",
+    "testing.cleanup_arxiv_paper_ingestion_artifacts",
+    "experiment.record_observation",
+    "experiment.compute_verdict",
+    "experiment.emit_learning_signal"
+  ],
+  "workflows": [
+    {
+      "workflow_id": "#V#arxiv_paper_ingestion_testing_workflow",
+      "display_name": "arXiv Paper Ingestion Testing Workflow",
+      "description": "Execute the canonical arXiv ingestion workflow against one live arXiv paper, verify represented scholarly metadata and provenance, and clean up transient artefacts afterwards.",
+      "content": "Prepare an isolated arXiv paper-ingestion fixture, run the real arXiv paper representation workflow, verify represented title, authors, abstract, publication date, provenance, and cleanup, then emit an experiment verdict and learning signal.",
+      "type_ids": [
+        "#V#ai_workflow",
+        "#V#durable_workflow",
+        "#V#testing_workflow",
+        "#V#theory_slice_test_workflow"
+      ],
+      "launch_input_contract": {
+        "schema_version": "workflow_launch_input_contract.v1",
+        "required_inputs": [
+          "prompt_text"
+        ],
+        "input_mappings": [
+          {
+            "target_context_key": "prompt_text",
+            "source_expression": "inputs.prompt",
+            "extractor": "identity",
+            "required": true,
+            "description": "Pass the full user request into the testing workflow so the fixture-preparation step can resolve the arXiv identifier or source URL."
+          }
+        ]
+      },
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"testing\",\"authoring_intent_required\":false,\"prefer_existing_capability\":false}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
+          "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"arxiv ingestion test\",\"paper ingestion workflow test\",\"test arxiv paper ingestion\",\"verify arxiv ingestion workflow\"],\"examples\":[\"Run the arXiv paper ingestion testing workflow on https://arxiv.org/abs/2603.21702.\",\"Test whether the canonical arXiv ingestion workflow fully represents this arXiv paper and cleans up after itself.\"]}",
+          "lang": "en-NZ"
+        }
+      ],
+      "publication_spec": {
+        "initial_state": "prepare_fixture",
+        "steps": [
+          {
+            "state_id": "prepare_fixture",
+            "action_id": "testing.prepare_arxiv_paper_ingestion_fixture",
+            "static_input_bindings": [
+              [
+                "prompt_text",
+                {
+                  "$context_key": "prompt_text"
+                }
+              ],
+              [
+                "timeout_seconds",
+                20
+              ],
+              [
+                "repair_existing_artifacts",
+                true
+              ]
+            ],
+            "next_state": "prepare_spec",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "prepare_spec",
+            "action_id": "testing.prepare_experiment_spec",
+            "static_input_bindings": [
+              [
+                "arxiv_id",
+                {
+                  "$context_key": "arxiv_id"
+                }
+              ],
+              [
+                "source_uri",
+                {
+                  "$context_key": "source_uri"
+                }
+              ],
+              [
+                "expected_title",
+                {
+                  "$context_key": "expected_title"
+                }
+              ],
+              [
+                "expected_summary",
+                {
+                  "$context_key": "expected_summary"
+                }
+              ],
+              [
+                "expected_publication_date",
+                {
+                  "$context_key": "expected_publication_date"
+                }
+              ],
+              [
+                "expected_author_names",
+                {
+                  "$context_key": "expected_author_names"
+                }
+              ],
+              [
+                "expected_topic_labels",
+                {
+                  "$context_key": "expected_topic_labels"
+                }
+              ],
+              [
+                "scenario_template",
+                {
+                  "schema_version": "testing_experiment_scenario_template.v1",
+                  "name": "arXiv paper ingestion workflow derivation and validation",
+                  "description": "Testing spec for executing the canonical arXiv paper ingestion workflow against one live arXiv paper and verifying represented scholarly metadata plus cleanup.",
+                  "fixture_payload": {
+                    "arxiv_id": {
+                      "$input": "arxiv_id"
+                    },
+                    "source_uri": {
+                      "$input": "source_uri"
+                    },
+                    "expected_title": {
+                      "$input": "expected_title"
+                    },
+                    "expected_summary": {
+                      "$input": "expected_summary"
+                    },
+                    "expected_publication_date": {
+                      "$input": "expected_publication_date"
+                    },
+                    "expected_author_names": {
+                      "$input": "expected_author_names"
+                    },
+                    "expected_topic_labels": {
+                      "$input": "expected_topic_labels"
+                    }
+                  },
+                  "target_workflow_ids": [
+                    "#V#arxiv_paper_representation_workflow"
+                  ],
+                  "candidate_workflow_ids": [
+                    "#V#arxiv_paper_representation_workflow"
+                  ],
+                  "expected_outcomes": [
+                    {
+                      "label": "target_workflow_execution",
+                      "expected": "completed"
+                    },
+                    {
+                      "label": "metadata_representation",
+                      "expected": "title, authors, abstract, and publication date represented"
+                    },
+                    {
+                      "label": "author_links",
+                      "expected": "all expected authors and topics linked to the paper"
+                    },
+                    {
+                      "label": "provenance_preserved",
+                      "expected": "arXiv identifiers, source URL, and file copy link preserved"
+                    },
+                    {
+                      "label": "cleanup_completed",
+                      "expected": "transient ingestion artefacts removed"
+                    }
+                  ],
+                  "theory_setup": {
+                    "seed_claims": [
+                      {
+                        "source_id": "#V#arxiv_paper_ingestion_testing_workflow",
+                        "predicate": "#V#has_hypothesis",
+                        "target": "The canonical arXiv ingestion workflow should represent the requested paper metadata and provenance completely.",
+                        "target_kind": "text"
+                      },
+                      {
+                        "source_id": "#V#arxiv_paper_ingestion_testing_workflow",
+                        "predicate": "#V#has_assumption",
+                        "target": "The testing workflow must clean up transient paper-ingestion artefacts after verification.",
+                        "target_kind": "text"
+                      }
+                    ]
+                  },
+                  "forbidden_side_effects": [
+                    "transient_paper_ingestion_artifacts_left_behind"
+                  ],
+                  "verdict_rules": {
+                    "require_all_expected_outcomes": true
+                  },
+                  "replay_policy": {
+                    "retain_failing_cases": true,
+                    "retain_passing_cases": true
+                  },
+                  "promotion_policy": {
+                    "requires_manual_gate": false
+                  },
+                  "metadata": {
+                    "scenario": "arxiv_paper_ingestion_testing",
+                    "acceptance_paper": "https://arxiv.org/abs/2603.21702"
+                  }
+                }
+              ]
+            ],
+            "next_state": "create_theory_slice",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "create_theory_slice",
+            "action_id": "theory.create_slice",
+            "static_input_bindings": [
+              [
+                "experiment_spec_id",
+                {
+                  "$context_key": "experiment_spec_id"
+                }
+              ],
+              [
+                "name",
+                {
+                  "$context_key": "theory_slice_name"
+                }
+              ],
+              [
+                "expected_observations",
+                {
+                  "$context_key": "theory_slice_expected_observations"
+                }
+              ],
+              [
+                "promotion_policy",
+                {
+                  "$context_key": "theory_slice_promotion_policy"
+                }
+              ],
+              [
+                "ttl_seconds",
+                3600
+              ]
+            ],
+            "next_state": "assert_seed_claims",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "assert_seed_claims",
+            "action_id": "theory.assert_local_claim",
+            "static_input_bindings": [
+              [
+                "theory_id",
+                {
+                  "$context_key": "theory_id"
+                }
+              ],
+              [
+                "claims",
+                {
+                  "$context_key": "seed_claims"
+                }
+              ]
+            ],
+            "next_state": "start_experiment_run",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "start_experiment_run",
+            "action_id": "experiment.start_run",
+            "static_input_bindings": [
+              [
+                "experiment_spec_id",
+                {
+                  "$context_key": "experiment_spec_id"
+                }
+              ],
+              [
+                "theory_id",
+                {
+                  "$context_key": "theory_id"
+                }
+              ],
+              [
+                "target_workflow_ids",
+                [
+                  "#V#arxiv_paper_representation_workflow"
+                ]
+              ],
+              [
+                "candidate_workflow_ids",
+                [
+                  "#V#arxiv_paper_representation_workflow"
+                ]
+              ],
+              [
+                "metadata",
+                {
+                  "scenario": "arxiv_paper_ingestion_testing"
+                }
+              ]
+            ],
+            "next_state": "execute_target_workflow",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "execute_target_workflow",
+            "action_id": "experiment.execute_target_workflow",
+            "static_input_bindings": [
+              [
+                "run_id",
+                {
+                  "$context_key": "run_id"
+                }
+              ],
+              [
+                "theory_id",
+                {
+                  "$context_key": "theory_id"
+                }
+              ],
+              [
+                "workflow_id",
+                "#V#arxiv_paper_representation_workflow"
+              ],
+              [
+                "workflow_inputs",
+                {
+                  "prompt": {
+                    "$context_key": "prompt_text"
+                  },
+                  "original_filename": {
+                    "$context_key": "original_filename"
+                  },
+                  "source_uri": {
+                    "$context_key": "source_uri"
+                  },
+                  "arxiv_id": {
+                    "$context_key": "arxiv_id"
+                  },
+                  "verification_profile": "arxiv"
+                }
+              ],
+              [
+                "await_terminal",
+                true
+              ],
+              [
+                "timeout_seconds",
+                2400
+              ],
+              [
+                "poll_interval_seconds",
+                5
+              ],
+              [
+                "record_observation",
+                true
+              ],
+              [
+                "expected_final_status",
+                "completed"
+              ],
+              [
+                "observation_label",
+                "target_workflow_execution"
+              ]
+            ],
+            "next_state": "verify_representation",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "verify_representation",
+            "action_id": "testing.verify_arxiv_paper_ingestion_result",
+            "static_input_bindings": [
+              [
+                "workflow_execution",
+                {
+                  "$context_key": "workflow_execution"
+                }
+              ],
+              [
+                "arxiv_id",
+                {
+                  "$context_key": "arxiv_id"
+                }
+              ],
+              [
+                "source_uri",
+                {
+                  "$context_key": "source_uri"
+                }
+              ],
+              [
+                "expected_title",
+                {
+                  "$context_key": "expected_title"
+                }
+              ],
+              [
+                "expected_summary",
+                {
+                  "$context_key": "expected_summary"
+                }
+              ],
+              [
+                "expected_publication_date",
+                {
+                  "$context_key": "expected_publication_date"
+                }
+              ],
+              [
+                "expected_author_names",
+                {
+                  "$context_key": "expected_author_names"
+                }
+              ],
+              [
+                "expected_author_concept_ids",
+                {
+                  "$context_key": "expected_author_concept_ids"
+                }
+              ],
+              [
+                "expected_topic_labels",
+                {
+                  "$context_key": "expected_topic_labels"
+                }
+              ],
+              [
+                "expected_topic_concept_ids",
+                {
+                  "$context_key": "expected_topic_concept_ids"
+                }
+              ],
+              [
+                "paper_concept_id",
+                {
+                  "$context_key": "paper_concept_id"
+                }
+              ]
+            ],
+            "next_state": "record_verification_observations",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "record_verification_observations",
+            "action_id": "experiment.record_observation",
+            "static_input_bindings": [
+              [
+                "run_id",
+                {
+                  "$context_key": "run_id"
+                }
+              ],
+              [
+                "observations",
+                {
+                  "$context_key": "observations"
+                }
+              ]
+            ],
+            "next_state": "cleanup_artifacts",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "cleanup_artifacts",
+            "action_id": "testing.cleanup_arxiv_paper_ingestion_artifacts",
+            "static_input_bindings": [
+              [
+                "paper_concept_id",
+                {
+                  "$context_key": "paper_concept_id"
+                }
+              ],
+              [
+                "file_copy_concept_id",
+                {
+                  "$context_key": "file_copy_concept_id"
+                }
+              ],
+              [
+                "file_copy_concept_ids",
+                {
+                  "$context_key": "file_copy_concept_ids"
+                }
+              ],
+              [
+                "author_concept_ids",
+                {
+                  "$context_key": "author_concept_ids"
+                }
+              ],
+              [
+                "topic_concept_ids",
+                {
+                  "$context_key": "topic_concept_ids"
+                }
+              ],
+              [
+                "preexisting_author_concept_ids",
+                {
+                  "$context_key": "preexisting_author_concept_ids"
+                }
+              ],
+              [
+                "preexisting_topic_concept_ids",
+                {
+                  "$context_key": "preexisting_topic_concept_ids"
+                }
+              ]
+            ],
+            "next_state": "record_cleanup_observations",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "record_cleanup_observations",
+            "action_id": "experiment.record_observation",
+            "static_input_bindings": [
+              [
+                "run_id",
+                {
+                  "$context_key": "run_id"
+                }
+              ],
+              [
+                "observations",
+                {
+                  "$context_key": "observations"
+                }
+              ]
+            ],
+            "next_state": "compute_experiment_verdict",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "compute_experiment_verdict",
+            "action_id": "experiment.compute_verdict",
+            "static_input_bindings": [
+              [
+                "run_id",
+                {
+                  "$context_key": "run_id"
+                }
+              ]
+            ],
+            "next_state": "emit_learning_signal",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "emit_learning_signal",
+            "action_id": "experiment.emit_learning_signal",
+            "static_input_bindings": [
+              [
+                "run_id",
+                {
+                  "$context_key": "run_id"
+                }
+              ],
+              [
+                "turn_text",
+                {
+                  "$context_key": "prompt_text"
+                }
+              ],
+              [
+                "expected_workflow_id",
+                "#V#arxiv_paper_representation_workflow"
+              ]
+            ],
+            "next_state": "complete",
+            "on_failure_state": "failed"
+          },
+          {
+            "state_id": "complete"
+          },
+          {
+            "state_id": "failed"
+          }
+        ]
+      }
+    }
+  ]
+}

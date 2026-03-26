@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from .action_registry import WorkflowActionResult
@@ -16,6 +16,44 @@ def _coerce_mcp_error_message(*, tool_name: str, payload: Mapping[str, Any]) -> 
         or ""
     ).strip()
     return error_text or f"mcp_tool_error:{tool_name}"
+
+
+def candidate_internal_mcp_tool_names(action_id: str | None) -> tuple[str, ...]:
+    """Return plausible internal MCP tool names for a workflow action ID."""
+
+    action_text = str(action_id or "").strip()
+    if not action_text:
+        return ()
+
+    candidates: list[str] = [action_text]
+    underscored = action_text.replace(".", "_")
+    if underscored and underscored not in candidates:
+        candidates.append(underscored)
+    return tuple(candidates)
+
+
+def resolve_internal_mcp_tool_name(
+    requested_name: str | None,
+    *,
+    available_tool_names: Sequence[str] | None = None,
+) -> str | None:
+    """Resolve the best available internal MCP tool name for ``requested_name``."""
+
+    candidates = candidate_internal_mcp_tool_names(requested_name)
+    if not candidates:
+        return None
+    if not available_tool_names:
+        return candidates[0]
+
+    available = {
+        str(name or "").strip()
+        for name in available_tool_names
+        if str(name or "").strip()
+    }
+    for candidate in candidates:
+        if candidate in available:
+            return candidate
+    return None
 
 
 def workflow_action_result_from_mcp_payload(
@@ -53,4 +91,8 @@ def workflow_action_result_from_mcp_payload(
     )
 
 
-__all__ = ["workflow_action_result_from_mcp_payload"]
+__all__ = [
+    "candidate_internal_mcp_tool_names",
+    "resolve_internal_mcp_tool_name",
+    "workflow_action_result_from_mcp_payload",
+]

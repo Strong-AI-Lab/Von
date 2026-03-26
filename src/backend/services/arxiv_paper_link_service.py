@@ -14,6 +14,7 @@ _ARXIV_ID_PATTERN = re.compile(
 )
 
 _MAX_TOPIC_RELATIONS = 3
+_PUBLICATION_DATE_PREDICATE_ID = "#V#has_publication_date"
 
 
 def _normalise_arxiv_id(arxiv_id: str) -> str:
@@ -87,7 +88,7 @@ def _concept_exists(concept_id: str) -> bool:
     from . import concept_service
 
     try:
-        return concept_service.get_concept_by_concept_id(concept_id) is not None
+        return concept_service.get_concept_by_concept_id_exact(concept_id) is not None
     except Exception:
         return False
 
@@ -116,6 +117,33 @@ def _ensure_type_concept(
     except Exception as exc:
         if logger is not None:
             logger.warning("[%s] Type ensure failed (continuing): %s", concept_id, exc)
+
+
+def _ensure_name_text_relation(
+    *,
+    concept_id: str,
+    text: str,
+    source: str,
+    logger: Any | None = None,
+) -> None:
+    cleaned_text = str(text or "").strip()
+    if not concept_id or not cleaned_text:
+        return
+    try:
+        upsert_text_for_concept(
+            subject_concept_id=concept_id,
+            predicate="hasName",
+            text=cleaned_text,
+            lang="en-NZ",
+            context={"name_type": "NL", "source": source},
+        )
+    except Exception as exc:
+        if logger is not None:
+            logger.warning(
+                "[arxiv_paper_representation] Name text ensure failed for %s: %s",
+                concept_id,
+                exc,
+            )
 
 
 def _ensure_predicate_concept(
@@ -232,24 +260,18 @@ def _resolve_or_create_person_concept_id(
 ) -> str:
     from . import concept_service
 
-    search_result = concept_search_service.search_concepts(
-        query=person_name,
-        instance_of="#V#person",
-        match_type="exact",
-        limit=10,
+    concept_id = predict_scholarly_author_concept_id(
+        user_concept_id=user_concept_id,
+        author_name=person_name,
     )
-    for item in search_result.get("results") or []:
-        if not isinstance(item, Mapping):
-            continue
-        candidate_id = item.get("concept_id")
-        candidate_name = item.get("name")
-        if not isinstance(candidate_id, str) or not candidate_id.strip():
-            continue
-        if isinstance(candidate_name, str) and candidate_name.strip():
-            if candidate_name.strip().casefold() == person_name.casefold():
-                return candidate_id.strip()
-
-    concept_id = _stable_named_instance_concept_id(person_name, prefix="person")
+    if _concept_exists(concept_id):
+        _ensure_name_text_relation(
+            concept_id=concept_id,
+            text=person_name,
+            source="arxiv_author_metadata",
+            logger=logger,
+        )
+        return concept_id
     try:
         concept_service.create_concept(
             name=person_name,
@@ -269,6 +291,13 @@ def _resolve_or_create_person_concept_id(
                 person_name,
                 exc,
             )
+    if _concept_exists(concept_id):
+        _ensure_name_text_relation(
+            concept_id=concept_id,
+            text=person_name,
+            source="arxiv_author_metadata",
+            logger=logger,
+        )
     return concept_id
 
 
@@ -280,24 +309,18 @@ def _resolve_or_create_topic_concept_id(
 ) -> str:
     from . import concept_service
 
-    search_result = concept_search_service.search_concepts(
-        query=topic_label,
-        instance_of="#V#research_topic",
-        match_type="exact",
-        limit=10,
+    concept_id = predict_scholarly_topic_concept_id(
+        user_concept_id=user_concept_id,
+        topic_label=topic_label,
     )
-    for item in search_result.get("results") or []:
-        if not isinstance(item, Mapping):
-            continue
-        candidate_id = item.get("concept_id")
-        candidate_name = item.get("name")
-        if not isinstance(candidate_id, str) or not candidate_id.strip():
-            continue
-        if isinstance(candidate_name, str) and candidate_name.strip():
-            if candidate_name.strip().casefold() == topic_label.casefold():
-                return candidate_id.strip()
-
-    concept_id = _stable_named_instance_concept_id(topic_label, prefix="research_topic")
+    if _concept_exists(concept_id):
+        _ensure_name_text_relation(
+            concept_id=concept_id,
+            text=topic_label,
+            source="arxiv_topic_metadata",
+            logger=logger,
+        )
+        return concept_id
     try:
         concept_service.create_concept(
             name=topic_label,
@@ -317,6 +340,13 @@ def _resolve_or_create_topic_concept_id(
                 topic_label,
                 exc,
             )
+    if _concept_exists(concept_id):
+        _ensure_name_text_relation(
+            concept_id=concept_id,
+            text=topic_label,
+            source="arxiv_topic_metadata",
+            logger=logger,
+        )
     return concept_id
 
 
@@ -337,6 +367,25 @@ def _extract_metadata_summary(metadata: Mapping[str, Any] | None) -> str | None:
         value = metadata.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
+    return None
+
+
+def _extract_metadata_publication_date(
+    metadata: Mapping[str, Any] | None,
+) -> str | None:
+    if not isinstance(metadata, Mapping):
+        return None
+    for key in ("publication_date", "published", "submission_date", "date"):
+        value = metadata.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        text = value.strip()
+        if "T" in text:
+            text = text.split("T", 1)[0].strip()
+        if re.match(r"^\d{4}/\d{2}/\d{2}$", text):
+            text = text.replace("/", "-")
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", text):
+            return text
     return None
 
 
@@ -372,6 +421,14 @@ def extract_scholarly_metadata_summary(
     return _extract_metadata_summary(metadata)
 
 
+def extract_scholarly_metadata_publication_date(
+    metadata: Mapping[str, Any] | None,
+) -> str | None:
+    """Return the preferred publication/submission date from scholarly metadata."""
+
+    return _extract_metadata_publication_date(metadata)
+
+
 def resolve_or_create_scholarly_author_concept_id(
     *,
     user_concept_id: str,
@@ -387,6 +444,66 @@ def resolve_or_create_scholarly_author_concept_id(
     )
 
 
+def predict_arxiv_paper_concept_id(*, arxiv_id: str) -> str:
+    """Return the stable paper concept ID for an arXiv identifier."""
+
+    return _stable_paper_instance_concept_id(arxiv_id)
+
+
+def predict_scholarly_author_concept_id(
+    *,
+    user_concept_id: str,
+    author_name: str,
+) -> str:
+    """Resolve the expected author concept ID without creating any concepts."""
+
+    del user_concept_id
+    search_result = concept_search_service.search_concepts(
+        query=author_name,
+        instance_of="#V#person",
+        match_type="exact",
+        limit=10,
+    )
+    for item in search_result.get("results") or []:
+        if not isinstance(item, Mapping):
+            continue
+        candidate_id = item.get("concept_id")
+        candidate_name = item.get("name")
+        if not isinstance(candidate_id, str) or not candidate_id.strip():
+            continue
+        if isinstance(candidate_name, str) and candidate_name.strip():
+            if candidate_name.strip().casefold() == author_name.casefold():
+                return candidate_id.strip()
+    return _stable_named_instance_concept_id(author_name, prefix="person")
+
+
+def predict_scholarly_topic_concept_id(
+    *,
+    user_concept_id: str,
+    topic_label: str,
+) -> str:
+    """Resolve the expected topic concept ID without creating any concepts."""
+
+    del user_concept_id
+    search_result = concept_search_service.search_concepts(
+        query=topic_label,
+        instance_of="#V#research_topic",
+        match_type="exact",
+        limit=10,
+    )
+    for item in search_result.get("results") or []:
+        if not isinstance(item, Mapping):
+            continue
+        candidate_id = item.get("concept_id")
+        candidate_name = item.get("name")
+        if not isinstance(candidate_id, str) or not candidate_id.strip():
+            continue
+        if isinstance(candidate_name, str) and candidate_name.strip():
+            if candidate_name.strip().casefold() == topic_label.casefold():
+                return candidate_id.strip()
+    return _stable_named_instance_concept_id(topic_label, prefix="research_topic")
+
+
 def _relation_contains_target(
     concept_id: str,
     predicate: str,
@@ -394,7 +511,10 @@ def _relation_contains_target(
 ) -> bool:
     from . import concept_service
 
-    concept_doc = concept_service.get_concept_by_concept_id(concept_id) or {}
+    try:
+        concept_doc = concept_service.get_concept_by_concept_id_exact(concept_id) or {}
+    except Exception:
+        concept_doc = {}
     relationships = concept_doc.get("relationships") or {}
     raw_targets = relationships.get(predicate) or []
     if isinstance(raw_targets, str):
@@ -453,11 +573,11 @@ def ensure_arxiv_paper_instance(
 
     type_concept_id = "#V#paper_on_arxiv"
     normalised_arxiv_id = _normalise_arxiv_id(arxiv_id)
-    instance_concept_id = _stable_paper_instance_concept_id(normalised_arxiv_id)
+    instance_concept_id = predict_arxiv_paper_concept_id(arxiv_id=normalised_arxiv_id)
 
     existing = None
     try:
-        existing = concept_service.get_concept_by_concept_id(instance_concept_id)
+        existing = concept_service.get_concept_by_concept_id_exact(instance_concept_id)
     except Exception:
         existing = None
 
@@ -581,12 +701,13 @@ def materialise_scholarly_representation_for_file_copy(
     paper_concept_id = _stable_file_copy_paper_instance_concept_id(file_copy_concept_id)
     existing = None
     try:
-        existing = concept_service.get_concept_by_concept_id(paper_concept_id)
+        existing = concept_service.get_concept_by_concept_id_exact(paper_concept_id)
     except Exception:
         existing = None
 
     title = _extract_metadata_title(metadata)
     summary = _extract_metadata_summary(metadata)
+    publication_date = _extract_metadata_publication_date(metadata)
     default_name = f"Scholarly paper for {file_copy_concept_id}"
 
     if not existing:
@@ -634,6 +755,15 @@ def materialise_scholarly_representation_for_file_copy(
             context={"source": "file_copy_interpretation"},
         )
 
+    if isinstance(publication_date, str) and publication_date.strip():
+        upsert_text_for_concept(
+            subject_concept_id=paper_concept_id,
+            predicate=_PUBLICATION_DATE_PREDICATE_ID,
+            text=publication_date.strip(),
+            lang="en-NZ",
+            context={"source": "file_copy_interpretation"},
+        )
+
     type_asserted = _relation_contains_target(
         paper_concept_id,
         "is_an_instance_of",
@@ -646,6 +776,7 @@ def materialise_scholarly_representation_for_file_copy(
     )
     summary_present = bool(summary and summary.strip())
     title_present = bool(title and title.strip())
+    publication_date_present = bool(publication_date and publication_date.strip())
 
     verification_failures: list[str] = []
     if not type_asserted:
@@ -662,6 +793,8 @@ def materialise_scholarly_representation_for_file_copy(
         "title": title,
         "title_present": title_present,
         "summary_present": summary_present,
+        "publication_date": publication_date,
+        "publication_date_present": publication_date_present,
         "type_asserted": type_asserted,
         "file_link_verified": file_link_verified,
         "verification_failures": verification_failures,
@@ -729,6 +862,7 @@ def materialise_scholarly_representation_for_arxiv_file_copy(
 
     title = _extract_metadata_title(metadata)
     summary = _extract_metadata_summary(metadata)
+    publication_date = _extract_metadata_publication_date(metadata)
     author_names = _extract_author_names(metadata)
     topic_labels = _extract_topic_labels(metadata)
 
@@ -753,6 +887,17 @@ def materialise_scholarly_representation_for_arxiv_file_copy(
             context={"source": "arxiv_metadata"},
         )
         summary_asserted = True
+
+    publication_date_asserted = False
+    if isinstance(publication_date, str) and publication_date.strip():
+        upsert_text_for_concept(
+            subject_concept_id=paper_concept_id,
+            predicate=_PUBLICATION_DATE_PREDICATE_ID,
+            text=publication_date.strip(),
+            lang="en-NZ",
+            context={"source": "arxiv_metadata"},
+        )
+        publication_date_asserted = True
 
     if topic_labels:
         upsert_text_for_concept(
@@ -875,6 +1020,8 @@ def materialise_scholarly_representation_for_arxiv_file_copy(
         verification_failures.append("title_missing")
     if not summary_present:
         verification_failures.append("summary_missing")
+    if not publication_date_asserted:
+        verification_failures.append("publication_date_missing")
     if not author_asserted:
         verification_failures.append("authors_missing")
     if not type_asserted:
@@ -898,6 +1045,8 @@ def materialise_scholarly_representation_for_arxiv_file_copy(
         "topic_concept_ids": topic_concept_ids,
         "topic_links_written": topic_links_written,
         "summary_present": summary_present,
+        "publication_date": publication_date,
+        "publication_date_asserted": publication_date_asserted,
         "type_asserted": type_asserted,
         "file_link_verified": file_link_verified,
         "verification_failures": verification_failures,
@@ -909,11 +1058,15 @@ __all__ = [
     "ensure_paper_on_arxiv_type_exists",
     "extract_arxiv_id_candidates",
     "extract_scholarly_author_names",
+    "extract_scholarly_metadata_publication_date",
     "extract_scholarly_metadata_summary",
     "extract_scholarly_metadata_title",
     "extract_scholarly_topic_labels",
     "link_file_copy_to_arxiv_paper",
     "materialise_scholarly_representation_for_file_copy",
     "materialise_scholarly_representation_for_arxiv_file_copy",
+    "predict_arxiv_paper_concept_id",
+    "predict_scholarly_author_concept_id",
+    "predict_scholarly_topic_concept_id",
     "resolve_or_create_scholarly_author_concept_id",
 ]

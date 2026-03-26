@@ -1108,10 +1108,12 @@ def _build_definition_from_publication_spec(
                     or not mapping_spec.context_key.strip()
                 ):
                     continue
-                action_inputs[mapping_spec.tool_param.strip()] = {
+                action_input_mapping: dict[str, Any] = {
                     "$context_key": mapping_spec.context_key.strip(),
                     "$mapping_concept_id": mapping_spec.concept_id,
                 }
+                action_input_mapping["$required"] = bool(mapping_spec.required)
+                action_inputs[mapping_spec.tool_param.strip()] = action_input_mapping
         actions = (
             (
                 WorkflowActionInvocation(

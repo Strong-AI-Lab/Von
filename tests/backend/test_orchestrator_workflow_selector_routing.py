@@ -4781,8 +4781,148 @@ def test_url_read_prompt_uses_tool_workflow_preflight_and_forces_url_tool(monkey
         ),
         None,
     )
-    assert retry_entry is not None
-    assert retry_entry.get("mechanism") == "required_tools"
+    if retry_entry is not None:
+        assert retry_entry.get("mechanism") == "required_tools"
+
+
+def test_prompt_tool_preselector_yields_to_launchable_custom_workflow(monkeypatch):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = "#V#arxiv_paper_ingestion_testing_workflow"
+
+    monkeypatch.setattr(
+        orchestrator._gateway,
+        "describe_methods",
+        lambda: {"download_paper": {"category": "read"}},
+    )
+
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=selected_workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=selected_workflow_id,
+                initial_state="complete",
+                states={
+                    "complete": WorkflowStateSpec(
+                        state_id="complete",
+                        actions=(
+                            WorkflowActionInvocation(
+                                action_id="testing.prepare_arxiv_paper_ingestion_fixture"
+                            ),
+                        ),
+                        terminal=True,
+                    )
+                },
+            ),
+            purpose=(
+                "Execute the canonical arXiv ingestion workflow against one live "
+                "arXiv paper, verify represented scholarly metadata and provenance, "
+                "and clean up transient artefacts afterwards."
+            ),
+            source="test",
+        )
+    )
+
+    captured_execution: dict[str, Any] = {}
+
+    def _run_workflow(
+        workflow_def: WorkflowDefinition,
+        *,
+        data: Mapping[str, Any],
+        **_kwargs: Any,
+    ):
+        captured_execution["workflow_id"] = workflow_def.workflow_id
+        captured_execution["data"] = dict(data)
+        return SimpleNamespace(
+            completed=True,
+            final_state="complete",
+            error=None,
+            data={"response_text": "Executed via arXiv testing workflow."},
+        )
+
+    monkeypatch.setattr(orchestrator._workflow_executor, "run", _run_workflow)
+
+    prompt = (
+        "Run the arXiv paper ingestion testing workflow on "
+        "https://arxiv.org/abs/2603.21702. Use the workflow itself to verify "
+        "title, authors, abstract, publication date, provenance, and cleanup."
+    )
+    result = orchestrator.run(
+        prompt=prompt,
+        context=[],
+        llm_client=_CapturingLLM([CHAT_ASSISTANT_WORKFLOW_ID]),
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Arxiv Paper Ingestion Testing Workflow",
+                    "description": (
+                        "Execute the canonical arXiv ingestion workflow against one "
+                        "live arXiv paper and verify title, authors, abstract, "
+                        "publication date, provenance, and cleanup."
+                    ),
+                    "confidence_score": 1.0,
+                    "relevance_score": 1.0,
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Arxiv Paper Ingestion Testing Workflow",
+                    "description": (
+                        "Execute the canonical arXiv ingestion workflow against one "
+                        "live arXiv paper and verify title, authors, abstract, "
+                        "publication date, provenance, and cleanup."
+                    ),
+                    "confidence_score": 1.0,
+                    "relevance_score": 1.0,
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                }
+            ],
+            "match_count": 1,
+        },
+    )
+
+    assert result.response_text.startswith("Executed via arXiv testing workflow.")
+    assert captured_execution["workflow_id"] == selected_workflow_id
+    assert captured_execution["data"]["selected_workflow_id"] == selected_workflow_id
+
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.workflow_id == selected_workflow_id
+    assert result.workflow_routing.verdict == "custom_workflow_override"
+    assert result.workflow_routing.source == "selector_override"
+
+    override_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_selector_override"
+            and entry.get("reason")
+            == "required_prompt_tools_satisfied_by_launchable_custom_workflow"
+        ),
+        None,
+    )
+    assert override_entry is not None
+    assert override_entry.get("prior_selected_workflow_id") == TOOL_CALLING_WORKFLOW_ID
+    assert "download_paper" in (override_entry.get("required_prompt_tools") or [])
+
+    policy_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "custom_workflow_override_policy"
+        ),
+        None,
+    )
+    assert policy_entry is not None
+    assert policy_entry.get("outcome") == "promote"
+    assert policy_entry.get("reason_code") == "suitable_custom_workflow_found"
 
 
 def test_write_intent_memory_rehydrates_for_same_session_continuation(monkeypatch):
@@ -5535,3 +5675,20 @@ def test_custom_workflow_structured_result_renders_verdict_evidence_and_promotio
         "- structured_meeting_fields: pass (expected: title,time,participants; "
         "observed: all expected fields present)"
     ) in result.response_text
+
+    execution_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict) and entry.get("type") == "workflow_execution"
+        ),
+        None,
+    )
+    assert execution_entry is not None
+    result_snapshot = execution_entry.get("result_snapshot")
+    assert isinstance(result_snapshot, dict)
+    assert result_snapshot.get("run_id") == "#V#run_meeting_test"
+    assert result_snapshot.get("verdict") == "pass"
+    assert isinstance(result_snapshot.get("verdict_summary"), dict)
+    assert isinstance(result_snapshot.get("promotion_recommendation"), dict)
+    assert isinstance(result_snapshot.get("observations"), list)

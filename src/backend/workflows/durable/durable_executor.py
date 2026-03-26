@@ -11,6 +11,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from ...db.transient_errors import run_with_transient_mongo_retry
 from ..engine import (
     WorkflowDefinition,
     apply_tool_output_context_mappings,
@@ -145,8 +146,18 @@ class DurableWorkflowExecutor:
         Returns:
             DurableWorkflowResult with execution outcome.
         """
+        def _retry_store_call(operation_name: str, operation):
+            return run_with_transient_mongo_retry(
+                operation,
+                operation_name=f"durable_executor.{operation_name}:{instance_id}",
+                logger_obj=logger,
+            )
+
         # Load instance
-        instance = self._instance_manager.get_instance(instance_id)
+        instance = _retry_store_call(
+            "get_instance",
+            lambda: self._instance_manager.get_instance(instance_id),
+        )
         if instance is None:
             return DurableWorkflowResult(
                 instance_id=instance_id,
@@ -231,8 +242,11 @@ class DurableWorkflowExecutor:
         ) -> DurableWorkflowResult:
             nonlocal persisted_execution_trace_id
             if persisted_execution_trace_id is None:
-                persisted_execution_trace_id = insert_workflow_execution_trace(
-                    trace.to_storage_document()
+                persisted_execution_trace_id = _retry_store_call(
+                    "insert_workflow_execution_trace",
+                    lambda: insert_workflow_execution_trace(
+                        trace.to_storage_document()
+                    ),
                 )
             result_envelope = build_workflow_result_envelope(
                 workflow_id=definition.workflow_id,
@@ -254,17 +268,20 @@ class DurableWorkflowExecutor:
                         fallback_message=final_state,
                     )
                 )
-                self._instance_manager.checkpoint(
-                    instance_id,
-                    current_state=final_state,
-                    workflow_data=context,
-                    step_index=step_index,
-                    error=error,
-                    error_step=error_step,
-                    progress_current=progress_current_value,
-                    progress_total=progress_total_value,
-                    progress_message=progress_message_value,
-                    execution_trace_id=persisted_execution_trace_id,
+                _retry_store_call(
+                    "checkpoint_terminal",
+                    lambda: self._instance_manager.checkpoint(
+                        instance_id,
+                        current_state=final_state,
+                        workflow_data=context,
+                        step_index=step_index,
+                        error=error,
+                        error_step=error_step,
+                        progress_current=progress_current_value,
+                        progress_total=progress_total_value,
+                        progress_message=progress_message_value,
+                        execution_trace_id=persisted_execution_trace_id,
+                    ),
                 )
             return DurableWorkflowResult(
                 instance_id=instance_id,
@@ -314,7 +331,10 @@ class DurableWorkflowExecutor:
             step_index += 1
 
             # Check for cancellation
-            if self._instance_manager.is_cancelled(instance_id):
+            if _retry_store_call(
+                "is_cancelled",
+                lambda: self._instance_manager.is_cancelled(instance_id),
+            ):
                 return _build_result(
                     completed=False,
                     final_state=current_state,
@@ -324,7 +344,20 @@ class DurableWorkflowExecutor:
 
             # Extend lock if worker_id provided
             if worker_id:
-                self._instance_manager.extend_lock(instance_id, worker_id)
+                try:
+                    _retry_store_call(
+                        "extend_lock",
+                        lambda: self._instance_manager.extend_lock(
+                            instance_id,
+                            worker_id,
+                        ),
+                    )
+                except Exception:
+                    logger.warning(
+                        "[durable_workflow] Failed to extend lock for %s during execution",
+                        instance_id,
+                        exc_info=True,
+                    )
 
             # Get current state spec
             state_spec = definition.states.get(current_state)
@@ -664,30 +697,34 @@ class DurableWorkflowExecutor:
                 )
 
             # CHECKPOINT after successful step (before transitioning)
+            resolved_next_state = str(next_state)
             progress_current_value, progress_total_value, progress_message_value = (
                 compute_plan_state_progress(
                     context=context,
                     fallback_current=step_index,
                     fallback_total=total_steps,
-                    fallback_message=next_state,
+                    fallback_message=resolved_next_state,
                 )
             )
-            self._instance_manager.checkpoint(
-                instance_id,
-                current_state=next_state,
-                workflow_data=context,
-                step_index=step_index,
-                progress_current=progress_current_value,
-                progress_total=progress_total_value,
-                progress_message=progress_message_value,
+            _retry_store_call(
+                "checkpoint_transition",
+                lambda: self._instance_manager.checkpoint(
+                    instance_id,
+                    current_state=resolved_next_state,
+                    workflow_data=context,
+                    step_index=step_index,
+                    progress_current=progress_current_value,
+                    progress_total=progress_total_value,
+                    progress_message=progress_message_value,
+                ),
             )
 
             trace.record_state_transition(
                 current_state,
-                next_state,
+                resolved_next_state,
                 reason=transition_reason,
             )
-            current_state = next_state
+            current_state = resolved_next_state
             clear_control_signal_context(context)
 
         # Transition limit exceeded

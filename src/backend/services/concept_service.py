@@ -792,7 +792,7 @@ def _finalise_concept_lookup_doc(
     return concept_doc
 
 
-def _find_concept_by_exact_concept_id(
+def _find_raw_concept_by_exact_concept_id(
     concept_id: str,
     *,
     concepts_coll: Any | None = None,
@@ -809,6 +809,20 @@ def _find_concept_by_exact_concept_id(
         concept_doc = collection.find_one({"concept_id": canonical_id})
     if concept_doc is None:
         concept_doc = collection.find_one({"concept_id": concept_id})
+    if not isinstance(concept_doc, dict):
+        return None
+    return concept_doc
+
+
+def _find_concept_by_exact_concept_id(
+    concept_id: str,
+    *,
+    concepts_coll: Any | None = None,
+) -> Dict[str, Any] | None:
+    concept_doc = _find_raw_concept_by_exact_concept_id(
+        concept_id,
+        concepts_coll=concepts_coll,
+    )
     if not isinstance(concept_doc, dict):
         return None
     return _finalise_concept_lookup_doc(

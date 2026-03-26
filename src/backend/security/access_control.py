@@ -152,10 +152,15 @@ def _validate_person_concept(concept_id: Optional[str]) -> Optional[str]:
         return None
     try:
         from ..services.concept_service import (
-            get_concept_by_concept_id,
+            _find_raw_concept_by_exact_concept_id,
         )  # local import to avoid cycles
 
-        doc = get_concept_by_concept_id(norm)
+        # Header/session identity validation should be a cheap exact lookup, not a
+        # recursive alias/name-resolution path. Re-entering access-controlled name
+        # resolution here can amplify per-request identity checks into deep recursion
+        # and make authenticated UI routes hang before they reach their own logic.
+        with bypass_access_control():
+            doc = _find_raw_concept_by_exact_concept_id(norm)
         if not doc:
             return None
 
@@ -228,6 +233,10 @@ def get_effective_user_concept_id() -> Optional[str]:
             if validated:
                 return validated
 
+    cached_header = _HEADER_CACHE.get()
+    if cached_header:
+        return cached_header
+
     # Allow a guarded per-request override via headers for trusted automation
     # clients (legacy behaviour relied on this pathway). We validate that the
     # supplied identifier maps to an existing person concept before accepting it.
@@ -238,6 +247,7 @@ def get_effective_user_concept_id() -> Optional[str]:
     if header_user:
         validated = _validate_person_concept(header_user)
         if validated:
+            _HEADER_CACHE.set(validated)
             return validated
     return None
 

@@ -9,6 +9,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
+from pymongo.errors import PyMongoError
+
 from src.backend.workflows.action_registry import (
     ActionRegistry,
     ActionSpec,
@@ -88,6 +90,57 @@ def test_durable_executor_persists_trace_and_checkpoints_trace_link() -> None:
         and call.kwargs.get("execution_trace_id") == "trace-1550"
         for call in manager.checkpoint.call_args_list
     )
+
+
+def test_durable_executor_retries_transient_cancel_check() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#durable_transient_cancel_retry",
+        initial_state="done",
+        states={
+            "done": WorkflowStateSpec(
+                state_id="done",
+                terminal=True,
+            ),
+        },
+    )
+
+    manager = MagicMock()
+    manager.get_instance.return_value = _build_instance(definition.workflow_id)
+    manager.is_cancelled.side_effect = [
+        PyMongoError("server selection timeout while reading workflow_instances"),
+        False,
+    ]
+    manager.extend_lock.return_value = True
+    manager.checkpoint.return_value = True
+
+    executor = DurableWorkflowExecutor(registry=ActionRegistry(), instance_manager=manager)
+
+    with (
+        patch(
+            "src.backend.languagemodels.llm_interface.get_llm_client",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "src.backend.languagemodels.llm_interface.get_active_model_name",
+            return_value="test-model",
+        ),
+        patch(
+            "src.backend.db.transient_errors.attempt_reconnect",
+            return_value={"reconnected": True},
+        ),
+        patch(
+            "src.backend.db.transient_errors.time.sleep",
+            return_value=None,
+        ),
+    ):
+        result = executor.run_durable(
+            "instance-1",
+            definition,
+            resume_from_checkpoint=False,
+        )
+
+    assert result.completed is True
+    assert manager.is_cancelled.call_count == 2
 
 
 def test_durable_executor_uses_scoped_active_model_and_context_defaults() -> None:

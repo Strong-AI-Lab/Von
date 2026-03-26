@@ -1093,10 +1093,23 @@ _WORKFLOW_STEP_VALIDATION_POLICY_INPUT_KEYS: tuple[str, ...] = (
 
 
 def _extract_step_execution_mode(input_map: Dict[str, Any]) -> str | None:
+    recognised_modes = {
+        WORKFLOW_STEP_EXECUTION_MODE_CONTROL,
+        WORKFLOW_STEP_EXECUTION_MODE_DETERMINISTIC,
+        WORKFLOW_STEP_EXECUTION_MODE_LLM,
+        WORKFLOW_STEP_EXECUTION_MODE_SUBWORKFLOW,
+    }
     for key in _WORKFLOW_STEP_EXECUTION_MODE_INPUT_KEYS:
         if key not in input_map:
             continue
-        return normalise_workflow_step_execution_mode(input_map.pop(key))
+        raw_value = input_map.get(key)
+        raw_text = str(raw_value or "").strip().lower()
+        if raw_text in recognised_modes:
+            input_map.pop(key, None)
+            return normalise_workflow_step_execution_mode(raw_text)
+        if key != "execution_mode":
+            input_map.pop(key, None)
+            return None
     return None
 
 
@@ -3121,6 +3134,7 @@ def load_workflow_definition_from_vontology(
                     input_map[tool_param] = {
                         "$context_key": context_key,
                         "$mapping_concept_id": mapping_concept_id,
+                        "$required": required,
                     }
                     if required:
                         reads_context_keys.append(context_key)

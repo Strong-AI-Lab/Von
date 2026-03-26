@@ -145,14 +145,32 @@ def resolve_action_inputs_from_context(
     ``{"$context_key": "target_type_id"}``. These are resolved to concrete
     payload values before action execution.
     """
+    def _resolve_nested_input_value(value: Any) -> Any:
+        symbol = _extract_context_binding_symbol(value)
+        if symbol:
+            found, concrete_value = _resolve_context_symbol(
+                context=context,
+                symbol=symbol,
+            )
+            return concrete_value if found else None
+
+        if isinstance(value, Mapping):
+            return {
+                str(nested_key): _resolve_nested_input_value(nested_value)
+                for nested_key, nested_value in value.items()
+            }
+
+        if isinstance(value, list):
+            return [_resolve_nested_input_value(item) for item in value]
+
+        if isinstance(value, tuple):
+            return tuple(_resolve_nested_input_value(item) for item in value)
+
+        return value
+
     resolved: Dict[str, Any] = {}
     for input_key, input_value in action_inputs.items():
-        symbol = _extract_context_binding_symbol(input_value)
-        if not symbol:
-            resolved[input_key] = input_value
-            continue
-        found, concrete_value = _resolve_context_symbol(context=context, symbol=symbol)
-        resolved[input_key] = concrete_value if found else None
+        resolved[input_key] = _resolve_nested_input_value(input_value)
     return resolved
 
 

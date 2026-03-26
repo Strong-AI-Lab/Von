@@ -18,6 +18,7 @@ from pymongo.errors import (
 )
 from pymongo.read_preferences import ReadPreference
 from ..db.mongo_client import get_db
+from ..db.transient_errors import is_transient_mongo_error
 from ..models.chat_history_model import chat_history_collection_name
 from .turn_execution_record_service import (
     build_turn_execution_record,
@@ -90,20 +91,10 @@ def _chat_history_read_circuit_seconds() -> float:
 
 
 def _is_transient_chat_history_error(exc: Exception) -> bool:
-    if isinstance(
-        exc,
-        (NetworkTimeout, ServerSelectionTimeoutError, AutoReconnect, ConnectionFailure),
-    ):
+    if is_transient_mongo_error(exc):
         return True
     message = str(exc).lower()
     transient_markers = (
-        "timed out",
-        "no primary",
-        "replicasetnoprimary",
-        "connection pool paused",
-        "server selection timeout",
-        "networktimeout",
-        "temporarily unavailable",
         "read circuit open",
     )
     return any(marker in message for marker in transient_markers)

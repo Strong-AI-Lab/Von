@@ -554,3 +554,32 @@ def test_vontology_defined_jira_hygiene_workflow_executes_via_gateway(monkeypatc
     assert hygiene_result.get("success") is True
     assert update_calls == ["JVNAUTOSCI-9400"]
     assert comment_calls == []
+
+
+def test_vontology_defined_jira_hygiene_workflow_preserves_execution_mode_tool_inputs() -> None:
+    docs = _build_workflow_docs()
+
+    with (
+        patch(
+            "src.backend.workflows.vontology_loader.ConceptsRepository.find",
+            side_effect=_build_repo_find(docs),
+        ),
+        patch(
+            "src.backend.workflows.vontology_loader.ConceptsRepository.find_one",
+            side_effect=_build_repo_find_one(docs),
+        ),
+        patch(
+            "src.backend.workflows.vontology_loader.best_effort_workflow_narrative_text",
+            return_value="Jira hygiene workflow.",
+        ),
+    ):
+        definition = load_workflow_definition_from_vontology(_WORKFLOW_ID)
+
+    assert definition is not None
+    approval_action = definition.states[_APPROVAL_STEP_ID].actions[0]
+    execute_action = definition.states[_EXECUTE_STEP_ID].actions[0]
+    audit_action = definition.states[_AUDIT_STEP_ID].actions[0]
+
+    assert approval_action.inputs.get("execution_mode") == "execute"
+    assert execute_action.inputs.get("execution_mode") == "execute"
+    assert audit_action.inputs.get("execution_mode") == "execute"

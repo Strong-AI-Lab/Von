@@ -212,6 +212,58 @@ def test_set_user_concept_updates_session_context_and_org_listing(app_client):
     assert orgs_data["organisations"][0]["concept_id"] == "#V#the_lu_witbrock_household"
 
 
+def test_set_user_concept_accepts_header_authenticated_identity(app_client, monkeypatch):
+    _, client = app_client
+
+    import src.backend.security.access_control as access_control
+
+    monkeypatch.setattr(
+        access_control,
+        "get_effective_user_concept_id",
+        lambda: "#V#michael_witbrock",
+    )
+
+    resp = client.post(
+        "/von/api/session/set_user_concept",
+        json={"user_concept_id": "#V#michael_witbrock"},
+        headers={"X-User-Concept-ID": "#V#michael_witbrock"},
+    )
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["user_id"] == "#V#michael_witbrock"
+    assert data["namespace"] == "#V#michael_witbrock"
+
+    with client.session_transaction() as sess:
+        assert sess["user_concept_id"] == "#V#michael_witbrock"
+        assert sess["user_id"] == "#V#michael_witbrock"
+
+
+def test_set_user_concept_accepts_real_header_authenticated_identity(app_client):
+    _, client = app_client
+    real_user_concept_id = "#V#person_hugues_van_assel_b0cd25a1"
+
+    resp = client.post(
+        "/von/api/session/set_user_concept",
+        json={"user_concept_id": real_user_concept_id},
+        headers={"X-User-Concept-ID": real_user_concept_id},
+    )
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["user_id"] == real_user_concept_id
+    assert data["namespace"] == real_user_concept_id
+
+    ctx = client.get(
+        "/von/api/session/context",
+        headers={"X-Von-Window-Session": "ws_real_header"},
+    )
+    assert ctx.status_code == 200
+    ctx_data = ctx.get_json()
+    assert ctx_data["authenticated"] is True
+    assert ctx_data["user_id"] == real_user_concept_id
+
+
 def test_get_my_organisations_requires_authentication(app_client):
     _, client = app_client
 

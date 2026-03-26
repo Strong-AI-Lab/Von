@@ -1,10 +1,7 @@
 import json
 from typing import Any, cast
 
-from src.backend.integrations.internal_mcp.orchestrator import (
-    InternalMCPChatOrchestrator,
-)
-from workflow_test_support import bootstrap_authoritative_conversation_turn_workflows
+from orchestrator_test_harness import build_db_independent_orchestrator
 
 
 class _StubResult:
@@ -172,13 +169,7 @@ class _ResolutionGateway:
 
         return _StubResult({"ok": True})
 
-
-def _bootstrap_authoritative_workflows() -> None:
-    report = bootstrap_authoritative_conversation_turn_workflows()
-    assert not report.get("graph_publication_errors")
-
-
-def test_orchestrator_executes_all_tool_calls_in_single_list_response():
+def test_orchestrator_executes_all_tool_calls_in_single_list_response(monkeypatch):
     """Regression test for JVNAUTOSCI-941.
 
     Previously, if the model emitted a list of >4 tool calls, the orchestrator
@@ -188,13 +179,12 @@ def test_orchestrator_executes_all_tool_calls_in_single_list_response():
     We now execute the remaining tool calls from the same list before prompting
     for a final answer.
     """
-    _bootstrap_authoritative_workflows()
-
     gateway = cast(Any, _CapturingGateway())
-    orchestrator = InternalMCPChatOrchestrator(
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
         gateway=gateway,
         max_tool_invocations=20,
-        max_context_chars=80_000,
+        tool_batch_cap=4,
     )
 
     tool_calls = [
@@ -219,13 +209,14 @@ def test_orchestrator_executes_all_tool_calls_in_single_list_response():
     assert len(llm.calls) >= 2
 
 
-def test_write_preflight_resolves_missing_concept_id_before_add_relationship():
-    _bootstrap_authoritative_workflows()
+def test_write_preflight_resolves_missing_concept_id_before_add_relationship(
+    monkeypatch,
+):
     gateway = cast(Any, _ResolutionGateway())
-    orchestrator = InternalMCPChatOrchestrator(
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
         gateway=gateway,
         max_tool_invocations=4,
-        max_context_chars=80_000,
     )
 
     llm = _CapturingLLM(
@@ -257,8 +248,9 @@ def test_write_preflight_resolves_missing_concept_id_before_add_relationship():
     assert result.tool_invocations[0].get("payload", {}).get("target") == "#V#gillian_dobbie"
 
 
-def test_add_relationship_target_not_found_retries_once_with_resolved_target():
-    _bootstrap_authoritative_workflows()
+def test_add_relationship_target_not_found_retries_once_with_resolved_target(
+    monkeypatch,
+):
     gateway = cast(
         Any,
         _ResolutionGateway(
@@ -273,10 +265,10 @@ def test_add_relationship_target_not_found_retries_once_with_resolved_target():
             ]
         ),
     )
-    orchestrator = InternalMCPChatOrchestrator(
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
         gateway=gateway,
         max_tool_invocations=4,
-        max_context_chars=80_000,
     )
 
     llm = _CapturingLLM(
@@ -312,13 +304,14 @@ def test_add_relationship_target_not_found_retries_once_with_resolved_target():
     assert auto_retry.get("to") == "#V#gillian_dobbie"
 
 
-def test_add_relationship_target_not_found_literal_date_retries_with_canonical_target():
-    _bootstrap_authoritative_workflows()
+def test_add_relationship_target_not_found_literal_date_retries_with_canonical_target(
+    monkeypatch,
+):
     gateway = cast(Any, _ResolutionGateway(resolve_sequence=[{"success": True, "status": "not_found"}]))
-    orchestrator = InternalMCPChatOrchestrator(
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
         gateway=gateway,
         max_tool_invocations=4,
-        max_context_chars=80_000,
     )
 
     llm = _CapturingLLM(
@@ -354,13 +347,14 @@ def test_add_relationship_target_not_found_literal_date_retries_with_canonical_t
     assert auto_retry.get("to") == "#V#2026_02_24"
 
 
-def test_add_relationship_predicate_not_found_literal_retries_with_canonical_predicate():
-    _bootstrap_authoritative_workflows()
+def test_add_relationship_predicate_not_found_literal_retries_with_canonical_predicate(
+    monkeypatch,
+):
     gateway = cast(Any, _ResolutionGateway())
-    orchestrator = InternalMCPChatOrchestrator(
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
         gateway=gateway,
         max_tool_invocations=4,
-        max_context_chars=80_000,
     )
 
     llm = _CapturingLLM(
@@ -397,13 +391,14 @@ def test_add_relationship_predicate_not_found_literal_retries_with_canonical_pre
     assert auto_retry.get("to") == "#V#has_co_supervisor"
 
 
-def test_add_relationship_source_not_found_literal_retries_with_canonical_source():
-    _bootstrap_authoritative_workflows()
+def test_add_relationship_source_not_found_literal_retries_with_canonical_source(
+    monkeypatch,
+):
     gateway = cast(Any, _ResolutionGateway())
-    orchestrator = InternalMCPChatOrchestrator(
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
         gateway=gateway,
         max_tool_invocations=4,
-        max_context_chars=80_000,
     )
 
     llm = _CapturingLLM(

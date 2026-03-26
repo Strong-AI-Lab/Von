@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -8,6 +9,7 @@ from unittest.mock import MagicMock
 from src.backend.services import concept_service
 from src.backend.services.concept_service import ConceptNotFoundError
 from src.backend.services.testing_workflow_vontology_service import (
+    ARXIV_PAPER_INGESTION_TESTING_WORKFLOW_ID,
     CANONICAL_TESTING_WORKFLOW_IDS,
     EPHEMERAL_THEORY_GC_WORKFLOW_ID,
     MEETING_INVITATION_CANDIDATE_WORKFLOW_ID,
@@ -30,6 +32,7 @@ from src.backend.workflows.durable.subworkflow_actions import register_subworkfl
 from src.backend.workflows.durable.testing_workflow_actions import (
     register_testing_workflow_actions,
 )
+from src.backend.workflows.durable.models import WorkflowInstanceStatus
 from src.backend.workflows.engine import WorkflowExecutor
 from src.backend.workflows.vontology_loader import load_workflow_definition_from_vontology
 
@@ -106,7 +109,7 @@ def test_bootstrap_materialises_testing_workflow_family(
 
     publication = report.get("publication") or {}
     counts = publication.get("counts") or {}
-    assert counts.get("workflows_published") == 5
+    assert counts.get("workflows_published") == 6
     assert counts.get("errors") == 0
     prompt_support = report.get("prompt_support") or {}
     assert prompt_support.get("success") is True
@@ -185,6 +188,73 @@ def test_bootstrap_materialises_testing_workflow_family(
     assert "#V#ai_workflow" in candidate_types
     assert "#V#durable_workflow" in candidate_types
     assert "#V#testing_workflow" not in candidate_types
+
+    arxiv_testing_definition = load_workflow_definition_from_vontology(
+        ARXIV_PAPER_INGESTION_TESTING_WORKFLOW_ID
+    )
+    assert arxiv_testing_definition is not None
+    arxiv_testing_launch_contract = arxiv_testing_definition.metadata.get(
+        "launch_input_contract"
+    )
+    assert isinstance(arxiv_testing_launch_contract, dict)
+    assert arxiv_testing_launch_contract.get("required_inputs") == ["prompt_text"]
+    arxiv_input_mappings = arxiv_testing_launch_contract.get("input_mappings")
+    assert isinstance(arxiv_input_mappings, list)
+    assert any(
+        isinstance(item, dict)
+        and item.get("target_context_key") == "prompt_text"
+        and item.get("source_expression") == "inputs.prompt"
+        and item.get("extractor") == "identity"
+        for item in arxiv_input_mappings
+    )
+    prepare_fixture_state = arxiv_testing_definition.states.get(
+        authority_service._step_concept_id(
+            workflow_id=ARXIV_PAPER_INGESTION_TESTING_WORKFLOW_ID,
+            state_id="prepare_fixture",
+        )
+    )
+    assert prepare_fixture_state is not None
+    prepare_fixture_action = prepare_fixture_state.actions[0]
+    assert prepare_fixture_action.inputs.get("repair_existing_artifacts") is True
+    execute_target_state = arxiv_testing_definition.states.get(
+        authority_service._step_concept_id(
+            workflow_id=ARXIV_PAPER_INGESTION_TESTING_WORKFLOW_ID,
+            state_id="execute_target_workflow",
+        )
+    )
+    assert execute_target_state is not None
+    execute_target_action = execute_target_state.actions[0]
+    workflow_inputs = execute_target_action.inputs.get("workflow_inputs")
+    assert isinstance(workflow_inputs, dict)
+    assert workflow_inputs.get("prompt") == {"$context_key": "prompt_text"}
+    assert workflow_inputs.get("original_filename") == {
+        "$context_key": "original_filename"
+    }
+    assert workflow_inputs.get("verification_profile") == "arxiv"
+    assert execute_target_action.inputs.get("await_terminal") is True
+    assert execute_target_action.inputs.get("timeout_seconds") == 2400
+    assert execute_target_action.inputs.get("poll_interval_seconds") == 5
+    cleanup_state = arxiv_testing_definition.states.get(
+        authority_service._step_concept_id(
+            workflow_id=ARXIV_PAPER_INGESTION_TESTING_WORKFLOW_ID,
+            state_id="cleanup_artifacts",
+        )
+    )
+    assert cleanup_state is not None
+    cleanup_action = cleanup_state.actions[0]
+    cleanup_file_copy_ids = cleanup_action.inputs.get("file_copy_concept_ids")
+    assert isinstance(cleanup_file_copy_ids, dict)
+    assert cleanup_file_copy_ids.get("$context_key") == "file_copy_concept_ids"
+    arxiv_testing_concept = concept_service.get_concept_by_concept_id(
+        ARXIV_PAPER_INGESTION_TESTING_WORKFLOW_ID
+    )
+    assert arxiv_testing_concept is not None
+    arxiv_testing_types = _relationship_targets(
+        arxiv_testing_concept,
+        "is_an_instance_of",
+    )
+    assert "#V#testing_workflow" in arxiv_testing_types
+    assert "#V#theory_slice_test_workflow" in arxiv_testing_types
 
     synthetic_concept = concept_service.get_concept_by_concept_id(
         SYNTHETIC_WORKFLOW_REGRESSION_SUITE_WORKFLOW_ID
@@ -370,7 +440,7 @@ def test_bootstrap_skips_republication_when_testing_workflow_family_is_current(
     _seed_meeting_invitation_prompt_content()
     first_report = bootstrap_canonical_testing_workflows()
     first_counts = (first_report.get("publication") or {}).get("counts") or {}
-    assert first_counts.get("workflows_published") == 5
+    assert first_counts.get("workflows_published") == 6
 
     second_report = bootstrap_canonical_testing_workflows()
     second_publication = second_report.get("publication") or {}
@@ -396,7 +466,7 @@ def test_bootstrap_can_force_republish_when_testing_workflow_family_is_current(
 
     assert publication.get("skipped") is not True
     assert publication.get("forced_republish") is True
-    assert counts.get("workflows_published") == 5
+    assert counts.get("workflows_published") == 6
     assert counts.get("errors") == 0
 
 
@@ -573,3 +643,245 @@ def test_meeting_invitation_testing_workflow_executes_with_optional_expectations
     assert result.data["candidate_meeting_type"] == "meeting_workflow_candidate"
     assert result.data["verdict"] == "pass"
     assert len(result.data["meeting_candidate_observations"]) == 3
+
+
+@dataclass
+class _StubWorkflowInstance:
+    instance_id: str
+    workflow_id: str
+    status: WorkflowInstanceStatus
+    current_state: str = "complete"
+    inputs: dict[str, Any] | None = None
+    outputs: dict[str, Any] | None = None
+    error: str | None = None
+    error_step: str | None = None
+    user_id: str = "#V#user"
+    org_id: str = "#V#org"
+    namespace: str = "#V#user@org"
+
+    def to_status_dict(self) -> dict[str, Any]:
+        return {
+            "instance_id": self.instance_id,
+            "workflow_id": self.workflow_id,
+            "status": self.status.value,
+            "current_state": self.current_state,
+            "error": self.error,
+            "error_step": self.error_step,
+        }
+
+
+@dataclass
+class _StubWorkflowManager:
+    last_call: dict[str, Any] | None = None
+    instances_by_id: dict[str, Any] | None = None
+
+    def create_instance(
+        self,
+        workflow_id: str,
+        *,
+        user_id: str,
+        org_id: str,
+        namespace: str,
+        inputs: dict[str, Any] | None = None,
+        max_retries: int = 3,
+        **_kwargs: Any,
+    ) -> str:
+        self.last_call = {
+            "workflow_id": workflow_id,
+            "user_id": user_id,
+            "org_id": org_id,
+            "namespace": namespace,
+            "inputs": dict(inputs or {}),
+            "max_retries": max_retries,
+        }
+        return "#V#wf_instance_arxiv_ingestion_test"
+
+    def get_instance(self, instance_id: str) -> Any | None:
+        return (self.instances_by_id or {}).get(instance_id)
+
+
+def test_arxiv_paper_ingestion_testing_workflow_executes_end_to_end_via_vontology(
+    _reset_mock_db: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backend.workflows.durable import testing_workflow_actions as actions_module
+    from src.backend.workflows.durable.workflow_instance_submission_service import (
+        WorkflowInstanceSubmissionResult,
+    )
+
+    _seed_meeting_invitation_prompt_content()
+    bootstrap_canonical_testing_workflows()
+    definition = load_workflow_definition_from_vontology(
+        ARXIV_PAPER_INGESTION_TESTING_WORKFLOW_ID
+    )
+    assert definition is not None
+
+    monkeypatch.setattr(
+        actions_module,
+        "prepare_arxiv_paper_ingestion_test_fixture",
+        lambda **_kwargs: {
+            "success": True,
+            "prompt_text": "Run the arXiv ingestion test on https://arxiv.org/abs/2603.21702",
+            "arxiv_id": "2603.21702",
+            "source_uri": "https://arxiv.org/abs/2603.21702",
+            "original_filename": "2603.21702v1.pdf",
+            "expected_title": "A very obscure paper",
+            "expected_summary": "An abstract about an obscure but useful result.",
+            "expected_publication_date": "2026-03-25",
+            "expected_author_names": ["Author One", "Author Two"],
+            "expected_author_concept_ids": ["#V#author_one", "#V#author_two"],
+            "expected_topic_labels": ["cs.AI"],
+            "expected_topic_concept_ids": ["#V#topic_cs_ai"],
+            "preexisting_author_concept_ids": [],
+            "preexisting_topic_concept_ids": [],
+            "paper_concept_id": "#V#paper_on_arxiv_2603_21702",
+        },
+    )
+    monkeypatch.setattr(
+        actions_module,
+        "verify_arxiv_paper_ingestion_test_result",
+        lambda **_kwargs: {
+            "success": True,
+            "verification_passed": True,
+            "paper_concept_id": "#V#paper_on_arxiv_2603_21702",
+            "file_copy_concept_id": "#V#file_copy_2603_21702",
+            "file_copy_concept_ids": [
+                "#V#file_copy_2603_21702",
+                "#V#markdown_file_copy_2603_21702",
+            ],
+            "author_concept_ids": ["#V#author_one", "#V#author_two"],
+            "topic_concept_ids": ["#V#topic_cs_ai"],
+            "metadata_verification": {
+                "title_matched": True,
+                "summary_matched": True,
+                "publication_date_matched": True,
+                "author_ids_matched": True,
+                "author_names_matched": True,
+                "topic_ids_matched": True,
+                "arxiv_identifier_preserved": True,
+                "source_uri_preserved": True,
+                "file_copy_link_preserved": True,
+            },
+            "observations": [
+                {
+                    "label": "metadata_representation",
+                    "verdict": "pass",
+                    "expected_outcome": "title, authors, abstract, and publication date represented",
+                    "observed_outcome": "target workflow completed, title matched, abstract matched, publication date matched",
+                },
+                {
+                    "label": "author_links",
+                    "verdict": "pass",
+                    "expected_outcome": "all expected authors and topics linked to the paper",
+                    "observed_outcome": "all expected author links present, author names preserved, topic links present",
+                },
+                {
+                    "label": "provenance_preserved",
+                    "verdict": "pass",
+                    "expected_outcome": "arXiv identifiers, source URL, and file copy link preserved",
+                    "observed_outcome": "arXiv identifier preserved, source URI preserved, file copy linked",
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        actions_module,
+        "cleanup_arxiv_paper_ingestion_test_artifacts",
+        lambda **_kwargs: {
+            "success": True,
+            "cleanup_passed": True,
+            "cleanup_summary": {
+                "cleanup_passed": True,
+                "deleted_concept_ids": [
+                    "#V#paper_on_arxiv_2603_21702",
+                    "#V#file_copy_2603_21702",
+                    "#V#markdown_file_copy_2603_21702",
+                ],
+                "failed_deletions": [],
+            },
+            "observations": [
+                {
+                    "label": "cleanup_completed",
+                    "verdict": "pass",
+                    "expected_outcome": "transient ingestion artefacts removed",
+                    "observed_outcome": "deleted 3 transient concepts",
+                }
+            ],
+        },
+    )
+
+    manager = _StubWorkflowManager(
+        instances_by_id={
+            "#V#wf_instance_arxiv_ingestion_test": _StubWorkflowInstance(
+                instance_id="#V#wf_instance_arxiv_ingestion_test",
+                workflow_id="#V#arxiv_paper_representation_workflow",
+                status=WorkflowInstanceStatus.COMPLETED,
+                outputs={
+                    "paper_concept_id": "#V#paper_on_arxiv_2603_21702",
+                    "file_copy_concept_id": "#V#file_copy_2603_21702",
+                },
+            )
+        }
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+
+    def _fake_submit_verified_workflow_instance(**kwargs: Any) -> WorkflowInstanceSubmissionResult:
+        workflow_id = str(kwargs.get("workflow_id") or "").strip()
+        instance_id = manager.create_instance(
+            workflow_id,
+            user_id=str(kwargs.get("user_id") or "anonymous").strip() or "anonymous",
+            org_id=str(kwargs.get("org_id") or "default").strip() or "default",
+            namespace=str(kwargs.get("namespace") or "#V#anonymous@default").strip()
+            or "#V#anonymous@default",
+            inputs=dict(kwargs.get("inputs") or {}),
+            max_retries=int(kwargs.get("max_retries", 3) or 3),
+        )
+        return WorkflowInstanceSubmissionResult(
+            success=True,
+            workflow_id=workflow_id,
+            status="pending",
+            instance_id=instance_id,
+            verification={
+                "preflight_passed": True,
+                "postflight_passed": True,
+                "runnable_verification_success": True,
+                "preflight": {"errors": []},
+                "postflight": {"errors": []},
+            },
+            created_new=True,
+        )
+
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.workflow_instance_submission_service.submit_verified_workflow_instance",
+        _fake_submit_verified_workflow_instance,
+    )
+
+    registry = ActionRegistry()
+    register_testing_workflow_actions(registry)
+
+    result = WorkflowExecutor(registry=registry, max_transitions=40).run(
+        definition,
+        environment=WorkflowEnvironment(
+            llm_client=MagicMock(),
+            user_namespace="#V#user@org",
+        ),
+        data={
+            "prompt_text": "Run the arXiv paper ingestion testing workflow on https://arxiv.org/abs/2603.21702",
+        },
+    )
+
+    assert result.completed is True
+    assert result.error is None
+    assert result.final_state == authority_service._step_concept_id(
+        workflow_id=ARXIV_PAPER_INGESTION_TESTING_WORKFLOW_ID,
+        state_id="complete",
+    )
+    assert result.data["run_id"].startswith("#V#experiment_run_")
+    assert result.data["verdict"] == "pass"
+    assert result.data["workflow_execution"]["final_status"] == "completed"
+    assert result.data["metadata_verification"]["publication_date_matched"] is True
+    assert result.data["cleanup_summary"]["cleanup_passed"] is True
+    assert len(result.data["observations"]) == 5

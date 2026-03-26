@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, MutableMapping, Optional
+from typing import Any, Callable, Dict, Iterable, Mapping, MutableMapping, Optional
 
 from .schemas import Schema, validate_payload, SchemaValidationError
 from .transport import InternalMCPTransport, TransportResult
@@ -29,6 +29,7 @@ class MethodDefinition:
     category: str = "read"
     timeout_sec: float | None = None
     description: str | None = None
+    write_guardrail: Mapping[str, Any] | None = None
 
     def resolved_timeout(self, transport: InternalMCPTransport) -> float | None:
         if self.timeout_sec is not None:
@@ -93,6 +94,11 @@ class MethodCatalogue:
                 "timeout_sec": definition.timeout_sec,
                 "has_output_schema": definition.output_schema is not None,
                 "description": definition.description,
+                "write_guardrail": (
+                    dict(definition.write_guardrail)
+                    if isinstance(definition.write_guardrail, Mapping)
+                    else None
+                ),
                 "input_schema": self._summarise_schema(definition.input_schema),
                 "output_schema": self._summarise_schema(definition.output_schema),
             }

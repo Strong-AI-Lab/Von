@@ -270,20 +270,24 @@ class ArxivMCPProxy:
                         cached,
                     )
                 else:
-                    recent = None
-                    if download_started_at is not None:
-                        recent = _find_recent_pdf_in_cache(
-                            self._config.storage_path,
-                            since=download_started_at,
-                        )
-                    if recent is not None:
-                        file_path = str(recent)
+                    waited = _await_downloaded_pdf_in_cache(
+                        self._config.storage_path,
+                        arxiv_id=arxiv_id,
+                        since=download_started_at,
+                        timeout_sec=self._config.timeout_sec,
+                        poll_interval_sec=0.5,
+                        allow_recent_fallback=_download_result_indicates_async_settlement(
+                            result
+                        ),
+                    )
+                    if waited is not None:
+                        file_path = str(waited)
                         result = dict(result)
                         result["file_path"] = file_path
                         logger.warning(
-                            "%s download_paper returned no file path; using newest PDF at %s",
+                            "%s download_paper returned no file path; settled on cached PDF at %s",
                             _LOG_TAG,
-                            recent,
+                            waited,
                         )
                     else:
                         raise ArxivProxyError(
@@ -320,6 +324,7 @@ class ArxivMCPProxy:
             raise ArxivProxyError(f"Failed to store PDF in blob store: {exc}") from exc
 
         stored = dict(result)
+        stored["success"] = True
         stored["arxiv_id"] = arxiv_id
         stored["file_path"] = str(path)
         stored["size_bytes"] = size_bytes
@@ -648,6 +653,57 @@ def _find_recent_pdf_in_cache(
         return None
 
     return best
+
+
+def _download_result_indicates_async_settlement(result: Any) -> bool:
+    if not isinstance(result, dict):
+        return False
+
+    text_parts = [
+        str(result.get("status") or "").strip(),
+        str(result.get("message") or "").strip(),
+        str(result.get("stage") or "").strip(),
+    ]
+    combined = " ".join(part for part in text_parts if part).casefold()
+    if not combined:
+        return False
+    markers = (
+        "converting",
+        "conversion started",
+        "processing",
+        "queued",
+        "downloaded",
+    )
+    return any(marker in combined for marker in markers)
+
+
+def _await_downloaded_pdf_in_cache(
+    storage_path: Path,
+    *,
+    arxiv_id: str,
+    since: float | None,
+    timeout_sec: float,
+    poll_interval_sec: float = 0.5,
+    allow_recent_fallback: bool = False,
+) -> Path | None:
+    if timeout_sec <= 0:
+        return None
+
+    deadline = time.time() + timeout_sec
+    while True:
+        cached = _find_cached_pdf_for_arxiv_id(storage_path, arxiv_id)
+        if cached is not None:
+            return cached
+
+        if allow_recent_fallback and since is not None:
+            recent = _find_recent_pdf_in_cache(storage_path, since=since)
+            if recent is not None:
+                return recent
+
+        if time.time() >= deadline:
+            return None
+
+        time.sleep(max(0.05, poll_interval_sec))
 
 
 # Singleton instance

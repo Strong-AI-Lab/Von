@@ -10,9 +10,11 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     from src.backend.workflows.durable import startup as durable_startup
     from src.backend.services import (
         identity_resolution_schedule_bootstrap_service as schedule_bootstrap,
+        paper_representation_workflow_vontology_service as paper_workflow_bootstrap,
         parent_specificity_schedule_bootstrap_service as parent_specificity_schedule_bootstrap,
         parent_specificity_vontology_service as parent_specificity_prompt_bootstrap,
         testing_workflow_vontology_service as testing_workflow_bootstrap,
+        talk_representation_workflow_vontology_service as talk_workflow_bootstrap,
         workflow_description_vontology_service as workflow_description_prompt_bootstrap,
         workflow_gap_vontology_service as workflow_gap_prompt_bootstrap,
     )
@@ -106,11 +108,32 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         },
     )
     monkeypatch.setattr(
+        paper_workflow_bootstrap,
+        "bootstrap_canonical_paper_representation_workflows",
+        lambda: {
+            "success": True,
+            "workflow_ids": [
+                "#V#scholarly_paper_representation_workflow",
+                "#V#arxiv_paper_representation_workflow",
+            ],
+            "publication": {"skipped": True},
+        },
+    )
+    monkeypatch.setattr(
         testing_workflow_bootstrap,
         "bootstrap_canonical_testing_workflows",
         lambda: {
             "success": True,
             "workflow_ids": ["#V#meeting_invitation_testing_workflow"],
+            "publication": {"skipped": True},
+        },
+    )
+    monkeypatch.setattr(
+        talk_workflow_bootstrap,
+        "bootstrap_canonical_talk_representation_workflows",
+        lambda: {
+            "success": True,
+            "workflow_ids": ["#V#talk_representation_workflow"],
             "publication": {"skipped": True},
         },
     )
@@ -134,9 +157,15 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     )
     assert isinstance(workflow_description_prompt_report, dict)
     assert workflow_description_prompt_report.get("success") is True
+    paper_workflow_bootstrap_report = result.get("paper_workflow_bootstrap")
+    assert isinstance(paper_workflow_bootstrap_report, dict)
+    assert paper_workflow_bootstrap_report.get("success") is True
     testing_workflow_bootstrap_report = result.get("testing_workflow_bootstrap")
     assert isinstance(testing_workflow_bootstrap_report, dict)
     assert testing_workflow_bootstrap_report.get("success") is True
+    talk_workflow_bootstrap_report = result.get("talk_workflow_bootstrap")
+    assert isinstance(talk_workflow_bootstrap_report, dict)
+    assert talk_workflow_bootstrap_report.get("success") is True
     workflow_authority_bootstrap_report = result.get("workflow_authority_bootstrap")
     assert isinstance(workflow_authority_bootstrap_report, dict)
     assert workflow_authority_bootstrap_report.get("success") is True
