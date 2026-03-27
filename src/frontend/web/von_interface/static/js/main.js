@@ -282,8 +282,7 @@ function setupSettingsFrameResizing() {
  */
 function initSessionStorageFromLocalStorage() {
   if (hasSessionOrgContext()) {
-    console.log('[main] sessionStorage already has org context, skipping localStorage copy');
-    return;
+    console.log('[main] sessionStorage already has org context, repairing namespace if needed');
   }
   syncOrgContextFromLocalStorage();
   syncNamespaceFromLocalStorage();

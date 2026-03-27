@@ -37,6 +37,31 @@ describe('settingsPage RAG status summary', () => {
         );
     });
 
+    test('repairs a stale user-only namespace when stored organisation context implies a composite scope', () => {
+        localStorage.setItem('current_user_namespace', '#V#michael_witbrock');
+        localStorage.setItem(
+            'von_current_user',
+            JSON.stringify({ concept_id: '#V#michael_witbrock', name: 'Michael Witbrock' }),
+        );
+        localStorage.setItem(
+            'von_current_org',
+            JSON.stringify({
+                concept_id: '#V#university_of_auckland_strong_ai_lab',
+                name: 'University Of Auckland Strong AI Lab',
+            }),
+        );
+
+        expect(__testOnly_getPreferredRagNamespace()).toBe(
+            '#V#michael_witbrock@university_of_auckland_strong_ai_lab',
+        );
+        expect(localStorage.getItem('current_user_namespace')).toBe(
+            '#V#michael_witbrock@university_of_auckland_strong_ai_lab',
+        );
+        expect(sessionStorage.getItem('current_user_namespace')).toBe(
+            '#V#michael_witbrock@university_of_auckland_strong_ai_lab',
+        );
+    });
+
     test('formats KA + Conversation summary when chat counts available', () => {
         const ragData = {
             indexed: 10,

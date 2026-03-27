@@ -31,6 +31,19 @@ function conceptIdToNamespaceSlug(value) {
     return raw.startsWith('#V#') ? raw.slice(3) : raw;
 }
 
+function readTrimmedStorageValue(storage, key) {
+    try {
+        const raw = storage?.getItem(key);
+        return typeof raw === 'string' ? raw.trim() : '';
+    } catch {
+        return '';
+    }
+}
+
+function isOrgScopedNamespace(namespace) {
+    return typeof namespace === 'string' && namespace.includes('@');
+}
+
 export function deriveNamespaceFromStoredContext() {
     const local = typeof localStorage !== 'undefined' ? localStorage : null;
     const session = typeof sessionStorage !== 'undefined' ? sessionStorage : null;
@@ -46,6 +59,60 @@ export function deriveNamespaceFromStoredContext() {
     const orgSlug = conceptIdToNamespaceSlug(storedOrg?.concept_id);
 
     return orgSlug ? `#V#${userSlug}@${orgSlug}` : `#V#${userSlug}`;
+}
+
+function resolvePreferredNamespaceFromStorage() {
+    const local = typeof localStorage !== 'undefined' ? localStorage : null;
+    const session = typeof sessionStorage !== 'undefined' ? sessionStorage : null;
+    const sessionNamespace = readTrimmedStorageValue(session, KEYS.NAMESPACE);
+    const localNamespace = readTrimmedStorageValue(local, KEYS.NAMESPACE);
+    const sessionLegacyNamespace = readTrimmedStorageValue(session, KEYS.NAMESPACE_LEGACY);
+    const localLegacyNamespace = readTrimmedStorageValue(local, KEYS.NAMESPACE_LEGACY);
+    const derivedNamespace = deriveNamespaceFromStoredContext();
+    const storedCandidates = [
+        sessionNamespace,
+        localNamespace,
+        sessionLegacyNamespace,
+        localLegacyNamespace,
+    ].filter(Boolean);
+    const firstStoredNamespace = storedCandidates[0] || '';
+    const firstOrgScopedStoredNamespace =
+        storedCandidates.find(isOrgScopedNamespace) || '';
+
+    // Browser storage can preserve the selected organisation while leaving the
+    // primary namespace key stale and user-only after restart. In that state,
+    // the user+organisation-derived composite namespace is authoritative.
+    if (derivedNamespace) {
+        if (!firstStoredNamespace || firstStoredNamespace === derivedNamespace) {
+            return derivedNamespace;
+        }
+        if (isOrgScopedNamespace(derivedNamespace)) {
+            return derivedNamespace;
+        }
+    }
+
+    return firstOrgScopedStoredNamespace || firstStoredNamespace || derivedNamespace;
+}
+
+function repairPrimaryNamespaceStorage(namespace) {
+    const preferredNamespace = typeof namespace === 'string' ? namespace.trim() : '';
+    const local = typeof localStorage !== 'undefined' ? localStorage : null;
+    const session = typeof sessionStorage !== 'undefined' ? sessionStorage : null;
+    const sessionNamespace = readTrimmedStorageValue(session, KEYS.NAMESPACE);
+    const localNamespace = readTrimmedStorageValue(local, KEYS.NAMESPACE);
+
+    if (!preferredNamespace) {
+        if (sessionNamespace || localNamespace) {
+            setSessionScopedNamespace(null);
+        }
+        return '';
+    }
+
+    if (sessionNamespace !== preferredNamespace || localNamespace !== preferredNamespace) {
+        setSessionScopedNamespace(preferredNamespace);
+    }
+
+    return preferredNamespace;
 }
 
 /**
@@ -96,31 +163,7 @@ export function getSessionScopedOrgId() {
  * @returns {string} Namespace string or empty string
  */
 export function getSessionScopedNamespace() {
-    // Try current_user_namespace from sessionStorage
-    try {
-        const sessionNs = sessionStorage.getItem(KEYS.NAMESPACE);
-        if (sessionNs) return sessionNs.trim();
-    } catch { /* ignore */ }
-
-    // Fallback to localStorage current_user_namespace
-    try {
-        const localNs = localStorage.getItem(KEYS.NAMESPACE);
-        if (localNs) return localNs.trim();
-    } catch { /* ignore */ }
-
-    // Try von_namespace from sessionStorage (legacy)
-    try {
-        const sessionLegacy = sessionStorage.getItem(KEYS.NAMESPACE_LEGACY);
-        if (sessionLegacy) return sessionLegacy.trim();
-    } catch { /* ignore */ }
-
-    // Fallback to localStorage von_namespace (legacy)
-    try {
-        const localLegacy = localStorage.getItem(KEYS.NAMESPACE_LEGACY);
-        if (localLegacy) return localLegacy.trim();
-    } catch { /* ignore */ }
-
-    return deriveNamespaceFromStoredContext();
+    return repairPrimaryNamespaceStorage(resolvePreferredNamespaceFromStorage());
 }
 
 /**
@@ -203,12 +246,7 @@ export function syncOrgContextFromLocalStorage() {
  * Called on page load to bootstrap window context from persistent storage.
  */
 export function syncNamespaceFromLocalStorage() {
-    if (hasSessionNamespace()) return;
-
-    try {
-        const lsNs = localStorage.getItem(KEYS.NAMESPACE);
-        if (lsNs) sessionStorage.setItem(KEYS.NAMESPACE, lsNs);
-    } catch { /* ignore */ }
+    repairPrimaryNamespaceStorage(resolvePreferredNamespaceFromStorage());
 }
 
 /**
@@ -219,9 +257,12 @@ export function clearAllOrgContext() {
         sessionStorage.removeItem(KEYS.CURRENT_ORG);
         sessionStorage.removeItem(KEYS.ORG_CONTEXT);
         sessionStorage.removeItem(KEYS.NAMESPACE);
+        sessionStorage.removeItem(KEYS.NAMESPACE_LEGACY);
         sessionStorage.removeItem(KEYS.ORG_SWITCHING);
         localStorage.removeItem(KEYS.CURRENT_ORG);
         localStorage.removeItem(KEYS.ORG_CONTEXT);
+        localStorage.removeItem(KEYS.NAMESPACE);
+        localStorage.removeItem(KEYS.NAMESPACE_LEGACY);
     } catch { /* ignore */ }
 }
 
