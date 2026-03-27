@@ -38,6 +38,37 @@ def _cmdline_matches_script(cmdline: Sequence[str], script_path: str) -> bool:
     return False
 
 
+def _process_pid(proc: Any) -> int:
+    info = getattr(proc, "info", None)
+    if isinstance(info, dict):
+        try:
+            return int(info.get("pid") or 0)
+        except Exception:
+            return 0
+
+    try:
+        return int(getattr(proc, "pid", 0) or 0)
+    except Exception:
+        return 0
+
+
+def _process_cmdline(proc: Any) -> list[str]:
+    info = getattr(proc, "info", None)
+    if isinstance(info, dict):
+        cmdline = info.get("cmdline")
+        if isinstance(cmdline, Iterable) and not isinstance(cmdline, (str, bytes)):
+            return [str(part) for part in cmdline]
+
+    try:
+        cmdline = proc.cmdline()
+    except Exception:
+        return []
+
+    if not isinstance(cmdline, Iterable) or isinstance(cmdline, (str, bytes)):
+        return []
+    return [str(part) for part in cmdline]
+
+
 def terminate_duplicate_sibling_servers(
     script_path: str,
     *,
@@ -105,18 +136,12 @@ def terminate_duplicate_sibling_servers(
 
     for proc in sibling_processes:
         try:
-            pid = int(proc.info.get("pid") or 0)
+            pid = _process_pid(proc)
             if pid <= 0 or pid == current_pid:
                 continue
-            cmdline = proc.info.get("cmdline")
-            if not cmdline:
-                try:
-                    cmdline = proc.cmdline()
-                except Exception:
-                    cmdline = []
-            if not isinstance(cmdline, Iterable):
+            cmdline_list = _process_cmdline(proc)
+            if not cmdline_list:
                 continue
-            cmdline_list = [str(part) for part in cmdline]
             if not _cmdline_matches_script(cmdline_list, script_path):
                 continue
 
