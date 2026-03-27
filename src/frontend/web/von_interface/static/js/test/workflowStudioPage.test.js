@@ -1,4 +1,5 @@
 import {
+  buildWorkflowStudioRequestHeaders,
   buildWorkflowLayout,
   normaliseAuthoringSpecForEditor,
   summarisePreviewDiff
@@ -60,5 +61,18 @@ describe('workflowStudioPage helpers', () => {
         changed_state_count: 2
       })
     ).toContain('description');
+  });
+
+  test('adds the window-session header to studio API requests', () => {
+    sessionStorage.setItem('von_window_session_id', 'ws_test123');
+
+    const getHeaders = buildWorkflowStudioRequestHeaders();
+    const postHeaders = buildWorkflowStudioRequestHeaders({ body: '{}' });
+
+    expect(getHeaders.Accept).toBe('application/json');
+    expect(getHeaders['Content-Type']).toBeUndefined();
+    expect(getHeaders['X-Von-Window-Session']).toBe('ws_test123');
+    expect(postHeaders['Content-Type']).toBe('application/json');
+    expect(postHeaders['X-Von-Window-Session']).toBe('ws_test123');
   });
 });

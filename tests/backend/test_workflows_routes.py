@@ -1444,3 +1444,4 @@ def test_workflow_studio_page_route(app_client):
 
     assert resp.status_code == 200
     assert b"Workflow Studio" in resp.data
+    assert b'href="/von/"' in resp.data

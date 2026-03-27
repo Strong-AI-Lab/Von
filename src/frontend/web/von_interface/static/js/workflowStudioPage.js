@@ -1,3 +1,9 @@
+import { getWindowSessionId, WINDOW_SESSION_HEADER } from './apiService.js';
+import {
+  syncNamespaceFromLocalStorage,
+  syncOrgContextFromLocalStorage
+} from './utils/sessionScopedStorage.js';
+
 function escapeHtml(value) {
   return String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -271,13 +277,23 @@ function setStatusBanner(message, tone = 'info') {
   elements.statusBanner.textContent = text;
 }
 
+function buildWorkflowStudioRequestHeaders(options = {}) {
+  const customHeaders = options.headers && typeof options.headers === 'object'
+    ? options.headers
+    : {};
+  return {
+    Accept: 'application/json',
+    ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+    ...customHeaders,
+    [WINDOW_SESSION_HEADER]: getWindowSessionId()
+  };
+}
+
 async function fetchJson(url, options = {}) {
+  const { headers: _ignoredHeaders, ...fetchOptions } = options || {};
   const response = await fetch(url, {
-    headers: {
-      Accept: 'application/json',
-      ...(options.body ? { 'Content-Type': 'application/json' } : {})
-    },
-    ...options
+    ...fetchOptions,
+    headers: buildWorkflowStudioRequestHeaders(options)
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -1090,6 +1106,9 @@ function bindEvents() {
 }
 
 async function initialiseWorkflowStudio() {
+  // Keep the standalone studio page aligned with the main Von window-scoped context model.
+  syncOrgContextFromLocalStorage();
+  syncNamespaceFromLocalStorage();
   cacheElements();
   bindEvents();
   renderAll();
@@ -1106,5 +1125,6 @@ if (typeof document !== 'undefined') {
 }
 
 export {
-  simplifyEdgeLabel
+  simplifyEdgeLabel,
+  buildWorkflowStudioRequestHeaders
 };
