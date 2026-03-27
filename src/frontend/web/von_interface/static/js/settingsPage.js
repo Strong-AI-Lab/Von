@@ -38,6 +38,7 @@ import {
   loadConversationHistorySettings
 } from './utils/conversationHistoryPreferences.js';
 import {
+  getSessionScopedOrgContext,
   getSessionScopedNamespace,
   setSessionScopedNamespace,
 } from './utils/sessionScopedStorage.js';
@@ -205,8 +206,15 @@ function getSelectedUserContextFromUi() {
   return buildStoredUserContextFromOption(userSelect?.selectedOptions?.[0]);
 }
 
+function getOrganisationSelectFromUi() {
+  return (
+    document.getElementById('currentOrganisationSelect')
+    || document.getElementById('orgSelect')
+  );
+}
+
 function getSelectedOrganisationContextFromUi() {
-  const orgSelect = document.getElementById('currentOrganisationSelect');
+  const orgSelect = getOrganisationSelectFromUi();
   return buildStoredOrganisationContextFromOption(orgSelect?.selectedOptions?.[0]);
 }
 
@@ -260,7 +268,9 @@ async function syncInitialScopedSelections({
     setSessionScopedNamespace(null);
   }
 
-  const orgData = getSelectedOrganisationContextFromUi();
+  const orgSelect = getOrganisationSelectFromUi();
+  const orgData = getSelectedOrganisationContextFromUi()
+    || (!orgSelect ? (getStoredJson(LS_ORG_KEY) || getSessionScopedOrgContext()) : null);
   setStoredJson(LS_ORG_KEY, orgData);
 
   try {
@@ -1536,7 +1546,7 @@ function normaliseOrgConceptId(value) {
 function resolveOrgNameFromSelect(orgConceptId) {
   const target = normaliseOrgConceptId(orgConceptId);
   if (!target) return null;
-  const select = document.getElementById('currentOrganisationSelect');
+  const select = getOrganisationSelectFromUi();
   if (!select) return null;
   for (const opt of select.options) {
     const optCid = normaliseOrgConceptId(opt.dataset?.conceptId);

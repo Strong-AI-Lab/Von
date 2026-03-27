@@ -156,5 +156,48 @@ describe('settingsPage RAG status summary', () => {
         );
         expect(refreshRagStatus).toHaveBeenCalled();
     });
+
+    test('initial scoped selection sync reads the visible Phase 2 org selector when the legacy org select is absent', async () => {
+        document.body.innerHTML = `
+            <select id="currentUserSelect">
+                <option data-id="user-1" data-concept-id="#V#michael_witbrock" selected>Michael Witbrock</option>
+            </select>
+            <select id="orgSelect">
+                <option value="">Personal (No Org)</option>
+                <option value="#V#university_of_auckland_strong_ai_lab" data-role="admin" data-concept-id="#V#university_of_auckland_strong_ai_lab" selected>
+                    University Of Auckland Strong Ai Lab (admin)
+                </option>
+            </select>
+            <div id="settingsActiveNamespaceValue"></div>
+            <div id="settingsActiveNamespaceHint"></div>
+        `;
+
+        const setUserConcept = jest.fn().mockResolvedValue({
+            namespace: '#V#michael_witbrock',
+        });
+        const switchOrganisationFn = jest.fn().mockResolvedValue({
+            namespace: '#V#michael_witbrock@university_of_auckland_strong_ai_lab',
+        });
+        const refreshRagStatus = jest.fn();
+
+        await __testOnly_syncInitialScopedSelections({
+            setUserConcept,
+            switchOrganisationFn,
+            refreshRagStatus,
+        });
+
+        expect(JSON.parse(localStorage.getItem('von_current_org'))).toMatchObject({
+            concept_id: '#V#university_of_auckland_strong_ai_lab',
+            name: 'University Of Auckland Strong Ai Lab',
+        });
+        expect(localStorage.getItem('current_user_namespace')).toBe(
+            '#V#michael_witbrock@university_of_auckland_strong_ai_lab',
+        );
+        expect(switchOrganisationFn).toHaveBeenCalledWith(
+            '#V#university_of_auckland_strong_ai_lab',
+            'University Of Auckland Strong Ai Lab',
+        );
+        expect(refreshRagStatus).toHaveBeenCalled();
+    });
 });
 
