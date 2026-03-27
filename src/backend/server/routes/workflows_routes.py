@@ -52,6 +52,14 @@ from ...workflows.workflow_definition_identity_service import (
     build_workflow_definition_identity_from_graph,
 )
 from ...workflows.workflow_listing_service import build_workflow_listing_entry
+from ...workflows.workflow_studio_service import (
+    WorkflowStudioConflictError,
+    apply_workflow_authoring_spec,
+    build_workflow_catalogue_payload,
+    build_workflow_description_proposal,
+    build_workflow_studio_detail_payload,
+    preview_workflow_authoring_spec,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -274,6 +282,11 @@ def _write_cached_workflow_definitions(
                 oldest_stamp = float(stored_at)
         if oldest_key is not None:
             _WORKFLOW_DEFINITIONS_CACHE.pop(oldest_key, None)
+
+
+def _clear_workflow_definitions_cache() -> None:
+    with _WORKFLOW_DEFINITIONS_CACHE_LOCK:
+        _WORKFLOW_DEFINITIONS_CACHE.clear()
 
 
 def _build_workflow_definitions_payload(
@@ -607,6 +620,209 @@ def api_list_workflow_definitions():
     finally:
         if refresh_lock is not None and refresh_lock_acquired:
             refresh_lock.release()
+
+
+@workflows_bp.get("/api/workflow-studio/catalogue")
+def api_workflow_studio_catalogue():
+    limit_raw = request.args.get("limit", "250")
+    try:
+        limit = int(limit_raw)
+    except Exception:
+        limit = 250
+    limit = max(1, min(limit, 500))
+    namespace = request.args.get("namespace")
+    session_id = request.args.get("session_id")
+    turn_id = request.args.get("turn_id")
+    include_designs = request.args.get("include_designs", "true").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    try:
+        payload = build_workflow_catalogue_payload(
+            limit=limit,
+            namespace=namespace or None,
+            session_id=session_id or None,
+            turn_id=turn_id or None,
+            include_designs=include_designs,
+        )
+        payload["studio"] = {
+            "independent_surface": True,
+            "read_model": "workflow_studio.read_model.v1",
+            "include_designs": include_designs,
+        }
+        return jsonify(payload)
+    except Exception as exc:
+        logger.exception("Failed to build workflow studio catalogue")
+        return (
+            jsonify(
+                {
+                    "error": "workflow_studio_catalogue_failed",
+                    "detail": str(exc),
+                }
+            ),
+            500,
+        )
+
+
+@workflows_bp.get("/api/workflow-studio/workflows/<path:workflow_id>")
+def api_get_workflow_studio_workflow(workflow_id: str):
+    namespace = request.args.get("namespace")
+    session_id = request.args.get("session_id")
+    turn_id = request.args.get("turn_id")
+    try:
+        payload = build_workflow_studio_detail_payload(
+            workflow_id,
+            namespace=namespace or None,
+            session_id=session_id or None,
+            turn_id=turn_id or None,
+        )
+        if not payload.get("raw") and not payload.get("views", {}).get("topology", {}).get(
+            "definition"
+        ):
+            return (
+                jsonify(
+                    {
+                        "error": "workflow_definition_not_found",
+                        "workflow_id": workflow_id,
+                    }
+                ),
+                404,
+            )
+        return jsonify(payload)
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "workflow_id": workflow_id}), 400
+    except Exception as exc:
+        logger.exception("Failed to build workflow studio payload for %s", workflow_id)
+        return (
+            jsonify(
+                {
+                    "error": "workflow_studio_detail_failed",
+                    "workflow_id": workflow_id,
+                    "detail": str(exc),
+                }
+            ),
+            500,
+        )
+
+
+@workflows_bp.post("/api/workflow-studio/workflows/<path:workflow_id>/authoring/preview")
+def api_preview_workflow_studio_authoring(workflow_id: str):
+    payload = request.get_json(silent=True) or {}
+    authoring_spec = payload.get("authoring_spec")
+    base_definition_hash = payload.get("base_definition_hash")
+    if not isinstance(authoring_spec, dict):
+        return jsonify({"error": "authoring_spec_dict_required"}), 400
+    try:
+        return jsonify(
+            preview_workflow_authoring_spec(
+                workflow_id,
+                authoring_spec=authoring_spec,
+                base_definition_hash=(
+                    str(base_definition_hash).strip()
+                    if isinstance(base_definition_hash, str)
+                    else None
+                ),
+            )
+        )
+    except WorkflowStudioConflictError as exc:
+        return jsonify({"error": str(exc), "workflow_id": workflow_id}), 409
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "workflow_id": workflow_id}), 400
+    except Exception as exc:
+        logger.exception(
+            "Workflow studio authoring preview failed for %s",
+            workflow_id,
+        )
+        return (
+            jsonify(
+                {
+                    "error": "workflow_studio_authoring_preview_failed",
+                    "workflow_id": workflow_id,
+                    "detail": str(exc),
+                }
+            ),
+            500,
+        )
+
+
+@workflows_bp.post("/api/workflow-studio/workflows/<path:workflow_id>/authoring/apply")
+def api_apply_workflow_studio_authoring(workflow_id: str):
+    payload = request.get_json(silent=True) or {}
+    authoring_spec = payload.get("authoring_spec")
+    base_definition_hash = payload.get("base_definition_hash")
+    if not isinstance(authoring_spec, dict):
+        return jsonify({"error": "authoring_spec_dict_required"}), 400
+    try:
+        result = apply_workflow_authoring_spec(
+            workflow_id,
+            authoring_spec=authoring_spec,
+            base_definition_hash=(
+                str(base_definition_hash).strip()
+                if isinstance(base_definition_hash, str)
+                else None
+            ),
+        )
+        try:
+            from ...workflows.durable.registry_factory import (
+                invalidate_shared_workflow_registry_read_only,
+            )
+
+            invalidate_shared_workflow_registry_read_only()
+        except Exception:
+            logger.debug(
+                "workflow studio apply could not invalidate shared workflow registry",
+                exc_info=True,
+            )
+        _clear_workflow_definitions_cache()
+        return jsonify(result)
+    except WorkflowStudioConflictError as exc:
+        return jsonify({"error": str(exc), "workflow_id": workflow_id}), 409
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "workflow_id": workflow_id}), 400
+    except Exception as exc:
+        logger.exception("Workflow studio authoring apply failed for %s", workflow_id)
+        return (
+            jsonify(
+                {
+                    "error": "workflow_studio_authoring_apply_failed",
+                    "workflow_id": workflow_id,
+                    "detail": str(exc),
+                }
+            ),
+            500,
+        )
+
+
+@workflows_bp.post("/api/workflow-studio/workflows/<path:workflow_id>/proposals/description")
+def api_build_workflow_studio_description_proposal(workflow_id: str):
+    payload = request.get_json(silent=True) or {}
+    mode = str(payload.get("mode") or "auto")
+    try:
+        return jsonify(
+            build_workflow_description_proposal(
+                workflow_id,
+                mode=mode,
+            )
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "workflow_id": workflow_id}), 400
+    except Exception as exc:
+        logger.exception(
+            "Workflow studio description proposal failed for %s",
+            workflow_id,
+        )
+        return (
+            jsonify(
+                {
+                    "error": "workflow_studio_description_proposal_failed",
+                    "workflow_id": workflow_id,
+                    "detail": str(exc),
+                }
+            ),
+            500,
+        )
 
 
 @workflows_bp.get("/api/workflows/executions/<execution_id>")

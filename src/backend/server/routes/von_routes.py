@@ -6178,6 +6178,12 @@ def serve_page():
     return render_template("von_interface.html")
 
 
+@von_bp.route("/workflow-studio")
+def serve_workflow_studio_page():
+    """Serve the independent workflow studio surface."""
+    return render_template("workflow_studio.html")
+
+
 @von_bp.route("/generate", methods=["POST"])
 def generate():  # pyright: ignore[reportGeneralTypeIssues]
     """Handle text generation requests."""

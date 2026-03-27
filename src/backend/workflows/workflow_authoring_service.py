@@ -286,6 +286,18 @@ def serialise_workflow_definition_to_authoring_spec(
     verification_inputs = definition_metadata.get("verification_inputs")
     if isinstance(verification_inputs, Mapping) and verification_inputs:
         authoring_spec["verification_inputs"] = dict(verification_inputs)
+    remaining_workflow_metadata = {
+        str(key): value
+        for key, value in definition_metadata.items()
+        if str(key)
+        not in {
+            "required_effects",
+            "postcondition_probe",
+            "verification_inputs",
+        }
+    }
+    if remaining_workflow_metadata:
+        authoring_spec["workflow_metadata"] = remaining_workflow_metadata
 
     return authoring_spec
 
@@ -305,6 +317,7 @@ def build_workflow_definition_from_authoring_spec(
 
     states: dict[str, WorkflowStateSpec] = {}
     termination_states: list[str] = []
+    seen_state_ids: set[str] = set()
 
     for index, raw_row in enumerate(raw_steps):
         if not isinstance(raw_row, Mapping):
@@ -312,6 +325,9 @@ def build_workflow_definition_from_authoring_spec(
         state_id = _clean_text(raw_row.get("state_key") or raw_row.get("state_id"))
         if not state_id:
             raise ValueError(f"workflow_authoring_spec_missing_state_id:{index}")
+        if state_id in seen_state_ids:
+            raise ValueError(f"workflow_authoring_spec_duplicate_state_id:{state_id}")
+        seen_state_ids.add(state_id)
 
         action = _build_action_from_row(raw_row)
         transitions = _build_transitions_from_row(raw_row)
@@ -351,8 +367,15 @@ def build_workflow_definition_from_authoring_spec(
     if not initial_state:
         raise ValueError("workflow_authoring_spec_missing_initial_state")
 
-    purpose = _clean_text(spec.get("workflow_description")) or None
+    purpose = _clean_text(spec.get("workflow_description") or spec.get("description")) or None
     workflow_metadata: dict[str, Any] = {}
+    raw_workflow_metadata = spec.get("workflow_metadata")
+    if isinstance(raw_workflow_metadata, Mapping):
+        workflow_metadata = {
+            str(key): value
+            for key, value in raw_workflow_metadata.items()
+            if str(key)
+        }
     required_effects = spec.get("required_effects")
     if isinstance(required_effects, list):
         workflow_metadata["required_effects"] = [
@@ -363,6 +386,9 @@ def build_workflow_definition_from_authoring_spec(
     postcondition_probe = spec.get("postcondition_probe")
     if isinstance(postcondition_probe, Mapping):
         workflow_metadata["postcondition_probe"] = dict(postcondition_probe)
+    verification_inputs = spec.get("verification_inputs")
+    if isinstance(verification_inputs, Mapping):
+        workflow_metadata["verification_inputs"] = dict(verification_inputs)
 
     return WorkflowDefinition(
         workflow_id=workflow_id,

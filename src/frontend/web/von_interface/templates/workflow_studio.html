@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Workflow Studio</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
+</head>
+
+<body class="workflow-studio-body">
+  <header class="workflow-studio-header">
+    <div class="workflow-studio-header-copy">
+      <a class="workflow-studio-backlink" href="/">Von</a>
+      <div>
+        <h1>Workflow Studio</h1>
+        <p class="workflow-studio-subtitle">
+          Independent workflow catalogue, topology visualisation, operational overlays, and preview-first authoring.
+        </p>
+      </div>
+    </div>
+    <div class="workflow-studio-header-actions">
+      <button id="workflowStudioRefreshButton" type="button" class="btn-mini">Refresh</button>
+      <span id="workflowStudioConnectionBadge" class="workflow-studio-connection-badge">Loading</span>
+    </div>
+  </header>
+
+  <main class="workflow-studio-shell">
+    <aside class="workflow-studio-sidebar">
+      <div class="workflow-studio-sidebar-header">
+        <label class="workflow-studio-search-label" for="workflowStudioSearchInput">Search workflows</label>
+        <input id="workflowStudioSearchInput" class="workflow-studio-search-input" type="search"
+          placeholder="Filter by workflow, purpose, action, or source" autocomplete="off" />
+      </div>
+      <div class="workflow-studio-sidebar-actions">
+        <label class="workflow-studio-checkbox">
+          <input id="workflowStudioShowDesignsToggle" type="checkbox" checked />
+          <span>Show design artefacts</span>
+        </label>
+        <div id="workflowStudioCatalogueMeta" class="workflow-studio-sidebar-meta">Loading catalogue…</div>
+      </div>
+      <div id="workflowStudioCatalogue" class="workflow-studio-catalogue" aria-live="polite"></div>
+    </aside>
+
+    <section class="workflow-studio-main">
+      <div id="workflowStudioHero" class="workflow-studio-hero">
+        <div>
+          <p class="workflow-studio-hero-eyebrow">Workflow</p>
+          <h2 id="workflowStudioTitle">Select a workflow</h2>
+          <p id="workflowStudioSummary" class="workflow-studio-summary">
+            Choose a workflow from the catalogue to inspect topology, decision structure, dataflow, operations, and bounded authoring controls.
+          </p>
+        </div>
+        <div id="workflowStudioSummaryChips" class="workflow-studio-summary-chips"></div>
+      </div>
+
+      <div class="workflow-studio-view-tabs" role="tablist" aria-label="Workflow studio views">
+        <button type="button" class="workflow-studio-view-tab active" data-view="topology" aria-selected="true">Topology</button>
+        <button type="button" class="workflow-studio-view-tab" data-view="decision" aria-selected="false">Decision</button>
+        <button type="button" class="workflow-studio-view-tab" data-view="dataflow" aria-selected="false">Dataflow</button>
+        <button type="button" class="workflow-studio-view-tab" data-view="operations" aria-selected="false">Operations</button>
+        <button type="button" class="workflow-studio-view-tab" data-view="edit" aria-selected="false">Edit</button>
+      </div>
+
+      <div id="workflowStudioStatusBanner" class="workflow-studio-status-banner hidden" aria-live="polite"></div>
+
+      <div class="workflow-studio-content-grid">
+        <section class="workflow-studio-canvas-panel">
+          <div id="workflowStudioCanvas" class="workflow-studio-canvas">
+            <div class="workflow-studio-empty">
+              <h3>No workflow selected</h3>
+              <p>The studio will render a derived workflow view here.</p>
+            </div>
+          </div>
+        </section>
+
+        <aside class="workflow-studio-inspector-panel">
+          <div id="workflowStudioInspector" class="workflow-studio-inspector">
+            <div class="workflow-studio-empty">
+              <h3>Inspector</h3>
+              <p>Workflow and step details appear here once a workflow is selected.</p>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="{{ url_for('static', filename='js/workflowStudioPage.js') }}"></script>
+</body>
+
+</html>

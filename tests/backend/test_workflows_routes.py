@@ -1254,3 +1254,165 @@ def test_workflow_definitions_list_refresh_in_progress_without_stale_returns_503
     assert payload["retryable"] is True
     assert float(payload["retry_after_seconds"]) > 0.0
     assert resp.headers.get("Retry-After") == "1"
+
+
+def test_workflow_studio_catalogue_endpoint(monkeypatch, app_client):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    seen: dict[str, object] = {}
+
+    def _fake_catalogue(**kwargs):
+        seen.update(kwargs)
+        return {
+            "items": [
+                {
+                    "workflow_id": "#V#alpha_workflow",
+                    "description": "Alpha workflow",
+                    "source": "vontology",
+                    "is_executable": True,
+                }
+            ],
+            "count": 1,
+            "total": 1,
+            "episodes_scope": {"namespace": None, "session_id": None, "turn_id": None},
+            "parity_inventory": {},
+        }
+
+    monkeypatch.setattr(
+        workflows_routes,
+        "build_workflow_catalogue_payload",
+        _fake_catalogue,
+    )
+
+    resp = app_client.get("/api/workflow-studio/catalogue?include_designs=false")
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["items"][0]["workflow_id"] == "#V#alpha_workflow"
+    assert payload["studio"]["independent_surface"] is True
+    assert seen["include_designs"] is False
+
+
+def test_workflow_studio_detail_endpoint(monkeypatch, app_client):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    monkeypatch.setattr(
+        workflows_routes,
+        "build_workflow_studio_detail_payload",
+        lambda *_args, **_kwargs: {
+            "workflow_id": "#V#alpha_workflow",
+            "summary": {
+                "workflow_id": "#V#alpha_workflow",
+                "source": "vontology",
+                "description": "Alpha",
+                "definition_identity": {"definition_hash": "hash"},
+            },
+            "authority": {"authoritative_store": "vontology"},
+            "views": {
+                "topology": {
+                    "definition": {
+                        "workflow_id": "#V#alpha_workflow",
+                        "initial_step": "start",
+                        "steps": [{"step_id": "start", "name": "Start"}],
+                        "edges": [],
+                    }
+                }
+            },
+            "operations": {"instances": {"items": [], "active_count": 0}},
+            "authoring": {"available": False},
+            "raw": None,
+            "raw_source": "none",
+            "warnings": [],
+        },
+    )
+
+    resp = app_client.get("/api/workflow-studio/workflows/%23V%23alpha_workflow")
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["workflow_id"] == "#V#alpha_workflow"
+    assert payload["authority"]["authoritative_store"] == "vontology"
+    assert payload["views"]["topology"]["definition"]["initial_step"] == "start"
+
+
+def test_workflow_studio_authoring_preview_conflict_returns_409(monkeypatch, app_client):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    def _raise_conflict(*_args, **_kwargs):
+        raise workflows_routes.WorkflowStudioConflictError(
+            "workflow_definition_hash_conflict"
+        )
+
+    monkeypatch.setattr(
+        workflows_routes,
+        "preview_workflow_authoring_spec",
+        _raise_conflict,
+    )
+
+    resp = app_client.post(
+        "/api/workflow-studio/workflows/%23V%23alpha_workflow/authoring/preview",
+        json={"authoring_spec": {"workflow_id": "#V#alpha_workflow", "steps": []}},
+    )
+
+    assert resp.status_code == 409
+    payload = resp.get_json()
+    assert payload["error"] == "workflow_definition_hash_conflict"
+
+
+def test_workflow_studio_authoring_apply_endpoint(monkeypatch, app_client):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    monkeypatch.setattr(
+        workflows_routes,
+        "apply_workflow_authoring_spec",
+        lambda *_args, **_kwargs: {
+            "workflow_id": "#V#alpha_workflow",
+            "publication": {"summary": {"workflows_published": 1}},
+            "preview": {"contract_validation": {"valid": True}},
+        },
+    )
+
+    resp = app_client.post(
+        "/api/workflow-studio/workflows/%23V%23alpha_workflow/authoring/apply",
+        json={
+            "authoring_spec": {
+                "workflow_id": "#V#alpha_workflow",
+                "steps": [{"state_id": "start"}],
+            }
+        },
+    )
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["publication"]["summary"]["workflows_published"] == 1
+
+
+def test_workflow_studio_description_proposal_endpoint(monkeypatch, app_client):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    monkeypatch.setattr(
+        workflows_routes,
+        "build_workflow_description_proposal",
+        lambda workflow_id, mode="auto": {
+            "workflow_id": workflow_id,
+            "proposal": {"text": "Alpha workflow description", "source": mode},
+            "guardrails": {"proposal_only": True},
+        },
+    )
+
+    resp = app_client.post(
+        "/api/workflow-studio/workflows/%23V%23alpha_workflow/proposals/description",
+        json={"mode": "llm"},
+    )
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["proposal"]["text"] == "Alpha workflow description"
+    assert payload["proposal"]["source"] == "llm"
+
+
+def test_workflow_studio_page_route(app_client):
+    resp = app_client.get("/von/workflow-studio")
+
+    assert resp.status_code == 200
+    assert b"Workflow Studio" in resp.data

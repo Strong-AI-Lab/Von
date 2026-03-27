@@ -1,0 +1,1110 @@
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function cleanText(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function uniqueStrings(values) {
+  const seen = new Set();
+  const output = [];
+  asArray(values).forEach((value) => {
+    const cleaned = cleanText(value);
+    if (!cleaned || seen.has(cleaned)) return;
+    seen.add(cleaned);
+    output.push(cleaned);
+  });
+  return output;
+}
+
+function simplifyEdgeLabel(predicate) {
+  const raw = cleanText(predicate);
+  if (!raw) return 'next';
+  const table = {
+    nextStep: 'next',
+    transition: 'transition',
+    onTrueNextStep: 'true',
+    onFalseNextStep: 'false',
+    onFailureNextStep: 'failure',
+    onUnknownNextStep: 'unknown',
+    onApprovalRequiredNextStep: 'approval',
+    onBreakNextStep: 'break',
+    onContinueNextStep: 'continue',
+    next_step: 'next',
+    on_true: 'true',
+    on_false: 'false',
+    on_failure: 'failure',
+    on_unknown: 'unknown'
+  };
+  return table[raw] || raw;
+}
+
+export function summarisePreviewDiff(diffSummary) {
+  if (!diffSummary || typeof diffSummary !== 'object') {
+    return 'No preview available.';
+  }
+  const parts = [];
+  if (diffSummary.workflow_description_changed) parts.push('description');
+  if (diffSummary.initial_state_changed) parts.push('initial state');
+  const changedStateCount = Number(diffSummary.changed_state_count || 0);
+  if (changedStateCount > 0) {
+    parts.push(`${changedStateCount} step${changedStateCount === 1 ? '' : 's'}`);
+  }
+  if (!parts.length) return 'No structural changes detected.';
+  return `Preview touches ${parts.join(', ')}.`;
+}
+
+export function normaliseAuthoringSpecForEditor(spec, workflowId) {
+  const source = spec && typeof spec === 'object' ? spec : {};
+  const steps = asArray(source.steps)
+    .filter((step) => step && typeof step === 'object')
+    .map((step, index) => {
+      const stateId = cleanText(step.state_id || step.state_key) || `step_${index + 1}`;
+      return {
+        state_id: stateId,
+        action_id: cleanText(step.action_id),
+        subworkflow_id: cleanText(step.subworkflow_id),
+        terminal: Boolean(step.terminal),
+        next_state_key: cleanText(step.next_state_key),
+        on_true_state_key: cleanText(step.on_true_state_key),
+        on_false_state_key: cleanText(step.on_false_state_key),
+        on_failure_state_key: cleanText(step.on_failure_state_key),
+        reads_variables: uniqueStrings(step.reads_variables),
+        writes_variables: uniqueStrings(step.writes_variables),
+        writes_context_keys: uniqueStrings(step.writes_context_keys),
+        tool_output_context_mappings: asArray(step.tool_output_context_mappings),
+        context_input_mappings: asArray(step.context_input_mappings),
+        metadata: step.metadata && typeof step.metadata === 'object' ? { ...step.metadata } : {}
+      };
+    });
+
+  return {
+    workflow_id: cleanText(source.workflow_id) || cleanText(workflowId),
+    description: cleanText(source.description || source.workflow_description),
+    initial_state_key: cleanText(source.initial_state_key) || (steps[0]?.state_id ?? ''),
+    required_effects: uniqueStrings(source.required_effects),
+    workflow_metadata: source.workflow_metadata && typeof source.workflow_metadata === 'object'
+      ? { ...source.workflow_metadata }
+      : {},
+    postcondition_probe: source.postcondition_probe && typeof source.postcondition_probe === 'object'
+      ? { ...source.postcondition_probe }
+      : undefined,
+    verification_inputs: source.verification_inputs && typeof source.verification_inputs === 'object'
+      ? { ...source.verification_inputs }
+      : undefined,
+    steps
+  };
+}
+
+function serialiseDraftSpec(spec) {
+  return JSON.stringify(spec || {});
+}
+
+function buildOutgoingCounts(definition) {
+  const counts = new Map();
+  asArray(definition?.edges).forEach((edge) => {
+    const from = cleanText(edge?.from);
+    const to = cleanText(edge?.to);
+    if (!from || !to) return;
+    counts.set(from, (counts.get(from) || 0) + 1);
+  });
+  return counts;
+}
+
+export function buildWorkflowLayout(definition) {
+  const steps = asArray(definition?.steps).filter((step) => step && typeof step === 'object');
+  const edges = asArray(definition?.edges).filter((edge) => edge && typeof edge === 'object');
+  const stepIds = steps.map((step) => cleanText(step.step_id)).filter(Boolean);
+  const initialStep = cleanText(definition?.initial_step) || stepIds[0] || '';
+  const adjacency = new Map();
+  stepIds.forEach((stepId) => adjacency.set(stepId, []));
+
+  edges.forEach((edge) => {
+    const from = cleanText(edge.from);
+    const to = cleanText(edge.to);
+    if (!from || !to || !adjacency.has(from)) return;
+    adjacency.get(from).push(to);
+  });
+
+  const depths = new Map();
+  const queue = [];
+  if (initialStep && adjacency.has(initialStep)) {
+    depths.set(initialStep, 0);
+    queue.push(initialStep);
+  }
+  while (queue.length) {
+    const stepId = queue.shift();
+    const depth = depths.get(stepId) || 0;
+    (adjacency.get(stepId) || []).forEach((target) => {
+      if (!depths.has(target)) {
+        depths.set(target, depth + 1);
+        queue.push(target);
+      }
+    });
+  }
+
+  let fallbackDepth = Math.max(0, ...Array.from(depths.values()));
+  steps.forEach((step) => {
+    const stepId = cleanText(step.step_id);
+    if (stepId && !depths.has(stepId)) {
+      fallbackDepth += 1;
+      depths.set(stepId, fallbackDepth);
+    }
+  });
+
+  const columns = new Map();
+  steps.forEach((step) => {
+    const stepId = cleanText(step.step_id);
+    const depth = depths.get(stepId) || 0;
+    if (!columns.has(depth)) columns.set(depth, []);
+    columns.get(depth).push(step);
+  });
+
+  const outgoingCounts = buildOutgoingCounts(definition);
+  const nodes = [];
+  const nodeMap = new Map();
+  Array.from(columns.keys()).sort((a, b) => a - b).forEach((depth) => {
+    const column = columns.get(depth) || [];
+    column.forEach((step, index) => {
+      const stepId = cleanText(step.step_id);
+      const node = {
+        stepId,
+        name: cleanText(step.name) || stepId,
+        x: 48 + (depth * 260),
+        y: 56 + (index * 148),
+        width: 208,
+        height: 92,
+        branch: (outgoingCounts.get(stepId) || 0) > 1 || asArray(step.control_flow?.conditions).length > 0,
+        terminal: (outgoingCounts.get(stepId) || 0) === 0,
+        actionId: cleanText(step.invokes_action_target || step.invokes_action),
+        subworkflowId: cleanText(step.invokes_workflow)
+      };
+      nodes.push(node);
+      nodeMap.set(stepId, node);
+    });
+  });
+
+  const laidOutEdges = edges
+    .map((edge, index) => {
+      const from = nodeMap.get(cleanText(edge.from));
+      const to = nodeMap.get(cleanText(edge.to));
+      if (!from || !to) return null;
+      const startX = from.x + from.width;
+      const startY = from.y + (from.height / 2);
+      const endX = to.x;
+      const endY = to.y + (to.height / 2);
+      const bend = Math.max(40, (endX - startX) / 2);
+      return {
+        edgeId: `edge_${index}`,
+        label: simplifyEdgeLabel(edge.predicate),
+        path: `M ${startX} ${startY} C ${startX + bend} ${startY}, ${endX - bend} ${endY}, ${endX} ${endY}`,
+        labelX: startX + ((endX - startX) / 2),
+        labelY: startY + ((endY - startY) / 2) - 8
+      };
+    })
+    .filter(Boolean);
+
+  const width = Math.max(720, ...nodes.map((node) => node.x + node.width + 80));
+  const height = Math.max(360, ...nodes.map((node) => node.y + node.height + 60));
+  return { width, height, nodes, edges: laidOutEdges };
+}
+
+const state = {
+  catalogue: [],
+  filteredCatalogue: [],
+  selectedWorkflowId: '',
+  workflowDetail: null,
+  activeView: 'topology',
+  selectedStepId: '',
+  draftSpec: null,
+  preview: null,
+  previewSignature: '',
+  search: '',
+  showDesigns: true
+};
+
+const elements = {};
+
+function cacheElements() {
+  elements.catalogue = document.getElementById('workflowStudioCatalogue');
+  elements.catalogueMeta = document.getElementById('workflowStudioCatalogueMeta');
+  elements.searchInput = document.getElementById('workflowStudioSearchInput');
+  elements.showDesignsToggle = document.getElementById('workflowStudioShowDesignsToggle');
+  elements.refreshButton = document.getElementById('workflowStudioRefreshButton');
+  elements.connectionBadge = document.getElementById('workflowStudioConnectionBadge');
+  elements.title = document.getElementById('workflowStudioTitle');
+  elements.summary = document.getElementById('workflowStudioSummary');
+  elements.summaryChips = document.getElementById('workflowStudioSummaryChips');
+  elements.canvas = document.getElementById('workflowStudioCanvas');
+  elements.inspector = document.getElementById('workflowStudioInspector');
+  elements.statusBanner = document.getElementById('workflowStudioStatusBanner');
+  elements.tabs = Array.from(document.querySelectorAll('.workflow-studio-view-tab'));
+}
+
+function setConnectionBadge(text, tone = 'loading') {
+  if (!elements.connectionBadge) return;
+  elements.connectionBadge.textContent = text;
+  elements.connectionBadge.dataset.tone = tone;
+}
+
+function setStatusBanner(message, tone = 'info') {
+  if (!elements.statusBanner) return;
+  const text = cleanText(message);
+  if (!text) {
+    elements.statusBanner.classList.add('hidden');
+    elements.statusBanner.textContent = '';
+    delete elements.statusBanner.dataset.tone;
+    return;
+  }
+  elements.statusBanner.classList.remove('hidden');
+  elements.statusBanner.dataset.tone = tone;
+  elements.statusBanner.textContent = text;
+}
+
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, {
+    headers: {
+      Accept: 'application/json',
+      ...(options.body ? { 'Content-Type': 'application/json' } : {})
+    },
+    ...options
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(cleanText(data.error) || `Request failed with ${response.status}`);
+    error.payload = data;
+    error.status = response.status;
+    throw error;
+  }
+  return data;
+}
+
+function filterCatalogue() {
+  const search = cleanText(state.search).toLowerCase();
+  state.filteredCatalogue = state.catalogue.filter((item) => {
+    if (!state.showDesigns && !item.is_executable) return false;
+    if (!search) return true;
+    const haystack = [
+      item.workflow_id,
+      item.description,
+      item.source,
+      item.executability_reason
+    ].map((value) => cleanText(value).toLowerCase()).join(' ');
+    return haystack.includes(search);
+  });
+}
+
+function renderCatalogue() {
+  if (!elements.catalogue) return;
+  filterCatalogue();
+  if (!state.filteredCatalogue.length) {
+    elements.catalogue.innerHTML = `
+      <div class="workflow-studio-empty compact">
+        <h3>No workflows match</h3>
+        <p>Adjust the search text or the design-artifact filter.</p>
+      </div>
+    `;
+  } else {
+    elements.catalogue.innerHTML = state.filteredCatalogue.map((item) => {
+      const selected = item.workflow_id === state.selectedWorkflowId;
+      const description = cleanText(item.description) || 'No workflow description yet.';
+      const badges = [
+        item.source ? `<span class="workflow-studio-pill">${escapeHtml(item.source)}</span>` : '',
+        item.is_executable
+          ? '<span class="workflow-studio-pill success">Executable</span>'
+          : '<span class="workflow-studio-pill muted">Design</span>'
+      ].join('');
+      return `
+        <button type="button" class="workflow-studio-catalogue-item${selected ? ' selected' : ''}"
+          data-workflow-id="${escapeHtml(item.workflow_id)}">
+          <div class="workflow-studio-catalogue-title">${escapeHtml(item.workflow_id)}</div>
+          <div class="workflow-studio-catalogue-description">${escapeHtml(description)}</div>
+          <div class="workflow-studio-catalogue-badges">${badges}</div>
+        </button>
+      `;
+    }).join('');
+  }
+
+  if (elements.catalogueMeta) {
+    elements.catalogueMeta.textContent = `${state.filteredCatalogue.length} of ${state.catalogue.length} workflows shown`;
+  }
+}
+
+function getDefinition() {
+  return state.workflowDetail?.views?.topology?.definition || null;
+}
+
+function getDefinitionSteps() {
+  return asArray(getDefinition()?.steps).filter((step) => step && typeof step === 'object');
+}
+
+function getSelectedStepSummary() {
+  const stepId = cleanText(state.selectedStepId);
+  if (!stepId) return null;
+  return getDefinitionSteps().find((step) => cleanText(step.step_id) === stepId) || null;
+}
+
+function ensureSelectedStep() {
+  const stepIds = getDefinitionSteps().map((step) => cleanText(step.step_id)).filter(Boolean);
+  if (!stepIds.length) {
+    state.selectedStepId = '';
+    return;
+  }
+  if (stepIds.includes(state.selectedStepId)) return;
+  state.selectedStepId = cleanText(getDefinition()?.initial_step) || stepIds[0];
+}
+
+function renderSummaryHeader() {
+  if (!elements.title || !elements.summary || !elements.summaryChips) return;
+  if (!state.workflowDetail) {
+    elements.title.textContent = 'Select a workflow';
+    elements.summary.textContent = 'Choose a workflow from the catalogue to inspect topology, decision structure, dataflow, operations, and bounded authoring controls.';
+    elements.summaryChips.innerHTML = '';
+    return;
+  }
+  const summary = state.workflowDetail.summary || {};
+  elements.title.textContent = summary.workflow_id || state.selectedWorkflowId;
+  elements.summary.textContent = cleanText(summary.description) || 'No workflow description yet. Use the editor to propose and publish one through the authoritative workflow path.';
+  const chips = [];
+  chips.push(`<span class="workflow-studio-hero-chip">${escapeHtml(cleanText(summary.source) || 'unknown')}</span>`);
+  chips.push(`<span class="workflow-studio-hero-chip ${summary.is_executable ? 'success' : 'muted'}">${summary.is_executable ? 'Executable' : 'Design artefact'}</span>`);
+  const stepCount = Number(state.workflowDetail?.views?.topology?.summary?.step_count || 0);
+  chips.push(`<span class="workflow-studio-hero-chip">${stepCount} step${stepCount === 1 ? '' : 's'}</span>`);
+  const activeCount = Number(state.workflowDetail?.operations?.instances?.active_count || 0);
+  chips.push(`<span class="workflow-studio-hero-chip">${activeCount} active instance${activeCount === 1 ? '' : 's'}</span>`);
+  elements.summaryChips.innerHTML = chips.join('');
+}
+
+function renderTopologyView() {
+  const definition = getDefinition();
+  if (!definition) {
+    return `
+      <div class="workflow-studio-empty">
+        <h3>No process graph</h3>
+        <p>This workflow currently exposes narrative text only.</p>
+      </div>
+    `;
+  }
+  const layout = buildWorkflowLayout(definition);
+  const svg = `
+    <svg class="workflow-studio-graph" viewBox="0 0 ${layout.width} ${layout.height}" role="img" aria-label="Workflow topology">
+      <defs>
+        <marker id="workflowStudioArrow" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L0,6 L8,3 z" class="workflow-studio-graph-arrow"></path>
+        </marker>
+      </defs>
+      ${layout.edges.map((edge) => `
+        <g class="workflow-studio-edge">
+          <path d="${edge.path}" class="workflow-studio-edge-path"></path>
+          <text x="${edge.labelX}" y="${edge.labelY}" class="workflow-studio-edge-label">${escapeHtml(edge.label)}</text>
+        </g>
+      `).join('')}
+      ${layout.nodes.map((node) => `
+        <g class="workflow-studio-node ${node.branch ? 'branch' : ''} ${node.terminal ? 'terminal' : ''} ${node.stepId === state.selectedStepId ? 'selected' : ''}"
+          data-step-id="${escapeHtml(node.stepId)}" tabindex="0" role="button" aria-label="Select step ${escapeHtml(node.name)}">
+          <rect x="${node.x}" y="${node.y}" rx="18" ry="18" width="${node.width}" height="${node.height}"></rect>
+          <text x="${node.x + 18}" y="${node.y + 28}" class="workflow-studio-node-title">${escapeHtml(node.name)}</text>
+          <text x="${node.x + 18}" y="${node.y + 48}" class="workflow-studio-node-subtitle">${escapeHtml(node.actionId || node.subworkflowId || 'No bound action')}</text>
+          <text x="${node.x + 18}" y="${node.y + 68}" class="workflow-studio-node-meta">${node.branch ? 'Branching' : node.terminal ? 'Terminal' : 'Linear step'}</text>
+        </g>
+      `).join('')}
+    </svg>
+  `;
+  return `
+    <div class="workflow-studio-view-intro">
+      <h3>Topology</h3>
+      <p>Derived process graph from authoritative workflow relationships and runtime metadata.</p>
+    </div>
+    <div class="workflow-studio-graph-shell">${svg}</div>
+  `;
+}
+
+function renderDecisionView() {
+  const decision = state.workflowDetail?.views?.decision || {};
+  const decisionPoints = asArray(decision.decision_points);
+  const terminalSteps = asArray(decision.terminal_steps);
+  return `
+    <div class="workflow-studio-view-intro">
+      <h3>Decision structure</h3>
+      <p>Conditional transitions, explicit preconditions, and terminal sinks.</p>
+    </div>
+    <div class="workflow-studio-card-grid">
+      ${decisionPoints.length ? decisionPoints.map((point) => `
+        <button type="button" class="workflow-studio-card workflow-studio-step-card" data-step-id="${escapeHtml(point.step_id)}">
+          <div class="workflow-studio-card-title">${escapeHtml(point.name || point.step_id)}</div>
+          <div class="workflow-studio-card-meta">${point.branch_targets.length} branch target${point.branch_targets.length === 1 ? '' : 's'}</div>
+          <div class="workflow-studio-card-copy">
+            ${point.preconditions?.length ? `Preconditions: ${escapeHtml(point.preconditions.join(', '))}` : 'No explicit preconditions'}
+          </div>
+        </button>
+      `).join('') : `
+        <div class="workflow-studio-empty compact">
+          <h3>No branching points</h3>
+          <p>This workflow is currently linear in its derived process graph.</p>
+        </div>
+      `}
+    </div>
+    <div class="workflow-studio-section">
+      <h4>Terminal steps</h4>
+      <div class="workflow-studio-chip-row">
+        ${terminalSteps.map((step) => `
+          <button type="button" class="workflow-studio-chip-button" data-step-id="${escapeHtml(step.step_id)}">${escapeHtml(step.name || step.step_id)}</button>
+        `).join('') || '<span class="workflow-studio-muted">No terminal steps derived.</span>'}
+      </div>
+    </div>
+  `;
+}
+
+function renderDataflowView() {
+  const dataflow = state.workflowDetail?.views?.dataflow || {};
+  const stepFlows = asArray(dataflow.step_dataflows);
+  return `
+    <div class="workflow-studio-view-intro">
+      <h3>Dataflow</h3>
+      <p>Context mappings, variable usage, and output propagation exposed by the workflow graph.</p>
+    </div>
+    <div class="workflow-studio-section">
+      <h4>Produced context keys</h4>
+      <div class="workflow-studio-chip-row">
+        ${uniqueStrings(dataflow.produced_context_keys).map((item) => `<span class="workflow-studio-pill">${escapeHtml(item)}</span>`).join('') || '<span class="workflow-studio-muted">No explicit context keys.</span>'}
+      </div>
+    </div>
+    <div class="workflow-studio-card-grid">
+      ${stepFlows.map((step) => `
+        <button type="button" class="workflow-studio-card workflow-studio-step-card" data-step-id="${escapeHtml(step.step_id)}">
+          <div class="workflow-studio-card-title">${escapeHtml(step.name || step.step_id)}</div>
+          <div class="workflow-studio-card-copy">
+            Reads: ${escapeHtml((step.reads_variables || []).join(', ') || 'none')}<br>
+            Writes: ${escapeHtml((step.writes_variables || []).join(', ') || 'none')}<br>
+            Context: ${escapeHtml((step.writes_context_keys || []).join(', ') || 'none')}
+          </div>
+        </button>
+      `).join('') || `
+        <div class="workflow-studio-empty compact">
+          <h3>No step dataflow metadata</h3>
+          <p>This workflow does not currently declare variable or context mappings.</p>
+        </div>
+      `}
+    </div>
+  `;
+}
+
+function renderOperationsList(items, renderer) {
+  if (!items.length) {
+    return '<div class="workflow-studio-muted">None</div>';
+  }
+  return `<div class="workflow-studio-list">${items.map(renderer).join('')}</div>`;
+}
+
+function renderOperationsView() {
+  const operations = state.workflowDetail?.operations || {};
+  const instances = operations.instances || {};
+  const bindings = operations.bindings || {};
+  const schedules = operations.schedules || {};
+  const executions = operations.executions || {};
+  return `
+    <div class="workflow-studio-view-intro">
+      <h3>Operations</h3>
+      <p>Live-ish operational overlays for schedules, event bindings, executions, and durable instances.</p>
+    </div>
+    ${instances.degraded ? `
+      <div class="workflow-studio-callout warning">
+        <strong>Instance view degraded.</strong>
+        <span>${escapeHtml(cleanText(instances.detail) || 'Workflow instances are temporarily unavailable.')}</span>
+      </div>
+    ` : ''}
+    <div class="workflow-studio-section">
+      <h4>Event bindings</h4>
+      ${renderOperationsList(asArray(bindings.items), (item) => `
+        <div class="workflow-studio-list-row">
+          <div><strong>${escapeHtml(item.event_type)}</strong></div>
+          <div>${escapeHtml(item.enabled ? 'Enabled' : 'Disabled')}</div>
+        </div>
+      `)}
+      ${asArray(bindings.diagnostics).length ? `
+        <div class="workflow-studio-diagnostics">
+          ${bindings.diagnostics.map((row) => `
+            <div class="workflow-studio-diagnostic-row">${escapeHtml(row.event_type)}: ${escapeHtml((row.reason_codes || []).join(', ') || 'healthy')}</div>
+          `).join('')}
+        </div>
+      ` : ''}
+    </div>
+    <div class="workflow-studio-section">
+      <h4>Schedules</h4>
+      ${renderOperationsList(asArray(schedules.items), (item) => `
+        <div class="workflow-studio-list-row">
+          <div><strong>${escapeHtml(item.schedule_type)}</strong></div>
+          <div>${escapeHtml(item.next_run_at || 'unscheduled')}</div>
+        </div>
+      `)}
+    </div>
+    <div class="workflow-studio-section">
+      <h4>Durable instances</h4>
+      ${renderOperationsList(asArray(instances.items), (item) => `
+        <div class="workflow-studio-list-row">
+          <div><strong>${escapeHtml(item.status || 'unknown')}</strong> ${escapeHtml(item.current_state || '')}</div>
+          <div>${escapeHtml(item.created_at || '')}</div>
+        </div>
+      `)}
+    </div>
+    <div class="workflow-studio-section">
+      <h4>Execution traces</h4>
+      ${renderOperationsList(asArray(executions.items), (item) => `
+        <div class="workflow-studio-list-row">
+          <div><strong>${escapeHtml(item.execution_id || item.trace_id || 'trace')}</strong></div>
+          <div>${escapeHtml(item.started_at || item.created_at || '')}</div>
+        </div>
+      `)}
+    </div>
+  `;
+}
+
+function getDraftStep(stepId) {
+  return state.draftSpec?.steps?.find((step) => cleanText(step.state_id) === cleanText(stepId)) || null;
+}
+
+function buildStepOptions(selectedValue = '') {
+  const selected = cleanText(selectedValue);
+  const options = ['<option value="">None</option>'];
+  asArray(state.draftSpec?.steps).forEach((step) => {
+    const stateId = cleanText(step.state_id);
+    options.push(`<option value="${escapeHtml(stateId)}"${stateId === selected ? ' selected' : ''}>${escapeHtml(stateId)}</option>`);
+  });
+  return options.join('');
+}
+
+function renderEditView() {
+  if (!state.draftSpec) {
+    return `
+      <div class="workflow-studio-empty">
+        <h3>Authoring unavailable</h3>
+        <p>This workflow does not currently expose a runtime definition for bounded editing.</p>
+      </div>
+    `;
+  }
+  const draft = state.draftSpec;
+  const currentStep = getDraftStep(state.selectedStepId) || draft.steps[0] || null;
+  const preview = state.preview?.preview || null;
+  return `
+    <div class="workflow-studio-view-intro">
+      <h3>Bounded authoring</h3>
+      <p>Edit workflow description, initial state, sequencing, and per-step action bindings. Publish is preview-first and Vontology-authoritative.</p>
+    </div>
+    <div class="workflow-studio-editor-grid">
+      <section class="workflow-studio-card">
+        <div class="workflow-studio-card-title">Workflow</div>
+        <label class="workflow-studio-field">
+          <span>Description</span>
+          <textarea data-edit-field="description" rows="5">${escapeHtml(draft.description || '')}</textarea>
+        </label>
+        <label class="workflow-studio-field">
+          <span>Initial state</span>
+          <select data-edit-field="initial_state_key">${buildStepOptions(draft.initial_state_key)}</select>
+        </label>
+        <div class="workflow-studio-button-row">
+          <button type="button" class="btn-mini" data-action="suggest-description">Suggest description</button>
+          <button type="button" class="btn-mini" data-action="reset-draft">Reset draft</button>
+        </div>
+      </section>
+      <section class="workflow-studio-card">
+        <div class="workflow-studio-card-title">Steps</div>
+        <div class="workflow-studio-chip-row">
+          ${draft.steps.map((step) => `
+            <button type="button" class="workflow-studio-chip-button ${cleanText(step.state_id) === cleanText(currentStep?.state_id) ? 'selected' : ''}"
+              data-step-select="${escapeHtml(step.state_id)}">${escapeHtml(step.state_id)}</button>
+          `).join('')}
+        </div>
+        <div class="workflow-studio-button-row">
+          <button type="button" class="btn-mini" data-action="add-step">Add step</button>
+          <button type="button" class="btn-mini danger" data-action="remove-step"${currentStep ? '' : ' disabled'}>Remove selected step</button>
+        </div>
+      </section>
+      ${currentStep ? `
+        <section class="workflow-studio-card">
+          <div class="workflow-studio-card-title">Selected step</div>
+          <label class="workflow-studio-field">
+            <span>State ID</span>
+            <input type="text" value="${escapeHtml(currentStep.state_id)}" disabled />
+          </label>
+          <label class="workflow-studio-field">
+            <span>Action ID</span>
+            <input type="text" data-step-field="action_id" data-step-id="${escapeHtml(currentStep.state_id)}" value="${escapeHtml(currentStep.action_id || '')}" />
+          </label>
+          <label class="workflow-studio-field">
+            <span>Subworkflow ID</span>
+            <input type="text" data-step-field="subworkflow_id" data-step-id="${escapeHtml(currentStep.state_id)}" value="${escapeHtml(currentStep.subworkflow_id || '')}" />
+          </label>
+          <label class="workflow-studio-field checkbox">
+            <input type="checkbox" data-step-field="terminal" data-step-id="${escapeHtml(currentStep.state_id)}"${currentStep.terminal ? ' checked' : ''} />
+            <span>Terminal step</span>
+          </label>
+          <div class="workflow-studio-two-column-fields">
+            <label class="workflow-studio-field">
+              <span>Next</span>
+              <select data-step-field="next_state_key" data-step-id="${escapeHtml(currentStep.state_id)}">${buildStepOptions(currentStep.next_state_key)}</select>
+            </label>
+            <label class="workflow-studio-field">
+              <span>On true</span>
+              <select data-step-field="on_true_state_key" data-step-id="${escapeHtml(currentStep.state_id)}">${buildStepOptions(currentStep.on_true_state_key)}</select>
+            </label>
+            <label class="workflow-studio-field">
+              <span>On false</span>
+              <select data-step-field="on_false_state_key" data-step-id="${escapeHtml(currentStep.state_id)}">${buildStepOptions(currentStep.on_false_state_key)}</select>
+            </label>
+            <label class="workflow-studio-field">
+              <span>On failure</span>
+              <select data-step-field="on_failure_state_key" data-step-id="${escapeHtml(currentStep.state_id)}">${buildStepOptions(currentStep.on_failure_state_key)}</select>
+            </label>
+          </div>
+          <label class="workflow-studio-field">
+            <span>Reads variables</span>
+            <input type="text" data-step-field="reads_variables" data-step-id="${escapeHtml(currentStep.state_id)}" value="${escapeHtml((currentStep.reads_variables || []).join(', '))}" />
+          </label>
+          <label class="workflow-studio-field">
+            <span>Writes variables</span>
+            <input type="text" data-step-field="writes_variables" data-step-id="${escapeHtml(currentStep.state_id)}" value="${escapeHtml((currentStep.writes_variables || []).join(', '))}" />
+          </label>
+          <label class="workflow-studio-field">
+            <span>Writes context keys</span>
+            <input type="text" data-step-field="writes_context_keys" data-step-id="${escapeHtml(currentStep.state_id)}" value="${escapeHtml((currentStep.writes_context_keys || []).join(', '))}" />
+          </label>
+        </section>
+      ` : ''}
+    </div>
+    <div class="workflow-studio-button-row anchored">
+      <button type="button" class="btn-mini" data-action="preview-authoring">Preview changes</button>
+      <button type="button" class="btn-mini primary" data-action="apply-authoring"${preview && state.previewSignature === serialiseDraftSpec(state.draftSpec) ? '' : ' disabled'}>Apply to Vontology</button>
+    </div>
+    ${preview ? `
+      <div class="workflow-studio-callout info">
+        <strong>Preview ready.</strong>
+        <span>${escapeHtml(summarisePreviewDiff(preview.diff_summary))}</span>
+      </div>
+    ` : ''}
+  `;
+}
+
+function renderCanvas() {
+  if (!elements.canvas) return;
+  let html = '';
+  if (!state.workflowDetail) {
+    html = `
+      <div class="workflow-studio-empty">
+        <h3>No workflow selected</h3>
+        <p>The studio will render a derived workflow view here.</p>
+      </div>
+    `;
+  } else if (state.activeView === 'topology') {
+    html = renderTopologyView();
+  } else if (state.activeView === 'decision') {
+    html = renderDecisionView();
+  } else if (state.activeView === 'dataflow') {
+    html = renderDataflowView();
+  } else if (state.activeView === 'operations') {
+    html = renderOperationsView();
+  } else {
+    html = renderEditView();
+  }
+  elements.canvas.innerHTML = html;
+}
+
+function renderInspector() {
+  if (!elements.inspector) return;
+  if (!state.workflowDetail) {
+    elements.inspector.innerHTML = `
+      <div class="workflow-studio-empty">
+        <h3>Inspector</h3>
+        <p>Workflow and step details appear here once a workflow is selected.</p>
+      </div>
+    `;
+    return;
+  }
+  const summary = state.workflowDetail.summary || {};
+  const selectedStep = getSelectedStepSummary();
+  const validation = state.workflowDetail.authoring?.validation || {};
+  elements.inspector.innerHTML = `
+    <div class="workflow-studio-section">
+      <h3>Authority</h3>
+      <div class="workflow-studio-key-value">
+        <span>Store</span>
+        <strong>${escapeHtml(state.workflowDetail.authority?.authoritative_store || 'vontology')}</strong>
+      </div>
+      <div class="workflow-studio-key-value">
+        <span>Runtime source</span>
+        <strong>${escapeHtml(summary.source || 'unknown')}</strong>
+      </div>
+      <div class="workflow-studio-key-value">
+        <span>Definition hash</span>
+        <strong class="workflow-studio-hash">${escapeHtml(summary.definition_identity?.definition_hash || 'unavailable')}</strong>
+      </div>
+    </div>
+    <div class="workflow-studio-section">
+      <h3>Validation</h3>
+      <div class="workflow-studio-key-value">
+        <span>Current authoring contract</span>
+        <strong>${validation.valid ? 'Valid' : 'Issues present'}</strong>
+      </div>
+      <div class="workflow-studio-muted">${escapeHtml((validation.errors || []).join(', ') || 'No validation errors recorded.')}</div>
+    </div>
+    <div class="workflow-studio-section">
+      <h3>${selectedStep ? `Step ${escapeHtml(selectedStep.step_id)}` : 'Workflow selection'}</h3>
+      ${selectedStep ? `
+        <div class="workflow-studio-key-value"><span>Action</span><strong>${escapeHtml(selectedStep.invokes_action_target || selectedStep.invokes_action || 'none')}</strong></div>
+        <div class="workflow-studio-key-value"><span>Subworkflow</span><strong>${escapeHtml(selectedStep.invokes_workflow || 'none')}</strong></div>
+        <div class="workflow-studio-key-value"><span>Writes context</span><strong>${escapeHtml((selectedStep.writes_context_keys || []).join(', ') || 'none')}</strong></div>
+      ` : `
+        <div class="workflow-studio-muted">Select a step in the current view to inspect its metadata.</div>
+      `}
+    </div>
+    ${state.preview?.preview ? `
+      <div class="workflow-studio-section">
+        <h3>Pending preview</h3>
+        <div class="workflow-studio-muted">${escapeHtml(summarisePreviewDiff(state.preview.preview.diff_summary))}</div>
+      </div>
+    ` : ''}
+  `;
+}
+
+function renderAll() {
+  elements.tabs.forEach((button) => {
+    const active = button.dataset.view === state.activeView;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  ensureSelectedStep();
+  renderCatalogue();
+  renderSummaryHeader();
+  renderCanvas();
+  renderInspector();
+}
+
+async function loadCatalogue({ selectFirst = false } = {}) {
+  setConnectionBadge('Loading', 'loading');
+  try {
+    const data = await fetchJson(`/api/workflow-studio/catalogue?include_designs=${state.showDesigns ? 'true' : 'false'}&limit=300`);
+    state.catalogue = asArray(data.items);
+    if (!state.selectedWorkflowId && selectFirst && state.catalogue[0]?.workflow_id) {
+      state.selectedWorkflowId = state.catalogue[0].workflow_id;
+    }
+    renderCatalogue();
+    setConnectionBadge('Ready', 'ready');
+  } catch (error) {
+    console.error('Workflow studio catalogue failed:', error);
+    setConnectionBadge('Offline', 'error');
+    setStatusBanner(cleanText(error?.payload?.detail) || cleanText(error.message) || 'Could not load workflow catalogue.', 'error');
+  }
+}
+
+async function loadWorkflowDetail(workflowId) {
+  const workflowIdClean = cleanText(workflowId);
+  if (!workflowIdClean) return;
+  state.selectedWorkflowId = workflowIdClean;
+  setConnectionBadge('Loading', 'loading');
+  try {
+    const data = await fetchJson(`/api/workflow-studio/workflows/${encodeURIComponent(workflowIdClean)}`);
+    state.workflowDetail = data;
+    state.draftSpec = data.authoring?.available
+      ? normaliseAuthoringSpecForEditor(data.authoring.current_spec, workflowIdClean)
+      : null;
+    state.preview = null;
+    state.previewSignature = '';
+    ensureSelectedStep();
+    renderAll();
+    setStatusBanner('', 'info');
+    setConnectionBadge('Ready', 'ready');
+  } catch (error) {
+    console.error('Workflow studio detail failed:', error);
+    setConnectionBadge('Error', 'error');
+    setStatusBanner(cleanText(error?.payload?.detail) || cleanText(error.message) || 'Could not load workflow detail.', 'error');
+  }
+}
+
+function markDraftChanged() {
+  const currentSignature = serialiseDraftSpec(state.draftSpec);
+  if (state.previewSignature && currentSignature !== state.previewSignature) {
+    state.preview = null;
+    state.previewSignature = '';
+  }
+  renderAll();
+}
+
+function parseStringList(rawValue) {
+  return uniqueStrings(String(rawValue ?? '').split(',').map((item) => item.trim()));
+}
+
+function updateDraftWorkflowField(field, value) {
+  if (!state.draftSpec) return;
+  state.draftSpec[field] = field === 'description' ? String(value ?? '') : cleanText(value);
+  markDraftChanged();
+}
+
+function clearReferencesToStep(stepId) {
+  asArray(state.draftSpec?.steps).forEach((step) => {
+    ['next_state_key', 'on_true_state_key', 'on_false_state_key', 'on_failure_state_key'].forEach((field) => {
+      if (cleanText(step[field]) === stepId) {
+        step[field] = '';
+      }
+    });
+  });
+}
+
+function updateDraftStepField(stepId, field, value, inputType = 'text') {
+  const step = getDraftStep(stepId);
+  if (!step) return;
+  if (field === 'terminal') {
+    step.terminal = Boolean(value);
+  } else if (['reads_variables', 'writes_variables', 'writes_context_keys'].includes(field)) {
+    step[field] = parseStringList(value);
+  } else {
+    step[field] = inputType === 'checkbox' ? Boolean(value) : cleanText(value);
+  }
+  markDraftChanged();
+}
+
+function addDraftStep() {
+  if (!state.draftSpec) return;
+  let index = state.draftSpec.steps.length + 1;
+  let stateId = `new_step_${index}`;
+  const existingIds = new Set(state.draftSpec.steps.map((step) => cleanText(step.state_id)));
+  while (existingIds.has(stateId)) {
+    index += 1;
+    stateId = `new_step_${index}`;
+  }
+  state.draftSpec.steps.push({
+    state_id: stateId,
+    action_id: '',
+    subworkflow_id: '',
+    terminal: false,
+    next_state_key: '',
+    on_true_state_key: '',
+    on_false_state_key: '',
+    on_failure_state_key: '',
+    reads_variables: [],
+    writes_variables: [],
+    writes_context_keys: [],
+    tool_output_context_mappings: [],
+    context_input_mappings: [],
+    metadata: {}
+  });
+  state.selectedStepId = stateId;
+  if (!cleanText(state.draftSpec.initial_state_key)) {
+    state.draftSpec.initial_state_key = stateId;
+  }
+  markDraftChanged();
+}
+
+function removeDraftStep(stepId) {
+  if (!state.draftSpec) return;
+  if (state.draftSpec.steps.length <= 1) {
+    setStatusBanner('A workflow needs at least one step in the draft authoring spec.', 'warning');
+    return;
+  }
+  state.draftSpec.steps = state.draftSpec.steps.filter((step) => cleanText(step.state_id) !== cleanText(stepId));
+  clearReferencesToStep(cleanText(stepId));
+  if (cleanText(state.draftSpec.initial_state_key) === cleanText(stepId)) {
+    state.draftSpec.initial_state_key = cleanText(state.draftSpec.steps[0]?.state_id);
+  }
+  state.selectedStepId = cleanText(state.draftSpec.steps[0]?.state_id);
+  markDraftChanged();
+}
+
+async function requestDescriptionProposal() {
+  if (!state.selectedWorkflowId) return;
+  setStatusBanner('Generating workflow description proposal...', 'info');
+  try {
+    const response = await fetchJson(
+      `/api/workflow-studio/workflows/${encodeURIComponent(state.selectedWorkflowId)}/proposals/description`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ mode: 'auto' })
+      }
+    );
+    const proposalText = cleanText(response?.proposal?.text);
+    if (proposalText && state.draftSpec) {
+      state.draftSpec.description = proposalText;
+      markDraftChanged();
+      setStatusBanner(`Description proposal loaded from ${cleanText(response?.proposal?.source) || 'proposal service'}.`, 'success');
+    } else {
+      setStatusBanner('Description proposal did not return usable text.', 'warning');
+    }
+  } catch (error) {
+    console.error('Workflow description proposal failed:', error);
+    setStatusBanner(cleanText(error?.payload?.detail) || cleanText(error.message) || 'Could not generate workflow description proposal.', 'error');
+  }
+}
+
+async function previewAuthoringDraft() {
+  if (!state.selectedWorkflowId || !state.draftSpec) return;
+  setStatusBanner('Previewing bounded workflow changes...', 'info');
+  try {
+    const response = await fetchJson(
+      `/api/workflow-studio/workflows/${encodeURIComponent(state.selectedWorkflowId)}/authoring/preview`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          authoring_spec: state.draftSpec,
+          base_definition_hash: state.workflowDetail?.authoring?.base_definition_hash || null
+        })
+      }
+    );
+    state.preview = response;
+    state.previewSignature = serialiseDraftSpec(state.draftSpec);
+    renderAll();
+    if (response?.preview?.contract_validation?.valid) {
+      setStatusBanner('Preview passed contract validation. Apply is enabled for this exact draft.', 'success');
+    } else {
+      setStatusBanner('Preview completed, but validation issues remain in the proposed workflow definition.', 'warning');
+    }
+  } catch (error) {
+    console.error('Workflow authoring preview failed:', error);
+    setStatusBanner(cleanText(error?.payload?.error) || cleanText(error.message) || 'Could not preview workflow authoring changes.', 'error');
+  }
+}
+
+async function applyAuthoringDraft() {
+  if (!state.selectedWorkflowId || !state.draftSpec) return;
+  if (!state.preview || state.previewSignature !== serialiseDraftSpec(state.draftSpec)) {
+    setStatusBanner('Preview the current draft before applying it.', 'warning');
+    return;
+  }
+  setStatusBanner('Publishing workflow changes to Vontology...', 'info');
+  try {
+    await fetchJson(
+      `/api/workflow-studio/workflows/${encodeURIComponent(state.selectedWorkflowId)}/authoring/apply`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          authoring_spec: state.draftSpec,
+          base_definition_hash: state.workflowDetail?.authoring?.base_definition_hash || null
+        })
+      }
+    );
+    setStatusBanner('Workflow changes published. Reloading authoritative detail...', 'success');
+    await loadCatalogue();
+    await loadWorkflowDetail(state.selectedWorkflowId);
+  } catch (error) {
+    console.error('Workflow authoring apply failed:', error);
+    setStatusBanner(cleanText(error?.payload?.error) || cleanText(error.message) || 'Could not apply workflow authoring changes.', 'error');
+  }
+}
+
+function handleCanvasClick(event) {
+  const stepNode = event.target.closest('[data-step-id]');
+  if (stepNode) {
+    state.selectedStepId = cleanText(stepNode.dataset.stepId);
+    renderAll();
+    return;
+  }
+  const stepSelect = event.target.closest('[data-step-select]');
+  if (stepSelect) {
+    state.selectedStepId = cleanText(stepSelect.dataset.stepSelect);
+    renderAll();
+    return;
+  }
+  const workflowAction = event.target.closest('[data-action]');
+  if (!workflowAction) return;
+  const action = cleanText(workflowAction.dataset.action);
+  if (action === 'suggest-description') {
+    void requestDescriptionProposal();
+  } else if (action === 'reset-draft') {
+    state.draftSpec = state.workflowDetail?.authoring?.available
+      ? normaliseAuthoringSpecForEditor(state.workflowDetail.authoring.current_spec, state.selectedWorkflowId)
+      : null;
+    state.preview = null;
+    state.previewSignature = '';
+    renderAll();
+    setStatusBanner('Draft reset to the currently loaded authoritative authoring spec.', 'info');
+  } else if (action === 'preview-authoring') {
+    void previewAuthoringDraft();
+  } else if (action === 'apply-authoring') {
+    void applyAuthoringDraft();
+  } else if (action === 'add-step') {
+    addDraftStep();
+  } else if (action === 'remove-step') {
+    removeDraftStep(state.selectedStepId);
+  }
+}
+
+function handleCanvasInput(event) {
+  const workflowField = event.target.closest('[data-edit-field]');
+  if (workflowField) {
+    updateDraftWorkflowField(workflowField.dataset.editField, workflowField.value);
+    return;
+  }
+  const stepField = event.target.closest('[data-step-field]');
+  if (!stepField) return;
+  const stepId = cleanText(stepField.dataset.stepId);
+  const field = cleanText(stepField.dataset.stepField);
+  const value = stepField.type === 'checkbox' ? stepField.checked : stepField.value;
+  updateDraftStepField(stepId, field, value, stepField.type);
+}
+
+function bindEvents() {
+  elements.searchInput?.addEventListener('input', (event) => {
+    state.search = event.target.value;
+    renderCatalogue();
+  });
+  elements.showDesignsToggle?.addEventListener('change', (event) => {
+    state.showDesigns = Boolean(event.target.checked);
+    void loadCatalogue();
+  });
+  elements.refreshButton?.addEventListener('click', async () => {
+    await loadCatalogue();
+    if (state.selectedWorkflowId) {
+      await loadWorkflowDetail(state.selectedWorkflowId);
+    }
+  });
+  elements.catalogue?.addEventListener('click', (event) => {
+    const item = event.target.closest('[data-workflow-id]');
+    if (!item) return;
+    void loadWorkflowDetail(item.dataset.workflowId);
+  });
+  elements.tabs.forEach((button) => {
+    button.addEventListener('click', () => {
+      state.activeView = button.dataset.view || 'topology';
+      renderAll();
+    });
+  });
+  elements.canvas?.addEventListener('click', handleCanvasClick);
+  elements.canvas?.addEventListener('input', handleCanvasInput);
+  elements.canvas?.addEventListener('change', handleCanvasInput);
+  elements.canvas?.addEventListener('keydown', (event) => {
+    const node = event.target.closest('[data-step-id]');
+    if (!node) return;
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      state.selectedStepId = cleanText(node.dataset.stepId);
+      renderAll();
+    }
+  });
+}
+
+async function initialiseWorkflowStudio() {
+  cacheElements();
+  bindEvents();
+  renderAll();
+  await loadCatalogue({ selectFirst: true });
+  if (state.selectedWorkflowId) {
+    await loadWorkflowDetail(state.selectedWorkflowId);
+  }
+}
+
+if (typeof document !== 'undefined') {
+  document.addEventListener('DOMContentLoaded', () => {
+    void initialiseWorkflowStudio();
+  });
+}
+
+export {
+  simplifyEdgeLabel
+};
