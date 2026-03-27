@@ -5,7 +5,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from ..db.transient_errors import is_transient_mongo_error
-from ..languagemodels.llm_interface import get_llm_client
+from ..languagemodels.llm_interface import get_active_model_name, get_llm_client
 from ..prompt.annotation_prompt import AnnotationPromptBuilder
 from ..services.workflow_description_vontology_service import (
     WORKFLOW_DESCRIPTION_PROMPT_CONCEPT_ID,
@@ -766,6 +766,8 @@ def build_workflow_description_proposal(
     workflow_id: str,
     *,
     mode: str = "auto",
+    user_concept_id: str | None = None,
+    org_concept_id: str | None = None,
 ) -> dict[str, Any]:
     workflow_id_clean = _clean_text(workflow_id)
     detail = build_workflow_studio_detail_payload(workflow_id_clean)
@@ -802,7 +804,17 @@ def build_workflow_description_proposal(
             prompt_lines.append(
                 "Return only the revised workflow description in New Zealand English."
             )
-            raw_response = get_llm_client().generate(prompt="\n".join(prompt_lines))
+            selected_model = get_active_model_name(
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+            )
+            raw_response = get_llm_client(
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+            ).generate(
+                prompt="\n".join(prompt_lines),
+                model=selected_model,
+            )
             llm_text = (
                 raw_response.strip()
                 if isinstance(raw_response, str)

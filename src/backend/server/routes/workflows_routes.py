@@ -8,7 +8,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, session
 from pymongo.errors import (
     AutoReconnect,
     ConnectionFailure,
@@ -19,6 +19,7 @@ from pymongo.errors import (
 
 from ...db.transient_errors import is_transient_mongo_error
 from ...db.repositories.concepts_repository import ConceptsRepository
+from ...security.access_control import get_effective_user_concept_id
 from ...services.text_value_service import get_texts_for_concept
 from ...services.workflow_episode_service import (
     count_workflow_use_episodes,
@@ -78,6 +79,24 @@ _WORKFLOW_DEFINITIONS_CACHE_TTL_SECONDS_DEFAULT = 8.0
 _WORKFLOW_DEFINITIONS_REFRESH_RETRY_AFTER_SECONDS_DEFAULT = 1.0
 _WORKFLOW_DEFINITIONS_EXECUTABILITY_PENDING_REASON = "inspection_summary_pending"
 _WORKFLOW_DEFINITIONS_EXECUTABILITY_PENDING_DETAIL = "lazy_definition_not_loaded"
+
+
+def _resolve_request_llm_scope_ids() -> Tuple[Optional[str], Optional[str]]:
+    user_concept_id: Optional[str] = None
+    org_concept_id: Optional[str] = None
+    try:
+        resolved_user_concept_id = get_effective_user_concept_id()
+        if isinstance(resolved_user_concept_id, str):
+            user_concept_id = resolved_user_concept_id.strip() or None
+    except Exception:
+        user_concept_id = None
+    try:
+        resolved_org_concept_id = session.get("organisation_concept_id")
+        if isinstance(resolved_org_concept_id, str):
+            org_concept_id = resolved_org_concept_id.strip() or None
+    except Exception:
+        org_concept_id = None
+    return user_concept_id, org_concept_id
 
 
 def _is_transient_workflow_instances_error(exc: Exception) -> bool:
@@ -799,11 +818,14 @@ def api_apply_workflow_studio_authoring(workflow_id: str):
 def api_build_workflow_studio_description_proposal(workflow_id: str):
     payload = request.get_json(silent=True) or {}
     mode = str(payload.get("mode") or "auto")
+    user_concept_id, org_concept_id = _resolve_request_llm_scope_ids()
     try:
         return jsonify(
             build_workflow_description_proposal(
                 workflow_id,
                 mode=mode,
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
             )
         )
     except ValueError as exc:

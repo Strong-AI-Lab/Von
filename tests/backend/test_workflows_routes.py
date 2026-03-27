@@ -1390,15 +1390,36 @@ def test_workflow_studio_authoring_apply_endpoint(monkeypatch, app_client):
 def test_workflow_studio_description_proposal_endpoint(monkeypatch, app_client):
     import src.backend.server.routes.workflows_routes as workflows_routes
 
-    monkeypatch.setattr(
-        workflows_routes,
-        "build_workflow_description_proposal",
-        lambda workflow_id, mode="auto": {
+    captured: dict[str, str | None] = {}
+
+    def _build_proposal(
+        workflow_id,
+        mode="auto",
+        user_concept_id=None,
+        org_concept_id=None,
+    ):
+        captured["workflow_id"] = workflow_id
+        captured["mode"] = mode
+        captured["user_concept_id"] = user_concept_id
+        captured["org_concept_id"] = org_concept_id
+        return {
             "workflow_id": workflow_id,
             "proposal": {"text": "Alpha workflow description", "source": mode},
             "guardrails": {"proposal_only": True},
-        },
+        }
+
+    monkeypatch.setattr(
+        workflows_routes,
+        "get_effective_user_concept_id",
+        lambda: "#V#test_user",
     )
+    monkeypatch.setattr(
+        workflows_routes,
+        "build_workflow_description_proposal",
+        _build_proposal,
+    )
+    with app_client.session_transaction() as flask_session:
+        flask_session["organisation_concept_id"] = "#V#test_org"
 
     resp = app_client.post(
         "/api/workflow-studio/workflows/%23V%23alpha_workflow/proposals/description",
@@ -1409,6 +1430,13 @@ def test_workflow_studio_description_proposal_endpoint(monkeypatch, app_client):
     payload = resp.get_json()
     assert payload["proposal"]["text"] == "Alpha workflow description"
     assert payload["proposal"]["source"] == "llm"
+    assert captured == {
+        "workflow_id": "#V#alpha_workflow",
+        "mode": "llm",
+        "user_concept_id": "#V#test_user",
+        "org_concept_id": "#V#test_org",
+    }
+
 
 
 def test_workflow_studio_page_route(app_client):
