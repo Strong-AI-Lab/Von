@@ -10642,6 +10642,26 @@ def history_length():
 @von_bp.route("/history/sessions", methods=["GET"])
 def history_sessions():
     """Return per-session chat history counts for the current user."""
+    def _resolve_authorised_active_session_id(
+        *,
+        user_concept_id: str,
+        session_id: Any,
+        namespace: str | None,
+    ) -> str | None:
+        if not isinstance(session_id, str) or not session_id.strip():
+            return None
+        active_session_id = session_id.strip()
+        if chat_history_service.has_chat_history_session(
+            user_concept_id, active_session_id, namespace=namespace
+        ):
+            return active_session_id
+        owner_user_id, shared_invite = _resolve_shared_conversation_owner(
+            user_concept_id=user_concept_id, session_id=active_session_id
+        )
+        if owner_user_id and shared_invite:
+            return active_session_id
+        return None
+
     try:
         from ...security.access_control import get_effective_user_concept_id
 
@@ -10655,6 +10675,7 @@ def history_sessions():
     summary_mode = request.args.get("summary", default="full")
     if not isinstance(summary_mode, str) or not summary_mode.strip():
         summary_mode = "full"
+    active_session_id: str | None = None
     try:
         from ...services.shared_conversation_service import (
             list_accepted_invites_for_user,
@@ -10685,6 +10706,11 @@ def history_sessions():
         ):
             ns_org_part = namespace.split("@", 1)[-1]
             organisation_concept_id = _normalise_concept_id(ns_org_part)
+        active_session_id = _resolve_authorised_active_session_id(
+            user_concept_id=user_concept_id,
+            session_id=effective.get("chat_session_id"),
+            namespace=namespace,
+        )
 
         # JVNAUTOSCI-1015: Legacy conversations without namespace are excluded.
         # Run utilities/backfill_chat_history_namespace.py to migrate any old data.
@@ -10911,7 +10937,7 @@ def history_sessions():
         response_payload: dict[str, Any] = {
             "authenticated": True,
             "sessions": combined,
-            "active_session_id": session.get("session_id"),
+            "active_session_id": active_session_id,
         }
         if warnings:
             response_payload["warnings"] = warnings
@@ -10931,7 +10957,7 @@ def history_sessions():
                     fallback_payload={
                         "authenticated": True,
                         "sessions": [],
-                        "active_session_id": session.get("session_id"),
+                        "active_session_id": active_session_id,
                         "warnings": ["chat_history_temporarily_unavailable"],
                     },
                 )

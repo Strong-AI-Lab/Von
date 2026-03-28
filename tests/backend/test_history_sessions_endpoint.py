@@ -228,3 +228,152 @@ def test_history_sessions_returns_degraded_payload_for_transient_history_errors(
     assert payload["retryable"] is True
     assert payload["sessions"] == []
     assert "chat_history_temporarily_unavailable" in (payload.get("warnings") or [])
+
+
+def test_history_sessions_ignores_stale_flask_active_session_id(
+    monkeypatch, app_client
+):
+    """The endpoint must not advertise a stale Flask-session active id after scope repair."""
+    _, client = app_client
+
+    with client.session_transaction() as sess:
+        sess["session_id"] = "stale-session-id"
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#u",
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "get_effective_context",
+        lambda *args, **kwargs: {
+            "user_id": "#V#u",
+            "organisation_id": "#V#org",
+            "role": None,
+            "namespace": "#V#u@org",
+            "chat_session_id": None,
+            "source": "test",
+        },
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "get_chat_history_session_summaries",
+        lambda *args, **kwargs: [
+            {
+                "session_id": "sess-1",
+                "session_name": "Session 1",
+                "last_message_at": "2026-02-25T00:00:00Z",
+                "namespace": "#V#u@org",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "has_chat_history_session",
+        lambda *args, **kwargs: False,
+    )
+
+    import src.backend.services.shared_conversation_service as shared_conversation_service
+
+    monkeypatch.setattr(
+        shared_conversation_service,
+        "list_accepted_invites_for_user",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
+        shared_conversation_service,
+        "list_outgoing_accepted_invites_for_user",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
+        shared_conversation_service,
+        "resolve_conversation_owner",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "_resolve_shared_conversation_owner",
+        lambda **kwargs: (None, None),
+    )
+
+    response = client.get(
+        "/von/history/sessions?limit=50&summary=light",
+        headers={"X-Von-Window-Session": "ws_test"},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["authenticated"] is True
+    assert payload["active_session_id"] is None
+
+
+def test_history_sessions_returns_effective_active_session_id_when_authorised(
+    monkeypatch, app_client
+):
+    """The endpoint should still expose the active session when the effective scope authorises it."""
+    _, client = app_client
+
+    with client.session_transaction() as sess:
+        sess["session_id"] = "stale-session-id"
+
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: "#V#u",
+    )
+    monkeypatch.setattr(
+        von_routes,
+        "get_effective_context",
+        lambda *args, **kwargs: {
+            "user_id": "#V#u",
+            "organisation_id": "#V#org",
+            "role": None,
+            "namespace": "#V#u@org",
+            "chat_session_id": "sess-1",
+            "source": "test",
+        },
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "get_chat_history_session_summaries",
+        lambda *args, **kwargs: [
+            {
+                "session_id": "sess-1",
+                "session_name": "Session 1",
+                "last_message_at": "2026-02-25T00:00:00Z",
+                "namespace": "#V#u@org",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        von_routes.chat_history_service,
+        "has_chat_history_session",
+        lambda user_id, session_id, namespace=None: session_id == "sess-1",
+    )
+
+    import src.backend.services.shared_conversation_service as shared_conversation_service
+
+    monkeypatch.setattr(
+        shared_conversation_service,
+        "list_accepted_invites_for_user",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
+        shared_conversation_service,
+        "list_outgoing_accepted_invites_for_user",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
+        shared_conversation_service,
+        "resolve_conversation_owner",
+        lambda **kwargs: None,
+    )
+
+    response = client.get(
+        "/von/history/sessions?limit=50&summary=light",
+        headers={"X-Von-Window-Session": "ws_test"},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["authenticated"] is True
+    assert payload["active_session_id"] == "sess-1"
