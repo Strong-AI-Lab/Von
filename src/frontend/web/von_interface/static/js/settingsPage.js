@@ -192,7 +192,13 @@ function buildStoredUserContextFromOption(option) {
 }
 
 function buildStoredOrganisationContextFromOption(option) {
-  const conceptId = option?.dataset?.conceptId || null;
+  let conceptId = option?.dataset?.conceptId || null;
+  if (!conceptId) {
+    const rawValue = String(option?.value || '').trim();
+    if (rawValue.startsWith('#V#')) {
+      conceptId = rawValue;
+    }
+  }
   if (!option || (!option.dataset?.id && !conceptId)) return null;
   return {
     id: option.dataset?.id || null,

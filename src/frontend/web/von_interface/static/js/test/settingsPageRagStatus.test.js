@@ -164,7 +164,7 @@ describe('settingsPage RAG status summary', () => {
             </select>
             <select id="orgSelect">
                 <option value="">Personal (No Org)</option>
-                <option value="#V#university_of_auckland_strong_ai_lab" data-role="admin" data-concept-id="#V#university_of_auckland_strong_ai_lab" selected>
+                <option value="#V#university_of_auckland_strong_ai_lab" data-role="admin" selected>
                     University Of Auckland Strong Ai Lab (admin)
                 </option>
             </select>

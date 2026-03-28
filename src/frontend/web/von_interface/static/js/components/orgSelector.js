@@ -146,7 +146,7 @@ export async function renderOrgSelector(containerId) {
         // Organisation options
         organisations.forEach(org => {
             const selected = context.organisation_id === org.concept_id ? 'selected' : '';
-            html += `<option value="${org.concept_id}" ${selected} data-role="${org.role}">`;
+            html += `<option value="${org.concept_id}" ${selected} data-role="${org.role}" data-concept-id="${org.concept_id}">`;
             html += `${org.name} (${org.role})`;
             html += `</option>`;
         });
