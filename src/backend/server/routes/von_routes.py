@@ -3740,7 +3740,7 @@ def _normalise_workflow_routing_payload(
 
 
 def _latest_turn_completion_gate(aux_calls: Any) -> dict[str, Any] | None:
-    if not isinstance(aux_calls, list):
+    if not isinstance(aux_calls, (list, tuple)):
         return None
 
     for entry in reversed(aux_calls):
@@ -4810,6 +4810,27 @@ def _extract_screen_only(text: str) -> str | None:
     return _extract_tagged_block(text, "screen")
 
 
+def _looks_like_internal_status_diagnostic(value: str | None) -> bool:
+    lowered = (value or "").strip().lower()
+    if not lowered:
+        return False
+
+    diagnostic_markers = (
+        "execution status:",
+        "blocking effect ids:",
+        "unresolved preconditions:",
+        "failure codes:",
+    )
+    marker_count = sum(1 for marker in diagnostic_markers if marker in lowered)
+    if lowered.startswith("execution status:") or marker_count >= 2:
+        return True
+
+    if lowered.startswith("workflow ") and " completed (state:" in lowered:
+        return True
+
+    return False
+
+
 def _extract_created_concept_labels_from_payload(
     payload: dict[str, Any], *, max_items: int = 3
 ) -> list[str]:
@@ -4986,6 +5007,40 @@ def _build_presenter_screen_summary_from_tool_messages(
         lines.extend(did_not_lines)
 
     return "\n".join(lines).strip() or None
+
+
+def _build_presenter_follow_up_summary_from_tool_messages(
+    tool_messages: list[dict],
+    *,
+    completion_gate: Mapping[str, Any] | None = None,
+) -> str | None:
+    """Build one shared presenter summary basis for incomplete tool turns."""
+
+    tool_summary = _build_presenter_screen_summary_from_tool_messages(tool_messages)
+    if not isinstance(completion_gate, Mapping):
+        return tool_summary
+
+    requires_follow_up = bool(completion_gate.get("requires_follow_up", False))
+    safe_to_claim_completion = bool(
+        completion_gate.get("safe_to_claim_completion", not requires_follow_up)
+    )
+    if not requires_follow_up and safe_to_claim_completion:
+        return tool_summary
+
+    lines: list[str] = [
+        "I ran tools for this request, but I do not have a reliable final answer yet.",
+        "This turn still needs follow-up before it should be treated as complete.",
+    ]
+
+    decision_reason = _progress_str(completion_gate.get("decision_reason"))
+    if decision_reason and not _looks_like_internal_status_diagnostic(decision_reason):
+        lines.append(decision_reason)
+
+    if tool_summary:
+        lines.append("")
+        lines.append(tool_summary)
+
+    return "\n\n".join(line.strip() for line in lines if line and line.strip())
 
 
 def _build_tool_messages_prompt_blob(
@@ -8165,6 +8220,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             not isinstance(presenter_channels, dict) or not presenter_channels
         )
         has_tool_messages = bool(tool_messages)
+        completion_gate_summary = _latest_turn_completion_gate(auxiliary_llm_calls)
         response_transformations = build_response_transformation_telemetry_payload(
             request_id=request_id
         )
@@ -8207,28 +8263,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     return True
                 return False
 
-            def _screen_looks_like_internal_status_diagnostic(value: str) -> bool:
-                lowered = (value or "").strip().lower()
-                if not lowered:
-                    return False
-
-                diagnostic_markers = (
-                    "execution status:",
-                    "blocking effect ids:",
-                    "unresolved preconditions:",
-                    "failure codes:",
-                )
-                marker_count = sum(
-                    1 for marker in diagnostic_markers if marker in lowered
-                )
-                if lowered.startswith("execution status:") or marker_count >= 2:
-                    return True
-
-                if lowered.startswith("workflow ") and " completed (state:" in lowered:
-                    return True
-
-                return False
-
             def _screen_too_similar_to_spoken(
                 screen_value: str | None, spoken_value: str | None
             ) -> bool:
@@ -8251,7 +8285,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 )
                 or (
                     isinstance(screen_text, str)
-                    and _screen_looks_like_internal_status_diagnostic(screen_text)
+                    and _looks_like_internal_status_diagnostic(screen_text)
                 )
                 or (
                     screen_fence_compat_enabled
@@ -8306,7 +8340,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     screen_backfill_second_pass_reason = "missing_screen_fence"
                 elif _screen_looks_like_tool_dump(screen_text or ""):
                     screen_backfill_second_pass_reason = "tool_payload_screen"
-                elif _screen_looks_like_internal_status_diagnostic(screen_text or ""):
+                elif _looks_like_internal_status_diagnostic(screen_text or ""):
                     screen_backfill_second_pass_reason = "internal_status_screen"
                 else:
                     screen_backfill_second_pass_reason = "screen_matches_spoken"
@@ -8382,9 +8416,29 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
                 screen_candidate = None
                 screen_backfill_source = None
+                follow_up_screen_summary = None
+                if has_tool_messages and isinstance(completion_gate_summary, Mapping):
+                    requires_follow_up = bool(
+                        completion_gate_summary.get("requires_follow_up", False)
+                    )
+                    safe_to_claim_completion = bool(
+                        completion_gate_summary.get(
+                            "safe_to_claim_completion", not requires_follow_up
+                        )
+                    )
+                    if requires_follow_up or not safe_to_claim_completion:
+                        follow_up_screen_summary = (
+                            _build_presenter_follow_up_summary_from_tool_messages(
+                                tool_messages,
+                                completion_gate=completion_gate_summary,
+                            )
+                        )
+                if follow_up_screen_summary:
+                    screen_candidate = follow_up_screen_summary
+                    screen_backfill_source = "follow_up_summary"
                 response_candidate = _strip_presenter_tags(response_text)
-                response_candidate_internal_status = (
-                    _screen_looks_like_internal_status_diagnostic(response_candidate)
+                response_candidate_internal_status = _looks_like_internal_status_diagnostic(
+                    response_candidate
                 )
                 response_candidate_duplicates_spoken = _screen_too_similar_to_spoken(
                     response_candidate, spoken_text
@@ -8392,7 +8446,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 # If the model emitted only <spoken>, response_candidate usually equals
                 # spoken text. Reusing it would keep screen/spoken identical.
                 if (
-                    response_candidate
+                    screen_candidate is None
+                    and response_candidate
                     and not response_candidate_duplicates_spoken
                     and not _screen_looks_like_tool_dump(response_candidate)
                     and not response_candidate_internal_status
@@ -8582,6 +8637,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 # discard it and fall back to the deterministic tool summary.
                 if (
                     screen_candidate
+                    and screen_backfill_source == "llm_synthesis"
                     and not description_write_seen
                     and isinstance(screen_candidate, str)
                 ):
@@ -8622,6 +8678,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     base_channels["screen"] = str(screen_candidate).strip()
                     if screen_backfill_source == "response_text":
                         base_channels["format"] = "screen_backfill_from_response_v1"
+                    elif screen_backfill_source == "follow_up_summary":
+                        base_channels["format"] = (
+                            "screen_backfill_from_follow_up_summary_v1"
+                        )
                     else:
                         base_channels["format"] = "screen_backfill_from_tools_v1"
                     presenter_channels = base_channels

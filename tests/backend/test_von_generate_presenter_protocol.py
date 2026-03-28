@@ -951,6 +951,106 @@ def test_presenter_mode_uses_tool_screen_when_screen_tag_missing(monkeypatch):
     assert llm.calls[0]["prompt"] == "Generate <spoken> talk track"
 
 
+def test_presenter_mode_uses_shared_follow_up_summary_for_incomplete_tool_turns(
+    monkeypatch,
+):
+    import json
+
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    llm = _StubLLMSequence(["<spoken>Short talk track.</spoken>"])
+    app = _make_app(monkeypatch, llm)
+
+    tool_messages = [
+        {
+            "role": "tool",
+            "content": json.dumps(
+                {
+                    "tool": "search_concepts",
+                    "status": "ok",
+                    "payload": {"query": "paper", "results_count": 20},
+                }
+            ),
+        },
+        {
+            "role": "tool",
+            "content": json.dumps(
+                {
+                    "tool": "search_concepts",
+                    "status": "ok",
+                    "payload": {"query": "paper", "results_count": 10},
+                }
+            ),
+        },
+    ]
+    aux_llm_calls = (
+        {
+            "type": "turn_completion_gate",
+            "decision": "escalation_required",
+            "decision_reason": (
+                "The tool path did not complete the requested paper-status analysis."
+            ),
+            "requires_follow_up": True,
+            "safe_to_claim_completion": False,
+            "blocking_effect_ids": ["effect_paper_representation_1"],
+        },
+    )
+    orchestrator_result = OrchestratorResult(
+        response_text="Plain response without presenter tags.",
+        extra_messages=tool_messages,
+        tool_invocations=(),
+        aux_llm_calls=aux_llm_calls,
+    )
+    app.config["INTERNAL_MCP_ORCHESTRATOR"] = _StubOrchestrator(orchestrator_result)
+
+    client = app.test_client()
+    resp = client.post(
+        "/von/generate",
+        json={"prompt": "Analyse paper status", "presenter_mode": True},
+    )
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+
+    screen_text = body["response_channels"]["screen"]
+    assert body["response"] == screen_text
+    assert body["response_channels"]["spoken"] == "Short talk track."
+    assert body["response_channels"]["format"].startswith("screen_backfill_")
+    assert (
+        "I ran tools for this request, but I do not have a reliable final answer yet."
+        in screen_text
+    )
+    assert (
+        "This turn still needs follow-up before it should be treated as complete."
+        in screen_text
+    )
+    assert "The tool path did not complete the requested paper-status analysis." in screen_text
+    assert "Tools ran to answer this request:" in screen_text
+    assert "search_concepts — ok" in screen_text
+    assert "Plain response without presenter tags." not in screen_text
+
+    llm_debug = body["llm_debug"]
+    assert llm_debug.get("screen_backfill_second_pass_attempted") is True
+    assert llm_debug.get("screen_backfill_second_pass_reason") == "missing_screen"
+    assert llm_debug.get("spoken_backfill_second_pass_attempted") is True
+    assert llm_debug.get("spoken_backfill_second_pass_reason") == "missing_spoken"
+
+    screen_backfill_event = _find_transformation_event(llm_debug, "screen_backfill")
+    assert screen_backfill_event["status"] == "fallback_success"
+    assert screen_backfill_event["source_path"] == "follow_up_summary"
+
+    spoken_backfill_event = _find_transformation_event(llm_debug, "spoken_backfill")
+    assert spoken_backfill_event["status"] == "success"
+    assert spoken_backfill_event["source_path"] == "llm_synthesis"
+
+    assert len(llm.calls) == 1
+    assert llm.calls[0]["prompt"] == "Generate <spoken> talk track"
+    assert (
+        "I ran tools for this request, but I do not have a reliable final answer yet."
+        in llm.calls[0]["context"][1]["content"]
+    )
+
+
 def test_presenter_mode_rejects_hallucinated_description_write_in_screen_backfill(
     monkeypatch,
 ):
