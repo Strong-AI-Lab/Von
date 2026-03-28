@@ -81,7 +81,7 @@ def _make_app(monkeypatch, llm: _LLMProtocol) -> Flask:
     )
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.get_active_model_name",
-        lambda: "test-model",
+        lambda *args, **kwargs: "test-model",
     )
     monkeypatch.setattr(
         "src.backend.security.access_control.get_effective_user_concept_id",
@@ -749,6 +749,74 @@ def test_generate_presenter_mode_falls_back_to_second_pass_spoken(monkeypatch):
 
     assert len(llm.calls) == 2
     assert llm.calls[1]["prompt"] == "Generate <spoken> talk track"
+
+
+def test_generate_presenter_mode_rewrites_internal_status_screen_backfill(monkeypatch):
+    llm = _StubLLMSequence(
+        [
+            (
+                "Execution status: requested mutation was not executed. "
+                "Blocking effect IDs: effect_paper_representation_1. "
+                "Unresolved preconditions: No required representation tool execution was observed. "
+                "Failure codes: paper_representation_not_executed."
+            ),
+            (
+                "<screen>The requested analysis did not complete cleanly, so there is no reliable on-screen answer yet. "
+                "Please retry with the intended analysis workflow.</screen>"
+            ),
+            "<spoken>Short summary for TTS.</spoken>",
+        ]
+    )
+    app = _make_app(monkeypatch, llm)
+
+    client = app.test_client()
+    resp = client.post(
+        "/von/generate",
+        json={"prompt": "Please analyse paper status", "presenter_mode": True},
+    )
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+
+    expected_screen = (
+        "The requested analysis did not complete cleanly, so there is no reliable "
+        "on-screen answer yet. Please retry with the intended analysis workflow."
+    )
+
+    assert body["response"] == expected_screen
+    assert body["response_channels"] == {
+        "screen": expected_screen,
+        "spoken": "Short summary for TTS.",
+        "format": "narration_fallback_v1",
+    }
+    assert "Execution status:" not in body["response"]
+    assert "Blocking effect IDs:" not in body["response"]
+    assert "Failure codes:" not in body["response"]
+
+    llm_debug = body["llm_debug"]
+    assert llm_debug.get("screen_backfill_second_pass_attempted") is True
+    assert llm_debug.get("screen_backfill_second_pass_reason") == "missing_screen"
+    assert llm_debug.get("spoken_backfill_second_pass_attempted") is True
+    assert (
+        llm_debug.get("spoken_backfill_second_pass_reason")
+        == "missing_presenter_channels"
+    )
+
+    screen_backfill_event = _find_transformation_event(llm_debug, "screen_backfill")
+    assert screen_backfill_event["status"] == "success"
+    assert screen_backfill_event["source_path"] == "llm_synthesis"
+
+    spoken_backfill_event = _find_transformation_event(llm_debug, "spoken_backfill")
+    assert spoken_backfill_event["status"] == "success"
+    assert spoken_backfill_event["source_path"] == "llm_synthesis"
+
+    assert len(llm.calls) == 3
+    assert llm.calls[1]["prompt"] == "Generate <screen> display content"
+    assert (
+        "internal execution-status text"
+        in llm.calls[1]["context"][1]["content"]
+    )
+    assert llm.calls[2]["prompt"] == "Generate <spoken> talk track"
 
 
 def test_generate_accepts_plain_text_from_narration_second_pass(monkeypatch):

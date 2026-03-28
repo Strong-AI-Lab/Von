@@ -8207,6 +8207,28 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     return True
                 return False
 
+            def _screen_looks_like_internal_status_diagnostic(value: str) -> bool:
+                lowered = (value or "").strip().lower()
+                if not lowered:
+                    return False
+
+                diagnostic_markers = (
+                    "execution status:",
+                    "blocking effect ids:",
+                    "unresolved preconditions:",
+                    "failure codes:",
+                )
+                marker_count = sum(
+                    1 for marker in diagnostic_markers if marker in lowered
+                )
+                if lowered.startswith("execution status:") or marker_count >= 2:
+                    return True
+
+                if lowered.startswith("workflow ") and " completed (state:" in lowered:
+                    return True
+
+                return False
+
             def _screen_too_similar_to_spoken(
                 screen_value: str | None, spoken_value: str | None
             ) -> bool:
@@ -8226,6 +8248,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 or (
                     isinstance(screen_text, str)
                     and _screen_looks_like_tool_dump(screen_text)
+                )
+                or (
+                    isinstance(screen_text, str)
+                    and _screen_looks_like_internal_status_diagnostic(screen_text)
                 )
                 or (
                     screen_fence_compat_enabled
@@ -8280,6 +8306,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     screen_backfill_second_pass_reason = "missing_screen_fence"
                 elif _screen_looks_like_tool_dump(screen_text or ""):
                     screen_backfill_second_pass_reason = "tool_payload_screen"
+                elif _screen_looks_like_internal_status_diagnostic(screen_text or ""):
+                    screen_backfill_second_pass_reason = "internal_status_screen"
                 else:
                     screen_backfill_second_pass_reason = "screen_matches_spoken"
 
@@ -8355,6 +8383,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 screen_candidate = None
                 screen_backfill_source = None
                 response_candidate = _strip_presenter_tags(response_text)
+                response_candidate_internal_status = (
+                    _screen_looks_like_internal_status_diagnostic(response_candidate)
+                )
                 response_candidate_duplicates_spoken = _screen_too_similar_to_spoken(
                     response_candidate, spoken_text
                 )
@@ -8364,6 +8395,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     response_candidate
                     and not response_candidate_duplicates_spoken
                     and not _screen_looks_like_tool_dump(response_candidate)
+                    and not response_candidate_internal_status
                 ):
                     screen_candidate = response_candidate
                     screen_backfill_source = "response_text"
@@ -8402,6 +8434,13 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                 "- If the tool results summary does not explicitly show a description update, you MUST NOT claim the description was added/updated. "
                                 "  You may say it is still empty/vacuous or that no tool updated it.\n"
                                 "- You MUST include a short section titled 'Writes ledger (authoritative)' that reflects the tool writes ledger without contradiction.\n"
+                                + (
+                                    "- The model response contains internal execution diagnostics. Rewrite them into user-facing screen content. "
+                                    "Do not copy raw labels like 'Execution status', 'Blocking effect IDs', 'Unresolved preconditions', "
+                                    "or 'Failure codes' unless the user explicitly asked for diagnostics.\n"
+                                    if response_candidate_internal_status
+                                    else ""
+                                )
                             )
                         else:
                             synthesis_system = (
@@ -8424,6 +8463,15 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                     + "\n\n"
                                     if isinstance(screen_prompt_text, str)
                                     and screen_prompt_text.strip()
+                                    else ""
+                                )
+                                + (
+                                    "Important:\n"
+                                    "- The model response is internal execution-status text, not final user-facing screen copy.\n"
+                                    "- Rewrite it into a concise user-facing screen answer that explains what happened.\n"
+                                    "- Do not repeat raw labels like 'Execution status', 'Blocking effect IDs', "
+                                    "'Unresolved preconditions', or 'Failure codes' unless the user explicitly asked for diagnostics.\n"
+                                    if response_candidate_internal_status
                                     else ""
                                 )
                             )
