@@ -11098,8 +11098,14 @@ def set_user_concept():
         else:
             existing_user_concept_id = None
 
-        organisation_concept_id = session.get("organisation_concept_id")
-        role_in_org = session.get("role_in_org")
+        window_session_id = request.headers.get("X-Von-Window-Session")
+        effective_context = get_effective_context(
+            window_session_id, dict(session), user_concept_id
+        )
+        organisation_concept_id = effective_context.get("organisation_id") or session.get(
+            "organisation_concept_id"
+        )
+        role_in_org = effective_context.get("role") or session.get("role_in_org")
         org_slug = None
         if isinstance(organisation_concept_id, str) and organisation_concept_id.strip():
             org_slug_raw = organisation_concept_id.strip()
@@ -11128,6 +11134,14 @@ def set_user_concept():
             role_in_org = None
             session.pop("organisation_concept_id", None)
             session.pop("role_in_org", None)
+            if window_session_id:
+                clear_window_organisation(window_session_id, namespace, user_concept_id)
+        elif org_slug:
+            session["organisation_concept_id"] = org_slug
+            if role_in_org:
+                session["role_in_org"] = role_in_org
+            else:
+                session.pop("role_in_org", None)
         session["namespace"] = namespace
         session.modified = True
 

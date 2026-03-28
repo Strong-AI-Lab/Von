@@ -260,15 +260,52 @@ def get_effective_context(
     Get the effective context combining window session (if present) and Flask session.
 
     Priority:
-    1. Window session context (if window_session_id provided and has org set)
-    2. Flask session context (fallback for windows that don't use window sessions)
+    1. Window session context when it has authoritative scope information
+       (organisation/role/namespace)
+    2. Flask session context when the window entry is partial (for example, it
+       only tracks a chat session id and would otherwise erase org scope)
+    3. Bare window session context if no richer scope exists anywhere
 
     Returns dict with: user_id, organisation_id, role, namespace, chat_session_id
     """
+    def _window_context_has_authoritative_scope(ctx: WindowSessionContext) -> bool:
+        return bool(
+            (
+                isinstance(ctx.organisation_concept_id, str)
+                and ctx.organisation_concept_id.strip()
+            )
+            or (isinstance(ctx.role_in_org, str) and ctx.role_in_org.strip())
+            or (isinstance(ctx.namespace, str) and ctx.namespace.strip())
+        )
+
     # Check window session first
     if window_session_id:
         window_ctx = get_window_context(window_session_id)
         if window_ctx is not None:
+            if _window_context_has_authoritative_scope(window_ctx):
+                return {
+                    "user_id": user_id,
+                    "organisation_id": window_ctx.organisation_concept_id,
+                    "role": window_ctx.role_in_org,
+                    "namespace": window_ctx.namespace,
+                    "chat_session_id": window_ctx.chat_session_id,
+                    "source": "window_session",
+                }
+
+            flask_org = flask_session.get("organisation_concept_id")
+            flask_role = flask_session.get("role_in_org")
+            flask_namespace = flask_session.get("namespace")
+            if flask_org or flask_role or flask_namespace:
+                return {
+                    "user_id": user_id,
+                    "organisation_id": flask_org,
+                    "role": flask_role,
+                    "namespace": flask_namespace,
+                    "chat_session_id": window_ctx.chat_session_id
+                    or flask_session.get("session_id"),
+                    "source": "flask_session",
+                }
+
             return {
                 "user_id": user_id,
                 "organisation_id": window_ctx.organisation_concept_id,

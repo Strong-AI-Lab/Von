@@ -634,3 +634,30 @@ class TestWindowSessionStoreIsolation:
 
         assert effective["organisation_id"] == "flask_org"
         assert effective["source"] == "flask_session"
+
+    def test_get_effective_context_ignores_partial_window_scope(self):
+        """A partial window entry should not erase richer Flask org scope."""
+        from src.backend.services.window_session_context_service import (
+            get_effective_context,
+            get_window_session_store,
+        )
+
+        store = get_window_session_store()
+        partial_ctx = store.get_or_create("partial_window", user_id="user_1")
+        partial_ctx.chat_session_id = "chat_123"
+        store.set(partial_ctx)
+
+        flask_session = {
+            "organisation_concept_id": "flask_org",
+            "namespace": "#V#user_1@flask_org",
+            "role_in_org": "member",
+            "session_id": "flask_chat",
+        }
+
+        effective = get_effective_context("partial_window", flask_session, "user_1")
+
+        assert effective["organisation_id"] == "flask_org"
+        assert effective["namespace"] == "#V#user_1@flask_org"
+        assert effective["role"] == "member"
+        assert effective["chat_session_id"] == "chat_123"
+        assert effective["source"] == "flask_session"

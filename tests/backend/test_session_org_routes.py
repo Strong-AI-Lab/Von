@@ -264,6 +264,53 @@ def test_set_user_concept_accepts_real_header_authenticated_identity(app_client)
     assert ctx_data["user_id"] == real_user_concept_id
 
 
+def test_set_user_concept_preserves_window_scoped_org_namespace(app_client):
+    _, client = app_client
+    window_session_id = "ws_preserve_org_scope"
+
+    with client.session_transaction() as sess:
+        sess["user_id"] = "michael_witbrock"
+        sess["user_concept_id"] = "#V#michael_witbrock"
+
+    org_resp = client.post(
+        "/von/api/session/set_organisation",
+        json={"organisation_concept_id": "university_of_auckland_strong_ai_lab"},
+        headers={"X-Von-Window-Session": window_session_id},
+    )
+    assert org_resp.status_code == 200
+
+    resp = client.post(
+        "/von/api/session/set_user_concept",
+        json={"user_concept_id": "#V#michael_witbrock"},
+        headers={"X-Von-Window-Session": window_session_id},
+    )
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["organisation_id"] == "#V#university_of_auckland_strong_ai_lab"
+    assert data["role"] == "admin"
+    assert (
+        data["namespace"]
+        == "#V#michael_witbrock@university_of_auckland_strong_ai_lab"
+    )
+
+    ctx = client.get(
+        "/von/api/session/context",
+        headers={"X-Von-Window-Session": window_session_id},
+    )
+    assert ctx.status_code == 200
+    ctx_data = ctx.get_json()
+    assert ctx_data["organisation_id"] == "#V#university_of_auckland_strong_ai_lab"
+    assert (
+        ctx_data["namespace"]
+        == "#V#michael_witbrock@university_of_auckland_strong_ai_lab"
+    )
+
+    with client.session_transaction() as sess:
+        assert sess["organisation_concept_id"] == "university_of_auckland_strong_ai_lab"
+        assert sess["role_in_org"] == "admin"
+
+
 def test_get_my_organisations_requires_authentication(app_client):
     _, client = app_client
 
