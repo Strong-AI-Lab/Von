@@ -1,6 +1,7 @@
 import {
     __testOnly_buildThinkingProgressPresentation,
     __testOnly_buildThinkingDiagnosticsPayload,
+    __testOnly_buildDiagnosticsExportRequestPayload,
     __testOnly_buildWorkflowMonitorExportPayload,
     __testOnly_loadChatHistory,
     __testOnly_refreshAvailableWorkflowDefinitions,
@@ -38,6 +39,8 @@ import {
     __testOnly_updateScrollToEndButtonVisibility,
     __testOnly_reduceThinkingCardDisplayState,
     __testOnly_copyActiveThinkingDiagnostics,
+    __testOnly_shouldAcceptThinkingProgressUpdate,
+    __testOnly_setThinkingCardRequests,
     __testOnly_setThinkingState,
     __testOnly_normaliseThinkingActivityHistory,
     __testOnly_renderThinkingCardBodyHTML,
@@ -1535,6 +1538,58 @@ describe('thinking card display state reducer', () => {
     });
 });
 
+describe('thinking progress recency guards', () => {
+    test('rejects stale progress updates with lower sequence numbers', () => {
+        expect(__testOnly_shouldAcceptThinkingProgressUpdate(
+            {
+                status: 'completed',
+                sequence_no: 7,
+                updated_at_epoch: 1007,
+                elapsed_ms: 7000
+            },
+            {
+                status: 'follow_up_required',
+                sequence_no: 6,
+                updated_at_epoch: 1006,
+                elapsed_ms: 6000
+            }
+        )).toBe(false);
+    });
+
+    test('rejects unordered waiting fallbacks once ordered progress exists', () => {
+        expect(__testOnly_shouldAcceptThinkingProgressUpdate(
+            {
+                status: 'completed',
+                sequence_no: 3,
+                updated_at_epoch: 1003,
+                elapsed_ms: 3000
+            },
+            {
+                status: 'pending',
+                phase_label: 'Awaiting visible progress',
+                result_summary: 'Progress visibility has not caught up yet.'
+            }
+        )).toBe(false);
+    });
+
+    test('accepts newer progress updates with higher sequence numbers', () => {
+        expect(__testOnly_shouldAcceptThinkingProgressUpdate(
+            {
+                status: 'follow_up_required',
+                sequence_no: 6,
+                updated_at_epoch: 1006,
+                elapsed_ms: 6000
+            },
+            {
+                status: 'completed',
+                sequence_no: 7,
+                updated_at_epoch: 1007,
+                elapsed_ms: 7000
+            }
+        )).toBe(true);
+    });
+});
+
 describe('thinking activity history normalisation', () => {
     test('captures non-tool orchestration and workflow activity rows', () => {
         const rows = __testOnly_normaliseThinkingActivityHistory([
@@ -2775,11 +2830,73 @@ describe('thinking card toggle accessibility', () => {
         expect(toggleButton.getAttribute('title')).toBe('Collapse thinking details');
         expect(detail.getAttribute('aria-hidden')).toBe('false');
     });
+
+    test('preserves a finished card even when live progress never becomes visible', async () => {
+        const { getUserContext } = require('../apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        document.getElementById('promptInput').value = 'fast response prompt';
+
+        global.fetch = jest.fn((url, options = {}) => {
+            if (typeof url === 'string' && url.startsWith('/api/settings/')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ show_tool_use_during_thinking: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/progress/')) {
+                return new Promise((_resolve, reject) => {
+                    options.signal?.addEventListener('abort', () => {
+                        const err = new Error('aborted');
+                        err.name = 'AbortError';
+                        reject(err);
+                    });
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        response: 'Done',
+                        llm_debug: { model: 'gpt-5.2' }
+                    })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        await expect(sendMessage()).resolves.toBeUndefined();
+
+        const wrapper = document.getElementById('thinkingCardWrapper');
+        const indicatorText = document.querySelector('.loading-indicator-text');
+        const detail = document.getElementById('loadingIndicatorDetail');
+
+        expect(wrapper.getAttribute('aria-hidden')).toBe('false');
+        expect(indicatorText.textContent).toBe('Complete');
+        expect(detail.innerHTML).toContain('Turn completed');
+        expect(detail.innerHTML).toContain('Response generated');
+    });
 });
 
 describe('copy diagnostics button visibility on preserved finished card', () => {
     beforeEach(() => {
         jest.useFakeTimers();
+        __testOnly_setThinkingCardRequests(null, null);
         document.body.innerHTML = `
             <div id="scrollableField"></div>
             <div class="thinking-card-wrapper" id="thinkingCardWrapper" aria-hidden="true">
@@ -2808,6 +2925,7 @@ describe('copy diagnostics button visibility on preserved finished card', () => 
     afterEach(() => {
         jest.useRealTimers();
         jest.restoreAllMocks();
+        __testOnly_setThinkingCardRequests(null, null);
     });
 
     test('copy diagnostics button remains visible on preserved finished card (JVNAUTOSCI-1431)', () => {
@@ -2881,6 +2999,75 @@ describe('copy diagnostics button visibility on preserved finished card', () => 
         jest.advanceTimersByTime(2300);
         expect(copyBtn.textContent).toBe('Copy diagnostics');
         expect(copyBtn.classList.contains('copy-json-copied')).toBe(false);
+    });
+
+    test('copy diagnostics button uses the preserved finished card when no active request exists', async () => {
+        const copyBtn = document.getElementById('copyThinkingDiagnosticsButton');
+        const writeText = jest.fn().mockResolvedValue(undefined);
+        Object.assign(navigator, {
+            clipboard: { writeText }
+        });
+
+        const finishedRequest = {
+            clientRequestId: 'request-preserved',
+            promptRaw: 'diagnose this',
+            thinkingStartedAtMs: Date.now() - 250,
+            latestProgress: {
+                status: 'completed',
+                phase_label: 'Turn completed',
+                result_summary: 'Response generated',
+                sequence_no: 3,
+                updated_at_epoch: 1003,
+                elapsed_ms: 250
+            },
+            activityHistory: [],
+            progressEvents: [],
+            phaseHistory: [],
+            workflowDiscovery: null,
+            workflowStagePath: null,
+            stageDiagnostics: []
+        };
+
+        __testOnly_setThinkingCardRequests(null, finishedRequest);
+        __testOnly_setThinkingState(false, finishedRequest, { preserveFinishedCard: true });
+
+        const copied = await __testOnly_copyActiveThinkingDiagnostics(copyBtn);
+
+        expect(copied).toBe(true);
+        expect(writeText).toHaveBeenCalledTimes(1);
+        expect(JSON.parse(writeText.mock.calls[0][0])).toEqual(expect.objectContaining({
+            request_id: 'request-preserved'
+        }));
+    });
+
+    test('diagnostics export snapshot uses the preserved finished card when no active request exists', () => {
+        const finishedRequest = {
+            clientRequestId: 'request-export',
+            promptRaw: 'diagnose this',
+            thinkingStartedAtMs: Date.now() - 250,
+            latestProgress: {
+                status: 'completed',
+                phase_label: 'Turn completed',
+                result_summary: 'Response generated',
+                sequence_no: 4,
+                updated_at_epoch: 1004,
+                elapsed_ms: 250
+            },
+            activityHistory: [],
+            progressEvents: [],
+            phaseHistory: [],
+            workflowDiscovery: null,
+            workflowStagePath: null,
+            stageDiagnostics: []
+        };
+
+        __testOnly_setThinkingCardRequests(null, finishedRequest);
+
+        const payload = __testOnly_buildDiagnosticsExportRequestPayload();
+
+        expect(payload.diagnostics.active_thinking).toEqual(expect.objectContaining({
+            request_id: 'request-export'
+        }));
     });
 });
 
