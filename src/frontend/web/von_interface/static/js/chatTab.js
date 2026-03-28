@@ -649,6 +649,8 @@ const THINKING_CARD_TOGGLE_ARIA_LABEL_COLLAPSED = 'Expand thinking details';
 const THINKING_ACTIVITY_LOW_LEVEL_EVENT_KINDS = new Set(['llm_call_chunk', 'heartbeat']);
 const THINKING_DIAGNOSTIC_DETAILS_SELECTOR = 'details[data-thinking-diagnostic-key]';
 const THINKING_PROGRESS_POLL_FETCH_TIMEOUT_MS = 2_000;
+const THINKING_PROGRESS_TIMEOUT_VISIBLE_AFTER_MS = 8_000;
+const THINKING_PROGRESS_TIMEOUTS_BEFORE_VISIBLE = 2;
 const THINKING_DIAGNOSTICS_EXPORT_EVENT_LIMIT = 40;
 const THINKING_DIAGNOSTICS_EXPORT_PHASE_HISTORY_LIMIT = 80;
 const THINKING_TERMINAL_PROGRESS_STATUSES = new Set([
@@ -3723,6 +3725,35 @@ function renderThinkingLatestProgressSummaryHTML(request) {
     }, 'thinking-card-tool thinking-card-activity');
 }
 
+function getThinkingRequestElapsedMs(request) {
+    if (!request || !Number.isFinite(request.thinkingStartedAtMs)) {
+        return null;
+    }
+    return Math.max(0, Date.now() - Number(request.thinkingStartedAtMs));
+}
+
+function isClientInitialThinkingProgress(progress) {
+    return normaliseThinkingActivityString(progress?.pending_reason) === 'client_request_setup';
+}
+
+function buildInitialThinkingProgressPlaceholder(requestId) {
+    const progress = {
+        status: 'pending',
+        phase: 'context_build',
+        stage: 'context_build',
+        phase_label: 'Preparing response',
+        stage_label: 'Build context',
+        liveness_state: THINKING_STATUS_ACTIVE,
+        pending_reason: 'client_request_setup',
+        subtask: 'request setup',
+        result_summary: 'Submitting your turn and preparing live progress updates.'
+    };
+    if (typeof requestId === 'string' && requestId.trim()) {
+        progress.request_id = requestId.trim();
+    }
+    return progress;
+}
+
 function buildPendingThinkingProgressFallback(statusCode, requestId, payload = null) {
     const fallback = (payload && typeof payload === 'object') ? { ...payload } : {};
     if (!normaliseThinkingActivityString(fallback.status)) {
@@ -3735,9 +3766,7 @@ function buildPendingThinkingProgressFallback(statusCode, requestId, payload = n
         fallback.stage = fallback.phase;
     }
     if (!normaliseThinkingActivityString(fallback.phase_label)) {
-        fallback.phase_label = statusCode === 404
-            ? 'Request status unavailable'
-            : 'Awaiting visible progress';
+        fallback.phase_label = 'Preparing response';
     }
     if (!normaliseThinkingActivityString(fallback.stage_label)) {
         fallback.stage_label = 'Build context';
@@ -3754,14 +3783,66 @@ function buildPendingThinkingProgressFallback(statusCode, requestId, payload = n
             : 'no_visible_progress_state';
     }
     if (!normaliseThinkingActivityString(fallback.subtask)) {
-        fallback.subtask = 'progress visibility';
+        fallback.subtask = 'request setup';
     }
     if (!normaliseThinkingActivityString(fallback.result_summary)) {
         fallback.result_summary = statusCode === 404
-            ? 'No visible progress record was found for this request in the current session.'
-            : 'No live progress state is visible yet. The request may still be initialising, or progress visibility may not have caught up yet.';
+            ? 'The turn has started, but live progress is not visible yet. Von will keep checking automatically.'
+            : 'Von is setting up this turn. Live progress updates will appear automatically when ready.';
     }
     return fallback;
+}
+
+function shouldSurfaceThinkingProgressTimeoutFallback(request, poll) {
+    const latestProgress = (request?.latestProgress && typeof request.latestProgress === 'object')
+        ? request.latestProgress
+        : null;
+    if (latestProgress && !isClientInitialThinkingProgress(latestProgress)) {
+        return true;
+    }
+
+    const consecutiveTimeouts = Number.isFinite(poll?.consecutiveTimeouts)
+        ? Math.max(0, Math.round(Number(poll.consecutiveTimeouts)))
+        : 0;
+    if (consecutiveTimeouts >= THINKING_PROGRESS_TIMEOUTS_BEFORE_VISIBLE) {
+        return true;
+    }
+
+    const elapsedMs = getThinkingRequestElapsedMs(request);
+    return elapsedMs !== null && elapsedMs >= THINKING_PROGRESS_TIMEOUT_VISIBLE_AFTER_MS;
+}
+
+function buildProgressPollTimeoutFallback(request, requestId) {
+    const current = (request?.latestProgress && typeof request.latestProgress === 'object')
+        ? request.latestProgress
+        : null;
+    const currentPhase = normaliseThinkingActivityString(current?.phase);
+    const currentStage = normaliseThinkingActivityString(current?.stage);
+    const currentPhaseLabel = normaliseThinkingActivityString(current?.phase_label);
+    const currentStageLabel = normaliseThinkingActivityString(current?.stage_label);
+    const currentSubtask = normaliseThinkingActivityString(current?.subtask);
+    const currentPendingReason = normaliseThinkingActivityString(current?.pending_reason);
+    const elapsedMs = getThinkingRequestElapsedMs(request);
+    const usesClientInitialPlaceholder = !current || isClientInitialThinkingProgress(current);
+
+    return buildPendingThinkingProgressFallback(202, requestId, {
+        ...(current && typeof current === 'object' ? current : {}),
+        status: 'pending',
+        phase: currentPhase || 'context_build',
+        stage: currentStage || currentPhase || 'context_build',
+        phase_label: usesClientInitialPlaceholder
+            ? 'Still preparing response'
+            : (currentPhaseLabel || 'Live progress delayed'),
+        stage_label: currentStageLabel || 'Build context',
+        liveness_state: THINKING_STATUS_WAITING,
+        pending_reason: currentPendingReason === 'client_request_setup'
+            ? 'progress_poll_timeout'
+            : (currentPendingReason || 'progress_poll_timeout'),
+        subtask: currentSubtask || (usesClientInitialPlaceholder ? 'request setup' : 'live progress'),
+        result_summary: elapsedMs !== null && elapsedMs >= (THINKING_PROGRESS_TIMEOUT_VISIBLE_AFTER_MS * 2)
+            ? 'Von is still working. Live progress updates remain delayed, and the interface will keep retrying automatically.'
+            : 'Von is still working. Live progress updates are taking longer than usual, so the interface will keep retrying automatically.'
+    });
 }
 
 /**
@@ -3866,7 +3947,8 @@ function startToolUseProgressPolling(request) {
         timeoutId: null,
         intervalId: null,
         nextDelayMs: 350,
-        consecutiveNotFound: 0
+        consecutiveNotFound: 0,
+        consecutiveTimeouts: 0
     };
 
     const scheduleNextPoll = (delayMs) => {
@@ -3903,6 +3985,7 @@ function startToolUseProgressPolling(request) {
 
             if (resp.status === 404) {
                 poll.consecutiveNotFound += 1;
+                poll.consecutiveTimeouts = 0;
                 let progressPayload = null;
                 try {
                     progressPayload = await resp.json();
@@ -3926,6 +4009,7 @@ function startToolUseProgressPolling(request) {
 
             if (resp.status === 202) {
                 poll.consecutiveNotFound = 0;
+                poll.consecutiveTimeouts = 0;
                 let progressPayload = null;
                 try {
                     progressPayload = await resp.json();
@@ -3948,6 +4032,7 @@ function startToolUseProgressPolling(request) {
             }
 
             if (!resp.ok) {
+                poll.consecutiveTimeouts = 0;
                 poll.nextDelayMs = Math.min(5000, poll.nextDelayMs * 1.7);
                 scheduleNextPoll(poll.nextDelayMs);
                 return;
@@ -3983,6 +4068,7 @@ function startToolUseProgressPolling(request) {
             }
 
             poll.consecutiveNotFound = 0;
+            poll.consecutiveTimeouts = 0;
             poll.nextDelayMs = 350;
             recordToolUseHistory(request, progress);
             if (!Array.isArray(progress?.activity_history)) {
@@ -4021,27 +4107,17 @@ function startToolUseProgressPolling(request) {
         } catch (err) {
             if (err && err.name === 'AbortError') {
                 if (err.vonTimeout) {
-                    applyThinkingProgressUpdate(request, buildPendingThinkingProgressFallback(
-                        202,
-                        requestId,
-                        {
-                            ...(request.latestProgress && typeof request.latestProgress === 'object'
-                                ? request.latestProgress
-                                : {}),
-                            status: 'pending',
-                            phase: 'context_build',
-                            stage: 'context_build',
-                            phase_label: 'Retrying live progress',
-                            liveness_state: THINKING_STATUS_WAITING,
-                            pending_reason: 'progress_poll_timeout',
-                            subtask: 'progress visibility',
-                            result_summary: `Live progress polling timed out after ${Math.round(THINKING_PROGRESS_POLL_FETCH_TIMEOUT_MS / 1000)}s; retrying in the background.`
+                    poll.consecutiveTimeouts += 1;
+                    if (shouldSurfaceThinkingProgressTimeoutFallback(request, poll)) {
+                        applyThinkingProgressUpdate(
+                            request,
+                            buildProgressPollTimeoutFallback(request, requestId)
+                        );
+                        refreshThinkingCardProgressUi(request);
+                        if (isTerminalThinkingProgress(request.latestProgress)) {
+                            stopToolUseProgressPolling(request);
+                            return;
                         }
-                    ));
-                    refreshThinkingCardProgressUi(request);
-                    if (isTerminalThinkingProgress(request.latestProgress)) {
-                        stopToolUseProgressPolling(request);
-                        return;
                     }
                     poll.nextDelayMs = Math.min(5000, poll.nextDelayMs * 1.7);
                     scheduleNextPoll(poll.nextDelayMs);
@@ -19815,11 +19891,7 @@ function buildThinkingDiagnosticsPayload(request) {
     const backendElapsedMs = (latestProgress && Number.isFinite(latestProgress.elapsed_ms))
         ? Math.max(0, Math.round(Number(latestProgress.elapsed_ms)))
         : null;
-    const elapsedMs = backendElapsedMs ?? (
-        Number.isFinite(request.thinkingStartedAtMs)
-        ? Math.max(0, Date.now() - Number(request.thinkingStartedAtMs))
-        : null
-    );
+    const elapsedMs = backendElapsedMs ?? getThinkingRequestElapsedMs(request);
 
     return {
         generated_at_utc: new Date().toISOString(),
@@ -20392,6 +20464,9 @@ async function handleSendPrompt(options = {}) {
 
     // Show loading indicator and disable send button
     setThinkingState(true, request);
+    setLoadingIndicatorText(
+        formatToolUseProgressText(buildInitialThinkingProgressPlaceholder(clientRequestId), request)
+    );
 
     // Create turn IDs for user and assistant
     const userTurnId = `u-${Date.now()}`;

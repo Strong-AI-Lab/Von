@@ -2648,14 +2648,30 @@ describe('thinking card toggle accessibility', () => {
             const sendPromise = sendMessage();
             await Promise.resolve();
 
+            const indicatorText = document.querySelector('.loading-indicator-text');
+            expect(indicatorText.textContent).toContain('Preparing response');
+            expect(indicatorText.textContent).toContain('request setup');
+            expect(document.getElementById('loadingIndicatorDetail').innerHTML).toBe('');
+
             jest.advanceTimersByTime(2_100);
             await Promise.resolve();
             await Promise.resolve();
 
-            const indicatorText = document.querySelector('.loading-indicator-text');
-            expect(indicatorText.textContent).toContain('Retrying live progress');
+            expect(indicatorText.textContent).toContain('Preparing response');
+            expect(indicatorText.textContent).not.toContain('Retrying live progress');
+            expect(document.getElementById('loadingIndicatorDetail').innerHTML).toBe('');
             expect(document.getElementById('loadingIndicatorDetail').innerHTML)
-                .toContain('retrying in the background');
+                .not.toContain('timed out after');
+
+            jest.advanceTimersByTime(3_000);
+            await Promise.resolve();
+            await Promise.resolve();
+
+            expect(indicatorText.textContent).toContain('Still preparing response');
+            expect(document.getElementById('loadingIndicatorDetail').innerHTML)
+                .toContain('taking longer than usual');
+            expect(document.getElementById('loadingIndicatorDetail').innerHTML)
+                .not.toContain('timed out after');
 
             document.getElementById('abortButton').click();
             await Promise.resolve();
