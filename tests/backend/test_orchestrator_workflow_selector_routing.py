@@ -3728,6 +3728,7 @@ def test_custom_workflow_override_prefers_semantically_fit_execution_candidate(
     assert override_policy_entry is not None
     assert override_policy_entry.get("outcome") == "promote"
     assert override_policy_entry.get("chosen_workflow_id") == execution_workflow_id
+    assert override_policy_entry.get("explicit_execution_request") is True
 
     candidate_assessments = override_policy_entry.get("candidate_assessments")
     assert isinstance(candidate_assessments, list)
@@ -3756,6 +3757,259 @@ def test_custom_workflow_override_prefers_semantically_fit_execution_candidate(
     assert isinstance(execution_assessment, dict)
     assert execution_assessment.get("role") in {"execution", "maintenance"}
     assert execution_assessment.get("suitable") is True
+
+
+def test_launchability_replacement_declines_testing_workflow_for_conceptual_prompt(
+    monkeypatch,
+):
+    import src.backend.services.workflow_selection_policy_service as policy_module
+
+    monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
+    monkeypatch.setattr(
+        "src.backend.workflows.workflow_selector.recommend_workflow_with_policy",
+        lambda **_kwargs: {
+            "policy_active": False,
+            "guidance_mode": "none",
+            "candidate_scores": [],
+            "ranked_candidate_ids": [],
+        },
+    )
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = "#V#scholarly_paper_representation_workflow"
+    testing_workflow_id = "#V#arxiv_paper_ingestion_testing_workflow"
+    monkeypatch.setenv("VON_WORKFLOW_SELECTOR_ALLOW_POLICY_UNSAFE", "1")
+
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=selected_workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=selected_workflow_id,
+                initial_state="normalise_inputs",
+                states={
+                    "normalise_inputs": WorkflowStateSpec(
+                        state_id="normalise_inputs",
+                        actions=(WorkflowActionInvocation(action_id="tool.prepare_spec"),),
+                        terminal=True,
+                        metadata={"reads_context_keys": ["file_copy_concept_id"]},
+                    )
+                },
+            ),
+            purpose=(
+                "Canonical durable workflow for representing scholarly papers "
+                "from file-copy artefacts, metadata, and verification requirements."
+            ),
+            source="test",
+        )
+    )
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=testing_workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=testing_workflow_id,
+                initial_state="prepare_fixture",
+                states={
+                    "prepare_fixture": WorkflowStateSpec(
+                        state_id="prepare_fixture",
+                        actions=(
+                            WorkflowActionInvocation(
+                                action_id="testing.prepare_arxiv_paper_ingestion_fixture"
+                            ),
+                        ),
+                        terminal=True,
+                    )
+                },
+                metadata={
+                    "launch_input_contract": {
+                        "schema_version": "workflow_launch_input_contract.v1",
+                        "required_inputs": ["prompt_text"],
+                        "input_mappings": [
+                            {
+                                "target_context_key": "prompt_text",
+                                "source_expression": "inputs.prompt",
+                                "required": True,
+                            }
+                        ],
+                    },
+                    "launch_input_contract_source": "test_contract",
+                },
+            ),
+            purpose=(
+                "Execute the canonical arXiv ingestion workflow against one live "
+                "arXiv paper, verify represented scholarly metadata and provenance, "
+                "and clean up transient artefacts afterwards."
+            ),
+            source="test",
+        )
+    )
+
+    execute_calls: list[dict[str, Any]] = []
+
+    def _run_workflow(
+        workflow_def: WorkflowDefinition,
+        *,
+        data: Mapping[str, Any],
+        **_kwargs: Any,
+    ):
+        execute_calls.append(
+            {"workflow_id": workflow_def.workflow_id, "data": dict(data)}
+        )
+        return SimpleNamespace(
+            completed=True,
+            final_state="complete",
+            error=None,
+            data={"response_text": "Handled via safe tool pipeline fallback."},
+        )
+
+    monkeypatch.setattr(orchestrator._workflow_executor, "run", _run_workflow)
+
+    prompt = (
+        "OK, thinking about the way papers are represented at the moment, think "
+        "about papers under preparation. How should they be represented. What is "
+        "common between them and published (or rejected papers) and what is "
+        "unique to the under-preparation status. Are any ontological edits needed"
+    )
+    result = orchestrator.run(
+        prompt=prompt,
+        context=[],
+        llm_client=_CapturingLLM([selected_workflow_id]),
+        model=None,
+        user_namespace="#V#user@org",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Scholarly Paper Representation Workflow",
+                    "description": (
+                        "Canonical durable workflow for representing scholarly "
+                        "papers from file-copy artefacts, metadata, and "
+                        "verification requirements."
+                    ),
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "relevance_score": 1.0,
+                    "confidence_score": 1.0,
+                },
+                {
+                    "concept_id": testing_workflow_id,
+                    "name": "Arxiv Paper Ingestion Testing Workflow",
+                    "description": (
+                        "Execute the canonical arXiv ingestion workflow against "
+                        "one live arXiv paper, verify represented scholarly "
+                        "metadata and provenance, and clean up transient "
+                        "artefacts afterwards."
+                    ),
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "relevance_score": 0.914,
+                    "confidence_score": 0.984,
+                },
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Scholarly Paper Representation Workflow",
+                    "description": (
+                        "Canonical durable workflow for representing scholarly "
+                        "papers from file-copy artefacts, metadata, and "
+                        "verification requirements."
+                    ),
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "relevance_score": 1.0,
+                    "confidence_score": 1.0,
+                },
+                {
+                    "concept_id": testing_workflow_id,
+                    "name": "Arxiv Paper Ingestion Testing Workflow",
+                    "description": (
+                        "Execute the canonical arXiv ingestion workflow against "
+                        "one live arXiv paper, verify represented scholarly "
+                        "metadata and provenance, and clean up transient "
+                        "artefacts afterwards."
+                    ),
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "relevance_score": 0.914,
+                    "confidence_score": 0.984,
+                },
+            ],
+            "match_count": 2,
+        },
+        conversation_session_id="session-paper-representation-safe-fallback",
+        turn_id="turn-paper-representation-safe-fallback",
+    )
+
+    assert execute_calls
+    assert execute_calls[0]["workflow_id"] == TOOL_CALLING_WORKFLOW_ID
+
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
+    assert result.workflow_routing.verdict == "tool_contract_override"
+    assert result.workflow_routing.source == "selector_override"
+
+    override_policy_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "custom_workflow_override_policy"
+        ),
+        None,
+    )
+    assert override_policy_entry is not None
+    assert override_policy_entry.get("outcome") == "decline"
+    assert override_policy_entry.get("reason_code") == "maintenance_override_declined"
+    assert override_policy_entry.get("explicit_execution_request") is False
+
+    candidate_assessments = override_policy_entry.get("candidate_assessments")
+    assert isinstance(candidate_assessments, list)
+    testing_assessment = next(
+        (
+            item
+            for item in candidate_assessments
+            if isinstance(item, dict) and item.get("workflow_id") == testing_workflow_id
+        ),
+        None,
+    )
+    assert isinstance(testing_assessment, dict)
+    assert testing_assessment.get("role") == "maintenance"
+    assert testing_assessment.get("suitable") is False
+    assert (
+        testing_assessment.get("suitability_reason")
+        == "maintenance_requires_explicit_request"
+    )
+
+    override_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "workflow_selector_override"
+            and entry.get("reason")
+            == "selected_custom_workflow_launchability_requires_safe_general_fallback"
+        ),
+        None,
+    )
+    assert override_entry is not None
+    assert override_entry.get("prior_selected_workflow_id") == selected_workflow_id
+    assert override_entry.get("selected_workflow_id") == TOOL_CALLING_WORKFLOW_ID
+    assert (
+        override_entry.get("custom_workflow_override_reason")
+        == "maintenance_override_declined"
+    )
+    assert (
+        override_entry.get("launch_viability_probe", {})
+        .get("prior_selected_workflow", {})
+        .get("launchable")
+        is False
+    )
+
+    override_reasons = {
+        entry.get("reason")
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict) and entry.get("type") == "workflow_selector_override"
+    }
+    assert "selected_custom_workflow_not_launchable_from_turn_inputs" not in override_reasons
 
 
 def test_custom_workflow_first_step_failure_projects_terminal_locality(monkeypatch):

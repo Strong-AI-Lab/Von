@@ -126,6 +126,23 @@ _EXPLICIT_AUTHORING_PATTERNS = (
         re.IGNORECASE,
     ),
 )
+_EXPLICIT_EXECUTION_PATTERNS = (
+    re.compile(
+        r"\b(run|execute|launch)\b[\s\w-]{0,64}\bworkflow\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(run|execute)\b[\s\w-]{0,64}\b(test|verification|benchmark)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(test|verify|benchmark|validate)\b[\s\w-]{0,64}\b("
+        r"workflow|ingestion|representation|invitation|fixture|experiment|"
+        r"regression|cleanup|provenance"
+        r")\b",
+        re.IGNORECASE,
+    ),
+)
 _WORKFLOW_QUERY_PATTERNS = (
     re.compile(
         r"\b(is|are|does|do|what|which|whether|can|could|should|would)\b"
@@ -292,6 +309,18 @@ def _turn_authoring_intent(turn_text: str) -> tuple[bool, bool]:
     return explicit_authoring, workflow_query
 
 
+def _turn_explicit_execution_request(turn_text: str) -> bool:
+    text = _safe_text(turn_text)
+    if not text:
+        return False
+    return any(pattern.search(text) for pattern in _EXPLICIT_EXECUTION_PATTERNS)
+
+
+def _context_requires_explicit_execution_request(context: str) -> bool:
+    lowered = _safe_text(context).lower()
+    return lowered == "selected_custom_workflow_launchability_replacement"
+
+
 def _infer_role(candidate: Mapping[str, Any]) -> tuple[str, str, dict[str, Any]]:
     profile, profile_source = _normalise_profile(candidate.get("routing_profile"))
     if profile is not None:
@@ -408,6 +437,7 @@ class WorkflowOverrideDecision:
     outcome: str
     reason_code: str
     explicit_authoring_request: bool
+    explicit_execution_request: bool
     workflow_query_intent: bool
     candidate_assessments: tuple[WorkflowOverrideCandidateAssessment, ...]
 
@@ -434,12 +464,14 @@ def choose_custom_workflow_override_candidate(
     routing path.
     """
 
-    explicit_authoring_request, workflow_query_intent = _turn_authoring_intent(
-        turn_text
-    )
+    explicit_authoring_request, workflow_query_intent = _turn_authoring_intent(turn_text)
+    explicit_execution_request = _turn_explicit_execution_request(turn_text)
     semantic_threshold = _context_semantic_threshold(context)
     composite_threshold = _context_composite_threshold(context)
     discovery_score_floor = _context_discovery_score_floor(context)
+    explicit_execution_request_required = _context_requires_explicit_execution_request(
+        context
+    )
 
     raw_assessments: list[dict[str, Any]] = []
     for candidate in candidates:
@@ -553,6 +585,16 @@ def choose_custom_workflow_override_candidate(
                 suitability_reason = "authoring_declined_for_workflow_query"
             else:
                 suitability_reason = "authoring_requires_explicit_request"
+        elif (
+            item["role"] == _ROLE_MAINTENANCE
+            and explicit_execution_request_required
+            and not explicit_execution_request
+        ):
+            suitable = False
+            if workflow_query_intent:
+                suitability_reason = "maintenance_declined_for_workflow_query"
+            else:
+                suitability_reason = "maintenance_requires_explicit_request"
         elif float(item["override_score"]) < composite_threshold:
             suitable = False
             suitability_reason = "override_score_below_threshold"
@@ -596,6 +638,7 @@ def choose_custom_workflow_override_candidate(
             outcome="promote",
             reason_code="suitable_custom_workflow_found",
             explicit_authoring_request=explicit_authoring_request,
+            explicit_execution_request=explicit_execution_request,
             workflow_query_intent=workflow_query_intent,
             candidate_assessments=tuple(candidate_assessments),
         )
@@ -620,6 +663,15 @@ def choose_custom_workflow_override_candidate(
     ):
         reason_code = "authoring_override_declined"
     elif any(
+        item.suitability_reason
+        in {
+            "maintenance_declined_for_workflow_query",
+            "maintenance_requires_explicit_request",
+        }
+        for item in candidate_assessments
+    ):
+        reason_code = "maintenance_override_declined"
+    elif any(
         item.suitability_reason == "semantic_fit_below_threshold"
         for item in candidate_assessments
     ):
@@ -631,6 +683,7 @@ def choose_custom_workflow_override_candidate(
         outcome="decline",
         reason_code=reason_code,
         explicit_authoring_request=explicit_authoring_request,
+        explicit_execution_request=explicit_execution_request,
         workflow_query_intent=workflow_query_intent,
         candidate_assessments=tuple(candidate_assessments),
     )

@@ -27637,6 +27637,8 @@ class InternalMCPChatOrchestrator:
                 prior_selected_workflow_id=selected_workflow_id_text,
                 preserved_execution_mode="custom_workflow",
             )
+            prior_selected_workflow_id = selected_workflow_id_text
+            prior_selector_verdict = selector_verdict or None
             replacement_probe = (
                 _get_cached_custom_workflow_launchability_probe(
                     override_policy.chosen_workflow_id
@@ -27646,10 +27648,26 @@ class InternalMCPChatOrchestrator:
                 else None
             )
             if replacement_probe is None:
+                # When a specialised workflow is semantically right but cannot
+                # launch from free-text turn inputs, prefer the safe generic
+                # tool path over promoting a weakly related custom workflow.
+                _force_tool_pipeline_routing(
+                    reason=(
+                        "selected_custom_workflow_launchability_requires_safe_general_fallback"
+                    ),
+                    excluded_selector_verdicts=[
+                        prior_selector_verdict or "rag_selected"
+                    ],
+                    extra_payload={
+                        "prior_selected_workflow_id": prior_selected_workflow_id,
+                        "prior_selector_verdict": prior_selector_verdict,
+                        "launch_viability_probe": {
+                            "prior_selected_workflow": dict(selected_probe),
+                        },
+                        "custom_workflow_override_reason": override_policy.reason_code,
+                    },
+                )
                 return
-
-            prior_selected_workflow_id = selected_workflow_id_text
-            prior_selector_verdict = selector_verdict or None
 
             reason = "selected_custom_workflow_not_launchable_from_turn_inputs"
             reasoning = (
