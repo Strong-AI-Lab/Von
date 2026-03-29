@@ -13791,6 +13791,366 @@ class InternalMCPChatOrchestrator:
 
         return parsed
 
+    @staticmethod
+    def _short_concept_id_for_display(
+        value: Any, *, max_chars: int = 25
+    ) -> str | None:
+        if not isinstance(value, str):
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        return cleaned.replace("#V#", "")[:max_chars]
+
+    @classmethod
+    def _build_search_query_label(
+        cls,
+        data: Mapping[str, Any],
+        *,
+        limit: int = 50,
+    ) -> str:
+        """Build a human-meaningful search descriptor for search-like payloads."""
+
+        query_info = data.get("query_info")
+        info = query_info if isinstance(query_info, Mapping) else {}
+
+        raw_query = data.get("query")
+        if not isinstance(raw_query, str):
+            raw_query = info.get("query")
+
+        if isinstance(raw_query, str) and raw_query.strip():
+            text = raw_query.strip()
+            return text[:limit] + "..." if len(text) > limit else text
+
+        parts: list[str] = []
+
+        instance_of = data.get("instance_of")
+        if not isinstance(instance_of, str):
+            instance_of = info.get("instance_of")
+        instance_short = cls._short_concept_id_for_display(instance_of)
+        if instance_short:
+            parts.append(f"instances of {instance_short}")
+
+        filter_kind = data.get("filter_kind")
+        if not isinstance(filter_kind, list):
+            filter_kind = info.get("filter_kind")
+        if isinstance(filter_kind, list):
+            kinds = [str(kind).strip() for kind in filter_kind if str(kind).strip()]
+            if kinds:
+                kind_text = "/".join(kinds[:3])
+                if len(kinds) > 3:
+                    kind_text += "+..."
+                parts.append(f"kind={kind_text}")
+
+        scope_root = data.get("scope_root")
+        if not isinstance(scope_root, str):
+            scope_root = info.get("scope_root")
+        scope_short = cls._short_concept_id_for_display(scope_root)
+        if scope_short:
+            parts.append(f"scope={scope_short}")
+
+        if parts:
+            label = "; ".join(parts)
+            return label[:limit] + "..." if len(label) > limit else label
+
+        return "all concepts"
+
+    @staticmethod
+    def _tokenise_search_text(value: Any, *, max_tokens: int = 12) -> list[str]:
+        if not isinstance(value, str):
+            return []
+        tokens: list[str] = []
+        seen: set[str] = set()
+        for token in re.findall(r"[A-Za-z0-9]+", value.lower()):
+            if len(token) < 3 or token.isdigit() or token in seen:
+                continue
+            seen.add(token)
+            tokens.append(token)
+            if len(tokens) >= max_tokens:
+                break
+        return tokens
+
+    @staticmethod
+    def _score_search_result_row(row: Mapping[str, Any]) -> float | None:
+        relevance = row.get("relevance_score")
+        if isinstance(relevance, (int, float)):
+            return float(relevance)
+        similarity = row.get("similarity_score")
+        if isinstance(similarity, (int, float)):
+            return float(similarity) * 100.0
+        return None
+
+    @classmethod
+    def _compute_search_query_overlap(
+        cls,
+        query_tokens: Sequence[str],
+        *values: Any,
+    ) -> float | None:
+        if not query_tokens:
+            return None
+        haystack_tokens: set[str] = set()
+        for value in values:
+            haystack_tokens.update(cls._tokenise_search_text(value))
+        if not haystack_tokens:
+            return 0.0
+        matched = sum(1 for token in query_tokens if token in haystack_tokens)
+        return matched / len(query_tokens)
+
+    @classmethod
+    def _compact_search_hierarchy_path(cls, hierarchy: Any) -> str | None:
+        if not isinstance(hierarchy, Mapping):
+            return None
+        primary_path = hierarchy.get("primary_path")
+        if not isinstance(primary_path, list) or not primary_path:
+            return None
+        segments: list[str] = []
+        for entry in primary_path:
+            if not isinstance(entry, str):
+                continue
+            segment = cls._short_concept_id_for_display(entry, max_chars=24)
+            if segment:
+                segments.append(segment)
+        if not segments:
+            return None
+        if len(segments) > 4:
+            segments = ["..."] + segments[-3:]
+        return " > ".join(segments)
+
+    @classmethod
+    def _shape_search_concepts_payload_for_llm(
+        cls,
+        payload: Mapping[str, Any],
+        *,
+        max_results: int = 5,
+    ) -> dict[str, Any]:
+        """Return a compact, quality-aware search view for same-turn LLM use.
+
+        The live summariser only needs authoritative query context plus the
+        strongest search evidence. Low-signal tails inflate context and can cause
+        the model to narrate unrelated concepts as if they were meaningful.
+        """
+
+        raw_results = payload.get("results")
+        result_rows = (
+            [row for row in raw_results if isinstance(row, Mapping)]
+            if isinstance(raw_results, list)
+            else []
+        )
+        query_info = payload.get("query_info")
+        info = query_info if isinstance(query_info, Mapping) else {}
+
+        raw_query = payload.get("query")
+        if not isinstance(raw_query, str):
+            raw_query = info.get("query")
+        query_text = raw_query.strip() if isinstance(raw_query, str) else ""
+        query_label = cls._build_search_query_label(payload, limit=120)
+        query_tokens = cls._tokenise_search_text(query_text)
+
+        total_count_raw = payload.get("total_count")
+        total_count = (
+            int(total_count_raw)
+            if isinstance(total_count_raw, (int, float))
+            else len(result_rows)
+        )
+        returned_count = len(result_rows)
+
+        filtered_rows = list(result_rows)
+        omitted_low_signal_results = 0
+        top_score = (
+            cls._score_search_result_row(result_rows[0]) if result_rows else None
+        )
+        if query_text and top_score is not None:
+            score_threshold = max(60.0, top_score - 15.0)
+            filtered_rows = [
+                row
+                for row in result_rows
+                if (
+                    cls._score_search_result_row(row) is None
+                    or cast(float, cls._score_search_result_row(row)) >= score_threshold
+                )
+            ]
+            omitted_low_signal_results = max(0, returned_count - len(filtered_rows))
+
+        shown_rows = filtered_rows[:max_results]
+        if not shown_rows and result_rows:
+            shown_rows = result_rows[: min(max_results, 3)]
+        shown_results: list[dict[str, Any]] = []
+        overlap_values: list[float] = []
+        score_values: list[float] = []
+
+        for row in shown_rows:
+            score = cls._score_search_result_row(row)
+            name = row.get("name")
+            concept_id = row.get("concept_id")
+            compact_row: dict[str, Any] = {}
+            if isinstance(name, str) and name.strip():
+                compact_row["name"] = name.strip()
+            if isinstance(concept_id, str) and concept_id.strip():
+                compact_row["concept_id"] = concept_id.strip()
+            kind = row.get("kind")
+            if isinstance(kind, str) and kind.strip():
+                compact_row["kind"] = kind.strip()
+            if score is not None:
+                score_values.append(score)
+                compact_row["relevance_score"] = round(score, 3)
+                if score >= 95.0:
+                    compact_row["match_signal"] = "exact_or_near_exact"
+                elif score >= 80.0:
+                    compact_row["match_signal"] = "strong_candidate"
+                elif score >= 70.0:
+                    compact_row["match_signal"] = "partial_candidate"
+                else:
+                    compact_row["match_signal"] = "weak_candidate"
+            similarity = row.get("similarity_score")
+            if isinstance(similarity, (int, float)):
+                compact_row["similarity_score"] = round(float(similarity), 3)
+
+            overlap = cls._compute_search_query_overlap(
+                query_tokens,
+                name,
+                concept_id,
+            )
+            if overlap is not None:
+                overlap_values.append(overlap)
+                compact_row["query_token_overlap"] = round(overlap, 3)
+                if overlap >= 0.5:
+                    compact_row["lexical_grounding"] = "high"
+                elif overlap > 0.0:
+                    compact_row["lexical_grounding"] = "partial"
+                else:
+                    compact_row["lexical_grounding"] = "none"
+
+            hierarchy_path = cls._compact_search_hierarchy_path(row.get("hierarchy"))
+            if hierarchy_path:
+                compact_row["primary_path"] = hierarchy_path
+
+            shown_results.append(compact_row)
+
+        scope_only = bool(query_label == "all concepts" and not query_text)
+        if not query_text and (
+            info.get("instance_of") or info.get("scope_root") or info.get("filter_kind")
+        ):
+            scope_only = True
+
+        if not shown_results:
+            quality_strength = "none"
+            response_guidance = "Report that no matching concepts were found."
+            quality_note = "No concept results were available."
+        elif scope_only:
+            quality_strength = "scope_listing"
+            response_guidance = (
+                "Treat these as scoped results, not lexical verification of a query."
+            )
+            quality_note = (
+                "This search used filters or scope constraints without a concrete query."
+            )
+        else:
+            best_score = score_values[0] if score_values else None
+            best_overlap = overlap_values[0] if overlap_values else None
+            if (
+                best_score is not None
+                and best_score >= 95.0
+                and (best_overlap is None or best_overlap >= 0.34)
+            ):
+                quality_strength = "strong"
+                response_guidance = (
+                    "You can identify the strongest match directly, but keep lower-ranked "
+                    "results secondary."
+                )
+                quality_note = "Top-ranked results look like strong name matches."
+            elif (
+                best_score is not None
+                and best_score >= 80.0
+                and (best_overlap is None or best_overlap > 0.0)
+            ):
+                quality_strength = "usable"
+                response_guidance = (
+                    "Describe these as best candidates rather than claiming a single "
+                    "verified match unless the evidence is explicit."
+                )
+                quality_note = "There are plausible candidate matches worth naming."
+            else:
+                quality_strength = "weak"
+                response_guidance = (
+                    "Use tentative language only; do not present any result as verified, "
+                    "and call out weak or noisy search quality."
+                )
+                quality_note = (
+                    "Top-ranked results are weak, noisy, or lexically mismatched."
+                )
+
+            if omitted_low_signal_results > 0:
+                quality_note += (
+                    f" {omitted_low_signal_results} low-signal result(s) were omitted "
+                    "from the live context."
+                )
+
+        compact_query_info: dict[str, Any] = {"query": query_label}
+        for key in (
+            "match_type",
+            "instance_of",
+            "scope_root",
+            "direct_instances_only",
+            "has_more",
+        ):
+            value = info.get(key)
+            if value is None:
+                continue
+            compact_query_info[key] = value
+        filter_kind = info.get("filter_kind")
+        if isinstance(filter_kind, list):
+            compact_query_info["filter_kind"] = [
+                str(kind).strip()
+                for kind in filter_kind[:6]
+                if isinstance(kind, str) and kind.strip()
+            ]
+
+        compact_payload: dict[str, Any] = {
+            "_llm_view": "search_concepts_results.v1",
+            "query_info": compact_query_info,
+            "total_count": total_count,
+            "returned_count": returned_count,
+            "shown_count": len(shown_results),
+            "omitted_result_count": max(0, returned_count - len(shown_results)),
+            "results": shown_results,
+            "result_quality": {
+                "strength": quality_strength,
+                "note": quality_note,
+                "response_guidance": response_guidance,
+            },
+        }
+
+        match_types_used = payload.get("match_types_used")
+        if isinstance(match_types_used, list):
+            compact_payload["match_types_used"] = [
+                str(item).strip()
+                for item in match_types_used[:6]
+                if isinstance(item, str) and item.strip()
+            ]
+
+        deduplication = payload.get("deduplication")
+        if isinstance(deduplication, Mapping):
+            duplicates_removed = deduplication.get("duplicates_removed")
+            if isinstance(duplicates_removed, (int, float)) and int(duplicates_removed) > 0:
+                compact_payload["deduplication"] = {
+                    "duplicates_removed": int(duplicates_removed),
+                    "total_before_dedup": deduplication.get("total_before_dedup"),
+                    "total_after_dedup": deduplication.get("total_after_dedup"),
+                }
+
+        if omitted_low_signal_results > 0:
+            compact_payload["omitted_low_signal_results"] = omitted_low_signal_results
+
+        return compact_payload
+
+    def _prepare_tool_payload_for_llm(self, tool_name: str, payload: Any) -> Any:
+        if not isinstance(tool_name, str) or not isinstance(payload, Mapping):
+            return payload
+        tool_lower = tool_name.strip().lower()
+        if tool_lower in {"search_concepts", "vontology_concept_search"}:
+            return self._shape_search_concepts_payload_for_llm(payload)
+        return payload
+
     def _format_tool_result(
         self,
         tool_name: str,
@@ -13807,8 +14167,9 @@ class InternalMCPChatOrchestrator:
         if status == "ok":
             # Tool outputs can be very large (e.g., web extraction). Truncate nested
             # strings/lists so the *next* model call doesn't balloon.
+            llm_payload = self._prepare_tool_payload_for_llm(tool_name, payload)
             result["payload"] = self._truncate_nested_for_llm(
-                payload,
+                llm_payload,
                 max_string_chars=self._max_tool_result_field_chars,
             )
         if error is not None:
@@ -14410,70 +14771,18 @@ class InternalMCPChatOrchestrator:
         if not template:
             return None
 
-        def _short_concept_id(value: Any, *, max_chars: int = 25) -> str | None:
-            if not isinstance(value, str):
-                return None
-            cleaned = value.strip()
-            if not cleaned:
-                return None
-            return cleaned.replace("#V#", "")[:max_chars]
-
-        def _build_search_query_label(data: dict[str, Any], *, limit: int = 50) -> str:
-            """Build a human-meaningful search descriptor for status text.
-
-            This avoids low-signal summaries like `for ""` when search_concepts
-            intentionally uses an empty query with filters (for example instance_of).
-            """
-
-            query_info = data.get("query_info")
-            info = query_info if isinstance(query_info, dict) else {}
-
-            raw_query = data.get("query")
-            if not isinstance(raw_query, str):
-                raw_query = info.get("query")
-
-            if isinstance(raw_query, str) and raw_query.strip():
-                text = raw_query.strip()
-                return text[:limit] + "..." if len(text) > limit else text
-
-            parts: list[str] = []
-
-            instance_of = data.get("instance_of")
-            if not isinstance(instance_of, str):
-                instance_of = info.get("instance_of")
-            instance_short = _short_concept_id(instance_of)
-            if instance_short:
-                parts.append(f"instances of {instance_short}")
-
-            filter_kind = data.get("filter_kind")
-            if not isinstance(filter_kind, list):
-                filter_kind = info.get("filter_kind")
-            if isinstance(filter_kind, list):
-                kinds = [str(kind).strip() for kind in filter_kind if str(kind).strip()]
-                if kinds:
-                    kind_text = "/".join(kinds[:3])
-                    if len(kinds) > 3:
-                        kind_text += "+..."
-                    parts.append(f"kind={kind_text}")
-
-            scope_root = data.get("scope_root")
-            if not isinstance(scope_root, str):
-                scope_root = info.get("scope_root")
-            scope_short = _short_concept_id(scope_root)
-            if scope_short:
-                parts.append(f"scope={scope_short}")
-
-            if parts:
-                label = "; ".join(parts)
-                return label[:limit] + "..." if len(label) > limit else label
-
-            return "all concepts"
-
         # Build a context dict from the payload with common field mappings
         context: dict[str, Any] = {}
 
         # Count-related fields
-        for key in ("count", "total", "successful", "added_count", "relations_found"):
+        for key in (
+            "count",
+            "total_count",
+            "total",
+            "successful",
+            "added_count",
+            "relations_found",
+        ):
             if key in payload:
                 context["count"] = payload[key]
                 break
@@ -14501,7 +14810,7 @@ class InternalMCPChatOrchestrator:
                 break
 
         # Search query context (especially important for search_concepts status text)
-        query_label = _build_search_query_label(payload)
+        query_label = InternalMCPChatOrchestrator._build_search_query_label(payload)
         if query_label:
             context["query"] = query_label
             context["query_label"] = query_label

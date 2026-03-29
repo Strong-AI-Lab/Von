@@ -218,34 +218,171 @@ def test_orchestrator_preserves_presenter_protocol_when_trimming_context():
 
 
 def test_orchestrator_truncates_tool_payload_in_context():
-    _bootstrap_authoritative_workflows()
-    gateway = cast(Any, _StubGateway())
     orchestrator = InternalMCPChatOrchestrator(
-        gateway=gateway,
+        gateway=cast(Any, _StubGateway()),
         max_tool_invocations=1,
         max_tool_result_chars=5_000,
         max_tool_result_field_chars=1_500,
         max_context_chars=80_000,
     )
 
-    llm = _CapturingLLM(
-        [
-            json.dumps({"action": "call_tool", "tool": "dummy", "payload": {}}),
-            "done",
-        ]
+    encoded = orchestrator._format_tool_result(
+        "dummy",
+        {"content": "x" * 50_000, "ok": True},
+        1.0,
+        "ok",
     )
 
-    result = orchestrator.run(prompt="extract", context=[], llm_client=llm, model=None)
-
-    assert isinstance(result.response_text, str)
-    assert result.response_text.strip()
-    assert len(result.extra_messages) == 1
-
-    tool_msg = result.extra_messages[0]
-    assert tool_msg["role"] == "tool"
-    assert len(tool_msg["content"]) <= 5_500
+    assert len(encoded) <= 5_500
 
     # Ensure the tool output is still valid JSON.
-    parsed = json.loads(tool_msg["content"])
+    parsed = json.loads(encoded)
     assert parsed["tool"] == "dummy"
     assert parsed["status"] == "ok"
+
+
+def test_format_tool_result_shapes_search_concepts_payload_for_live_follow_up():
+    _bootstrap_authoritative_workflows()
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=cast(Any, _StubGateway()),
+        max_tool_invocations=1,
+        max_tool_result_chars=5_000,
+        max_tool_result_field_chars=1_500,
+        max_context_chars=80_000,
+    )
+
+    encoded = orchestrator._format_tool_result(
+        "search_concepts",
+        {
+            "results": [
+                {
+                    "concept_id": "#V#under_preparation_paper",
+                    "name": "Under Preparation Paper",
+                    "kind": "type",
+                    "relevance_score": 96.0,
+                    "hierarchy": {
+                        "primary_path": [
+                            "#V#thing",
+                            "#V#document",
+                            "#V#paper",
+                            "#V#under_preparation_paper",
+                        ]
+                    },
+                },
+                {
+                    "concept_id": "#V#paper_draft",
+                    "name": "Paper Draft",
+                    "kind": "type",
+                    "relevance_score": 88.0,
+                },
+                {
+                    "concept_id": "#V#research_manuscript",
+                    "name": "Research Manuscript",
+                    "kind": "type",
+                    "relevance_score": 82.0,
+                },
+                {
+                    "concept_id": "#V#bathroom_closet",
+                    "name": "Bathroom Closet",
+                    "kind": "type",
+                    "relevance_score": 51.0,
+                },
+                {
+                    "concept_id": "#V#linen_cupboard",
+                    "name": "Linen Cupboard",
+                    "kind": "type",
+                    "relevance_score": 50.0,
+                },
+            ],
+            "total_count": 5,
+            "match_types_used": ["substring"],
+            "query_info": {
+                "query": "under preparation paper",
+                "match_type": "substring",
+                "has_more": False,
+            },
+        },
+        1.0,
+        "ok",
+    )
+
+    parsed = json.loads(encoded)
+    assert parsed["tool"] == "search_concepts"
+    payload = parsed["payload"]
+    assert payload["_llm_view"] == "search_concepts_results.v1"
+    assert payload["query_info"]["query"] == "under preparation paper"
+    assert payload["total_count"] == 5
+    assert payload["returned_count"] == 5
+    assert payload["omitted_low_signal_results"] == 2
+    assert payload["result_quality"]["strength"] == "strong"
+    assert "secondary" in payload["result_quality"]["response_guidance"].lower()
+    assert "omitted" in payload["result_quality"]["note"].lower()
+    assert [item["name"] for item in payload["results"]] == [
+        "Under Preparation Paper",
+        "Paper Draft",
+        "Research Manuscript",
+    ]
+    assert all(item["name"] != "Bathroom Closet" for item in payload["results"])
+
+
+def test_format_tool_result_marks_search_concepts_payload_weak_when_matches_are_noisy():
+    _bootstrap_authoritative_workflows()
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=cast(Any, _StubGateway()),
+        max_tool_invocations=1,
+        max_tool_result_chars=5_000,
+        max_tool_result_field_chars=1_500,
+        max_context_chars=80_000,
+    )
+
+    encoded = orchestrator._format_tool_result(
+        "search_concepts",
+        {
+            "results": [
+                {
+                    "concept_id": "#V#bathroom_closet",
+                    "name": "Bathroom Closet",
+                    "kind": "type",
+                    "relevance_score": 58.0,
+                },
+                {
+                    "concept_id": "#V#linen_cupboard",
+                    "name": "Linen Cupboard",
+                    "kind": "type",
+                    "relevance_score": 54.0,
+                },
+            ],
+            "total_count": 2,
+            "query_info": {
+                "query": "under preparation paper",
+                "match_type": "substring",
+                "has_more": False,
+            },
+        },
+        1.0,
+        "ok",
+    )
+
+    parsed = json.loads(encoded)
+    payload = parsed["payload"]
+    assert payload["result_quality"]["strength"] == "weak"
+    assert "tentative" in payload["result_quality"]["response_guidance"].lower()
+    assert payload["results"][0]["lexical_grounding"] == "none"
+
+
+def test_extract_result_summary_uses_total_count_and_query_for_search_concepts():
+    summary = InternalMCPChatOrchestrator._extract_result_summary(
+        "search_concepts",
+        {
+            "total_count": 7,
+            "results": [
+                {"concept_id": "#V#under_preparation_paper", "name": "Under Preparation Paper"}
+            ],
+            "query_info": {
+                "query": "under preparation paper",
+                "match_type": "substring",
+            },
+        },
+    )
+
+    assert summary == "Found 7 concepts for under preparation paper"

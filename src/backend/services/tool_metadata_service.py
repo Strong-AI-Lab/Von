@@ -65,7 +65,7 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
     "search_concepts": {
         "salience": "high",
         "category": "vontology",
-        "display_template": "Found {count} concepts",
+        "display_template": "Found {count} concepts for {query}",
     },
     "add_relationship": {
         "salience": "high",
@@ -341,12 +341,12 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
     "vontology_concept_search": {
         "salience": "medium",
         "category": "vontology",
-        "display_template": "{count} concepts",
+        "display_template": "{count} concepts for {query}",
     },
     "search_concept_descriptions": {
         "salience": "medium",
         "category": "vontology",
-        "display_template": "{count} concepts",
+        "display_template": "{count} concepts for {query}",
     },
     "get_paper_metadata": {
         "salience": "medium",
