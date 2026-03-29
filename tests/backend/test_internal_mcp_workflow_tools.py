@@ -1242,6 +1242,47 @@ def test_turn_execution_get_critic_bundle_invokes_service(monkeypatch):
     assert payload["episode_locator"]["request_id"] == "req-bundle-1"
 
 
+def test_episode_critique_memory_list_forwards_to_rag_collection(monkeypatch):
+    gateway = _build_gateway()
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.catalogue._rag_list_indexed",
+        lambda **kwargs: {
+            "success": True,
+            "collection": kwargs.get("collection"),
+            "items": [],
+        },
+    )
+
+    payload = gateway.invoke(
+        "episode_critique_memory_list",
+        {"namespace": "#V#user@org", "limit": 5},
+    ).payload
+
+    assert payload["success"] is True
+    assert payload["collection"] == "episode_critique_memories"
+
+
+def test_episode_critique_memory_get_forwards_to_rag_collection(monkeypatch):
+    gateway = _build_gateway()
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.catalogue._rag_get_item",
+        lambda **kwargs: {
+            "success": True,
+            "collection": kwargs.get("collection"),
+            "session_id": kwargs.get("session_id"),
+        },
+    )
+
+    payload = gateway.invoke(
+        "episode_critique_memory_get",
+        {"memory_id": "#V#episode_critique_memory_xyz", "namespace": "#V#user@org"},
+    ).payload
+
+    assert payload["success"] is True
+    assert payload["collection"] == "episode_critique_memories"
+    assert payload["session_id"] == "#V#episode_critique_memory_xyz"
+
+
 def test_workflow_list_execution_traces_returns_bounded_summaries(monkeypatch):
     gateway = _build_gateway()
     monkeypatch.setattr(

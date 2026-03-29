@@ -25,6 +25,7 @@ from .turn_execution_record_service import (
     infer_turn_execution_workflow_routing_from_debug,
     upsert_turn_execution_record_projection,
 )
+from .episode_critique_memory_service import upsert_episode_critique_memory_from_turn
 
 # Try to import RAG service, but don't fail if it's not available (circular imports etc)
 try:
@@ -1250,9 +1251,27 @@ def _upsert_turn_execution_projection_for_message(
                     record.get("request_id"),
                     reason,
                 )
+        critique_outcome = upsert_episode_critique_memory_from_turn(
+            record=record,
+            llm_debug_data=llm_debug_data,
+            user_id=user_id,
+            session_id=session_id,
+            namespace=namespace,
+            org_id=org_id,
+        )
+        if isinstance(critique_outcome, dict) and not critique_outcome.get(
+            "success", False
+        ):
+            reason = critique_outcome.get("reason")
+            if isinstance(reason, str) and reason:
+                logger.debug(
+                    "episode_critique_memory not updated for request_id=%s (%s)",
+                    record.get("request_id"),
+                    reason,
+                )
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning(
-            "Failed to persist turn_execution_record projection for request_id=%s: %s",
+            "Failed to persist turn_execution projections for request_id=%s: %s",
             record.get("request_id"),
             exc,
         )

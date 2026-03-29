@@ -39,6 +39,8 @@ WORKFLOW_TOOL_NAMES = {
     "experiment_execute_regression_suite",
     "experiment_run_list",
     "experiment_run_get",
+    "episode_critique_memory_list",
+    "episode_critique_memory_get",
     "testing_prepare_experiment_spec",
     "testing_prepare_meeting_invitation_spec",
     "testing_prepare_arxiv_paper_ingestion_fixture",

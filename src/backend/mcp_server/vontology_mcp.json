@@ -727,6 +727,100 @@
       }
     },
     {
+      "name": "episode_critique_memory_get",
+      "description": "Fetch a single episode-critic memory artefact with verdict, implicated entities, evidence receipt hash, and remediation links.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "memory_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [],
+        "additionalProperties": true,
+        "description": "Get one episode critique memory by memory_id (session_id accepted as alias)."
+      }
+    },
+    {
+      "name": "episode_critique_memory_list",
+      "description": "List episode-critic memory artefacts, including verdicts, implicated workflows/tools/concepts, and remediation links.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "workflow_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "episode_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verdict": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verdicts": {
+            "type": "array",
+            "items": {}
+          },
+          "from_utc": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "to_utc": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [],
+        "additionalProperties": true,
+        "description": "List episode critique memories with structured filters. This is a convenience wrapper over rag_list_indexed(collection='episode_critique_memories')."
+      }
+    },
+    {
       "name": "experiment_start_run",
       "description": "Create a first-class experiment_run artefact and projection for Testing Workflow evidence capture.",
       "inputSchema": {

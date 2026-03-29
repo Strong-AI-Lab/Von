@@ -33,6 +33,8 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, List, Mapping, Sequence
 
+from pymongo import DESCENDING
+
 from .dynamic_tool_loader import load_dynamic_method_definitions
 from .gateway import MethodCatalogue, MethodDefinition
 from .schemas import Schema, make_error_response
@@ -9147,6 +9149,29 @@ def _experiment_run_get(**kwargs):
     return _rag_get_item(**forwarded)
 
 
+def _episode_critique_memory_list(**kwargs):
+    forwarded = dict(kwargs)
+    forwarded["collection"] = "episode_critique_memories"
+    return _rag_list_indexed(**forwarded)
+
+
+def _episode_critique_memory_get(**kwargs):
+    memory_id = kwargs.get("memory_id")
+    session_id = kwargs.get("session_id")
+    target = memory_id if memory_id is not None else session_id
+    if not isinstance(target, str) or not target.strip():
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: memory_id",
+            details={"missing": ["memory_id"]},
+            suggestions=["Provide memory_id (or session_id alias)"],
+        )
+    forwarded = dict(kwargs)
+    forwarded["collection"] = "episode_critique_memories"
+    forwarded["session_id"] = target.strip()
+    return _rag_get_item(**forwarded)
+
+
 def _testing_theory_create_slice(**kwargs):
     from ...services.testing_theory_service import create_testing_theory_slice
 
@@ -12574,6 +12599,12 @@ def _resolve_rag_collection_from_kwargs(kwargs: dict) -> dict[str, object]:
         "experiment_runs": "experiment_runs",
         "experiment": "experiment_runs",
         "experiments": "experiment_runs",
+        "episode_critique_memory": "episode_critique_memories",
+        "episode_critique_memories": "episode_critique_memories",
+        "critique_memory": "episode_critique_memories",
+        "critique_memories": "episode_critique_memories",
+        "episode_critique": "episode_critique_memories",
+        "episode_critiques": "episode_critique_memories",
     }
     effective = aliases.get(lowered, lowered)
     return {
@@ -12690,6 +12721,26 @@ def _rag_list_collections(**kwargs):
             "get_supported_reason": None,
             "item_kind": "experiment_run",
             "source_system": "mongo.experiment_runs",
+        },
+        {
+            "collection": "episode_critique_memories",
+            "label": "Episode critique memories",
+            "description": (
+                "Episode-critic memory artefacts stored in MongoDB "
+                "(episode_critique_memories). Includes the criticised episode "
+                "identity, verdict, confidence, implicated workflows/tools/concepts, "
+                "evidence receipts, and remediation links."
+            ),
+            "list_tool": "rag_list_indexed",
+            "get_tool": "rag_get_item",
+            "search_tool": None,
+            "list_supported": True,
+            "get_supported": True,
+            "search_supported": False,
+            "list_supported_reason": None,
+            "get_supported_reason": None,
+            "item_kind": "episode_critique_memory",
+            "source_system": "mongo.episode_critique_memories",
         },
         {
             "collection": "rag_documents",
@@ -13803,6 +13854,118 @@ def _rag_list_indexed(**kwargs):
             source_system="mongo.experiment_runs",
         )
 
+    if collection == "episode_critique_memories":
+        coll = db["episode_critique_memories"]
+
+        query: dict[str, Any] = {"namespace": ns}
+        workflow_id = kwargs.get("workflow_id")
+        if isinstance(workflow_id, str) and workflow_id.strip():
+            query["workflow_id"] = workflow_id.strip()
+
+        request_id = kwargs.get("request_id")
+        if isinstance(request_id, str) and request_id.strip():
+            query["request_id"] = request_id.strip()
+
+        episode_id = kwargs.get("episode_id")
+        if isinstance(episode_id, str) and episode_id.strip():
+            query["episode_id"] = episode_id.strip()
+
+        verdict_values: list[str] = []
+        verdict_single = kwargs.get("verdict")
+        if isinstance(verdict_single, str) and verdict_single.strip():
+            verdict_values.append(verdict_single.strip())
+        verdicts_many = kwargs.get("verdicts")
+        if isinstance(verdicts_many, list):
+            for item in verdicts_many:
+                if isinstance(item, str) and item.strip():
+                    verdict_values.append(item.strip())
+        if verdict_values:
+            deduped_verdicts = list(dict.fromkeys(verdict_values))
+            if len(deduped_verdicts) == 1:
+                query["verdict"] = deduped_verdicts[0]
+            else:
+                query["verdict"] = {"$in": deduped_verdicts}
+
+        from_utc = kwargs.get("from_utc")
+        to_utc = kwargs.get("to_utc")
+        created_range: dict[str, str] = {}
+        if isinstance(from_utc, str) and from_utc.strip():
+            created_range["$gte"] = from_utc.strip()
+        if isinstance(to_utc, str) and to_utc.strip():
+            created_range["$lte"] = to_utc.strip()
+        if created_range:
+            query["created_at_utc"] = created_range
+
+        cursor = (
+            coll.find(
+                query,
+                {
+                    "memory_id": 1,
+                    "request_id": 1,
+                    "episode_id": 1,
+                    "workflow_id": 1,
+                    "created_at_utc": 1,
+                    "updated_at_utc": 1,
+                    "namespace": 1,
+                    "verdict": 1,
+                    "confidence": 1,
+                    "unresolved_check_count": 1,
+                    "implicated_tool_names": 1,
+                    "implicated_concept_ids": 1,
+                    "remediation_task_ids": 1,
+                    "remediation_issue_keys": 1,
+                },
+            )
+            .sort("created_at_utc", DESCENDING)
+            .skip(offset)
+            .limit(limit)
+        )
+        items: list[dict[str, Any]] = []
+        for doc in cursor:
+            if not isinstance(doc, dict):
+                continue
+            items.append(
+                {
+                    "collection": collection,
+                    "session_id": doc.get("memory_id"),
+                    "memory_id": doc.get("memory_id"),
+                    "request_id": doc.get("request_id"),
+                    "episode_id": doc.get("episode_id"),
+                    "workflow_id": doc.get("workflow_id"),
+                    "created_at_utc": doc.get("created_at_utc"),
+                    "updated_at_utc": doc.get("updated_at_utc"),
+                    "namespace": doc.get("namespace"),
+                    "verdict": doc.get("verdict"),
+                    "confidence": doc.get("confidence"),
+                    "unresolved_check_count": doc.get("unresolved_check_count"),
+                    "implicated_tool_names": doc.get("implicated_tool_names") or [],
+                    "implicated_concept_ids": doc.get("implicated_concept_ids") or [],
+                    "remediation_task_ids": doc.get("remediation_task_ids") or [],
+                    "remediation_issue_keys": doc.get("remediation_issue_keys") or [],
+                    "item_kind": "episode_critique_memory",
+                    "source_system": "mongo.episode_critique_memories",
+                    "namespace_source": ns_report.get("namespace_source"),
+                }
+            )
+
+        payload = {
+            "collection": collection,
+            **collection_report,
+            "items": items,
+            "total": coll.count_documents(query),
+            "limit": limit,
+            "offset": offset,
+            "effective_namespace": ns,
+            "effective_namespace_source": ns_report.get("namespace_source"),
+            **ns_report,
+            "success": True,
+        }
+        return _with_rag_provenance(
+            payload=payload,
+            item_kind="episode_critique_memory_list",
+            source_system="mongo.episode_critique_memories",
+        )
+
     if collection == "vontology_text_relations":
         from ...services.rag_text_relation_sync_service import (
             list_text_relation_index_items,
@@ -14237,6 +14400,55 @@ def _rag_get_item(**kwargs):
             payload=payload,
             item_kind="experiment_run_item",
             source_system="mongo.experiment_runs",
+        )
+
+    if collection == "episode_critique_memories":
+        coll = db["episode_critique_memories"]
+        doc = coll.find_one({"memory_id": session_id, "namespace": ns})
+        if not doc:
+            return make_error_response(
+                "not_found",
+                f"Episode critique memory {session_id} not found",
+                details={"memory_id": session_id, "namespace": ns},
+                suggestions=["Check the memory_id and namespace"],
+            )
+
+        payload = {
+            "collection": collection,
+            **collection_report,
+            "session_id": doc.get("memory_id"),
+            "memory_id": doc.get("memory_id"),
+            "request_id": doc.get("request_id"),
+            "episode_id": doc.get("episode_id"),
+            "workflow_id": doc.get("workflow_id"),
+            "created_at_utc": doc.get("created_at_utc"),
+            "updated_at_utc": doc.get("updated_at_utc"),
+            "namespace": doc.get("namespace"),
+            "user_id": doc.get("user_id"),
+            "org_id": doc.get("org_id"),
+            "verdict": doc.get("verdict"),
+            "confidence": doc.get("confidence"),
+            "unresolved_check_count": doc.get("unresolved_check_count"),
+            "implicated_workflow_ids": doc.get("implicated_workflow_ids") or [],
+            "implicated_tool_names": doc.get("implicated_tool_names") or [],
+            "implicated_concept_ids": doc.get("implicated_concept_ids") or [],
+            "remediation_task_ids": doc.get("remediation_task_ids") or [],
+            "remediation_issue_keys": doc.get("remediation_issue_keys") or [],
+            "recommendations": doc.get("recommendations") or [],
+            "receipt_hash": doc.get("receipt_hash"),
+            "dedupe_fingerprint": doc.get("dedupe_fingerprint"),
+            "item_kind": "episode_critique_memory",
+            "source_system": "mongo.episode_critique_memories",
+            "namespace_source": ns_report.get("namespace_source"),
+            "effective_namespace": ns,
+            "effective_namespace_source": ns_report.get("namespace_source"),
+            **ns_report,
+            "success": True,
+        }
+        return _with_rag_provenance(
+            payload=payload,
+            item_kind="episode_critique_memory_item",
+            source_system="mongo.episode_critique_memories",
         )
 
     if collection == "vontology_text_relations":
@@ -21070,6 +21282,57 @@ def build_default_catalogue() -> MethodCatalogue:
             category="read",
             description=(
                 "Fetch a single Testing Workflow experiment run with observations, verdict summary, promotion recommendation, and retained replay case."
+            ),
+        ),
+        MethodDefinition(
+            name="episode_critique_memory_list",
+            handler=_episode_critique_memory_list,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "namespace": (str, type(None)),
+                    "limit": (int,),
+                    "offset": (int,),
+                    "workflow_id": (str, type(None)),
+                    "request_id": (str, type(None)),
+                    "episode_id": (str, type(None)),
+                    "verdict": (str, type(None)),
+                    "verdicts": (list,),
+                    "from_utc": (str, type(None)),
+                    "to_utc": (str, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "List episode critique memories with structured filters. "
+                    "This is a convenience wrapper over rag_list_indexed(collection='episode_critique_memories')."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "List episode-critic memory artefacts, including verdicts, implicated workflows/tools/concepts, and remediation links."
+            ),
+        ),
+        MethodDefinition(
+            name="episode_critique_memory_get",
+            handler=_episode_critique_memory_get,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "memory_id": (str, type(None)),
+                    "session_id": (str, type(None)),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "Get one episode critique memory by memory_id "
+                    "(session_id accepted as alias)."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Fetch a single episode-critic memory artefact with verdict, implicated entities, evidence receipt hash, and remediation links."
             ),
         ),
         MethodDefinition(

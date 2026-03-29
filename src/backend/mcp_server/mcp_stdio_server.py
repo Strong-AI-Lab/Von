@@ -138,6 +138,12 @@ from src.backend.integrations.internal_mcp.catalogue import (
 from src.backend.integrations.internal_mcp.catalogue import (
     _experiment_execute_target_workflow,
 )
+from src.backend.integrations.internal_mcp.catalogue import (
+    _episode_critique_memory_get,
+)
+from src.backend.integrations.internal_mcp.catalogue import (
+    _episode_critique_memory_list,
+)
 from src.backend.integrations.internal_mcp.catalogue import _experiment_record_observation
 from src.backend.integrations.internal_mcp.catalogue import _experiment_run_get
 from src.backend.integrations.internal_mcp.catalogue import _experiment_run_list
@@ -2977,6 +2983,26 @@ async def _handle_experiment_run_get(arguments: dict[str, Any]) -> list[TextCont
     )
 
 
+async def _handle_episode_critique_memory_list(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _episode_critique_memory_list,
+        arguments,
+        tool_family_label="EpisodeCritique",
+    )
+
+
+async def _handle_episode_critique_memory_get(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _episode_critique_memory_get,
+        arguments,
+        tool_family_label="EpisodeCritique",
+    )
+
+
 async def _handle_testing_theory_create_slice(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
@@ -3334,6 +3360,8 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "search_knowledge_base": _handle_search_knowledge_base,
     "experiment_run_list": _handle_experiment_run_list,
     "experiment_run_get": _handle_experiment_run_get,
+    "episode_critique_memory_list": _handle_episode_critique_memory_list,
+    "episode_critique_memory_get": _handle_episode_critique_memory_get,
     "testing_theory_create_slice": _handle_testing_theory_create_slice,
     "testing_theory_import_canonical_context": _handle_testing_theory_import_canonical_context,
     "testing_theory_assert_local_claims": _handle_testing_theory_assert_local_claims,

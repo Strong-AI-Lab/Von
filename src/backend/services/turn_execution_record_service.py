@@ -4987,6 +4987,25 @@ def backfill_turn_execution_records_from_chat_history(
                 org_id=org_id,
             )
             if bool(outcome.get("updated", False)):
+                try:
+                    from .episode_critique_memory_service import (
+                        upsert_episode_critique_memory_from_turn,
+                    )
+
+                    upsert_episode_critique_memory_from_turn(
+                        record=record,
+                        llm_debug_data=llm_debug,
+                        user_id=user_id,
+                        session_id=session_id,
+                        namespace=namespace_value,
+                        org_id=org_id,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning(
+                        "Failed to backfill episode_critique_memory for request_id=%s: %s",
+                        request_id,
+                        exc,
+                    )
                 upserted_count += 1
                 if bool(outcome.get("inserted", False)):
                     inserted_count += 1
