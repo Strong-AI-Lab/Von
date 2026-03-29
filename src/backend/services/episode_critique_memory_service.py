@@ -94,6 +94,21 @@ def _normalise_strings(values: Any, *, limit: int = 200) -> list[str]:
     return items
 
 
+def _merge_string_lists(*values: Any, limit: int = 200) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for items in values:
+        for item in _normalise_strings(items, limit=limit):
+            lowered = item.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            merged.append(item)
+            if len(merged) >= limit:
+                return merged
+    return merged
+
+
 def _json_default(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
@@ -743,6 +758,7 @@ def build_episode_critique_memory_state_from_episode_assessment(
             unresolved_check_count=unresolved_check_count,
             workflow_id=workflow_id,
         ),
+        "routing": {},
     }
     return state
 
@@ -896,6 +912,7 @@ def build_episode_critique_memory_state_from_turn(
             }
         ),
         "description": description,
+        "routing": {},
     }
     return state
 
@@ -935,6 +952,7 @@ def _build_episode_critique_memory_projection(
     implicated = _mapping_or_empty(state.get("implicated"))
     remediation = _mapping_or_empty(state.get("remediation"))
     evidence_receipts = _mapping_or_empty(state.get("evidence_receipts"))
+    routing = _mapping_or_empty(state.get("routing"))
 
     return {
         "schema_version": EPISODE_CRITIQUE_MEMORY_SCHEMA_VERSION,
@@ -971,6 +989,15 @@ def _build_episode_critique_memory_projection(
             remediation.get("jira_issue_keys"),
             limit=40,
         ),
+        "routing_decision": _safe_str(routing.get("decision")),
+        "routing_reason_codes": _normalise_strings(
+            routing.get("reason_codes"),
+            limit=20,
+        ),
+        "routing_fingerprint": _safe_str(routing.get("fingerprint")),
+        "routing_repeat_count": _safe_int(routing.get("repeat_count")),
+        "routing_task_action": _safe_str(routing.get("task_action")),
+        "routing_jira_action": _safe_str(routing.get("jira_action")),
         "dedupe_fingerprint": _safe_str(state.get("dedupe_fingerprint")),
         "recommendations": _normalise_strings(state.get("recommendations"), limit=8),
         "receipt_hash": _safe_str(evidence_receipts.get("receipt_hash")),
@@ -1014,6 +1041,20 @@ def _ensure_indexes(collection: Any) -> None:
             collection.create_index(
                 [("verdict", ASCENDING), ("created_at_utc", DESCENDING)],
                 name="verdict_created_desc",
+            )
+        if "namespace_routing_fingerprint" not in existing_indexes:
+            collection.create_index(
+                [("namespace", ASCENDING), ("routing_fingerprint", ASCENDING)],
+                name="namespace_routing_fingerprint",
+            )
+        if "namespace_routing_decision_created_desc" not in existing_indexes:
+            collection.create_index(
+                [
+                    ("namespace", ASCENDING),
+                    ("routing_decision", ASCENDING),
+                    ("created_at_utc", DESCENDING),
+                ],
+                name="namespace_routing_decision_created_desc",
             )
     except OperationFailure as exc:
         logger.warning(
@@ -1222,6 +1263,52 @@ def upsert_episode_critique_memory_from_episode_assessment(
     }
 
 
+def record_episode_critique_memory_routing(
+    *,
+    memory_id: str,
+    routing: Mapping[str, Any],
+    remediation_task_ids: Sequence[str] | None = None,
+    remediation_issue_keys: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    state = get_episode_critique_memory_state(memory_id)
+    if not isinstance(state, Mapping):
+        return {"success": False, "reason": "memory_not_found", "memory_id": memory_id}
+
+    updated_state = dict(state)
+    updated_state["updated_at_utc"] = _utcnow_iso()
+    updated_state["routing"] = dict(routing) if isinstance(routing, Mapping) else {}
+
+    remediation = _mapping_or_empty(updated_state.get("remediation"))
+    remediation["task_ids"] = _merge_string_lists(
+        remediation.get("task_ids"),
+        remediation_task_ids,
+        limit=40,
+    )
+    remediation["jira_issue_keys"] = _merge_string_lists(
+        remediation.get("jira_issue_keys"),
+        remediation_issue_keys,
+        limit=40,
+    )
+    updated_state["remediation"] = remediation
+
+    persisted = _persist_episode_critique_memory_state(
+        memory_id=memory_id,
+        state=updated_state,
+    )
+    projection = upsert_episode_critique_memory_projection(
+        record=persisted,
+        namespace=_safe_str(updated_state.get("namespace")),
+        user_id=_safe_str(updated_state.get("user_id")),
+        org_id=_safe_str(updated_state.get("org_id")),
+    )
+    return {
+        "success": True,
+        "memory_id": memory_id,
+        "state": persisted,
+        "projection": projection,
+    }
+
+
 __all__ = [
     "EPISODE_CRITIQUE_MEMORIES_COLLECTION",
     "EPISODE_CRITIQUE_MEMORY_SCHEMA_VERSION",
@@ -1231,6 +1318,7 @@ __all__ = [
     "get_episode_critique_memories_collection",
     "get_episode_critique_memory_projection",
     "get_episode_critique_memory_state",
+    "record_episode_critique_memory_routing",
     "upsert_episode_critique_memory_from_episode_assessment",
     "upsert_episode_critique_memory_from_turn",
     "upsert_episode_critique_memory_projection",

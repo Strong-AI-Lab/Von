@@ -287,15 +287,16 @@ def test_apply_repairs_executes_operations(monkeypatch):
 def test_apply_repairs_executes_jira_self_diagnosis_upsert(monkeypatch):
     from src.backend.workflows.durable import workflow_introspection_maintenance_workflow as mod
 
-    def _fake_invoke(tool_name: str, payload: dict):
-        if tool_name == "jira_search":
-            return {"success": True, "issues": [{"key": "JVNAUTOSCI-1600"}]}
-        if tool_name == "jira_add_comment":
-            assert payload["issue_key"] == "JVNAUTOSCI-1600"
-            return {"success": True}
-        return {"success": True}
-
-    monkeypatch.setattr(mod, "_invoke_mcp_tool", _fake_invoke)
+    monkeypatch.setattr(
+        mod,
+        "upsert_deduplicated_jira_issue",
+        lambda **kwargs: {
+            "success": True,
+            "mode": "updated_existing",
+            "issue_key": "JVNAUTOSCI-1600",
+            "fingerprint": kwargs.get("fingerprint"),
+        },
+    )
 
     result = mod._handle_apply_repairs(
         _request(

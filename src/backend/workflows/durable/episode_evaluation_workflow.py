@@ -13,6 +13,9 @@ from ...services.episode_critic_evidence_service import (
 from ...services.episode_critique_memory_service import (
     upsert_episode_critique_memory_from_episode_assessment,
 )
+from ...services.episode_critique_routing_service import (
+    route_episode_critique_memory,
+)
 from ...services.episode_evaluation_workflow_contracts import (
     EPISODE_EVALUATION_BUILD_EVIDENCE_ACTION_ID,
     EPISODE_EVALUATION_PERSIST_MEMORY_ACTION_ID,
@@ -289,6 +292,11 @@ def _build_persist_memory_handler():
             )
 
         memory_id = _clean_text(outcome.get("memory_id"))
+        remediation_routing = route_episode_critique_memory(
+            memory_id=memory_id,
+            memory_state=_mapping_or_empty(outcome.get("state")),
+            actor_concept_id=_clean_text(request.data.get("user_id")),
+        )
         maintenance_follow_up_requested = bool(
             assessment.get("maintenance_follow_up_recommended")
         )
@@ -307,6 +315,38 @@ def _build_persist_memory_handler():
             outputs={
                 "episode_critique_memory_upsert": dict(outcome),
                 "episode_critique_memory_id": memory_id,
+                "remediation_routing": remediation_routing,
+                "remediation_routing_decision": _clean_text(
+                    remediation_routing.get("decision")
+                ),
+                "remediation_routing_reason_codes": _normalise_string_list(
+                    remediation_routing.get("reason_codes"),
+                    limit=20,
+                ),
+                "remediation_routing_fingerprint": _clean_text(
+                    remediation_routing.get("routing_fingerprint")
+                ),
+                "remediation_repeat_count": remediation_routing.get("repeat_count"),
+                "remediation_task_id": _clean_text(
+                    remediation_routing.get("remediation_task_id")
+                ),
+                "remediation_task_ids": _normalise_string_list(
+                    remediation_routing.get("remediation_task_ids"),
+                    limit=40,
+                ),
+                "remediation_issue_key": _clean_text(
+                    remediation_routing.get("remediation_issue_key")
+                ),
+                "remediation_issue_keys": _normalise_string_list(
+                    remediation_routing.get("remediation_issue_keys"),
+                    limit=40,
+                ),
+                "remediation_task_action": _clean_text(
+                    remediation_routing.get("task_action")
+                ),
+                "remediation_jira_action": _clean_text(
+                    remediation_routing.get("jira_action")
+                ),
                 "maintenance_launch_inputs": maintenance_payload.get("inputs"),
                 "maintenance_launch_source_event_id": maintenance_payload.get(
                     "source_event_id"

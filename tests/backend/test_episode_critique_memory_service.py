@@ -170,6 +170,14 @@ def test_upsert_episode_critique_memory_projection_persists_document(monkeypatch
             "task_ids": ["#V#task_123"],
             "jira_issue_keys": ["JVNAUTOSCI-999"],
         },
+        "routing": {
+            "decision": "task_and_jira",
+            "reason_codes": ["repeat_threshold_met"],
+            "fingerprint": "route-fingerprint-123",
+            "repeat_count": 3,
+            "task_action": "created_new",
+            "jira_action": "created_new",
+        },
         "recommendations": ["No remediation is currently indicated by the recorded critic evidence."],
         "dedupe_fingerprint": "fingerprint-123",
         "evidence_receipts": {"receipt_hash": "receipt-123"},
@@ -184,6 +192,61 @@ def test_upsert_episode_critique_memory_projection_persists_document(monkeypatch
     assert stored["verdict"] == "pass"
     assert stored["receipt_hash"] == "receipt-123"
     assert stored["remediation_task_ids"] == ["#V#task_123"]
+    assert stored["routing_decision"] == "task_and_jira"
+    assert stored["routing_fingerprint"] == "route-fingerprint-123"
+
+
+def test_record_episode_critique_memory_routing_merges_remediation_links(monkeypatch):
+    from src.backend.services import episode_critique_memory_service as svc
+
+    base_state = {
+        "memory_id": "#V#episode_critique_memory_abc",
+        "namespace": "#V#user@org",
+        "user_id": "#V#user",
+        "org_id": "#V#org",
+        "remediation": {
+            "task_ids": ["#V#task_existing"],
+            "jira_issue_keys": ["JVNAUTOSCI-1700"],
+        },
+    }
+    persisted_payloads: list[dict] = []
+
+    monkeypatch.setattr(svc, "get_episode_critique_memory_state", lambda _memory_id: base_state)
+    monkeypatch.setattr(
+        svc,
+        "_persist_episode_critique_memory_state",
+        lambda **kwargs: persisted_payloads.append(kwargs["state"]) or kwargs["state"],
+    )
+    monkeypatch.setattr(
+        svc,
+        "upsert_episode_critique_memory_projection",
+        lambda **kwargs: {"updated": True, "record": kwargs["record"]},
+    )
+
+    outcome = svc.record_episode_critique_memory_routing(
+        memory_id="#V#episode_critique_memory_abc",
+        routing={
+            "decision": "task_and_jira",
+            "reason_codes": ["repeat_threshold_met"],
+            "fingerprint": "route-fingerprint-123",
+            "repeat_count": 3,
+        },
+        remediation_task_ids=["#V#task_existing", "#V#task_new"],
+        remediation_issue_keys=["JVNAUTOSCI-1700", "JVNAUTOSCI-1710"],
+    )
+
+    assert outcome["success"] is True
+    assert persisted_payloads
+    updated_state = persisted_payloads[-1]
+    assert updated_state["routing"]["decision"] == "task_and_jira"
+    assert updated_state["remediation"]["task_ids"] == [
+        "#V#task_existing",
+        "#V#task_new",
+    ]
+    assert updated_state["remediation"]["jira_issue_keys"] == [
+        "JVNAUTOSCI-1700",
+        "JVNAUTOSCI-1710",
+    ]
 
 
 def test_chat_history_projection_path_invokes_episode_critique_memory_upsert(monkeypatch):
