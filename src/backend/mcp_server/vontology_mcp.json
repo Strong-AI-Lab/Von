@@ -3066,6 +3066,45 @@
       }
     },
     {
+      "name": "turn_execution_get_critic_bundle",
+      "description": "Return a bounded critic-ready evidence bundle with receipts over turn execution, chat-history debug context, tool ledger, workflow runtime state, and trace artefacts.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "instance_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "neighbour_turn_count": {
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "additionalProperties": true,
+        "description": "Build one bounded episode-critic evidence bundle for a completed turn or workflow episode."
+      }
+    },
+    {
       "name": "turn_execution_list",
       "description": "List assistant turn execution records (workflow selection, required effects, postcondition checks, completion gate). Use for deterministic evidence triage across conversations. Includes MCP-visible rag_indexing_state diagnostics per record.",
       "inputSchema": {

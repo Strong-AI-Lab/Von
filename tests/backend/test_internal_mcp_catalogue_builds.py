@@ -11,6 +11,7 @@ def test_internal_mcp_catalogue_builds_and_includes_relationship_tools():
     assert "undo_relationship_removal" in methods
     assert "turn_execution_list" in methods
     assert "turn_execution_get" in methods
+    assert "turn_execution_get_critic_bundle" in methods
     assert "turn_execution_search_failures" in methods
     assert "turn_execution_build_benchmark" in methods
     assert "turn_execution_backfill_from_chat_history" in methods

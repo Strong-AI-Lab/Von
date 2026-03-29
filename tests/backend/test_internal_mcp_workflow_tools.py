@@ -1217,6 +1217,31 @@ def test_workflow_get_execution_trace_resolves_instance_link(monkeypatch):
     assert payload.get("execution_trace", {}).get("status") == "completed"
 
 
+def test_turn_execution_get_critic_bundle_invokes_service(monkeypatch):
+    gateway = _build_gateway()
+    monkeypatch.setattr(
+        "src.backend.services.episode_critic_evidence_service.build_episode_critic_evidence_bundle",
+        lambda **kwargs: {
+            "success": True,
+            "schema_version": "episode_critic_evidence_bundle.v1",
+            "ready_for_critic": True,
+            "episode_locator": {
+                "request_id": kwargs.get("request_id"),
+                "instance_id": kwargs.get("instance_id"),
+            },
+        },
+    )
+
+    payload = gateway.invoke(
+        "turn_execution_get_critic_bundle",
+        {"request_id": "req-bundle-1", "neighbour_turn_count": 1},
+    ).payload
+
+    assert payload["success"] is True
+    assert payload["ready_for_critic"] is True
+    assert payload["episode_locator"]["request_id"] == "req-bundle-1"
+
+
 def test_workflow_list_execution_traces_returns_bounded_summaries(monkeypatch):
     gateway = _build_gateway()
     monkeypatch.setattr(

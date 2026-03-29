@@ -9111,6 +9111,19 @@ def _turn_execution_get(**kwargs):
     return _rag_get_item(**forwarded)
 
 
+def _turn_execution_get_critic_bundle(**kwargs):
+    from ...services.episode_critic_evidence_service import (
+        build_episode_critic_evidence_bundle,
+    )
+
+    return build_episode_critic_evidence_bundle(
+        request_id=kwargs.get("request_id") or kwargs.get("session_id"),
+        instance_id=kwargs.get("instance_id"),
+        namespace=kwargs.get("namespace"),
+        neighbour_turn_count=kwargs.get("neighbour_turn_count", 2),
+    )
+
+
 def _experiment_run_list(**kwargs):
     forwarded = dict(kwargs)
     forwarded["collection"] = "experiment_runs"
@@ -21446,6 +21459,30 @@ def build_default_catalogue() -> MethodCatalogue:
             description=(
                 "Fetch a single turn execution record by request_id for detailed failure analysis, "
                 "including MCP-visible rag_indexing_state diagnostics."
+            ),
+        ),
+        MethodDefinition(
+            name="turn_execution_get_critic_bundle",
+            handler=_turn_execution_get_critic_bundle,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "request_id": (str, type(None)),
+                    "session_id": (str, type(None)),
+                    "instance_id": (str, type(None)),
+                    "namespace": (str, type(None)),
+                    "neighbour_turn_count": (int,),
+                },
+                allow_unknown=True,
+                description=(
+                    "Build one bounded episode-critic evidence bundle for a completed turn or workflow episode."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Return a bounded critic-ready evidence bundle with receipts over turn execution, "
+                "chat-history debug context, tool ledger, workflow runtime state, and trace artefacts."
             ),
         ),
         MethodDefinition(
