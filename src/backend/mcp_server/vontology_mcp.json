@@ -821,6 +821,154 @@
       }
     },
     {
+      "name": "repo_dossier_file_snapshot",
+      "description": "Inspect one tracked repo file safely with bounded content, tracked blob receipt, and secret-aware sanitisation.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "revision": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_chars": {
+            "type": "integer"
+          },
+          "max_lines": {
+            "type": "integer"
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": true,
+        "description": "Return a bounded snapshot of one tracked repo file from the working tree or a specific git revision. Blocks .env and secret-like paths."
+      }
+    },
+    {
+      "name": "repo_dossier_search",
+      "description": "Search tracked repo files with bounded match output and receipts suitable for critic-grounded diagnosis.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "path_prefixes": {
+            "type": "array",
+            "items": {}
+          },
+          "regex": {
+            "type": "boolean"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": true,
+        "description": "Run a bounded search across tracked repo files, optionally narrowed by repo-relative path prefixes."
+      }
+    },
+    {
+      "name": "repo_dossier_workflow_definition_get",
+      "description": "Inspect a workflow definition through the authoritative registry with state/action/transition summary and identity receipt.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "workflow_id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "workflow_id"
+        ],
+        "additionalProperties": true,
+        "description": "Fetch an authoritative workflow definition summary and identity hash from the workflow registry."
+      }
+    },
+    {
+      "name": "repo_dossier_prompt_definition_get",
+      "description": "Inspect prompt definition text and supporting text-relation metadata with bounded output and receipt.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "prompt_concept_id": {
+            "type": "string"
+          },
+          "max_chars": {
+            "type": "integer"
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "prompt_concept_id"
+        ],
+        "additionalProperties": true,
+        "description": "Fetch bounded authoritative prompt text for one prompt concept."
+      }
+    },
+    {
+      "name": "repo_dossier_git_metadata",
+      "description": "Inspect bounded git metadata for critic or maintenance workflows without exposing unrestricted shell access.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "paths": {
+            "type": "array",
+            "items": {}
+          },
+          "compare_base": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "commit_limit": {
+            "type": "integer"
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [],
+        "additionalProperties": true,
+        "description": "Return bounded branch, status, recent-commit, and diff metadata for the repo or specific tracked paths."
+      }
+    },
+    {
       "name": "experiment_start_run",
       "description": "Create a first-class experiment_run artefact and projection for Testing Workflow evidence capture.",
       "inputSchema": {

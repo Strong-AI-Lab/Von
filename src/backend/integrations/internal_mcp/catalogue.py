@@ -9172,6 +9172,40 @@ def _episode_critique_memory_get(**kwargs):
     return _rag_get_item(**forwarded)
 
 
+def _repo_dossier_file_snapshot(**kwargs):
+    from ...services.repo_dossier_service import repo_dossier_file_snapshot
+
+    return repo_dossier_file_snapshot(**kwargs)
+
+
+def _repo_dossier_search(**kwargs):
+    from ...services.repo_dossier_service import repo_dossier_search
+
+    return repo_dossier_search(**kwargs)
+
+
+def _repo_dossier_workflow_definition_get(**kwargs):
+    from ...services.repo_dossier_service import (
+        repo_dossier_workflow_definition_get,
+    )
+
+    return repo_dossier_workflow_definition_get(**kwargs)
+
+
+def _repo_dossier_prompt_definition_get(**kwargs):
+    from ...services.repo_dossier_service import (
+        repo_dossier_prompt_definition_get,
+    )
+
+    return repo_dossier_prompt_definition_get(**kwargs)
+
+
+def _repo_dossier_git_metadata(**kwargs):
+    from ...services.repo_dossier_service import repo_dossier_git_metadata
+
+    return repo_dossier_git_metadata(**kwargs)
+
+
 def _testing_theory_create_slice(**kwargs):
     from ...services.testing_theory_service import create_testing_theory_slice
 
@@ -21333,6 +21367,110 @@ def build_default_catalogue() -> MethodCatalogue:
             category="read",
             description=(
                 "Fetch a single episode-critic memory artefact with verdict, implicated entities, evidence receipt hash, and remediation links."
+            ),
+        ),
+        MethodDefinition(
+            name="repo_dossier_file_snapshot",
+            handler=_repo_dossier_file_snapshot,
+            input_schema=Schema(
+                required={"path": str},
+                optional={
+                    "revision": (str, type(None)),
+                    "max_chars": (int,),
+                    "max_lines": (int,),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "Return a bounded snapshot of one tracked repo file from the working tree or a specific git revision. "
+                    "Blocks .env and secret-like paths."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Inspect one tracked repo file safely with bounded content, tracked blob receipt, and secret-aware sanitisation."
+            ),
+        ),
+        MethodDefinition(
+            name="repo_dossier_search",
+            handler=_repo_dossier_search,
+            input_schema=Schema(
+                required={"query": str},
+                optional={
+                    "path_prefixes": (list,),
+                    "regex": (bool,),
+                    "limit": (int,),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "Run a bounded search across tracked repo files, optionally narrowed by repo-relative path prefixes."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Search tracked repo files with bounded match output and receipts suitable for critic-grounded diagnosis."
+            ),
+        ),
+        MethodDefinition(
+            name="repo_dossier_workflow_definition_get",
+            handler=_repo_dossier_workflow_definition_get,
+            input_schema=Schema(
+                required={"workflow_id": str},
+                optional={"namespace": (str, type(None))},
+                allow_unknown=True,
+                description=(
+                    "Fetch an authoritative workflow definition summary and identity hash from the workflow registry."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Inspect a workflow definition through the authoritative registry with state/action/transition summary and identity receipt."
+            ),
+        ),
+        MethodDefinition(
+            name="repo_dossier_prompt_definition_get",
+            handler=_repo_dossier_prompt_definition_get,
+            input_schema=Schema(
+                required={"prompt_concept_id": str},
+                optional={
+                    "max_chars": (int,),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "Fetch bounded authoritative prompt text for one prompt concept."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Inspect prompt definition text and supporting text-relation metadata with bounded output and receipt."
+            ),
+        ),
+        MethodDefinition(
+            name="repo_dossier_git_metadata",
+            handler=_repo_dossier_git_metadata,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "paths": (list,),
+                    "compare_base": (str, type(None)),
+                    "commit_limit": (int,),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "Return bounded branch, status, recent-commit, and diff metadata for the repo or specific tracked paths."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Inspect bounded git metadata for critic or maintenance workflows without exposing unrestricted shell access."
             ),
         ),
         MethodDefinition(

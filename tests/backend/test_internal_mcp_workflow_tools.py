@@ -1283,6 +1283,63 @@ def test_episode_critique_memory_get_forwards_to_rag_collection(monkeypatch):
     assert payload["session_id"] == "#V#episode_critique_memory_xyz"
 
 
+def test_repo_dossier_file_snapshot_invokes_service(monkeypatch):
+    gateway = _build_gateway()
+    monkeypatch.setattr(
+        "src.backend.services.repo_dossier_service.repo_dossier_file_snapshot",
+        lambda **kwargs: {
+            "success": True,
+            "path": kwargs.get("path"),
+            "receipt": {"source_system": "local.git_repository"},
+        },
+    )
+
+    payload = gateway.invoke(
+        "repo_dossier_file_snapshot",
+        {"path": "src/backend/example.py"},
+    ).payload
+
+    assert payload["success"] is True
+    assert payload["path"] == "src/backend/example.py"
+
+
+def test_repo_dossier_search_invokes_service(monkeypatch):
+    gateway = _build_gateway()
+    monkeypatch.setattr(
+        "src.backend.services.repo_dossier_service.repo_dossier_search",
+        lambda **kwargs: {
+            "success": True,
+            "query": kwargs.get("query"),
+            "match_count_returned": 0,
+        },
+    )
+
+    payload = gateway.invoke("repo_dossier_search", {"query": "WorkflowDefinition"}).payload
+
+    assert payload["success"] is True
+    assert payload["query"] == "WorkflowDefinition"
+
+
+def test_repo_dossier_git_metadata_invokes_service(monkeypatch):
+    gateway = _build_gateway()
+    monkeypatch.setattr(
+        "src.backend.services.repo_dossier_service.repo_dossier_git_metadata",
+        lambda **kwargs: {
+            "success": True,
+            "branch": "main",
+            "paths": kwargs.get("paths") or [],
+        },
+    )
+
+    payload = gateway.invoke(
+        "repo_dossier_git_metadata",
+        {"paths": ["src/backend/example.py"]},
+    ).payload
+
+    assert payload["success"] is True
+    assert payload["paths"] == ["src/backend/example.py"]
+
+
 def test_workflow_list_execution_traces_returns_bounded_summaries(monkeypatch):
     gateway = _build_gateway()
     monkeypatch.setattr(

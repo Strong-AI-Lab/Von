@@ -144,6 +144,15 @@ from src.backend.integrations.internal_mcp.catalogue import (
 from src.backend.integrations.internal_mcp.catalogue import (
     _episode_critique_memory_list,
 )
+from src.backend.integrations.internal_mcp.catalogue import _repo_dossier_file_snapshot
+from src.backend.integrations.internal_mcp.catalogue import _repo_dossier_git_metadata
+from src.backend.integrations.internal_mcp.catalogue import (
+    _repo_dossier_prompt_definition_get,
+)
+from src.backend.integrations.internal_mcp.catalogue import _repo_dossier_search
+from src.backend.integrations.internal_mcp.catalogue import (
+    _repo_dossier_workflow_definition_get,
+)
 from src.backend.integrations.internal_mcp.catalogue import _experiment_record_observation
 from src.backend.integrations.internal_mcp.catalogue import _experiment_run_get
 from src.backend.integrations.internal_mcp.catalogue import _experiment_run_list
@@ -3003,6 +3012,56 @@ async def _handle_episode_critique_memory_get(
     )
 
 
+async def _handle_repo_dossier_file_snapshot(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _repo_dossier_file_snapshot,
+        arguments,
+        tool_family_label="RepoDossier",
+    )
+
+
+async def _handle_repo_dossier_search(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _repo_dossier_search,
+        arguments,
+        tool_family_label="RepoDossier",
+    )
+
+
+async def _handle_repo_dossier_workflow_definition_get(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _repo_dossier_workflow_definition_get,
+        arguments,
+        tool_family_label="RepoDossier",
+    )
+
+
+async def _handle_repo_dossier_prompt_definition_get(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _repo_dossier_prompt_definition_get,
+        arguments,
+        tool_family_label="RepoDossier",
+    )
+
+
+async def _handle_repo_dossier_git_metadata(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _repo_dossier_git_metadata,
+        arguments,
+        tool_family_label="RepoDossier",
+    )
+
+
 async def _handle_testing_theory_create_slice(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
@@ -3362,6 +3421,11 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "experiment_run_get": _handle_experiment_run_get,
     "episode_critique_memory_list": _handle_episode_critique_memory_list,
     "episode_critique_memory_get": _handle_episode_critique_memory_get,
+    "repo_dossier_file_snapshot": _handle_repo_dossier_file_snapshot,
+    "repo_dossier_search": _handle_repo_dossier_search,
+    "repo_dossier_workflow_definition_get": _handle_repo_dossier_workflow_definition_get,
+    "repo_dossier_prompt_definition_get": _handle_repo_dossier_prompt_definition_get,
+    "repo_dossier_git_metadata": _handle_repo_dossier_git_metadata,
     "testing_theory_create_slice": _handle_testing_theory_create_slice,
     "testing_theory_import_canonical_context": _handle_testing_theory_import_canonical_context,
     "testing_theory_assert_local_claims": _handle_testing_theory_assert_local_claims,

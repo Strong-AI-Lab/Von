@@ -34,6 +34,11 @@ def test_internal_mcp_catalogue_builds_and_includes_relationship_tools():
     assert "experiment_run_get" in methods
     assert "episode_critique_memory_list" in methods
     assert "episode_critique_memory_get" in methods
+    assert "repo_dossier_file_snapshot" in methods
+    assert "repo_dossier_search" in methods
+    assert "repo_dossier_workflow_definition_get" in methods
+    assert "repo_dossier_prompt_definition_get" in methods
+    assert "repo_dossier_git_metadata" in methods
     assert "testing_prepare_experiment_spec" in methods
     assert "testing_prepare_meeting_invitation_spec" in methods
     assert "testing_prepare_arxiv_paper_ingestion_fixture" in methods
