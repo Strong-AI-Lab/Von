@@ -9033,6 +9033,61 @@ def _turn_execution_build_benchmark(**kwargs):
     )
 
 
+def _episode_critique_build_benchmark(**kwargs):
+    from ...services.episode_critique_benchmark_service import (
+        build_episode_critique_benchmark_report,
+    )
+
+    ns_report = _resolve_rag_namespace_from_kwargs(kwargs)
+    ns = ns_report.get("namespace")
+    ns_error = _rag_namespace_resolution_error(ns_report)
+    if ns_error is not None:
+        return ns_error
+    if not isinstance(ns, str) or not ns.strip():
+        return make_error_response(
+            "namespace_required",
+            "Episode critique benchmark requires authenticated user context (namespace)",
+            details={"namespace_report": ns_report},
+        )
+
+    result = build_episode_critique_benchmark_report(
+        namespace=ns.strip(),
+        workflow_id=kwargs.get("workflow_id"),
+        request_id=kwargs.get("request_id"),
+        episode_id=kwargs.get("episode_id"),
+        verdict=kwargs.get("verdict"),
+        verdicts=kwargs.get("verdicts"),
+        from_utc=kwargs.get("from_utc"),
+        to_utc=kwargs.get("to_utc"),
+        scan_limit=kwargs.get("scan_limit", kwargs.get("limit", 500)),
+        max_audit_cases=kwargs.get("max_audit_cases", kwargs.get("max_cases", 5)),
+        neighbour_turn_count=kwargs.get("neighbour_turn_count", 1),
+        run_id=kwargs.get("run_id"),
+        baseline_precision_proxy_pct=kwargs.get("baseline_precision_proxy_pct"),
+        baseline_recall_proxy_pct=kwargs.get("baseline_recall_proxy_pct"),
+        baseline_post_remediation_recurrence_rate_pct=kwargs.get(
+            "baseline_post_remediation_recurrence_rate_pct"
+        ),
+        regression_tolerance_pct=kwargs.get("regression_tolerance_pct"),
+    )
+    if not isinstance(result, dict):
+        return result
+    if not result.get("success", False):
+        return result
+
+    payload = {
+        **result,
+        "effective_namespace": ns.strip(),
+        "effective_namespace_source": ns_report.get("namespace_source"),
+        **ns_report,
+    }
+    return _with_rag_provenance(
+        payload=payload,
+        item_kind="episode_critique_benchmark_report",
+        source_system="mongo.episode_critique_memories",
+    )
+
+
 def _turn_execution_backfill_from_chat_history(**kwargs):
     from ...services.turn_execution_record_service import (
         backfill_turn_execution_records_from_chat_history,
@@ -21966,6 +22021,41 @@ def build_default_catalogue() -> MethodCatalogue:
             category="read",
             description=(
                 "Generate corpus-level turn execution reliability metrics, seeded replay cases, and capability-gap signals."
+            ),
+        ),
+        MethodDefinition(
+            name="episode_critique_build_benchmark",
+            handler=_episode_critique_build_benchmark,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "namespace": (str, type(None)),
+                    "workflow_id": (str, type(None)),
+                    "request_id": (str, type(None)),
+                    "episode_id": (str, type(None)),
+                    "verdict": (str, type(None)),
+                    "verdicts": (list,),
+                    "from_utc": (str, type(None)),
+                    "to_utc": (str, type(None)),
+                    "scan_limit": (int,),
+                    "max_audit_cases": (int,),
+                    "neighbour_turn_count": (int,),
+                    "run_id": (str, type(None)),
+                    "baseline_precision_proxy_pct": (int, float),
+                    "baseline_recall_proxy_pct": (int, float),
+                    "baseline_post_remediation_recurrence_rate_pct": (int, float),
+                    "regression_tolerance_pct": (int, float),
+                },
+                allow_unknown=True,
+                description=(
+                    "Build bounded actor/critic quality metrics from episode_critique_memories and include sampled non-recursive meta-audit cases."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Report bounded actor/critic benchmark metrics, recurrence and remediation proxies, "
+                "and sampled meta-audit cases with fresh evidence-bundle receipts."
             ),
         ),
         MethodDefinition(

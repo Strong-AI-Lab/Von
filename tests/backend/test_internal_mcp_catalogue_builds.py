@@ -32,6 +32,7 @@ def test_internal_mcp_catalogue_builds_and_includes_relationship_tools():
     assert "experiment_execute_regression_suite" in methods
     assert "experiment_run_list" in methods
     assert "experiment_run_get" in methods
+    assert "episode_critique_build_benchmark" in methods
     assert "episode_critique_memory_list" in methods
     assert "episode_critique_memory_get" in methods
     assert "repo_dossier_file_snapshot" in methods

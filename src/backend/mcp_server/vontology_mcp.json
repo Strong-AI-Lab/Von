@@ -757,6 +757,103 @@
       }
     },
     {
+      "name": "episode_critique_build_benchmark",
+      "description": "Build bounded actor/critic benchmark metrics plus sampled non-recursive meta-audit cases from episode critique memories.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workflow_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "episode_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verdict": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verdicts": {
+            "type": "array",
+            "items": {}
+          },
+          "from_utc": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "to_utc": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scan_limit": {
+            "type": "integer"
+          },
+          "max_audit_cases": {
+            "type": "integer"
+          },
+          "neighbour_turn_count": {
+            "type": "integer"
+          },
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "baseline_precision_proxy_pct": {
+            "type": [
+              "integer",
+              "number"
+            ]
+          },
+          "baseline_recall_proxy_pct": {
+            "type": [
+              "integer",
+              "number"
+            ]
+          },
+          "baseline_post_remediation_recurrence_rate_pct": {
+            "type": [
+              "integer",
+              "number"
+            ]
+          },
+          "regression_tolerance_pct": {
+            "type": [
+              "integer",
+              "number"
+            ]
+          }
+        },
+        "required": [],
+        "additionalProperties": true,
+        "description": "Build bounded actor/critic benchmark metrics from episode_critique_memories and include sampled non-recursive meta-audit cases."
+      }
+    },
+    {
       "name": "episode_critique_memory_list",
       "description": "List episode-critic memory artefacts, including verdicts, implicated workflows/tools/concepts, and remediation links.",
       "inputSchema": {

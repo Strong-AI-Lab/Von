@@ -1262,6 +1262,50 @@ def test_episode_critique_memory_list_forwards_to_rag_collection(monkeypatch):
     assert payload["collection"] == "episode_critique_memories"
 
 
+def test_episode_critique_build_benchmark_invokes_service(monkeypatch):
+    gateway = _build_gateway()
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.catalogue._resolve_rag_namespace_from_kwargs",
+        lambda kwargs: {
+            "namespace": kwargs.get("namespace"),
+            "namespace_source": "argument",
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.catalogue._rag_namespace_resolution_error",
+        lambda _report: None,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.episode_critique_benchmark_service.build_episode_critique_benchmark_report",
+        lambda **kwargs: {
+            "success": True,
+            "collection": "episode_critique_memories",
+            "namespace": kwargs.get("namespace"),
+            "benchmark_fingerprint": "bench1609abcd1234",
+            "sampled_meta_audit": {
+                "mode": "on_demand_sample",
+                "non_recursive": True,
+                "case_count": 1,
+                "cases": [
+                    {
+                        "case_id": "episode_critique_audit_case_01",
+                        "memory_id": "#V#episode_critique_memory_1",
+                    }
+                ],
+            },
+        },
+    )
+
+    payload = gateway.invoke(
+        "episode_critique_build_benchmark",
+        {"namespace": "#V#user@org", "max_audit_cases": 1},
+    ).payload
+
+    assert payload["success"] is True
+    assert payload["benchmark_fingerprint"] == "bench1609abcd1234"
+    assert payload["sampled_meta_audit"]["non_recursive"] is True
+
+
 def test_episode_critique_memory_get_forwards_to_rag_collection(monkeypatch):
     gateway = _build_gateway()
     monkeypatch.setattr(

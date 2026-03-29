@@ -139,6 +139,9 @@ from src.backend.integrations.internal_mcp.catalogue import (
     _experiment_execute_target_workflow,
 )
 from src.backend.integrations.internal_mcp.catalogue import (
+    _episode_critique_build_benchmark,
+)
+from src.backend.integrations.internal_mcp.catalogue import (
     _episode_critique_memory_get,
 )
 from src.backend.integrations.internal_mcp.catalogue import (
@@ -3002,6 +3005,16 @@ async def _handle_episode_critique_memory_list(
     )
 
 
+async def _handle_episode_critique_build_benchmark(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _episode_critique_build_benchmark,
+        arguments,
+        tool_family_label="EpisodeCritique",
+    )
+
+
 async def _handle_episode_critique_memory_get(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
@@ -3419,6 +3432,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "search_knowledge_base": _handle_search_knowledge_base,
     "experiment_run_list": _handle_experiment_run_list,
     "experiment_run_get": _handle_experiment_run_get,
+    "episode_critique_build_benchmark": _handle_episode_critique_build_benchmark,
     "episode_critique_memory_list": _handle_episode_critique_memory_list,
     "episode_critique_memory_get": _handle_episode_critique_memory_get,
     "repo_dossier_file_snapshot": _handle_repo_dossier_file_snapshot,
