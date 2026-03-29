@@ -18,7 +18,10 @@ from src.backend.services.workflow_event_integration_service import (
     EVENT_TYPE_TASK_CREATED,
     EVENT_TYPE_TYPE_CREATED,
     EVENT_TYPE_VONTOLOGY_MUTATED,
+    EVENT_TYPE_WORKFLOW_INSTANCE_TERMINAL,
     launch_event_workflow,
+    maybe_launch_episode_evaluation_for_turn_completion_gate,
+    maybe_launch_episode_evaluation_for_workflow_terminal,
     maybe_launch_effort_unit_completed_workflow,
     maybe_launch_file_copy_uploaded_workflow,
     maybe_launch_type_created_workflow,
@@ -773,3 +776,118 @@ def test_maybe_launch_vontology_mutation_workflow_emits_specific_and_catch_all(
     second_call = mock_launch_event_workflow.call_args_list[1]
     assert first_call.kwargs["event_type"] == EVENT_TYPE_CONCEPT_UPDATED
     assert second_call.kwargs["event_type"] == EVENT_TYPE_VONTOLOGY_MUTATED
+
+
+@patch("src.backend.services.workflow_event_integration_service.launch_event_workflow")
+def test_maybe_launch_episode_evaluation_for_turn_completion_gate_uses_event_binding(
+    mock_launch_event_workflow: MagicMock,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_EPISODE_EVALUATION_AUTOTRIGGER_ENABLE", "1")
+    monkeypatch.setenv("VON_EPISODE_EVALUATION_MAX_DEPTH", "1")
+    mock_launch_event_workflow.return_value = {
+        "success": True,
+        "triggered": True,
+        "workflow_id": "#V#episode_evaluation_workflow",
+        "instance_id": "wf-episode-1",
+        "status": "pending",
+    }
+
+    result = maybe_launch_episode_evaluation_for_turn_completion_gate(
+        request_id="req-1605",
+        session_id="sess-1605",
+        namespace="#V#user@org",
+        user_id="#V#user",
+        org_id="#V#org",
+        selected_workflow_id="#V#tool_calling_workflow",
+        incident_text="Follow-up required after completion gate.",
+        maintenance_apply_repairs_default=True,
+    )
+
+    assert result["success"] is True
+    assert result["triggered"] is True
+    assert result["episode_evaluation_depth"] == 1
+    called_args = mock_launch_event_workflow.call_args
+    assert called_args is not None
+    assert called_args.kwargs["event_type"] == "turn_execution.completion_gate"
+    assert "workflow_id" not in called_args.kwargs
+    assert called_args.kwargs["inputs"]["request_id"] == "req-1605"
+    assert called_args.kwargs["inputs"]["episode_evaluation_depth"] == 1
+
+
+def test_maybe_launch_episode_evaluation_for_workflow_terminal_honours_depth_guard(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_EPISODE_EVALUATION_AUTOTRIGGER_ENABLE", "1")
+    monkeypatch.setenv("VON_EPISODE_EVALUATION_MAX_DEPTH", "1")
+
+    instance = SimpleNamespace(
+        instance_id="inst-1605",
+        workflow_id="#V#episode_evaluation_workflow",
+        namespace="#V#user@org",
+        user_id="#V#user",
+        org_id="#V#org",
+        inputs={"episode_evaluation_depth": 1},
+    )
+
+    result = maybe_launch_episode_evaluation_for_workflow_terminal(
+        instance=instance,
+        terminal_status="completed",
+        final_state="complete",
+        termination_code="completed",
+        termination_detail=None,
+    )
+
+    assert result["success"] is False
+    assert result["triggered"] is False
+    assert result["reason"] == "max_depth_reached"
+    assert result["event_type"] == EVENT_TYPE_WORKFLOW_INSTANCE_TERMINAL
+
+
+@patch("src.backend.services.workflow_event_integration_service.launch_event_workflow")
+def test_maybe_launch_episode_evaluation_for_workflow_terminal_emits_terminal_event(
+    mock_launch_event_workflow: MagicMock,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_EPISODE_EVALUATION_AUTOTRIGGER_ENABLE", "1")
+    monkeypatch.setenv("VON_EPISODE_EVALUATION_MAX_DEPTH", "2")
+    mock_launch_event_workflow.return_value = {
+        "success": True,
+        "triggered": True,
+        "workflow_id": "#V#episode_evaluation_workflow",
+        "instance_id": "wf-episode-2",
+        "status": "pending",
+    }
+
+    instance = SimpleNamespace(
+        instance_id="inst-1605-b",
+        workflow_id="#V#workflow_introspection_maintenance_workflow",
+        namespace="#V#user@org",
+        user_id="#V#user",
+        org_id="#V#org",
+        execution_trace_id="trace-1605",
+        inputs={
+            "request_id": "req-1605-b",
+            "session_id": "sess-1605-b",
+        },
+    )
+
+    result = maybe_launch_episode_evaluation_for_workflow_terminal(
+        instance=instance,
+        terminal_status="completed",
+        final_state="complete",
+        termination_code="completed",
+        termination_detail=None,
+    )
+
+    assert result["success"] is True
+    assert result["triggered"] is True
+    assert result["episode_evaluation_depth"] == 1
+    called_args = mock_launch_event_workflow.call_args
+    assert called_args is not None
+    assert called_args.kwargs["event_type"] == EVENT_TYPE_WORKFLOW_INSTANCE_TERMINAL
+    assert called_args.kwargs["event_id"] == "inst-1605-b"
+    assert called_args.kwargs["inputs"]["instance_id"] == "inst-1605-b"
+    assert called_args.kwargs["inputs"]["selected_workflow_id"] == (
+        "#V#workflow_introspection_maintenance_workflow"
+    )

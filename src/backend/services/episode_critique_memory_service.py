@@ -16,6 +16,7 @@ from pymongo.errors import OperationFailure, PyMongoError
 from ..db.mongo_client import get_db
 from . import concept_service
 from .concept_service import ConceptNotFoundError, get_concept_by_concept_id_exact
+from .episode_evaluation_workflow_contracts import EPISODE_EVALUATION_WORKFLOW_ID
 from .text_value_service import upsert_singleton_text_relation
 from .workflow_episode_service import get_latest_workflow_use_episode
 
@@ -570,6 +571,182 @@ def _build_description(
     )
 
 
+def _extract_implicated_from_episode_bundle(
+    *,
+    evidence_bundle: Mapping[str, Any],
+    assessment: Mapping[str, Any],
+) -> tuple[list[str], list[str], list[str], list[str], list[str]]:
+    locator = _mapping_or_empty(evidence_bundle.get("episode_locator"))
+    observed_evidence = _mapping_or_empty(evidence_bundle.get("observed_evidence"))
+    tool_ledger = _mapping_or_empty(observed_evidence.get("tool_ledger"))
+    tool_invocations = tool_ledger.get("tool_invocations")
+    if not isinstance(tool_invocations, list):
+        tool_invocations = []
+
+    workflow_ids = _normalise_strings(
+        [
+            locator.get("workflow_id"),
+            *(_mapping_or_empty(assessment).get("implicated_workflow_ids") or []),
+        ],
+        limit=20,
+    )
+    tool_names = _normalise_strings(
+        [
+            *[
+                _safe_str(item.get("tool"))
+                for item in tool_invocations
+                if isinstance(item, Mapping)
+            ],
+            *(_mapping_or_empty(assessment).get("implicated_tool_names") or []),
+        ],
+        limit=60,
+    )
+    concept_ids, issue_keys = _extract_concept_ids_and_issue_keys(
+        evidence_bundle,
+        assessment,
+    )
+    task_ids = _extract_task_ids(evidence_bundle, assessment)
+    return workflow_ids, tool_names, concept_ids[:120], task_ids[:40], issue_keys[:40]
+
+
+def build_episode_critique_memory_state_from_episode_assessment(
+    *,
+    evidence_bundle: Mapping[str, Any],
+    assessment: Mapping[str, Any],
+    namespace: str | None = None,
+    user_id: str | None = None,
+    org_id: str | None = None,
+) -> dict[str, Any] | None:
+    if not isinstance(evidence_bundle, Mapping) or not isinstance(assessment, Mapping):
+        return None
+
+    locator = _mapping_or_empty(evidence_bundle.get("episode_locator"))
+    request_id = _safe_str(locator.get("request_id")) or _safe_str(locator.get("instance_id"))
+    if not request_id:
+        return None
+
+    episode_id = _safe_str(locator.get("episode_id"))
+    instance_id = _safe_str(locator.get("instance_id"))
+    workflow_id = _safe_str(locator.get("workflow_id"))
+    resolved_namespace = _safe_str(namespace) or _safe_str(locator.get("namespace"))
+    resolved_user_id = _safe_str(user_id) or _safe_str(locator.get("user_id"))
+    resolved_org_id = _safe_str(org_id) or _safe_str(locator.get("org_id"))
+    resolved_session_id = _safe_str(locator.get("session_id"))
+    memory_id = _build_memory_id(
+        request_id=request_id,
+        episode_id=episode_id or instance_id,
+    )
+
+    verdict = _safe_str(assessment.get("verdict")) or "inconclusive"
+    unresolved_check_count = _safe_int(
+        assessment.get("unresolved_check_count"),
+        default=len(_normalise_strings(evidence_bundle.get("fail_closed_reason_codes"))),
+    )
+    confidence = _safe_float(assessment.get("confidence"))
+    workflow_ids, tool_names, concept_ids, task_ids, issue_keys = (
+        _extract_implicated_from_episode_bundle(
+            evidence_bundle=evidence_bundle,
+            assessment=assessment,
+        )
+    )
+    observed_evidence = _mapping_or_empty(evidence_bundle.get("observed_evidence"))
+    workflow_identity = _mapping_or_empty(observed_evidence.get("workflow_definition_identity"))
+    recommendations = _normalise_strings(assessment.get("recommendations"), limit=8)
+    summary = _safe_str(assessment.get("summary"))
+    created_at_utc = _utcnow_iso()
+    updated_at_utc = created_at_utc
+
+    subject_kind = "workflow_use_episode"
+    if not episode_id and instance_id:
+        subject_kind = "workflow_terminal_instance"
+    elif not episode_id:
+        subject_kind = "turn_execution_request"
+
+    receipt_payload = {
+        "episode_bundle_receipt": _mapping_or_empty(evidence_bundle.get("bundle_receipt")),
+        "section_receipts": _mapping_or_empty(evidence_bundle.get("receipts")),
+        "assessment_sha256": _hash_payload(assessment),
+    }
+
+    state: dict[str, Any] = {
+        "schema_version": EPISODE_CRITIQUE_MEMORY_SCHEMA_VERSION,
+        "memory_id": memory_id,
+        "request_id": request_id,
+        "created_at_utc": created_at_utc,
+        "updated_at_utc": updated_at_utc,
+        "namespace": resolved_namespace,
+        "session_id": resolved_session_id,
+        "user_id": resolved_user_id,
+        "org_id": resolved_org_id,
+        "subject_episode": {
+            "subject_kind": subject_kind,
+            "episode_id": episode_id,
+            "workflow_id": workflow_id,
+            "instance_id": instance_id,
+            "stable_key": _safe_str(locator.get("episode_id")) or instance_id or request_id,
+            "source": _safe_str(locator.get("execution_trace_id")) or subject_kind,
+            "turn_id": _safe_str(locator.get("request_id")),
+            "session_id": resolved_session_id,
+            "namespace": resolved_namespace,
+            "workflow_definition_identity": workflow_identity,
+        },
+        "critic": {
+            "workflow_id": EPISODE_EVALUATION_WORKFLOW_ID,
+            "summary": {
+                "summary": summary,
+                "maintenance_follow_up_recommended": bool(
+                    assessment.get("maintenance_follow_up_recommended")
+                ),
+                "root_cause_count": len(
+                    [
+                        item
+                        for item in (assessment.get("root_causes") or [])
+                        if isinstance(item, Mapping)
+                    ]
+                ),
+            },
+            "verdict": verdict,
+            "confidence": confidence,
+            "unresolved_check_count": unresolved_check_count,
+            "assessment": dict(assessment),
+        },
+        "completion_gate": {},
+        "implicated": {
+            "workflow_ids": workflow_ids,
+            "tool_names": tool_names,
+            "concept_ids": concept_ids,
+        },
+        "remediation": {
+            "task_ids": task_ids,
+            "jira_issue_keys": issue_keys,
+        },
+        "recommendations": recommendations,
+        "evidence_receipts": {
+            **receipt_payload,
+            "receipt_hash": _hash_payload(receipt_payload),
+        },
+        "dedupe_fingerprint": _hash_payload(
+            {
+                "request_id": request_id,
+                "episode_id": episode_id,
+                "instance_id": instance_id,
+                "workflow_id": workflow_id,
+                "verdict": verdict,
+                "assessment": assessment,
+            }
+        ),
+        "description": summary
+        or _build_description(
+            request_id=request_id,
+            episode_id=episode_id or instance_id,
+            verdict=verdict,
+            unresolved_check_count=unresolved_check_count,
+            workflow_id=workflow_id,
+        ),
+    }
+    return state
+
+
 def build_episode_critique_memory_state_from_turn(
     *,
     record: Mapping[str, Any],
@@ -998,14 +1175,63 @@ def upsert_episode_critique_memory_from_turn(
     }
 
 
+def upsert_episode_critique_memory_from_episode_assessment(
+    *,
+    evidence_bundle: Mapping[str, Any],
+    assessment: Mapping[str, Any],
+    namespace: str | None = None,
+    user_id: str | None = None,
+    org_id: str | None = None,
+) -> dict[str, Any]:
+    state = build_episode_critique_memory_state_from_episode_assessment(
+        evidence_bundle=evidence_bundle,
+        assessment=assessment,
+        namespace=namespace,
+        user_id=user_id,
+        org_id=org_id,
+    )
+    if not isinstance(state, Mapping):
+        return {"success": False, "reason": "state_unavailable"}
+
+    memory_id = _safe_str(state.get("memory_id"))
+    if not memory_id:
+        return {"success": False, "reason": "missing_memory_id"}
+
+    _ensure_episode_critique_memory_type()
+    _ensure_episode_critique_memory_concept(
+        memory_id=memory_id,
+        name=f"Episode critique memory {memory_id.replace('#V#', '')}",
+        description=_safe_str(state.get("description")) or "Episode critique memory",
+        user_id=_safe_str(user_id) or _safe_str(state.get("user_id")),
+        org_id=_safe_str(org_id) or _safe_str(state.get("org_id")),
+        namespace=_safe_str(namespace) or _safe_str(state.get("namespace")),
+    )
+
+    persisted = _persist_episode_critique_memory_state(memory_id=memory_id, state=state)
+    projection = upsert_episode_critique_memory_projection(
+        record=persisted,
+        namespace=_safe_str(namespace) or _safe_str(state.get("namespace")),
+        user_id=_safe_str(user_id) or _safe_str(state.get("user_id")),
+        org_id=_safe_str(org_id) or _safe_str(state.get("org_id")),
+    )
+    return {
+        "success": True,
+        "memory_id": memory_id,
+        "state": persisted,
+        "projection": projection,
+    }
+
+
 __all__ = [
     "EPISODE_CRITIQUE_MEMORIES_COLLECTION",
     "EPISODE_CRITIQUE_MEMORY_SCHEMA_VERSION",
     "EPISODE_CRITIQUE_MEMORY_TYPE_ID",
+    "build_episode_critique_memory_state_from_episode_assessment",
     "build_episode_critique_memory_state_from_turn",
     "get_episode_critique_memories_collection",
     "get_episode_critique_memory_projection",
     "get_episode_critique_memory_state",
+    "upsert_episode_critique_memory_from_episode_assessment",
     "upsert_episode_critique_memory_from_turn",
     "upsert_episode_critique_memory_projection",
 ]

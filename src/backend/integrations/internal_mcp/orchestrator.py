@@ -6924,10 +6924,16 @@ class InternalMCPChatOrchestrator:
         )
 
         introspection_autotrigger: dict[str, Any] | None = None
-        autotrigger_enabled = os.getenv(
-            self._INTROSPECTION_AUTOTRIGGER_ENV, "1"
-        ).strip().lower() in {"1", "true", "yes", "on"}
-        already_autotriggered = bool(data.get("workflow_introspection_autotriggered"))
+        from ...services.workflow_event_integration_service import (
+            episode_evaluation_autotrigger_enabled,
+            maybe_launch_episode_evaluation_for_turn_completion_gate,
+        )
+
+        autotrigger_enabled = episode_evaluation_autotrigger_enabled()
+        already_autotriggered = bool(
+            data.get("workflow_introspection_autotriggered")
+            or data.get("episode_evaluation_autotriggered")
+        )
         if (
             autotrigger_enabled
             and requires_follow_up
@@ -6969,80 +6975,37 @@ class InternalMCPChatOrchestrator:
                 if prompt_text
                 else str(decision_reason or "")[:500]
             )
-            source_event_type = "turn_execution.completion_gate"
-            if request_id:
-                source_event_id = request_id
-            else:
-                identity_seed = "|".join(
-                    part
-                    for part in (
-                        conversation_session_id,
-                        selected_workflow_id,
-                        incident_text,
-                    )
-                    if isinstance(part, str) and part.strip()
-                )
-                identity_digest = hashlib.sha256(
-                    identity_seed.encode("utf-8")
-                ).hexdigest()[:16]
-                session_component = conversation_session_id or "sessionless"
-                source_event_id = f"{session_component}:{identity_digest}"
-            event_idempotency_key = (
-                "orchestrator.workflow_introspection_autotrigger:"
-                f"{self._WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID}:"
-                f"{source_event_type}:{source_event_id}"
-            )
-            if selected_workflow_id:
-                event_idempotency_key = (
-                    f"{event_idempotency_key}:workflow:{selected_workflow_id}"
-                )
             try:
-                create_payload = {
-                    "workflow_id": self._WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
-                    "namespace": namespace,
-                    "user_id": user_concept_id or "anonymous",
-                    "org_id": org_concept_id or "default",
-                    "max_retries": 1,
-                    "source_event_type": source_event_type,
-                    "source_event_id": source_event_id,
-                    "event_idempotency_key": event_idempotency_key,
-                    "inputs": {
-                        "namespace": namespace,
-                        "request_id": request_id,
-                        "session_id": conversation_session_id,
-                        "selected_workflow_id": selected_workflow_id,
-                        "incident_text": incident_text,
-                        "apply_repairs": auto_apply_repairs,
-                        "dry_run": False,
-                    },
-                }
-                result = self._gateway.invoke("workflow_create_instance", create_payload)
-                payload = result.payload if isinstance(result.payload, Mapping) else {}
-                ok = bool(payload.get("success", False))
-                introspection_autotrigger = {
-                    "attempted": True,
-                    "enabled": True,
-                    "success": ok,
-                    "instance_id": payload.get("instance_id"),
-                    "status": payload.get("status"),
-                    "error": payload.get("error"),
-                    "error_code": payload.get("error_code"),
-                    "source_event_type": source_event_type,
-                    "source_event_id": source_event_id,
-                    "event_idempotency_key": event_idempotency_key,
-                    "workflow_id": self._WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
-                }
+                introspection_autotrigger = (
+                    maybe_launch_episode_evaluation_for_turn_completion_gate(
+                        request_id=request_id,
+                        session_id=conversation_session_id,
+                        namespace=namespace,
+                        user_id=user_concept_id or "anonymous",
+                        org_id=org_concept_id or "default",
+                        selected_workflow_id=selected_workflow_id,
+                        incident_text=incident_text,
+                        maintenance_apply_repairs_default=auto_apply_repairs,
+                        current_depth=int(data.get("episode_evaluation_depth") or 0),
+                    )
+                )
+                ok = bool(introspection_autotrigger.get("success")) and bool(
+                    introspection_autotrigger.get("triggered")
+                    or introspection_autotrigger.get("idempotent_reused")
+                )
                 data["workflow_introspection_autotriggered"] = ok
+                data["episode_evaluation_autotriggered"] = ok
             except Exception as exc:
                 introspection_autotrigger = {
                     "attempted": True,
                     "enabled": True,
                     "success": False,
-                    "workflow_id": self._WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
+                    "workflow_id": "#V#episode_evaluation_workflow",
                     "error": str(exc),
-                    "error_code": "workflow_introspection_autotrigger_failed",
+                    "error_code": "episode_evaluation_autotrigger_failed",
                 }
                 data["workflow_introspection_autotriggered"] = False
+                data["episode_evaluation_autotriggered"] = False
         elif autotrigger_enabled:
             introspection_autotrigger = {
                 "attempted": False,
@@ -7054,14 +7017,14 @@ class InternalMCPChatOrchestrator:
                     if already_autotriggered
                     else "no_follow_up_required"
                 ),
-                "workflow_id": self._WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
+                "workflow_id": "#V#episode_evaluation_workflow",
             }
         else:
             introspection_autotrigger = {
                 "attempted": False,
                 "enabled": False,
                 "reason": "autotrigger_disabled",
-                "workflow_id": self._WORKFLOW_INTROSPECTION_MAINTENANCE_WORKFLOW_ID,
+                "workflow_id": "#V#episode_evaluation_workflow",
             }
 
         aux_llm_calls = data.get("aux_llm_calls")
@@ -7095,6 +7058,7 @@ class InternalMCPChatOrchestrator:
                         "escalation_reason": escalation_reason,
                         "loop_retry_reason": loop_retry_reason,
                         "workflow_introspection_autotrigger": introspection_autotrigger,
+                        "episode_evaluation_autotrigger": introspection_autotrigger,
                     }
                 )
             except Exception:
@@ -7131,6 +7095,7 @@ class InternalMCPChatOrchestrator:
                 "completion_gate_escalation_signal": escalation_signal,
                 "completion_gate_escalation_reason": escalation_reason,
                 "workflow_introspection_autotrigger": introspection_autotrigger,
+                "episode_evaluation_autotrigger": introspection_autotrigger,
                 "result": requires_follow_up,
             }
         )

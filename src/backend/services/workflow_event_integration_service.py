@@ -14,6 +14,15 @@ import os
 from time import perf_counter
 from typing import Any
 
+from .episode_evaluation_workflow_contracts import (
+    EPISODE_EVALUATION_AUTOTRIGGER_ENV,
+    EPISODE_EVALUATION_AUTOTRIGGER_LEGACY_ENV,
+    EPISODE_EVALUATION_DEFAULT_MAX_DEPTH,
+    EPISODE_EVALUATION_MAX_DEPTH_ENV,
+    EPISODE_EVALUATION_WORKFLOW_ID,
+    EVENT_TYPE_TURN_COMPLETION_GATE_FINALISED,
+    EVENT_TYPE_WORKFLOW_INSTANCE_TERMINAL,
+)
 from .feature_flags import (
     get_durable_workflows_enabled,
     get_event_workflow_integration_enabled,
@@ -58,6 +67,97 @@ def _task_status_trigger_values() -> set[str]:
     if values:
         return values
     return {"in_progress", "completed", "blocked", "cancelled"}
+
+
+def _clean_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _coerce_non_negative_int(value: Any, *, default: int = 0) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0, parsed)
+
+
+def episode_evaluation_autotrigger_enabled() -> bool:
+    for env_name in (
+        EPISODE_EVALUATION_AUTOTRIGGER_ENV,
+        EPISODE_EVALUATION_AUTOTRIGGER_LEGACY_ENV,
+    ):
+        raw = os.getenv(env_name)
+        if raw is None:
+            continue
+        lowered = raw.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return True
+
+
+def _episode_evaluation_max_depth() -> int:
+    return max(
+        0,
+        _coerce_non_negative_int(
+            os.getenv(EPISODE_EVALUATION_MAX_DEPTH_ENV),
+            default=EPISODE_EVALUATION_DEFAULT_MAX_DEPTH,
+        ),
+    )
+
+
+def _episode_evaluation_not_triggered(
+    *,
+    event_type: str,
+    reason: str,
+    workflow_id: str | None = None,
+    attempted: bool = False,
+    current_depth: int | None = None,
+    next_depth: int | None = None,
+    max_depth: int | None = None,
+    event_id: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "success": False,
+        "triggered": False,
+        "attempted": attempted,
+        "enabled": episode_evaluation_autotrigger_enabled(),
+        "event_type": event_type,
+        "outcome": "not_triggered",
+        "reason": reason,
+        "workflow_id": workflow_id or EPISODE_EVALUATION_WORKFLOW_ID,
+    }
+    if current_depth is not None:
+        payload["current_depth"] = current_depth
+    if next_depth is not None:
+        payload["episode_evaluation_depth"] = next_depth
+    if max_depth is not None:
+        payload["max_depth"] = max_depth
+    if event_id:
+        payload["event_id"] = event_id
+    return payload
+
+
+def _derive_episode_evaluation_event_id(
+    *,
+    request_id: str | None,
+    session_id: str | None,
+    workflow_id: str | None,
+    incident_text: str | None,
+) -> str:
+    if request_id:
+        return request_id
+    identity_seed = "|".join(
+        part
+        for part in (session_id, workflow_id, incident_text)
+        if isinstance(part, str) and part.strip()
+    )
+    identity_digest = hashlib.sha256(identity_seed.encode("utf-8")).hexdigest()[:16]
+    return f"{session_id or 'sessionless'}:{identity_digest}"
 
 
 def _build_event_idempotency_key(
@@ -1292,6 +1392,178 @@ def maybe_launch_vontology_mutation_workflow(
         "catch_all": catch_all_result,
         "specific_triggered": bool(specific_result.get("triggered")),
         "catch_all_triggered": bool(catch_all_result.get("triggered")),
+    }
+
+
+def maybe_launch_episode_evaluation_for_turn_completion_gate(
+    *,
+    request_id: str | None,
+    session_id: str | None,
+    namespace: str | None,
+    user_id: str | None,
+    org_id: str | None,
+    selected_workflow_id: str | None,
+    incident_text: str | None,
+    maintenance_apply_repairs_default: bool,
+    current_depth: int = 0,
+) -> dict[str, Any]:
+    enabled = episode_evaluation_autotrigger_enabled()
+    event_id = _derive_episode_evaluation_event_id(
+        request_id=_clean_text(request_id),
+        session_id=_clean_text(session_id),
+        workflow_id=_clean_text(selected_workflow_id),
+        incident_text=_clean_text(incident_text),
+    )
+    max_depth = _episode_evaluation_max_depth()
+    next_depth = _coerce_non_negative_int(current_depth) + 1
+    if not enabled:
+        return _episode_evaluation_not_triggered(
+            event_type=EVENT_TYPE_TURN_COMPLETION_GATE_FINALISED,
+            event_id=event_id,
+            reason="autotrigger_disabled",
+            current_depth=current_depth,
+            next_depth=next_depth,
+            max_depth=max_depth,
+        )
+    if next_depth > max_depth:
+        return _episode_evaluation_not_triggered(
+            event_type=EVENT_TYPE_TURN_COMPLETION_GATE_FINALISED,
+            event_id=event_id,
+            reason="max_depth_reached",
+            attempted=False,
+            current_depth=current_depth,
+            next_depth=next_depth,
+            max_depth=max_depth,
+        )
+
+    inputs = {
+        "request_id": _clean_text(request_id),
+        "session_id": _clean_text(session_id),
+        "selected_workflow_id": _clean_text(selected_workflow_id),
+        "incident_text": _clean_text(incident_text),
+        "maintenance_apply_repairs_default": bool(maintenance_apply_repairs_default),
+        "episode_evaluation_depth": next_depth,
+    }
+    if _clean_text(namespace):
+        inputs["namespace"] = _clean_text(namespace)
+    event_payload = {
+        **inputs,
+        "subject_kind": "turn_execution_request",
+    }
+    result = launch_event_workflow(
+        event_type=EVENT_TYPE_TURN_COMPLETION_GATE_FINALISED,
+        event_id=event_id,
+        user_id=user_id,
+        org_id=org_id,
+        namespace=namespace,
+        inputs=inputs,
+        event_payload=event_payload,
+    )
+    return {
+        **result,
+        "attempted": True,
+        "enabled": True,
+        "current_depth": current_depth,
+        "episode_evaluation_depth": next_depth,
+        "max_depth": max_depth,
+    }
+
+
+def maybe_launch_episode_evaluation_for_workflow_terminal(
+    *,
+    instance: Any,
+    terminal_status: str,
+    final_state: str | None,
+    termination_code: str | None,
+    termination_detail: str | None,
+) -> dict[str, Any]:
+    instance_id = _extract_instance_id(instance)
+    workflow_id = _clean_text(_extract_instance_field(instance, "workflow_id"))
+    if not instance_id or not workflow_id:
+        return _episode_evaluation_not_triggered(
+            event_type=EVENT_TYPE_WORKFLOW_INSTANCE_TERMINAL,
+            event_id=instance_id,
+            reason="missing_instance_identity",
+            attempted=False,
+            workflow_id=workflow_id,
+        )
+
+    inputs_payload = _extract_instance_field(instance, "inputs")
+    inputs_mapping = inputs_payload if isinstance(inputs_payload, dict) else {}
+    current_depth = _coerce_non_negative_int(
+        inputs_mapping.get("episode_evaluation_depth"),
+        default=0,
+    )
+    max_depth = _episode_evaluation_max_depth()
+    next_depth = current_depth + 1
+    enabled = episode_evaluation_autotrigger_enabled()
+    if not enabled:
+        return _episode_evaluation_not_triggered(
+            event_type=EVENT_TYPE_WORKFLOW_INSTANCE_TERMINAL,
+            event_id=instance_id,
+            reason="autotrigger_disabled",
+            workflow_id=workflow_id,
+            current_depth=current_depth,
+            next_depth=next_depth,
+            max_depth=max_depth,
+        )
+    if next_depth > max_depth:
+        return _episode_evaluation_not_triggered(
+            event_type=EVENT_TYPE_WORKFLOW_INSTANCE_TERMINAL,
+            event_id=instance_id,
+            reason="max_depth_reached",
+            workflow_id=workflow_id,
+            current_depth=current_depth,
+            next_depth=next_depth,
+            max_depth=max_depth,
+        )
+
+    namespace = _clean_text(_extract_instance_field(instance, "namespace"))
+    user_id = _clean_text(_extract_instance_field(instance, "user_id"))
+    org_id = _clean_text(_extract_instance_field(instance, "org_id"))
+    request_id = _clean_text(inputs_mapping.get("turn_id")) or _clean_text(
+        inputs_mapping.get("request_id")
+    )
+    session_id = _clean_text(inputs_mapping.get("conversation_session_id")) or _clean_text(
+        inputs_mapping.get("session_id")
+    )
+    launch_inputs = {
+        "instance_id": instance_id,
+        "request_id": request_id,
+        "session_id": session_id,
+        "selected_workflow_id": workflow_id,
+        "source_terminal_status": _clean_text(terminal_status) or "completed",
+        "source_final_state": _clean_text(final_state),
+        "source_termination_code": _clean_text(termination_code),
+        "source_termination_detail": _clean_text(termination_detail),
+        "episode_evaluation_depth": next_depth,
+    }
+    if namespace:
+        launch_inputs["namespace"] = namespace
+    event_payload = {
+        **launch_inputs,
+        "workflow_id": workflow_id,
+        "execution_trace_id": _clean_text(
+            _extract_instance_field(instance, "execution_trace_id")
+        ),
+        "subject_kind": "workflow_terminal_instance",
+    }
+    result = launch_event_workflow(
+        event_type=EVENT_TYPE_WORKFLOW_INSTANCE_TERMINAL,
+        event_id=instance_id,
+        user_id=user_id,
+        org_id=org_id,
+        namespace=namespace,
+        inputs=launch_inputs,
+        event_payload=event_payload,
+    )
+    return {
+        **result,
+        "attempted": True,
+        "enabled": True,
+        "current_depth": current_depth,
+        "episode_evaluation_depth": next_depth,
+        "max_depth": max_depth,
     }
 
 

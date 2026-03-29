@@ -9,6 +9,7 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     import src.backend.server.utils_flask as utils_flask
     from src.backend.workflows.durable import startup as durable_startup
     from src.backend.services import (
+        episode_evaluation_workflow_vontology_service as episode_evaluation_workflow_bootstrap,
         identity_resolution_schedule_bootstrap_service as schedule_bootstrap,
         paper_representation_workflow_vontology_service as paper_workflow_bootstrap,
         parent_specificity_schedule_bootstrap_service as parent_specificity_schedule_bootstrap,
@@ -120,6 +121,16 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
         },
     )
     monkeypatch.setattr(
+        episode_evaluation_workflow_bootstrap,
+        "bootstrap_canonical_episode_evaluation_workflow",
+        lambda: {
+            "success": True,
+            "workflow_ids": ["#V#episode_evaluation_workflow"],
+            "publication": {"skipped": True},
+            "event_bindings": {"success": True, "binding_count": 2},
+        },
+    )
+    monkeypatch.setattr(
         testing_workflow_bootstrap,
         "bootstrap_canonical_testing_workflows",
         lambda: {
@@ -160,6 +171,11 @@ def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     paper_workflow_bootstrap_report = result.get("paper_workflow_bootstrap")
     assert isinstance(paper_workflow_bootstrap_report, dict)
     assert paper_workflow_bootstrap_report.get("success") is True
+    episode_evaluation_workflow_bootstrap_report = result.get(
+        "episode_evaluation_workflow_bootstrap"
+    )
+    assert isinstance(episode_evaluation_workflow_bootstrap_report, dict)
+    assert episode_evaluation_workflow_bootstrap_report.get("success") is True
     testing_workflow_bootstrap_report = result.get("testing_workflow_bootstrap")
     assert isinstance(testing_workflow_bootstrap_report, dict)
     assert testing_workflow_bootstrap_report.get("success") is True

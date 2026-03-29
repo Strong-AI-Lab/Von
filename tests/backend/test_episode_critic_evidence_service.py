@@ -142,3 +142,66 @@ def test_episode_critic_bundle_fails_closed_when_core_context_is_missing(monkeyp
     assert "selected_llm_debug_missing" in result["fail_closed_reason_codes"]
     assert "neighbouring_context_missing" in result["fail_closed_reason_codes"]
     assert "workflow_definition_identity_missing" in result["fail_closed_reason_codes"]
+
+
+def test_episode_critic_bundle_supports_workflow_terminal_instances_without_turn_record(
+    monkeypatch,
+):
+    from src.backend.services import episode_critic_evidence_service as svc
+
+    instance = SimpleNamespace(
+        instance_id="wf-inst-1",
+        workflow_id="#V#workflow_introspection_maintenance_workflow",
+        namespace="#V#user@org",
+        user_id="#V#user",
+        org_id="#V#org",
+        status="completed",
+        current_state="complete",
+        step_index=4,
+        retry_count=0,
+        inputs={"session_id": "sess-wf-1"},
+        outputs={"result": "done"},
+        execution_trace_id="trace-1",
+    )
+
+    monkeypatch.setattr(svc, "_load_turn_execution_record", lambda **_: None)
+    monkeypatch.setattr(svc, "_resolve_history_context", lambda **_: None)
+    monkeypatch.setattr(svc, "get_latest_workflow_use_episode", lambda **_: None)
+    monkeypatch.setattr(svc, "get_workflow_execution_trace", lambda _trace_id: None)
+    monkeypatch.setattr(
+        svc,
+        "_resolve_workflow_definition_identity",
+        lambda **_: (
+            {
+                "workflow_id": "#V#workflow_introspection_maintenance_workflow",
+                "definition_hash": "wf-hash-1",
+                "source": "runtime_registry",
+            },
+            "workflow_registry",
+        ),
+    )
+
+    class _StubManager:
+        def get_instance(self, _instance_id):
+            return instance
+
+        def list_instances(self, **_kwargs):
+            return []
+
+    monkeypatch.setattr(svc, "WorkflowInstanceManager", lambda: _StubManager())
+
+    result = svc.build_episode_critic_evidence_bundle(instance_id="wf-inst-1")
+
+    assert result["success"] is True
+    assert result["ready_for_critic"] is True
+    assert result["fail_closed"] is False
+    assert result["episode_locator"]["subject_kind"] == "workflow_terminal_instance"
+    assert result["episode_locator"]["instance_id"] == "wf-inst-1"
+    assert result["expected_context"]["completion_criteria"]["terminal_status"] == "completed"
+    assert result["expected_context"]["workflow_definition_identity"]["definition_hash"] == (
+        "wf-hash-1"
+    )
+    assert (
+        result["observed_evidence"]["workflow_instance"]["status"]["instance_id"]
+        == "wf-inst-1"
+    )

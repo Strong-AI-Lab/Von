@@ -1,0 +1,473 @@
+{
+  "family_id": "episode_evaluation_workflow_seed_bundle",
+  "managed_by": "episode_evaluation_workflow_vontology_service",
+  "schema_version": "repo_seed_workflow_bundle.v1",
+  "source_tag": "JVNAUTOSCI-1605",
+  "supported_action_ids": [
+    "episode_critic.build_evidence_bundle",
+    "llm.action",
+    "episode_critic.persist_memory",
+    "workflow_create_instance"
+  ],
+  "workflows": [
+    {
+      "workflow_id": "#V#episode_evaluation_workflow",
+      "display_name": "Episode Evaluation Workflow",
+      "description": "Critique a completed turn or durable workflow episode from authoritative evidence, persist the assessment as episodic memory, and optionally launch bounded maintenance follow-up.",
+      "content": "Workflow-first actor/critic evaluation for completed chat turns and durable workflow episodes. Builds an authoritative evidence bundle, asks a high-quality critic prompt for a bounded judgement, persists the result as episode memory, and launches maintenance only when the assessment recommends reusable follow-up.",
+      "type_ids": [
+        "#V#ai_workflow",
+        "#V#durable_workflow"
+      ],
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"execution\",\"authoring_intent_required\":false,\"prefer_existing_capability\":true}",
+          "lang": "en-NZ"
+        }
+      ],
+      "publication_spec": {
+        "initial_state": "build_evidence",
+        "steps": [
+          {
+            "action_concept_id": null,
+            "action_id": "episode_critic.build_evidence_bundle",
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_build_evidence_request_id_to_request_id_parameter",
+                "context_key": "request_id",
+                "required": false,
+                "tool_param": "request_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_build_evidence_instance_id_to_instance_id_parameter",
+                "context_key": "instance_id",
+                "required": false,
+                "tool_param": "instance_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_build_evidence_namespace_to_namespace_parameter",
+                "context_key": "namespace",
+                "required": false,
+                "tool_param": "namespace"
+              }
+            ],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": "persist_assessment",
+            "on_true_state": "evaluate_episode",
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "build_evidence",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_build_evidence_episode_evidence_bundle_to_episode_evidence_bundle",
+                "context_key": "episode_evidence_bundle",
+                "tool_output_field": "episode_evidence_bundle"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_build_evidence_episode_evidence_bundle_receipt_to_episode_evidence_bundle_receipt",
+                "context_key": "episode_evidence_bundle_receipt",
+                "tool_output_field": "episode_evidence_bundle_receipt"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_build_evidence_episode_locator_to_episode_locator",
+                "context_key": "episode_locator",
+                "tool_output_field": "episode_locator"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_build_evidence_source_resolution_to_source_resolution",
+                "context_key": "source_resolution",
+                "tool_output_field": "source_resolution"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_build_evidence_expected_context_to_expected_context",
+                "context_key": "expected_context",
+                "tool_output_field": "expected_context"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_build_evidence_observed_evidence_to_observed_evidence",
+                "context_key": "observed_evidence",
+                "tool_output_field": "observed_evidence"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_build_evidence_capability_gaps_to_capability_gaps",
+                "context_key": "capability_gaps",
+                "tool_output_field": "capability_gaps"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_build_evidence_fail_closed_reason_codes_to_fail_closed_reason_codes",
+                "context_key": "fail_closed_reason_codes",
+                "tool_output_field": "fail_closed_reason_codes"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_build_evidence_selected_workflow_id_to_selected_workflow_id",
+                "context_key": "selected_workflow_id",
+                "tool_output_field": "selected_workflow_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_build_evidence_request_id_to_request_id",
+                "context_key": "request_id",
+                "tool_output_field": "request_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_build_evidence_instance_id_to_instance_id",
+                "context_key": "instance_id",
+                "tool_output_field": "instance_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_build_evidence_session_id_to_session_id",
+                "context_key": "session_id",
+                "tool_output_field": "session_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_build_evidence_user_id_to_user_id",
+                "context_key": "user_id",
+                "tool_output_field": "user_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_build_evidence_org_id_to_org_id",
+                "context_key": "org_id",
+                "tool_output_field": "org_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_build_evidence_namespace_to_namespace",
+                "context_key": "namespace",
+                "tool_output_field": "namespace"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_build_evidence_maintenance_apply_repairs_default_to_maintenance_apply_repairs_default",
+                "context_key": "maintenance_apply_repairs_default",
+                "tool_output_field": "maintenance_apply_repairs_default"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_build_evidence_episode_critic_fallback_assessment_to_episode_critic_fallback_assessment",
+                "context_key": "episode_critic_fallback_assessment",
+                "tool_output_field": "episode_critic_fallback_assessment"
+              }
+            ],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "episode_evidence_bundle",
+              "episode_evidence_bundle_receipt",
+              "episode_locator",
+              "source_resolution",
+              "expected_context",
+              "observed_evidence",
+              "capability_gaps",
+              "fail_closed_reason_codes",
+              "selected_workflow_id",
+              "request_id",
+              "instance_id",
+              "session_id",
+              "user_id",
+              "org_id",
+              "namespace",
+              "maintenance_apply_repairs_default",
+              "episode_critic_fallback_assessment"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "llm.action",
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": "llm",
+            "invoked_workflow_id": null,
+            "llm_policy": {
+              "policy_stage": "postcondition_critic",
+              "tool_mode": "none",
+              "response_contract_text": "Return JSON with keys verdict, confidence, unresolved_check_count, summary, maintenance_follow_up_recommended, maintenance_follow_up_reason, recommendations, and root_causes.",
+              "context_fields": [
+                {
+                  "context_key": "episode_locator",
+                  "label": "Episode locator"
+                },
+                {
+                  "context_key": "expected_context",
+                  "label": "Expected behaviour context"
+                },
+                {
+                  "context_key": "observed_evidence",
+                  "label": "Observed evidence"
+                },
+                {
+                  "context_key": "capability_gaps",
+                  "label": "Capability gaps"
+                },
+                {
+                  "context_key": "fail_closed_reason_codes",
+                  "label": "Fail-closed reason codes"
+                }
+              ]
+            },
+            "mutation_authority": null,
+            "next_state": "persist_assessment",
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [
+              "#V#episode_critic_evaluation_prompt"
+            ],
+            "state_id": "evaluate_episode",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_evaluate_episode_validated_json_to_critic_assessment",
+                "context_key": "critic_assessment",
+                "tool_output_field": "validated_json"
+              }
+            ],
+            "validation_policy": {
+              "output_format": "json_value"
+            },
+            "writes_context_keys": [
+              "critic_assessment"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "episode_critic.persist_memory",
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": "complete",
+            "on_true_state": "launch_maintenance_follow_up",
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "persist_assessment",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_persist_assessment_episode_critique_memory_upsert_to_episode_critique_memory_upsert",
+                "context_key": "episode_critique_memory_upsert",
+                "tool_output_field": "episode_critique_memory_upsert"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_persist_assessment_episode_critique_memory_id_to_episode_critique_memory_id",
+                "context_key": "episode_critique_memory_id",
+                "tool_output_field": "episode_critique_memory_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_persist_assessment_maintenance_launch_inputs_to_maintenance_launch_inputs",
+                "context_key": "maintenance_launch_inputs",
+                "tool_output_field": "maintenance_launch_inputs"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_persist_assessment_maintenance_launch_source_event_id_to_maintenance_launch_source_event_id",
+                "context_key": "maintenance_launch_source_event_id",
+                "tool_output_field": "maintenance_launch_source_event_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_persist_assessment_maintenance_launch_event_idempotency_key_to_maintenance_launch_event_idempotency_key",
+                "context_key": "maintenance_launch_event_idempotency_key",
+                "tool_output_field": "maintenance_launch_event_idempotency_key"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_persist_assessment_maintenance_follow_up_requested_to_maintenance_follow_up_requested",
+                "context_key": "maintenance_follow_up_requested",
+                "tool_output_field": "maintenance_follow_up_requested"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_persist_assessment_maintenance_follow_up_reason_to_maintenance_follow_up_reason",
+                "context_key": "maintenance_follow_up_reason",
+                "tool_output_field": "maintenance_follow_up_reason"
+              }
+            ],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "episode_critique_memory_upsert",
+              "episode_critique_memory_id",
+              "maintenance_launch_inputs",
+              "maintenance_launch_source_event_id",
+              "maintenance_launch_event_idempotency_key",
+              "maintenance_follow_up_requested",
+              "maintenance_follow_up_reason"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": "workflow_create_instance",
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_launch_maintenance_follow_up_namespace_to_namespace_parameter",
+                "context_key": "namespace",
+                "required": false,
+                "tool_param": "namespace"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_launch_maintenance_follow_up_user_id_to_user_id_parameter",
+                "context_key": "user_id",
+                "required": false,
+                "tool_param": "user_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_launch_maintenance_follow_up_org_id_to_org_id_parameter",
+                "context_key": "org_id",
+                "required": false,
+                "tool_param": "org_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_launch_maintenance_follow_up_inputs_to_inputs_parameter",
+                "context_key": "maintenance_launch_inputs",
+                "required": true,
+                "tool_param": "inputs"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_launch_maintenance_follow_up_source_event_id_to_source_event_id_parameter",
+                "context_key": "maintenance_launch_source_event_id",
+                "required": true,
+                "tool_param": "source_event_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_episode_evaluation_workflow_launch_maintenance_follow_up_event_idempotency_key_to_event_idempotency_key_parameter",
+                "context_key": "maintenance_launch_event_idempotency_key",
+                "required": true,
+                "tool_param": "event_idempotency_key"
+              }
+            ],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": "complete",
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": "failed",
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "launch_maintenance_follow_up",
+            "static_input_bindings": [
+              [
+                "workflow_id",
+                "#V#workflow_introspection_maintenance_workflow"
+              ],
+              [
+                "max_retries",
+                1
+              ],
+              [
+                "source_event_type",
+                "episode_critic.maintenance_follow_up"
+              ]
+            ],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_launch_maintenance_follow_up_instance_id_to_maintenance_follow_up_instance_id",
+                "context_key": "maintenance_follow_up_instance_id",
+                "tool_output_field": "instance_id"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_tool_field_episode_evaluation_workflow_launch_maintenance_follow_up_status_to_maintenance_follow_up_status",
+                "context_key": "maintenance_follow_up_status",
+                "tool_output_field": "status"
+              }
+            ],
+            "validation_policy": null,
+            "writes_context_keys": [
+              "maintenance_follow_up_instance_id",
+              "maintenance_follow_up_status"
+            ]
+          },
+          {
+            "action_concept_id": null,
+            "action_id": null,
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": null,
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "complete",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": []
+          },
+          {
+            "action_concept_id": null,
+            "action_id": null,
+            "concept_id": null,
+            "conditional_transitions": [],
+            "context_input_mapping_specs": [],
+            "context_input_mappings": [],
+            "effects": [],
+            "execution_mode": null,
+            "invoked_workflow_id": null,
+            "llm_policy": null,
+            "mutation_authority": null,
+            "next_state": null,
+            "on_approval_required_state": null,
+            "on_break_state": null,
+            "on_continue_state": null,
+            "on_failure_state": null,
+            "on_false_state": null,
+            "on_true_state": null,
+            "on_unknown_state": null,
+            "prompt_concept_ids": [],
+            "state_id": "failed",
+            "static_input_bindings": [],
+            "tool_output_context_mappings": [],
+            "tool_output_mapping_specs": [],
+            "validation_policy": null,
+            "writes_context_keys": []
+          }
+        ]
+      }
+    }
+  ]
+}

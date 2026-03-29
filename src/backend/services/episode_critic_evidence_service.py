@@ -947,7 +947,39 @@ def _build_expected_context(
     instance: Any | None,
 ) -> dict[str, Any] | None:
     if not isinstance(turn_record, Mapping):
-        return None
+        if instance is None:
+            return None
+        workflow_id = _safe_str(getattr(instance, "workflow_id", None))
+        source_event_type = _safe_str(getattr(instance, "source_event_type", None))
+        source_event_id = _safe_str(getattr(instance, "source_event_id", None))
+        return {
+            "selected_workflow": {
+                "selected_workflow_id": workflow_id,
+                "source_event_type": source_event_type,
+                "source_event_id": source_event_id,
+            },
+            "workflow_stage_path": None,
+            "workflow_definition_identity": _normalise_mapping(workflow_identity),
+            "intended_effects": [],
+            "completion_criteria": {
+                "terminal_status": _safe_str(getattr(instance, "status", None)),
+                "final_state": _safe_str(getattr(instance, "current_state", None)),
+                "has_outputs": getattr(instance, "outputs", None) is not None,
+                "source_event_type": source_event_type,
+                "source_event_id": source_event_id,
+                "step_index": getattr(instance, "step_index", None),
+                "retry_count": getattr(instance, "retry_count", None),
+            },
+            "allowed_tool_names": [],
+            "allowed_write_tools": [],
+            "allowed_tool_families": [],
+            "fail_closed_policy": {
+                "profile_fail_closed": False,
+                "profile_fail_closed_reason": None,
+                "fail_closed_on_missing_requirements": False,
+                "completion_block_on_unresolved_effects": False,
+            },
+        }
 
     execution = _mapping_or_empty(turn_record.get("execution"))
     contract = _mapping_or_empty(execution.get("required_effects_contract"))
@@ -1156,6 +1188,13 @@ def build_episode_critic_evidence_bundle(
         episode=episode,
         trace_doc=trace_doc,
     )
+    episode_subject_kind = (
+        "turn_execution_request"
+        if isinstance(turn_record, Mapping)
+        else "workflow_terminal_instance"
+        if instance is not None
+        else "workflow_use_episode"
+    )
 
     llm_debug = (
         history_context.get("target_llm_debug") if isinstance(history_context, Mapping) else None
@@ -1207,6 +1246,24 @@ def build_episode_critic_evidence_bundle(
     receipts: dict[str, Any] = {}
     observed_evidence: dict[str, Any] = {}
     source_systems: list[str] = []
+    required_sections = {
+        "workflow_definition_identity",
+        "expected_context",
+    }
+    if episode_subject_kind == "turn_execution_request":
+        required_sections.update(
+            {
+                "turn_execution_record",
+                "selected_llm_debug",
+                "neighbouring_context",
+            }
+        )
+    else:
+        required_sections.update(
+            {
+                "workflow_instance",
+            }
+        )
     for section_id, value in observed_evidence_raw.items():
         source_system = {
             "turn_execution_record": "mongo.turn_execution_records",
@@ -1223,13 +1280,7 @@ def build_episode_critic_evidence_bundle(
             section_id=section_id,
             value=value,
             source_system=source_system,
-            required=section_id
-            in {
-                "turn_execution_record",
-                "selected_llm_debug",
-                "neighbouring_context",
-                "workflow_definition_identity",
-            },
+            required=section_id in required_sections,
             locator={
                 "request_id": resolved_request_id,
                 "instance_id": instance_id_value,
@@ -1255,7 +1306,9 @@ def build_episode_critic_evidence_bundle(
     receipts["expected_context"] = expected_receipt
 
     capability_gaps: list[dict[str, Any]] = []
-    if not isinstance(turn_record, Mapping):
+    if episode_subject_kind == "turn_execution_request" and not isinstance(
+        turn_record, Mapping
+    ):
         capability_gaps.append(
             _build_gap(
                 "turn_execution_record_missing",
@@ -1264,7 +1317,11 @@ def build_episode_critic_evidence_bundle(
                 section_id="turn_execution_record",
             )
         )
-    if resolved_request_id and not isinstance(selected_llm_debug, Mapping):
+    if (
+        episode_subject_kind == "turn_execution_request"
+        and resolved_request_id
+        and not isinstance(selected_llm_debug, Mapping)
+    ):
         capability_gaps.append(
             _build_gap(
                 "selected_llm_debug_missing",
@@ -1273,7 +1330,11 @@ def build_episode_critic_evidence_bundle(
                 section_id="selected_llm_debug",
             )
         )
-    if resolved_request_id and not isinstance(neighbouring_context, Mapping):
+    if (
+        episode_subject_kind == "turn_execution_request"
+        and resolved_request_id
+        and not isinstance(neighbouring_context, Mapping)
+    ):
         capability_gaps.append(
             _build_gap(
                 "neighbouring_context_missing",
@@ -1318,6 +1379,7 @@ def build_episode_critic_evidence_bundle(
     }
 
     episode_locator = {
+        "subject_kind": episode_subject_kind,
         "request_id": resolved_request_id,
         "instance_id": instance_id_value,
         "namespace": resolved_namespace,

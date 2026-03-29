@@ -251,6 +251,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         from ..services.paper_representation_workflow_vontology_service import (
             bootstrap_canonical_paper_representation_workflows,
         )
+        from ..services.episode_evaluation_workflow_vontology_service import (
+            bootstrap_canonical_episode_evaluation_workflow,
+        )
         from ..services.testing_workflow_vontology_service import (
             bootstrap_canonical_testing_workflows,
         )
@@ -282,6 +285,10 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
         paper_workflow_bootstrap_report = _run_workflow_family_bootstrap(
             label="paper workflow",
             bootstrap_fn=bootstrap_canonical_paper_representation_workflows,
+        )
+        episode_evaluation_workflow_bootstrap_report = _run_workflow_family_bootstrap(
+            label="episode evaluation workflow",
+            bootstrap_fn=bootstrap_canonical_episode_evaluation_workflow,
         )
         talk_workflow_bootstrap_report = _run_workflow_family_bootstrap(
             label="talk workflow",
@@ -323,6 +330,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             ),
         )
         result["paper_workflow_bootstrap"] = paper_workflow_bootstrap_report
+        result["episode_evaluation_workflow_bootstrap"] = (
+            episode_evaluation_workflow_bootstrap_report
+        )
         result["talk_workflow_bootstrap"] = talk_workflow_bootstrap_report
         result["testing_workflow_bootstrap"] = testing_workflow_bootstrap_report
         result["workflow_authority_bootstrap"] = workflow_authority_bootstrap_report
@@ -330,6 +340,13 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             app_logger.warning(
                 "[durable_workflows] paper workflow bootstrap failed: %s",
                 paper_workflow_bootstrap_report,
+            )
+        if not bool(
+            episode_evaluation_workflow_bootstrap_report.get("success", False)
+        ):
+            app_logger.warning(
+                "[durable_workflows] episode evaluation workflow bootstrap failed: %s",
+                episode_evaluation_workflow_bootstrap_report,
             )
         if not bool(talk_workflow_bootstrap_report.get("success", False)):
             app_logger.warning(

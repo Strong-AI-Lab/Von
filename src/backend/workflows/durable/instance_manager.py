@@ -990,6 +990,46 @@ class WorkflowInstanceManager:
     # Status transitions
     # -------------------------------------------------------------------------
 
+    def _emit_episode_evaluation_terminal_event(
+        self,
+        *,
+        instance: WorkflowInstance,
+        terminal_status: str,
+        final_state: str | None,
+        termination_code: str | None,
+        termination_detail: str | None,
+    ) -> None:
+        try:
+            from ...services.workflow_event_integration_service import (
+                maybe_launch_episode_evaluation_for_workflow_terminal,
+            )
+
+            result = maybe_launch_episode_evaluation_for_workflow_terminal(
+                instance=instance,
+                terminal_status=terminal_status,
+                final_state=final_state,
+                termination_code=termination_code,
+                termination_detail=termination_detail,
+            )
+            if not bool(result.get("success")) and str(
+                result.get("reason") or ""
+            ) not in {
+                "autotrigger_disabled",
+                "max_depth_reached",
+                "workflow_not_configured",
+            }:
+                logger.warning(
+                    "[durable_workflow] Episode evaluation autotrigger did not launch for %s: %s",
+                    instance.instance_id,
+                    result,
+                )
+        except Exception as exc:
+            logger.warning(
+                "[durable_workflow] Episode evaluation autotrigger error for %s: %s",
+                instance.instance_id,
+                exc,
+            )
+
     def mark_completed(
         self,
         instance_id: str,
@@ -1041,23 +1081,29 @@ class WorkflowInstanceManager:
                 termination_detail=None,
                 final_state=final_state or instance_before.current_state,
             )
-            self._broadcast_instance(
-                replace(
-                    instance_before,
-                    status=WorkflowInstanceStatus.COMPLETED,
-                    completed_at=now,
-                    locked_by=None,
-                    lock_expires_at=None,
-                    progress_message="completed",
-                    progress_updated_at=now,
-                    current_state=final_state or instance_before.current_state,
-                    outputs=outputs if outputs is not None else instance_before.outputs,
-                    execution_trace_id=(
-                        execution_trace_id
-                        if execution_trace_id is not None
-                        else instance_before.execution_trace_id
-                    ),
-                )
+            completed_instance = replace(
+                instance_before,
+                status=WorkflowInstanceStatus.COMPLETED,
+                completed_at=now,
+                locked_by=None,
+                lock_expires_at=None,
+                progress_message="completed",
+                progress_updated_at=now,
+                current_state=final_state or instance_before.current_state,
+                outputs=outputs if outputs is not None else instance_before.outputs,
+                execution_trace_id=(
+                    execution_trace_id
+                    if execution_trace_id is not None
+                    else instance_before.execution_trace_id
+                ),
+            )
+            self._broadcast_instance(completed_instance)
+            self._emit_episode_evaluation_terminal_event(
+                instance=completed_instance,
+                terminal_status=WorkflowInstanceStatus.COMPLETED.value,
+                final_state=final_state or instance_before.current_state,
+                termination_code="completed",
+                termination_detail=None,
             )
             return True
         return False
@@ -1123,28 +1169,34 @@ class WorkflowInstanceManager:
                 termination_detail=error,
                 final_state=instance_before.current_state,
             )
-            self._broadcast_instance(
-                replace(
-                    instance_before,
-                    status=WorkflowInstanceStatus.FAILED,
-                    completed_at=now,
-                    error=error,
-                    error_step=error_step or instance_before.error_step,
-                    locked_by=None,
-                    lock_expires_at=None,
-                    progress_message="failed",
-                    progress_updated_at=now,
-                    retry_count=(
-                        instance_before.retry_count + 1
-                        if increment_retry
-                        else instance_before.retry_count
-                    ),
-                    execution_trace_id=(
-                        execution_trace_id
-                        if execution_trace_id is not None
-                        else instance_before.execution_trace_id
-                    ),
-                )
+            failed_instance = replace(
+                instance_before,
+                status=WorkflowInstanceStatus.FAILED,
+                completed_at=now,
+                error=error,
+                error_step=error_step or instance_before.error_step,
+                locked_by=None,
+                lock_expires_at=None,
+                progress_message="failed",
+                progress_updated_at=now,
+                retry_count=(
+                    instance_before.retry_count + 1
+                    if increment_retry
+                    else instance_before.retry_count
+                ),
+                execution_trace_id=(
+                    execution_trace_id
+                    if execution_trace_id is not None
+                    else instance_before.execution_trace_id
+                ),
+            )
+            self._broadcast_instance(failed_instance)
+            self._emit_episode_evaluation_terminal_event(
+                instance=failed_instance,
+                terminal_status=WorkflowInstanceStatus.FAILED.value,
+                final_state=instance_before.current_state,
+                termination_code=reason_code or "failed",
+                termination_detail=error,
             )
             return True
         return False
@@ -1192,16 +1244,22 @@ class WorkflowInstanceManager:
                 termination_detail="Workflow instance cancelled",
                 final_state=instance_before.current_state,
             )
-            self._broadcast_instance(
-                replace(
-                    instance_before,
-                    status=WorkflowInstanceStatus.CANCELLED,
-                    completed_at=now,
-                    locked_by=None,
-                    lock_expires_at=None,
-                    progress_message="cancelled",
-                    progress_updated_at=now,
-                )
+            cancelled_instance = replace(
+                instance_before,
+                status=WorkflowInstanceStatus.CANCELLED,
+                completed_at=now,
+                locked_by=None,
+                lock_expires_at=None,
+                progress_message="cancelled",
+                progress_updated_at=now,
+            )
+            self._broadcast_instance(cancelled_instance)
+            self._emit_episode_evaluation_terminal_event(
+                instance=cancelled_instance,
+                terminal_status=WorkflowInstanceStatus.CANCELLED.value,
+                final_state=instance_before.current_state,
+                termination_code="cancelled",
+                termination_detail="Workflow instance cancelled",
             )
             return True
         return False

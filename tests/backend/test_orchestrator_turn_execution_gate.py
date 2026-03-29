@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from typing import Any, cast
+from unittest.mock import MagicMock, patch
 
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
@@ -780,13 +781,27 @@ def test_turn_completion_gate_stops_repeat_when_stall_latency_budget_exhausted()
     assert evidence_payload.get("escalation_reason") == "stall_latency_budget_exhausted"
 
 
-def test_turn_completion_gate_autotriggers_workflow_introspection(monkeypatch) -> None:
+@patch(
+    "src.backend.services.workflow_event_integration_service.maybe_launch_episode_evaluation_for_turn_completion_gate"
+)
+def test_turn_completion_gate_autotriggers_episode_evaluation(
+    mock_launch_episode_evaluation: MagicMock,
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("VON_WORKFLOW_INTROSPECTION_AUTOTRIGGER_ENABLE", "1")
     monkeypatch.setenv("VON_WORKFLOW_INTROSPECTION_AUTO_APPLY", "1")
 
     orchestrator = _build_orchestrator()
-    gateway = _RecordingGateway()
-    orchestrator._gateway = cast(Any, gateway)
+    mock_launch_episode_evaluation.return_value = {
+        "success": True,
+        "triggered": True,
+        "workflow_id": "#V#episode_evaluation_workflow",
+        "instance_id": "wf-episode-1",
+        "status": "pending",
+        "event_type": "turn_execution.completion_gate",
+        "event_id": "req-introspection-1",
+        "episode_evaluation_depth": 1,
+    }
 
     request = _build_request(
         action_id="turn_execution.completion_gate",
@@ -824,19 +839,13 @@ def test_turn_completion_gate_autotriggers_workflow_introspection(monkeypatch) -
     autotrigger = result.outputs.get("workflow_introspection_autotrigger")
     assert isinstance(autotrigger, dict)
     assert autotrigger.get("success") is True
-    assert autotrigger.get("instance_id") == "wf-maint-1"
+    assert autotrigger.get("instance_id") == "wf-episode-1"
+    assert autotrigger.get("workflow_id") == "#V#episode_evaluation_workflow"
+    assert result.outputs.get("episode_evaluation_autotrigger") == autotrigger
 
-    assert gateway.calls
-    tool_name, payload = gateway.calls[0]
-    assert tool_name == "workflow_create_instance"
-    assert payload.get("workflow_id") == (
-        "#V#workflow_introspection_maintenance_workflow"
-    )
-    assert payload.get("source_event_type") == "turn_execution.completion_gate"
-    assert payload.get("source_event_id") == "req-introspection-1"
-    event_idempotency_key = payload.get("event_idempotency_key")
-    assert isinstance(event_idempotency_key, str)
-    assert "req-introspection-1" in event_idempotency_key
-    inputs = payload.get("inputs")
-    assert isinstance(inputs, dict)
-    assert inputs.get("request_id") == "req-introspection-1"
+    called_args = mock_launch_episode_evaluation.call_args
+    assert called_args is not None
+    assert called_args.kwargs["request_id"] == "req-introspection-1"
+    assert called_args.kwargs["session_id"] == "session-introspection-1"
+    assert called_args.kwargs["namespace"] == "#V#test_user"
+    assert called_args.kwargs["selected_workflow_id"] == "#V#tool_calling_workflow"

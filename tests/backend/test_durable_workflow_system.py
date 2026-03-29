@@ -565,6 +565,38 @@ class TestWorkflowInstanceManager:
         assert instance.execution_trace_id == "trace-1550"
         assert instance.completed_at is not None
 
+    def test_mark_completed_emits_episode_evaluation_terminal_event(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        manager = WorkflowInstanceManager()
+        launches: list[dict[str, Any]] = []
+
+        monkeypatch.setattr(
+            "src.backend.services.workflow_event_integration_service.maybe_launch_episode_evaluation_for_workflow_terminal",
+            lambda **kwargs: launches.append(dict(kwargs))
+            or {"success": True, "triggered": True},
+        )
+
+        instance_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+
+        success = manager.mark_completed(
+            instance_id,
+            outputs={"result": "done"},
+            final_state="end_state",
+        )
+
+        assert success is True
+        assert len(launches) == 1
+        assert launches[0]["terminal_status"] == "completed"
+        assert launches[0]["final_state"] == "end_state"
+        assert launches[0]["instance"].instance_id == instance_id
+
     def test_mark_failed_updates_status(self) -> None:
         """mark_failed() should set status to FAILED with error."""
         manager = WorkflowInstanceManager()

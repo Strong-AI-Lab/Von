@@ -71,6 +71,7 @@ _EXPECTED_AUTHORITATIVE_REASONING_RECOVERY_WORKFLOW_IDS: tuple[str, ...] = (
 _EXPECTED_AUTHORITATIVE_SUPPORT_MAINTENANCE_WORKFLOW_IDS: tuple[str, ...] = (
     "#V#rag_text_relation_sync_workflow",
     "#V#enrichment_workflow",
+    "#V#episode_evaluation_workflow",
     "#V#workflow_introspection_maintenance_workflow",
     "#V#entity_identity_resolution_workflow",
     "#V#jira_task_incremental_import_workflow",
@@ -1111,6 +1112,7 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
     from ..skill_interop import register_skill_interop_actions
     from .control_flow_actions import register_control_flow_actions
     from .enrichment_workflow import register_enrichment_actions
+    from .episode_evaluation_workflow import register_episode_evaluation_actions
     from .entity_identity_resolution_workflow import (
         register_entity_identity_resolution_actions,
     )
@@ -1153,6 +1155,7 @@ def _register_durable_action_modules(registry: ActionRegistry) -> None:
 
     register_rag_sync_actions(registry)
     register_enrichment_actions(registry)
+    register_episode_evaluation_actions(registry)
     register_rumination_actions(registry)
     register_planning_actions(registry)
     register_workflow_introspection_maintenance_actions(registry)
