@@ -83,6 +83,7 @@ from ...services.tool_progress_store_service import (
     store_tool_progress_state,
 )
 from ...services.turn_execution_record_service import (
+    build_search_tool_evidence,
     build_turn_execution_record,
     build_workflow_routing_diagnostics,
 )
@@ -169,10 +170,13 @@ _DIAGNOSTIC_EXPORT_EXACT_SENSITIVE_KEYS = {
 _DIAGNOSTIC_EXPORT_STRUCTURAL_ONLY_KEYS = {
     "arguments",
     "args",
+    "effective_arguments",
+    "effective_payload",
     "payload",
     "request_payload",
     "response_payload",
     "raw_payload",
+    "search_evidence",
     "tool_payload",
 }
 
@@ -3397,6 +3401,66 @@ def _truncate_large_tool_results(
     return result
 
 
+def _serialise_tool_invocations_for_llm_debug(tool_invocations: Any) -> list[dict[str, Any]]:
+    """Persist a stable, compact view of tool invocations in llm_debug_data.
+
+    Keep the common operational fields needed for later diagnosis, but avoid
+    storing every raw result payload inline under `tool_invocations`. Search
+    tools retain their authoritative outputs separately via `search_evidence`.
+    """
+
+    if not isinstance(tool_invocations, list):
+        return []
+
+    serialised: list[dict[str, Any]] = []
+    for raw_invocation in tool_invocations:
+        if not isinstance(raw_invocation, Mapping):
+            continue
+
+        tool_name = raw_invocation.get("tool") or raw_invocation.get("method")
+        if not isinstance(tool_name, str) or not tool_name.strip():
+            tool_name = "unknown"
+        else:
+            tool_name = tool_name.strip()
+
+        arguments = raw_invocation.get("effective_arguments")
+        if arguments in (None, {}):
+            arguments = raw_invocation.get("payload")
+        if arguments in (None, {}):
+            arguments = raw_invocation.get("arguments")
+
+        entry: dict[str, Any] = {
+            "tool": tool_name,
+            "method": tool_name,
+            "arguments": arguments if arguments is not None else {},
+        }
+
+        for key in (
+            "status",
+            "error",
+            "error_code",
+            "blocked",
+            "call_id",
+            "result_summary",
+            "direct_user_call",
+            "duration_ms",
+            "ok",
+            "auto_retry",
+            "knowledge_interaction",
+            "write_policy_risk_class",
+            "write_policy_outcome",
+            "write_policy_decision_basis",
+            "write_policy_effective_mutation_authority",
+            "write_policy_authority_sources",
+        ):
+            if key in raw_invocation:
+                entry[key] = raw_invocation.get(key)
+
+        serialised.append(entry)
+
+    return serialised
+
+
 def _truncate_debug_payload(raw: str | None, max_chars: int = 4000) -> str | None:
     """Limit rejected tool payloads before surfacing them in LLM debug info."""
     if raw is None:
@@ -3940,6 +4004,21 @@ def _finalise_llm_debug_info(
     if not isinstance(llm_debug_info, dict):
         return llm_debug_info
 
+    tool_invocations_payload = (
+        llm_debug_info.get("tool_invocations")
+        if isinstance(llm_debug_info.get("tool_invocations"), list)
+        else []
+    )
+    search_evidence_payload = (
+        llm_debug_info.get("search_evidence")
+        if isinstance(llm_debug_info.get("search_evidence"), list)
+        else None
+    )
+    if search_evidence_payload is None:
+        search_evidence_payload = build_search_tool_evidence(tool_invocations_payload)
+        if search_evidence_payload:
+            llm_debug_info["search_evidence"] = search_evidence_payload
+
     code_version_details = get_runtime_code_version_info()
     llm_debug_info["code_version"] = _progress_str(code_version_details.get("version"))
     llm_debug_info["code_version_details"] = code_version_details
@@ -3990,11 +4069,8 @@ def _finalise_llm_debug_info(
             interaction_timestamp_utc=llm_debug_info.get("interaction_timestamp_utc"),
             workflow_discovery=workflow_discovery_payload,
             workflow_routing=workflow_routing_payload,
-            tool_invocations=(
-                llm_debug_info.get("tool_invocations")
-                if isinstance(llm_debug_info.get("tool_invocations"), list)
-                else []
-            ),
+            tool_invocations=tool_invocations_payload,
+            search_evidence=search_evidence_payload,
             turn_execution_diagnostics=(
                 llm_debug_info.get("turn_execution_diagnostics")
                 if isinstance(llm_debug_info.get("turn_execution_diagnostics"), dict)
@@ -9708,6 +9784,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             if isinstance(entry, dict)
             and str(entry.get("type", "")).strip() == "workflow_use_episode"
         ]
+        serialised_tool_invocations = _serialise_tool_invocations_for_llm_debug(
+            tool_invocations
+        )
+        search_evidence = build_search_tool_evidence(tool_invocations)
 
         llm_debug_info = {
             "interaction_timestamp_utc": interaction_timestamp_utc,
@@ -9757,18 +9837,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             },
             "context_concept_references": context_concept_references,
             "tool_stats": tool_stats,  # MCP tool result statistics
-            "tool_invocations": (
-                [
-                    {
-                        "method": inv.get("tool") or inv.get("method", "unknown"),
-                        "arguments": inv.get("payload") or inv.get("arguments", {}),
-                        "error": inv.get("error"),
-                    }
-                    for inv in tool_invocations
-                ]
-                if tool_invocations
-                else []
-            ),
+            "tool_invocations": serialised_tool_invocations,
+            "search_evidence": search_evidence,
             "aux_llm_calls": auxiliary_llm_calls,
             "workflow_use_episodes": workflow_use_episodes,
             "buttonify": buttonify_meta,

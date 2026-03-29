@@ -157,6 +157,22 @@ _VERIFICATION_READ_TOOL_PREFIXES = (
     "search_",
 )
 
+_SEARCH_EVIDENCE_TOOL_NAMES = {
+    "context_search",
+    "find_concepts_by_name",
+    "qna_search",
+    "search_arxiv",
+    "search_concept_descriptions",
+    "search_concepts",
+    "search_knowledge_base",
+    "search_web",
+    "vontology_concept_search",
+}
+_SEARCH_EVIDENCE_TOOL_PREFIXES = ("search_",)
+_SEARCH_EVIDENCE_MAX_ARGUMENT_CHARS = 50_000
+_SEARCH_EVIDENCE_MAX_RESULT_CHARS = 500_000
+_SEARCH_EVIDENCE_PREVIEW_CHARS = 8_000
+
 _MUTATION_INTENT_TERMS = (
     "add",
     "added",
@@ -476,6 +492,158 @@ def _hash_payload(value: Any) -> str | None:
     except Exception:
         return None
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _payload_char_count(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        payload = json.dumps(value, sort_keys=True, default=str)
+    except Exception:
+        try:
+            payload = str(value)
+        except Exception:
+            return None
+    return len(payload)
+
+
+def _payload_preview(value: Any, *, max_chars: int = _SEARCH_EVIDENCE_PREVIEW_CHARS) -> str | None:
+    if value is None:
+        return None
+    try:
+        payload = json.dumps(value, sort_keys=True, default=str)
+    except Exception:
+        try:
+            payload = str(value)
+        except Exception:
+            return None
+    if len(payload) <= max_chars:
+        return payload
+    return payload[:max_chars] + f"\n... [truncated {len(payload) - max_chars} chars]"
+
+
+def _is_search_evidence_tool(tool_name: str | None) -> bool:
+    if not isinstance(tool_name, str):
+        return False
+    cleaned = tool_name.strip()
+    if not cleaned:
+        return False
+    lowered = cleaned.lower()
+    if lowered in _SEARCH_EVIDENCE_TOOL_NAMES:
+        return True
+    return any(lowered.startswith(prefix) for prefix in _SEARCH_EVIDENCE_TOOL_PREFIXES)
+
+
+def _capture_search_evidence_value(
+    field_name: str,
+    value: Any,
+    *,
+    max_chars: int,
+) -> dict[str, Any]:
+    if value is None:
+        return {}
+
+    field_payload: dict[str, Any] = {}
+    char_count = _payload_char_count(value)
+    if char_count is not None:
+        field_payload[f"{field_name}_char_count"] = char_count
+
+    fingerprint = _hash_payload(value)
+    if fingerprint:
+        field_payload[f"{field_name}_sha256"] = fingerprint
+
+    if char_count is None or char_count > max_chars:
+        field_payload[f"{field_name}_truncated"] = True
+        preview = _payload_preview(value)
+        if isinstance(preview, str) and preview:
+            field_payload[f"{field_name}_preview"] = preview
+        return field_payload
+
+    field_payload[field_name] = value
+    field_payload[f"{field_name}_truncated"] = False
+    return field_payload
+
+
+def build_search_tool_evidence(
+    tool_invocations: Sequence[Mapping[str, Any]] | None,
+    *,
+    max_argument_chars: int = _SEARCH_EVIDENCE_MAX_ARGUMENT_CHARS,
+    max_result_chars: int = _SEARCH_EVIDENCE_MAX_RESULT_CHARS,
+) -> list[dict[str, Any]]:
+    """Return authoritative search-tool evidence for later quality inspection.
+
+    Search-tool results are often much more diagnostic than their user-facing
+    summaries. Preserve the exact arguments/result when reasonably sized and
+    fall back to fingerprint + preview metadata when the payload is too large.
+    """
+
+    evidence: list[dict[str, Any]] = []
+
+    for invocation in tool_invocations or ():
+        if not isinstance(invocation, Mapping):
+            continue
+
+        tool_name = _safe_str(invocation.get("tool")) or _safe_str(
+            invocation.get("method")
+        )
+        if not _is_search_evidence_tool(tool_name):
+            continue
+
+        arguments_value = invocation.get("effective_arguments")
+        if arguments_value in (None, {}):
+            arguments_value = invocation.get("payload")
+        if arguments_value in (None, {}):
+            arguments_value = invocation.get("arguments")
+
+        result_value = invocation.get("effective_payload")
+        if result_value is None:
+            result_value = invocation.get("result")
+
+        entry: dict[str, Any] = {
+            "tool": tool_name,
+            "status": _classify_tool_invocation_status(invocation=invocation),
+        }
+
+        error_value = _safe_str(invocation.get("error"))
+        if error_value:
+            entry["error"] = error_value
+
+        result_summary = _safe_str(invocation.get("result_summary"))
+        if not result_summary and isinstance(result_value, Mapping):
+            result_summary = _safe_str(result_value.get("result_summary")) or _safe_str(
+                result_value.get("summary")
+            )
+        if result_summary:
+            entry["result_summary"] = result_summary
+
+        call_id = _safe_str(invocation.get("call_id"))
+        if call_id:
+            entry["call_id"] = call_id
+
+        if isinstance(arguments_value, Mapping):
+            for key in ("query", "q", "name", "text"):
+                query_value = _safe_str(arguments_value.get(key))
+                if query_value:
+                    entry["query"] = query_value
+                    break
+
+        entry.update(
+            _capture_search_evidence_value(
+                "arguments",
+                arguments_value,
+                max_chars=max_argument_chars,
+            )
+        )
+        entry.update(
+            _capture_search_evidence_value(
+                "result",
+                result_value,
+                max_chars=max_result_chars,
+            )
+        )
+        evidence.append(entry)
+
+    return evidence
 
 
 def _is_write_tool(tool_name: str | None) -> bool:
@@ -3614,6 +3782,7 @@ def build_turn_execution_record(
     workflow_discovery: Mapping[str, Any] | None = None,
     workflow_routing: Mapping[str, Any] | None = None,
     tool_invocations: Sequence[Mapping[str, Any]] | None = None,
+    search_evidence: Sequence[Mapping[str, Any]] | None = None,
     turn_execution_diagnostics: Mapping[str, Any] | None = None,
     aux_llm_calls: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -3641,6 +3810,11 @@ def build_turn_execution_record(
         successful_write_tools,
         successful_verification_tools,
     ) = _summarise_tool_invocations(tool_invocations)
+    search_evidence_payload = [
+        dict(item) for item in (search_evidence or ()) if isinstance(item, Mapping)
+    ]
+    if not search_evidence_payload:
+        search_evidence_payload = build_search_tool_evidence(tool_invocations)
     execution_summary = _summarise_tool_execution_context(
         workflow_routing=workflow_routing,
         turn_execution_diagnostics=(
@@ -3809,6 +3983,7 @@ def build_turn_execution_record(
             execution_summary_with_contract["required_effects_contract_fail_closed_reason"] = _safe_str(
                 profile_resolution.get("fail_closed_reason")
             )
+    execution_summary_with_contract["search_evidence_count"] = len(search_evidence_payload)
 
     return {
         "schema_version": TURN_EXECUTION_RECORD_SCHEMA_VERSION,
@@ -3837,6 +4012,7 @@ def build_turn_execution_record(
         "required_effects": required_effects,
         "execution": {
             "tool_invocations": serialised_invocations,
+            "search_evidence": search_evidence_payload,
             "summary": execution_summary_with_contract,
             "required_effects_contract": representation_effects_contract,
             "diagnostic_events": diagnostic_events,

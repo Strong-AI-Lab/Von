@@ -36,7 +36,21 @@ class _StubOrchestrator:
                 }
             ],
             tool_invocations=[
-                {"tool": "search_knowledge_base", "payload": {"query": "x"}}
+                {
+                    "tool": "search_knowledge_base",
+                    "payload": {"query": "x", "top_k": 5},
+                    "effective_payload": {
+                        "success": True,
+                        "results": [
+                            {
+                                "concept_id": "#V#search_trace_example",
+                                "text": "Example retrieved knowledge",
+                            }
+                        ],
+                    },
+                    "status": "ok",
+                    "result_summary": "Found 1 knowledge-base result for 'x'",
+                }
             ],
         )
 
@@ -73,7 +87,7 @@ def app(monkeypatch):
     )
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.get_active_model_name",
-        lambda: "test-model",
+        lambda *_args, **_kwargs: "test-model",
     )
 
     flask_app = Flask(__name__)
@@ -121,6 +135,17 @@ def test_generate_includes_rag_trace_when_authenticated(app):
         == "effective_context.namespace"
     )
     assert body["llm_debug"]["namespace_report"]["mismatch_detected"] is False
+    tool_invocations = body["llm_debug"]["tool_invocations"]
+    assert tool_invocations[0]["tool"] == "search_knowledge_base"
+    assert tool_invocations[0]["arguments"] == {"query": "x", "top_k": 5}
+    assert tool_invocations[0]["result_summary"] == "Found 1 knowledge-base result for 'x'"
+    search_evidence = body["llm_debug"]["search_evidence"]
+    assert len(search_evidence) == 1
+    assert search_evidence[0]["tool"] == "search_knowledge_base"
+    assert search_evidence[0]["arguments"]["query"] == "x"
+    assert search_evidence[0]["result"]["results"][0]["concept_id"] == "#V#search_trace_example"
+    turn_record = body["llm_debug"]["turn_execution_record"]
+    assert turn_record["execution"]["search_evidence"][0]["tool"] == "search_knowledge_base"
 
 
 def test_generate_prefers_window_effective_namespace_and_reports_mismatch(

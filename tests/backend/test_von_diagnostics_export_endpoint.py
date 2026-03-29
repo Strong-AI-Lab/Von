@@ -37,6 +37,20 @@ def test_diagnostics_export_writes_sanitised_file(monkeypatch, tmp_path):
                             "arguments": {"query": "very sensitive text", "limit": 5},
                         }
                     ],
+                    "search_evidence": [
+                        {
+                            "tool": "search_concepts",
+                            "arguments": {"query": "bathroom closet"},
+                            "result": {
+                                "results": [
+                                    {
+                                        "concept_id": "#V#bathroom_closet",
+                                        "name": "Bathroom Closet",
+                                    }
+                                ]
+                            },
+                        }
+                    ],
                     "api_token": "abc123",
                     "llm_interaction": {"token_count": 42},
                 },
@@ -71,6 +85,11 @@ def test_diagnostics_export_writes_sanitised_file(monkeypatch, tmp_path):
         "type": "object",
         "key_count": 2,
         "keys": ["limit", "query"],
+    }
+    assert latest.get("search_evidence") == {
+        "summary": "[summarised]",
+        "type": "array",
+        "item_count": 1,
     }
 
 

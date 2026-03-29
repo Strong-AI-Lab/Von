@@ -427,6 +427,11 @@ def _ensure_turn_execution_record_for_assistant_message(
                 if isinstance(llm_debug_data.get("tool_invocations"), list)
                 else []
             ),
+            search_evidence=(
+                llm_debug_data.get("search_evidence")
+                if isinstance(llm_debug_data.get("search_evidence"), list)
+                else []
+            ),
             turn_execution_diagnostics=(
                 llm_debug_data.get("turn_execution_diagnostics")
                 if isinstance(llm_debug_data.get("turn_execution_diagnostics"), dict)
