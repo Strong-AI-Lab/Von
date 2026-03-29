@@ -215,6 +215,15 @@ def build_db_independent_orchestrator(
         lambda *_a, **_kw: None,
     )
     monkeypatch.setattr(
+        "src.backend.workflows.workflow_selector.recommend_workflow_with_policy",
+        lambda **_kwargs: {
+            "policy_active": False,
+            "guidance_mode": "none",
+            "candidate_scores": [],
+            "ranked_candidate_ids": [],
+        },
+    )
+    monkeypatch.setattr(
         "src.backend.integrations.internal_mcp.orchestrator.build_conversation_turn_stage_model_snapshot",
         _stub_stage_model_snapshot,
     )

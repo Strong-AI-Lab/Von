@@ -108,6 +108,64 @@ def _build_orchestrator(
     )
 
 
+def _stub_execute_workflow_result(
+    monkeypatch: pytest.MonkeyPatch,
+    orchestrator: InternalMCPChatOrchestrator,
+    *,
+    expected_workflow_id: str,
+    data: Mapping[str, Any],
+    final_state: str = "completed",
+    completed: bool = True,
+    passthrough_unmatched: bool = False,
+) -> None:
+    """Stub direct workflow execution so routing tests stay focused."""
+
+    original_execute_workflow = orchestrator.execute_workflow
+
+    def _execute_workflow(workflow_id: str, **_kwargs: Any):
+        if workflow_id != expected_workflow_id:
+            if passthrough_unmatched:
+                return original_execute_workflow(workflow_id, **_kwargs)
+            raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+        return SimpleNamespace(
+            data=dict(data),
+            final_state=final_state,
+            completed=completed,
+        )
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+
+def _register_terminal_custom_workflow(
+    orchestrator: InternalMCPChatOrchestrator,
+    *,
+    workflow_id: str,
+    purpose: str = "Custom workflow for routing tests.",
+) -> None:
+    """Register a minimal launchable custom workflow for selector tests."""
+
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=workflow_id,
+                initial_state="complete",
+                states={
+                    "complete": WorkflowStateSpec(
+                        state_id="complete",
+                        actions=(
+                            WorkflowActionInvocation(action_id="tool.prepare_custom"),
+                        ),
+                        terminal=True,
+                    )
+                },
+            ),
+            purpose=purpose,
+            source="test",
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # Voice hint injection (selector OFF — tests augmented context, not routing).
 # ---------------------------------------------------------------------------
@@ -258,11 +316,22 @@ def test_renderer_applicability_can_enable_narration_when_flag_enabled(monkeypat
         )
 
     monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
+    _stub_execute_workflow_result(
+        monkeypatch,
+        orchestrator,
+        expected_workflow_id=TOOL_CALLING_WORKFLOW_ID,
+        data={
+            "final_response": "Here is the answer on screen.",
+            "tool_messages": [],
+            "invocations": [],
+            "iteration_count": 1,
+        },
+        passthrough_unmatched=True,
+    )
 
     llm = _CapturingLLM(
         [
             TOOL_CALLING_WORKFLOW_ID,  # workflow selector verdict
-            "Here is the answer on screen.",  # tool-calling final response
             "<spoken>Short talk track.</spoken>",  # narration generation
         ]
     )
@@ -384,11 +453,22 @@ def test_renderer_applicability_flag_off_preserves_default_rendering(monkeypatch
         raise AssertionError("Renderer applicability tool must not be invoked when disabled")
 
     monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
+    _stub_execute_workflow_result(
+        monkeypatch,
+        orchestrator,
+        expected_workflow_id=TOOL_CALLING_WORKFLOW_ID,
+        data={
+            "final_response": "Here is the answer on screen.",
+            "tool_messages": [],
+            "invocations": [],
+            "iteration_count": 1,
+        },
+        passthrough_unmatched=True,
+    )
 
     llm = _CapturingLLM(
         [
             TOOL_CALLING_WORKFLOW_ID,
-            "Here is the answer on screen.",
         ]
     )
 
@@ -402,7 +482,7 @@ def test_renderer_applicability_flag_off_preserves_default_rendering(monkeypatch
 
     assert result.response_text == "Here is the answer on screen."
     assert result.render_plan is None
-    assert len(llm.calls) == 2
+    assert len(llm.calls) == 1
     assert all(
         not (isinstance(entry, dict) and entry.get("type") == "renderer_applicability_routing")
         for entry in result.aux_llm_calls
@@ -435,11 +515,22 @@ def test_renderer_applicability_non_narration_renderer_keeps_screen_only(monkeyp
         )
 
     monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
+    _stub_execute_workflow_result(
+        monkeypatch,
+        orchestrator,
+        expected_workflow_id=TOOL_CALLING_WORKFLOW_ID,
+        data={
+            "final_response": "Here is the answer on screen.",
+            "tool_messages": [],
+            "invocations": [],
+            "iteration_count": 1,
+        },
+        passthrough_unmatched=True,
+    )
 
     llm = _CapturingLLM(
         [
             TOOL_CALLING_WORKFLOW_ID,
-            "Here is the answer on screen.",
         ]
     )
 
@@ -452,7 +543,7 @@ def test_renderer_applicability_non_narration_renderer_keeps_screen_only(monkeyp
     )
 
     assert result.response_text == "Here is the answer on screen."
-    assert len(llm.calls) == 2
+    assert len(llm.calls) == 1
     renderer_entry = next(
         (
             entry
@@ -2418,11 +2509,22 @@ def test_renderer_applicability_missing_definitions_falls_back_screen_only(monke
         raise AssertionError("Renderer applicability tool should not be invoked")
 
     monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
+    _stub_execute_workflow_result(
+        monkeypatch,
+        orchestrator,
+        expected_workflow_id=TOOL_CALLING_WORKFLOW_ID,
+        data={
+            "final_response": "Here is the answer on screen.",
+            "tool_messages": [],
+            "invocations": [],
+            "iteration_count": 1,
+        },
+        passthrough_unmatched=True,
+    )
 
     llm = _CapturingLLM(
         [
             TOOL_CALLING_WORKFLOW_ID,
-            "Here is the answer on screen.",
         ]
     )
 
@@ -2492,8 +2594,19 @@ def test_renderer_applicability_bootstrap_defaults_surface_resolver_error_detail
         )
 
     monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
+    _stub_execute_workflow_result(
+        monkeypatch,
+        orchestrator,
+        expected_workflow_id=TOOL_CALLING_WORKFLOW_ID,
+        data={
+            "final_response": "Here is the answer on screen.",
+            "tool_messages": [],
+            "invocations": [],
+            "iteration_count": 1,
+        },
+    )
 
-    llm = _CapturingLLM([TOOL_CALLING_WORKFLOW_ID, "Here is the answer on screen."])
+    llm = _CapturingLLM([TOOL_CALLING_WORKFLOW_ID])
 
     result = orchestrator.run(
         prompt="Explain this briefly",
@@ -2565,11 +2678,22 @@ def test_renderer_applicability_multimodal_selection_sets_spoken_plus_screen(mon
         )
 
     monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
+    _stub_execute_workflow_result(
+        monkeypatch,
+        orchestrator,
+        expected_workflow_id=TOOL_CALLING_WORKFLOW_ID,
+        data={
+            "final_response": "Here is the answer on screen.",
+            "tool_messages": [],
+            "invocations": [],
+            "iteration_count": 1,
+        },
+        passthrough_unmatched=True,
+    )
 
     llm = _CapturingLLM(
         [
             TOOL_CALLING_WORKFLOW_ID,
-            "Here is the answer on screen.",
             "<spoken>Short talk track.</spoken>",
         ]
     )
@@ -2618,12 +2742,22 @@ def test_selector_fires_without_presenter_mode(monkeypatch):
     """Workflow selector should run for any authenticated turn (no presenter-mode gate)."""
 
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    _stub_execute_workflow_result(
+        monkeypatch,
+        orchestrator,
+        expected_workflow_id=TOOL_CALLING_WORKFLOW_ID,
+        data={
+            "final_response": "I'll help with that.",
+            "tool_messages": [],
+            "invocations": [],
+            "iteration_count": 1,
+        },
+    )
 
     # No presenter mode context — selector should still fire.
     llm = _CapturingLLM(
         [
             TOOL_CALLING_WORKFLOW_ID,  # workflow selector verdict
-            "I'll help with that.",  # main assistant response (plan handler)
         ]
     )
 
@@ -2635,9 +2769,11 @@ def test_selector_fires_without_presenter_mode(monkeypatch):
         user_namespace="#V#user",
     )
 
-    # The selector consumed one response, the planner consumed the other.
-    assert len(llm.calls) == 2
+    # The selector still fires even when the final response comes from the
+    # tool workflow rather than a separate presenter-mode path.
+    assert len(llm.calls) == 1
     assert llm.calls[0]["prompt"] == "Select workflow"
+    assert result.response_text == "I'll help with that."
 
     aux_types = [
         entry.get("type") for entry in result.aux_llm_calls if isinstance(entry, dict)
@@ -4593,6 +4729,9 @@ def test_plain_response_overridden_to_tool_pipeline_for_mutative_intent(monkeypa
 def test_mutative_intent_prefers_launchable_discovered_custom_workflow(monkeypatch):
     """Launchable discovered custom workflows should outrank generic tool fallback."""
 
+    import src.backend.services.workflow_selection_policy_service as policy_module
+
+    monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
     selected_workflow_id = "#V#launchable_mutative_custom_workflow"
 
@@ -4612,7 +4751,10 @@ def test_mutative_intent_prefers_launchable_discovered_custom_workflow(monkeypat
                     )
                 },
             ),
-            purpose="Launchable custom workflow for mutative routing tests.",
+            purpose=(
+                "Create concept links in Vontology via a specialised "
+                "relationship editing workflow."
+            ),
             source="test",
         )
     )
@@ -4653,16 +4795,28 @@ def test_mutative_intent_prefers_launchable_discovered_custom_workflow(monkeypat
                 {
                     "concept_id": selected_workflow_id,
                     "name": "Launchable mutative custom workflow",
+                    "description": (
+                        "Create concept links in Vontology via a specialised "
+                        "relationship editing workflow."
+                    ),
                     "is_executable": True,
                     "executability_reason": "executable_now",
+                    "relevance_score": 0.82,
+                    "confidence_score": 0.82,
                 }
             ],
             "candidates": [
                 {
                     "concept_id": selected_workflow_id,
                     "name": "Launchable mutative custom workflow",
+                    "description": (
+                        "Create concept links in Vontology via a specialised "
+                        "relationship editing workflow."
+                    ),
                     "is_executable": True,
                     "executability_reason": "executable_now",
+                    "relevance_score": 0.82,
+                    "confidence_score": 0.82,
                 }
             ],
             "match_count": 1,
@@ -4714,6 +4868,154 @@ def test_mutative_intent_prefers_launchable_discovered_custom_workflow(monkeypat
     ]
     assert dispatch_boundaries[-3].get("selected_execution_mode") == "custom_workflow"
     assert dispatch_boundaries[-3].get("selected_workflow_id") == selected_workflow_id
+
+
+def test_mutative_override_declines_unrelated_execution_workflow_without_lexical_grounding(
+    monkeypatch,
+):
+    import src.backend.services.workflow_selection_policy_service as policy_module
+
+    monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.prompt_has_low_risk_additive_write_evidence",
+        lambda _prompt: True,
+    )
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    unrelated_workflow_id = "#V#sail_phd_student_onboarding_workflow"
+
+    orchestrator._workflow_registry.register_or_replace(
+        WorkflowRegistration(
+            workflow_id=unrelated_workflow_id,
+            definition=WorkflowDefinition(
+                workflow_id=unrelated_workflow_id,
+                initial_state="collect_student_info",
+                states={
+                    "collect_student_info": WorkflowStateSpec(
+                        state_id="collect_student_info",
+                        actions=(
+                            WorkflowActionInvocation(
+                                action_id="tool.prepare_student_onboarding"
+                            ),
+                        ),
+                        terminal=True,
+                    )
+                },
+            ),
+            purpose=(
+                "Onboard new PhD students into SAIL by collecting student "
+                "details and setting up onboarding tasks."
+            ),
+            source="test",
+        )
+    )
+
+    monkeypatch.setattr(
+        orchestrator._gateway,
+        "describe_methods",
+        lambda: {"add_relationship": {"category": "write"}},
+    )
+
+    execute_calls: list[dict[str, Any]] = []
+
+    def _run_workflow(
+        workflow_def: WorkflowDefinition,
+        *,
+        data: Mapping[str, Any],
+        **_kwargs: Any,
+    ):
+        execute_calls.append(
+            {"workflow_id": workflow_def.workflow_id, "data": dict(data)}
+        )
+        return SimpleNamespace(
+            completed=True,
+            final_state="completed",
+            error=None,
+            data={"response_text": "Tool pipeline executed instead."},
+        )
+
+    monkeypatch.setattr(orchestrator._workflow_executor, "run", _run_workflow)
+
+    result = orchestrator.run(
+        prompt=(
+            "OK, taking into account the way papers are represented at the moment, "
+            "think about papers under preparation. How should they be represented. "
+            "What is common between them and published (or rejected papers) and what "
+            "is unique to the under-preparation status. Are any ontological edits "
+            "needed. If so, list the new types and relations needed."
+        ),
+        context=[],
+        llm_client=_CapturingLLM([CHAT_ASSISTANT_WORKFLOW_ID]),
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": unrelated_workflow_id,
+                    "name": "Sail Phd Student Onboarding Workflow",
+                    "description": (
+                        "Onboarding workflow for new PhD students joining the "
+                        "SAIL research group."
+                    ),
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "relevance_score": 1.0,
+                    "confidence_score": 1.0,
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": unrelated_workflow_id,
+                    "name": "Sail Phd Student Onboarding Workflow",
+                    "description": (
+                        "Onboarding workflow for new PhD students joining the "
+                        "SAIL research group."
+                    ),
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "relevance_score": 1.0,
+                    "confidence_score": 1.0,
+                }
+            ],
+            "match_count": 1,
+        },
+        conversation_session_id="session-paper-representation-routing",
+        turn_id="turn-paper-representation-routing",
+    )
+
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.verdict == "tool_contract_override"
+    assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
+    assert execute_calls
+    assert execute_calls[0]["workflow_id"] == TOOL_CALLING_WORKFLOW_ID
+
+    override_policy_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "custom_workflow_override_policy"
+        ),
+        None,
+    )
+    assert override_policy_entry is not None
+    assert override_policy_entry.get("outcome") == "decline"
+    assert override_policy_entry.get("reason_code") == "lexical_grounding_missing"
+
+    candidate_assessments = override_policy_entry.get("candidate_assessments")
+    assert isinstance(candidate_assessments, list)
+    onboarding_assessment = candidate_assessments[0]
+    assert onboarding_assessment.get("role") == "execution"
+    assert onboarding_assessment.get("suitable") is False
+    assert onboarding_assessment.get("suitability_reason") == "lexical_grounding_missing"
+
+    override_reasons = {
+        entry.get("reason")
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict) and entry.get("type") == "workflow_selector_override"
+    }
+    assert "mutative_intent_prefers_launchable_custom_workflow" not in override_reasons
+    assert "mutative_intent_requires_tool_pipeline" in override_reasons
 
 
 def test_mutative_override_declines_authoring_workflow_for_workflow_query(monkeypatch):
@@ -5763,26 +6065,28 @@ def test_discovery_miss_invokes_gap_recovery_after_plain_fallback(monkeypatch):
 
 
 def test_custom_workflow_result_preserves_messages_and_invocations(monkeypatch):
+    import src.backend.services.workflow_selection_policy_service as policy_module
+
+    monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
     selected_workflow_id = "#V#custom_gap_analysis_workflow"
     monkeypatch.setenv("VON_WORKFLOW_SELECTOR_ALLOW_POLICY_UNSAFE", "1")
-
-    monkeypatch.setattr(
+    _register_terminal_custom_workflow(
         orchestrator,
-        "execute_workflow",
-        lambda workflow_id, **_kwargs: (
-            SimpleNamespace(
-                data={
-                    "response_text": "Custom workflow response.",
-                    "extra_messages": [{"role": "tool", "content": "custom output"}],
-                    "tool_invocations": [{"tool": "search_concepts"}],
-                },
-                final_state="complete",
-                completed=True,
-            )
-            if workflow_id == selected_workflow_id
-            else pytest.fail(f"unexpected workflow execution: {workflow_id}")
-        ),
+        workflow_id=selected_workflow_id,
+        purpose="Custom gap-analysis workflow for selector dispatch tests.",
+    )
+
+    _stub_execute_workflow_result(
+        monkeypatch,
+        orchestrator,
+        expected_workflow_id=selected_workflow_id,
+        final_state="complete",
+        data={
+            "response_text": "Custom workflow response.",
+            "extra_messages": [{"role": "tool", "content": "custom output"}],
+            "tool_invocations": [{"tool": "search_concepts"}],
+        },
     )
 
     result = orchestrator.run(
@@ -5828,59 +6132,61 @@ def test_custom_workflow_result_preserves_messages_and_invocations(monkeypatch):
 def test_custom_workflow_structured_result_renders_verdict_evidence_and_promotion(
     monkeypatch,
 ):
+    import src.backend.services.workflow_selection_policy_service as policy_module
+
+    monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
     selected_workflow_id = "#V#custom_gap_analysis_workflow"
     monkeypatch.setenv("VON_WORKFLOW_SELECTOR_ALLOW_POLICY_UNSAFE", "1")
-
-    monkeypatch.setattr(
+    _register_terminal_custom_workflow(
         orchestrator,
-        "execute_workflow",
-        lambda workflow_id, **_kwargs: (
-            SimpleNamespace(
-                data={
-                    "response_text": json.dumps(
-                        [
-                            {
-                                "label": "meeting_type_classification",
-                                "verdict": "pass",
-                                "expected_outcome": "project_meeting",
-                                "observed_outcome": "project_meeting",
-                            }
-                        ]
-                    ),
-                    "run_id": "#V#run_meeting_test",
+        workflow_id=selected_workflow_id,
+        purpose="Structured-result workflow for selector dispatch tests.",
+    )
+
+    _stub_execute_workflow_result(
+        monkeypatch,
+        orchestrator,
+        expected_workflow_id=selected_workflow_id,
+        final_state="complete",
+        data={
+            "response_text": json.dumps(
+                [
+                    {
+                        "label": "meeting_type_classification",
+                        "verdict": "pass",
+                        "expected_outcome": "project_meeting",
+                        "observed_outcome": "project_meeting",
+                    }
+                ]
+            ),
+            "run_id": "#V#run_meeting_test",
+            "verdict": "pass",
+            "verdict_summary": {
+                "reason": "all_recorded_observations_passed",
+            },
+            "promotion_recommendation": {
+                "recommended": True,
+                "requires_promotion_gate": True,
+                "reason": "explicit_promotion_gate_required",
+            },
+            "candidate_meeting_type": "project_meeting",
+            "candidate_safe_downstream_action": "draft_calendar_entry",
+            "meeting_candidate_observations": [
+                {
+                    "label": "meeting_type_classification",
                     "verdict": "pass",
-                    "verdict_summary": {
-                        "reason": "all_recorded_observations_passed",
-                    },
-                    "promotion_recommendation": {
-                        "recommended": True,
-                        "requires_promotion_gate": True,
-                        "reason": "explicit_promotion_gate_required",
-                    },
-                    "candidate_meeting_type": "project_meeting",
-                    "candidate_safe_downstream_action": "draft_calendar_entry",
-                    "meeting_candidate_observations": [
-                        {
-                            "label": "meeting_type_classification",
-                            "verdict": "pass",
-                            "expected_outcome": "project_meeting",
-                            "observed_outcome": "project_meeting",
-                        },
-                        {
-                            "label": "structured_meeting_fields",
-                            "verdict": "pass",
-                            "expected_outcome": "title,time,participants",
-                            "observed_outcome": "all expected fields present",
-                        },
-                    ],
+                    "expected_outcome": "project_meeting",
+                    "observed_outcome": "project_meeting",
                 },
-                final_state="complete",
-                completed=True,
-            )
-            if workflow_id == selected_workflow_id
-            else pytest.fail(f"unexpected workflow execution: {workflow_id}")
-        ),
+                {
+                    "label": "structured_meeting_fields",
+                    "verdict": "pass",
+                    "expected_outcome": "title,time,participants",
+                    "observed_outcome": "all expected fields present",
+                },
+            ],
+        },
     )
 
     result = orchestrator.run(

@@ -84,6 +84,10 @@ def _make_app(monkeypatch, llm: _LLMProtocol) -> Flask:
         lambda *args, **kwargs: "test-model",
     )
     monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_show_tool_use_during_thinking",
+        lambda: False,
+    )
+    monkeypatch.setattr(
         "src.backend.security.access_control.get_effective_user_concept_id",
         lambda: None,
     )
@@ -110,6 +114,77 @@ def _make_app(monkeypatch, llm: _LLMProtocol) -> Flask:
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.PromptTemplateService.render_prompt",
         _render_prompt_stub,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes._set_tool_progress",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes._build_turn_execution_diagnostics",
+        lambda **_kwargs: {
+            "generated_at_utc": "2026-03-29T00:00:00Z",
+            "request_id": None,
+            "code_version": "test",
+            "code_version_details": {"version": "test"},
+            "elapsed_ms": 0,
+            "prompt_preview": None,
+            "latest_progress": None,
+            "progress_events": [],
+            "activity_history": [],
+            "phase_history": [],
+            "tool_history": [],
+            "tool_call_count": 0,
+            "tool_success_count": 0,
+            "tool_failure_count": 0,
+            "tool_pending_count": 0,
+            "tool_call_start_count": 0,
+            "tool_call_end_count": 0,
+            "workflow_discovery": None,
+            "workflow_routing_diagnostics": None,
+            "workflow_stage_model": {"schema_version": "conversation_turn_stage_model.v1", "stages": []},
+            "workflow_stage_path": None,
+            "stage_diagnostics": [],
+            "timing_breakdown": None,
+        },
+    )
+    def _finalise_llm_debug_info_stub(*, llm_debug_info, actor_concept_id=None, namespace=None, **_kwargs):
+        payload = dict(llm_debug_info)
+        resolved_actor = (
+            actor_concept_id
+            if isinstance(actor_concept_id, str) and actor_concept_id.strip()
+            else namespace
+            if isinstance(namespace, str) and namespace.strip()
+            else payload.get("actor_concept_id")
+        )
+        if isinstance(resolved_actor, str) and resolved_actor.strip():
+            payload["actor_concept_id"] = resolved_actor.strip()
+        payload["turn_execution_record"] = {
+            "actor_concept_id": payload.get("actor_concept_id"),
+            "execution": {
+                "workflow_stage_path": {
+                    "schema_version": "conversation_turn_stage_path.v1",
+                    "path": [],
+                }
+            },
+        }
+        return payload
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes._finalise_llm_debug_info",
+        _finalise_llm_debug_info_stub,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_discovery_service.discover_workflows_for_turn",
+        lambda *_args, **_kwargs: {
+            "matches": [],
+            "candidates": [],
+            "match_count": 0,
+            "candidate_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_continuation_service.get_session_workflow_continuation_context",
+        lambda *_args, **_kwargs: None,
     )
 
     flask_app = Flask(__name__)
@@ -1049,6 +1124,61 @@ def test_presenter_mode_uses_shared_follow_up_summary_for_incomplete_tool_turns(
         "I ran tools for this request, but I do not have a reliable final answer yet."
         in llm.calls[0]["context"][1]["content"]
     )
+
+
+def test_presenter_mode_rewrites_failed_workflow_status_screen_backfill(monkeypatch):
+    llm = _StubLLMSequence(
+        [
+            (
+                "Workflow SAIL Phd Student Onboarding Workflow failed "
+                "(state: Onboarding Step: Collect Student Info Type)."
+            ),
+            (
+                "<screen>I couldn't complete that request because the selected "
+                "workflow failed before it produced a usable result.</screen>"
+            ),
+            "<spoken>I couldn't complete that request.</spoken>",
+        ]
+    )
+    app = _make_app(monkeypatch, llm)
+
+    client = app.test_client()
+    resp = client.post(
+        "/von/generate",
+        json={"prompt": "Analyse paper status", "presenter_mode": True},
+    )
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+
+    screen_text = body["response_channels"]["screen"]
+    assert body["response"] == screen_text
+    raw_failure_text = (
+        "Workflow SAIL Phd Student Onboarding Workflow failed "
+        "(state: Onboarding Step: Collect Student Info Type)."
+    )
+    assert raw_failure_text not in screen_text
+    assert "workflow failed" in screen_text.lower()
+    assert body["response_channels"]["spoken"] == "I couldn't complete that request."
+
+    llm_debug = body["llm_debug"]
+    screen_backfill_event = _find_transformation_event(
+        llm_debug, "screen_backfill"
+    )
+    assert screen_backfill_event["status"] == "success"
+    assert screen_backfill_event["source_path"] == "llm_synthesis"
+
+    spoken_backfill_event = _find_transformation_event(llm_debug, "spoken_backfill")
+    assert spoken_backfill_event["status"] == "success"
+    assert spoken_backfill_event["source_path"] == "llm_synthesis"
+
+    assert len(llm.calls) == 3
+    assert llm.calls[1]["prompt"] == "Generate <screen> display content"
+    assert (
+        "internal execution-status text"
+        in llm.calls[1]["context"][1]["content"]
+    )
+    assert llm.calls[2]["prompt"] == "Generate <spoken> talk track"
 
 
 def test_presenter_mode_rejects_hallucinated_description_write_in_screen_backfill(

@@ -27750,12 +27750,24 @@ class InternalMCPChatOrchestrator:
             ``run()`` appends routing and dispatch telemetry after branch-local
             response construction. Refreshing the frozen result here keeps the
             user-visible return payload aligned with the authoritative aux log
-            and avoids stale snapshots in diagnostics/MCP read surfaces.
+            and avoids stale snapshots in diagnostics/MCP read surfaces. Some
+            branch-local helpers also append result-only aux entries (for
+            example workflow-gap recovery), so preserve those before adding the
+            latest outer aux tail.
             """
+
+            base_aux = list(base_result.aux_llm_calls)
+            live_aux = list(aux_llm_calls)
+            common_prefix_len = 0
+            for base_entry, live_entry in zip(base_aux, live_aux):
+                if base_entry != live_entry:
+                    break
+                common_prefix_len += 1
+            merged_aux = tuple(base_aux + live_aux[common_prefix_len:])
 
             return replace(
                 base_result,
-                aux_llm_calls=tuple(aux_llm_calls),
+                aux_llm_calls=merged_aux,
                 orchestrator_duration_ms=_orchestrator_duration_ms(),
             )
 

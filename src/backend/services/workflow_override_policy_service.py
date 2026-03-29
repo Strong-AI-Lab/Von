@@ -407,6 +407,11 @@ def _context_discovery_score_floor(context: str) -> float:
     return 0.0
 
 
+def _context_requires_lexical_grounding(context: str) -> bool:
+    lowered = _safe_text(context).lower()
+    return lowered == "mutative_intent_direct_response_override"
+
+
 @dataclass(frozen=True)
 class WorkflowOverrideCandidateAssessment:
     workflow_id: str
@@ -472,6 +477,7 @@ def choose_custom_workflow_override_candidate(
     explicit_execution_request_required = _context_requires_explicit_execution_request(
         context
     )
+    requires_lexical_grounding = _context_requires_lexical_grounding(context)
 
     raw_assessments: list[dict[str, Any]] = []
     for candidate in candidates:
@@ -574,6 +580,14 @@ def choose_custom_workflow_override_candidate(
             suitable = False
             suitability_reason = "semantic_fit_below_threshold"
         elif (
+            requires_lexical_grounding
+            and item["role"] == _ROLE_EXECUTION
+            and not explicit_execution_request
+            and float(item["lexical_score"]) <= 0.0
+        ):
+            suitable = False
+            suitability_reason = "lexical_grounding_missing"
+        elif (
             item["role"] == _ROLE_AUTHORING
             and bool(item["policy_flags"].get("authoring_intent_required"))
             and not explicit_authoring_request
@@ -671,6 +685,11 @@ def choose_custom_workflow_override_candidate(
         for item in candidate_assessments
     ):
         reason_code = "maintenance_override_declined"
+    elif any(
+        item.suitability_reason == "lexical_grounding_missing"
+        for item in candidate_assessments
+    ):
+        reason_code = "lexical_grounding_missing"
     elif any(
         item.suitability_reason == "semantic_fit_below_threshold"
         for item in candidate_assessments

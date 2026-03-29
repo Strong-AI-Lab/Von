@@ -4825,7 +4825,7 @@ def _looks_like_internal_status_diagnostic(value: str | None) -> bool:
     if lowered.startswith("execution status:") or marker_count >= 2:
         return True
 
-    if lowered.startswith("workflow ") and " completed (state:" in lowered:
+    if lowered.startswith("workflow ") and " (state:" in lowered:
         return True
 
     return False
