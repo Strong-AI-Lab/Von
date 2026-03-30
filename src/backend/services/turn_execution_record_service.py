@@ -2940,172 +2940,9 @@ def _build_representation_required_effects_contract(
     prompt_text: Any,
     aux_llm_calls: Sequence[Mapping[str, Any]] | None,
 ) -> dict[str, Any] | None:
-    # Contract generation is intentionally deterministic and prompt/aux-driven
-    # so repeated runs over the same context produce the same contract_id.
-    prompt_clean = _safe_str(prompt_text) or ""
+    del prompt_text
     continuation_context = _extract_applied_workflow_continuation_context(aux_llm_calls)
-    continuation_contract = _representation_contract_from_continuation_context(
-        continuation_context
-    )
-    if not _prompt_requests_representation_action(
-        prompt_clean
-    ) and not _prompt_implies_low_risk_arxiv_representation(
-        prompt_clean,
-        aux_llm_calls=aux_llm_calls,
-    ):
-        return continuation_contract
-
-    file_copy_ids = _extract_required_file_copy_ids_from_aux(aux_llm_calls)
-    if not file_copy_ids:
-        file_copy_ids = _extract_file_copy_concept_ids_from_text(prompt_clean)
-    urls = _extract_urls_from_text(prompt_clean)
-    source_hints = _extract_representation_source_hints(prompt_clean)
-    artefact_source = _infer_representation_artefact_source(
-        file_copy_ids=file_copy_ids,
-        urls=urls,
-        source_hints=source_hints,
-    )
-    targets = list(file_copy_ids) if file_copy_ids else list(urls)
-
-    profiles, profile_loading = _load_representation_domain_profiles_from_vontology()
-    selected_profile = _select_representation_domain_profile(
-        prompt_clean,
-        profiles=profiles,
-    )
-    if selected_profile is None and isinstance(continuation_contract, Mapping):
-        return continuation_contract
-
-    profile_source = (
-        _safe_str(profile_loading.get("representation_profile_source"))
-        or "vontology_concept_text_relations"
-    )
-    profile_version_hash = _safe_str(profile_loading.get("profile_version_hash"))
-    requested_profile_concept_ids = _dedupe_string_sequence(
-        profile_loading.get("requested_concept_ids") or []
-    )
-    loaded_profile_concept_ids = _dedupe_string_sequence(
-        profile_loading.get("loaded_concept_ids") or []
-    )
-    selected_profile_concept_id = (
-        _safe_str(selected_profile.get("profile_concept_id"))
-        if isinstance(selected_profile, Mapping)
-        else None
-    )
-    profile_resolution: dict[str, Any] = {
-        "source": profile_source,
-        "requested_profile_concept_ids": requested_profile_concept_ids,
-        "loaded_profile_concept_ids": loaded_profile_concept_ids,
-        "loaded_profile_count": len(profiles),
-        "profile_version_hash": profile_version_hash,
-        "selected_profile_concept_id": selected_profile_concept_id,
-        "fail_closed": False,
-        "fail_closed_reason": None,
-    }
-
-    if not profiles:
-        fail_closed_reason = "profile_catalogue_unavailable"
-        profile_resolution["fail_closed"] = True
-        profile_resolution["fail_closed_reason"] = fail_closed_reason
-        effect_template = _build_fail_closed_representation_effect(
-            failure_code=_REPRESENTATION_CONFIG_UNAVAILABLE_FAILURE_CODE,
-            status_reason=(
-                "Representation intent was recognised, but the Vontology "
-                "representation profile catalogue could not be resolved."
-            ),
-            targets=targets,
-        )
-        contract_payload: dict[str, Any] = {
-            "schema_version": _REPRESENTATION_CONTRACT_SCHEMA_VERSION,
-            "intent_class": "representation",
-            "domain_profile_id": "representation",
-            "target_entity_class": "thing",
-            "artefact_source": artefact_source,
-            "artefact_context": {
-                "file_copy_ids": list(file_copy_ids),
-                "urls": list(urls),
-                "source_hints": list(source_hints),
-            },
-            "required_effects": [effect_template],
-            "default_decision_policy": dict(
-                _REPRESENTATION_DEFAULT_DECISION_POLICY_FALLBACK
-            ),
-            "profile_source": profile_source,
-            "profile_version_hash": profile_version_hash,
-            "profile_resolution": profile_resolution,
-        }
-        contract_fingerprint = _hash_payload(contract_payload) or ""
-        contract_payload["contract_id"] = f"required_effects_{contract_fingerprint[:16]}"
-        return contract_payload
-
-    if not isinstance(selected_profile, Mapping):
-        fail_closed_reason = "profile_unmatched_for_intent"
-        profile_resolution["fail_closed"] = True
-        profile_resolution["fail_closed_reason"] = fail_closed_reason
-        effect_template = _build_fail_closed_representation_effect(
-            failure_code=_REPRESENTATION_PROFILE_UNMATCHED_FAILURE_CODE,
-            status_reason=(
-                "Representation intent was recognised, but no Vontology "
-                "representation profile matched this prompt."
-            ),
-            targets=targets,
-        )
-        contract_payload = {
-            "schema_version": _REPRESENTATION_CONTRACT_SCHEMA_VERSION,
-            "intent_class": "representation",
-            "domain_profile_id": "representation",
-            "target_entity_class": "thing",
-            "artefact_source": artefact_source,
-            "artefact_context": {
-                "file_copy_ids": list(file_copy_ids),
-                "urls": list(urls),
-                "source_hints": list(source_hints),
-            },
-            "required_effects": [effect_template],
-            "default_decision_policy": dict(
-                _REPRESENTATION_DEFAULT_DECISION_POLICY_FALLBACK
-            ),
-            "profile_source": profile_source,
-            "profile_version_hash": profile_version_hash,
-            "profile_resolution": profile_resolution,
-        }
-        contract_fingerprint = _hash_payload(contract_payload) or ""
-        contract_payload["contract_id"] = f"required_effects_{contract_fingerprint[:16]}"
-        return contract_payload
-
-    required_tools = _resolve_representation_required_tools(
-        profile=selected_profile,
-        artefact_source=artefact_source,
-    )
-    effect_template = _build_representation_required_effect_template(
-        profile=selected_profile,
-        required_tools=required_tools,
-        targets=targets,
-    )
-    default_decision_policy = _normalise_representation_decision_policy(
-        selected_profile.get("default_decision_policy")
-    )
-
-    contract_payload: dict[str, Any] = {
-        "schema_version": _REPRESENTATION_CONTRACT_SCHEMA_VERSION,
-        "intent_class": "representation",
-        "domain_profile_id": _safe_str(selected_profile.get("profile_id")) or "representation",
-        "domain_profile_concept_id": _safe_str(selected_profile.get("profile_concept_id")),
-        "target_entity_class": _safe_str(selected_profile.get("target_entity_class")) or "thing",
-        "artefact_source": artefact_source,
-        "artefact_context": {
-            "file_copy_ids": list(file_copy_ids),
-            "urls": list(urls),
-            "source_hints": list(source_hints),
-        },
-        "required_effects": [effect_template],
-        "default_decision_policy": default_decision_policy,
-        "profile_source": profile_source,
-        "profile_version_hash": profile_version_hash,
-        "profile_resolution": profile_resolution,
-    }
-    contract_fingerprint = _hash_payload(contract_payload) or ""
-    contract_payload["contract_id"] = f"required_effects_{contract_fingerprint[:16]}"
-    return contract_payload
+    return _representation_contract_from_continuation_context(continuation_context)
 
 
 def _is_representation_effect_type(effect_type: str | None) -> bool:
@@ -3376,36 +3213,11 @@ def _materialise_required_effects_from_contract(
 
 def _infer_mutation_required_effect(
     *,
-    prompt_text: Any,
     successful_write_tools: Sequence[str],
     failed_tools: Sequence[str],
     blocked_tools: Sequence[str],
 ) -> dict[str, Any] | None:
-    prompt_clean = prompt_text if isinstance(prompt_text, str) else ""
-    lowered = prompt_clean.lower()
-
-    has_mutation_term = _has_affirmative_mutation_term(lowered)
-    has_kb_term = any(token in lowered for token in _KB_TERMS)
-    has_write_object_term = any(token in lowered for token in _WRITE_OBJECT_TERMS)
-    diagnostic_only_prompt = _looks_like_diagnostic_only_prompt(lowered)
-    explicit_missing_relation_phrase = any(
-        phrase in lowered
-        for phrase in (
-            "relations were not added",
-            "relation was not added",
-            "predicates were not added",
-            "proceed with the predicates",
-            "proceed with predicates",
-        )
-    )
-
-    mutation_intent = explicit_missing_relation_phrase or (
-        has_mutation_term and (has_kb_term or has_write_object_term)
-    )
-    if diagnostic_only_prompt and not explicit_missing_relation_phrase:
-        mutation_intent = False
-
-    if not mutation_intent and not successful_write_tools and not failed_tools and not blocked_tools:
+    if not successful_write_tools and not failed_tools and not blocked_tools:
         return None
 
     effect_status = "pending"
@@ -3434,7 +3246,7 @@ def _infer_mutation_required_effect(
     required_tools = list(successful_write_tools[:3]) or ["add_relationship"]
     mutation_effect = {
         "effect_id": "effect_1",
-        "intent_origin": "implicit" if mutation_intent else "explicit",
+        "intent_origin": "observed_tool_activity",
         "effect_type": "kb_mutation",
         "description": "Apply or repair requested knowledge-base relation/predicate changes.",
         "required_tools": required_tools,
@@ -3855,7 +3667,6 @@ def build_turn_execution_record(
     mutation_effect = None
     if not representation_effects:
         mutation_effect = _infer_mutation_required_effect(
-            prompt_text=prompt_text,
             successful_write_tools=successful_write_tools,
             failed_tools=failed_tools,
             blocked_tools=blocked_tools,

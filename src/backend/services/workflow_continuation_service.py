@@ -30,10 +30,6 @@ _FOLLOW_UP_REPAIR_PROMPT_PATTERN = re.compile(
     r"weren't|were not|why didn't|why did not|why wasn't|why was not|yet)\b",
     flags=re.IGNORECASE,
 )
-_REPRESENTATION_TERM_PATTERN = re.compile(
-    r"\b(?:represent|representation|materialis(?:e|ation)|model|profile)\b",
-    flags=re.IGNORECASE,
-)
 
 
 def _safe_str(value: Any) -> str | None:
@@ -205,20 +201,6 @@ def assess_prompt_for_workflow_continuation(
 
     if _FOLLOW_UP_REPAIR_PROMPT_PATTERN.search(prompt_text):
         return {"applies": True, "reason": "explicit_follow_up_or_repair_prompt"}
-
-    unresolved_effects = continuation_context.get("unresolved_required_effects")
-    if isinstance(unresolved_effects, list):
-        for effect in unresolved_effects:
-            if not isinstance(effect, Mapping):
-                continue
-            effect_type = _safe_str(effect.get("effect_type")) or ""
-            if "representation" in effect_type.lower() and _REPRESENTATION_TERM_PATTERN.search(
-                prompt_text
-            ):
-                return {
-                    "applies": True,
-                    "reason": "representation_follow_up_prompt",
-                }
 
     return {"applies": False, "reason": "prompt_not_continuation"}
 
