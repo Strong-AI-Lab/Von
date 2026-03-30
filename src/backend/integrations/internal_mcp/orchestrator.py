@@ -21144,13 +21144,18 @@ class InternalMCPChatOrchestrator:
                 apply_reason = str(apply_decision.get("reason") or "").strip() or None
                 if isinstance(aux_llm_calls, list):
                     continuation_decision_source = (
-                        "prompt_shape_heuristic"
-                        if apply_reason
-                        in {
-                            "short_follow_up_prompt",
-                            "explicit_follow_up_or_repair_prompt",
-                        }
-                        else "workflow_state_check"
+                        str(
+                            apply_decision.get("decision_source") or ""
+                        ).strip()
+                        or (
+                            "prompt_shape_heuristic"
+                            if apply_reason
+                            in {
+                                "short_follow_up_prompt",
+                                "explicit_follow_up_or_repair_prompt",
+                            }
+                            else "workflow_state_check"
+                        )
                     )
                     try:
                         aux_llm_calls.append(

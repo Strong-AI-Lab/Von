@@ -25,9 +25,9 @@ _SHORT_CONTINUATION_PROMPT_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 _FOLLOW_UP_REPAIR_PROMPT_PATTERN = re.compile(
-    r"\b(?:continue|proceed|finish|complete|retry|repair|fix|verify|check|"
+    r"\b(?:continue|proceed|finish|complete|retry|repair|fix|verify|"
     r"still missing|not created|not added|didn't|did not|wasn't|was not|"
-    r"weren't|were not|why didn't|why did not|why wasn't|why was not|yet)\b",
+    r"weren't|were not|why didn't|why did not|why wasn't|why was not)\b",
     flags=re.IGNORECASE,
 )
 
@@ -181,28 +181,75 @@ def assess_prompt_for_workflow_continuation(
     prompt: str | None,
     continuation_context: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
-    """Classify whether the current prompt should continue prior workflow state."""
+    """Classify whether the current prompt should continue prior workflow state.
+
+    Priority cascade:
+    1. Gate checks: empty prompt or no context → not continuation.
+    2. No open work in context → not continuation (workflow-state decision).
+    3. Workflow-state-authoritative: open work under a specific workflow →
+       continuation applies regardless of prompt shape.
+    4. Prompt-shape heuristics (short confirming prompt or repair keywords)
+       — temporary scaffolding, telemetry-visible via ``decision_source``.
+
+    Returns a dict with ``applies``, ``reason``, and ``decision_source``
+    (one of ``"gate"``, ``"workflow_state"``, or ``"prompt_shape_heuristic"``).
+    """
 
     prompt_text = _safe_str(prompt) or ""
     if not prompt_text:
-        return {"applies": False, "reason": "empty_prompt"}
+        return {"applies": False, "reason": "empty_prompt", "decision_source": "gate"}
     if not isinstance(continuation_context, Mapping):
-        return {"applies": False, "reason": "no_continuation_context"}
+        return {
+            "applies": False,
+            "reason": "no_continuation_context",
+            "decision_source": "gate",
+        }
 
     has_open_work = bool(
         continuation_context.get("requires_follow_up")
         or continuation_context.get("has_unresolved_required_effects")
     )
     if not has_open_work:
-        return {"applies": False, "reason": "no_open_work"}
+        return {
+            "applies": False,
+            "reason": "no_open_work",
+            "decision_source": "workflow_state",
+        }
 
+    # Workflow-state-authoritative path: when open work exists under a
+    # specific workflow, the persisted continuation state is authoritative
+    # and continuation applies regardless of prompt shape.
+    has_specific_workflow = bool(
+        _safe_str(continuation_context.get("selected_workflow_id"))
+    )
+    if has_specific_workflow:
+        return {
+            "applies": True,
+            "reason": "workflow_state_authoritative",
+            "decision_source": "workflow_state",
+        }
+
+    # Prompt-shape heuristics (temporary scaffolding for cases without a
+    # specific workflow).  Annotated with decision_source for telemetry.
     if len(prompt_text) <= 24 and _SHORT_CONTINUATION_PROMPT_PATTERN.search(prompt_text):
-        return {"applies": True, "reason": "short_follow_up_prompt"}
+        return {
+            "applies": True,
+            "reason": "short_follow_up_prompt",
+            "decision_source": "prompt_shape_heuristic",
+        }
 
     if _FOLLOW_UP_REPAIR_PROMPT_PATTERN.search(prompt_text):
-        return {"applies": True, "reason": "explicit_follow_up_or_repair_prompt"}
+        return {
+            "applies": True,
+            "reason": "explicit_follow_up_or_repair_prompt",
+            "decision_source": "prompt_shape_heuristic",
+        }
 
-    return {"applies": False, "reason": "prompt_not_continuation"}
+    return {
+        "applies": False,
+        "reason": "prompt_not_continuation",
+        "decision_source": "prompt_shape_heuristic",
+    }
 
 
 def build_workflow_continuation_routing_prompt(

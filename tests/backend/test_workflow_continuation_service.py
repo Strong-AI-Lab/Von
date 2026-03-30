@@ -79,13 +79,76 @@ def test_assess_prompt_for_workflow_continuation_detects_repair_turn() -> None:
             "unresolved_required_effects": [
                 {"effect_type": "scholarly_representation"}
             ],
+            # No selected_workflow_id → falls through to prompt-shape heuristic.
         },
     )
 
-    assert decision == {
-        "applies": True,
-        "reason": "explicit_follow_up_or_repair_prompt",
-    }
+    assert decision["applies"] is True
+    assert decision["reason"] == "explicit_follow_up_or_repair_prompt"
+    assert decision["decision_source"] == "prompt_shape_heuristic"
+
+
+def test_workflow_state_authoritative_overrides_prompt_shape() -> None:
+    """When continuation context has open work + a specific workflow_id,
+    continuation applies regardless of prompt content."""
+    decision = service.assess_prompt_for_workflow_continuation(
+        prompt="Tell me about quantum physics.",
+        continuation_context={
+            "requires_follow_up": True,
+            "has_unresolved_required_effects": True,
+            "selected_workflow_id": "#V#scholarly_paper_representation_workflow",
+            "unresolved_required_effects": [
+                {"effect_type": "scholarly_representation"}
+            ],
+        },
+    )
+
+    assert decision["applies"] is True
+    assert decision["reason"] == "workflow_state_authoritative"
+    assert decision["decision_source"] == "workflow_state"
+
+
+def test_narrowed_heuristic_no_longer_matches_bare_yet() -> None:
+    """The word 'yet' alone should not trigger continuation heuristic."""
+    decision = service.assess_prompt_for_workflow_continuation(
+        prompt="I haven't looked at this yet but I'll try later.",
+        continuation_context={
+            "requires_follow_up": True,
+            "has_unresolved_required_effects": False,
+        },
+    )
+
+    assert decision["applies"] is False
+    assert decision["reason"] == "prompt_not_continuation"
+
+
+def test_narrowed_heuristic_no_longer_matches_bare_check() -> None:
+    """The word 'check' alone should not trigger continuation heuristic."""
+    decision = service.assess_prompt_for_workflow_continuation(
+        prompt="Check out this new paper I found.",
+        continuation_context={
+            "requires_follow_up": True,
+            "has_unresolved_required_effects": False,
+        },
+    )
+
+    assert decision["applies"] is False
+    assert decision["reason"] == "prompt_not_continuation"
+
+
+def test_no_open_work_returns_workflow_state_decision_source() -> None:
+    """When there's no open work, the decision is workflow-state based."""
+    decision = service.assess_prompt_for_workflow_continuation(
+        prompt="proceed",
+        continuation_context={
+            "requires_follow_up": False,
+            "has_unresolved_required_effects": False,
+        },
+    )
+
+    assert decision["applies"] is False
+    assert decision["reason"] == "no_open_work"
+    assert decision["decision_source"] == "workflow_state"
 
 
 def test_build_workflow_continuation_routing_prompt_summarises_targets_and_tools() -> None:
