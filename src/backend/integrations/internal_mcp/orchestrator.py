@@ -246,6 +246,8 @@ class _PromptRequirementEvaluation:
     required_scholarly_representation_file_copy_ids: tuple[str, ...] = ()
     required_create_type_name: str | None = None
     unavailable_required_tools: tuple[str, ...] = ()
+    # DEPRECATED: Always False — scholarly representation intent is now
+    # workflow/LLM-owned.  Kept for structural compatibility.
     scholarly_representation_intent: bool = False
     missing_tools: tuple[str, ...] = ()
     missing_fetch_concept_ids: tuple[str, ...] = ()
@@ -1138,39 +1140,24 @@ class InternalMCPChatOrchestrator:
         r"\b([a-z][a-z0-9_]*)\s+MCP\s+(?:([a-z]+)\s+)?tools?\b",
         flags=re.IGNORECASE,
     )
-    _PROMPT_CONCEPT_VERIFICATION_HINT_PATTERN = re.compile(
-        r"\b("
-        r"verify|verification|check|confirm|validate|"
-        r"exist(?:s|ence)?|real|valid|"
-        r"do(?:es)?\s+.+?\s+exist|"
-        r"is\s+.+?\s+(?:real|valid)"
-        r")\b",
-        flags=re.IGNORECASE,
-    )
+    # NOTE: Concept verification intent (verify/check/confirm/exist) is now
+    # workflow/LLM-owned — the selector and LLM decide when to call
+    # concept_exists or fetch_concept.  The former Python regex pattern
+    # (_PROMPT_CONCEPT_VERIFICATION_HINT_PATTERN) was removed as part of
+    # the JVNAUTOSCI-1613 authority refactor (Phase 9).
     _PROMPT_FILE_COPY_REFERENCE_PATTERN = re.compile(
         r"(#V#[A-Za-z0-9][A-Za-z0-9._-]*file_copy[A-Za-z0-9._-]*"
         r"|\b(?:computer_)?file_copy_[A-Za-z0-9][A-Za-z0-9._-]*\b)",
         flags=re.IGNORECASE,
     )
-    _PROMPT_SCHOLARLY_REPRESENTATION_INTENT_PATTERN = re.compile(
-        r"\b("
-        r"represent(?:ation|ing)?\s+(?:the\s+)?(?:corresponding\s+)?paper"
-        r"|paper\s+representation"
-        r"|represent\s+the\s+paper\s+not\s+the\s+file"
-        r"|represent\s+the\s+paper\s+rather\s+than\s+the\s+file"
-        r"|fully\s+represent\s+(?:the\s+)?(?:corresponding\s+)?paper"
-        r"|scholarly\s+paper\s+representation"
-        r")\b",
-        flags=re.IGNORECASE,
-    )
-    _PROMPT_PAPER_INTENT_PATTERN = re.compile(
-        r"\b(paper|scholarly\s+(?:paper|article)|article)\b",
-        flags=re.IGNORECASE,
-    )
-    _PROMPT_REPRESENTATION_INTENT_PATTERN = re.compile(
-        r"\b(represent(?:ation|ing)?|formal(?:ise|ize)|model(?:ling)?|reconstruct)\b",
-        flags=re.IGNORECASE,
-    )
+    # NOTE: Scholarly representation intent (represent the paper / paper
+    # representation) and paper/representation intent patterns are now
+    # workflow/LLM-owned — the selector and LLM decide when scholarly
+    # representation is needed. The former Python regex patterns
+    # (_PROMPT_SCHOLARLY_REPRESENTATION_INTENT_PATTERN,
+    # _PROMPT_PAPER_INTENT_PATTERN, _PROMPT_REPRESENTATION_INTENT_PATTERN)
+    # were removed as part of the JVNAUTOSCI-1613 authority refactor
+    # (Phase 9).
     _FILE_COPY_CONCEPT_ID_PATTERN = re.compile(
         r"^#V#[A-Za-z0-9][A-Za-z0-9._-]*file_copy[A-Za-z0-9._-]*$",
         flags=re.IGNORECASE,
@@ -7138,7 +7125,62 @@ class InternalMCPChatOrchestrator:
                 "workflow_id": "#V#episode_evaluation_workflow",
             }
 
+        # Standalone annotation for the episode-evaluation auto-trigger gate.
+        # This Python gate decision ("should we launch analytical recovery?")
+        # is logged independently so it is visible in per-stage authority
+        # summaries without being buried inside the completion gate payload.
         aux_llm_calls = data.get("aux_llm_calls")
+        autotrigger_attempted = bool(
+            introspection_autotrigger
+            and introspection_autotrigger.get("attempted")
+        )
+        autotrigger_reason = (
+            str(introspection_autotrigger.get("reason") or "")
+            if introspection_autotrigger
+            else ""
+        )
+        if isinstance(aux_llm_calls, list):
+            try:
+                aux_llm_calls.append(
+                    annotate_python_decision_event(
+                        {
+                            "type": "episode_evaluation_autotrigger_gate",
+                            "workflow_id": "#V#episode_evaluation_workflow",
+                            "enabled": autotrigger_enabled,
+                            "attempted": autotrigger_attempted,
+                            "triggered": bool(
+                                introspection_autotrigger
+                                and (
+                                    introspection_autotrigger.get("triggered")
+                                    or introspection_autotrigger.get(
+                                        "idempotent_reused"
+                                    )
+                                )
+                            ),
+                            "gate_inputs": {
+                                "requires_follow_up": requires_follow_up,
+                                "repeat_iteration": repeat_iteration,
+                                "already_autotriggered": already_autotriggered,
+                            },
+                            "skip_reason": autotrigger_reason or None,
+                        },
+                        stage="completion_gate",
+                        component="internal_mcp_orchestrator",
+                        function="_action_turn_execution_completion_gate",
+                        decision_class="episode_evaluation_autotrigger_gate",
+                        decision_source="gate_check",
+                        changed_outcome=autotrigger_attempted,
+                        reason_code=(
+                            "autotrigger_launched"
+                            if autotrigger_attempted
+                            else autotrigger_reason or "autotrigger_skipped"
+                        ),
+                        possible_inappropriate_python_code_use=False,
+                    )
+                )
+            except Exception:
+                pass
+
         if isinstance(aux_llm_calls, list):
             try:
                 aux_llm_calls.append(
@@ -27277,12 +27319,22 @@ class InternalMCPChatOrchestrator:
             except Exception as exc:
                 aux_payload = list(base_result.aux_llm_calls)
                 aux_payload.append(
-                    {
-                        "type": "workflow_gap_recovery",
-                        "status": "failed",
-                        "error": str(exc),
-                        "error_class": type(exc).__name__,
-                    }
+                    annotate_python_decision_event(
+                        {
+                            "type": "workflow_gap_recovery",
+                            "status": "failed",
+                            "error": str(exc),
+                            "error_class": type(exc).__name__,
+                        },
+                        stage="workflow_dispatch",
+                        component="internal_mcp_orchestrator",
+                        function="_maybe_apply_workflow_gap_recovery",
+                        decision_class="workflow_gap_recovery_gate",
+                        decision_source="gate_check",
+                        changed_outcome=False,
+                        reason_code="workflow_gap_recovery_execution_failed",
+                        possible_inappropriate_python_code_use=False,
+                    )
                 )
                 return OrchestratorResult(
                     response_text=base_result.response_text,
@@ -27314,19 +27366,29 @@ class InternalMCPChatOrchestrator:
 
             aux_payload = list(base_result.aux_llm_calls)
             aux_payload.append(
-                {
-                    "type": "workflow_gap_recovery",
-                    "status": "applied",
-                    "workflow_id": WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
-                    "final_state": recovery_result.final_state,
-                    "completed": recovery_result.completed,
-                    "recovery_outcome": recovery_result.data.get(
-                        "workflow_gap_recovery_outcome"
-                    ),
-                    "candidate_workflow_id": recovery_result.data.get(
-                        "workflow_gap_candidate_workflow_id"
-                    ),
-                }
+                annotate_python_decision_event(
+                    {
+                        "type": "workflow_gap_recovery",
+                        "status": "applied",
+                        "workflow_id": WORKFLOW_DISCOVERY_GAP_RECOVERY_WORKFLOW_ID,
+                        "final_state": recovery_result.final_state,
+                        "completed": recovery_result.completed,
+                        "recovery_outcome": recovery_result.data.get(
+                            "workflow_gap_recovery_outcome"
+                        ),
+                        "candidate_workflow_id": recovery_result.data.get(
+                            "workflow_gap_candidate_workflow_id"
+                        ),
+                    },
+                    stage="workflow_dispatch",
+                    component="internal_mcp_orchestrator",
+                    function="_maybe_apply_workflow_gap_recovery",
+                    decision_class="workflow_gap_recovery_gate",
+                    decision_source="gate_check",
+                    changed_outcome=True,
+                    reason_code="workflow_gap_recovery_applied",
+                    possible_inappropriate_python_code_use=False,
+                )
             )
             return OrchestratorResult(
                 response_text=final_response_text.strip(),
