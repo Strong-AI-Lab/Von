@@ -1655,3 +1655,51 @@ def test_run_keeps_non_claim_responses_free_of_completion_validation_events():
     }
     assert "completion_claim_detection" not in aux_types
     assert "completion_claim_validation" not in aux_types
+
+
+def test_run_critic_emits_annotated_response_critic_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VON_CRITIC_ENABLE", "1")
+    llm = _RecorderLLM(["Initial response."])
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=_DummyGateway(),
+        selector_enabled=False,
+        max_tool_invocations=1,
+    )
+
+    original_run_llm_with_fallbacks = orchestrator._run_llm_with_fallbacks
+
+    def _patched_run_llm_with_fallbacks(*args, **kwargs):
+        if kwargs.get("stage") == "critic":
+            return (
+                '{"approve": false, "revised_response": "Critic-approved response."}',
+                "critic-model",
+                None,
+            )
+        return original_run_llm_with_fallbacks(*args, **kwargs)
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_llm_with_fallbacks",
+        _patched_run_llm_with_fallbacks,
+    )
+
+    result = orchestrator.run(
+        prompt="Review the response.",
+        context=None,
+        llm_client=llm,
+        model="primary-model",
+        user_namespace="#V#user",
+    )
+
+    assert result.response_text == "Critic-approved response."
+    critic_entries = [
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict) and entry.get("type") == "critic"
+    ]
+    assert critic_entries
+    assert critic_entries[-1].get("decision_class") == "response_critic"
+    assert critic_entries[-1].get("decision_source") == "llm_review_response"

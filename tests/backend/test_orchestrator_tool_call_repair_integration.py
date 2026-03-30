@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Mapping, Optional, Sequence, cast
 
 import pytest
@@ -110,7 +111,6 @@ def test_tool_call_repair_recovers_invalid_payload(
     assert isinstance(gateway.invocations[0]["payload"]["top_k"], int)
     assert "validation error" not in result.response_text.lower()
 
-
 def test_tool_call_repair_recovers_unknown_tool_with_params(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -141,3 +141,46 @@ def test_tool_call_repair_recovers_unknown_tool_with_params(
     assert gateway.invocations[0]["payload"]["query"].strip()
     assert isinstance(gateway.invocations[0]["payload"]["top_k"], int)
     assert "validation error" not in result.response_text.lower()
+
+
+def test_attempt_tool_call_repair_emits_annotated_prompt_and_response_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VON_TOOL_CALL_REPAIR_ENABLE", "1")
+
+    gateway = _Gateway()
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, gateway))
+    llm = _SequencedLLM(
+        ['{"action":"call_tool","tool":"search_knowledge_base","payload":{"query":"fixed","top_k":7}}']
+    )
+    aux_llm_calls: list[Mapping[str, Any]] = []
+
+    repaired_calls = orchestrator._attempt_tool_call_repair(
+        current_response='{"action":"call_tool","tool":"search_knowledge_base","payload":{"query":"fixed","top_k":"bad"}}',
+        errors=["payload.top_k must be int"],
+        tool_list=["search_knowledge_base"],
+        llm_client=llm,
+        policy_state=cast(Any, None),
+        default_model="test-model",
+        registry_snapshot=None,
+        user_concept_id=None,
+        org_concept_id=None,
+        aux_llm_calls=aux_llm_calls,
+        llm_calls_log=[],
+        record_llm_call=None,
+    )
+
+    assert repaired_calls is not None
+    assert repaired_calls[0]["tool"] == "search_knowledge_base"
+    assert repaired_calls[0]["payload"]["top_k"] == 7
+
+    repair_entries = [
+        entry
+        for entry in aux_llm_calls
+        if isinstance(entry, dict) and entry.get("type") == "tool_call_repair"
+    ]
+    assert len(repair_entries) == 2
+    assert repair_entries[0].get("decision_class") == "tool_call_repair_prompt"
+    assert repair_entries[0].get("decision_source") == "workflow_retry_prompt"
+    assert repair_entries[1].get("decision_class") == "tool_call_repair_response"
+    assert repair_entries[1].get("decision_source") == "workflow_retry_response"
