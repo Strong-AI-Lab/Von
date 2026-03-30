@@ -3437,7 +3437,7 @@ def test_custom_workflow_run_applies_launch_contract_without_workflow_specific_g
     ]
 
 
-def test_custom_workflow_launchability_falls_back_when_replacement_lacks_discovery_signal(
+def test_custom_workflow_launchability_promotes_launchable_replacement_candidate(
     monkeypatch,
 ):
     import src.backend.services.workflow_selection_policy_service as policy_module
@@ -3579,11 +3579,11 @@ def test_custom_workflow_launchability_falls_back_when_replacement_lacks_discove
     )
 
     assert result.response_text == "Handled via safe tool pipeline fallback."
-    assert captured_execution["workflow_id"] == TOOL_CALLING_WORKFLOW_ID
+    assert captured_execution["workflow_id"] == launchable_workflow_id
 
     assert result.workflow_routing is not None
-    assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
-    assert result.workflow_routing.verdict == "tool_contract_override"
+    assert result.workflow_routing.workflow_id == launchable_workflow_id
+    assert result.workflow_routing.verdict == "launch_contract_override"
     assert result.workflow_routing.source == "selector_override"
 
     override_policy_entry = next(
@@ -3596,16 +3596,16 @@ def test_custom_workflow_launchability_falls_back_when_replacement_lacks_discove
         None,
     )
     assert override_policy_entry is not None
-    assert override_policy_entry.get("outcome") == "decline"
-    assert override_policy_entry.get("reason_code") == "semantic_fit_insufficient"
+    assert override_policy_entry.get("outcome") == "promote"
+    assert override_policy_entry.get("reason_code") == "launchable_custom_workflow_found"
 
     candidate_assessments = override_policy_entry.get("candidate_assessments")
     assert isinstance(candidate_assessments, list)
     replacement_assessment = candidate_assessments[0]
     assert replacement_assessment.get("workflow_id") == launchable_workflow_id
     assert replacement_assessment.get("launchable") is True
-    assert replacement_assessment.get("suitable") is False
-    assert replacement_assessment.get("suitability_reason") == "semantic_fit_below_threshold"
+    assert replacement_assessment.get("suitable") is True
+    assert replacement_assessment.get("suitability_reason") == "suitable"
 
     override_entry = next(
         (
@@ -3614,30 +3614,31 @@ def test_custom_workflow_launchability_falls_back_when_replacement_lacks_discove
             if isinstance(entry, dict)
             and entry.get("type") == "workflow_selector_override"
             and entry.get("reason")
-            == "selected_custom_workflow_launchability_requires_safe_general_fallback"
+            == "selected_custom_workflow_not_launchable_from_turn_inputs"
         ),
         None,
     )
     assert override_entry is not None
     assert override_entry.get("prior_selected_workflow_id") == selected_workflow_id
-    assert override_entry.get("selected_workflow_id") == TOOL_CALLING_WORKFLOW_ID
-    assert override_entry.get("custom_workflow_override_reason") == "semantic_fit_insufficient"
+    assert override_entry.get("selected_workflow_id") == launchable_workflow_id
+    assert (
+        override_entry.get("custom_workflow_override_reason")
+        == "launchable_custom_workflow_found"
+    )
 
     dispatch_boundaries = [
         entry
         for entry in result.aux_llm_calls
         if isinstance(entry, dict) and entry.get("type") == "workflow_dispatch_boundary"
     ]
-    assert [entry.get("boundary") for entry in dispatch_boundaries[-4:]] == [
+    assert [entry.get("boundary") for entry in dispatch_boundaries[-3:]] == [
         "execution_mode_selected",
-        "contract_resolution",
         "workflow_handoff",
         "workflow_terminal",
     ]
-    assert dispatch_boundaries[-4].get("selected_workflow_id") == TOOL_CALLING_WORKFLOW_ID
-    assert dispatch_boundaries[-3].get("selected_workflow_id") == TOOL_CALLING_WORKFLOW_ID
-    assert dispatch_boundaries[-2].get("selected_workflow_id") == TOOL_CALLING_WORKFLOW_ID
-    assert dispatch_boundaries[-1].get("selected_workflow_id") == TOOL_CALLING_WORKFLOW_ID
+    assert dispatch_boundaries[-3].get("selected_workflow_id") == launchable_workflow_id
+    assert dispatch_boundaries[-2].get("selected_workflow_id") == launchable_workflow_id
+    assert dispatch_boundaries[-1].get("selected_workflow_id") == launchable_workflow_id
 
 
 def test_custom_workflow_override_prefers_semantically_fit_execution_candidate(
@@ -5644,10 +5645,7 @@ def test_tool_planner_receives_authoritative_workflow_continuation_context(
     )
     assert continuation_entry is not None
     assert continuation_entry.get("applied") is True
-    assert continuation_entry.get("reason") in {
-        "short_follow_up_prompt",
-        "explicit_follow_up_or_repair_prompt",
-    }
+    assert continuation_entry.get("reason") == "workflow_state_authoritative"
 
 
 # ---------------------------------------------------------------------------

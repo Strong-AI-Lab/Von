@@ -70,7 +70,7 @@ def test_get_session_workflow_continuation_context_uses_latest_record_and_episod
     assert context["required_effects_contract"]["domain_profile_id"] == "paper"
 
 
-def test_assess_prompt_for_workflow_continuation_detects_repair_turn() -> None:
+def test_assess_prompt_for_workflow_continuation_requires_selected_workflow() -> None:
     decision = service.assess_prompt_for_workflow_continuation(
         prompt="You did not create this concept at all.",
         continuation_context={
@@ -79,13 +79,13 @@ def test_assess_prompt_for_workflow_continuation_detects_repair_turn() -> None:
             "unresolved_required_effects": [
                 {"effect_type": "scholarly_representation"}
             ],
-            # No selected_workflow_id → falls through to prompt-shape heuristic.
+            # No selected_workflow_id -> workflow state alone is insufficient.
         },
     )
 
-    assert decision["applies"] is True
-    assert decision["reason"] == "explicit_follow_up_or_repair_prompt"
-    assert decision["decision_source"] == "prompt_shape_heuristic"
+    assert decision["applies"] is False
+    assert decision["reason"] == "open_work_without_selected_workflow"
+    assert decision["decision_source"] == "workflow_state"
 
 
 def test_workflow_state_authoritative_overrides_prompt_shape() -> None:
@@ -109,7 +109,7 @@ def test_workflow_state_authoritative_overrides_prompt_shape() -> None:
 
 
 def test_narrowed_heuristic_no_longer_matches_bare_yet() -> None:
-    """The word 'yet' alone should not trigger continuation heuristic."""
+    """Prompt wording alone should not trigger continuation without workflow state."""
     decision = service.assess_prompt_for_workflow_continuation(
         prompt="I haven't looked at this yet but I'll try later.",
         continuation_context={
@@ -119,11 +119,12 @@ def test_narrowed_heuristic_no_longer_matches_bare_yet() -> None:
     )
 
     assert decision["applies"] is False
-    assert decision["reason"] == "prompt_not_continuation"
+    assert decision["reason"] == "open_work_without_selected_workflow"
+    assert decision["decision_source"] == "workflow_state"
 
 
 def test_narrowed_heuristic_no_longer_matches_bare_check() -> None:
-    """The word 'check' alone should not trigger continuation heuristic."""
+    """Prompt wording alone should not trigger continuation without workflow state."""
     decision = service.assess_prompt_for_workflow_continuation(
         prompt="Check out this new paper I found.",
         continuation_context={
@@ -133,7 +134,8 @@ def test_narrowed_heuristic_no_longer_matches_bare_check() -> None:
     )
 
     assert decision["applies"] is False
-    assert decision["reason"] == "prompt_not_continuation"
+    assert decision["reason"] == "open_work_without_selected_workflow"
+    assert decision["decision_source"] == "workflow_state"
 
 
 def test_no_open_work_returns_workflow_state_decision_source() -> None:

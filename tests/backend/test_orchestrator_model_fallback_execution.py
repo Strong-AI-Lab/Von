@@ -491,11 +491,6 @@ def test_tool_calling_backfill_uses_compacted_follow_up_context(monkeypatch) -> 
         orchestrator, "_store_prompt_requirement_evaluation", lambda *_args, **_kwargs: None
     )
     monkeypatch.setattr(
-        orchestrator,
-        "_assess_minimal_imposition_auto_proceed",
-        lambda _text: {"should_auto_proceed": False},
-    )
-    monkeypatch.setattr(
         orchestrator, "_sanitise_user_visible_action_output", lambda text, **_kwargs: text
     )
     monkeypatch.setattr(

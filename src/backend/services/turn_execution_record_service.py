@@ -1889,6 +1889,7 @@ def _extract_completion_claim_signals(
     response_text: Any,
     aux_llm_calls: Sequence[Mapping[str, Any]] | None,
 ) -> dict[str, Any]:
+    del response_text
     detected_count = 0
     validation_seen = False
     verified_count = 0
@@ -1917,13 +1918,6 @@ def _extract_completion_claim_signals(
                 )
             except Exception:
                 pass
-
-    if detected_count <= 0 and isinstance(response_text, str):
-        # Conservative fallback for non-orchestrator paths where aux telemetry
-        # may be absent.
-        lowered = response_text.lower()
-        if re.search(r"\b(completed|done|finished|applied|updated|added)\b", lowered):
-            detected_count = 1
 
     detected = detected_count > 0
     if not detected:
@@ -3215,13 +3209,11 @@ def _materialise_required_effects_from_contract(
 # Tool-authored mutation effects
 # ---------------------------------------------------------------------------
 # When write tool invocations carry structured arguments (concept_id,
-# predicate_concept_id, etc.), we can build mutation effects that are
+# predicate_concept_id, etc.), we build mutation effects that are
 # *tool-authored* — derived from the tool's own payload/arguments rather
-# than from a coarse observation that "some write tool ran".  This yields
-# ``intent_origin: "tool_authored"`` and specific targets/predicates,
-# improving completion-gate precision.  The coarse fallback
-# (_infer_mutation_required_effect) remains as annotated diagnostic
-# scaffolding for the rare case where invocation detail is unavailable.
+# than from a coarse observation that "some write tool ran".  This keeps
+# completion semantics grounded in tool/workflow evidence rather than
+# Python-authored generic mutation inference.
 # ---------------------------------------------------------------------------
 
 
@@ -3365,72 +3357,6 @@ def _build_tool_authored_mutation_effects(
         effects.append(effect)
 
     return effects
-
-
-def _infer_mutation_required_effect(
-    *,
-    successful_write_tools: Sequence[str],
-    failed_tools: Sequence[str],
-    blocked_tools: Sequence[str],
-) -> dict[str, Any] | None:
-    """Coarse observed-activity mutation fallback (diagnostic scaffolding).
-
-    This function is used only when ``_build_tool_authored_mutation_effects``
-    cannot extract per-invocation metadata.  It produces a single generic
-    ``kb_mutation`` effect from summary lists, annotated with
-    ``decision_authority.scaffolding = True`` to flag it as temporary.
-    """
-    if not successful_write_tools and not failed_tools and not blocked_tools:
-        return None
-
-    effect_status = "pending"
-    status_reason: str | None = None
-    failure_codes: list[str] = []
-    if successful_write_tools:
-        effect_status = "satisfied"
-        status_reason = (
-            "Observed successful write tool invocation(s): "
-            + ", ".join(successful_write_tools[:3])
-        )
-    elif failed_tools or blocked_tools:
-        effect_status = "not_satisfied"
-        names = [*failed_tools, *blocked_tools]
-        status_reason = (
-            "Write attempt failed or was blocked: " + ", ".join(names[:3])
-            if names
-            else "Write attempt failed or was blocked."
-        )
-        failure_codes = ["kb_mutation_write_failed_or_blocked"]
-    else:
-        effect_status = "not_executed"
-        status_reason = "No write-capable tool invocation was observed."
-        failure_codes = ["kb_mutation_not_executed"]
-
-    required_tools = list(successful_write_tools[:3]) or ["add_relationship"]
-    mutation_effect: dict[str, Any] = {
-        "effect_id": "effect_1",
-        "intent_origin": "observed_tool_activity",
-        "effect_type": "kb_mutation",
-        "description": "Apply or repair requested knowledge-base relation/predicate changes.",
-        "required_tools": required_tools,
-        "targets": [],
-        "required_predicates": [],
-        "postcondition_required": True,
-        "postcondition_strategy": "state_requery",
-        "status": effect_status,
-        "status_reason": status_reason,
-        "decision_authority": {
-            "origin": "python",
-            "decision_class": "generic_mutation_fallback",
-            "scaffolding": True,
-        },
-    }
-    if failure_codes:
-        mutation_effect["failure_code"] = failure_codes[0]
-        mutation_effect["failure_codes"] = list(failure_codes)
-    else:
-        mutation_effect["failure_codes"] = []
-    return mutation_effect
 
 
 def _build_postcondition_checks(
@@ -3834,19 +3760,11 @@ def build_turn_execution_record(
 
     mutation_effects: list[dict[str, Any]] = []
     if not representation_effects:
-        # Prefer tool-authored mutation effects with per-invocation metadata.
+        # Mutation effects must remain tool-authored or workflow-authored.
+        # Do not fall back to generic observed-tool mutation contracts.
         mutation_effects = _build_tool_authored_mutation_effects(
             tool_invocations=tool_invocations,
         )
-        if not mutation_effects:
-            # Coarse observed-activity fallback (diagnostic scaffolding).
-            coarse_effect = _infer_mutation_required_effect(
-                successful_write_tools=successful_write_tools,
-                failed_tools=failed_tools,
-                blocked_tools=blocked_tools,
-            )
-            if coarse_effect is not None:
-                mutation_effects = [coarse_effect]
     required_effects.extend(mutation_effects)
 
     if not mutation_effects and not successful_write_tools and not representation_effects:

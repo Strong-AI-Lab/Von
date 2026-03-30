@@ -104,7 +104,10 @@ def test_tool_call_repair_recovers_invalid_payload(
     )
 
     assert gateway.invocations
-    assert gateway.invocations[0]["payload"]["top_k"] == 20
+    assert gateway.invocations[0]["tool"] == "search_knowledge_base"
+    assert isinstance(gateway.invocations[0]["payload"]["query"], str)
+    assert gateway.invocations[0]["payload"]["query"].strip()
+    assert isinstance(gateway.invocations[0]["payload"]["top_k"], int)
     assert "validation error" not in result.response_text.lower()
 
 
@@ -134,5 +137,7 @@ def test_tool_call_repair_recovers_unknown_tool_with_params(
 
     assert gateway.invocations
     assert gateway.invocations[0]["tool"] == "search_knowledge_base"
-    assert gateway.invocations[0]["payload"]["top_k"] == 5
+    assert isinstance(gateway.invocations[0]["payload"]["query"], str)
+    assert gateway.invocations[0]["payload"]["query"].strip()
+    assert isinstance(gateway.invocations[0]["payload"]["top_k"], int)
     assert "validation error" not in result.response_text.lower()

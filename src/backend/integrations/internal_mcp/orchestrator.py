@@ -1028,62 +1028,6 @@ class InternalMCPChatOrchestrator:
     _MISSING_TOOL_CLASSIFIER_PROMPTS = ("#V#missing_tool_call_classifier_prompt",)
     _MISSING_TOOL_RETRY_PROMPTS = ("#V#missing_tool_call_retry_prompt",)
     _TURN_SELECTOR_PROMPTS = ("#V#chat_turn_classifier_prompt",)
-    # Completion-claim validation guardrails (JVNAUTOSCI-940).
-    # Keep this bounded and deterministic so we avoid extra LLM traffic while
-    # still surfacing when the assistant claims work is already complete.
-    _COMPLETION_CLAIM_MAX_CANDIDATES = 8
-    _COMPLETION_CLAIM_MAX_TEXT_CHARS = 16_000
-    _COMPLETION_CLAIM_VERB_PATTERN = re.compile(
-        r"\b(i|we)\s+(?:have\s+|had\s+)?(?:successfully\s+)?"
-        r"(completed|finished|implemented|created|added|updated|deleted|removed|linked|"
-        r"merged|pushed|committed|commented|transitioned|assigned|validated|verified|"
-        r"executed|ran|invoked|called|retrieved|fetched|searched|resolved|fixed|closed)\b",
-        flags=re.IGNORECASE,
-    )
-    _COMPLETION_CLAIM_LINE_START_PATTERN = re.compile(
-        r"^(completed|finished|implemented|created|added|updated|deleted|removed|"
-        r"linked|merged|pushed|committed|commented|transitioned|assigned|validated|"
-        r"verified|executed|ran|invoked|called|retrieved|fetched|searched|"
-        r"resolved|fixed|closed)\b",
-        flags=re.IGNORECASE,
-    )
-    _COMPLETION_CLAIM_INTENT_PATTERN = re.compile(
-        r"\b(i will|i'll|we will|we'll|i am going to|i'm going to|we are going to|"
-        r"we're going to|let me|about to)\b",
-        flags=re.IGNORECASE,
-    )
-    # Minimal-imposition auto-proceed gate:
-    # If the assistant explicitly says it is continuing now (for example
-    # "Proceeding now") and it is not asking the user for a decision, we
-    # should continue the tool workflow instead of waiting for another human
-    # prompt.
-    _AUTO_PROCEED_PROGRESS_PROMISE_PATTERN = re.compile(
-        r"\b(i will now|i'll now|i am going to|i'm going to|proceeding now|"
-        r"next (?:i|we) will|continuing now|proceed with)\b",
-        flags=re.IGNORECASE,
-    )
-    _AUTO_PROCEED_USER_DECISION_PATTERN = re.compile(
-        r"\b(would you like|do you want|should i|shall i|can i|may i|"
-        r"please confirm|confirm first|let me know|which option|"
-        r"choose|select|pick|if you'd like|if you would like|if you want|"
-        r"if you prefer)\b",
-        flags=re.IGNORECASE,
-    )
-    _AUTO_PROCEED_CONFIRMATION_LANGUAGE_PATTERN = re.compile(
-        r"\b(confirm(?:ed|ing|ation)?|approve(?:d|al)?|permission|ok(?:ay)?\s+to\s+proceed)\b",
-        flags=re.IGNORECASE,
-    )
-    _AUTO_PROCEED_LOW_RISK_CONFIRMATION_SUBJECT_PATTERN = re.compile(
-        r"\b(structure|format|layout|wording|phrasing|style|spelling|grammar|"
-        r"organisation|organization|plan|approach|response shape|output shape)\b",
-        flags=re.IGNORECASE,
-    )
-    _AUTO_PROCEED_HIGH_RISK_MUTATION_PATTERN = re.compile(
-        r"\b(delete|remove|merge|rename|create|add|update|modify|insert|upsert|"
-        r"write|link|unlink|relationship|predicate|concept|ontology|vontology|"
-        r"knowledge base|kb|production|deploy|billing|payment|credential|token)\b",
-        flags=re.IGNORECASE,
-    )
     _PROMPT_EXPLICIT_TOOL_CALL_PATTERN = re.compile(
         r"\b(?:call|use|run|invoke|execute)\s+`?([a-z_][a-z0-9_]*(?:_[a-z0-9_]+)+)`?\b",
         flags=re.IGNORECASE,
@@ -6280,68 +6224,6 @@ class InternalMCPChatOrchestrator:
                 except Exception:
                     pass
 
-            auto_proceed_enabled = bool(
-                data.get("auto_proceed_minimal_imposition_enabled", True)
-            )
-            auto_proceed_assessment = self._assess_minimal_imposition_auto_proceed(
-                current_response
-            )
-            auto_proceed_gate_passed = auto_proceed_enabled and bool(
-                auto_proceed_assessment.get("should_auto_proceed")
-            )
-
-            if isinstance(aux_llm_calls, list):
-                try:
-                    aux_llm_calls.append(
-                        {
-                            "type": "auto_proceed_minimal_imposition",
-                            "enabled": auto_proceed_enabled,
-                            "should_auto_proceed": bool(
-                                auto_proceed_assessment.get("should_auto_proceed")
-                            ),
-                            "reason": str(auto_proceed_assessment.get("reason") or ""),
-                            "has_progress_promise": bool(
-                                auto_proceed_assessment.get("has_progress_promise")
-                            ),
-                            "has_intent_language": bool(
-                                auto_proceed_assessment.get("has_intent_language")
-                            ),
-                            "has_remaining_work_signal": bool(
-                                auto_proceed_assessment.get(
-                                    "has_remaining_work_signal"
-                                )
-                            ),
-                            "asks_for_user_decision": bool(
-                                auto_proceed_assessment.get("asks_for_user_decision")
-                            ),
-                            "contains_question_mark": bool(
-                                auto_proceed_assessment.get("contains_question_mark")
-                            ),
-                            "has_confirmation_language": bool(
-                                auto_proceed_assessment.get(
-                                    "has_confirmation_language"
-                                )
-                            ),
-                            "has_low_risk_confirmation_subject": bool(
-                                auto_proceed_assessment.get(
-                                    "has_low_risk_confirmation_subject"
-                                )
-                            ),
-                            "has_high_risk_mutation_signal": bool(
-                                auto_proceed_assessment.get(
-                                    "has_high_risk_mutation_signal"
-                                )
-                            ),
-                            "low_risk_confirmation_request": bool(
-                                auto_proceed_assessment.get(
-                                    "low_risk_confirmation_request"
-                                )
-                            ),
-                        }
-                    )
-                except Exception:
-                    pass
-
             exc = interpretation.tool_call_parse_error
             recovery_reason: str | None = None
             override_retry_reason = data.get("missing_tool_call_retry_reason_override")
@@ -6352,8 +6234,6 @@ class InternalMCPChatOrchestrator:
                 recovery_reason = "parse_error"
             elif has_override_retry_reason:
                 recovery_reason = "required_prompt_tools_missing"
-            elif auto_proceed_gate_passed:
-                recovery_reason = "minimal_imposition"
 
             if recovery_reason is not None:
                 recovery_data = self._run_missing_tool_call_recovery_workflow(
@@ -8537,146 +8417,6 @@ class InternalMCPChatOrchestrator:
         return telemetry
 
     @staticmethod
-    def _strip_fenced_code_blocks(text: str) -> tuple[str, bool]:
-        """Strip markdown fenced code blocks for safer claim detection."""
-
-        if not isinstance(text, str) or not text:
-            return "", False
-        # Handles both closed and unterminated fences by treating the
-        # remainder as code content.
-        stripped, substitutions = re.subn(
-            r"```[\w+\-]*\n.*?(?:```|$)",
-            "",
-            text,
-            flags=re.DOTALL,
-        )
-        return stripped, substitutions > 0
-
-    @classmethod
-    def _extract_completion_claim_candidates(
-        cls,
-        response_text: str,
-        *,
-        max_claims: int | None = None,
-    ) -> tuple[list[str], Mapping[str, Any]]:
-        """Extract likely completion claims from assistant prose.
-
-        Claims inside markdown code fences are ignored by design.
-        """
-
-        if not isinstance(response_text, str) or not response_text.strip():
-            return (
-                [],
-                {
-                    "code_fence_stripped": False,
-                    "text_chars_considered": 0,
-                    "segment_count": 0,
-                    "claim_count": 0,
-                    "claim_cap": 0,
-                },
-            )
-
-        claim_cap = cls._COMPLETION_CLAIM_MAX_CANDIDATES
-        if max_claims is not None:
-            try:
-                claim_cap = int(max_claims)
-            except Exception:
-                claim_cap = cls._COMPLETION_CLAIM_MAX_CANDIDATES
-        claim_cap = max(1, min(20, claim_cap))
-
-        stripped_text, stripped_any_fence = cls._strip_fenced_code_blocks(
-            response_text
-        )
-        searchable = stripped_text[: cls._COMPLETION_CLAIM_MAX_TEXT_CHARS]
-        segments: list[str] = []
-        for raw_line in searchable.splitlines():
-            line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s*", "", raw_line).strip()
-            if not line:
-                continue
-            parts = re.split(r"(?<=[.!?])\s+", line)
-            for part in parts:
-                sentence = " ".join(part.strip().split())
-                if sentence:
-                    segments.append(sentence)
-
-        claims: list[str] = []
-        seen_claims: set[str] = set()
-        for segment in segments:
-            lowered = segment.lower()
-            if len(lowered) < 12:
-                continue
-            if cls._COMPLETION_CLAIM_INTENT_PATTERN.search(lowered):
-                continue
-            if not (
-                cls._COMPLETION_CLAIM_VERB_PATTERN.search(lowered)
-                or cls._COMPLETION_CLAIM_LINE_START_PATTERN.search(lowered)
-            ):
-                continue
-            key = lowered[:400]
-            if key in seen_claims:
-                continue
-            seen_claims.add(key)
-            claims.append(segment[:400])
-            if len(claims) >= claim_cap:
-                break
-
-        return (
-            claims,
-            {
-                "code_fence_stripped": stripped_any_fence,
-                "text_chars_considered": len(searchable),
-                "segment_count": len(segments),
-                "claim_count": len(claims),
-                "claim_cap": claim_cap,
-            },
-        )
-
-    @staticmethod
-    def _summarise_tool_invocation_outcomes(
-        tool_invocations: Sequence[Mapping[str, Any]],
-    ) -> tuple[list[str], list[str]]:
-        """Return (successful_tools, failed_tools) preserving first-seen order."""
-
-        successful: list[str] = []
-        failed: list[str] = []
-        seen_success: set[str] = set()
-        seen_failed: set[str] = set()
-
-        for invocation in tool_invocations:
-            if not isinstance(invocation, Mapping):
-                continue
-            raw_name = invocation.get("tool")
-            if not isinstance(raw_name, str):
-                continue
-            tool_name = raw_name.strip()
-            if not tool_name or tool_name.startswith("__"):
-                continue
-
-            error_value = invocation.get("error")
-            payload = invocation.get("payload")
-            status_value = ""
-            if isinstance(payload, Mapping):
-                raw_status = payload.get("status")
-                if isinstance(raw_status, str):
-                    status_value = raw_status.strip().lower()
-
-            failed_invocation = bool(
-                (isinstance(error_value, str) and error_value.strip())
-                or status_value in {"error", "failed", "failure"}
-            )
-            lowered = tool_name.lower()
-            if failed_invocation:
-                if lowered not in seen_failed:
-                    failed.append(tool_name)
-                    seen_failed.add(lowered)
-                continue
-            if lowered not in seen_success:
-                successful.append(tool_name)
-                seen_success.add(lowered)
-
-        return successful, failed
-
-    @staticmethod
     def _normalise_concept_id_candidate(raw_value: Any) -> str | None:
         """Normalise #V# concept IDs (or concept slug names) to canonical form."""
 
@@ -9305,258 +9045,6 @@ class InternalMCPChatOrchestrator:
             )
         else:
             data.pop("missing_tool_call_retry_reason_override", None)
-
-    @classmethod
-    def _validate_completion_claims(
-        cls,
-        *,
-        claims: Sequence[str],
-        tool_invocations: Sequence[Mapping[str, Any]],
-        tool_messages: Sequence[Mapping[str, Any]],
-    ) -> Mapping[str, Any]:
-        """Validate completion claims against observed tool execution evidence."""
-
-        successful_tools, failed_tools = cls._summarise_tool_invocation_outcomes(
-            tool_invocations
-        )
-        all_tools = list(successful_tools)
-        for tool_name in failed_tools:
-            if tool_name.lower() not in {item.lower() for item in all_tools}:
-                all_tools.append(tool_name)
-
-        action_hint_map: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
-            (("create", "created", "add", "added", "new"), ("create", "add", "insert")),
-            (
-                ("update", "updated", "edit", "edited", "modify", "modified", "rename"),
-                ("update", "edit", "modify", "rename", "set"),
-            ),
-            (("delete", "deleted", "remove", "removed", "drop"), ("delete", "remove", "drop")),
-            (
-                ("search", "searched", "fetch", "fetched", "retrieve", "retrieved", "list", "listed"),
-                ("search", "fetch", "get", "read", "list"),
-            ),
-            (("comment", "commented"), ("comment",)),
-            (("transition", "transitioned", "status", "moved"), ("transition", "status", "move")),
-            (("assign", "assigned"), ("assign",)),
-            (("merge", "merged"), ("merge",)),
-            (("push", "pushed", "commit", "committed"), ("push", "commit")),
-        )
-
-        successful_lookup = {tool.lower(): tool for tool in successful_tools}
-        validated: list[dict[str, Any]] = []
-        verified: list[dict[str, Any]] = []
-        not_verified: list[dict[str, Any]] = []
-
-        for claim in claims:
-            lowered_claim = claim.lower()
-
-            mentioned_tools = [
-                tool for tool in all_tools if tool.lower() in lowered_claim
-            ]
-
-            hinted_tools: list[str] = []
-            for claim_tokens, tool_tokens in action_hint_map:
-                if not any(token in lowered_claim for token in claim_tokens):
-                    continue
-                for tool_name in all_tools:
-                    lowered_tool = tool_name.lower()
-                    if any(token in lowered_tool for token in tool_tokens):
-                        hinted_tools.append(tool_name)
-
-            candidate_tools: list[str] = []
-            for tool_name in mentioned_tools + hinted_tools:
-                if tool_name.lower() not in {t.lower() for t in candidate_tools}:
-                    candidate_tools.append(tool_name)
-
-            if mentioned_tools:
-                strategy = "explicit_tool_name_match"
-            elif candidate_tools:
-                strategy = "tool_name_hint_match"
-            else:
-                strategy = "any_successful_tool"
-
-            matched_success = [
-                successful_lookup.get(tool_name.lower())
-                for tool_name in candidate_tools
-                if tool_name.lower() in successful_lookup
-            ]
-            matched_success = [item for item in matched_success if isinstance(item, str)]
-
-            if strategy == "any_successful_tool":
-                if successful_tools:
-                    evidence_tools = successful_tools[:2]
-                    record = {
-                        "claim": claim,
-                        "status": "verified",
-                        "strategy": strategy,
-                        "evidence": f"Observed successful tool call(s): {', '.join(evidence_tools)}.",
-                    }
-                    verified.append(record)
-                else:
-                    record = {
-                        "claim": claim,
-                        "status": "not_verified",
-                        "strategy": strategy,
-                        "reason": "No successful tool invocations were recorded for this response.",
-                    }
-                    not_verified.append(record)
-                validated.append(record)
-                continue
-
-            if matched_success:
-                record = {
-                    "claim": claim,
-                    "status": "verified",
-                    "strategy": strategy,
-                    "candidate_tools": list(candidate_tools),
-                    "evidence": "Matched successful tool invocation: "
-                    + ", ".join(matched_success[:2])
-                    + ".",
-                }
-                verified.append(record)
-                validated.append(record)
-                continue
-
-            if candidate_tools:
-                reason = (
-                    "No successful invocation matched the expected tool(s): "
-                    + ", ".join(candidate_tools[:3])
-                    + "."
-                )
-            else:
-                reason = "No matching tool invocation evidence was found."
-            record = {
-                "claim": claim,
-                "status": "not_verified",
-                "strategy": strategy,
-                "candidate_tools": list(candidate_tools),
-                "reason": reason,
-            }
-            not_verified.append(record)
-            validated.append(record)
-
-        return {
-            "validated": validated,
-            "verified": verified,
-            "not_verified": not_verified,
-            "successful_tools": successful_tools,
-            "failed_tools": failed_tools,
-            "tool_messages_observed": len(tool_messages),
-        }
-
-    @staticmethod
-    def _render_completion_claim_validation_summary(
-        *,
-        verified: Sequence[Mapping[str, Any]],
-        not_verified: Sequence[Mapping[str, Any]],
-    ) -> str:
-        if not verified and not not_verified:
-            return ""
-
-        lines = ["Completion claim validation summary:", "Verified:"]
-        if verified:
-            for item in verified:
-                claim = str(item.get("claim") or "").strip()
-                evidence = str(item.get("evidence") or "").strip()
-                if claim and evidence:
-                    lines.append(f"- {claim} ({evidence})")
-                elif claim:
-                    lines.append(f"- {claim}")
-        else:
-            lines.append("- None")
-
-        lines.append("Not verified:")
-        if not_verified:
-            for item in not_verified:
-                claim = str(item.get("claim") or "").strip()
-                reason = str(item.get("reason") or "").strip()
-                if claim and reason:
-                    lines.append(f"- {claim} ({reason})")
-                elif claim:
-                    lines.append(f"- {claim}")
-        else:
-            lines.append("- None")
-
-        return "\n".join(lines)
-
-    def _apply_completion_claim_validation(
-        self,
-        response_text: str,
-        *,
-        tool_invocations: Sequence[Mapping[str, Any]],
-        tool_messages: Sequence[Mapping[str, Any]],
-        aux_log: list[Mapping[str, Any]] | None,
-    ) -> str:
-        """Append a verified/not-verified summary for likely completion claims."""
-
-        if not isinstance(response_text, str) or not response_text.strip():
-            return response_text if isinstance(response_text, str) else str(response_text)
-
-        try:
-            claims, detection = self._extract_completion_claim_candidates(response_text)
-
-            if isinstance(aux_log, list):
-                aux_log.append(
-                    {
-                        "type": "completion_claim_detection",
-                        "claim_count": len(claims),
-                        **dict(detection),
-                    }
-                )
-
-            if not claims:
-                return response_text
-
-            validation = self._validate_completion_claims(
-                claims=claims,
-                tool_invocations=tool_invocations,
-                tool_messages=tool_messages,
-            )
-            verified = cast(
-                Sequence[Mapping[str, Any]], validation.get("verified") or []
-            )
-            not_verified = cast(
-                Sequence[Mapping[str, Any]], validation.get("not_verified") or []
-            )
-
-            if isinstance(aux_log, list):
-                aux_log.append(
-                    {
-                        "type": "completion_claim_validation",
-                        "claim_count": len(claims),
-                        "verified_count": len(verified),
-                        "not_verified_count": len(not_verified),
-                        "successful_tools": list(validation.get("successful_tools") or []),
-                        "failed_tools": list(validation.get("failed_tools") or []),
-                        "tool_messages_observed": int(
-                            validation.get("tool_messages_observed") or 0
-                        ),
-                    }
-                )
-
-            summary = self._render_completion_claim_validation_summary(
-                verified=verified,
-                not_verified=not_verified,
-            )
-            if not summary:
-                return response_text
-
-            base = response_text.rstrip()
-            if not base:
-                return summary
-            return f"{base}\n\n{summary}"
-        except Exception as exc:
-            if isinstance(aux_log, list):
-                try:
-                    aux_log.append(
-                        {
-                            "type": "completion_claim_validation",
-                            "error": str(exc),
-                        }
-                    )
-                except Exception:
-                    pass
-            return response_text
 
     @staticmethod
     def _looks_like_missing_tool_call(response: str) -> bool:
@@ -13263,11 +12751,21 @@ class InternalMCPChatOrchestrator:
 
         try:
             aux_llm_calls.append(
-                {
-                    "type": "tool_call_repair",
-                    "stage": "prompt",
-                    "prompt_preview": prompt_text[:800],
-                }
+                annotate_python_decision_event(
+                    {
+                        "type": "tool_call_repair",
+                        "stage": "tool_recovery",
+                        "prompt_preview": prompt_text[:800],
+                    },
+                    stage="tool_recovery",
+                    component="internal_mcp_orchestrator",
+                    function="_attempt_tool_call_repair",
+                    decision_class="tool_call_repair_prompt",
+                    decision_source="workflow_retry_prompt",
+                    changed_outcome=False,
+                    reason_code="repair_prompt_emitted",
+                    possible_inappropriate_python_code_use=False,
+                )
             )
         except Exception:
             pass
@@ -13297,15 +12795,25 @@ class InternalMCPChatOrchestrator:
 
         try:
             aux_llm_calls.append(
-                {
-                    "type": "tool_call_repair",
-                    "stage": "response",
-                    "response_preview": (
-                        repaired_response[:800]
-                        if isinstance(repaired_response, str)
-                        else str(repaired_response)[:800]
-                    ),
-                }
+                annotate_python_decision_event(
+                    {
+                        "type": "tool_call_repair",
+                        "stage": "tool_recovery",
+                        "response_preview": (
+                            repaired_response[:800]
+                            if isinstance(repaired_response, str)
+                            else str(repaired_response)[:800]
+                        ),
+                    },
+                    stage="tool_recovery",
+                    component="internal_mcp_orchestrator",
+                    function="_attempt_tool_call_repair",
+                    decision_class="tool_call_repair_response",
+                    decision_source="workflow_retry_response",
+                    changed_outcome=True,
+                    reason_code="repair_response_recorded",
+                    possible_inappropriate_python_code_use=False,
+                )
             )
         except Exception:
             pass
@@ -20335,127 +19843,6 @@ class InternalMCPChatOrchestrator:
             )
             raise
 
-    def _get_auto_proceed_minimal_imposition_enabled(self) -> bool:
-        """Return whether minimal-imposition auto-proceed is enabled.
-
-        Defaults to enabled so the assistant avoids avoidable human hand-offs.
-        """
-
-        try:
-            from src.backend.services.settings_service import (
-                get_auto_proceed_minimal_imposition_enabled,
-            )
-
-            return bool(get_auto_proceed_minimal_imposition_enabled())
-        except Exception:
-            return self._env_flag_enabled(
-                "VON_AUTO_PROCEED_MINIMAL_IMPOSITION_ENABLE",
-                default="1",
-            )
-
-    @classmethod
-    def _assess_minimal_imposition_auto_proceed(
-        cls,
-        response_text: str,
-    ) -> Mapping[str, Any]:
-        """Assess whether autonomous continuation minimises user imposition."""
-
-        if not isinstance(response_text, str) or not response_text.strip():
-            return {
-                "should_auto_proceed": False,
-                "reason": "empty_response",
-                "has_progress_promise": False,
-                "has_intent_language": False,
-                "has_remaining_work_signal": False,
-                "asks_for_user_decision": False,
-                "contains_question_mark": False,
-                "has_confirmation_language": False,
-                "has_low_risk_confirmation_subject": False,
-                "has_high_risk_mutation_signal": False,
-                "low_risk_confirmation_request": False,
-            }
-
-        text = response_text.strip()
-        normalised = (
-            text.replace("\u2019", "'")
-            .replace("\u2018", "'")
-            .replace("\u2032", "'")
-            .replace("\u201c", '"')
-            .replace("\u201d", '"')
-        )
-        lowered = normalised.lower()
-
-        has_progress_promise = bool(
-            cls._AUTO_PROCEED_PROGRESS_PROMISE_PATTERN.search(lowered)
-        )
-        has_intent_language = bool(cls._COMPLETION_CLAIM_INTENT_PATTERN.search(lowered))
-        has_remaining_work_signal = any(
-            token in lowered
-            for token in (
-                "remaining",
-                "still need",
-                "next",
-                "to complete",
-                "to finish",
-                "continue",
-            )
-        )
-        asks_for_user_decision = bool(
-            cls._AUTO_PROCEED_USER_DECISION_PATTERN.search(lowered)
-        )
-        contains_question_mark = "?" in normalised
-        has_confirmation_language = bool(
-            cls._AUTO_PROCEED_CONFIRMATION_LANGUAGE_PATTERN.search(lowered)
-        )
-        has_low_risk_confirmation_subject = bool(
-            cls._AUTO_PROCEED_LOW_RISK_CONFIRMATION_SUBJECT_PATTERN.search(lowered)
-        )
-        has_high_risk_mutation_signal = bool(
-            cls._AUTO_PROCEED_HIGH_RISK_MUTATION_PATTERN.search(lowered)
-        )
-        low_risk_confirmation_request = (
-            has_confirmation_language
-            and has_low_risk_confirmation_subject
-            and not has_high_risk_mutation_signal
-        )
-
-        should_auto_proceed = False
-        reason = "no_progress_signal"
-        if asks_for_user_decision and not low_risk_confirmation_request:
-            reason = "user_decision_requested"
-        elif (
-            contains_question_mark
-            and not has_progress_promise
-            and not low_risk_confirmation_request
-        ):
-            reason = "question_without_progress_promise"
-        elif (
-            has_progress_promise
-            or (has_intent_language and has_remaining_work_signal)
-            or low_risk_confirmation_request
-        ):
-            should_auto_proceed = True
-            reason = (
-                "minimal_imposition_pass_low_risk_confirmation"
-                if low_risk_confirmation_request
-                and not (has_progress_promise or has_intent_language)
-                else "minimal_imposition_pass"
-            )
-
-        return {
-            "should_auto_proceed": should_auto_proceed,
-            "reason": reason,
-            "has_progress_promise": has_progress_promise,
-            "has_intent_language": has_intent_language,
-            "has_remaining_work_signal": has_remaining_work_signal,
-            "asks_for_user_decision": asks_for_user_decision,
-            "contains_question_mark": contains_question_mark,
-            "has_confirmation_language": has_confirmation_language,
-            "has_low_risk_confirmation_subject": has_low_risk_confirmation_subject,
-            "has_high_risk_mutation_signal": has_high_risk_mutation_signal,
-            "low_risk_confirmation_request": low_risk_confirmation_request,
-        }
-
     @staticmethod
     def _env_flag_enabled(name: str, *, default: str = "0") -> bool:
         value = os.getenv(name, default)
@@ -21037,12 +20424,22 @@ class InternalMCPChatOrchestrator:
                 )
             except Exception as exc:
                 aux_llm_calls.append(
-                    {
-                        "type": "critic",
-                        "stage": "critic",
-                        "error": str(exc),
-                        "model": critic_model_used,
-                    }
+                    annotate_python_decision_event(
+                        {
+                            "type": "critic",
+                            "stage": "critic",
+                            "error": str(exc),
+                            "model": critic_model_used,
+                        },
+                        stage="critic",
+                        component="internal_mcp_orchestrator",
+                        function="_maybe_apply_critic",
+                        decision_class="response_critic",
+                        decision_source="llm_review_response",
+                        changed_outcome=False,
+                        reason_code="critic_llm_error",
+                        possible_inappropriate_python_code_use=False,
+                    )
                 )
                 return response_text
 
@@ -21050,12 +20447,22 @@ class InternalMCPChatOrchestrator:
                 parsed = json.loads(str(critic_response))
             except Exception:
                 aux_llm_calls.append(
-                    {
-                        "type": "critic",
-                        "stage": "critic",
-                        "error": "critic_json_parse_failed",
-                        "model": critic_model_used,
-                    }
+                    annotate_python_decision_event(
+                        {
+                            "type": "critic",
+                            "stage": "critic",
+                            "error": "critic_json_parse_failed",
+                            "model": critic_model_used,
+                        },
+                        stage="critic",
+                        component="internal_mcp_orchestrator",
+                        function="_maybe_apply_critic",
+                        decision_class="response_critic",
+                        decision_source="llm_review_response",
+                        changed_outcome=False,
+                        reason_code="critic_json_parse_failed",
+                        possible_inappropriate_python_code_use=False,
+                    )
                 )
                 return response_text
 
@@ -21063,38 +20470,57 @@ class InternalMCPChatOrchestrator:
                 revised = parsed.get("revised_response")
                 if isinstance(revised, str) and revised.strip():
                     aux_llm_calls.append(
-                        {
-                            "type": "critic",
-                            "stage": "critic",
-                            "model": critic_model_used,
-                            "approved": False,
-                            "notes": parsed.get("notes") if parsed else None,
-                        }
+                        annotate_python_decision_event(
+                            {
+                                "type": "critic",
+                                "stage": "critic",
+                                "model": critic_model_used,
+                                "approved": False,
+                                "notes": parsed.get("notes") if parsed else None,
+                            },
+                            stage="critic",
+                            component="internal_mcp_orchestrator",
+                            function="_maybe_apply_critic",
+                            decision_class="response_critic",
+                            decision_source="llm_review_response",
+                            changed_outcome=True,
+                            reason_code="critic_rewrite_applied",
+                            possible_inappropriate_python_code_use=False,
+                        )
                     )
                     return revised.strip()
 
             aux_llm_calls.append(
-                {
-                    "type": "critic",
-                    "stage": "critic",
-                    "model": critic_model_used,
-                    "approved": True,
-                }
+                annotate_python_decision_event(
+                    {
+                        "type": "critic",
+                        "stage": "critic",
+                        "model": critic_model_used,
+                        "approved": True,
+                    },
+                    stage="critic",
+                    component="internal_mcp_orchestrator",
+                    function="_maybe_apply_critic",
+                    decision_class="response_critic",
+                    decision_source="llm_review_response",
+                    changed_outcome=False,
+                    reason_code="critic_approved",
+                    possible_inappropriate_python_code_use=False,
+                )
             )
             return response_text
 
-        def _maybe_append_completion_claim_validation(
+        def _postprocess_response_text(
             response_text: str,
             *,
             tool_invocations_for_validation: Sequence[Mapping[str, Any]] = (),
             tool_messages_for_validation: Sequence[Mapping[str, Any]] = (),
         ) -> str:
-            return self._apply_completion_claim_validation(
-                response_text,
-                tool_invocations=tool_invocations_for_validation,
-                tool_messages=tool_messages_for_validation,
-                aux_log=aux_llm_calls,
-            )
+            # Python completion-claim validation was removed so user-visible
+            # response ownership stays with the workflow/LLM path.
+            del tool_invocations_for_validation
+            del tool_messages_for_validation
+            return response_text
 
         if not self._gateway.enabled or self._max_tool_invocations <= 0:
             planner_model = _model_for_stage("planner")
@@ -21162,7 +20588,7 @@ class InternalMCPChatOrchestrator:
                 source_stage="run.gateway_disabled",
             )
             response_text = _maybe_apply_critic(response_text)
-            response_text = _maybe_append_completion_claim_validation(response_text)
+            response_text = _postprocess_response_text(response_text)
             result = OrchestratorResult(
                 response_text=response_text,
                 extra_messages=(),
@@ -21224,18 +20650,8 @@ class InternalMCPChatOrchestrator:
                 apply_reason = str(apply_decision.get("reason") or "").strip() or None
                 if isinstance(aux_llm_calls, list):
                     continuation_decision_source = (
-                        str(
-                            apply_decision.get("decision_source") or ""
-                        ).strip()
-                        or (
-                            "prompt_shape_heuristic"
-                            if apply_reason
-                            in {
-                                "short_follow_up_prompt",
-                                "explicit_follow_up_or_repair_prompt",
-                            }
-                            else "workflow_state_check"
-                        )
+                        str(apply_decision.get("decision_source") or "").strip()
+                        or "workflow_state_check"
                     )
                     try:
                         aux_llm_calls.append(
@@ -27501,7 +26917,7 @@ class InternalMCPChatOrchestrator:
                 tool_messages=(),
             )
             response_text = _maybe_apply_critic(response_text)
-            response_text = _maybe_append_completion_claim_validation(response_text)
+            response_text = _postprocess_response_text(response_text)
             result = OrchestratorResult(
                 response_text=response_text,
                 extra_messages=(),
@@ -27582,7 +26998,7 @@ class InternalMCPChatOrchestrator:
                         aux_log=aux_llm_calls if isinstance(aux_llm_calls, list) else None,
                         source_stage="run.custom_workflow",
                     )
-                    wf_response = _maybe_append_completion_claim_validation(wf_response)
+                    wf_response = _postprocess_response_text(wf_response)
                     wf_extra_messages = _coerce_message_sequence(
                         wf_result.data.get("extra_messages")
                     )
@@ -27751,20 +27167,6 @@ class InternalMCPChatOrchestrator:
                 max_tool_result_field_chars=self._max_tool_result_field_chars,
                 default_gmail_profile=gmail_profile or self._default_gmail_profile,
             )
-            auto_proceed_minimal_imposition_enabled = (
-                self._get_auto_proceed_minimal_imposition_enabled()
-            )
-            try:
-                aux_llm_calls.append(
-                    {
-                        "type": "auto_proceed_minimal_imposition_setting",
-                        "enabled": bool(auto_proceed_minimal_imposition_enabled),
-                        "source": "settings",
-                    }
-                )
-            except Exception:
-                pass
-
             routing_info_payload = (
                 asdict(routing_info) if routing_info is not None else None
             )
@@ -27785,9 +27187,6 @@ class InternalMCPChatOrchestrator:
                 "gmail_profile": gmail_profile or self._default_gmail_profile,
                 "workflow_discovery_result": workflow_discovery_result,
                 "workflow_routing": routing_info_payload,
-                "auto_proceed_minimal_imposition_enabled": bool(
-                    auto_proceed_minimal_imposition_enabled
-                ),
                 "workflow_episode_source": "chat_turn_workflow",
                 "workflow_episode_stage": "tool_calling",
                 # Closures from run().
@@ -28026,7 +27425,7 @@ class InternalMCPChatOrchestrator:
         final_response_text = _maybe_apply_critic(
             final_response_text, tool_messages_for_critic=tool_messages
         )
-        final_response_text = _maybe_append_completion_claim_validation(
+        final_response_text = _postprocess_response_text(
             final_response_text,
             tool_invocations_for_validation=tuple(invocations),
             tool_messages_for_validation=tuple(tool_messages),

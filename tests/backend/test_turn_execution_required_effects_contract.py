@@ -173,8 +173,8 @@ def test_continuation_context_representation_contract_can_be_satisfied_by_matchi
     assert effect.get("status") == "satisfied"
 
     completion_gate = record.get("completion_gate") or {}
-    assert completion_gate.get("decision") == "partial"
-    assert completion_gate.get("safe_to_claim_completion") is False
+    assert completion_gate.get("decision") == "completed"
+    assert completion_gate.get("safe_to_claim_completion") is True
 
 
 def test_observed_write_tool_activity_emits_generic_kb_mutation_effect_without_prompt_semantics() -> None:
@@ -305,22 +305,18 @@ def test_multiple_write_tools_produce_grouped_tool_authored_effects() -> None:
         assert effect.get("status") == "satisfied"
 
 
-def test_coarse_mutation_fallback_carries_scaffolding_annotation() -> None:
-    """When no tool invocations are available (only summary lists),
-    the coarse fallback must carry decision_authority with scaffolding=True."""
-    from src.backend.services.turn_execution_record_service import (
-        _infer_mutation_required_effect,
+def test_summary_only_write_activity_does_not_emit_generic_mutation_effect() -> None:
+    """Summary-only write activity must not recreate the removed Python fallback."""
+    record = _build_record(
+        aux_llm_calls=[
+            {
+                "type": "write_tool_policy",
+                "allowed_write_tools": ["add_relationship"],
+            }
+        ],
     )
-
-    effect = _infer_mutation_required_effect(
-        successful_write_tools=["add_relationship"],
-        failed_tools=[],
-        blocked_tools=[],
+    required_effects = record.get("required_effects") or []
+    assert all(
+        isinstance(effect, dict) and effect.get("effect_type") != "kb_mutation"
+        for effect in required_effects
     )
-    assert effect is not None
-    assert effect.get("intent_origin") == "observed_tool_activity"
-    authority = effect.get("decision_authority")
-    assert isinstance(authority, dict)
-    assert authority.get("origin") == "python"
-    assert authority.get("scaffolding") is True
-    assert authority.get("decision_class") == "generic_mutation_fallback"

@@ -7223,15 +7223,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             component="workflow_continuation_service",
                             function="assess_prompt_for_workflow_continuation",
                             decision_class="continuation_classifier",
-                            decision_source=(
-                                "prompt_shape_heuristic"
-                                if apply_reason
-                                in {
-                                    "short_follow_up_prompt",
-                                    "explicit_follow_up_or_repair_prompt",
-                                }
-                                else "workflow_state_check"
-                            ),
+                            decision_source="workflow_state_check",
                             changed_outcome=bool(
                                 apply_decision.get("applies", False)
                             ),
@@ -8475,9 +8467,32 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     else False
                 )
 
+                def _append_operational_summary(
+                    base_text: str,
+                    summary_text: str | None,
+                ) -> str:
+                    cleaned_base = str(base_text or "").strip()
+                    cleaned_summary = str(summary_text or "").strip()
+                    if not cleaned_summary:
+                        return cleaned_base
+                    if not cleaned_base:
+                        return (
+                            "I do not yet have a complete workflow-backed answer.\n\n"
+                            "Operational summary:\n"
+                            f"{cleaned_summary}"
+                        )
+                    if cleaned_summary in cleaned_base:
+                        return cleaned_base
+                    return (
+                        f"{cleaned_base}\n\n"
+                        "Operational summary:\n"
+                        f"{cleaned_summary}"
+                    )
+
                 screen_candidate = None
                 screen_backfill_source = None
                 follow_up_screen_summary = None
+                supplementary_screen_summary = None
                 if has_tool_messages and isinstance(completion_gate_summary, Mapping):
                     requires_follow_up = bool(
                         completion_gate_summary.get("requires_follow_up", False)
@@ -8495,25 +8510,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             )
                         )
                 if follow_up_screen_summary:
-                    screen_candidate = follow_up_screen_summary
-                    screen_backfill_source = "follow_up_summary"
-                    auxiliary_llm_calls.append(
-                        annotate_python_decision_event(
-                            {
-                                "type": "presenter_screen_backfill",
-                                "stage": "screen_backfill",
-                                "source": "follow_up_summary",
-                            },
-                            stage="screen_backfill",
-                            component="presenter_routes",
-                            function="_build_presenter_follow_up_summary_from_tool_messages",
-                            decision_class="presenter_fallback",
-                            decision_source="structural_pattern_detection",
-                            changed_outcome=True,
-                            reason_code="tool_backed_follow_up_summary",
-                            possible_inappropriate_python_code_use=True,
-                        )
-                    )
+                    supplementary_screen_summary = follow_up_screen_summary
                 response_candidate = _strip_presenter_tags(response_text)
                 response_candidate_internal_status = _looks_like_internal_status_diagnostic(
                     response_candidate
@@ -8530,8 +8527,33 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     and not _screen_looks_like_tool_dump(response_candidate)
                     and not response_candidate_internal_status
                 ):
-                    screen_candidate = response_candidate
-                    screen_backfill_source = "response_text"
+                    screen_candidate = _append_operational_summary(
+                        response_candidate,
+                        supplementary_screen_summary,
+                    )
+                    screen_backfill_source = (
+                        "response_text_plus_follow_up_summary"
+                        if supplementary_screen_summary
+                        else "response_text"
+                    )
+                    if supplementary_screen_summary:
+                        auxiliary_llm_calls.append(
+                            annotate_python_decision_event(
+                                {
+                                    "type": "presenter_screen_backfill",
+                                    "stage": "screen_backfill",
+                                    "source": "response_text_plus_follow_up_summary",
+                                },
+                                stage="screen_backfill",
+                                component="presenter_routes",
+                                function="_build_presenter_follow_up_summary_from_tool_messages",
+                                decision_class="presenter_fallback",
+                                decision_source="structural_pattern_detection",
+                                changed_outcome=True,
+                                reason_code="response_text_supplemented_with_follow_up_summary",
+                                possible_inappropriate_python_code_use=True,
+                            )
+                        )
                 allow_llm_screen_synthesis = os.getenv(
                     "VON_PRESENTER_SCREEN_BACKFILL_USE_LLM", "1"
                 ).lower() in {"1", "true"}
@@ -8759,27 +8781,44 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         screen_candidate = None
 
                 if not screen_candidate:
-                    screen_candidate = (
+                    fallback_summary = supplementary_screen_summary or (
                         _build_presenter_screen_summary_from_tool_messages(
                             tool_messages
                         )
                     )
-                    if screen_candidate:
-                        screen_backfill_source = "tool_summary"
+                    if fallback_summary:
+                        screen_candidate = _append_operational_summary(
+                            "",
+                            fallback_summary,
+                        )
+                        screen_backfill_source = (
+                            "follow_up_summary"
+                            if supplementary_screen_summary
+                            else "tool_summary"
+                        )
+                        reason_code = (
+                            "tool_backed_follow_up_summary"
+                            if supplementary_screen_summary
+                            else "tool_activity_summary_fallback"
+                        )
                         auxiliary_llm_calls.append(
                             annotate_python_decision_event(
                                 {
                                     "type": "presenter_screen_backfill",
                                     "stage": "screen_backfill",
-                                    "source": "tool_summary",
+                                    "source": screen_backfill_source,
                                 },
                                 stage="screen_backfill",
                                 component="presenter_routes",
-                                function="_build_presenter_screen_summary_from_tool_messages",
+                                function=(
+                                    "_build_presenter_follow_up_summary_from_tool_messages"
+                                    if supplementary_screen_summary
+                                    else "_build_presenter_screen_summary_from_tool_messages"
+                                ),
                                 decision_class="presenter_fallback",
                                 decision_source="structural_pattern_detection",
                                 changed_outcome=True,
-                                reason_code="tool_activity_summary_fallback",
+                                reason_code=reason_code,
                                 possible_inappropriate_python_code_use=True,
                             )
                         )
@@ -8798,6 +8837,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     base_channels["screen"] = str(screen_candidate).strip()
                     if screen_backfill_source == "response_text":
                         base_channels["format"] = "screen_backfill_from_response_v1"
+                    elif screen_backfill_source == "response_text_plus_follow_up_summary":
+                        base_channels["format"] = (
+                            "screen_backfill_from_response_with_operational_summary_v1"
+                        )
                     elif screen_backfill_source == "follow_up_summary":
                         base_channels["format"] = (
                             "screen_backfill_from_follow_up_summary_v1"

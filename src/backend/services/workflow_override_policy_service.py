@@ -102,13 +102,6 @@ def _normalise_profile(profile: Any) -> tuple[dict[str, Any] | None, str]:
     )
 
 
-def _context_semantic_threshold(context: str) -> float:
-    lowered = _safe_text(context).lower()
-    if lowered == "selected_custom_workflow_launchability_replacement":
-        return 0.24
-    return 0.34
-
-
 def _resolve_candidate_role(candidate: Mapping[str, Any]) -> tuple[str, str, dict[str, Any]]:
     profile, profile_source = _normalise_profile(candidate.get("routing_profile"))
     if profile is not None:
@@ -186,7 +179,6 @@ def choose_custom_workflow_override_candidate(
     """Return a launchable replacement candidate without prompt-semantic vetoes."""
 
     del turn_text
-    semantic_threshold = _context_semantic_threshold(context)
     candidate_assessments: list[WorkflowOverrideCandidateAssessment] = []
 
     for candidate in candidates:
@@ -224,9 +216,6 @@ def choose_custom_workflow_override_candidate(
         if not launchable:
             suitable = False
             suitability_reason = "not_launchable"
-        elif semantic_fit_score < semantic_threshold:
-            suitable = False
-            suitability_reason = "semantic_fit_below_threshold"
         elif (
             role == _ROLE_AUTHORING
             and bool(policy_flags.get("authoring_intent_required"))
@@ -287,12 +276,6 @@ def choose_custom_workflow_override_candidate(
         for item in candidate_assessments
     ):
         reason_code = "authoring_workflow_profile_requires_explicit_authoring_context"
-    elif any(
-        item.suitability_reason == "semantic_fit_below_threshold"
-        for item in candidate_assessments
-    ):
-        reason_code = "semantic_fit_insufficient"
-
     return WorkflowOverrideDecision(
         context=context,
         chosen_workflow_id=None,

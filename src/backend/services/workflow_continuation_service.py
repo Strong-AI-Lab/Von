@@ -18,20 +18,6 @@ _CONCEPT_ID_PATTERN = re.compile(
     r"#V#[A-Za-z0-9][A-Za-z0-9._-]*",
     flags=re.IGNORECASE,
 )
-_SHORT_CONTINUATION_PROMPT_PATTERN = re.compile(
-    r"^\s*(?:yes|yep|yeah|ok|okay|sure|do it|go ahead|proceed|continue|"
-    r"please do|sounds good|looks good|that works|finish|retry|repair|fix|"
-    r"verify|check|status|again)\b",
-    flags=re.IGNORECASE,
-)
-_FOLLOW_UP_REPAIR_PROMPT_PATTERN = re.compile(
-    r"\b(?:continue|proceed|finish|complete|retry|repair|fix|verify|"
-    r"still missing|not created|not added|didn't|did not|wasn't|was not|"
-    r"weren't|were not|why didn't|why did not|why wasn't|why was not)\b",
-    flags=re.IGNORECASE,
-)
-
-
 def _safe_str(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -188,11 +174,10 @@ def assess_prompt_for_workflow_continuation(
     2. No open work in context → not continuation (workflow-state decision).
     3. Workflow-state-authoritative: open work under a specific workflow →
        continuation applies regardless of prompt shape.
-    4. Prompt-shape heuristics (short confirming prompt or repair keywords)
-       — temporary scaffolding, telemetry-visible via ``decision_source``.
+    4. Open work without a specific workflow → do not continue implicitly.
 
     Returns a dict with ``applies``, ``reason``, and ``decision_source``
-    (one of ``"gate"``, ``"workflow_state"``, or ``"prompt_shape_heuristic"``).
+    (one of ``"gate"`` or ``"workflow_state"``).
     """
 
     prompt_text = _safe_str(prompt) or ""
@@ -229,26 +214,10 @@ def assess_prompt_for_workflow_continuation(
             "decision_source": "workflow_state",
         }
 
-    # Prompt-shape heuristics (temporary scaffolding for cases without a
-    # specific workflow).  Annotated with decision_source for telemetry.
-    if len(prompt_text) <= 24 and _SHORT_CONTINUATION_PROMPT_PATTERN.search(prompt_text):
-        return {
-            "applies": True,
-            "reason": "short_follow_up_prompt",
-            "decision_source": "prompt_shape_heuristic",
-        }
-
-    if _FOLLOW_UP_REPAIR_PROMPT_PATTERN.search(prompt_text):
-        return {
-            "applies": True,
-            "reason": "explicit_follow_up_or_repair_prompt",
-            "decision_source": "prompt_shape_heuristic",
-        }
-
     return {
         "applies": False,
-        "reason": "prompt_not_continuation",
-        "decision_source": "prompt_shape_heuristic",
+        "reason": "open_work_without_selected_workflow",
+        "decision_source": "workflow_state",
     }
 
 

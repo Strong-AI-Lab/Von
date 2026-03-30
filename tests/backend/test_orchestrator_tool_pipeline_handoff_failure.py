@@ -54,17 +54,17 @@ def _build_orchestrator(monkeypatch) -> InternalMCPChatOrchestrator:
     )
 
 
-def test_tool_pipeline_setup_failure_emits_local_handoff_boundary(monkeypatch):
+def test_tool_pipeline_execution_failure_emits_terminal_handoff_boundary(monkeypatch):
     monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
     orchestrator = _build_orchestrator(monkeypatch)
 
-    def _raise_setup_failure() -> bool:
+    def _raise_execution_failure(*_args, **_kwargs):
         raise RuntimeError("settings unavailable")
 
     monkeypatch.setattr(
         orchestrator,
-        "_get_auto_proceed_minimal_imposition_enabled",
-        _raise_setup_failure,
+        "execute_workflow",
+        _raise_execution_failure,
     )
 
     llm = _CapturingLLM([TOOL_CALLING_WORKFLOW_ID])
@@ -89,11 +89,10 @@ def test_tool_pipeline_setup_failure_emits_local_handoff_boundary(monkeypatch):
         "workflow_handoff",
         "workflow_terminal",
     ]
-    assert dispatch_boundaries[-2].get("status") == "failed"
-    assert dispatch_boundaries[-2].get("reason") == "tool_pipeline_setup_exception"
-    assert dispatch_boundaries[-2].get("error_class") == "RuntimeError"
+    assert dispatch_boundaries[-2].get("status") == "started"
     assert dispatch_boundaries[-1].get("status") == "failed"
-    assert dispatch_boundaries[-1].get("reason") == "tool_pipeline_setup_exception"
+    assert dispatch_boundaries[-1].get("reason") == "tool_pipeline_execution_exception"
+    assert dispatch_boundaries[-1].get("error_class") == "RuntimeError"
     assert result.workflow_routing is not None
     assert result.workflow_routing.routing_duration_ms is not None
     assert result.workflow_routing.routing_duration_ms >= 0

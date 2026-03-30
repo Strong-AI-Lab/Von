@@ -658,20 +658,6 @@ def test_looks_like_missing_tool_call_ignores_long_prose():
     assert not orchestrator._looks_like_missing_tool_call(text)
 
 
-def test_extract_completion_claim_candidates_ignores_markdown_code_fences():
-    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
-    text = (
-        "```text\n"
-        "I completed the migration and merged the branch.\n"
-        "```\n"
-        "This is only a draft note for discussion."
-    )
-
-    claims, telemetry = orchestrator._extract_completion_claim_candidates(text)
-    assert claims == []
-    assert telemetry["code_fence_stripped"] is True
-
-
 def test_llm_detector_returns_true_on_yes():
     orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
     orchestrator._missing_tool_call_detector_loaded = True
@@ -861,49 +847,6 @@ def test_missing_tool_call_assess_uses_heuristic_when_classifier_misses():
         if entry.get("type") == "missing_tool_call_detection"
     )
     assert detection_entry["classifier_verdict"] == "no"
-
-
-def test_minimal_imposition_assessment_autoproceeds_on_progress_promise_signal():
-    assessment = InternalMCPChatOrchestrator._assess_minimal_imposition_auto_proceed(
-        "I will now continue wiring the remaining workflow links. Proceeding now."
-    )
-
-    assert assessment.get("should_auto_proceed") is True
-    assert assessment.get("reason") == "minimal_imposition_pass"
-
-
-def test_minimal_imposition_assessment_autoproceeds_low_risk_confirmation():
-    assessment = InternalMCPChatOrchestrator._assess_minimal_imposition_auto_proceed(
-        "Could you confirm the structure before I continue?"
-    )
-
-    assert assessment.get("should_auto_proceed") is True
-    assert assessment.get("low_risk_confirmation_request") is True
-    assert assessment.get("has_high_risk_mutation_signal") is False
-    assert assessment.get("reason") == "minimal_imposition_pass_low_risk_confirmation"
-
-
-def test_minimal_imposition_assessment_blocks_high_risk_confirmation():
-    assessment = InternalMCPChatOrchestrator._assess_minimal_imposition_auto_proceed(
-        "Could you confirm before I delete the concept?"
-    )
-
-    assert assessment.get("should_auto_proceed") is False
-    assert assessment.get("low_risk_confirmation_request") is False
-    assert assessment.get("has_high_risk_mutation_signal") is True
-    assert assessment.get("reason") in {
-        "user_decision_requested",
-        "question_without_progress_promise",
-    }
-
-
-def test_minimal_imposition_assessment_for_low_risk_confirmation_request():
-    assessment = InternalMCPChatOrchestrator._assess_minimal_imposition_auto_proceed(
-        "Could you confirm the structure before I continue?"
-    )
-
-    assert assessment.get("should_auto_proceed") is True
-    assert assessment.get("low_risk_confirmation_request") is True
 
 
 def test_missing_tool_retry_forces_explicitly_requested_workflow_tools():
@@ -1588,10 +1531,10 @@ def test_missing_tool_call_retry_stops_on_no_progress_guard_with_safe_response()
         for entry in aux_entries
         if isinstance(entry, dict)
         and entry.get("type") == "missing_tool_call_retry"
-        and entry.get("stage") == "skipped"
         and entry.get("mechanism") == "no_progress_guard"
     ]
     assert retry_guard_entries
+    assert retry_guard_entries[-1].get("stage") == "tool_recovery"
     assert (
         retry_guard_entries[-1].get("stop_reason")
         == "no_state_change_guard_triggered"
@@ -1652,7 +1595,7 @@ def test_sanitise_user_visible_action_output_rewrites_action_json_and_logs_reaso
     assert aux_log[0].get("source_stage") == "unit_test"
 
 
-def test_run_appends_completion_claim_validation_for_unverified_claims():
+def test_run_preserves_claim_like_response_without_python_completion_validation():
     llm = _RecorderLLM(
         [
             "I completed the task and merged the branch.",
@@ -1671,20 +1614,18 @@ def test_run_appends_completion_claim_validation_for_unverified_claims():
         user_namespace="#V#user",
     )
 
-    assert "Completion claim validation summary:" in result.response_text
-    assert "Not verified:" in result.response_text
-    assert "I completed the task and merged the branch." in result.response_text
+    assert result.response_text == "I completed the task and merged the branch."
 
-    aux_types = [
+    aux_types = {
         entry.get("type")
         for entry in result.aux_llm_calls
         if isinstance(entry, dict)
-    ]
-    assert "completion_claim_detection" in aux_types
-    assert "completion_claim_validation" in aux_types
+    }
+    assert "completion_claim_detection" not in aux_types
+    assert "completion_claim_validation" not in aux_types
 
 
-def test_run_skips_completion_claim_validation_for_non_claim_responses():
+def test_run_keeps_non_claim_responses_free_of_completion_validation_events():
     llm = _RecorderLLM(
         [
             "Here are two options for next steps, and I can apply either approach.",
@@ -1703,20 +1644,14 @@ def test_run_skips_completion_claim_validation_for_non_claim_responses():
         user_namespace="#V#user",
     )
 
-    assert "Completion claim validation summary:" not in result.response_text
-
-    detection_entries = [
-        entry
+    assert (
+        result.response_text
+        == "Here are two options for next steps, and I can apply either approach."
+    )
+    aux_types = {
+        entry.get("type")
         for entry in result.aux_llm_calls
         if isinstance(entry, dict)
-        and entry.get("type") == "completion_claim_detection"
-    ]
-    assert detection_entries
-    assert detection_entries[0].get("claim_count") == 0
-    assert all(
-        not (
-            isinstance(entry, dict)
-            and entry.get("type") == "completion_claim_validation"
-        )
-        for entry in result.aux_llm_calls
-    )
+    }
+    assert "completion_claim_detection" not in aux_types
+    assert "completion_claim_validation" not in aux_types

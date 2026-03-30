@@ -1091,10 +1091,8 @@ def test_presenter_mode_uses_shared_follow_up_summary_for_incomplete_tool_turns(
     assert body["response"] == screen_text
     assert body["response_channels"]["spoken"] == "Short talk track."
     assert body["response_channels"]["format"].startswith("screen_backfill_")
-    assert (
-        "I ran tools for this request, but I do not have a reliable final answer yet."
-        in screen_text
-    )
+    assert "Plain response without presenter tags." in screen_text
+    assert "Operational summary:" in screen_text
     assert (
         "This turn still needs follow-up before it should be treated as complete."
         in screen_text
@@ -1102,7 +1100,6 @@ def test_presenter_mode_uses_shared_follow_up_summary_for_incomplete_tool_turns(
     assert "The tool path did not complete the requested paper-status analysis." in screen_text
     assert "Tool activity diagnostics:" in screen_text
     assert "search_concepts — ok" in screen_text
-    assert "Plain response without presenter tags." not in screen_text
 
     llm_debug = body["llm_debug"]
     assert llm_debug.get("screen_backfill_second_pass_attempted") is True
@@ -1112,7 +1109,7 @@ def test_presenter_mode_uses_shared_follow_up_summary_for_incomplete_tool_turns(
 
     screen_backfill_event = _find_transformation_event(llm_debug, "screen_backfill")
     assert screen_backfill_event["status"] == "fallback_success"
-    assert screen_backfill_event["source_path"] == "follow_up_summary"
+    assert screen_backfill_event["source_path"] == "response_text_plus_follow_up_summary"
 
     spoken_backfill_event = _find_transformation_event(llm_debug, "spoken_backfill")
     assert spoken_backfill_event["status"] == "success"
