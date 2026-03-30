@@ -1537,11 +1537,6 @@ def test_specialised_preflight_shadow_mode_reports_evaluation_without_applying(
         lambda self, prompt, context, max_recent_messages=5: [],
     )
     monkeypatch.setattr(
-        InternalMCPChatOrchestrator,
-        "_should_trigger_predicate_search",
-        staticmethod(lambda _text: False),
-    )
-    monkeypatch.setattr(
         "src.backend.services.annotation_extraction_service.extract_annotations",
         lambda text, use_llm=None, use_match=True, return_timings=False: [],
     )
@@ -1646,11 +1641,6 @@ def test_specialised_preflight_active_mode_applies_fallback_suggestions(monkeypa
         lambda self, prompt, context, max_recent_messages=5: [],
     )
     monkeypatch.setattr(
-        InternalMCPChatOrchestrator,
-        "_should_trigger_predicate_search",
-        staticmethod(lambda _text: False),
-    )
-    monkeypatch.setattr(
         "src.backend.services.annotation_extraction_service.extract_annotations",
         lambda text, use_llm=None, use_match=True, return_timings=False: [],
     )
@@ -1753,3 +1743,117 @@ def test_specialised_preflight_active_mode_applies_fallback_suggestions(monkeypa
     )
     assert isinstance(preflight_text, str)
     assert "Specialised workflow fallback candidates" in preflight_text
+
+
+def test_preflight_stage_authorities_classify_mechanical_stages_correctly(
+    monkeypatch,
+):
+    """JVNAUTOSCI-1629: per-stage sub-annotations should NOT label mechanical
+    stages as prompt_semantic_inference; only topic keyword extraction is
+    prompt-semantic.  The top-level decision_source should be
+    composite_preflight, not prompt_semantic_inference.
+    """
+
+    def _fake_search_concepts(
+        *, query="", instance_of=None, filter_kind=None, **_kwargs
+    ):
+        if instance_of == "#V#conversation_preflight_predicate":
+            return {"results": []}
+        if filter_kind == ["type"]:
+            return {
+                "results": [
+                    {
+                        "concept_id": "#V#research_paper",
+                        "name": "Research Paper",
+                        "similarity_score": 0.90,
+                    },
+                ]
+            }
+        if filter_kind == ["predicate"]:
+            return {
+                "results": [
+                    {
+                        "concept_id": "#V#has_citation",
+                        "name": "has citation",
+                        "similarity_score": 0.85,
+                    },
+                ]
+            }
+        return {"results": []}
+
+    monkeypatch.setattr(
+        "src.backend.services.concept_search_service.search_concepts",
+        _fake_search_concepts,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.get_texts_for_concept",
+        lambda concept_id, predicate=None, limit=50: [],
+    )
+
+    gateway = cast(Any, _CapturingGateway())
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway, max_tool_invocations=1, max_context_chars=80_000
+    )
+
+    llm = _CapturingLLM(["ok"])
+    result = orchestrator.run(
+        prompt="Tell me about machine learning papers",
+        context=[
+            {"role": "user", "content": "I'm interested in deep learning"},
+        ],
+        llm_client=llm,
+        model=None,
+        preferred_language="en",
+    )
+
+    preflight_entries = [
+        entry
+        for entry in (result.aux_llm_calls or [])
+        if entry.get("type") == "ontology_preflight"
+    ]
+
+    assert preflight_entries, "expected ontology preflight telemetry"
+    telemetry = preflight_entries[0]
+
+    # Top-level decision_source must be composite, not prompt_semantic_inference.
+    assert telemetry["decision_source"] == "composite_preflight"
+
+    # possible_inappropriate_python_code_use should reflect whether topic
+    # keywords (the only prompt-semantic stage) actually produced output.
+    has_topic_keywords = bool(telemetry.get("topic_keywords"))
+    assert telemetry["possible_inappropriate_python_code_use"] == has_topic_keywords
+
+    # Per-stage sub-annotations must be present.
+    stage_authorities = telemetry.get("preflight_stage_authorities")
+    assert isinstance(stage_authorities, list)
+    assert len(stage_authorities) > 0
+
+    stages_by_name = {item["stage"]: item for item in stage_authorities}
+
+    # Mechanical stages must NOT be prompt_semantic_inference.
+    mechanical_stages = {
+        "explicit_id_extraction",
+        "predicate_registry_load",
+        "topic_type_discovery",
+        "topic_predicate_discovery",
+        "annotation_extraction",
+        "annotation_region_expansion",
+        "rag_concept_discovery",
+        "salient_predicate_aggregation",
+        "session_memory_carry_over",
+    }
+    for stage_name in mechanical_stages:
+        if stage_name in stages_by_name:
+            assert stages_by_name[stage_name]["decision_source"] != "prompt_semantic_inference", (
+                f"Stage {stage_name} should not be classified as prompt_semantic_inference"
+            )
+
+    # Only topic_keyword_extraction should be prompt_semantic_inference.
+    assert "topic_keyword_extraction" in stages_by_name
+    assert stages_by_name["topic_keyword_extraction"]["decision_source"] == "prompt_semantic_inference"
+
+    # Each sub-stage entry must have required fields.
+    for item in stage_authorities:
+        assert "stage" in item
+        assert "decision_source" in item
+        assert "changed_outcome" in item

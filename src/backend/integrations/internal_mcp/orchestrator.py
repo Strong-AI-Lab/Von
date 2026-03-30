@@ -16149,56 +16149,11 @@ class InternalMCPChatOrchestrator:
                 "predicates": predicates,
             }
 
+        # Targeted predicate search removed (JVNAUTOSCI-1629): redundant with
+        # topic-keyword-driven discovery via _discover_predicates_for_topic.
+        # Initialisations kept for downstream telemetry/memory structure stability.
         targeted_predicates: list[dict[str, Any]] = []
         predicate_query: str | None = None
-
-        if self._should_trigger_predicate_search(raw):
-            predicate_query = self._extract_predicate_query_from_text(raw)
-            if predicate_query:
-                try:
-                    from src.backend.services.concept_search_service import (
-                        search_concepts,
-                    )
-                except Exception:
-                    search_concepts = None
-
-                if callable(search_concepts):
-                    try:
-                        result = search_concepts(
-                            query=predicate_query,
-                            filter_kind=["predicate"],
-                            match_type="similarity",
-                            min_similarity=0.55,
-                            limit=12,
-                        )
-                    except Exception:
-                        result = None
-
-                    entries = (
-                        result.get("results") if isinstance(result, dict) else None
-                    )
-                    if isinstance(entries, list):
-                        seen_targeted: set[str] = set()
-                        for entry in entries:
-                            if not isinstance(entry, dict):
-                                continue
-                            concept_id = entry.get("concept_id")
-                            if not isinstance(concept_id, str) or not concept_id:
-                                continue
-                            if concept_id in seen_targeted:
-                                continue
-                            name_value = entry.get("name")
-                            if isinstance(name_value, str) and name_value.strip():
-                                name_value = self._normalise_preflight_display_name(
-                                    name_value
-                                )
-                            targeted_predicates.append(
-                                {
-                                    "concept_id": concept_id,
-                                    "display_name": name_value,
-                                }
-                            )
-                            seen_targeted.add(concept_id)
 
         # --- Topic vocabulary discovery (JVNAUTOSCI-1052) ---
         topic_keywords: list[str] = []
@@ -17442,22 +17397,82 @@ class InternalMCPChatOrchestrator:
                 "final_predicate_suggestions": final_predicate_suggestions,
                 "final_suggestion_paths": final_suggestion_paths,
                 "discovery_path_counts": discovery_path_counts,
+                # JVNAUTOSCI-1629: per-stage decision-authority sub-annotations.
+                "preflight_stage_authorities": [
+                    {
+                        "stage": "explicit_id_extraction",
+                        "decision_source": "explicit_identifier_parse",
+                        "changed_outcome": bool(explicit_ids),
+                    },
+                    {
+                        "stage": "predicate_registry_load",
+                        "decision_source": "ontology_registry_lookup",
+                        "changed_outcome": bool(predicates),
+                    },
+                    {
+                        "stage": "topic_keyword_extraction",
+                        "decision_source": "prompt_semantic_inference",
+                        "changed_outcome": bool(topic_keywords),
+                    },
+                    {
+                        "stage": "topic_type_discovery",
+                        "decision_source": "vontology_service_delegation",
+                        "changed_outcome": bool(topic_types),
+                    },
+                    {
+                        "stage": "topic_predicate_discovery",
+                        "decision_source": "vontology_service_delegation",
+                        "changed_outcome": bool(topic_predicates),
+                    },
+                    {
+                        "stage": "annotation_extraction",
+                        "decision_source": "vontology_service_delegation",
+                        "changed_outcome": bool(annotation_seed_candidate_ids),
+                    },
+                    {
+                        "stage": "annotation_region_expansion",
+                        "decision_source": "ontology_relation_lookup",
+                        "changed_outcome": bool(
+                            annotation_region_type_ids
+                            or annotation_region_predicate_ids
+                            or annotation_region_related_concept_ids
+                        ),
+                    },
+                    {
+                        "stage": "rag_concept_discovery",
+                        "decision_source": "vontology_service_delegation",
+                        "changed_outcome": bool(rag_selected_concept_ids),
+                    },
+                    {
+                        "stage": "salient_predicate_aggregation",
+                        "decision_source": "ontology_relation_lookup",
+                        "changed_outcome": bool(salient_predicate_ids),
+                    },
+                    {
+                        "stage": "session_memory_carry_over",
+                        "decision_source": "session_state_carry_over",
+                        "changed_outcome": session_memory_reused,
+                    },
+                ],
             },
             stage="deterministic_preflight",
             component="internal_mcp_orchestrator",
             function="_build_ontology_preflight",
             decision_class="ontology_preflight",
-            decision_source="prompt_semantic_inference",
+            # JVNAUTOSCI-1629: composite decision_source — only topic keyword
+            # extraction is prompt-semantic; all other sub-stages are mechanical
+            # lookups or service delegations.  Per-stage granularity is in
+            # preflight_stage_authorities above.
+            decision_source="composite_preflight",
             changed_outcome=bool(
-                predicate_query
-                or targeted_predicates
-                or topic_keywords
+                topic_keywords
                 or annotation_seed_candidate_ids
                 or rag_selected_concept_ids
                 or salient_predicate_ids
                 or final_type_suggestions
                 or final_predicate_suggestions
             ),
+            possible_inappropriate_python_code_use=bool(topic_keywords),
             reason_code="deterministic_ontology_preflight",
         )
 
@@ -17911,56 +17926,10 @@ class InternalMCPChatOrchestrator:
 
         return re.sub(r"[\x00-\x1f\x7f]", "", value)
 
-    @staticmethod
-    def _extract_predicate_query_from_text(text: str) -> str | None:
-        if not isinstance(text, str):
-            return None
-        raw = text.strip()
-        if not raw:
-            return None
-
-        import re
-
-        quoted = re.findall(r'"([^"]{3,80})"|\'([^\']{3,80})\'', raw)
-        for pair in quoted:
-            candidate = next((item for item in pair if item), None)
-            if candidate:
-                return candidate.strip()
-
-        keyword_match = re.search(
-            r"\b(predicate|relationship|relation|related to)\b\s*(?:called|named)?\s*([A-Za-z0-9_\-\s]{3,60})",
-            raw,
-            re.IGNORECASE,
-        )
-        if keyword_match:
-            return keyword_match.group(2).strip()
-
-        words = re.findall(r"[A-Za-z][A-Za-z0-9_\-]{2,}", raw)
-        if not words:
-            return None
-        return " ".join(words[:6]).strip()
-
-    @staticmethod
-    def _should_trigger_predicate_search(text: str) -> bool:
-        if not isinstance(text, str) or not text.strip():
-            return False
-        import re
-
-        lowered = text.lower()
-        if re.search(r"#V#[A-Za-z0-9][A-Za-z0-9._-]*", text):
-            return False
-        return any(
-            token in lowered
-            for token in (
-                "predicate",
-                "relationship",
-                "relation",
-                "related to",
-                "is an instance of",
-                "is a type of",
-                "has author",
-            )
-        )
+    # _extract_predicate_query_from_text and _should_trigger_predicate_search
+    # removed (JVNAUTOSCI-1629): the Python keyword gate drove a redundant
+    # targeted predicate search path.  Predicate discovery now flows entirely
+    # through _discover_predicates_for_topic via topic-keyword similarity.
 
     @staticmethod
     def _extract_concept_ids_from_text(text: str) -> list[str]:
