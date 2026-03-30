@@ -65,9 +65,9 @@ def test_explicit_denial_blocks_additive_write():
     assert decision.user_denial_detected is True
 
 
-def test_mutative_non_destructive_write_requires_explicit_request():
+def test_mutative_non_destructive_write_defaults_allow():
     from src.backend.workflows.write_tool_policy import (
-        REASON_MUTATIVE_NON_DESTRUCTIVE_REQUEST_REQUIRED,
+        REASON_DEFAULT_ALLOW_MUTATIVE_NON_DESTRUCTIVE,
         compute_allowed_write_tools,
     )
 
@@ -77,13 +77,13 @@ def test_mutative_non_destructive_write_requires_explicit_request():
         recent_user_prompts=[],
     )
 
-    assert "update_concept" not in decision.allowed_tools
-    assert decision.reason == REASON_MUTATIVE_NON_DESTRUCTIVE_REQUEST_REQUIRED
+    assert "update_concept" in decision.allowed_tools
+    assert decision.reason == REASON_DEFAULT_ALLOW_MUTATIVE_NON_DESTRUCTIVE
 
 
 def test_recent_prompt_allows_mutative_non_destructive_write():
     from src.backend.workflows.write_tool_policy import (
-        REASON_RECENT_NON_DESTRUCTIVE_MUTATION_REQUEST,
+        REASON_DEFAULT_ALLOW_MUTATIVE_NON_DESTRUCTIVE,
         compute_allowed_write_tools,
     )
 
@@ -94,7 +94,7 @@ def test_recent_prompt_allows_mutative_non_destructive_write():
     )
 
     assert "update_concept" in decision.allowed_tools
-    assert decision.reason == REASON_RECENT_NON_DESTRUCTIVE_MUTATION_REQUEST
+    assert decision.reason == REASON_DEFAULT_ALLOW_MUTATIVE_NON_DESTRUCTIVE
 
 
 def test_destructive_write_requires_confirmation():
@@ -225,16 +225,3 @@ def test_build_mutation_guardrail_events_includes_authority_context():
     assert event["workflow_step_id"] == "respond"
     assert event["conversation_session_id"] == "sess-1"
 
-
-def test_prompt_has_low_risk_additive_write_evidence_for_arxiv_url():
-    from src.backend.workflows.write_tool_policy import (
-        prompt_has_low_risk_additive_write_evidence,
-    )
-
-    assert (
-        prompt_has_low_risk_additive_write_evidence(
-            "https://arxiv.org/abs/2510.06248"
-        )
-        is True
-    )
-    assert prompt_has_low_risk_additive_write_evidence("Yes, do it.") is False

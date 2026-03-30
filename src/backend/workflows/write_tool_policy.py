@@ -1,11 +1,14 @@
 """Write-tool policy helpers.
 
-This module centralises write-policy classification so routing, execution, and
-telemetry all reason about the same mutation semantics.
+This module now serves as a narrow execution-time write authoriser.
+
+It must not decide whether a turn is semantically mutative, tool-requiring, or
+workflow-worthy. The workflow/LLM owns those decisions. This module only checks
+whether a concrete write tool invocation is mechanically safe to execute.
 
 Minimal imposition here means:
-- low-risk additive Vontology writes default-allow unless explicitly denied;
-- non-destructive edits to existing state require a clear request;
+- additive Vontology writes default-allow unless explicitly denied;
+- non-destructive Vontology writes default-allow unless explicitly denied;
 - destructive writes require explicit confirmation or a preserved continuation;
 - external-system writes remain stricter than Vontology-governed writes.
 """
@@ -15,6 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 from typing import Any, Mapping, Sequence
+
+from ..services.python_decision_authority_service import annotate_python_decision_event
 
 
 MUTATION_AUTHORITY_LEVEL_READ_ONLY = "read_only"
@@ -47,6 +52,9 @@ WRITE_RISK_DESTRUCTIVE = "destructive"
 WRITE_RISK_EXTERNAL_NON_VONTOLOGY = "external_non_vontology"
 
 REASON_DEFAULT_ALLOW_ADDITIVE_LOW_RISK = "default_allow_additive_low_risk"
+REASON_DEFAULT_ALLOW_MUTATIVE_NON_DESTRUCTIVE = (
+    "default_allow_mutative_non_destructive"
+)
 REASON_EXPLICIT_NON_DESTRUCTIVE_MUTATION_REQUEST = (
     "explicit_non_destructive_mutation_request"
 )
@@ -180,22 +188,6 @@ _EXTERNAL_CONTEXT_TERMS_BY_PREFIX: dict[str, tuple[str, ...]] = {
     "github_": ("github", "pull request", "pr", "issue", "review", "repository"),
     "gmail_": ("gmail", "email", "mail", "label", "message"),
 }
-
-_ADDITIVE_MUTATION_PATTERN = re.compile(
-    r"\b("
-    r"create|add|insert|upsert|link|attach|store|save|download|finalise|"
-    r"finalize|represent|materialise|materialize|capture|record"
-    r")\b",
-    flags=re.IGNORECASE,
-)
-
-_ARXIV_ID_OR_URL_PATTERN = re.compile(
-    r"(?:arxiv\.org/(?:abs|pdf)/(?:(?:[a-z\-]+/\d{7})|(?:\d{4}\.\d{4,5}))(?:v\d+)?)"
-    r"|(?:\barxiv:\s*(?:(?:[a-z\-]+/\d{7})|(?:\d{4}\.\d{4,5}))(?:v\d+)?\b)"
-    r"|(?:\b\d{4}\.\d{4,5}(?:v\d+)?\b)",
-    flags=re.IGNORECASE,
-)
-
 
 @dataclass(frozen=True)
 class WriteToolDecision:
@@ -542,7 +534,41 @@ def build_mutation_guardrail_events(
             event["conversation_session_id"] = conversation_session_id
         if turn_id:
             event["turn_id"] = turn_id
-        events.append(event)
+        decision_basis = str(decision.decision_basis or "").strip()
+        decision_source = "execution_safety_check"
+        if decision_basis == REASON_EXPLICIT_WRITE_DENIAL_DETECTED:
+            decision_source = "explicit_user_denial_parse"
+        elif decision_basis in {
+            REASON_DESTRUCTIVE_CONFIRMATION_REQUIRED,
+            REASON_EXPLICIT_DESTRUCTIVE_CONFIRMATION,
+            REASON_RECENT_DESTRUCTIVE_CONFIRMATION,
+        }:
+            decision_source = "destructive_confirmation_check"
+        elif decision_basis in {
+            REASON_EXPLICIT_EXTERNAL_WRITE_REQUEST,
+            REASON_RECENT_EXTERNAL_WRITE_REQUEST,
+            REASON_EXTERNAL_WRITE_REQUIRES_EXPLICIT_REQUEST,
+        }:
+            decision_source = "external_write_request_check"
+        elif decision_basis in {
+            REASON_INSUFFICIENT_MUTATION_AUTHORITY,
+            REASON_WORKFLOW_MUTATION_AUTHORITY_INVALID,
+        }:
+            decision_source = "authority_intersection_check"
+
+        events.append(
+            annotate_python_decision_event(
+                event,
+                stage=str(stage or "").strip() or None,
+                component="write_tool_policy",
+                function="build_mutation_guardrail_events",
+                decision_class="write_execution_authorisation",
+                decision_source=decision_source,
+                changed_outcome=not decision.allowed,
+                reason_code=decision_basis or None,
+                possible_inappropriate_python_code_use=False,
+            )
+        )
     return tuple(events)
 
 
@@ -551,6 +577,7 @@ def write_policy_reason_is_session_memory_eligible(reason: str | None) -> bool:
 
     return str(reason or "").strip() in {
         REASON_DEFAULT_ALLOW_ADDITIVE_LOW_RISK,
+        REASON_DEFAULT_ALLOW_MUTATIVE_NON_DESTRUCTIVE,
         REASON_EXPLICIT_NON_DESTRUCTIVE_MUTATION_REQUEST,
         REASON_RECENT_NON_DESTRUCTIVE_MUTATION_REQUEST,
         REASON_DESTRUCTIVE_CONFIRMATION_REQUIRED,
@@ -559,49 +586,6 @@ def write_policy_reason_is_session_memory_eligible(reason: str | None) -> bool:
         REASON_EXPLICIT_EXTERNAL_WRITE_REQUEST,
         REASON_RECENT_EXTERNAL_WRITE_REQUEST,
     }
-
-
-def prompt_has_low_risk_additive_write_evidence(prompt: str) -> bool:
-    """Return whether the prompt gives affirmative evidence for additive writes.
-
-    This routing helper is intentionally narrower than the allow-policy itself:
-    additive tools may be allowed if requested, but we should only force the
-    tool route when the prompt itself supplies concrete evidence of an additive
-    mutation task.
-    """
-
-    if not isinstance(prompt, str):
-        return False
-    text = prompt.strip()
-    if not text or prompt_explicitly_denies_write(text):
-        return False
-
-    lowered = text.lower()
-    if _ARXIV_ID_OR_URL_PATTERN.search(text):
-        return True
-
-    additive_context_terms = (
-        "#v#",
-        "vontology",
-        "ontology",
-        "concept",
-        "relationship",
-        "predicate",
-        "text relation",
-        "note",
-        "description",
-        "metadata",
-        "task",
-        "workflow",
-        "schedule",
-        "binding",
-    )
-    if any(token in lowered for token in additive_context_terms) and _ADDITIVE_MUTATION_PATTERN.search(
-        text
-    ):
-        return True
-
-    return False
 
 
 def prompt_grants_high_impact_kb_write_approval(
@@ -745,38 +729,15 @@ def _decide_single_tool(
         )
 
     if risk_class == WRITE_RISK_MUTATIVE_NON_DESTRUCTIVE:
-        explicit = _prompt_requests_non_destructive_mutation(prompt)
-        recent = any(
-            _prompt_requests_non_destructive_mutation(text)
-            for text in recent_user_prompts
-        )
-        if explicit or recent:
-            reason = (
-                REASON_EXPLICIT_NON_DESTRUCTIVE_MUTATION_REQUEST
-                if explicit
-                else REASON_RECENT_NON_DESTRUCTIVE_MUTATION_REQUEST
-            )
-            return WriteToolDecision(
-                tool_name=tool_name,
-                risk_class=risk_class,
-                required_mutation_authority=required_mutation_authority,
-                effective_mutation_authority=effective_mutation_authority,
-                authority_sources=authority_sources,
-                allowed=True,
-                outcome=MUTATION_GUARDRAIL_DECISION_ALLOWED,
-                decision_basis=reason,
-                continuation_context_used=recent and not explicit,
-            )
         return WriteToolDecision(
             tool_name=tool_name,
             risk_class=risk_class,
             required_mutation_authority=required_mutation_authority,
             effective_mutation_authority=effective_mutation_authority,
             authority_sources=authority_sources,
-            allowed=False,
-            outcome=MUTATION_GUARDRAIL_DECISION_DEFERRED,
-            decision_basis=REASON_MUTATIVE_NON_DESTRUCTIVE_REQUEST_REQUIRED,
-            blocked_reason=REASON_MUTATIVE_NON_DESTRUCTIVE_REQUEST_REQUIRED,
+            allowed=True,
+            outcome=MUTATION_GUARDRAIL_DECISION_ALLOWED,
+            decision_basis=REASON_DEFAULT_ALLOW_MUTATIVE_NON_DESTRUCTIVE,
         )
 
     if risk_class == WRITE_RISK_DESTRUCTIVE:
