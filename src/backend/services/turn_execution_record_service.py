@@ -3211,12 +3211,175 @@ def _materialise_required_effects_from_contract(
     return required_effects
 
 
+# ---------------------------------------------------------------------------
+# Tool-authored mutation effects
+# ---------------------------------------------------------------------------
+# When write tool invocations carry structured arguments (concept_id,
+# predicate_concept_id, etc.), we can build mutation effects that are
+# *tool-authored* — derived from the tool's own payload/arguments rather
+# than from a coarse observation that "some write tool ran".  This yields
+# ``intent_origin: "tool_authored"`` and specific targets/predicates,
+# improving completion-gate precision.  The coarse fallback
+# (_infer_mutation_required_effect) remains as annotated diagnostic
+# scaffolding for the rare case where invocation detail is unavailable.
+# ---------------------------------------------------------------------------
+
+
+def _extract_mutation_metadata_from_invocation(
+    invocation: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Extract mutation-relevant metadata from a single write tool invocation."""
+    tool_name = _safe_str(invocation.get("tool")) or _safe_str(
+        invocation.get("method")
+    )
+    if not tool_name or not _is_write_tool(tool_name):
+        return None
+
+    payload = _extract_tool_invocation_payload(invocation)
+    status = _classify_tool_invocation_status(
+        invocation=invocation, payload=payload
+    )
+    targets = _extract_tool_invocation_target_ids(invocation)
+
+    predicates: list[str] = []
+    for source in (
+        invocation.get("effective_arguments"),
+        invocation.get("arguments"),
+        payload,
+    ):
+        if not isinstance(source, Mapping):
+            continue
+        for key in ("predicate_concept_id", "predicate"):
+            val = _safe_str(source.get(key))
+            if val and val not in predicates:
+                predicates.append(val)
+
+    return {
+        "tool_name": tool_name,
+        "status": status,
+        "targets": targets,
+        "predicates": predicates,
+    }
+
+
+def _build_tool_authored_mutation_effects(
+    *,
+    tool_invocations: Sequence[Mapping[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Build mutation effects from tool-authored invocation metadata.
+
+    Groups write tool invocations by tool name, collecting targets and
+    predicates from each invocation's arguments/payload.  Each group
+    yields one effect with ``intent_origin: "tool_authored"``.
+    """
+    if not tool_invocations:
+        return []
+
+    groups: dict[str, dict[str, Any]] = {}
+    tool_order: list[str] = []
+
+    for invocation in tool_invocations:
+        if not isinstance(invocation, Mapping):
+            continue
+        metadata = _extract_mutation_metadata_from_invocation(invocation)
+        if metadata is None:
+            continue
+
+        lowered = metadata["tool_name"].lower()
+        if lowered not in groups:
+            groups[lowered] = {
+                "tool_name": metadata["tool_name"],
+                "targets": [],
+                "predicates": [],
+                "any_success": False,
+                "any_failure": False,
+                "any_blocked": False,
+            }
+            tool_order.append(lowered)
+
+        group = groups[lowered]
+        for t in metadata["targets"]:
+            if t not in group["targets"]:
+                group["targets"].append(t)
+        for p in metadata["predicates"]:
+            if p not in group["predicates"]:
+                group["predicates"].append(p)
+
+        if metadata["status"] == "ok":
+            group["any_success"] = True
+        elif metadata["status"] == "blocked":
+            group["any_blocked"] = True
+        else:
+            group["any_failure"] = True
+
+    effects: list[dict[str, Any]] = []
+    for index, lowered in enumerate(tool_order):
+        group = groups[lowered]
+        tool_name = group["tool_name"]
+        targets = group["targets"][:5]
+        predicates = group["predicates"][:5]
+
+        if group["any_success"]:
+            effect_status = "satisfied"
+            status_reason = f"Successful {tool_name} invocation observed."
+        elif group["any_blocked"]:
+            effect_status = "not_satisfied"
+            status_reason = f"{tool_name} invocation was blocked."
+        elif group["any_failure"]:
+            effect_status = "not_satisfied"
+            status_reason = f"{tool_name} invocation failed."
+        else:
+            effect_status = "not_executed"
+            status_reason = f"No {tool_name} invocation completed."
+
+        failure_codes: list[str] = []
+        if effect_status == "not_satisfied":
+            failure_codes = [f"kb_mutation_{tool_name.lower()}_failed"]
+
+        target_detail = (
+            f" targeting {', '.join(targets[:2])}" if targets else ""
+        )
+        predicate_detail = (
+            f" ({', '.join(predicates[:2])})" if predicates else ""
+        )
+
+        effect: dict[str, Any] = {
+            "effect_id": f"mutation_{index + 1}",
+            "intent_origin": "tool_authored",
+            "effect_type": "kb_mutation",
+            "description": (
+                f"Mutation via {tool_name}{target_detail}{predicate_detail}."
+            ),
+            "required_tools": [tool_name],
+            "targets": targets,
+            "required_predicates": predicates,
+            "postcondition_required": True,
+            "postcondition_strategy": "state_requery",
+            "status": effect_status,
+            "status_reason": status_reason,
+            "failure_codes": failure_codes,
+        }
+        if failure_codes:
+            effect["failure_code"] = failure_codes[0]
+
+        effects.append(effect)
+
+    return effects
+
+
 def _infer_mutation_required_effect(
     *,
     successful_write_tools: Sequence[str],
     failed_tools: Sequence[str],
     blocked_tools: Sequence[str],
 ) -> dict[str, Any] | None:
+    """Coarse observed-activity mutation fallback (diagnostic scaffolding).
+
+    This function is used only when ``_build_tool_authored_mutation_effects``
+    cannot extract per-invocation metadata.  It produces a single generic
+    ``kb_mutation`` effect from summary lists, annotated with
+    ``decision_authority.scaffolding = True`` to flag it as temporary.
+    """
     if not successful_write_tools and not failed_tools and not blocked_tools:
         return None
 
@@ -3244,7 +3407,7 @@ def _infer_mutation_required_effect(
         failure_codes = ["kb_mutation_not_executed"]
 
     required_tools = list(successful_write_tools[:3]) or ["add_relationship"]
-    mutation_effect = {
+    mutation_effect: dict[str, Any] = {
         "effect_id": "effect_1",
         "intent_origin": "observed_tool_activity",
         "effect_type": "kb_mutation",
@@ -3256,6 +3419,11 @@ def _infer_mutation_required_effect(
         "postcondition_strategy": "state_requery",
         "status": effect_status,
         "status_reason": status_reason,
+        "decision_authority": {
+            "origin": "python",
+            "decision_class": "generic_mutation_fallback",
+            "scaffolding": True,
+        },
     }
     if failure_codes:
         mutation_effect["failure_code"] = failure_codes[0]
@@ -3664,16 +3832,24 @@ def build_turn_execution_record(
     required_effects: list[dict[str, Any]] = []
     required_effects.extend(representation_effects)
 
-    mutation_effect = None
+    mutation_effects: list[dict[str, Any]] = []
     if not representation_effects:
-        mutation_effect = _infer_mutation_required_effect(
-            successful_write_tools=successful_write_tools,
-            failed_tools=failed_tools,
-            blocked_tools=blocked_tools,
+        # Prefer tool-authored mutation effects with per-invocation metadata.
+        mutation_effects = _build_tool_authored_mutation_effects(
+            tool_invocations=tool_invocations,
         )
-    if mutation_effect is not None:
-        required_effects.append(mutation_effect)
-    elif not successful_write_tools and not representation_effects:
+        if not mutation_effects:
+            # Coarse observed-activity fallback (diagnostic scaffolding).
+            coarse_effect = _infer_mutation_required_effect(
+                successful_write_tools=successful_write_tools,
+                failed_tools=failed_tools,
+                blocked_tools=blocked_tools,
+            )
+            if coarse_effect is not None:
+                mutation_effects = [coarse_effect]
+    required_effects.extend(mutation_effects)
+
+    if not mutation_effects and not successful_write_tools and not representation_effects:
         tool_execution_effect = _infer_tool_execution_required_effect(
             execution_summary=execution_summary
         )
