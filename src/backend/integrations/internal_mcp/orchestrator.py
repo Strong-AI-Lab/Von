@@ -6911,11 +6911,49 @@ class InternalMCPChatOrchestrator:
                         f"{', '.join(unresolved_failure_codes[:3])}."
                     )
 
+            # Track whether we're replacing an empty response or appending to
+            # a substantive one — the downstream presenter uses this to decide
+            # whether the user saw only ledger diagnostics.
+            ledger_replaced_empty = not (
+                isinstance(final_response, str) and final_response.strip()
+            )
             if isinstance(final_response, str) and final_response.strip():
                 if "Execution status:" not in final_response:
                     final_response = f"{final_response.rstrip()}\n\n{status_line}"
             else:
                 final_response = status_line
+
+            # Annotate the ledger injection as a Python diagnostic decision.
+            # This is scaffolding: the completion gate status text changes
+            # user-visible meaning and should eventually be replaced by
+            # workflow-authored failure presentation.
+            _aux_llm_calls = data.get("aux_llm_calls")
+            if isinstance(_aux_llm_calls, list):
+                try:
+                    _aux_llm_calls.append(
+                        annotate_python_decision_event(
+                            {
+                                "type": "completion_ledger_injection",
+                                "decision": decision,
+                                "ledger_replaced_empty_response": ledger_replaced_empty,
+                                "decision_authority": {
+                                    "origin": "python",
+                                    "decision_class": "completion_ledger_injection",
+                                    "scaffolding": True,
+                                },
+                            },
+                            stage="completion_gate",
+                            component="internal_mcp_orchestrator",
+                            function="_action_turn_execution_completion_gate",
+                            decision_class="completion_ledger_injection",
+                            decision_source="execution_postcondition_check",
+                            changed_outcome=True,
+                            reason_code=decision or "unknown",
+                            possible_inappropriate_python_code_use=True,
+                        )
+                    )
+                except Exception:
+                    pass
 
         invocations_raw = data.get("invocations")
         invocation_count = len(invocations_raw) if isinstance(invocations_raw, list) else 0

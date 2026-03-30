@@ -8508,9 +8508,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             component="presenter_routes",
                             function="_build_presenter_follow_up_summary_from_tool_messages",
                             decision_class="presenter_fallback",
-                            decision_source="response_semantic_inference",
+                            decision_source="structural_pattern_detection",
                             changed_outcome=True,
                             reason_code="tool_backed_follow_up_summary",
+                            possible_inappropriate_python_code_use=True,
                         )
                     )
                 response_candidate = _strip_presenter_tags(response_text)
@@ -8707,6 +8708,30 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                 screen_candidate = raw
                         if screen_candidate:
                             screen_backfill_source = "llm_synthesis"
+                            auxiliary_llm_calls.append(
+                                annotate_python_decision_event(
+                                    {
+                                        "type": "presenter_screen_backfill",
+                                        "stage": "screen_backfill",
+                                        "source": "llm_synthesis",
+                                        "diagnostic_rewrite": response_candidate_internal_status,
+                                    },
+                                    stage="screen_backfill",
+                                    component="presenter_routes",
+                                    function="_presenter_llm_screen_synthesis",
+                                    decision_class="presenter_fallback",
+                                    decision_source="llm_synthesis",
+                                    changed_outcome=True,
+                                    reason_code=(
+                                        "diagnostic_ledger_rewritten"
+                                        if response_candidate_internal_status
+                                        else "screen_synthesised_from_tools"
+                                    ),
+                                    possible_inappropriate_python_code_use=bool(
+                                        response_candidate_internal_status
+                                    ),
+                                )
+                            )
                     except Exception as exc:
                         screen_backfill_error_class = type(exc).__name__
                         screen_candidate = None
@@ -8752,9 +8777,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                 component="presenter_routes",
                                 function="_build_presenter_screen_summary_from_tool_messages",
                                 decision_class="presenter_fallback",
-                                decision_source="response_semantic_inference",
+                                decision_source="structural_pattern_detection",
                                 changed_outcome=True,
                                 reason_code="tool_activity_summary_fallback",
+                                possible_inappropriate_python_code_use=True,
                             )
                         )
 

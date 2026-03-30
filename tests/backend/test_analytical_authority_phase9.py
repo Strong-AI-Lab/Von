@@ -146,3 +146,101 @@ def test_workflow_gap_recovery_annotation_envelope() -> None:
     assert event["changed_outcome"] is True
     assert event["stage"] == "workflow_dispatch"
     assert event["status"] == "applied"
+
+
+# ---- Phase 10: Presenter / completion fallback authority ----------------
+
+def test_completion_ledger_injection_annotation_envelope() -> None:
+    """Completion ledger injection produces scaffolding-tagged annotation."""
+    from src.backend.services.python_decision_authority_service import (
+        annotate_python_decision_event,
+    )
+
+    event = annotate_python_decision_event(
+        {
+            "type": "completion_ledger_injection",
+            "decision": "failed",
+            "ledger_replaced_empty_response": True,
+            "decision_authority": {
+                "origin": "python",
+                "decision_class": "completion_ledger_injection",
+                "scaffolding": True,
+            },
+        },
+        stage="completion_gate",
+        component="internal_mcp_orchestrator",
+        function="_action_turn_execution_completion_gate",
+        decision_class="completion_ledger_injection",
+        decision_source="execution_postcondition_check",
+        changed_outcome=True,
+        reason_code="failed",
+        possible_inappropriate_python_code_use=True,
+    )
+
+    assert event["decision_authority_origin"] == "python"
+    assert event["decision_class"] == "completion_ledger_injection"
+    assert event["possible_inappropriate_python_code_use"] is True
+    assert event["decision_authority"]["scaffolding"] is True
+    assert event["ledger_replaced_empty_response"] is True
+
+
+def test_presenter_fallback_uses_structural_pattern_detection() -> None:
+    """Presenter fallback decision_source is structural, not semantic."""
+    from src.backend.services.python_decision_authority_service import (
+        annotate_python_decision_event,
+    )
+
+    event = annotate_python_decision_event(
+        {
+            "type": "presenter_screen_backfill",
+            "stage": "screen_backfill",
+            "source": "follow_up_summary",
+        },
+        stage="screen_backfill",
+        component="presenter_routes",
+        function="_build_presenter_follow_up_summary_from_tool_messages",
+        decision_class="presenter_fallback",
+        decision_source="structural_pattern_detection",
+        changed_outcome=True,
+        reason_code="tool_backed_follow_up_summary",
+        possible_inappropriate_python_code_use=True,
+    )
+
+    assert event["decision_source"] == "structural_pattern_detection"
+    assert event["possible_inappropriate_python_code_use"] is True
+    # structural_pattern_detection is NOT in _PROMPT_SEMANTIC_DECISION_SOURCES
+    # but we explicitly set possible_inappropriate=True because it changes
+    # user-visible meaning
+    from src.backend.services.python_decision_authority_service import (
+        _PROMPT_SEMANTIC_DECISION_SOURCES,
+    )
+    assert "structural_pattern_detection" not in _PROMPT_SEMANTIC_DECISION_SOURCES
+
+
+def test_llm_screen_synthesis_annotation_envelope() -> None:
+    """LLM screen synthesis produces a decision_authority annotation."""
+    from src.backend.services.python_decision_authority_service import (
+        annotate_python_decision_event,
+    )
+
+    event = annotate_python_decision_event(
+        {
+            "type": "presenter_screen_backfill",
+            "stage": "screen_backfill",
+            "source": "llm_synthesis",
+            "diagnostic_rewrite": True,
+        },
+        stage="screen_backfill",
+        component="presenter_routes",
+        function="_presenter_llm_screen_synthesis",
+        decision_class="presenter_fallback",
+        decision_source="llm_synthesis",
+        changed_outcome=True,
+        reason_code="diagnostic_ledger_rewritten",
+        possible_inappropriate_python_code_use=True,
+    )
+
+    assert event["decision_authority_origin"] == "python"
+    assert event["decision_source"] == "llm_synthesis"
+    assert event["reason_code"] == "diagnostic_ledger_rewritten"
+    assert event["diagnostic_rewrite"] is True
