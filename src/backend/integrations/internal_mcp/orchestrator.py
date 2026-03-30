@@ -17852,6 +17852,51 @@ class InternalMCPChatOrchestrator:
                             "heuristic missing tool call (classifier said no)"
                         )
 
+            if heuristic_missing and isinstance(retry_reason, str):
+                heuristic_reason_code = None
+                if retry_reason == "heuristic missing tool call":
+                    heuristic_reason_code = (
+                        "heuristic_missing_tool_call_requested_retry"
+                    )
+                elif retry_reason == "heuristic missing tool call (classifier said no)":
+                    heuristic_reason_code = (
+                        "heuristic_missing_tool_call_backstopped_classifier_no"
+                    )
+                if heuristic_reason_code:
+                    try:
+                        aux_log.append(
+                            annotate_python_decision_event(
+                                {
+                                    "type": "missing_tool_call_heuristic",
+                                    "path": path,
+                                    "heuristic_missing_tool_call": True,
+                                    "mentions_tools": mentions_tools,
+                                    "fallback_detector": fallback_detector,
+                                    "classifier_invoked": classifier_invoked,
+                                    "classifier_verdict": (
+                                        "yes"
+                                        if llm_flag is True
+                                        else (
+                                            "no"
+                                            if llm_flag is False
+                                            else "unavailable"
+                                        )
+                                    ),
+                                    "retry_reason": retry_reason,
+                                },
+                                stage="tool_recovery",
+                                component="internal_mcp_orchestrator",
+                                function="_assess_missing_tool_call",
+                                decision_class="missing_tool_call_heuristic",
+                                decision_source="response_semantic_inference",
+                                changed_outcome=True,
+                                reason_code=heuristic_reason_code,
+                                possible_inappropriate_python_code_use=True,
+                            )
+                        )
+                    except Exception:
+                        pass
+
         return _MissingToolCallAssessment(
             path=path,
             is_json_action=is_json_action,

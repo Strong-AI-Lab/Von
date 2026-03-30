@@ -847,6 +847,17 @@ def test_missing_tool_call_assess_uses_heuristic_when_classifier_misses():
         if entry.get("type") == "missing_tool_call_detection"
     )
     assert detection_entry["classifier_verdict"] == "no"
+    heuristic_entry = next(
+        entry
+        for entry in result.outputs["aux_llm_calls"]
+        if entry.get("type") == "missing_tool_call_heuristic"
+    )
+    assert heuristic_entry["decision_class"] == "missing_tool_call_heuristic"
+    assert heuristic_entry["decision_source"] == "response_semantic_inference"
+    assert heuristic_entry["reason_code"] == (
+        "heuristic_missing_tool_call_backstopped_classifier_no"
+    )
+    assert heuristic_entry["possible_inappropriate_python_code_use"] is True
 
 
 def test_missing_tool_retry_forces_explicitly_requested_workflow_tools():

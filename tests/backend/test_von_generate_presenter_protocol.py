@@ -209,6 +209,29 @@ def _find_transformation_event(llm_debug: dict, transform_name: str) -> dict:
     raise AssertionError(f"Missing transformation event: {transform_name}")
 
 
+def _find_aux_event(
+    llm_debug: dict,
+    event_type: str,
+    *,
+    reason_code: str | None = None,
+) -> dict:
+    aux_llm_calls = llm_debug.get("aux_llm_calls")
+    assert isinstance(aux_llm_calls, list)
+    for event in aux_llm_calls:
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") != event_type:
+            continue
+        if reason_code is not None and event.get("reason_code") != reason_code:
+            continue
+        return event
+    if reason_code is not None:
+        raise AssertionError(
+            f"Missing aux event: {event_type} with reason_code={reason_code}"
+        )
+    raise AssertionError(f"Missing aux event: {event_type}")
+
+
 def test_generate_extracts_presenter_blocks_and_returns_response_channels(monkeypatch):
     llm = _StubLLM(
         "<spoken>Hello there.</spoken>\n<screen>Here is the on-screen content.</screen>"
@@ -880,6 +903,14 @@ def test_generate_presenter_mode_rewrites_internal_status_screen_backfill(monkey
     screen_backfill_event = _find_transformation_event(llm_debug, "screen_backfill")
     assert screen_backfill_event["status"] == "success"
     assert screen_backfill_event["source_path"] == "llm_synthesis"
+    detector_event = _find_aux_event(
+        llm_debug,
+        "presenter_detector",
+        reason_code="response_candidate_internal_status_rejected",
+    )
+    assert detector_event["decision_class"] == "presenter_detector"
+    assert detector_event["decision_source"] == "structural_pattern_detection"
+    assert detector_event["possible_inappropriate_python_code_use"] is True
 
     spoken_backfill_event = _find_transformation_event(llm_debug, "spoken_backfill")
     assert spoken_backfill_event["status"] == "success"
@@ -1233,10 +1264,48 @@ def test_presenter_mode_rejects_hallucinated_description_write_in_screen_backfil
     llm_debug = body["llm_debug"]
     assert llm_debug.get("screen_backfill_second_pass_attempted") is True
     assert llm_debug.get("screen_backfill_second_pass_reason") == "missing_screen"
+    tool_dump_detector = _find_aux_event(
+        llm_debug,
+        "presenter_detector",
+        reason_code="response_candidate_tool_dump_rejected",
+    )
+    assert tool_dump_detector["detector"] == "screen_tool_dump"
+    assert tool_dump_detector["context"] == "response_candidate_reuse"
 
     assert len(llm.calls) == 2
     assert llm.calls[0]["prompt"] == "Generate <screen> display content"
     assert llm.calls[1]["prompt"] == "Generate <spoken> talk track"
+
+
+def test_follow_up_summary_suppresses_internal_status_reason_with_detector_event():
+    from src.backend.server.routes.von_routes import (
+        _build_presenter_follow_up_summary_from_tool_messages,
+    )
+
+    aux_llm_calls: list[dict] = []
+    summary = _build_presenter_follow_up_summary_from_tool_messages(
+        [],
+        completion_gate={
+            "requires_follow_up": True,
+            "safe_to_claim_completion": False,
+            "decision_reason": (
+                "Execution status: requested mutation was not executed. "
+                "Failure codes: paper_representation_not_executed."
+            ),
+        },
+        auxiliary_llm_calls=aux_llm_calls,
+    )
+
+    assert isinstance(summary, str)
+    assert "Execution status:" not in summary
+    detector_event = next(
+        entry
+        for entry in aux_llm_calls
+        if entry.get("type") == "presenter_detector"
+        and entry.get("reason_code") == "follow_up_decision_reason_suppressed"
+    )
+    assert detector_event["detector"] == "internal_status_diagnostic"
+    assert detector_event["context"] == "follow_up_decision_reason"
 
 
 def test_presenter_mode_preserves_required_screen_json_fence_from_prompt(monkeypatch):

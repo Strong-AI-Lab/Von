@@ -4950,6 +4950,48 @@ def _looks_like_internal_status_diagnostic(value: str | None) -> bool:
     return False
 
 
+def _append_presenter_detector_event(
+    auxiliary_llm_calls: list[dict[str, Any]] | None,
+    *,
+    function_name: str,
+    detector: str,
+    context: str,
+    reason_code: str,
+    preview: str | None = None,
+) -> None:
+    """Record detector-level presenter telemetry when Python pattern checks branch."""
+
+    if not isinstance(auxiliary_llm_calls, list):
+        return
+
+    payload: dict[str, Any] = {
+        "type": "presenter_detector",
+        "stage": "screen_backfill",
+        "detector": detector,
+        "context": context,
+        "matched": True,
+    }
+    if isinstance(preview, str) and preview.strip():
+        payload["preview"] = preview.strip()[:240]
+
+    try:
+        auxiliary_llm_calls.append(
+            annotate_python_decision_event(
+                payload,
+                stage="screen_backfill",
+                component="presenter_routes",
+                function=function_name,
+                decision_class="presenter_detector",
+                decision_source="structural_pattern_detection",
+                changed_outcome=True,
+                reason_code=reason_code,
+                possible_inappropriate_python_code_use=True,
+            )
+        )
+    except Exception:
+        return
+
+
 def _extract_created_concept_labels_from_payload(
     payload: dict[str, Any], *, max_items: int = 3
 ) -> list[str]:
@@ -5133,6 +5175,7 @@ def _build_presenter_follow_up_summary_from_tool_messages(
     tool_messages: list[dict],
     *,
     completion_gate: Mapping[str, Any] | None = None,
+    auxiliary_llm_calls: list[dict[str, Any]] | None = None,
 ) -> str | None:
     """Build one shared presenter summary basis for incomplete tool turns."""
 
@@ -5153,7 +5196,19 @@ def _build_presenter_follow_up_summary_from_tool_messages(
     ]
 
     decision_reason = _progress_str(completion_gate.get("decision_reason"))
-    if decision_reason and not _looks_like_internal_status_diagnostic(decision_reason):
+    decision_reason_is_internal_status = _looks_like_internal_status_diagnostic(
+        decision_reason
+    )
+    if decision_reason and decision_reason_is_internal_status:
+        _append_presenter_detector_event(
+            auxiliary_llm_calls,
+            function_name="_build_presenter_follow_up_summary_from_tool_messages",
+            detector="internal_status_diagnostic",
+            context="follow_up_decision_reason",
+            reason_code="follow_up_decision_reason_suppressed",
+            preview=decision_reason,
+        )
+    if decision_reason and not decision_reason_is_internal_status:
         lines.append(decision_reason)
 
     if tool_summary:
@@ -8329,17 +8384,37 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 # model emitted only <spoken> and we defaulted screen=spoken.
                 return a == b
 
+            existing_screen_tool_dump = bool(
+                isinstance(screen_text, str) and _screen_looks_like_tool_dump(screen_text)
+            )
+            existing_screen_internal_status = bool(
+                isinstance(screen_text, str)
+                and _looks_like_internal_status_diagnostic(screen_text)
+            )
+            if existing_screen_tool_dump:
+                _append_presenter_detector_event(
+                    auxiliary_llm_calls,
+                    function_name="_presenter_screen_backfill_detector",
+                    detector="screen_tool_dump",
+                    context="existing_screen_candidate",
+                    reason_code="existing_screen_candidate_tool_dump_detected",
+                    preview=screen_text,
+                )
+            if existing_screen_internal_status:
+                _append_presenter_detector_event(
+                    auxiliary_llm_calls,
+                    function_name="_presenter_screen_backfill_detector",
+                    detector="internal_status_diagnostic",
+                    context="existing_screen_candidate",
+                    reason_code="existing_screen_candidate_internal_status_detected",
+                    preview=screen_text,
+                )
+
             needs_screen_backfill = (
                 (not screen_tag_present)
                 or (not isinstance(screen_text, str) or not screen_text.strip())
-                or (
-                    isinstance(screen_text, str)
-                    and _screen_looks_like_tool_dump(screen_text)
-                )
-                or (
-                    isinstance(screen_text, str)
-                    and _looks_like_internal_status_diagnostic(screen_text)
-                )
+                or existing_screen_tool_dump
+                or existing_screen_internal_status
                 or (
                     screen_fence_compat_enabled
                     and isinstance(required_screen_json_fence, str)
@@ -8507,6 +8582,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             _build_presenter_follow_up_summary_from_tool_messages(
                                 tool_messages,
                                 completion_gate=completion_gate_summary,
+                                auxiliary_llm_calls=auxiliary_llm_calls,
                             )
                         )
                 if follow_up_screen_summary:
@@ -8515,16 +8591,46 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 response_candidate_internal_status = _looks_like_internal_status_diagnostic(
                     response_candidate
                 )
+                response_candidate_tool_dump = bool(
+                    isinstance(response_candidate, str)
+                    and _screen_looks_like_tool_dump(response_candidate)
+                )
                 response_candidate_duplicates_spoken = _screen_too_similar_to_spoken(
                     response_candidate, spoken_text
                 )
+                if (
+                    response_candidate
+                    and not response_candidate_duplicates_spoken
+                    and response_candidate_tool_dump
+                ):
+                    _append_presenter_detector_event(
+                        auxiliary_llm_calls,
+                        function_name="_presenter_screen_backfill_detector",
+                        detector="screen_tool_dump",
+                        context="response_candidate_reuse",
+                        reason_code="response_candidate_tool_dump_rejected",
+                        preview=response_candidate,
+                    )
+                if (
+                    response_candidate
+                    and not response_candidate_duplicates_spoken
+                    and response_candidate_internal_status
+                ):
+                    _append_presenter_detector_event(
+                        auxiliary_llm_calls,
+                        function_name="_presenter_screen_backfill_detector",
+                        detector="internal_status_diagnostic",
+                        context="response_candidate_reuse",
+                        reason_code="response_candidate_internal_status_rejected",
+                        preview=response_candidate,
+                    )
                 # If the model emitted only <spoken>, response_candidate usually equals
                 # spoken text. Reusing it would keep screen/spoken identical.
                 if (
                     screen_candidate is None
                     and response_candidate
                     and not response_candidate_duplicates_spoken
-                    and not _screen_looks_like_tool_dump(response_candidate)
+                    and not response_candidate_tool_dump
                     and not response_candidate_internal_status
                 ):
                     screen_candidate = _append_operational_summary(
