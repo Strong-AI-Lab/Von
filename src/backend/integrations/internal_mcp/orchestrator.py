@@ -48,6 +48,9 @@ from src.backend.services.workflow_override_policy_service import (
     WorkflowOverrideDecision,
     choose_custom_workflow_override_candidate,
 )
+from src.backend.services.python_decision_authority_service import (
+    annotate_python_decision_event,
+)
 from ...workflows.action_registry import (
     ActionRegistry,
     ActionSpec,
@@ -98,13 +101,9 @@ from src.backend.workflows.write_tool_policy import (
     build_mutation_guardrail_events,
     classify_write_tool_risk,
     compute_allowed_write_tools,
-    prompt_has_low_risk_additive_write_evidence,
-    prompt_grants_high_impact_kb_write_approval,
     prompt_explicitly_denies_write,
-    REASON_DEFAULT_ALLOW_ADDITIVE_LOW_RISK,
     required_mutation_authority_level_for_risk,
     tool_requires_confirmation,
-    write_policy_reason_is_session_memory_eligible,
 )
 from ...services.turn_execution_record_service import build_turn_execution_record
 from src.backend.services.buttonify_service import (
@@ -1462,11 +1461,6 @@ class InternalMCPChatOrchestrator:
         # This keeps topic/predicate context available for short follow-up turns
         # even when prompts become underspecified ("continue", "now do affiliations").
         self._preflight_session_memory: dict[str, dict[str, Any]] = {}
-        # Session-scoped carry-over for write intent/approval context.
-        # This supports short continuation prompts ("yes", "do it") while
-        # staying bounded by TTL + turn count + compatibility checks.
-        self._write_intent_session_memory: dict[str, dict[str, Any]] = {}
-
         # Workflow model policy cache (single policy instance).
         self._workflow_model_policy_cache: dict[str, Any] = {}
         self._workflow_model_policy_cache_ttl_seconds = self._coerce_int(
@@ -4700,14 +4694,12 @@ class InternalMCPChatOrchestrator:
             else None
         )
 
-        url_requirement = dict(
-            self._derive_url_extraction_requirement(
-                prompt_text,
-                method_catalogue=(
-                    method_catalogue if isinstance(method_catalogue, Mapping) else None
-                ),
-            )
-        )
+        url_requirement = {
+            "required": False,
+            "url": None,
+            "tool": None,
+            "reason": "workflow_llm_owns_url_reading_decision",
+        }
         prompt_requirements = self._evaluate_prompt_requirements(
             prompt_text=prompt_text,
             method_catalogue=(
@@ -4727,18 +4719,33 @@ class InternalMCPChatOrchestrator:
         if isinstance(aux_log, list):
             try:
                 aux_log.append(
-                    {
-                        "type": "prompt_tool_requirements_preflight",
-                        "required_tools": list(prompt_requirements.required_tools),
-                        "required_url_extraction_tool": (
-                            prompt_requirements.required_url_extraction_tool
+                    annotate_python_decision_event(
+                        {
+                            "type": "prompt_tool_requirements_preflight",
+                            "stage": "tool_plan",
+                            "required_tools": list(prompt_requirements.required_tools),
+                            "required_url_extraction_tool": (
+                                prompt_requirements.required_url_extraction_tool
+                            ),
+                            "required_url_extraction_url": (
+                                prompt_requirements.required_url_extraction_url
+                            ),
+                            "missing_tools": list(prompt_requirements.missing_tools),
+                            "url_requirement": dict(url_requirement),
+                        },
+                        stage="tool_plan",
+                        component="internal_mcp_orchestrator",
+                        function="_action_tool_calling_preflight_requirements",
+                        decision_class="prompt_requirement_inference",
+                        decision_source="explicit_identifier_parse",
+                        changed_outcome=bool(prompt_requirements.required_tools),
+                        reason_code=(
+                            "explicit_prompt_tool_requirement_detected"
+                            if prompt_requirements.required_tools
+                            else "no_explicit_prompt_tool_requirement"
                         ),
-                        "required_url_extraction_url": (
-                            prompt_requirements.required_url_extraction_url
-                        ),
-                        "missing_tools": list(prompt_requirements.missing_tools),
-                        "url_requirement": dict(url_requirement),
-                    }
+                        possible_inappropriate_python_code_use=False,
+                    )
                 )
             except Exception:
                 pass
@@ -5407,7 +5414,19 @@ class InternalMCPChatOrchestrator:
                 "continuation_context_reused": continuation_context_reused,
             }
             try:
-                aux_llm_calls.append(payload)
+                aux_llm_calls.append(
+                    annotate_python_decision_event(
+                        payload,
+                        stage=stage,
+                        component="internal_mcp_orchestrator",
+                        function="_record_write_gate_decision",
+                        decision_class="write_execution_gate",
+                        decision_source="execution_safety_check",
+                        changed_outcome=not allowed,
+                        reason_code=str(reason or "").strip() or None,
+                        possible_inappropriate_python_code_use=False,
+                    )
+                )
             except Exception:
                 pass
 
@@ -6159,37 +6178,52 @@ class InternalMCPChatOrchestrator:
             if isinstance(aux_llm_calls, list) and required_prompt_tools:
                 try:
                     aux_llm_calls.append(
-                        {
-                            "type": "prompt_tool_requirements",
-                            "required_tools": list(required_prompt_tools),
-                            "missing_tools": list(missing_prompt_tools),
-                            "required_fetch_concept_ids": list(
-                                required_prompt_fetch_concept_ids
+                        annotate_python_decision_event(
+                            {
+                                "type": "prompt_tool_requirements",
+                                "stage": "tool_execute",
+                                "required_tools": list(required_prompt_tools),
+                                "missing_tools": list(missing_prompt_tools),
+                                "required_fetch_concept_ids": list(
+                                    required_prompt_fetch_concept_ids
+                                ),
+                                "missing_fetch_concept_ids": list(
+                                    missing_prompt_fetch_concept_ids
+                                ),
+                                "required_read_file_copy_ids": list(
+                                    required_prompt_read_file_copy_ids
+                                ),
+                                "missing_read_file_copy_ids": list(
+                                    missing_prompt_read_file_copy_ids
+                                ),
+                                "required_scholarly_representation_for_file_copy_ids": list(
+                                    required_prompt_scholarly_representation_file_copy_ids
+                                ),
+                                "missing_scholarly_representation_for_file_copy_ids": list(
+                                    missing_prompt_scholarly_representation_file_copy_ids
+                                ),
+                                "required_create_type_name": (
+                                    required_prompt_create_type_name
+                                ),
+                                "invoked_tools": [
+                                    str(item.get("tool"))
+                                    for item in invocations_for_requirements
+                                    if isinstance(item.get("tool"), str)
+                                ],
+                            },
+                            stage="tool_execute",
+                            component="internal_mcp_orchestrator",
+                            function="_action_tool_calling_respond",
+                            decision_class="prompt_requirement_inference",
+                            decision_source="explicit_identifier_parse",
+                            changed_outcome=bool(missing_prompt_tools),
+                            reason_code=(
+                                "explicit_prompt_tool_requirement_missing"
+                                if missing_prompt_tools
+                                else "explicit_prompt_tool_requirement_satisfied"
                             ),
-                            "missing_fetch_concept_ids": list(
-                                missing_prompt_fetch_concept_ids
-                            ),
-                            "required_read_file_copy_ids": list(
-                                required_prompt_read_file_copy_ids
-                            ),
-                            "missing_read_file_copy_ids": list(
-                                missing_prompt_read_file_copy_ids
-                            ),
-                            "required_scholarly_representation_for_file_copy_ids": list(
-                                required_prompt_scholarly_representation_file_copy_ids
-                            ),
-                            "missing_scholarly_representation_for_file_copy_ids": list(
-                                missing_prompt_scholarly_representation_file_copy_ids
-                            ),
-                            "required_create_type_name": (
-                                required_prompt_create_type_name
-                            ),
-                            "invoked_tools": [
-                                str(item.get("tool"))
-                                for item in invocations_for_requirements
-                                if isinstance(item.get("tool"), str)
-                            ],
-                        }
+                            possible_inappropriate_python_code_use=False,
+                        )
                     )
                 except Exception:
                     pass
@@ -7388,31 +7422,11 @@ class InternalMCPChatOrchestrator:
                 seen_baseline.add(key)
                 baseline_tools.append(definitions_by_name[key].name)
 
-        recent_user_prompts = self._recent_user_prompts_from_context(context)
         write_tool_names = sorted(
             [name for name in ordered_tool_names if _is_write_tool(name)],
             key=lambda value: value.lower(),
         )
-        write_policy_decision = compute_allowed_write_tools(
-            prompt=prompt,
-            requested_tools=write_tool_names,
-            recent_user_prompts=recent_user_prompts or None,
-        )
-        write_policy_reason = str(write_policy_decision.reason or "").strip()
-        allowed_write_tools = {
-            str(tool_name).strip().lower()
-            for tool_name in write_policy_decision.allowed_tools
-            if isinstance(tool_name, str) and str(tool_name).strip()
-        }
-        confirmation_required_write_tools = {
-            item.tool_name.strip().lower()
-            for item in write_policy_decision.tool_decisions
-            if item.requires_confirmation and item.tool_name.strip()
-        }
         write_explicitly_denied = prompt_explicitly_denies_write(prompt)
-        if write_explicitly_denied:
-            allowed_write_tools = set()
-            write_policy_reason = "explicit_write_denial_detected"
 
         hinted_families = self._collect_structured_tool_family_hints(
             prompt=prompt,
@@ -7440,12 +7454,6 @@ class InternalMCPChatOrchestrator:
             if _is_write_tool(tool_name):
                 if write_explicitly_denied:
                     _mark_excluded(tool_name, "write_tool_explicitly_denied")
-                    return
-                if (
-                    key not in allowed_write_tools
-                    and key not in confirmation_required_write_tools
-                ):
-                    _mark_excluded(tool_name, "write_tool_not_allowed_for_prompt")
                     return
             included_lookup.add(key)
             candidate_names.append(definitions_by_name[key].name)
@@ -7609,7 +7617,11 @@ class InternalMCPChatOrchestrator:
             provider_limit=provider_limit,
             cap_applied=cap_applied,
             truncation_applied=truncation_applied,
-            write_policy_reason=write_policy_reason,
+            write_policy_reason=(
+                "explicit_write_denial_detected"
+                if write_explicitly_denied and write_tool_names
+                else "workflow_llm_owns_write_tool_selection"
+            ),
             warnings=tuple(warnings),
         )
 
@@ -8515,49 +8527,6 @@ class InternalMCPChatOrchestrator:
         return None
 
     @classmethod
-    def _extract_required_fetch_concept_ids_from_prompt(
-        cls,
-        user_prompt: Any,
-    ) -> list[str]:
-        """Extract concept IDs/slugs that imply required fetch_concept checks."""
-
-        if not isinstance(user_prompt, str) or not user_prompt.strip():
-            return []
-
-        explicit_concept_ids = cls._extract_explicit_concept_ids_from_prompt(user_prompt)
-        has_verification_intent = bool(
-            cls._PROMPT_CONCEPT_VERIFICATION_HINT_PATTERN.search(user_prompt)
-        )
-
-        # Require multiple suffix segments so field names like
-        # "workflow_mapping_spec" are not treated as concept IDs.
-        matches = re.findall(
-            r"(#V#workflow_mapping_[A-Za-z0-9]+(?:_[A-Za-z0-9]+){2,}"
-            r"|\bworkflow_mapping_[A-Za-z0-9]+(?:_[A-Za-z0-9]+){2,}\b)",
-            user_prompt,
-            flags=re.IGNORECASE,
-        )
-        concept_ids: list[str] = []
-        seen: set[str] = set()
-        if has_verification_intent:
-            for concept_id in explicit_concept_ids:
-                key = concept_id.lower()
-                if key in seen:
-                    continue
-                seen.add(key)
-                concept_ids.append(concept_id)
-        for match in matches:
-            concept_id = cls._normalise_concept_id_candidate(match)
-            if not concept_id:
-                continue
-            key = concept_id.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            concept_ids.append(concept_id)
-        return concept_ids
-
-    @classmethod
     def _extract_explicit_concept_ids_from_prompt(
         cls,
         user_prompt: Any,
@@ -8583,28 +8552,6 @@ class InternalMCPChatOrchestrator:
         return concept_ids
 
     @classmethod
-    def _extract_required_read_file_copy_ids_from_prompt(
-        cls,
-        user_prompt: Any,
-    ) -> list[str]:
-        if not isinstance(user_prompt, str) or not user_prompt.strip():
-            return []
-
-        references = cls._PROMPT_FILE_COPY_REFERENCE_PATTERN.findall(user_prompt)
-        concept_ids: list[str] = []
-        seen: set[str] = set()
-        for reference in references:
-            concept_id = cls._normalise_concept_id_candidate(reference)
-            if not concept_id:
-                continue
-            lowered = concept_id.lower()
-            if lowered in seen:
-                continue
-            seen.add(lowered)
-            concept_ids.append(concept_id)
-        return concept_ids
-
-    @classmethod
     def _is_file_copy_concept_id(cls, concept_id: Any) -> bool:
         if not isinstance(concept_id, str):
             return False
@@ -8612,102 +8559,6 @@ class InternalMCPChatOrchestrator:
         if not cleaned:
             return False
         return bool(cls._FILE_COPY_CONCEPT_ID_PATTERN.match(cleaned))
-
-    @classmethod
-    def _extract_file_copy_concept_ids_from_context_messages(
-        cls,
-        context_messages: Sequence[Mapping[str, Any]] | None,
-        *,
-        max_ids: int = 6,
-    ) -> list[str]:
-        if not context_messages:
-            return []
-
-        concept_ids: list[str] = []
-        seen: set[str] = set()
-        for message in reversed(list(context_messages)):
-            if not isinstance(message, Mapping):
-                continue
-            role = str(message.get("role") or "").strip().lower()
-            if role not in {"user", "assistant", "tool"}:
-                continue
-            content = message.get("content")
-            if not isinstance(content, str) or not content.strip():
-                continue
-            candidates = cls._extract_explicit_concept_ids_from_prompt(content)
-            for candidate in candidates:
-                if not cls._is_file_copy_concept_id(candidate):
-                    continue
-                lowered = candidate.lower()
-                if lowered in seen:
-                    continue
-                seen.add(lowered)
-                concept_ids.append(candidate)
-                if len(concept_ids) >= max_ids:
-                    return concept_ids
-        return concept_ids
-
-    @classmethod
-    def _prompt_requests_scholarly_representation(
-        cls,
-        user_prompt: Any,
-    ) -> bool:
-        if not isinstance(user_prompt, str) or not user_prompt.strip():
-            return False
-        prompt_text = user_prompt.strip()
-        if cls._PROMPT_SCHOLARLY_REPRESENTATION_INTENT_PATTERN.search(prompt_text):
-            return True
-        has_paper_term = bool(cls._PROMPT_PAPER_INTENT_PATTERN.search(prompt_text))
-        has_representation_term = bool(
-            cls._PROMPT_REPRESENTATION_INTENT_PATTERN.search(prompt_text)
-        )
-        return has_paper_term and has_representation_term
-
-    @classmethod
-    def _extract_required_scholarly_representation_file_copy_ids(
-        cls,
-        user_prompt: Any,
-        *,
-        context_messages: Sequence[Mapping[str, Any]] | None = None,
-    ) -> list[str]:
-        if not cls._prompt_requests_scholarly_representation(user_prompt):
-            return []
-
-        explicit_prompt_ids = cls._extract_required_read_file_copy_ids_from_prompt(
-            user_prompt
-        )
-        if explicit_prompt_ids:
-            return explicit_prompt_ids
-
-        return cls._extract_file_copy_concept_ids_from_context_messages(
-            context_messages
-        )
-
-    @classmethod
-    def _extract_required_create_type_name_from_prompt(
-        cls,
-        user_prompt: Any,
-    ) -> str | None:
-        """Extract a requested test type name for deterministic create_concepts."""
-
-        if not isinstance(user_prompt, str) or not user_prompt.strip():
-            return None
-        lowered = user_prompt.lower()
-        if "create" not in lowered or "type" not in lowered:
-            return None
-
-        pattern = re.compile(
-            r"(?:#V#)?(test_workflow_trigger_type_[A-Za-z0-9_]+)",
-            flags=re.IGNORECASE,
-        )
-        match = pattern.search(user_prompt)
-        if not match:
-            return None
-
-        raw_name = str(match.group(1) or "").strip()
-        if not raw_name:
-            return None
-        return raw_name.lstrip("#").lstrip("V#")
 
     @classmethod
     def _extract_explicit_prompt_tool_requirements(
@@ -8769,40 +8620,6 @@ class InternalMCPChatOrchestrator:
                     _add_tool(canonical)
 
         return required_tools
-
-    @classmethod
-    def _infer_arxiv_acquisition_tool_from_prompt(
-        cls,
-        prompt_text: str,
-        *,
-        allow_default_download: bool,
-    ) -> str | None:
-        """Infer the deterministic arXiv acquisition tool implied by a prompt."""
-
-        if not isinstance(prompt_text, str) or not prompt_text.strip():
-            return None
-
-        if not cls._extract_arxiv_id_from_text(prompt_text):
-            return None
-
-        # Explicit denial overrides all artefact-intent tokens — the denial
-        # phrase itself contains words like "download"/"store" that would
-        # otherwise register as positive intent.
-        if prompt_explicitly_denies_write(prompt_text):
-            return None
-
-        lowered = prompt_text.lower()
-        if any(token in lowered for token in ("finalise", "finalize", "cached")):
-            return "finalise_cached_paper"
-
-        explicit_artefact_intent = any(
-            token in lowered
-            for token in ("download", "ingest", "upload", "store", "save")
-        )
-        if explicit_artefact_intent or allow_default_download:
-            return "download_paper"
-
-        return None
 
     @staticmethod
     def _missing_prompt_tool_requirements(
@@ -8938,6 +8755,8 @@ class InternalMCPChatOrchestrator:
 
     @classmethod
     def _extract_prompt_urls(cls, prompt_text: Any) -> list[str]:
+        """Extract explicit URLs from prompt text without inferring read intent."""
+
         if not isinstance(prompt_text, str) or not prompt_text.strip():
             return []
 
@@ -8955,97 +8774,6 @@ class InternalMCPChatOrchestrator:
         return urls
 
     @classmethod
-    def _prompt_requests_url_reading(cls, prompt_text: str) -> bool:
-        urls = cls._extract_prompt_urls(prompt_text)
-        if not urls:
-            return False
-
-        lowered = prompt_text.casefold()
-        if cls._URL_READING_INTENT_PATTERN.search(lowered):
-            return True
-
-        prompt_without_urls = prompt_text
-        for url in urls:
-            prompt_without_urls = prompt_without_urls.replace(url, " ")
-        stripped = re.sub(r"\s+", " ", prompt_without_urls).strip(
-            " \t\r\n:;,-()[]{}<>\"'"
-        )
-        return stripped.casefold() in cls._URL_READING_SHORT_FRAME_TEXTS if stripped else True
-
-    @classmethod
-    def _derive_url_extraction_requirement(
-        cls,
-        user_prompt: Any,
-        *,
-        method_catalogue: Mapping[str, Any] | None = None,
-    ) -> Mapping[str, Any]:
-        """Keep URL-reading policy aligned across routing, workflow preflight, and retry."""
-
-        prompt_text = user_prompt if isinstance(user_prompt, str) else ""
-        prompt_urls = cls._extract_prompt_urls(prompt_text)
-        if not prompt_urls:
-            return {
-                "required": False,
-                "url": None,
-                "tool": None,
-                "reason": "no_prompt_url",
-            }
-
-        available_tools: set[str] = set()
-        if isinstance(method_catalogue, Mapping):
-            for tool_name in method_catalogue.keys():
-                if isinstance(tool_name, str) and tool_name.strip():
-                    available_tools.add(tool_name.strip().lower())
-
-        def _tool_available(tool_name: str) -> bool:
-            if not available_tools:
-                return True
-            return tool_name.lower() in available_tools
-
-        allow_default_arxiv_download = bool(
-            cls._extract_arxiv_id_from_text(prompt_text)
-        ) and not prompt_explicitly_denies_write(prompt_text)
-        if cls._infer_arxiv_acquisition_tool_from_prompt(
-            prompt_text,
-            allow_default_download=allow_default_arxiv_download,
-        ):
-            return {
-                "required": False,
-                "url": None,
-                "tool": None,
-                "reason": "arxiv_workflow_preferred",
-            }
-
-        tool_name: str | None = None
-        if _tool_available("resilient_extract_url"):
-            tool_name = "resilient_extract_url"
-        elif _tool_available("extract_url"):
-            tool_name = "extract_url"
-
-        if not tool_name:
-            return {
-                "required": False,
-                "url": prompt_urls[0],
-                "tool": None,
-                "reason": "url_tool_unavailable",
-            }
-
-        if not cls._prompt_requests_url_reading(prompt_text):
-            return {
-                "required": False,
-                "url": prompt_urls[0],
-                "tool": tool_name,
-                "reason": "no_url_reading_intent",
-            }
-
-        return {
-            "required": True,
-            "url": prompt_urls[0],
-            "tool": tool_name,
-            "reason": "url_reading_intent",
-        }
-
-    @classmethod
     def _derive_prompt_tool_requirements(
         cls,
         user_prompt: Any,
@@ -9054,7 +8782,12 @@ class InternalMCPChatOrchestrator:
         context_messages: Sequence[Mapping[str, Any]] | None = None,
         url_requirement: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Derive deterministic prompt requirements for tool recovery."""
+        """Derive explicit prompt-tool requirements without semantic inference.
+
+        This pathway intentionally recognises only explicit tool mentions. It
+        must not infer required tools, representation contracts, or mutation
+        intent from prompt semantics.
+        """
 
         required_tools = cls._extract_explicit_prompt_tool_requirements(
             user_prompt,
@@ -9072,105 +8805,6 @@ class InternalMCPChatOrchestrator:
                 return True
             return tool_name.lower() in available_tools
 
-        required_fetch_concept_ids = cls._extract_required_fetch_concept_ids_from_prompt(
-            user_prompt
-        )
-        required_read_file_copy_ids = cls._extract_required_read_file_copy_ids_from_prompt(
-            user_prompt
-        )
-        required_scholarly_representation_for_file_copy_ids = (
-            cls._extract_required_scholarly_representation_file_copy_ids(
-                user_prompt,
-                context_messages=context_messages,
-            )
-        )
-        scholarly_representation_intent = bool(
-            required_scholarly_representation_for_file_copy_ids
-        )
-
-        required_create_type_name = cls._extract_required_create_type_name_from_prompt(
-            user_prompt
-        )
-        if not _tool_available("create_concepts"):
-            required_create_type_name = None
-        prompt_text = user_prompt if isinstance(user_prompt, str) else ""
-        allow_default_arxiv_download = bool(cls._extract_arxiv_id_from_text(prompt_text)) and not (
-            prompt_explicitly_denies_write(prompt_text)
-        )
-
-        seen_required = {
-            str(tool_name).strip().lower()
-            for tool_name in required_tools
-            if isinstance(tool_name, str) and tool_name.strip()
-        }
-        preferred_arxiv_tool = cls._infer_arxiv_acquisition_tool_from_prompt(
-            prompt_text,
-            allow_default_download=allow_default_arxiv_download,
-        )
-        if preferred_arxiv_tool == "finalise_cached_paper" and not _tool_available(
-            "finalise_cached_paper"
-        ):
-            preferred_arxiv_tool = (
-                "download_paper"
-                if allow_default_arxiv_download and _tool_available("download_paper")
-                else None
-            )
-        elif preferred_arxiv_tool and not _tool_available(preferred_arxiv_tool):
-            preferred_arxiv_tool = None
-
-        url_requirement_map = (
-            dict(url_requirement)
-            if isinstance(url_requirement, Mapping)
-            else dict(
-                cls._derive_url_extraction_requirement(
-                    prompt_text,
-                    method_catalogue=method_catalogue,
-                )
-            )
-        )
-        required_url_extraction_tool = (
-            str(url_requirement_map.get("tool")).strip()
-            if bool(url_requirement_map.get("required"))
-            and isinstance(url_requirement_map.get("tool"), str)
-            and str(url_requirement_map.get("tool")).strip()
-            else None
-        )
-        required_url_extraction_url = (
-            str(url_requirement_map.get("url")).strip()
-            if bool(url_requirement_map.get("required"))
-            and isinstance(url_requirement_map.get("url"), str)
-            and str(url_requirement_map.get("url")).strip()
-            else None
-        )
-
-        if preferred_arxiv_tool:
-            if preferred_arxiv_tool not in seen_required:
-                required_tools.append(preferred_arxiv_tool)
-                seen_required.add(preferred_arxiv_tool)
-        elif (
-            required_url_extraction_tool
-            and required_url_extraction_url
-            and required_url_extraction_tool not in seen_required
-        ):
-            required_tools.append(required_url_extraction_tool)
-            seen_required.add(required_url_extraction_tool)
-        if required_create_type_name and "create_concepts" not in seen_required:
-            required_tools.append("create_concepts")
-            seen_required.add("create_concepts")
-        if required_fetch_concept_ids and "fetch_concept" not in seen_required:
-            required_tools.append("fetch_concept")
-            seen_required.add("fetch_concept")
-        if required_read_file_copy_ids and "read_file_copy" not in seen_required:
-            required_tools.append("read_file_copy")
-            seen_required.add("read_file_copy")
-        if (
-            required_scholarly_representation_for_file_copy_ids
-            and _tool_available("interpret_file_copy")
-            and "interpret_file_copy" not in seen_required
-        ):
-            required_tools.append("interpret_file_copy")
-            seen_required.add("interpret_file_copy")
-
         unavailable_required_tools: list[str] = []
         if available_tools:
             for tool_name in required_tools:
@@ -9182,13 +8816,13 @@ class InternalMCPChatOrchestrator:
 
         return {
             "required_tools": required_tools,
-            "required_url_extraction_tool": required_url_extraction_tool,
-            "required_url_extraction_url": required_url_extraction_url,
-            "required_fetch_concept_ids": required_fetch_concept_ids,
-            "required_read_file_copy_ids": required_read_file_copy_ids,
-            "required_scholarly_representation_for_file_copy_ids": required_scholarly_representation_for_file_copy_ids,
-            "scholarly_representation_intent": scholarly_representation_intent,
-            "required_create_type_name": required_create_type_name,
+            "required_url_extraction_tool": None,
+            "required_url_extraction_url": None,
+            "required_fetch_concept_ids": [],
+            "required_read_file_copy_ids": [],
+            "required_scholarly_representation_for_file_copy_ids": [],
+            "scholarly_representation_intent": False,
+            "required_create_type_name": None,
             "unavailable_required_tools": unavailable_required_tools,
         }
 
@@ -15280,269 +14914,6 @@ class InternalMCPChatOrchestrator:
             return False
         return bool(cls._WRITE_CONTINUATION_PROMPT_PATTERN.search(cleaned.lower()))
 
-    def _prune_write_intent_session_memory(self, now: float) -> None:
-        if not self._write_intent_session_memory:
-            return
-
-        def _coerce_timestamp(value: Any) -> float | None:
-            if isinstance(value, (int, float)):
-                return float(value)
-            if isinstance(value, str):
-                stripped = value.strip()
-                if not stripped:
-                    return None
-                try:
-                    return float(stripped)
-                except Exception:
-                    return None
-            return None
-
-        expired_keys: list[str] = []
-        for key, entry in self._write_intent_session_memory.items():
-            if not isinstance(entry, Mapping):
-                expired_keys.append(key)
-                continue
-            timestamp = _coerce_timestamp(entry.get("timestamp"))
-            if timestamp is None:
-                age_seconds = self._WRITE_INTENT_SESSION_MEMORY_TTL_SECONDS + 1
-            else:
-                age_seconds = now - timestamp
-            if age_seconds > self._WRITE_INTENT_SESSION_MEMORY_TTL_SECONDS:
-                expired_keys.append(key)
-
-        for key in expired_keys:
-            self._write_intent_session_memory.pop(key, None)
-
-        excess = (
-            len(self._write_intent_session_memory)
-            - self._WRITE_INTENT_SESSION_MEMORY_MAX_SESSIONS
-        )
-        if excess <= 0:
-            return
-
-        oldest_first = sorted(
-            self._write_intent_session_memory.items(),
-            key=lambda item: _coerce_timestamp((item[1] or {}).get("timestamp")) or 0.0,
-        )
-        for key, _entry in oldest_first[:excess]:
-            self._write_intent_session_memory.pop(key, None)
-
-    def _rehydrate_write_intent_session_memory(
-        self,
-        *,
-        prompt: str,
-        recent_user_prompts: list[str] | None,
-        requested_write_tools: Sequence[str] | None,
-        conversation_session_id: str | None,
-    ) -> tuple[list[str], Mapping[str, Any] | None]:
-        cleaned_recent = [
-            str(item).strip()
-            for item in (recent_user_prompts or [])
-            if isinstance(item, str) and str(item).strip()
-        ]
-
-        session_key = self._normalise_preflight_session_key(conversation_session_id)
-        if not session_key:
-            return cleaned_recent, None
-
-        now = time.time()
-        self._prune_write_intent_session_memory(now)
-        memory_entry = self._write_intent_session_memory.get(session_key)
-        if not isinstance(memory_entry, Mapping):
-            return cleaned_recent, None
-
-        remaining_before = self._coerce_non_negative_int(
-            memory_entry.get("follow_up_turns_remaining"),
-            default=0,
-            max_value=32,
-        )
-        if remaining_before <= 0:
-            self._write_intent_session_memory.pop(session_key, None)
-            return cleaned_recent, {
-                "type": "write_intent_session_memory",
-                "stage": "rehydrate",
-                "reused": False,
-                "reason": "memory_exhausted",
-            }
-
-        stored_tools = {
-            tool.lower()
-            for tool in self._normalise_write_tool_names(
-                cast(Sequence[str] | None, memory_entry.get("write_tools"))
-            )
-        }
-        requested_tools = {
-            tool.lower()
-            for tool in self._normalise_write_tool_names(requested_write_tools)
-        }
-        if requested_tools and stored_tools and requested_tools.isdisjoint(stored_tools):
-            return cleaned_recent, {
-                "type": "write_intent_session_memory",
-                "stage": "rehydrate",
-                "reused": False,
-                "reason": "context_mismatch_requested_tools",
-            }
-
-        if not self._is_write_continuation_prompt(prompt):
-            return cleaned_recent, {
-                "type": "write_intent_session_memory",
-                "stage": "rehydrate",
-                "reused": False,
-                "reason": "prompt_not_continuation",
-            }
-
-        additions: list[str] = []
-        seen_recent = {item.lower() for item in cleaned_recent}
-
-        anchor_prompt = memory_entry.get("intent_anchor_prompt")
-        if isinstance(anchor_prompt, str) and anchor_prompt.strip():
-            candidate = anchor_prompt.strip()
-            if candidate.lower() not in seen_recent:
-                additions.append(candidate)
-                seen_recent.add(candidate.lower())
-
-        confirmation_from_continuation = False
-        if bool(memory_entry.get("has_confirmation_required_tools")):
-            synthetic_approval_prompt = (
-                "Confirmed destructive Vontology mutation continuation for the current context."
-            )
-            if synthetic_approval_prompt.lower() not in seen_recent:
-                additions.append(synthetic_approval_prompt)
-                seen_recent.add(synthetic_approval_prompt.lower())
-            confirmation_from_continuation = True
-
-        cleaned_recent.extend(additions)
-        remaining_after = max(0, remaining_before - 1)
-        updated_entry = dict(memory_entry)
-        updated_entry["timestamp"] = now
-        updated_entry["last_used_at"] = now
-        updated_entry["follow_up_turns_remaining"] = remaining_after
-        self._write_intent_session_memory[session_key] = updated_entry
-
-        return cleaned_recent, {
-            "type": "write_intent_session_memory",
-            "stage": "rehydrate",
-            "reused": bool(additions),
-            "reason": "rehydrated" if additions else "no_additions_required",
-            "added_prompts": len(additions),
-            "remaining_before": remaining_before,
-            "remaining_after": remaining_after,
-            "confirmation_from_continuation": confirmation_from_continuation,
-        }
-
-    def _persist_write_intent_session_memory(
-        self,
-        *,
-        prompt: str,
-        recent_user_prompts: list[str] | None,
-        requested_write_tools: Sequence[str] | None,
-        allowed_write_tools: Sequence[str] | None,
-        write_policy_reason: str | None,
-        conversation_session_id: str | None,
-    ) -> Mapping[str, Any] | None:
-        session_key = self._normalise_preflight_session_key(conversation_session_id)
-        if not session_key:
-            return None
-
-        now = time.time()
-        self._prune_write_intent_session_memory(now)
-        existing_entry = self._write_intent_session_memory.get(session_key)
-        existing_mapping = (
-            cast(Mapping[str, Any], existing_entry)
-            if isinstance(existing_entry, Mapping)
-            else {}
-        )
-
-        policy_reason = str(write_policy_reason or "").strip()
-        if not write_policy_reason_is_session_memory_eligible(policy_reason):
-            return {
-                "type": "write_intent_session_memory",
-                "stage": "persist",
-                "updated": False,
-                "reason": "policy_reason_not_eligible",
-                "write_policy_reason": policy_reason,
-            }
-
-        requested_tools = self._normalise_write_tool_names(requested_write_tools)
-        allowed_tools = self._normalise_write_tool_names(allowed_write_tools)
-        fallback_tools = self._normalise_write_tool_names(
-            cast(Sequence[str] | None, existing_mapping.get("write_tools"))
-        )
-        tools_to_store = allowed_tools or requested_tools or fallback_tools
-        if not tools_to_store:
-            return {
-                "type": "write_intent_session_memory",
-                "stage": "persist",
-                "updated": False,
-                "reason": "no_write_tools_to_store",
-                "write_policy_reason": policy_reason,
-            }
-
-        continuation_prompt = self._is_write_continuation_prompt(prompt)
-        anchor_prompt = (
-            prompt.strip() if isinstance(prompt, str) and prompt.strip() else ""
-        )
-        existing_anchor = existing_mapping.get("intent_anchor_prompt")
-        if continuation_prompt and isinstance(existing_anchor, str) and existing_anchor.strip():
-            anchor_prompt = existing_anchor.strip()
-        if not anchor_prompt and isinstance(existing_anchor, str) and existing_anchor.strip():
-            anchor_prompt = existing_anchor.strip()
-        if not anchor_prompt:
-            for item in reversed(recent_user_prompts or []):
-                if not isinstance(item, str):
-                    continue
-                cleaned = item.strip()
-                if not cleaned:
-                    continue
-                if self._is_write_continuation_prompt(cleaned):
-                    continue
-                anchor_prompt = cleaned
-                break
-
-        has_confirmation_required_tools = any(
-            tool_requires_confirmation(tool_name) for tool_name in tools_to_store
-        )
-        confirmation_granted = prompt_grants_high_impact_kb_write_approval(
-            prompt=prompt,
-            recent_user_prompts=[
-                str(item).strip()
-                for item in (recent_user_prompts or [])
-                if isinstance(item, str) and str(item).strip()
-            ],
-        )
-        if (
-            continuation_prompt
-            and has_confirmation_required_tools
-            and policy_reason.startswith("recent_")
-        ):
-            confirmation_granted = True
-        confirmation_granted = bool(
-            existing_mapping.get("confirmation_granted")
-        ) or bool(confirmation_granted)
-
-        self._write_intent_session_memory[session_key] = {
-            "timestamp": now,
-            "last_updated_at": now,
-            "follow_up_turns_remaining": int(
-                self._WRITE_INTENT_SESSION_MEMORY_FOLLOW_UP_TURNS
-            ),
-            "intent_anchor_prompt": anchor_prompt,
-            "write_tools": tools_to_store,
-            "has_confirmation_required_tools": has_confirmation_required_tools,
-            "confirmation_granted": confirmation_granted,
-            "write_policy_reason": policy_reason,
-        }
-
-        return {
-            "type": "write_intent_session_memory",
-            "stage": "persist",
-            "updated": True,
-            "write_policy_reason": policy_reason,
-            "write_tool_count": len(tools_to_store),
-            "has_confirmation_required_tools": has_confirmation_required_tools,
-            "confirmation_granted": confirmation_granted,
-        }
-
     def _get_topic_vocabulary_cache_key(self, keywords: list[str]) -> str:
         """Generate a cache key from topic keywords."""
         if not keywords:
@@ -18334,79 +17705,97 @@ class InternalMCPChatOrchestrator:
                 discovery_path_counts.get(source_path, 0) + 1
             )
 
-        telemetry: dict[str, Any] = {
-            "type": "ontology_preflight",
-            "stage": "deterministic_preflight",
-            "preferred_language": preferred_language,
-            "predicate_type": self._PREFLIGHT_PREDICATE_TYPE_ID,
-            "preflight_predicates": predicates,
-            "explicit_ids": explicit_ids,
-            "predicate_query": predicate_query,
-            "targeted_predicates": targeted_predicates,
-            # JVNAUTOSCI-1052: Topic vocabulary discovery telemetry
-            "topic_keywords": topic_keywords,
-            "topic_types": topic_types,
-            "topic_predicates": topic_predicates,
-            "topic_vocabulary_cached": topic_vocabulary_cached,
-            # JVNAUTOSCI-991: annotation-derived candidates + bounded region expansion.
-            "annotation_span_count": annotation_span_count,
-            "annotation_seed_candidates": annotation_seed_candidates,
-            "annotation_seed_candidate_ids": annotation_seed_candidate_ids,
-            "annotation_suggested_type_ids": annotation_suggested_type_ids,
-            "annotation_region_type_ids": annotation_region_type_ids,
-            "annotation_region_predicate_ids": annotation_region_predicate_ids,
-            "annotation_region_related_concept_ids": annotation_region_related_concept_ids,
-            "annotation_preflight_errors": annotation_preflight_errors,
-            # JVNAUTOSCI-989: bounded RAG-backed concept discovery.
-            "rag_query": rag_query,
-            "rag_namespace_present": rag_namespace_present,
-            "rag_invoked": rag_invoked,
-            "rag_used": rag_used,
-            "rag_result_count": rag_result_count,
-            "rag_candidates": rag_candidates,
-            "rag_candidate_concept_ids": rag_candidate_concept_ids,
-            "rag_type_candidates": rag_type_candidates,
-            "rag_predicate_candidates": rag_predicate_candidates,
-            "rag_selected_concept_ids": rag_selected_concept_ids,
-            "rag_selected_concept_id": rag_selected_concept_id,
-            "rag_preflight_errors": rag_preflight_errors,
-            # JVNAUTOSCI-992: salient predicate suggestions by relevant type.
-            "salient_type_candidate_ids": salient_type_candidate_ids,
-            "salient_predicates_by_type": salient_predicates_by_type,
-            "salient_predicate_ids": salient_predicate_ids,
-            "salient_preflight_errors": salient_preflight_errors,
-            # JVNAUTOSCI-990: specialised workflow fallback evaluation signals.
-            "specialised_preflight_mode": specialised_mode,
-            "specialised_preflight_needed": specialised_needed,
-            "specialised_preflight_workflow_available": specialised_workflow_available,
-            "specialised_preflight_workflow_invoked": specialised_workflow_invoked,
-            "specialised_preflight_workflow_completed": specialised_workflow_completed,
-            "specialised_preflight_workflow_error": specialised_workflow_error,
-            "specialised_preflight_metadata_validation_fallback_applied": specialised_metadata_validation_fallback_applied,
-            "specialised_preflight_search_invoked": specialised_search_invoked,
-            "specialised_preflight_search_errors": specialised_search_errors,
-            "specialised_preflight_baseline_type_suggestion_count": baseline_type_suggestion_count,
-            "specialised_preflight_baseline_predicate_suggestion_count": baseline_predicate_suggestion_count,
-            "specialised_preflight_projected_type_suggestion_count": projected_type_suggestion_count,
-            "specialised_preflight_projected_predicate_suggestion_count": projected_predicate_suggestion_count,
-            "specialised_preflight_raw_type_suggestions": specialised_raw_type_suggestions,
-            "specialised_preflight_raw_predicate_suggestions": specialised_raw_predicate_suggestions,
-            "specialised_preflight_applied_type_suggestions": specialised_applied_type_suggestions,
-            "specialised_preflight_applied_predicate_suggestions": specialised_applied_predicate_suggestions,
-            "specialised_preflight_recommendation": specialised_recommendation,
-            # JVNAUTOSCI-987: explicit discovery-path provenance + follow-up continuity.
-            "preflight_session_id_present": bool(session_key),
-            "session_memory_reused": session_memory_reused,
-            "session_memory_refreshed": session_memory_refreshed,
-            "session_memory_follow_up_turns_remaining": session_memory_remaining_turns,
-            "session_memory_salient_predicates_by_type": session_memory_salient_predicates_by_type,
-            "session_memory_annotation_candidates": session_memory_annotation_candidates,
-            "session_memory_related_concept_ids": session_memory_related_concept_ids,
-            "final_type_suggestions": final_type_suggestions,
-            "final_predicate_suggestions": final_predicate_suggestions,
-            "final_suggestion_paths": final_suggestion_paths,
-            "discovery_path_counts": discovery_path_counts,
-        }
+        telemetry: dict[str, Any] = annotate_python_decision_event(
+            {
+                "type": "ontology_preflight",
+                "stage": "deterministic_preflight",
+                "preferred_language": preferred_language,
+                "predicate_type": self._PREFLIGHT_PREDICATE_TYPE_ID,
+                "preflight_predicates": predicates,
+                "explicit_ids": explicit_ids,
+                "predicate_query": predicate_query,
+                "targeted_predicates": targeted_predicates,
+                # JVNAUTOSCI-1052: Topic vocabulary discovery telemetry
+                "topic_keywords": topic_keywords,
+                "topic_types": topic_types,
+                "topic_predicates": topic_predicates,
+                "topic_vocabulary_cached": topic_vocabulary_cached,
+                # JVNAUTOSCI-991: annotation-derived candidates + bounded region expansion.
+                "annotation_span_count": annotation_span_count,
+                "annotation_seed_candidates": annotation_seed_candidates,
+                "annotation_seed_candidate_ids": annotation_seed_candidate_ids,
+                "annotation_suggested_type_ids": annotation_suggested_type_ids,
+                "annotation_region_type_ids": annotation_region_type_ids,
+                "annotation_region_predicate_ids": annotation_region_predicate_ids,
+                "annotation_region_related_concept_ids": annotation_region_related_concept_ids,
+                "annotation_preflight_errors": annotation_preflight_errors,
+                # JVNAUTOSCI-989: bounded RAG-backed concept discovery.
+                "rag_query": rag_query,
+                "rag_namespace_present": rag_namespace_present,
+                "rag_invoked": rag_invoked,
+                "rag_used": rag_used,
+                "rag_result_count": rag_result_count,
+                "rag_candidates": rag_candidates,
+                "rag_candidate_concept_ids": rag_candidate_concept_ids,
+                "rag_type_candidates": rag_type_candidates,
+                "rag_predicate_candidates": rag_predicate_candidates,
+                "rag_selected_concept_ids": rag_selected_concept_ids,
+                "rag_selected_concept_id": rag_selected_concept_id,
+                "rag_preflight_errors": rag_preflight_errors,
+                # JVNAUTOSCI-992: salient predicate suggestions by relevant type.
+                "salient_type_candidate_ids": salient_type_candidate_ids,
+                "salient_predicates_by_type": salient_predicates_by_type,
+                "salient_predicate_ids": salient_predicate_ids,
+                "salient_preflight_errors": salient_preflight_errors,
+                # JVNAUTOSCI-990: specialised workflow fallback evaluation signals.
+                "specialised_preflight_mode": specialised_mode,
+                "specialised_preflight_needed": specialised_needed,
+                "specialised_preflight_workflow_available": specialised_workflow_available,
+                "specialised_preflight_workflow_invoked": specialised_workflow_invoked,
+                "specialised_preflight_workflow_completed": specialised_workflow_completed,
+                "specialised_preflight_workflow_error": specialised_workflow_error,
+                "specialised_preflight_metadata_validation_fallback_applied": specialised_metadata_validation_fallback_applied,
+                "specialised_preflight_search_invoked": specialised_search_invoked,
+                "specialised_preflight_search_errors": specialised_search_errors,
+                "specialised_preflight_baseline_type_suggestion_count": baseline_type_suggestion_count,
+                "specialised_preflight_baseline_predicate_suggestion_count": baseline_predicate_suggestion_count,
+                "specialised_preflight_projected_type_suggestion_count": projected_type_suggestion_count,
+                "specialised_preflight_projected_predicate_suggestion_count": projected_predicate_suggestion_count,
+                "specialised_preflight_raw_type_suggestions": specialised_raw_type_suggestions,
+                "specialised_preflight_raw_predicate_suggestions": specialised_raw_predicate_suggestions,
+                "specialised_preflight_applied_type_suggestions": specialised_applied_type_suggestions,
+                "specialised_preflight_applied_predicate_suggestions": specialised_applied_predicate_suggestions,
+                "specialised_preflight_recommendation": specialised_recommendation,
+                # JVNAUTOSCI-987: explicit discovery-path provenance + follow-up continuity.
+                "preflight_session_id_present": bool(session_key),
+                "session_memory_reused": session_memory_reused,
+                "session_memory_refreshed": session_memory_refreshed,
+                "session_memory_follow_up_turns_remaining": session_memory_remaining_turns,
+                "session_memory_salient_predicates_by_type": session_memory_salient_predicates_by_type,
+                "session_memory_annotation_candidates": session_memory_annotation_candidates,
+                "session_memory_related_concept_ids": session_memory_related_concept_ids,
+                "final_type_suggestions": final_type_suggestions,
+                "final_predicate_suggestions": final_predicate_suggestions,
+                "final_suggestion_paths": final_suggestion_paths,
+                "discovery_path_counts": discovery_path_counts,
+            },
+            stage="deterministic_preflight",
+            component="internal_mcp_orchestrator",
+            function="_build_ontology_preflight",
+            decision_class="ontology_preflight",
+            decision_source="prompt_semantic_inference",
+            changed_outcome=bool(
+                predicate_query
+                or targeted_predicates
+                or topic_keywords
+                or annotation_seed_candidate_ids
+                or rag_selected_concept_ids
+                or salient_predicate_ids
+                or final_type_suggestions
+                or final_predicate_suggestions
+            ),
+            reason_code="deterministic_ontology_preflight",
+        )
 
         return _OntologyPreflightResult(message="\n".join(lines), telemetry=telemetry)
 
@@ -18940,6 +18329,7 @@ class InternalMCPChatOrchestrator:
     ) -> list[_ToolCallRequest] | None:
         """Build deterministic tool calls for still-missing explicit requirements."""
 
+        del context_messages
         if not missing_required_tools:
             return None
 
@@ -19020,11 +18410,12 @@ class InternalMCPChatOrchestrator:
                 continue
 
             if name == "create_concepts":
-                requested_name = required_create_type_name
-                if not requested_name:
-                    requested_name = self._extract_required_create_type_name_from_prompt(
-                        user_text
-                    )
+                requested_name = (
+                    str(required_create_type_name).strip()
+                    if isinstance(required_create_type_name, str)
+                    and str(required_create_type_name).strip()
+                    else None
+                )
                 if not requested_name:
                     continue
                 forced_calls.append(
@@ -19049,10 +18440,6 @@ class InternalMCPChatOrchestrator:
 
             if name == "fetch_concept":
                 fetch_concept_ids = list(missing_required_fetch_concept_ids)
-                if not fetch_concept_ids:
-                    fetch_concept_ids = (
-                        self._extract_required_fetch_concept_ids_from_prompt(user_text)
-                    )
                 for concept_id in fetch_concept_ids:
                     forced_calls.append(
                         {
@@ -19065,10 +18452,6 @@ class InternalMCPChatOrchestrator:
 
             if name == "read_file_copy":
                 read_file_copy_ids = list(missing_required_read_file_copy_ids)
-                if not read_file_copy_ids:
-                    read_file_copy_ids = self._extract_required_read_file_copy_ids_from_prompt(
-                        user_text
-                    )
                 for concept_id in read_file_copy_ids:
                     forced_calls.append(
                         {
@@ -19096,13 +18479,6 @@ class InternalMCPChatOrchestrator:
                 scholarly_file_copy_ids = list(
                     missing_required_scholarly_representation_file_copy_ids
                 )
-                if not scholarly_file_copy_ids:
-                    scholarly_file_copy_ids = (
-                        self._extract_required_scholarly_representation_file_copy_ids(
-                            user_text,
-                            context_messages=context_messages,
-                        )
-                    )
                 for concept_id in scholarly_file_copy_ids:
                     forced_calls.append(
                         {
@@ -19191,42 +18567,7 @@ class InternalMCPChatOrchestrator:
         )
         if required_forced:
             return required_forced
-
-        if self._should_trigger_predicate_search(last_user_text):
-            predicate_query = self._extract_predicate_query_from_text(last_user_text)
-            if predicate_query:
-                return [
-                    {
-                        "action": "call_tool",
-                        "tool": "search_concepts",
-                        "payload": {
-                            "query": predicate_query,
-                            "filter_kind": ["predicate"],
-                            "match_type": "similarity",
-                            "min_similarity": 0.55,
-                            "limit": 12,
-                        },
-                    }
-                ]
-
-        arxiv_id = self._extract_arxiv_id_from_text(last_user_text)
-        if not arxiv_id:
-            return None
-
-        tool_name = self._infer_arxiv_acquisition_tool_from_prompt(
-            last_user_text,
-            allow_default_download=False,
-        )
-        if tool_name is None:
-            return None
-
-        return [
-            {
-                "action": "call_tool",
-                "tool": tool_name,
-                "payload": {"arxiv_id": arxiv_id},
-            }
-        ]
+        return None
 
     def _resolve_allowed_write_tools(
         self,
@@ -21724,6 +21065,45 @@ class InternalMCPChatOrchestrator:
                     prompt=prompt,
                     continuation_context=workflow_continuation_payload,
                 )
+                apply_reason = str(apply_decision.get("reason") or "").strip() or None
+                if isinstance(aux_llm_calls, list):
+                    continuation_decision_source = (
+                        "prompt_shape_heuristic"
+                        if apply_reason
+                        in {
+                            "short_follow_up_prompt",
+                            "explicit_follow_up_or_repair_prompt",
+                        }
+                        else "workflow_state_check"
+                    )
+                    try:
+                        aux_llm_calls.append(
+                            annotate_python_decision_event(
+                                {
+                                    "type": "workflow_continuation_decision",
+                                    "stage": "workflow_dispatch",
+                                    "applies": bool(apply_decision.get("applies", False)),
+                                    "reason": apply_reason,
+                                    "session_id": workflow_continuation_payload.get(
+                                        "session_id"
+                                    ),
+                                    "selected_workflow_id": workflow_continuation_payload.get(
+                                        "selected_workflow_id"
+                                    ),
+                                },
+                                stage="workflow_dispatch",
+                                component="workflow_continuation_service",
+                                function="assess_prompt_for_workflow_continuation",
+                                decision_class="continuation_classifier",
+                                decision_source=continuation_decision_source,
+                                changed_outcome=bool(
+                                    apply_decision.get("applies", False)
+                                ),
+                                reason_code=apply_reason,
+                            )
+                        )
+                    except Exception:
+                        pass
                 workflow_continuation_payload = dict(workflow_continuation_payload)
                 workflow_continuation_payload["applied"] = bool(
                     apply_decision.get("applies", False)
@@ -21806,10 +21186,12 @@ class InternalMCPChatOrchestrator:
             except Exception:
                 method_catalogue_for_routing = {}
 
-        routing_url_requirement = self._derive_url_extraction_requirement(
-            effective_prompt_for_routing,
-            method_catalogue=method_catalogue_for_routing,
-        )
+        routing_url_requirement: dict[str, Any] = {
+            "required": False,
+            "url": None,
+            "tool": None,
+            "reason": "workflow_llm_owns_url_reading_decision",
+        }
         routing_prompt_requirements = self._evaluate_prompt_requirements(
             prompt_text=effective_prompt_for_routing,
             method_catalogue=method_catalogue_for_routing,
@@ -21817,15 +21199,44 @@ class InternalMCPChatOrchestrator:
             tool_invocations=(),
             url_requirement=routing_url_requirement,
         )
-        prompt_requirements_force_tool_pipeline = (
-            routing_prompt_requirements.has_missing_requirements
-        )
-
-        selected_workflow_id = (
-            TOOL_CALLING_WORKFLOW_ID
-            if prompt_requirements_force_tool_pipeline
-            else CHAT_ASSISTANT_WORKFLOW_ID
-        )
+        if isinstance(aux_llm_calls, list):
+            try:
+                aux_llm_calls.append(
+                    annotate_python_decision_event(
+                        {
+                            "type": "prompt_tool_requirements_preflight",
+                            "stage": "workflow_dispatch",
+                            "required_tools": list(
+                                routing_prompt_requirements.required_tools
+                            ),
+                            "required_url_extraction_tool": (
+                                routing_prompt_requirements.required_url_extraction_tool
+                            ),
+                            "required_url_extraction_url": (
+                                routing_prompt_requirements.required_url_extraction_url
+                            ),
+                            "missing_tools": list(
+                                routing_prompt_requirements.missing_tools
+                            ),
+                            "url_requirement": dict(routing_url_requirement),
+                        },
+                        stage="workflow_dispatch",
+                        component="internal_mcp_orchestrator",
+                        function="_evaluate_prompt_requirements",
+                        decision_class="prompt_requirement_inference",
+                        decision_source="explicit_identifier_parse",
+                        changed_outcome=False,
+                        reason_code=(
+                            "explicit_prompt_tool_requirement_observed"
+                            if routing_prompt_requirements.required_tools
+                            else "no_explicit_prompt_tool_requirement"
+                        ),
+                        possible_inappropriate_python_code_use=False,
+                    )
+                )
+            except Exception:
+                pass
+        selected_workflow_id = CHAT_ASSISTANT_WORKFLOW_ID
         presenter_mode_requested = False
         if context:
             for msg in context:
@@ -21989,73 +21400,6 @@ class InternalMCPChatOrchestrator:
 
         routing_info: WorkflowRoutingInfo | None = None
         selection_experience_id: str | None = None
-        if prompt_requirements_force_tool_pipeline:
-            routing_info = WorkflowRoutingInfo(
-                workflow_id=TOOL_CALLING_WORKFLOW_ID,
-                verdict="tool_contract_preselected",
-                prompt_id=None,
-                discovered_workflow_ids=(),
-                source="selector_override",
-                selection_rationale="required_prompt_tools_missing_preselector",
-            )
-            override_payload = {
-                "type": "workflow_selector_override",
-                "reason": "required_prompt_tools_missing_preselector",
-                "selected_workflow_id": TOOL_CALLING_WORKFLOW_ID,
-                "excluded_workflow_ids": [CHAT_ASSISTANT_WORKFLOW_ID],
-                "excluded_selector_verdicts": ["selector_skipped"],
-                "prior_selected_workflow_id": CHAT_ASSISTANT_WORKFLOW_ID,
-                "prior_selector_verdict": None,
-                "required_prompt_tools": list(routing_prompt_requirements.required_tools),
-                "required_prompt_url_extraction_tool": (
-                    routing_prompt_requirements.required_url_extraction_tool
-                ),
-                "required_prompt_url_extraction_url": (
-                    routing_prompt_requirements.required_url_extraction_url
-                ),
-                "missing_prompt_tools": list(routing_prompt_requirements.missing_tools),
-                "required_prompt_fetch_concept_ids": list(
-                    routing_prompt_requirements.required_fetch_concept_ids
-                ),
-                "missing_prompt_fetch_concept_ids": list(
-                    routing_prompt_requirements.missing_fetch_concept_ids
-                ),
-                "required_prompt_read_file_copy_ids": list(
-                    routing_prompt_requirements.required_read_file_copy_ids
-                ),
-                "missing_prompt_read_file_copy_ids": list(
-                    routing_prompt_requirements.missing_read_file_copy_ids
-                ),
-                "required_prompt_scholarly_representation_for_file_copy_ids": list(
-                    routing_prompt_requirements.required_scholarly_representation_file_copy_ids
-                ),
-                "missing_prompt_scholarly_representation_for_file_copy_ids": list(
-                    routing_prompt_requirements.missing_scholarly_representation_file_copy_ids
-                ),
-                "unavailable_required_tools": list(
-                    routing_prompt_requirements.unavailable_required_tools
-                ),
-                "prompt_requirement_url_policy": dict(routing_url_requirement),
-                "retry_reason": routing_prompt_requirements.missing_retry_reason,
-            }
-            aux_llm_calls.append(override_payload)
-            if trace_enabled and trace is not None:
-                trace.metadata["workflow_selector_override"] = dict(override_payload)
-            _emit_progress_local(
-                {
-                    "status": "thinking",
-                    "stage": "workflow_dispatch",
-                    "phase": "workflow_dispatch",
-                    "phase_label": "Workflow routing overridden",
-                    "workflow_selector_verdict": "tool_contract_preselected",
-                    "selected_workflow_id": TOOL_CALLING_WORKFLOW_ID,
-                    "workflow_selection_rationale": (
-                        "required_prompt_tools_missing_preselector"
-                    ),
-                    **_build_live_workflow_routing_payload(),
-                }
-            )
-
         def _resolve_selected_workflow_name(workflow_id: str | None) -> str | None:
             clean_workflow_id = (
                 workflow_id.strip()
@@ -22087,11 +21431,7 @@ class InternalMCPChatOrchestrator:
                 else clean_workflow_id
             )
 
-        if (
-            not prompt_requirements_force_tool_pipeline
-            and user_namespace
-            and self._workflow_selector.enabled()
-        ):
+        if user_namespace and self._workflow_selector.enabled():
             _emit_progress_local(
                 {
                     "status": "phase_transition",
@@ -22705,136 +22045,37 @@ class InternalMCPChatOrchestrator:
             },
             key=lambda value: value.lower(),
         )
-        recent_user_prompts_for_write = list(recent_user_prompts or [])
-        write_intent_rehydrate_telemetry: Mapping[str, Any] | None = None
-        if write_tool_candidates_for_routing:
-            (
-                recent_user_prompts_for_write,
-                write_intent_rehydrate_telemetry,
-            ) = self._rehydrate_write_intent_session_memory(
-                prompt=prompt,
-                recent_user_prompts=recent_user_prompts_for_write,
-                requested_write_tools=write_tool_candidates_for_routing,
-                conversation_session_id=conversation_session_id,
-            )
-            recent_user_prompts = list(recent_user_prompts_for_write)
-            if (
-                isinstance(write_intent_rehydrate_telemetry, Mapping)
-                and isinstance(aux_llm_calls, list)
-            ):
-                try:
-                    aux_llm_calls.append(dict(write_intent_rehydrate_telemetry))
-                except Exception:
-                    pass
 
-        write_routing_policy_reason = "no_write_tools_available"
-        mutative_intent_requires_tool_routing = False
-        if write_tool_candidates_for_routing:
-            write_routing_policy_decision = compute_allowed_write_tools(
-                prompt=prompt,
-                requested_tools=write_tool_candidates_for_routing,
-                recent_user_prompts=recent_user_prompts_for_write or None,
-                user_mutation_authority=self._resolve_user_mutation_authority_level(
-                    user_namespace=user_namespace
-                ),
-                global_mutation_authority=self._resolve_global_mutation_authority_level(),
-            )
-            write_routing_policy_reason = str(
-                write_routing_policy_decision.reason or ""
-            ).strip()
-            self._record_mutation_guardrail_events(
-                events=build_mutation_guardrail_events(
-                    policy_decision=write_routing_policy_decision,
-                    guardrail_surface="routing",
-                    stage="routing",
-                    conversation_session_id=conversation_session_id,
-                    turn_id=turn_id,
-                ),
-                aux_llm_calls=aux_llm_calls,
-            )
-            low_risk_additive_routing_evidence = (
-                prompt_has_low_risk_additive_write_evidence(prompt)
-                or bool(
-                    isinstance(write_intent_rehydrate_telemetry, Mapping)
-                        and write_intent_rehydrate_telemetry.get("reused")
-                )
-            )
-            routing_gate_allowed = any(
-                item.allowed
-                and (
-                    item.decision_basis != REASON_DEFAULT_ALLOW_ADDITIVE_LOW_RISK
-                    or low_risk_additive_routing_evidence
-                )
-                for item in write_routing_policy_decision.tool_decisions
-            ) or any(
-                item.requires_confirmation
-                for item in write_routing_policy_decision.tool_decisions
-            )
-            mutative_intent_requires_tool_routing = routing_gate_allowed
-            if prompt_explicitly_denies_write(prompt):
-                mutative_intent_requires_tool_routing = False
-            write_gate_state = self._classify_write_gate_state(
-                allowed=routing_gate_allowed,
-                reason=write_routing_policy_reason,
-            )
-            if isinstance(aux_llm_calls, list):
-                routing_risk_classes = {
-                    item.tool_name: item.risk_class
-                    for item in write_routing_policy_decision.tool_decisions
-                }
-                confirmation_required_tools = [
-                    item.tool_name
-                    for item in write_routing_policy_decision.tool_decisions
-                    if item.requires_confirmation
-                ]
-                try:
-                    aux_llm_calls.append(
+        write_routing_policy_reason = "workflow_llm_owns_mutation_routing"
+        if isinstance(aux_llm_calls, list) and write_tool_candidates_for_routing:
+            try:
+                aux_llm_calls.append(
+                    annotate_python_decision_event(
                         {
                             "type": "write_policy_gate",
                             "stage": "routing",
-                            "gate_state": write_gate_state,
+                            "gate_state": "not_applied",
                             "reason": write_routing_policy_reason,
-                            "decision_basis": write_routing_policy_decision.decision_basis,
-                            "risk_classes": routing_risk_classes,
-                            "requires_confirmation": bool(
-                                confirmation_required_tools
-                            ),
-                            "confirmation_required_tools": confirmation_required_tools,
-                            "blocked_reason": write_routing_policy_reason
-                            if not write_routing_policy_decision.allowed_tools
-                            else None,
-                            "user_denial_detected": write_routing_policy_decision.user_denial_detected,
-                            "low_risk_additive_routing_evidence": low_risk_additive_routing_evidence,
                             "requested_write_tools_count": len(
                                 write_tool_candidates_for_routing
                             ),
-                            "allowed_write_tools_count": len(
-                                write_routing_policy_decision.allowed_tools
+                            "write_tool_candidates": list(
+                                write_tool_candidates_for_routing[:12]
                             ),
-                            "continuation_context_reused": bool(
-                                isinstance(write_intent_rehydrate_telemetry, Mapping)
-                                and write_intent_rehydrate_telemetry.get("reused")
-                            ),
-                        }
+                            "continuation_context_reused": False,
+                        },
+                        stage="routing",
+                        component="internal_mcp_orchestrator",
+                        function="run",
+                        decision_class="routing_write_guardrail_bypassed",
+                        decision_source="workflow_authored_policy",
+                        changed_outcome=False,
+                        reason_code=write_routing_policy_reason,
+                        possible_inappropriate_python_code_use=False,
                     )
-                except Exception:
-                    pass
-            write_intent_persist_telemetry = self._persist_write_intent_session_memory(
-                prompt=prompt,
-                recent_user_prompts=recent_user_prompts_for_write,
-                requested_write_tools=write_tool_candidates_for_routing,
-                allowed_write_tools=sorted(write_routing_policy_decision.allowed_tools),
-                write_policy_reason=write_routing_policy_reason,
-                conversation_session_id=conversation_session_id,
-            )
-            if (
-                isinstance(write_intent_persist_telemetry, Mapping)
-                and isinstance(aux_llm_calls, list)
-            ):
-                try:
-                    aux_llm_calls.append(dict(write_intent_persist_telemetry))
-                except Exception:
-                    pass
+                )
+            except Exception:
+                pass
 
         # Feature-flagged step toward ontology-driven render planning:
         # resolve whether narration should be part of the response rendering.
@@ -27174,9 +26415,8 @@ class InternalMCPChatOrchestrator:
         #   2. custom_workflow — execute selected discovered workflow
         #   3. tool_pipeline   — execute registry workflow matching tool contract
         # ----------------------------------------------------------------
-        # This was already evaluated before workflow selection so prompt-required
-        # tools can dominate routing deterministically, even when selector output
-        # is noisy or unavailable.
+        # Python may still apply narrow routing overrides for launchability, but
+        # semantic authority should stay with the workflow/LLM path.
 
         def _force_tool_pipeline_routing(
             *,
@@ -27240,60 +26480,21 @@ class InternalMCPChatOrchestrator:
             }
             if extra_payload:
                 override_payload.update(dict(extra_payload))
-            aux_llm_calls.append(override_payload)
+            aux_llm_calls.append(
+                annotate_python_decision_event(
+                    override_payload,
+                    stage="workflow_dispatch",
+                    component="internal_mcp_orchestrator",
+                    function="_force_tool_pipeline_routing",
+                    decision_class="workflow_selector_override",
+                    decision_source="workflow_launchability_check",
+                    changed_outcome=True,
+                    reason_code=reason,
+                    possible_inappropriate_python_code_use=False,
+                )
+            )
             if trace_enabled and trace is not None:
                 trace.metadata["workflow_selector_override"] = dict(override_payload)
-
-        if (
-            routing_prompt_requirements.has_missing_requirements
-            and not selected_uses_tool_pipeline_contract
-        ):
-            excluded_selector_verdicts: list[str] = []
-            if selector_verdict:
-                excluded_selector_verdicts.append(selector_verdict)
-            elif routing_info is None:
-                excluded_selector_verdicts.append("no_selector_verdict")
-            _force_tool_pipeline_routing(
-                reason="required_prompt_tools_missing",
-                excluded_selector_verdicts=excluded_selector_verdicts,
-                extra_payload={
-                    "required_prompt_tools": list(
-                        routing_prompt_requirements.required_tools
-                    ),
-                    "required_prompt_url_extraction_tool": (
-                        routing_prompt_requirements.required_url_extraction_tool
-                    ),
-                    "required_prompt_url_extraction_url": (
-                        routing_prompt_requirements.required_url_extraction_url
-                    ),
-                    "missing_prompt_tools": list(
-                        routing_prompt_requirements.missing_tools
-                    ),
-                    "required_prompt_fetch_concept_ids": list(
-                        routing_prompt_requirements.required_fetch_concept_ids
-                    ),
-                    "missing_prompt_fetch_concept_ids": list(
-                        routing_prompt_requirements.missing_fetch_concept_ids
-                    ),
-                    "required_prompt_read_file_copy_ids": list(
-                        routing_prompt_requirements.required_read_file_copy_ids
-                    ),
-                    "missing_prompt_read_file_copy_ids": list(
-                        routing_prompt_requirements.missing_read_file_copy_ids
-                    ),
-                    "required_prompt_scholarly_representation_for_file_copy_ids": list(
-                        routing_prompt_requirements.required_scholarly_representation_file_copy_ids
-                    ),
-                    "missing_prompt_scholarly_representation_for_file_copy_ids": list(
-                        routing_prompt_requirements.missing_scholarly_representation_file_copy_ids
-                    ),
-                    "unavailable_required_tools": list(
-                        routing_prompt_requirements.unavailable_required_tools
-                    ),
-                    "prompt_requirement_url_policy": dict(routing_url_requirement),
-                    "retry_reason": routing_prompt_requirements.missing_retry_reason,
-                },
-            )
 
         def _build_custom_workflow_dispatch_data(
             workflow_id_override: str | None = None,
@@ -27627,7 +26828,19 @@ class InternalMCPChatOrchestrator:
                     "candidate_count": len(decision.candidate_assessments),
                 }
             )
-            aux_llm_calls.append(payload)
+            aux_llm_calls.append(
+                annotate_python_decision_event(
+                    payload,
+                    stage="workflow_dispatch",
+                    component="workflow_override_policy_service",
+                    function="choose_custom_workflow_override_candidate",
+                    decision_class="workflow_override_policy",
+                    decision_source="workflow_launchability_check",
+                    changed_outcome=decision.outcome == "promote",
+                    reason_code=decision.reason_code,
+                    possible_inappropriate_python_code_use=False,
+                )
+            )
             if trace_enabled and trace is not None:
                 raw_events = trace.metadata.get("custom_workflow_override_policy")
                 if isinstance(raw_events, list):
@@ -27725,7 +26938,19 @@ class InternalMCPChatOrchestrator:
             }
             if extra_payload:
                 override_payload.update(dict(extra_payload))
-            aux_llm_calls.append(override_payload)
+            aux_llm_calls.append(
+                annotate_python_decision_event(
+                    override_payload,
+                    stage="workflow_dispatch",
+                    component="internal_mcp_orchestrator",
+                    function="_promote_selected_workflow_to_custom_dispatch",
+                    decision_class="workflow_selector_override",
+                    decision_source="workflow_launchability_check",
+                    changed_outcome=True,
+                    reason_code=reason,
+                    possible_inappropriate_python_code_use=False,
+                )
+            )
             if trace_enabled and trace is not None:
                 trace.metadata["workflow_selector_override"] = dict(override_payload)
             _emit_progress_local(
@@ -27744,147 +26969,6 @@ class InternalMCPChatOrchestrator:
                 }
             )
             return True
-
-        if (
-            selected_uses_tool_pipeline_contract
-            and selected_workflow_id_text == TOOL_CALLING_WORKFLOW_ID
-            and routing_prompt_requirements.has_missing_requirements
-            and discovered_matches
-        ):
-            override_policy = _evaluate_custom_workflow_override_policy(
-                override_context="prompt_requirements_tool_pipeline_override"
-            )
-            _record_custom_workflow_override_policy(
-                decision=override_policy,
-                prior_selected_workflow_id=selected_workflow_id_text,
-                preserved_execution_mode="tool_pipeline",
-            )
-            replacement_probe = (
-                _get_cached_custom_workflow_launchability_probe(
-                    override_policy.chosen_workflow_id
-                )
-                if isinstance(override_policy.chosen_workflow_id, str)
-                and override_policy.chosen_workflow_id.strip()
-                else None
-            )
-            if replacement_probe is not None:
-                _promote_selected_workflow_to_custom_dispatch(
-                    replacement_probe=replacement_probe,
-                    reason="required_prompt_tools_satisfied_by_launchable_custom_workflow",
-                    verdict="custom_workflow_override",
-                    reasoning=(
-                        "Prompt-tool preselection identified required tool usage, but a "
-                        "discovered KB-authored workflow was both launchable and a better "
-                        "semantic fit for the turn than the generic tool pipeline."
-                    ),
-                    extra_payload={
-                        "required_prompt_tools": list(
-                            routing_prompt_requirements.required_tools
-                        ),
-                        "missing_prompt_tools": list(
-                            routing_prompt_requirements.missing_tools
-                        ),
-                        "required_prompt_fetch_concept_ids": list(
-                            routing_prompt_requirements.required_fetch_concept_ids
-                        ),
-                        "missing_prompt_fetch_concept_ids": list(
-                            routing_prompt_requirements.missing_fetch_concept_ids
-                        ),
-                        "required_prompt_read_file_copy_ids": list(
-                            routing_prompt_requirements.required_read_file_copy_ids
-                        ),
-                        "missing_prompt_read_file_copy_ids": list(
-                            routing_prompt_requirements.missing_read_file_copy_ids
-                        ),
-                        "required_prompt_scholarly_representation_for_file_copy_ids": list(
-                            routing_prompt_requirements.required_scholarly_representation_file_copy_ids
-                        ),
-                        "missing_prompt_scholarly_representation_for_file_copy_ids": list(
-                            routing_prompt_requirements.missing_scholarly_representation_file_copy_ids
-                        ),
-                        "required_prompt_url_extraction_tool": (
-                            routing_prompt_requirements.required_url_extraction_tool
-                        ),
-                        "required_prompt_url_extraction_url": (
-                            routing_prompt_requirements.required_url_extraction_url
-                        ),
-                        "prompt_requirement_url_policy": dict(routing_url_requirement),
-                        "retry_reason": routing_prompt_requirements.missing_retry_reason,
-                        "launch_viability_probe": {
-                            "replacement_workflow": dict(replacement_probe),
-                        },
-                        "custom_workflow_override_reason": (
-                            override_policy.reason_code
-                        ),
-                    },
-                )
-
-        if (
-            selected_prefers_direct_response
-            and mutative_intent_requires_tool_routing
-            and not selected_uses_tool_pipeline_contract
-        ):
-            override_policy = _evaluate_custom_workflow_override_policy(
-                override_context="mutative_intent_direct_response_override"
-            )
-            _record_custom_workflow_override_policy(
-                decision=override_policy,
-                prior_selected_workflow_id=selected_workflow_id_text,
-                preserved_execution_mode="tool_pipeline",
-            )
-            replacement_probe = (
-                _get_cached_custom_workflow_launchability_probe(
-                    override_policy.chosen_workflow_id
-                )
-                if isinstance(override_policy.chosen_workflow_id, str)
-                and override_policy.chosen_workflow_id.strip()
-                else None
-            )
-            promoted_to_custom_workflow = False
-            if replacement_probe is not None:
-                promoted_to_custom_workflow = (
-                    _promote_selected_workflow_to_custom_dispatch(
-                        replacement_probe=replacement_probe,
-                        reason="mutative_intent_prefers_launchable_custom_workflow",
-                        verdict="custom_workflow_override",
-                        reasoning=(
-                            "Mutative/tool-using turn selected a direct-response "
-                            "pathway, but a discovered custom workflow was both "
-                            "launchable and a better semantic fit for the current "
-                            "turn than the generic tool pipeline."
-                        ),
-                        extra_payload={
-                            "write_policy_reason": write_routing_policy_reason,
-                            "write_tool_candidate_count": len(
-                                write_tool_candidates_for_routing
-                            ),
-                            "write_tool_candidates": write_tool_candidates_for_routing[
-                                :12
-                            ],
-                            "launch_viability_probe": {
-                                "replacement_workflow": dict(replacement_probe),
-                            },
-                            "custom_workflow_override_reason": (
-                                override_policy.reason_code
-                            ),
-                        },
-                    )
-                )
-            if not promoted_to_custom_workflow:
-                _force_tool_pipeline_routing(
-                    reason="mutative_intent_requires_tool_pipeline",
-                    excluded_selector_verdicts=[selector_verdict or "direct_response"],
-                    extra_payload={
-                        "write_policy_reason": write_routing_policy_reason,
-                        "write_tool_candidate_count": len(
-                            write_tool_candidates_for_routing
-                        ),
-                        "write_tool_candidates": write_tool_candidates_for_routing[
-                            :12
-                        ],
-                        "custom_workflow_override_reason": override_policy.reason_code,
-                    },
-                )
 
         def _maybe_override_selected_custom_workflow_for_launchability() -> None:
             if not selected_workflow_id_text:
@@ -28516,10 +27600,7 @@ class InternalMCPChatOrchestrator:
                 "conversation_session_id": conversation_session_id,
                 "turn_id": turn_id,
                 "recent_user_prompts": recent_user_prompts,
-                "write_intent_context_reused": bool(
-                    isinstance(write_intent_rehydrate_telemetry, Mapping)
-                    and write_intent_rehydrate_telemetry.get("reused")
-                ),
+                "write_intent_context_reused": False,
                 "gmail_profile": gmail_profile or self._default_gmail_profile,
                 "workflow_discovery_result": workflow_discovery_result,
                 "workflow_routing": routing_info_payload,
