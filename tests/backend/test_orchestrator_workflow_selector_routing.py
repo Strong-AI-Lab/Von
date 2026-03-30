@@ -3437,7 +3437,9 @@ def test_custom_workflow_run_applies_launch_contract_without_workflow_specific_g
     ]
 
 
-def test_custom_workflow_routing_prefers_launchable_discovered_candidate(monkeypatch):
+def test_custom_workflow_launchability_falls_back_when_replacement_lacks_discovery_signal(
+    monkeypatch,
+):
     import src.backend.services.workflow_selection_policy_service as policy_module
 
     monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
@@ -3521,9 +3523,12 @@ def test_custom_workflow_routing_prefers_launchable_discovered_candidate(monkeyp
         captured_execution["data"] = dict(data)
         return SimpleNamespace(
             completed=True,
-            final_state="prepare_spec",
+            final_state="complete",
             error=None,
-            data={"response_text": "Prepared via launchable workflow."},
+            data={
+                "response_text": "Handled via safe tool pipeline fallback.",
+                "final_response": "Handled via safe tool pipeline fallback.",
+            },
         )
 
     monkeypatch.setattr(orchestrator._workflow_executor, "run", _run_workflow)
@@ -3573,20 +3578,34 @@ def test_custom_workflow_routing_prefers_launchable_discovered_candidate(monkeyp
         turn_id="turn-launch-override",
     )
 
-    assert result.response_text == "Prepared via launchable workflow."
-    assert captured_execution["workflow_id"] == launchable_workflow_id
-
-    captured_data = captured_execution["data"]
-    assert captured_data["selected_workflow_id"] == launchable_workflow_id
-    assert captured_data["invitation_text"] == (
-        "Kia ora team, please join us on Tuesday at 2:00pm in Room 4 for a "
-        "project planning meeting about the Q2 roadmap."
-    )
+    assert result.response_text == "Handled via safe tool pipeline fallback."
+    assert captured_execution["workflow_id"] == TOOL_CALLING_WORKFLOW_ID
 
     assert result.workflow_routing is not None
-    assert result.workflow_routing.workflow_id == launchable_workflow_id
-    assert result.workflow_routing.verdict == "launch_contract_override"
+    assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
+    assert result.workflow_routing.verdict == "tool_contract_override"
     assert result.workflow_routing.source == "selector_override"
+
+    override_policy_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "custom_workflow_override_policy"
+        ),
+        None,
+    )
+    assert override_policy_entry is not None
+    assert override_policy_entry.get("outcome") == "decline"
+    assert override_policy_entry.get("reason_code") == "semantic_fit_insufficient"
+
+    candidate_assessments = override_policy_entry.get("candidate_assessments")
+    assert isinstance(candidate_assessments, list)
+    replacement_assessment = candidate_assessments[0]
+    assert replacement_assessment.get("workflow_id") == launchable_workflow_id
+    assert replacement_assessment.get("launchable") is True
+    assert replacement_assessment.get("suitable") is False
+    assert replacement_assessment.get("suitability_reason") == "semantic_fit_below_threshold"
 
     override_entry = next(
         (
@@ -3595,51 +3614,30 @@ def test_custom_workflow_routing_prefers_launchable_discovered_candidate(monkeyp
             if isinstance(entry, dict)
             and entry.get("type") == "workflow_selector_override"
             and entry.get("reason")
-            == "selected_custom_workflow_not_launchable_from_turn_inputs"
+            == "selected_custom_workflow_launchability_requires_safe_general_fallback"
         ),
         None,
     )
     assert override_entry is not None
     assert override_entry.get("prior_selected_workflow_id") == selected_workflow_id
-    assert override_entry.get("selected_workflow_id") == launchable_workflow_id
-
-    launch_viability_probe = override_entry.get("launch_viability_probe")
-    assert isinstance(launch_viability_probe, dict)
-
-    prior_probe = launch_viability_probe.get("prior_selected_workflow")
-    assert isinstance(prior_probe, dict)
-    assert prior_probe.get("launchable") is False
-    assert prior_probe.get("launch_input_resolution", {}).get("status") == "no_contract"
-    assert (
-        prior_probe.get("pre_action_validation", {}).get("reason_code")
-        == "metadata_read_context_key_missing"
-    )
-    assert (
-        prior_probe.get("pre_action_validation", {}).get("symbol")
-        == "target_workflow_ids"
-    )
-
-    replacement_probe = launch_viability_probe.get("replacement_workflow")
-    assert isinstance(replacement_probe, dict)
-    assert replacement_probe.get("launchable") is True
-    assert (
-        replacement_probe.get("launch_input_resolution", {}).get("status")
-        == "resolved"
-    )
+    assert override_entry.get("selected_workflow_id") == TOOL_CALLING_WORKFLOW_ID
+    assert override_entry.get("custom_workflow_override_reason") == "semantic_fit_insufficient"
 
     dispatch_boundaries = [
         entry
         for entry in result.aux_llm_calls
         if isinstance(entry, dict) and entry.get("type") == "workflow_dispatch_boundary"
     ]
-    assert [entry.get("boundary") for entry in dispatch_boundaries[-3:]] == [
+    assert [entry.get("boundary") for entry in dispatch_boundaries[-4:]] == [
         "execution_mode_selected",
+        "contract_resolution",
         "workflow_handoff",
         "workflow_terminal",
     ]
-    assert dispatch_boundaries[-3].get("selected_workflow_id") == launchable_workflow_id
-    assert dispatch_boundaries[-2].get("selected_workflow_id") == launchable_workflow_id
-    assert dispatch_boundaries[-1].get("selected_workflow_id") == launchable_workflow_id
+    assert dispatch_boundaries[-4].get("selected_workflow_id") == TOOL_CALLING_WORKFLOW_ID
+    assert dispatch_boundaries[-3].get("selected_workflow_id") == TOOL_CALLING_WORKFLOW_ID
+    assert dispatch_boundaries[-2].get("selected_workflow_id") == TOOL_CALLING_WORKFLOW_ID
+    assert dispatch_boundaries[-1].get("selected_workflow_id") == TOOL_CALLING_WORKFLOW_ID
 
 
 def test_custom_workflow_override_prefers_semantically_fit_execution_candidate(
@@ -3864,7 +3862,7 @@ def test_custom_workflow_override_prefers_semantically_fit_execution_candidate(
     assert override_policy_entry is not None
     assert override_policy_entry.get("outcome") == "promote"
     assert override_policy_entry.get("chosen_workflow_id") == execution_workflow_id
-    assert override_policy_entry.get("explicit_execution_request") is True
+    assert override_policy_entry.get("explicit_execution_request") is False
 
     candidate_assessments = override_policy_entry.get("candidate_assessments")
     assert isinstance(candidate_assessments, list)
@@ -3880,7 +3878,10 @@ def test_custom_workflow_override_prefers_semantically_fit_execution_candidate(
     assert isinstance(authoring_assessment, dict)
     assert authoring_assessment.get("role") == "authoring"
     assert authoring_assessment.get("suitable") is False
-    assert authoring_assessment.get("suitability_reason") == "existing_capability_preferred"
+    assert (
+        authoring_assessment.get("suitability_reason")
+        == "authoring_intent_required_by_workflow_profile"
+    )
 
     execution_assessment = next(
         (
@@ -3891,7 +3892,7 @@ def test_custom_workflow_override_prefers_semantically_fit_execution_candidate(
         None,
     )
     assert isinstance(execution_assessment, dict)
-    assert execution_assessment.get("role") in {"execution", "maintenance"}
+    assert execution_assessment.get("role") == "unknown"
     assert execution_assessment.get("suitable") is True
 
 
@@ -4076,11 +4077,11 @@ def test_launchability_replacement_declines_testing_workflow_for_conceptual_prom
     )
 
     assert execute_calls
-    assert execute_calls[0]["workflow_id"] == TOOL_CALLING_WORKFLOW_ID
+    assert execute_calls[0]["workflow_id"] == testing_workflow_id
 
     assert result.workflow_routing is not None
-    assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
-    assert result.workflow_routing.verdict == "tool_contract_override"
+    assert result.workflow_routing.workflow_id == testing_workflow_id
+    assert result.workflow_routing.verdict == "launch_contract_override"
     assert result.workflow_routing.source == "selector_override"
 
     override_policy_entry = next(
@@ -4093,8 +4094,8 @@ def test_launchability_replacement_declines_testing_workflow_for_conceptual_prom
         None,
     )
     assert override_policy_entry is not None
-    assert override_policy_entry.get("outcome") == "decline"
-    assert override_policy_entry.get("reason_code") == "maintenance_override_declined"
+    assert override_policy_entry.get("outcome") == "promote"
+    assert override_policy_entry.get("reason_code") == "launchable_custom_workflow_found"
     assert override_policy_entry.get("explicit_execution_request") is False
 
     candidate_assessments = override_policy_entry.get("candidate_assessments")
@@ -4108,12 +4109,9 @@ def test_launchability_replacement_declines_testing_workflow_for_conceptual_prom
         None,
     )
     assert isinstance(testing_assessment, dict)
-    assert testing_assessment.get("role") == "maintenance"
-    assert testing_assessment.get("suitable") is False
-    assert (
-        testing_assessment.get("suitability_reason")
-        == "maintenance_requires_explicit_request"
-    )
+    assert testing_assessment.get("role") == "unknown"
+    assert testing_assessment.get("suitable") is True
+    assert testing_assessment.get("suitability_reason") == "suitable"
 
     override_entry = next(
         (
@@ -4121,17 +4119,17 @@ def test_launchability_replacement_declines_testing_workflow_for_conceptual_prom
             for entry in result.aux_llm_calls
             if isinstance(entry, dict)
             and entry.get("type") == "workflow_selector_override"
-            and entry.get("reason")
-            == "selected_custom_workflow_launchability_requires_safe_general_fallback"
+                and entry.get("reason")
+                == "selected_custom_workflow_not_launchable_from_turn_inputs"
         ),
         None,
     )
     assert override_entry is not None
     assert override_entry.get("prior_selected_workflow_id") == selected_workflow_id
-    assert override_entry.get("selected_workflow_id") == TOOL_CALLING_WORKFLOW_ID
+    assert override_entry.get("selected_workflow_id") == testing_workflow_id
     assert (
         override_entry.get("custom_workflow_override_reason")
-        == "maintenance_override_declined"
+        == "launchable_custom_workflow_found"
     )
     assert (
         override_entry.get("launch_viability_probe", {})
@@ -4145,7 +4143,7 @@ def test_launchability_replacement_declines_testing_workflow_for_conceptual_prom
         for entry in result.aux_llm_calls
         if isinstance(entry, dict) and entry.get("type") == "workflow_selector_override"
     }
-    assert "selected_custom_workflow_not_launchable_from_turn_inputs" not in override_reasons
+    assert "selected_custom_workflow_not_launchable_from_turn_inputs" in override_reasons
 
 
 def test_custom_workflow_first_step_failure_projects_terminal_locality(monkeypatch):
@@ -4686,8 +4684,8 @@ def test_workflow_selector_uses_provider_aware_classifier_fallback(monkeypatch):
     )
 
 
-def test_plain_response_overridden_to_tool_pipeline_for_mutative_intent(monkeypatch):
-    """Mutative intent should force tool-calling even when selector says plain response."""
+def test_mutative_wording_does_not_override_plain_response_routing(monkeypatch):
+    """Mutative wording alone must not trigger Python-side routing overrides."""
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
 
     # Write-policy checks in orchestrator should only keep this on the
@@ -4701,9 +4699,7 @@ def test_plain_response_overridden_to_tool_pipeline_for_mutative_intent(monkeypa
     llm = _CapturingLLM(
         [
             CHAT_ASSISTANT_WORKFLOW_ID,  # selector verdict
-            "I can create that relationship in the knowledge base.",  # tool-calling planner
-            "Relationship creation needs tool execution.",
-            "Final response after tool workflow.",
+            "Plain response only.",
         ]
     )
 
@@ -4716,18 +4712,33 @@ def test_plain_response_overridden_to_tool_pipeline_for_mutative_intent(monkeypa
     )
 
     assert result.workflow_routing is not None
-    assert result.workflow_routing.verdict == "tool_contract_override"
-    assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
-    assert result.workflow_routing.source == "selector_override"
+    assert result.workflow_routing.verdict == "rag_selected"
+    assert result.workflow_routing.workflow_id == CHAT_ASSISTANT_WORKFLOW_ID
+    assert result.workflow_routing.source == "selector"
+    assert result.response_text == "Plain response only."
+    assert not any(
+        isinstance(entry, dict) and entry.get("type") == "workflow_selector_override"
+        for entry in result.aux_llm_calls
+    )
+    gate_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "write_policy_gate"
+            and entry.get("stage") == "routing"
+        ),
+        None,
+    )
+    assert gate_entry is not None
+    assert gate_entry.get("gate_state") == "not_applied"
+    assert gate_entry.get("reason") == "workflow_llm_owns_mutation_routing"
 
-    aux_types = [
-        entry.get("type") for entry in result.aux_llm_calls if isinstance(entry, dict)
-    ]
-    assert "workflow_selector_override" in aux_types
 
-
-def test_mutative_intent_prefers_launchable_discovered_custom_workflow(monkeypatch):
-    """Launchable discovered custom workflows should outrank generic tool fallback."""
+def test_launchable_custom_workflow_is_not_python_overridden_from_mutative_wording(
+    monkeypatch,
+):
+    """Discovered custom workflows must not be promoted from mutative wording alone."""
 
     import src.backend.services.workflow_selection_policy_service as policy_module
 
@@ -4787,7 +4798,7 @@ def test_mutative_intent_prefers_launchable_discovered_custom_workflow(monkeypat
     result = orchestrator.run(
         prompt="Create a concept link in Vontology.",
         context=[],
-        llm_client=_CapturingLLM([CHAT_ASSISTANT_WORKFLOW_ID]),
+        llm_client=_CapturingLLM([CHAT_ASSISTANT_WORKFLOW_ID, "Plain response only."]),
         model=None,
         user_namespace="#V#user",
         workflow_discovery_result={
@@ -4825,61 +4836,25 @@ def test_mutative_intent_prefers_launchable_discovered_custom_workflow(monkeypat
         turn_id="turn-mutative-custom",
     )
 
-    assert result.response_text.startswith("Executed via specialised workflow.")
-    assert captured_execution["workflow_id"] == selected_workflow_id
-    assert captured_execution["data"]["selected_workflow_id"] == selected_workflow_id
-
     assert result.workflow_routing is not None
-    assert result.workflow_routing.workflow_id == selected_workflow_id
-    assert result.workflow_routing.verdict == "custom_workflow_override"
-    assert result.workflow_routing.source == "selector_override"
-
-    override_entry = next(
-        (
-            entry
-            for entry in result.aux_llm_calls
-            if isinstance(entry, dict)
-            and entry.get("type") == "workflow_selector_override"
-            and entry.get("reason")
-            == "mutative_intent_prefers_launchable_custom_workflow"
-        ),
-        None,
-    )
-    assert override_entry is not None
-    assert override_entry.get("prior_selected_workflow_id") == CHAT_ASSISTANT_WORKFLOW_ID
-    assert override_entry.get("selected_workflow_id") == selected_workflow_id
-    assert override_entry.get("write_policy_reason") == "default_allow_additive_low_risk"
-
-    launch_probe = override_entry.get("launch_viability_probe", {}).get(
-        "replacement_workflow"
-    )
-    assert isinstance(launch_probe, dict)
-    assert launch_probe.get("launchable") is True
-
-    dispatch_boundaries = [
-        entry
+    assert result.workflow_routing.workflow_id == CHAT_ASSISTANT_WORKFLOW_ID
+    assert result.workflow_routing.verdict == "rag_selected"
+    assert result.workflow_routing.source == "selector"
+    assert result.response_text == "Plain response only."
+    assert captured_execution == {}
+    assert not any(
+        isinstance(entry, dict)
+        and entry.get("type") in {"workflow_selector_override", "custom_workflow_override_policy"}
         for entry in result.aux_llm_calls
-        if isinstance(entry, dict) and entry.get("type") == "workflow_dispatch_boundary"
-    ]
-    assert [entry.get("boundary") for entry in dispatch_boundaries[-3:]] == [
-        "execution_mode_selected",
-        "workflow_handoff",
-        "workflow_terminal",
-    ]
-    assert dispatch_boundaries[-3].get("selected_execution_mode") == "custom_workflow"
-    assert dispatch_boundaries[-3].get("selected_workflow_id") == selected_workflow_id
+    )
 
 
-def test_mutative_override_declines_unrelated_execution_workflow_without_lexical_grounding(
+def test_unrelated_execution_workflow_is_not_python_declined_or_promoted_from_prompt_text(
     monkeypatch,
 ):
     import src.backend.services.workflow_selection_policy_service as policy_module
 
     monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
-    monkeypatch.setattr(
-        "src.backend.integrations.internal_mcp.orchestrator.prompt_has_low_risk_additive_write_evidence",
-        lambda _prompt: True,
-    )
 
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
     unrelated_workflow_id = "#V#sail_phd_student_onboarding_workflow"
@@ -4945,7 +4920,7 @@ def test_mutative_override_declines_unrelated_execution_workflow_without_lexical
             "needed. If so, list the new types and relations needed."
         ),
         context=[],
-        llm_client=_CapturingLLM([CHAT_ASSISTANT_WORKFLOW_ID]),
+        llm_client=_CapturingLLM([CHAT_ASSISTANT_WORKFLOW_ID, "Plain response only."]),
         model=None,
         user_namespace="#V#user",
         workflow_discovery_result={
@@ -4984,48 +4959,24 @@ def test_mutative_override_declines_unrelated_execution_workflow_without_lexical
     )
 
     assert result.workflow_routing is not None
-    assert result.workflow_routing.verdict == "tool_contract_override"
-    assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
-    assert execute_calls
-    assert execute_calls[0]["workflow_id"] == TOOL_CALLING_WORKFLOW_ID
-
-    override_policy_entry = next(
-        (
-            entry
-            for entry in result.aux_llm_calls
-            if isinstance(entry, dict)
-            and entry.get("type") == "custom_workflow_override_policy"
-        ),
-        None,
-    )
-    assert override_policy_entry is not None
-    assert override_policy_entry.get("outcome") == "decline"
-    assert override_policy_entry.get("reason_code") == "lexical_grounding_missing"
-
-    candidate_assessments = override_policy_entry.get("candidate_assessments")
-    assert isinstance(candidate_assessments, list)
-    onboarding_assessment = candidate_assessments[0]
-    assert onboarding_assessment.get("role") == "execution"
-    assert onboarding_assessment.get("suitable") is False
-    assert onboarding_assessment.get("suitability_reason") == "lexical_grounding_missing"
-
-    override_reasons = {
-        entry.get("reason")
+    assert result.workflow_routing.verdict == "rag_selected"
+    assert result.workflow_routing.workflow_id == CHAT_ASSISTANT_WORKFLOW_ID
+    assert result.workflow_routing.source == "selector"
+    assert result.response_text == "Plain response only."
+    assert execute_calls == []
+    assert not any(
+        isinstance(entry, dict)
+        and entry.get("type") in {"workflow_selector_override", "custom_workflow_override_policy"}
         for entry in result.aux_llm_calls
-        if isinstance(entry, dict) and entry.get("type") == "workflow_selector_override"
-    }
-    assert "mutative_intent_prefers_launchable_custom_workflow" not in override_reasons
-    assert "mutative_intent_requires_tool_pipeline" in override_reasons
+    )
 
 
-def test_mutative_override_declines_authoring_workflow_for_workflow_query(monkeypatch):
+def test_authoring_workflow_query_is_left_to_selector_without_python_semantic_override(
+    monkeypatch,
+):
     import src.backend.services.workflow_selection_policy_service as policy_module
 
     monkeypatch.setattr(policy_module, "get_live_selection_policy", lambda: None)
-    monkeypatch.setattr(
-        "src.backend.integrations.internal_mcp.orchestrator.prompt_has_low_risk_additive_write_evidence",
-        lambda _prompt: True,
-    )
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
     authoring_workflow_id = "#V#launchable_authoring_workflow"
 
@@ -5091,7 +5042,7 @@ def test_mutative_override_declines_authoring_workflow_for_workflow_query(monkey
     result = orchestrator.run(
         prompt="Is there already a workflow for creating a meeting instance?",
         context=[],
-        llm_client=_CapturingLLM([CHAT_ASSISTANT_WORKFLOW_ID]),
+        llm_client=_CapturingLLM([CHAT_ASSISTANT_WORKFLOW_ID, "Plain response only."]),
         model=None,
         user_namespace="#V#user",
         workflow_discovery_result={
@@ -5130,45 +5081,22 @@ def test_mutative_override_declines_authoring_workflow_for_workflow_query(monkey
     )
 
     assert result.workflow_routing is not None
-    assert result.workflow_routing.verdict == "tool_contract_override"
-    assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
-    assert execute_calls
-    assert execute_calls[0]["workflow_id"] == TOOL_CALLING_WORKFLOW_ID
-
-    override_policy_entry = next(
-        (
-            entry
-            for entry in result.aux_llm_calls
-            if isinstance(entry, dict)
-            and entry.get("type") == "custom_workflow_override_policy"
-        ),
-        None,
-    )
-    assert override_policy_entry is not None
-    assert override_policy_entry.get("outcome") == "decline"
-    assert override_policy_entry.get("reason_code") == "authoring_override_declined"
-
-    candidate_assessments = override_policy_entry.get("candidate_assessments")
-    assert isinstance(candidate_assessments, list)
-    authoring_assessment = candidate_assessments[0]
-    assert authoring_assessment.get("role") == "authoring"
-    assert authoring_assessment.get("suitable") is False
-    assert (
-        authoring_assessment.get("suitability_reason")
-        == "authoring_declined_for_workflow_query"
-    )
-
-    override_reasons = {
-        entry.get("reason")
+    assert result.workflow_routing.verdict == "rag_selected"
+    assert result.workflow_routing.workflow_id == CHAT_ASSISTANT_WORKFLOW_ID
+    assert result.workflow_routing.source == "selector"
+    assert result.response_text == "Plain response only."
+    assert execute_calls == []
+    assert not any(
+        isinstance(entry, dict)
+        and entry.get("type") in {"workflow_selector_override", "custom_workflow_override_policy"}
         for entry in result.aux_llm_calls
-        if isinstance(entry, dict) and entry.get("type") == "workflow_selector_override"
-    }
-    assert "mutative_intent_prefers_launchable_custom_workflow" not in override_reasons
-    assert "mutative_intent_requires_tool_pipeline" in override_reasons
+    )
 
 
-def test_plain_response_overridden_when_prompt_requires_tool_verification(monkeypatch):
-    """Prompt-required tool checks must not be bypassed by plain-response routing."""
+def test_explicit_tool_requirement_is_telemetry_visible_even_without_python_routing_override(
+    monkeypatch,
+):
+    """Explicit tool mentions should be surfaced in telemetry without forcing routing."""
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
 
     monkeypatch.setattr(
@@ -5186,7 +5114,6 @@ def test_plain_response_overridden_when_prompt_requires_tool_verification(monkey
         [
             CHAT_ASSISTANT_WORKFLOW_ID,
             "I inspected workflow definitions.",
-            "Here is what exists.",
         ]
     )
 
@@ -5199,23 +5126,26 @@ def test_plain_response_overridden_when_prompt_requires_tool_verification(monkey
     )
 
     assert result.workflow_routing is not None
-    assert result.workflow_routing.verdict == "tool_contract_preselected"
-    assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
-    assert result.workflow_routing.source == "selector_override"
+    assert result.workflow_routing.verdict == "rag_selected"
+    assert result.workflow_routing.workflow_id == CHAT_ASSISTANT_WORKFLOW_ID
+    assert result.workflow_routing.source == "selector"
 
-    override_entry = next(
+    requirement_entry = next(
         (
             entry
             for entry in result.aux_llm_calls
             if isinstance(entry, dict)
-            and entry.get("type") == "workflow_selector_override"
-            and entry.get("reason") == "required_prompt_tools_missing_preselector"
+            and entry.get("type") == "prompt_tool_requirements_preflight"
+            and entry.get("stage") == "workflow_dispatch"
         ),
         None,
     )
-    assert override_entry is not None
-    assert "workflow_list_definitions" in (
-        override_entry.get("required_prompt_tools") or []
+    assert requirement_entry is not None
+    assert requirement_entry.get("required_tools") == ["workflow_list_definitions"]
+    assert requirement_entry.get("missing_tools") == ["workflow_list_definitions"]
+    assert not any(
+        isinstance(entry, dict) and entry.get("type") == "workflow_selector_override"
+        for entry in result.aux_llm_calls
     )
 
 
@@ -5255,7 +5185,9 @@ def test_incidental_url_prompt_stays_on_plain_response_path(monkeypatch):
     )
 
 
-def test_url_read_prompt_uses_tool_workflow_preflight_and_forces_url_tool(monkeypatch):
+def test_url_read_prompt_stays_selector_owned_without_python_url_preselection(
+    monkeypatch,
+):
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
 
     gateway_calls: list[tuple[str, dict[str, Any]]] = []
@@ -5283,7 +5215,6 @@ def test_url_read_prompt_uses_tool_workflow_preflight_and_forces_url_tool(monkey
         [
             CHAT_ASSISTANT_WORKFLOW_ID,
             "I can help with that.",
-            "Summary after URL extraction.",
         ]
     )
 
@@ -5296,24 +5227,11 @@ def test_url_read_prompt_uses_tool_workflow_preflight_and_forces_url_tool(monkey
     )
 
     assert result.workflow_routing is not None
-    assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
-    assert result.workflow_routing.verdict == "tool_contract_preselected"
-    assert result.workflow_routing.source == "selector_override"
-    extract_call = next(
-        (
-            payload
-            for tool_name, payload in gateway_calls
-            if tool_name == "resilient_extract_url"
-        ),
-        None,
-    )
-    assert extract_call is not None
-    assert extract_call.get("url") == "https://example.com/report"
-    assert any(
-        invocation.get("tool") == "resilient_extract_url"
-        for invocation in result.tool_invocations
-        if isinstance(invocation, dict)
-    )
+    assert result.workflow_routing.workflow_id == CHAT_ASSISTANT_WORKFLOW_ID
+    assert result.workflow_routing.verdict == "rag_selected"
+    assert result.workflow_routing.source == "selector"
+    assert gateway_calls == []
+    assert result.tool_invocations == ()
 
     preflight_entry = next(
         (
@@ -5321,27 +5239,23 @@ def test_url_read_prompt_uses_tool_workflow_preflight_and_forces_url_tool(monkey
             for entry in result.aux_llm_calls
             if isinstance(entry, dict)
             and entry.get("type") == "prompt_tool_requirements_preflight"
+            and entry.get("stage") == "workflow_dispatch"
         ),
         None,
     )
     assert preflight_entry is not None
-    assert preflight_entry.get("required_url_extraction_tool") == "resilient_extract_url"
-
-    retry_entry = next(
-        (
-            entry
-            for entry in result.aux_llm_calls
-            if isinstance(entry, dict)
-            and entry.get("type") == "missing_tool_call_retry"
-            and entry.get("stage") == "response"
-        ),
-        None,
+    assert preflight_entry.get("required_tools") == []
+    assert preflight_entry.get("required_url_extraction_tool") is None
+    assert preflight_entry.get("required_url_extraction_url") is None
+    assert not any(
+        isinstance(entry, dict) and entry.get("type") == "workflow_selector_override"
+        for entry in result.aux_llm_calls
     )
-    if retry_entry is not None:
-        assert retry_entry.get("mechanism") == "required_tools"
 
 
-def test_prompt_tool_preselector_yields_to_launchable_custom_workflow(monkeypatch):
+def test_explicit_workflow_prompt_is_not_python_reinterpreted_into_custom_dispatch(
+    monkeypatch,
+):
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
     selected_workflow_id = "#V#arxiv_paper_ingestion_testing_workflow"
 
@@ -5405,7 +5319,7 @@ def test_prompt_tool_preselector_yields_to_launchable_custom_workflow(monkeypatc
     result = orchestrator.run(
         prompt=prompt,
         context=[],
-        llm_client=_CapturingLLM([CHAT_ASSISTANT_WORKFLOW_ID]),
+        llm_client=_CapturingLLM([CHAT_ASSISTANT_WORKFLOW_ID, "Plain response only."]),
         model=None,
         user_namespace="#V#user",
         workflow_discovery_result={
@@ -5443,46 +5357,23 @@ def test_prompt_tool_preselector_yields_to_launchable_custom_workflow(monkeypatc
         },
     )
 
-    assert result.response_text.startswith("Executed via arXiv testing workflow.")
-    assert captured_execution["workflow_id"] == selected_workflow_id
-    assert captured_execution["data"]["selected_workflow_id"] == selected_workflow_id
-
     assert result.workflow_routing is not None
-    assert result.workflow_routing.workflow_id == selected_workflow_id
-    assert result.workflow_routing.verdict == "custom_workflow_override"
-    assert result.workflow_routing.source == "selector_override"
-
-    override_entry = next(
-        (
-            entry
-            for entry in result.aux_llm_calls
-            if isinstance(entry, dict)
-            and entry.get("type") == "workflow_selector_override"
-            and entry.get("reason")
-            == "required_prompt_tools_satisfied_by_launchable_custom_workflow"
-        ),
-        None,
+    assert result.workflow_routing.workflow_id == CHAT_ASSISTANT_WORKFLOW_ID
+    assert result.workflow_routing.verdict == "rag_selected"
+    assert result.workflow_routing.source == "selector"
+    assert result.response_text == "Plain response only."
+    assert captured_execution == {}
+    assert not any(
+        isinstance(entry, dict)
+        and entry.get("type") in {"workflow_selector_override", "custom_workflow_override_policy"}
+        for entry in result.aux_llm_calls
     )
-    assert override_entry is not None
-    assert override_entry.get("prior_selected_workflow_id") == TOOL_CALLING_WORKFLOW_ID
-    assert "download_paper" in (override_entry.get("required_prompt_tools") or [])
-
-    policy_entry = next(
-        (
-            entry
-            for entry in result.aux_llm_calls
-            if isinstance(entry, dict)
-            and entry.get("type") == "custom_workflow_override_policy"
-        ),
-        None,
-    )
-    assert policy_entry is not None
-    assert policy_entry.get("outcome") == "promote"
-    assert policy_entry.get("reason_code") == "suitable_custom_workflow_found"
 
 
-def test_write_intent_memory_rehydrates_for_same_session_continuation(monkeypatch):
-    """Continuation prompts should inherit prior write intent in the same session."""
+def test_same_session_follow_up_does_not_rehydrate_python_write_intent_memory(
+    monkeypatch,
+):
+    """Same-session follow-up turns should remain selector-owned."""
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
     monkeypatch.setattr(
         orchestrator._gateway,
@@ -5496,9 +5387,7 @@ def test_write_intent_memory_rehydrates_for_same_session_continuation(monkeypatc
         llm_client=_CapturingLLM(
             [
                 CHAT_ASSISTANT_WORKFLOW_ID,
-                "First tool-calling turn.",
-                "Follow-through response.",
-                "Final response after tool workflow.",
+                "Plain response only.",
             ]
         ),
         model=None,
@@ -5506,8 +5395,8 @@ def test_write_intent_memory_rehydrates_for_same_session_continuation(monkeypatc
         conversation_session_id="session-1328-same",
     )
     assert first.workflow_routing is not None
-    assert first.workflow_routing.verdict == "tool_contract_override"
-    assert first.workflow_routing.source == "selector_override"
+    assert first.workflow_routing.verdict == "rag_selected"
+    assert first.workflow_routing.source == "selector"
 
     second = orchestrator.run(
         prompt="Yes, do it.",
@@ -5515,9 +5404,7 @@ def test_write_intent_memory_rehydrates_for_same_session_continuation(monkeypatc
         llm_client=_CapturingLLM(
             [
                 CHAT_ASSISTANT_WORKFLOW_ID,
-                "Continuation turn.",
-                "Follow-through response.",
-                "Final response after tool workflow.",
+                "Plain response only.",
             ]
         ),
         model=None,
@@ -5525,21 +5412,8 @@ def test_write_intent_memory_rehydrates_for_same_session_continuation(monkeypatc
         conversation_session_id="session-1328-same",
     )
     assert second.workflow_routing is not None
-    assert second.workflow_routing.verdict == "tool_contract_override"
-    assert second.workflow_routing.source == "selector_override"
-
-    rehydrate_entry = next(
-        (
-            entry
-            for entry in second.aux_llm_calls
-            if isinstance(entry, dict)
-            and entry.get("type") == "write_intent_session_memory"
-            and entry.get("stage") == "rehydrate"
-        ),
-        None,
-    )
-    assert rehydrate_entry is not None
-    assert rehydrate_entry.get("reused") is True
+    assert second.workflow_routing.verdict == "rag_selected"
+    assert second.workflow_routing.source == "selector"
     gate_entry = next(
         (
             entry
@@ -5551,12 +5425,16 @@ def test_write_intent_memory_rehydrates_for_same_session_continuation(monkeypatc
         None,
     )
     assert gate_entry is not None
-    assert gate_entry.get("gate_state") == "confirmed"
-    assert gate_entry.get("continuation_context_reused") is True
+    assert gate_entry.get("gate_state") == "not_applied"
+    assert gate_entry.get("continuation_context_reused") is False
+    assert not any(
+        isinstance(entry, dict) and entry.get("type") == "write_intent_session_memory"
+        for entry in second.aux_llm_calls
+    )
 
 
-def test_write_intent_memory_rejects_cross_session_continuation(monkeypatch):
-    """Continuation prompts must not reuse write intent across different sessions."""
+def test_cross_session_follow_up_has_no_python_write_intent_reuse(monkeypatch):
+    """Cross-session follow-up turns should also remain selector-owned."""
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
     monkeypatch.setattr(
         orchestrator._gateway,
@@ -5570,9 +5448,7 @@ def test_write_intent_memory_rejects_cross_session_continuation(monkeypatch):
         llm_client=_CapturingLLM(
             [
                 CHAT_ASSISTANT_WORKFLOW_ID,
-                "First tool-calling turn.",
-                "Follow-through response.",
-                "Final response after tool workflow.",
+                "Plain response only.",
             ]
         ),
         model=None,
@@ -5580,8 +5456,8 @@ def test_write_intent_memory_rejects_cross_session_continuation(monkeypatch):
         conversation_session_id="session-1328-a",
     )
     assert first.workflow_routing is not None
-    assert first.workflow_routing.verdict == "tool_contract_override"
-    assert first.workflow_routing.source == "selector_override"
+    assert first.workflow_routing.verdict == "rag_selected"
+    assert first.workflow_routing.source == "selector"
 
     second = orchestrator.run(
         prompt="Yes, do it.",
@@ -5615,16 +5491,19 @@ def test_write_intent_memory_rejects_cross_session_continuation(monkeypatch):
         None,
     )
     assert gate_entry is not None
-    assert gate_entry.get("gate_state") == "pending"
-    assert gate_entry.get("reason") == "default_allow_additive_low_risk"
-    assert gate_entry.get("low_risk_additive_routing_evidence") is False
+    assert gate_entry.get("gate_state") == "not_applied"
+    assert gate_entry.get("reason") == "workflow_llm_owns_mutation_routing"
     assert gate_entry.get("continuation_context_reused") is False
+    assert not any(
+        isinstance(entry, dict) and entry.get("type") == "write_intent_session_memory"
+        for entry in second.aux_llm_calls
+    )
 
 
-def test_write_intent_memory_rehydrates_for_low_risk_confirm_structure_prompt(
+def test_confirm_structure_follow_up_does_not_rehydrate_python_write_intent_memory(
     monkeypatch,
 ):
-    """Low-risk confirmation prompts should reuse same-session write context."""
+    """Short confirmation prompts should not trigger Python write-intent reuse."""
 
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
     monkeypatch.setattr(
@@ -5639,9 +5518,7 @@ def test_write_intent_memory_rehydrates_for_low_risk_confirm_structure_prompt(
         llm_client=_CapturingLLM(
             [
                 CHAT_ASSISTANT_WORKFLOW_ID,
-                "First tool-calling turn.",
-                "Follow-through response.",
-                "Final response after tool workflow.",
+                "Plain response only.",
             ]
         ),
         model=None,
@@ -5649,8 +5526,8 @@ def test_write_intent_memory_rehydrates_for_low_risk_confirm_structure_prompt(
         conversation_session_id="session-1328-structure",
     )
     assert first.workflow_routing is not None
-    assert first.workflow_routing.verdict == "tool_contract_override"
-    assert first.workflow_routing.source == "selector_override"
+    assert first.workflow_routing.verdict == "rag_selected"
+    assert first.workflow_routing.source == "selector"
 
     second = orchestrator.run(
         prompt="Confirm structure.",
@@ -5658,9 +5535,7 @@ def test_write_intent_memory_rehydrates_for_low_risk_confirm_structure_prompt(
         llm_client=_CapturingLLM(
             [
                 CHAT_ASSISTANT_WORKFLOW_ID,
-                "Continuation turn.",
-                "Follow-through response.",
-                "Final response after tool workflow.",
+                "Plain response only.",
             ]
         ),
         model=None,
@@ -5668,21 +5543,8 @@ def test_write_intent_memory_rehydrates_for_low_risk_confirm_structure_prompt(
         conversation_session_id="session-1328-structure",
     )
     assert second.workflow_routing is not None
-    assert second.workflow_routing.verdict == "tool_contract_override"
-    assert second.workflow_routing.source == "selector_override"
-
-    rehydrate_entry = next(
-        (
-            entry
-            for entry in second.aux_llm_calls
-            if isinstance(entry, dict)
-            and entry.get("type") == "write_intent_session_memory"
-            and entry.get("stage") == "rehydrate"
-        ),
-        None,
-    )
-    assert rehydrate_entry is not None
-    assert rehydrate_entry.get("reused") is True
+    assert second.workflow_routing.verdict == "rag_selected"
+    assert second.workflow_routing.source == "selector"
     gate_entry = next(
         (
             entry
@@ -5694,11 +5556,15 @@ def test_write_intent_memory_rehydrates_for_low_risk_confirm_structure_prompt(
         None,
     )
     assert gate_entry is not None
-    assert gate_entry.get("gate_state") == "confirmed"
-    assert gate_entry.get("continuation_context_reused") is True
+    assert gate_entry.get("gate_state") == "not_applied"
+    assert gate_entry.get("continuation_context_reused") is False
+    assert not any(
+        isinstance(entry, dict) and entry.get("type") == "write_intent_session_memory"
+        for entry in second.aux_llm_calls
+    )
 
 
-def test_preselected_tool_planner_receives_authoritative_workflow_continuation_context(
+def test_tool_planner_receives_authoritative_workflow_continuation_context(
     monkeypatch,
 ):
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
@@ -5752,16 +5618,17 @@ def test_preselected_tool_planner_receives_authoritative_workflow_continuation_c
     )
 
     assert result.workflow_routing is not None
-    assert result.workflow_routing.verdict == "tool_contract_preselected"
-    assert result.workflow_routing.source == "selector_override"
+    assert result.workflow_routing.verdict == "rag_selected"
+    assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
+    assert result.workflow_routing.source == "selector"
 
-    planner_context = llm.calls[0]["context"] or []
+    planner_context = llm.calls[1]["context"] or []
     planner_prompt_context = "\n".join(
         str(message.get("content") or "")
         for message in planner_context
         if isinstance(message, dict)
     )
-    assert llm.calls[0]["prompt"] == "Please proceed."
+    assert llm.calls[1]["prompt"] == "Please proceed."
     assert "ACTIVE WORKFLOW CONTINUATION CONTEXT" in planner_prompt_context
     assert "#V#scholarly_paper_representation_workflow" in planner_prompt_context
     assert "#V#uploaded_file_copy_abc123" in planner_prompt_context

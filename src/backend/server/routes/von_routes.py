@@ -18,7 +18,7 @@ import json
 from pathlib import Path
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Mapping, cast
+from typing import Any, Dict, Mapping, Sequence, cast
 from ...workflows.durable.registry_factory import build_workflow_registry_read_only
 from ...workflows.durable.startup import get_instance_manager
 from ...workflows.durable.workflow_instance_submission_service import (
@@ -86,6 +86,10 @@ from ...services.turn_execution_record_service import (
     build_search_tool_evidence,
     build_turn_execution_record,
     build_workflow_routing_diagnostics,
+)
+from ...services.python_decision_authority_service import (
+    annotate_python_decision_event,
+    build_stage_authority_summary,
 )
 from ...workflows import (
     CHAT_BUTTONIFY_WORKFLOW_ID,
@@ -559,6 +563,15 @@ def _serialise_tool_progress_state(
             else None
         ),
         latest_progress=payload,
+        aux_llm_calls=(
+            [
+                cast(dict[str, Any], entry)
+                for entry in workflow_routing_aux
+                if isinstance(entry, dict)
+            ]
+            if isinstance(workflow_routing_aux, list)
+            else None
+        ),
     )
     payload["phase_history"] = phase_history
     payload["progress_events"] = _build_progress_events_from_phase_history(
@@ -1473,6 +1486,7 @@ def _build_turn_execution_stage_diagnostics(
     tool_observation_summary: Mapping[str, Any] | None,
     workflow_discovery: Mapping[str, Any] | None,
     latest_progress: Mapping[str, Any] | None,
+    aux_llm_calls: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     path_entries_raw = (
         workflow_stage_path.get("path")
@@ -1517,6 +1531,10 @@ def _build_turn_execution_stage_diagnostics(
         ]
         latest_stage_event = stage_events[-1] if stage_events else None
         live_stage_payload = dict(live_stage_diagnostic_map.get(stage_id) or {})
+        authority_summary = build_stage_authority_summary(
+            stage_id=stage_id,
+            aux_entries=aux_llm_calls,
+        )
         stage_payload: dict[str, Any] = {
             "stage_id": stage_id,
             "stage_label": _progress_str(stage_entry.get("stage_label"))
@@ -1551,6 +1569,30 @@ def _build_turn_execution_stage_diagnostics(
                 _progress_str(latest_stage_event.get("error"))
                 if isinstance(latest_stage_event, Mapping)
                 else None
+            ),
+            "llm_input_recorded": bool(authority_summary["llm_input_recorded"]),
+            "llm_output_recorded": bool(authority_summary["llm_output_recorded"]),
+            "has_recorded_llm_exchange": bool(
+                authority_summary["has_recorded_llm_exchange"]
+            ),
+            "llm_exchange_record_count": int(
+                authority_summary["llm_exchange_record_count"]
+            ),
+            "missing_recorded_llm_input": bool(
+                authority_summary["missing_recorded_llm_input"]
+            ),
+            "missing_recorded_llm_output": bool(
+                authority_summary["missing_recorded_llm_output"]
+            ),
+            "python_decision_count": int(authority_summary["python_decision_count"]),
+            "possibly_inappropriate_python_code_use_count": int(
+                authority_summary["possibly_inappropriate_python_code_use_count"]
+            ),
+            "python_decision_classes": list(
+                authority_summary["python_decision_classes"]
+            ),
+            "python_decision_sources": list(
+                authority_summary["python_decision_sources"]
             ),
         }
 
@@ -1750,6 +1792,7 @@ def _build_turn_execution_diagnostics(
         tool_observation_summary=tool_observation_summary,
         workflow_discovery=workflow_payload,
         latest_progress=latest_progress,
+        aux_llm_calls=routing_aux_llm_calls,
     )
     progress_events = _build_progress_events_from_phase_history(
         phase_history,
@@ -4984,7 +5027,7 @@ def _build_presenter_screen_summary_from_tool_messages(
     import json
 
     lines: list[str] = []
-    lines.append("Tools ran to answer this request:")
+    lines.append("Tool activity diagnostics:")
 
     description_write_seen = False
     relationship_write_seen = False
@@ -5061,26 +5104,27 @@ def _build_presenter_screen_summary_from_tool_messages(
     if index == 0:
         return None
 
-    # Always include an explicit writes ledger to make negative facts visible.
+    write_activity_seen = any(
+        (
+            description_write_seen,
+            relationship_write_seen,
+            names_write_seen,
+            concept_create_seen,
+        )
+    )
     lines.append("")
-    lines.append("Writes ledger (authoritative):")
-    if description_write_seen:
-        lines.append("- Description updated: YES (evidence present in tool results)")
+    if write_activity_seen:
+        lines.append("Write activity (authoritative):")
+        if description_write_seen:
+            lines.append("- Description updated: YES (evidence present in tool results)")
+        if relationship_write_seen:
+            lines.append("- Relationship writes detected")
+        if names_write_seen:
+            lines.append("- Name writes detected")
+        if concept_create_seen:
+            lines.append("- Concept creation detected")
     else:
-        lines.append("- Description updated: NO (no description write tool ran)")
-
-    did_not_lines: list[str] = []
-    if not relationship_write_seen:
-        did_not_lines.append("- No relationship writes detected")
-    if not names_write_seen:
-        did_not_lines.append("- No name writes detected")
-    if not concept_create_seen:
-        did_not_lines.append("- No concept creation detected")
-
-    if did_not_lines:
-        lines.append("")
-        lines.append("Writes not detected:")
-        lines.extend(did_not_lines)
+        lines.append("No write activity was detected in the tool results.")
 
     return "\n".join(lines).strip() or None
 
@@ -7159,6 +7203,43 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     prompt=prompt_text,
                     continuation_context=workflow_continuation_context,
                 )
+                apply_reason = str(apply_decision.get("reason") or "").strip() or None
+                try:
+                    auxiliary_llm_calls.append(
+                        annotate_python_decision_event(
+                            {
+                                "type": "workflow_continuation_decision",
+                                "stage": "workflow_dispatch",
+                                "applies": bool(apply_decision.get("applies", False)),
+                                "reason": apply_reason,
+                                "session_id": workflow_continuation_context.get(
+                                    "session_id"
+                                ),
+                                "selected_workflow_id": workflow_continuation_context.get(
+                                    "selected_workflow_id"
+                                ),
+                            },
+                            stage="workflow_dispatch",
+                            component="workflow_continuation_service",
+                            function="assess_prompt_for_workflow_continuation",
+                            decision_class="continuation_classifier",
+                            decision_source=(
+                                "prompt_shape_heuristic"
+                                if apply_reason
+                                in {
+                                    "short_follow_up_prompt",
+                                    "explicit_follow_up_or_repair_prompt",
+                                }
+                                else "workflow_state_check"
+                            ),
+                            changed_outcome=bool(
+                                apply_decision.get("applies", False)
+                            ),
+                            reason_code=apply_reason,
+                        )
+                    )
+                except Exception:
+                    pass
                 workflow_continuation_context = dict(workflow_continuation_context)
                 workflow_continuation_context["applied"] = bool(
                     apply_decision.get("applies", False)
@@ -7820,6 +7901,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             payload.setdefault("request_id", request_id)
             _set_tool_progress(progress_scope_key, request_id, payload)
 
+        tool_invocations: list[dict[str, Any]] = []
+
         if orchestrator is None:
             orchestrator_status = current_app.config.get(
                 "INTERNAL_MCP_ORCHESTRATOR_STATUS"
@@ -7855,154 +7938,56 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     context_messages=enhanced_context,
                 )
             )
-            required_scholarly_file_copy_ids = list(
-                cast(
-                    list[str],
-                    fallback_requirement_state.get(
-                        "required_scholarly_representation_for_file_copy_ids"
-                    )
-                    or [],
-                )
-            )
             unavailable_required_tools = list(
                 cast(
                     list[str],
                     fallback_requirement_state.get("unavailable_required_tools") or [],
                 )
             )
-
-            tool_invocations = []
-            fallback_preflight_errors: list[dict[str, Any]] = []
-            if required_scholarly_file_copy_ids:
-                if (
-                    gateway is None
-                    or not callable(getattr(gateway, "invoke", None))
-                    or (
-                        isinstance(method_catalogue_for_fallback, Mapping)
-                        and "interpret_file_copy"
-                        not in {
-                            str(name).strip().lower()
-                            for name in method_catalogue_for_fallback.keys()
-                            if isinstance(name, str) and str(name).strip()
-                        }
-                    )
-                ):
-                    fallback_preflight_errors.append(
+            if unavailable_required_tools:
+                auxiliary_llm_calls.append(
+                    annotate_python_decision_event(
                         {
-                            "error": "required_tool_unavailable",
-                            "tool": "interpret_file_copy",
-                            "required_file_copy_ids": list(
-                                required_scholarly_file_copy_ids
+                            "type": "prompt_tool_requirements_preflight",
+                            "stage": "fallback_direct_llm",
+                            "required_tools": list(
+                                cast(
+                                    list[str],
+                                    fallback_requirement_state.get("required_tools") or [],
+                                )
                             ),
                             "unavailable_required_tools": list(
                                 unavailable_required_tools
                             ),
-                        }
+                        },
+                        stage="fallback_direct_llm",
+                        component="internal_mcp_orchestrator",
+                        function="_derive_prompt_tool_requirements",
+                        decision_class="prompt_requirement_inference",
+                        decision_source="explicit_identifier_parse",
+                        changed_outcome=True,
+                        reason_code="explicit_prompt_tool_unavailable_in_fallback",
+                        possible_inappropriate_python_code_use=False,
                     )
-                else:
-                    for file_copy_id in required_scholarly_file_copy_ids:
-                        payload: dict[str, Any] = {"concept_id": file_copy_id}
-                        if isinstance(user_namespace, str) and user_namespace.strip():
-                            payload["namespace"] = user_namespace.strip()
-                        try:
-                            invoke_result = gateway.invoke("interpret_file_copy", payload)
-                            result_payload = (
-                                invoke_result.payload
-                                if hasattr(invoke_result, "payload")
-                                else invoke_result
-                            )
-                            invocation_status = (
-                                "ok"
-                                if not (
-                                    isinstance(result_payload, Mapping)
-                                    and result_payload.get("success") is False
-                                )
-                                else "error"
-                            )
-                            tool_invocations.append(
-                                {
-                                    "tool": "interpret_file_copy",
-                                    "payload": payload,
-                                    "effective_payload": result_payload,
-                                    "status": invocation_status,
-                                    "error": (
-                                        str(result_payload.get("error"))
-                                        if (
-                                            isinstance(result_payload, Mapping)
-                                            and result_payload.get("success") is False
-                                        )
-                                        else None
-                                    ),
-                                }
-                            )
-                            if (
-                                isinstance(result_payload, Mapping)
-                                and result_payload.get("success") is False
-                            ):
-                                fallback_preflight_errors.append(
-                                    {
-                                        "error": "interpret_file_copy_failed",
-                                        "concept_id": file_copy_id,
-                                        "details": result_payload,
-                                    }
-                                )
-                        except Exception as exc:
-                            fallback_preflight_errors.append(
-                                {
-                                    "error": "interpret_file_copy_exception",
-                                    "concept_id": file_copy_id,
-                                    "details": str(exc),
-                                }
-                            )
-
-            if fallback_preflight_errors:
-                response_text = (
-                    "I could not complete the required scholarly-paper representation "
-                    "workflow while the orchestrator was unavailable, so I am failing "
-                    "closed instead of returning an unverifiable narrative response."
                 )
-                llm_interaction["duration_ms"] = 0.0
-                llm_interaction["calls"] = []
-                auxiliary_llm_calls.append(
-                    {
-                        "type": "orchestrator_unavailable_fail_closed",
-                        "reason": "required_scholarly_representation_unavailable",
-                        "required_scholarly_representation_for_file_copy_ids": list(
-                            required_scholarly_file_copy_ids
-                        ),
-                        "errors": list(fallback_preflight_errors),
-                    }
-                )
-            else:
-                if required_scholarly_file_copy_ids:
-                    auxiliary_llm_calls.append(
-                        {
-                            "type": "orchestrator_unavailable_preflight",
-                            "required_scholarly_representation_for_file_copy_ids": list(
-                                required_scholarly_file_copy_ids
-                            ),
-                            "preflight_tool": "interpret_file_copy",
-                            "invocation_count": len(tool_invocations),
-                        }
-                    )
-                llm_start_perf = time.perf_counter()
-                response_text = llm_client.generate(
-                    prompt_text, context=enhanced_context, model=model_name
-                )
-                llm_interaction["duration_ms"] = (
-                    time.perf_counter() - llm_start_perf
-                ) * 1000.0
-                llm_interaction["calls"] = [
-                    {
-                        "type": "llm.generate",
-                        "model": model_name,
-                        "provider": _infer_provider(model_name),
-                        "duration_ms": llm_interaction["duration_ms"],
-                        "usage": None,
-                        "workflow": "von_generate",
-                        "stage": "fallback_direct_llm",
-                    }
-                ]
+            llm_start_perf = time.perf_counter()
+            response_text = llm_client.generate(
+                prompt_text, context=enhanced_context, model=model_name
+            )
+            llm_interaction["duration_ms"] = (
+                time.perf_counter() - llm_start_perf
+            ) * 1000.0
+            llm_interaction["calls"] = [
+                {
+                    "type": "llm.generate",
+                    "model": model_name,
+                    "provider": _infer_provider(model_name),
+                    "duration_ms": llm_interaction["duration_ms"],
+                    "usage": None,
+                    "workflow": "von_generate",
+                    "stage": "fallback_direct_llm",
+                }
+            ]
         else:
             try:
                 current_app.logger.info(
@@ -8512,6 +8497,22 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 if follow_up_screen_summary:
                     screen_candidate = follow_up_screen_summary
                     screen_backfill_source = "follow_up_summary"
+                    auxiliary_llm_calls.append(
+                        annotate_python_decision_event(
+                            {
+                                "type": "presenter_screen_backfill",
+                                "stage": "screen_backfill",
+                                "source": "follow_up_summary",
+                            },
+                            stage="screen_backfill",
+                            component="presenter_routes",
+                            function="_build_presenter_follow_up_summary_from_tool_messages",
+                            decision_class="presenter_fallback",
+                            decision_source="response_semantic_inference",
+                            changed_outcome=True,
+                            reason_code="tool_backed_follow_up_summary",
+                        )
+                    )
                 response_candidate = _strip_presenter_tags(response_text)
                 response_candidate_internal_status = _looks_like_internal_status_diagnostic(
                     response_candidate
@@ -8564,7 +8565,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                 "\nNon-negotiable rule:\n"
                                 "- If the tool results summary does not explicitly show a description update, you MUST NOT claim the description was added/updated. "
                                 "  You may say it is still empty/vacuous or that no tool updated it.\n"
-                                "- You MUST include a short section titled 'Writes ledger (authoritative)' that reflects the tool writes ledger without contradiction.\n"
+                                "- Treat diagnostic ledger content as supplementary evidence, not the main answer.\n"
+                                "- If the tool results summary includes an authoritative write-activity section, preserve it without contradiction, but do not make it the whole response unless the user asked for diagnostics.\n"
                                 + (
                                     "- The model response contains internal execution diagnostics. Rewrite them into user-facing screen content. "
                                     "Do not copy raw labels like 'Execution status', 'Blocking effect IDs', 'Unresolved preconditions', "
@@ -8739,6 +8741,22 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     )
                     if screen_candidate:
                         screen_backfill_source = "tool_summary"
+                        auxiliary_llm_calls.append(
+                            annotate_python_decision_event(
+                                {
+                                    "type": "presenter_screen_backfill",
+                                    "stage": "screen_backfill",
+                                    "source": "tool_summary",
+                                },
+                                stage="screen_backfill",
+                                component="presenter_routes",
+                                function="_build_presenter_screen_summary_from_tool_messages",
+                                decision_class="presenter_fallback",
+                                decision_source="response_semantic_inference",
+                                changed_outcome=True,
+                                reason_code="tool_activity_summary_fallback",
+                            )
+                        )
 
                 if screen_candidate:
                     if screen_fence_compat_enabled:

@@ -79,7 +79,7 @@ def app(monkeypatch):
     )
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.get_active_model_name",
-        lambda: "test-model",
+        lambda *args, **kwargs: "test-model",
     )
 
     flask_app = Flask(__name__)
@@ -269,7 +269,7 @@ def test_prompt_introspection_fastpath_disabled_by_default_does_not_trigger(
     )
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.get_active_model_name",
-        lambda: "test-model",
+        lambda *args, **kwargs: "test-model",
     )
 
     class _FailingGateway:

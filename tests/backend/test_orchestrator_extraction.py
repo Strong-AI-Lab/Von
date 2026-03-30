@@ -12,6 +12,7 @@ from src.backend.integrations.internal_mcp.orchestrator import (
     ToolCallParsingError,
     _MissingToolCallDetectorSpec,
 )
+from orchestrator_test_harness import build_db_independent_orchestrator
 
 
 class _DummyGateway:
@@ -90,6 +91,49 @@ class _RecorderLLM:
         if not self.responses:
             raise RuntimeError("No responses left in _RecorderLLM")
         return self.responses.pop(0)
+
+
+def _make_tool_pipeline_orchestrator(monkeypatch, gateway, **kwargs):
+    """Disable workflow selection so tests exercise tool-pipeline mechanics directly."""
+
+    orchestrator = build_db_independent_orchestrator(
+        monkeypatch,
+        gateway=gateway,
+        selector_enabled=False,
+        max_tool_invocations=int(kwargs.pop("max_tool_invocations", 1)),
+        tool_batch_cap=int(kwargs.pop("tool_batch_cap", 3)),
+    )
+    return orchestrator
+
+
+def _make_workflow_action_request(
+    orchestrator: InternalMCPChatOrchestrator,
+    *,
+    llm_client,
+    data: Mapping[str, Any],
+    action_id: str,
+    model: str = "primary-model",
+    user_namespace: str = "#V#user",
+):
+    class _Env:
+        def __init__(self):
+            self.llm_client = llm_client
+            self.model = model
+            self.user_namespace = user_namespace
+            self.auxiliary_system_prompt = None
+            self.max_tool_invocations = orchestrator._max_tool_invocations
+            self.max_tool_result_chars = orchestrator._max_tool_result_chars
+            self.max_tool_result_field_chars = orchestrator._max_tool_result_field_chars
+            self.default_gmail_profile = None
+
+    class _Request:
+        def __init__(self):
+            self.action_id = action_id
+            self.data = dict(data)
+            self.environment = _Env()
+            self.trace = None
+
+    return _Request()
 
 
 def test_apply_vontology_template_search_concepts_empty_query_uses_filter_context():
@@ -740,21 +784,9 @@ def test_llm_detector_uses_fallback_model_when_missing():
     assert aux_log[0]["path"] == "legacy"
 
 
-def test_run_retries_when_llm_detector_flags_missing_tool_call():
-    gateway = _DummyGateway()
-    llm = _RecorderLLM(
-        [
-            "I will search the ontology now",  # initial response (no tool call)
-            "YES",  # classifier verdict
-            '{"action": "call_tool", "tool": "test", "payload": {}}',  # retry emits tool call
-            "Final response",  # follow-up after tool invocation
-        ]
-    )
-
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=gateway,  # type: ignore[arg-type]
-        max_tool_invocations=1,
-    )
+def test_missing_tool_call_assess_requests_retry_when_classifier_flags_missing_tool_call():
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    llm = _RecorderLLM(["YES"])
     orchestrator._missing_tool_call_detector_loaded = True
     orchestrator._missing_tool_call_detector = _MissingToolCallDetectorSpec(
         action_id="#V#detect_missing_tool_call_action",
@@ -762,55 +794,35 @@ def test_run_retries_when_llm_detector_flags_missing_tool_call():
         prompt_text="Answer YES or NO for: {response}",
         model="detector-model",
     )
-
-    result = orchestrator.run(
-        prompt="hello",
-        context=None,
+    response_text = "I will search the ontology now"
+    request = _make_workflow_action_request(
+        orchestrator,
         llm_client=llm,
-        model="primary-model",
-        user_namespace="#V#user",
+        action_id="missing_tool_call.assess",
+        data={
+            "response_text": response_text,
+            "interpretation": orchestrator._interpret_model_turn(response_text),
+            "use_structured": False,
+            "missing_tool_assessor": orchestrator._assess_missing_tool_call,
+            "classifier_model": "detector-model",
+            "aux_llm_calls": [],
+            "tool_call_parse_error": None,
+            "missing_tool_call_retry_attempts": 0,
+            "missing_tool_call_retry_budget": 1,
+        },
     )
+    result = orchestrator._action_missing_tool_call_assess(request)
 
-    # Should have attempted a tool after classifier said YES
-    assert gateway.calls
-    method_name, payload = gateway.calls[0]
-    assert method_name == "test"
-    assert payload.get("namespace") == "#V#user"
-    assert result.tool_invocations
-    assert result.response_text == "Final response"
-    assert result.aux_llm_calls
-
-    aux_by_type = {}
-    for entry in result.aux_llm_calls:
-        if isinstance(entry, dict) and isinstance(entry.get("type"), str):
-            aux_by_type.setdefault(entry["type"], []).append(entry)
-
-    assert aux_by_type["missing_tool_call_detection"][0]["path"] == "legacy"
-    assert aux_by_type["missing_tool_call_classifier"][0]["path"] == "legacy"
-    for retry_entry in aux_by_type["missing_tool_call_retry"]:
-        assert retry_entry["path"] == "legacy"
+    assert result.outputs["result"] is True
+    assert result.outputs["missing_tool_call_retry_reason"]
+    aux_types = [entry.get("type") for entry in result.outputs["aux_llm_calls"]]
+    assert "missing_tool_call_detection" in aux_types
+    assert "missing_tool_call_classifier" in aux_types
 
 
-def test_run_retries_when_classifier_misses_but_heuristic_triggers():
-    gateway = _DummyGateway()
-    llm = _RecorderLLM(
-        [
-            # Initial response: promises tool-backed actions, includes a strong heuristic trigger.
-            (
-                "I’ll do one thing only in this turn: create the concept and then verify it.\n\n"
-                "Proceeding now.\n\n"
-                "Next message will contain the tool output."  # No tool JSON payload
-            ),
-            "NO",  # classifier verdict (incorrect)
-            '{"action": "call_tool", "tool": "test", "payload": {}}',  # retry emits tool call
-            "Final response",  # follow-up after tool invocation
-        ]
-    )
-
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=gateway,  # type: ignore[arg-type]
-        max_tool_invocations=1,
-    )
+def test_missing_tool_call_assess_uses_heuristic_when_classifier_misses():
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    llm = _RecorderLLM(["NO"])
     orchestrator._missing_tool_call_detector_loaded = True
     orchestrator._missing_tool_call_detector = _MissingToolCallDetectorSpec(
         action_id="#V#detect_missing_tool_call_action",
@@ -818,68 +830,46 @@ def test_run_retries_when_classifier_misses_but_heuristic_triggers():
         prompt_text="Answer YES or NO for: {response}",
         model="detector-model",
     )
-
-    result = orchestrator.run(
-        prompt="hello",
-        context=None,
+    response_text = (
+        "I’ll do one thing only in this turn: create the concept and then verify it.\n\n"
+        "Proceeding now.\n\n"
+        "Next message will contain the tool output."
+    )
+    request = _make_workflow_action_request(
+        orchestrator,
         llm_client=llm,
-        model="primary-model",
-        user_namespace="#V#user",
+        action_id="missing_tool_call.assess",
+        data={
+            "response_text": response_text,
+            "interpretation": orchestrator._interpret_model_turn(response_text),
+            "use_structured": False,
+            "missing_tool_assessor": orchestrator._assess_missing_tool_call,
+            "classifier_model": "detector-model",
+            "aux_llm_calls": [],
+            "tool_call_parse_error": None,
+            "missing_tool_call_retry_attempts": 0,
+            "missing_tool_call_retry_budget": 1,
+        },
     )
+    result = orchestrator._action_missing_tool_call_assess(request)
 
-    assert gateway.calls
-    method_name, payload = gateway.calls[0]
-    assert method_name == "test"
-    assert payload.get("namespace") == "#V#user"
-    assert result.tool_invocations
-    assert result.response_text == "Final response"
-    assert result.aux_llm_calls
-
-
-def test_run_backfill_autoproceeds_on_minimal_imposition_signal():
-    gateway = _DummyGateway()
-    llm = _RecorderLLM(
-        [
-            # Initial plan response: first tool call executes.
-            '{"action":"call_tool","tool":"test","payload":{"step":1}}',
-            # Backfill response: claims it is continuing now but emits no tool JSON.
-            "I will now continue wiring the remaining workflow links. Proceeding now.",
-            # Recovery response for missing-tool-call workflow.
-            '{"action":"call_tool","tool":"test","payload":{"step":2}}',
-            # Final follow-up after second tool execution.
-            "Workflow wiring complete.",
-        ]
-    )
-
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=gateway,  # type: ignore[arg-type]
-        max_tool_invocations=2,
-    )
-
-    result = orchestrator.run(
-        prompt="wire the workflow end-to-end",
-        context=None,
-        llm_client=llm,
-        model="primary-model",
-        user_namespace="#V#user",
-    )
-
-    assert any(name == "test" for name, _payload in gateway.calls)
-
-    aux_types = [
-        entry.get("type")
-        for entry in result.aux_llm_calls
-        if isinstance(entry, dict)
-    ]
-    assert "auto_proceed_minimal_imposition" in aux_types
-    gate_entries = [
+    assert result.outputs["result"] is True
+    assert result.outputs["missing_tool_call_retry_reason"]
+    detection_entry = next(
         entry
-        for entry in result.aux_llm_calls
-        if isinstance(entry, dict)
-        and entry.get("type") == "auto_proceed_minimal_imposition"
-    ]
-    assert gate_entries
-    assert gate_entries[-1].get("should_auto_proceed") is True
+        for entry in result.outputs["aux_llm_calls"]
+        if entry.get("type") == "missing_tool_call_detection"
+    )
+    assert detection_entry["classifier_verdict"] == "no"
+
+
+def test_minimal_imposition_assessment_autoproceeds_on_progress_promise_signal():
+    assessment = InternalMCPChatOrchestrator._assess_minimal_imposition_auto_proceed(
+        "I will now continue wiring the remaining workflow links. Proceeding now."
+    )
+
+    assert assessment.get("should_auto_proceed") is True
+    assert assessment.get("reason") == "minimal_imposition_pass"
 
 
 def test_minimal_imposition_assessment_autoproceeds_low_risk_confirmation():
@@ -907,178 +897,64 @@ def test_minimal_imposition_assessment_blocks_high_risk_confirmation():
     }
 
 
-def test_run_backfill_autoproceeds_for_low_risk_confirmation_request():
-    gateway = _DummyGateway()
-    llm = _RecorderLLM(
-        [
-            '{"action":"call_tool","tool":"test","payload":{"step":1}}',
-            "Could you confirm the structure before I continue?",
-            '{"action":"call_tool","tool":"test","payload":{"step":2}}',
-            "Workflow wiring complete.",
-        ]
+def test_minimal_imposition_assessment_for_low_risk_confirmation_request():
+    assessment = InternalMCPChatOrchestrator._assess_minimal_imposition_auto_proceed(
+        "Could you confirm the structure before I continue?"
     )
 
+    assert assessment.get("should_auto_proceed") is True
+    assert assessment.get("low_risk_confirmation_request") is True
+
+
+def test_missing_tool_retry_forces_explicitly_requested_workflow_tools():
+    prompt = (
+        "1) Call workflow_list_definitions.\n"
+        "2) Call workflow_list_instances for #V#salient_predicate_governance_workflow."
+    )
     orchestrator = InternalMCPChatOrchestrator(
-        gateway=gateway,  # type: ignore[arg-type]
-        max_tool_invocations=2,
+        gateway=_ExplicitPromptToolGateway()  # type: ignore[arg-type]
     )
-
-    result = orchestrator.run(
-        prompt="wire the workflow end-to-end",
-        context=None,
-        llm_client=llm,
-        model="primary-model",
-        user_namespace="#V#user",
-    )
-
-    assert any(name == "test" for name, _payload in gateway.calls)
-
-    gate_entries = [
-        entry
-        for entry in result.aux_llm_calls
-        if isinstance(entry, dict)
-        and entry.get("type") == "auto_proceed_minimal_imposition"
-    ]
-    assert gate_entries
-    assert gate_entries[-1].get("should_auto_proceed") is True
-    assert gate_entries[-1].get("low_risk_confirmation_request") is True
-
-
-def test_run_backfill_does_not_autoproceed_when_setting_disabled(monkeypatch):
-    gateway = _DummyGateway()
-    llm = _RecorderLLM(
-        [
-            '{"action":"call_tool","tool":"test","payload":{"step":1}}',
-            "I will now continue wiring the remaining workflow links. Proceeding now.",
-        ]
-    )
-
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=gateway,  # type: ignore[arg-type]
-        max_tool_invocations=2,
-    )
-    monkeypatch.setattr(
+    request = _make_workflow_action_request(
         orchestrator,
-        "_get_auto_proceed_minimal_imposition_enabled",
-        lambda: False,
-    )
-
-    result = orchestrator.run(
-        prompt="wire the workflow end-to-end",
-        context=None,
-        llm_client=llm,
-        model="primary-model",
-        user_namespace="#V#user",
-    )
-
-    assert sum(1 for name, _payload in gateway.calls if name == "test") == 1
-    assert "Proceeding now." in result.response_text
-
-    gate_entries = [
-        entry
-        for entry in result.aux_llm_calls
-        if isinstance(entry, dict)
-        and entry.get("type") == "auto_proceed_minimal_imposition"
-    ]
-    assert gate_entries
-    assert gate_entries[-1].get("enabled") is False
-    assert gate_entries[-1].get("should_auto_proceed") is True
-
-
-def test_run_backfill_recovers_when_prompt_explicitly_requests_missing_tool():
-    gateway = _ExplicitPromptToolGateway()
-    llm = _RecorderLLM(
-        [
-            '{"action":"call_tool","tool":"workflow_list_definitions","payload":{}}',
-            "Definitions fetched.",
-            (
-                '{"action":"call_tool","tool":"workflow_list_instances",'
-                '"payload":{"workflow_id":"#V#salient_predicate_governance_workflow"}}'
+        llm_client=_RecorderLLM(["Proceeding now."]),
+        action_id="missing_tool_call.retry",
+        data={
+            "response_text": "Proceeding now.",
+            "user_prompt": prompt,
+            "augmented_context": [],
+            "missing_tool_call_assessment": {"path": "legacy"},
+            "missing_tool_call_retry_reason": (
+                "prompt requested tool(s) not yet invoked: "
+                "workflow_list_definitions, workflow_list_instances"
             ),
-            "Both requested checks are complete.",
-        ]
+            "missing_tool_call_retry_attempts": 0,
+            "missing_tool_call_retry_budget": 2,
+            "missing_prompt_tools": [
+                "workflow_list_definitions",
+                "workflow_list_instances",
+            ],
+            "missing_prompt_fetch_concept_ids": [],
+            "missing_prompt_read_file_copy_ids": [],
+            "missing_prompt_scholarly_representation_for_file_copy_ids": [],
+            "required_prompt_create_type_name": None,
+            "required_url_extraction_url": None,
+            "extract_tool_calls_fn": orchestrator._extract_tool_calls,
+            "aux_llm_calls": [],
+        },
     )
 
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=gateway,  # type: ignore[arg-type]
-        max_tool_invocations=2,
-    )
+    result = orchestrator._action_missing_tool_call_retry(request)
+    tool_calls = result.outputs["tool_calls"]
 
-    result = orchestrator.run(
-        prompt=(
-            "Re-inspect runtime.\n"
-            "1) Call workflow_list_definitions.\n"
-            "2) Call workflow_list_instances."
-        ),
-        context=None,
-        llm_client=llm,
-        model="primary-model",
-        user_namespace="#V#user",
-    )
-
-    assert len(gateway.calls) == 2
-    assert gateway.calls[0][0] == "workflow_list_definitions"
-    assert gateway.calls[1][0] == "workflow_list_instances"
-    assert result.response_text == "Both requested checks are complete."
-
-    detection_entries = [
-        entry
-        for entry in result.aux_llm_calls
-        if isinstance(entry, dict)
-        and entry.get("type") == "missing_tool_call_detection"
+    assert [call["tool"] for call in tool_calls] == [
+        "workflow_list_definitions",
+        "workflow_list_instances",
     ]
-    assert detection_entries
-    assert (
-        detection_entries[-1].get("retry_reason")
-        == "prompt requested tool(s) not yet invoked: workflow_list_instances"
-    )
+    assert tool_calls[1]["payload"]["workflow_id"] == "#V#salient_predicate_governance_workflow"
+    assert result.outputs["missing_tool_call_retry_success"] is True
 
 
-def test_run_forces_required_tool_calls_when_retry_response_has_no_tool_json():
-    gateway = _ExplicitPromptToolGateway()
-    llm = _RecorderLLM(
-        [
-            "Proceeding now.",
-            "Final response after deterministic required-tool forcing.",
-        ]
-    )
-
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=gateway,  # type: ignore[arg-type]
-        max_tool_invocations=2,
-    )
-
-    result = orchestrator.run(
-        prompt=(
-            "1) Call workflow_list_definitions.\n"
-            "2) Call workflow_list_instances for #V#salient_predicate_governance_workflow."
-        ),
-        context=None,
-        llm_client=llm,
-        model="primary-model",
-        user_namespace="#V#user",
-    )
-
-    assert len(gateway.calls) == 2
-    assert gateway.calls[0][0] == "workflow_list_definitions"
-    assert gateway.calls[1][0] == "workflow_list_instances"
-    assert (
-        gateway.calls[1][1].get("workflow_id")
-        == "#V#salient_predicate_governance_workflow"
-    )
-
-    retry_entries = [
-        entry
-        for entry in result.aux_llm_calls
-        if isinstance(entry, dict)
-        and entry.get("type") == "missing_tool_call_retry"
-        and entry.get("stage") == "response"
-    ]
-    assert retry_entries
-    assert retry_entries[0].get("mechanism") == "required_tools"
-
-
-def test_derive_prompt_tool_requirements_adds_checklist_create_and_fetch_tools():
+def test_derive_prompt_tool_requirements_keeps_only_explicit_tools_from_checklist():
     orchestrator = InternalMCPChatOrchestrator(
         gateway=_ChecklistPromptToolGateway()  # type: ignore[arg-type]
     )
@@ -1100,19 +976,13 @@ def test_derive_prompt_tool_requirements_adds_checklist_create_and_fetch_tools()
     required_tools = requirements.get("required_tools") or []
     assert "workflow_list_definitions" in required_tools
     assert "workflow_list_instances" in required_tools
-    assert "create_concepts" in required_tools
-    assert "fetch_concept" in required_tools
-    assert requirements.get("required_create_type_name") == (
-        "test_workflow_trigger_type_for_identify_step_fix_1"
-    )
-    assert requirements.get("required_fetch_concept_ids") == [
-        "#V#workflow_mapping_target_type_id_to_concept_id_param",
-        "#V#workflow_mapping_tool_field_concept_id_to_validated_type_id",
-        "#V#workflow_mapping_tool_field_name_to_validated_type_name",
-    ]
+    assert "create_concepts" not in required_tools
+    assert "fetch_concept" not in required_tools
+    assert requirements.get("required_create_type_name") is None
+    assert requirements.get("required_fetch_concept_ids") == []
 
 
-def test_derive_prompt_tool_requirements_adds_url_extraction_tool_for_current_prompt():
+def test_derive_prompt_tool_requirements_does_not_infer_url_extraction_from_prompt_text():
     orchestrator = InternalMCPChatOrchestrator(
         gateway=_DummyGateway()  # type: ignore[arg-type]
     )
@@ -1125,7 +995,10 @@ def test_derive_prompt_tool_requirements_adds_url_extraction_tool_for_current_pr
     )
 
     required_tools = requirements.get("required_tools") or []
-    assert "resilient_extract_url" in required_tools
+    assert "resilient_extract_url" not in required_tools
+    assert "extract_url" not in required_tools
+    assert requirements.get("required_url_extraction_tool") is None
+    assert requirements.get("required_url_extraction_url") is None
 
 
 def test_derive_prompt_tool_requirements_ignores_incidental_urls_without_read_intent():
@@ -1221,13 +1094,11 @@ def test_derive_prompt_tool_requirements_detects_concept_verification_intent():
         method_catalogue=orchestrator._gateway.describe_methods(),
     )
 
-    assert "fetch_concept" in (requirements.get("required_tools") or [])
-    assert requirements.get("required_fetch_concept_ids") == [
-        "#V#workflow_mapping_target_type_id_to_concept_id_param"
-    ]
+    assert "fetch_concept" not in (requirements.get("required_tools") or [])
+    assert requirements.get("required_fetch_concept_ids") == []
 
 
-def test_derive_prompt_tool_requirements_uses_context_for_corresponding_paper_intent():
+def test_derive_prompt_tool_requirements_does_not_infer_paper_representation_from_context():
     orchestrator = InternalMCPChatOrchestrator(
         gateway=_ScholarlyPromptToolGateway()  # type: ignore[arg-type]
     )
@@ -1247,13 +1118,11 @@ def test_derive_prompt_tool_requirements_uses_context_for_corresponding_paper_in
     )
 
     required_tools = requirements.get("required_tools") or []
-    assert "interpret_file_copy" in required_tools
-    assert requirements.get("required_scholarly_representation_for_file_copy_ids") == [
-        "#V#uploaded_file_copy_76c1c13fed0140f496133d008b4cfad7"
-    ]
+    assert "interpret_file_copy" not in required_tools
+    assert requirements.get("required_scholarly_representation_for_file_copy_ids") == []
 
 
-def test_run_forces_read_file_copy_when_prompt_references_file_copy_concept():
+def test_run_does_not_force_read_file_copy_from_prompt_semantics(monkeypatch):
     gateway = _FileCopyPromptToolGateway()
     llm = _RecorderLLM(
         [
@@ -1261,8 +1130,9 @@ def test_run_forces_read_file_copy_when_prompt_references_file_copy_concept():
             "File copy inspected.",
         ]
     )
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=gateway,  # type: ignore[arg-type]
+    orchestrator = _make_tool_pipeline_orchestrator(
+        monkeypatch,
+        gateway,
         max_tool_invocations=2,
     )
 
@@ -1277,13 +1147,13 @@ def test_run_forces_read_file_copy_when_prompt_references_file_copy_concept():
     )
 
     called_tools = [tool for tool, _ in gateway.calls]
-    assert called_tools.count("read_file_copy") == 1
-    read_payload = next(payload for tool, payload in gateway.calls if tool == "read_file_copy")
-    assert read_payload.get("concept_id") == "#V#computer_file_copy_case_1"
-    assert result.response_text == "File copy inspected."
+    assert called_tools.count("read_file_copy") == 0
+    assert all(tool != "read_file_copy" for tool, _ in result.tool_invocations)
 
 
-def test_run_forces_interpret_file_copy_for_corresponding_paper_follow_up():
+def test_run_does_not_force_interpret_file_copy_from_paper_representation_language(
+    monkeypatch,
+):
     gateway = _ScholarlyPromptToolGateway()
     llm = _RecorderLLM(
         [
@@ -1291,8 +1161,9 @@ def test_run_forces_interpret_file_copy_for_corresponding_paper_follow_up():
             "Paper representation complete.",
         ]
     )
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=gateway,  # type: ignore[arg-type]
+    orchestrator = _make_tool_pipeline_orchestrator(
+        monkeypatch,
+        gateway,
         max_tool_invocations=2,
     )
 
@@ -1313,84 +1184,61 @@ def test_run_forces_interpret_file_copy_for_corresponding_paper_follow_up():
     )
 
     called_tools = [tool for tool, _ in gateway.calls]
-    assert called_tools.count("interpret_file_copy") == 1
-    interpret_payload = next(
-        payload for tool, payload in gateway.calls if tool == "interpret_file_copy"
+    assert called_tools.count("interpret_file_copy") == 0
+    assert all(tool != "interpret_file_copy" for tool, _ in result.tool_invocations)
+
+
+def test_missing_tool_retry_forces_only_explicit_checklist_tools():
+    prompt = (
+        "1) Call workflow_list_definitions.\n"
+        "2) Create a fresh test type under #V#event (e.g. #V#test_workflow_trigger_type_for_identify_step_fix_1).\n"
+        "3) Call workflow_list_instances for #V#salient_predicate_governance_workflow.\n"
+        "4) Verify migration by checking these concepts:\n"
+        "- #V#workflow_mapping_target_type_id_to_concept_id_param\n"
+        "- #V#workflow_mapping_tool_field_concept_id_to_validated_type_id\n"
+        "- #V#workflow_mapping_tool_field_name_to_validated_type_name\n"
     )
-    assert interpret_payload.get("concept_id") == "#V#uploaded_file_copy_76c1c13fed0140f496133d008b4cfad7"
-    assert result.response_text == "Paper representation complete."
-
-
-def test_run_forces_checklist_tools_when_retry_response_has_no_tool_json():
-    gateway = _ChecklistPromptToolGateway()
-    llm = _RecorderLLM(
-        [
-            "I will do that now.",
-            "Checklist complete.",
-        ]
-    )
-
     orchestrator = InternalMCPChatOrchestrator(
-        gateway=gateway,  # type: ignore[arg-type]
-        max_tool_invocations=8,
-        tool_batch_cap=8,
+        gateway=_ChecklistPromptToolGateway()  # type: ignore[arg-type]
     )
-
-    result = orchestrator.run(
-        prompt=(
-            "1) Call workflow_list_definitions.\n"
-            "2) Create a fresh test type under #V#event (e.g. #V#test_workflow_trigger_type_for_identify_step_fix_1).\n"
-            "3) Call workflow_list_instances for #V#salient_predicate_governance_workflow.\n"
-            "4) Verify migration by checking these concepts:\n"
-            "- #V#workflow_mapping_target_type_id_to_concept_id_param\n"
-            "- #V#workflow_mapping_tool_field_concept_id_to_validated_type_id\n"
-            "- #V#workflow_mapping_tool_field_name_to_validated_type_name\n"
-        ),
-        context=None,
-        llm_client=llm,
-        model="primary-model",
-        user_namespace="#V#user",
+    request = _make_workflow_action_request(
+        orchestrator,
+        llm_client=_RecorderLLM(["I will do that now."]),
+        action_id="missing_tool_call.retry",
+        data={
+            "response_text": "I will do that now.",
+            "user_prompt": prompt,
+            "augmented_context": [],
+            "missing_tool_call_assessment": {"path": "legacy"},
+            "missing_tool_call_retry_reason": (
+                "prompt requested tool(s) not yet invoked: "
+                "workflow_list_definitions, workflow_list_instances"
+            ),
+            "missing_tool_call_retry_attempts": 0,
+            "missing_tool_call_retry_budget": 2,
+            "missing_prompt_tools": [
+                "workflow_list_definitions",
+                "workflow_list_instances",
+            ],
+            "missing_prompt_fetch_concept_ids": [],
+            "missing_prompt_read_file_copy_ids": [],
+            "missing_prompt_scholarly_representation_for_file_copy_ids": [],
+            "required_prompt_create_type_name": None,
+            "required_url_extraction_url": None,
+            "extract_tool_calls_fn": orchestrator._extract_tool_calls,
+            "aux_llm_calls": [],
+        },
     )
+    result = orchestrator._action_missing_tool_call_retry(request)
+    tool_calls = result.outputs["tool_calls"]
 
-    called_tools = [tool for tool, _ in gateway.calls]
-    assert called_tools.count("workflow_list_definitions") == 1
-    assert called_tools.count("workflow_list_instances") == 1
-    assert called_tools.count("create_concepts") == 1
-    assert called_tools.count("fetch_concept") == 3
-
-    create_payload = next(
-        payload for tool, payload in gateway.calls if tool == "create_concepts"
-    )
-    assert create_payload.get("parent_id") == "#V#event"
-    concepts = create_payload.get("concepts")
-    assert isinstance(concepts, list) and concepts
-    assert concepts[0].get("name") == "test_workflow_trigger_type_for_identify_step_fix_1"
-    assert concepts[0].get("kind") == "type"
-
-    fetch_concept_ids = {
-        payload.get("concept_id")
-        for tool, payload in gateway.calls
-        if tool == "fetch_concept"
-    }
-    assert fetch_concept_ids == {
-        "#V#workflow_mapping_target_type_id_to_concept_id_param",
-        "#V#workflow_mapping_tool_field_concept_id_to_validated_type_id",
-        "#V#workflow_mapping_tool_field_name_to_validated_type_name",
-    }
-
-    retry_entries = [
-        entry
-        for entry in result.aux_llm_calls
-        if isinstance(entry, dict)
-        and entry.get("type") == "missing_tool_call_retry"
-        and entry.get("stage") == "response"
+    assert [call["tool"] for call in tool_calls] == [
+        "workflow_list_definitions",
+        "workflow_list_instances",
     ]
-    assert retry_entries
-    assert retry_entries[0].get("mechanism") == "required_tools"
-    assert result.response_text == "Checklist complete."
 
 
-def test_run_retries_when_response_uses_smart_quotes_promising_tool_use():
+def test_missing_tool_call_assess_handles_smart_quotes_in_tool_promises():
     """Regression test: smart quotes should not bypass missing-tool-call detection.
 
     Some models emit curly apostrophes (e.g., "I’m") which previously bypassed
@@ -1400,119 +1248,112 @@ def test_run_retries_when_response_uses_smart_quotes_promising_tool_use():
     deterministically (without consuming an extra LLM turn for classification).
     """
 
-    gateway = _DummyGateway()
-    llm = _RecorderLLM(
-        [
-            # Initial response: promises a tool-backed action, but emits no tool JSON.
-            "I’m going to search the knowledge base now.",
-            '{"action": "call_tool", "tool": "test", "payload": {}}',
-            "Final response",
-        ]
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    llm = _RecorderLLM(["YES"])
+    orchestrator._missing_tool_call_detector_loaded = True
+    orchestrator._missing_tool_call_detector = _MissingToolCallDetectorSpec(
+        action_id="#V#detect_missing_tool_call_action",
+        prompt_id="#V#missing_tool_call_detection_prompt",
+        prompt_text="Answer YES or NO for: {response}",
+        model="detector-model",
     )
-
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=gateway,  # type: ignore[arg-type]
-        max_tool_invocations=1,
-    )
-
-    result = orchestrator.run(
-        prompt="hello",
-        context=None,
+    response_text = "I’m going to search the knowledge base now."
+    request = _make_workflow_action_request(
+        orchestrator,
         llm_client=llm,
-        model="primary-model",
-        user_namespace="#V#user",
+        action_id="missing_tool_call.assess",
+        data={
+            "response_text": response_text,
+            "interpretation": orchestrator._interpret_model_turn(response_text),
+            "use_structured": False,
+            "missing_tool_assessor": orchestrator._assess_missing_tool_call,
+            "classifier_model": "detector-model",
+            "aux_llm_calls": [],
+            "tool_call_parse_error": None,
+            "missing_tool_call_retry_attempts": 0,
+            "missing_tool_call_retry_budget": 1,
+        },
     )
+    result = orchestrator._action_missing_tool_call_assess(request)
 
-    assert gateway.calls
-    assert result.tool_invocations
-    assert result.response_text == "Final response"
-    aux_types = [entry.get("type") for entry in result.aux_llm_calls]
-    assert "missing_tool_call_detection" in aux_types
-    assert "missing_tool_call_retry" in aux_types
+    assert result.outputs["result"] is True
+    assert result.outputs["missing_tool_call_retry_reason"]
 
 
-def test_run_recovers_from_invalid_tool_call_json_with_retry():
+def test_missing_tool_retry_recovers_from_invalid_tool_call_json():
     """Regression test: invalid JSON tool-call output should trigger a retry.
 
     Previously, ToolCallParsingError would bubble out of orchestrator.run(),
     short-circuiting the missing-tool-call recovery path.
     """
 
-    gateway = _DummyGateway()
-    llm = _RecorderLLM(
-        [
-            # Initial response: clearly a tool call but malformed JSON.
-            '{"action":"call_tool","tool":"test","payload":{"x":"oops}',
-            # Retry response: valid tool call.
-            '{"action":"call_tool","tool":"test","payload":{}}',
-            # Follow-up after tool invocation.
-            "Final response",
-        ]
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    request = _make_workflow_action_request(
+        orchestrator,
+        llm_client=_RecorderLLM(['{"action":"call_tool","tool":"test","payload":{}}']),
+        action_id="missing_tool_call.retry",
+        data={
+            "response_text": '{"action":"call_tool","tool":"test","payload":{"x":"oops}',
+            "user_prompt": "hello",
+            "augmented_context": [],
+            "missing_tool_call_assessment": {"path": "legacy"},
+            "missing_tool_call_retry_reason": "tool call parse error",
+            "missing_tool_call_retry_attempts": 0,
+            "missing_tool_call_retry_budget": 1,
+            "missing_prompt_tools": [],
+            "missing_prompt_fetch_concept_ids": [],
+            "missing_prompt_read_file_copy_ids": [],
+            "missing_prompt_scholarly_representation_for_file_copy_ids": [],
+            "required_prompt_create_type_name": None,
+            "required_url_extraction_url": None,
+            "extract_tool_calls_fn": orchestrator._extract_tool_calls,
+            "tool_call_parse_error": ToolCallParsingError("bad json"),
+            "aux_llm_calls": [],
+        },
     )
+    result = orchestrator._action_missing_tool_call_retry(request)
 
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=gateway,  # type: ignore[arg-type]
-        max_tool_invocations=1,
-    )
-
-    result = orchestrator.run(
-        prompt="hello",
-        context=None,
-        llm_client=llm,
-        model="primary-model",
-        user_namespace="#V#user",
-    )
-
-    assert gateway.calls
-    assert result.tool_invocations
-    assert result.response_text == "Final response"
-
-    # Ensure we recorded the detection path and the retry attempt.
-    aux_types = [entry.get("type") for entry in result.aux_llm_calls]
-    assert "missing_tool_call_detection" in aux_types
-    assert "missing_tool_call_retry" in aux_types
+    assert result.outputs["missing_tool_call_retry_success"] is True
+    assert result.outputs["tool_calls"] == [
+        {"action": "call_tool", "tool": "test", "payload": {}}
+    ]
 
 
-def test_run_recovers_from_late_turn_invalid_tool_call_json_with_retry():
+def test_missing_tool_retry_recovers_from_late_turn_invalid_tool_call_json():
     """Regression test (JVNAUTOSCI-842): late-turn parse errors should not crash.
 
     Scenario: after executing a tool, the follow-up response attempts another tool
     call but emits malformed JSON. The orchestrator should retry once and continue.
     """
 
-    gateway = _DummyGateway()
-    llm = _RecorderLLM(
-        [
-            # Initial response: tool call.
-            '{"action":"call_tool","tool":"test","payload":{}}',
-            # Follow-up after tool invocation: malformed JSON tool call.
-            '{"action":"call_tool","tool":"test","payload":{"x":"oops}',
-            # Retry response: valid tool call.
-            '{"action":"call_tool","tool":"test","payload":{}}',
-            # Follow-up after second tool invocation.
-            "Final response",
-        ]
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    request = _make_workflow_action_request(
+        orchestrator,
+        llm_client=_RecorderLLM(['{"action":"call_tool","tool":"test","payload":{}}']),
+        action_id="missing_tool_call.retry",
+        data={
+            "response_text": '{"action":"call_tool","tool":"test","payload":{"x":"oops}',
+            "user_prompt": "hello",
+            "augmented_context": [],
+            "missing_tool_call_assessment": {"path": "legacy"},
+            "missing_tool_call_retry_reason": "tool call parse error",
+            "missing_tool_call_retry_attempts": 0,
+            "missing_tool_call_retry_budget": 1,
+            "missing_prompt_tools": [],
+            "missing_prompt_fetch_concept_ids": [],
+            "missing_prompt_read_file_copy_ids": [],
+            "missing_prompt_scholarly_representation_for_file_copy_ids": [],
+            "required_prompt_create_type_name": None,
+            "required_url_extraction_url": None,
+            "extract_tool_calls_fn": orchestrator._extract_tool_calls,
+            "tool_call_parse_error": ToolCallParsingError("bad json"),
+            "aux_llm_calls": [],
+        },
     )
+    result = orchestrator._action_missing_tool_call_retry(request)
 
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=gateway,  # type: ignore[arg-type]
-        max_tool_invocations=2,
-    )
-
-    result = orchestrator.run(
-        prompt="hello",
-        context=None,
-        llm_client=llm,
-        model="primary-model",
-        user_namespace="#V#user",
-    )
-
-    assert len(gateway.calls) == 2
-    assert result.response_text == "Final response"
-    assert all(
-        inv.get("tool") != "__tool_call_parse_error__"
-        for inv in result.tool_invocations
-    )
+    assert result.outputs["missing_tool_call_retry_success"] is True
+    assert result.outputs["tool_calls"][0]["tool"] == "test"
 
 
 # ---- Tests for widened prompt requirement detection (JVNAUTOSCI-1422) ----
@@ -1611,7 +1452,7 @@ def test_extract_explicit_prompt_tool_requirements_deduplicates():
     assert result.count("github_read_file") == 1
 
 
-def test_run_surfaces_late_turn_parse_error_when_retry_also_invalid():
+def test_missing_tool_retry_surfaces_parse_error_when_retry_also_invalid():
     """Regression test (JVNAUTOSCI-842): late-turn parse errors should surface cleanly.
 
     If both the original follow-up and the retry response are malformed, the
@@ -1619,101 +1460,69 @@ def test_run_surfaces_late_turn_parse_error_when_retry_also_invalid():
     parse-error tool invocation (while preserving earlier tool invocations).
     """
 
-    gateway = _DummyGateway()
-    llm = _RecorderLLM(
-        [
-            # Initial response: tool call.
-            '{"action":"call_tool","tool":"test","payload":{}}',
-            # Follow-up after tool invocation: malformed JSON tool call.
-            '{"action":"call_tool","tool":"test","payload":{"x":"oops}',
-            # Retry response: still malformed.
-            '{"action":"call_tool","tool":"test","payload":{"x":"oops}',
-        ]
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    request = _make_workflow_action_request(
+        orchestrator,
+        llm_client=_RecorderLLM(['{"action":"call_tool","tool":"test","payload":{"x":"oops}']),
+        action_id="missing_tool_call.retry",
+        data={
+            "response_text": '{"action":"call_tool","tool":"test","payload":{"x":"oops}',
+            "user_prompt": "hello",
+            "augmented_context": [],
+            "missing_tool_call_assessment": {"path": "legacy"},
+            "missing_tool_call_retry_reason": "tool call parse error",
+            "missing_tool_call_retry_attempts": 0,
+            "missing_tool_call_retry_budget": 1,
+            "missing_prompt_tools": [],
+            "missing_prompt_fetch_concept_ids": [],
+            "missing_prompt_read_file_copy_ids": [],
+            "missing_prompt_scholarly_representation_for_file_copy_ids": [],
+            "required_prompt_create_type_name": None,
+            "required_url_extraction_url": None,
+            "extract_tool_calls_fn": orchestrator._extract_tool_calls,
+            "tool_call_parse_error": ToolCallParsingError("bad json"),
+            "aux_llm_calls": [],
+        },
     )
+    result = orchestrator._action_missing_tool_call_retry(request)
 
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=gateway,  # type: ignore[arg-type]
-        max_tool_invocations=2,
-    )
-
-    result = orchestrator.run(
-        prompt="hello",
-        context=None,
-        llm_client=llm,
-        model="primary-model",
-        user_namespace="#V#user",
-    )
-
-    assert len(gateway.calls) == 1
-    assert (
-        "Tool call was not executed due to an MCP serialisation error"
-        in result.response_text
-    )
-    assert any(
-        inv.get("tool") == "__tool_call_parse_error__"
-        for inv in result.tool_invocations
-    )
-    assert any(inv.get("tool") == "test" for inv in result.tool_invocations)
+    assert result.outputs["missing_tool_call_retry_success"] is False
+    assert isinstance(result.outputs["tool_call_parse_error"], ToolCallParsingError)
+    assert isinstance(result.outputs["response_text"], str)
 
 
-def test_run_applies_missing_tool_retry_budget_across_plan_and_backfill():
+def test_missing_tool_retry_respects_retry_budget():
     """Retry budget is per-turn, not per-phase (plan/backfill)."""
 
-    gateway = _DummyGateway()
-    llm = _RecorderLLM(
-        [
-            # Plan response: malformed tool call -> consumes retry budget.
-            '{"action":"call_tool","tool":"test","payload":{"x":"oops}',
-            # Plan retry response: valid tool call.
-            '{"action":"call_tool","tool":"test","payload":{}}',
-            # Backfill response: malformed chained tool call.
-            '{"action":"call_tool","tool":"test","payload":{"y":"oops}',
-            # Should not be consumed when budget enforcement works.
-            '{"action":"call_tool","tool":"test","payload":{}}',
-        ]
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    request = _make_workflow_action_request(
+        orchestrator,
+        llm_client=_RecorderLLM(['{"action":"call_tool","tool":"test","payload":{}}']),
+        action_id="missing_tool_call.retry",
+        data={
+            "response_text": '{"action":"call_tool","tool":"test","payload":{"y":"oops}',
+            "user_prompt": "hello",
+            "augmented_context": [],
+            "missing_tool_call_assessment": {"path": "legacy"},
+            "missing_tool_call_retry_reason": "tool call parse error",
+            "missing_tool_call_retry_attempts": 1,
+            "missing_tool_call_retry_budget": 1,
+            "missing_prompt_tools": [],
+            "missing_prompt_fetch_concept_ids": [],
+            "missing_prompt_read_file_copy_ids": [],
+            "missing_prompt_scholarly_representation_for_file_copy_ids": [],
+            "required_prompt_create_type_name": None,
+            "required_url_extraction_url": None,
+            "extract_tool_calls_fn": orchestrator._extract_tool_calls,
+            "tool_call_parse_error": ToolCallParsingError("bad json"),
+            "aux_llm_calls": [],
+        },
     )
+    result = orchestrator._action_missing_tool_call_retry(request)
 
-    orchestrator = InternalMCPChatOrchestrator(
-        gateway=gateway,  # type: ignore[arg-type]
-        max_tool_invocations=2,
-    )
-    orchestrator.configure_execution_caps(max_missing_tool_call_retries_per_turn=1)
-
-    result = orchestrator.run(
-        prompt="hello",
-        context=None,
-        llm_client=llm,
-        model="primary-model",
-        user_namespace="#V#user",
-    )
-
-    assert len(gateway.calls) == 1
-    assert (
-        "Tool call was not executed due to an MCP serialisation error"
-        in result.response_text
-    )
-
-    retry_responses = [
-        entry
-        for entry in result.aux_llm_calls
-        if isinstance(entry, dict)
-        and entry.get("type") == "missing_tool_call_retry"
-        and entry.get("stage") == "response"
-    ]
-    assert len(retry_responses) == 1
-
-    retry_skips = [
-        entry
-        for entry in result.aux_llm_calls
-        if isinstance(entry, dict)
-        and entry.get("type") == "missing_tool_call_retry"
-        and entry.get("stage") == "skipped"
-        and entry.get("mechanism") == "budget"
-    ]
-    assert retry_skips
-
-    # The fourth scripted response remains unused when no second retry occurs.
-    assert len(llm.calls) == 3
+    assert result.outputs["missing_tool_call_retry_success"] is False
+    assert result.outputs["missing_tool_call_retry_suppressed"] is True
+    assert result.outputs["missing_tool_call_retry_stop_reason"] == "retry_budget_exhausted"
 
 
 def test_missing_tool_call_retry_stops_on_no_progress_guard_with_safe_response():

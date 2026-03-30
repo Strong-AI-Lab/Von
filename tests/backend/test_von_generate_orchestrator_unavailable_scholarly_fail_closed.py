@@ -31,7 +31,7 @@ def app(monkeypatch):
     )
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.get_active_model_name",
-        lambda: "test-model",
+        lambda *args, **kwargs: "test-model",
     )
     monkeypatch.setattr(
         "src.backend.security.access_control.get_effective_user_concept_id",
@@ -69,7 +69,9 @@ def app(monkeypatch):
     return flask_app
 
 
-def test_orchestrator_unavailable_fails_closed_for_scholarly_representation_intent(app):
+def test_orchestrator_unavailable_uses_direct_llm_fallback_for_scholarly_language_prompt(
+    app,
+):
     client = app.test_client()
     response = client.post(
         "/von/generate",
@@ -80,23 +82,25 @@ def test_orchestrator_unavailable_fails_closed_for_scholarly_representation_inte
     body = response.get_json()
     assert isinstance(body, dict)
     text = body.get("response") or ""
-    assert "failing closed" in text
+    assert text == "unexpected"
 
     llm = app.config["_test_llm"]
-    assert llm.calls == []
+    assert len(llm.calls) == 1
 
     llm_debug = body.get("llm_debug") or {}
     aux_calls = llm_debug.get("aux_llm_calls") or []
-    fail_closed_entry = next(
+    fallback_entry = next(
         (
             entry
             for entry in aux_calls
             if isinstance(entry, dict)
-            and entry.get("type") == "orchestrator_unavailable_fail_closed"
+            and entry.get("type") == "orchestrator_unavailable_fallback"
         ),
         None,
     )
-    assert fail_closed_entry is not None
-    assert fail_closed_entry.get("required_scholarly_representation_for_file_copy_ids") == [
-        "#V#uploaded_file_copy_76c1c13fed0140f496133d008b4cfad7"
-    ]
+    assert fallback_entry is not None
+    assert not any(
+        isinstance(entry, dict)
+        and entry.get("type") == "orchestrator_unavailable_fail_closed"
+        for entry in aux_calls
+    )

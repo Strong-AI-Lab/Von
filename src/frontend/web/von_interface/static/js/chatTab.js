@@ -3005,7 +3005,31 @@ function buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request) 
             || null,
         latest_error: normaliseThinkingActivityString(stageDiagnostic?.latest_error)
             || normaliseThinkingActivityString(latestStageEvent?.error)
-            || null
+            || null,
+        llm_input_recorded: stageDiagnostic?.llm_input_recorded === true,
+        llm_output_recorded: stageDiagnostic?.llm_output_recorded === true,
+        has_recorded_llm_exchange: stageDiagnostic?.has_recorded_llm_exchange === true,
+        llm_exchange_record_count: Number.isFinite(stageDiagnostic?.llm_exchange_record_count)
+            ? Number(stageDiagnostic.llm_exchange_record_count)
+            : 0,
+        missing_recorded_llm_input: stageDiagnostic?.missing_recorded_llm_input === true,
+        missing_recorded_llm_output: stageDiagnostic?.missing_recorded_llm_output === true,
+        python_decision_count: Number.isFinite(stageDiagnostic?.python_decision_count)
+            ? Number(stageDiagnostic.python_decision_count)
+            : 0,
+        possibly_inappropriate_python_code_use_count: Number.isFinite(stageDiagnostic?.possibly_inappropriate_python_code_use_count)
+            ? Number(stageDiagnostic.possibly_inappropriate_python_code_use_count)
+            : 0,
+        python_decision_classes: Array.isArray(stageDiagnostic?.python_decision_classes)
+            ? stageDiagnostic.python_decision_classes
+                .map((value) => normaliseThinkingActivityString(value))
+                .filter(Boolean)
+            : [],
+        python_decision_sources: Array.isArray(stageDiagnostic?.python_decision_sources)
+            ? stageDiagnostic.python_decision_sources
+                .map((value) => normaliseThinkingActivityString(value))
+                .filter(Boolean)
+            : []
     };
 
     if (cleanStageId === 'workflow_discovery' && workflowDiscovery) {
@@ -3079,7 +3103,11 @@ function renderThinkingWorkflowStageDiagnosticDataHTML(data, workflowDiscovery =
         { label: 'Observed updates', value: data.stage_event_count },
         { label: 'Latest status', value: data.latest_status ? formatThinkingActivityFallbackLabel(data.latest_status) : '' },
         { label: 'Latest update', value: data.latest_at_utc },
-        { label: 'Latest result', value: data.latest_result_summary }
+        { label: 'Latest result', value: data.latest_result_summary },
+        { label: 'Recorded LLM input', value: data.llm_input_recorded ? 'Yes' : 'No' },
+        { label: 'Recorded LLM output', value: data.llm_output_recorded ? 'Yes' : 'No' },
+        { label: 'Python decisions', value: data.python_decision_count },
+        { label: 'Possibly inappropriate Python decisions', value: data.possibly_inappropriate_python_code_use_count }
     ];
     const sections = [];
 
@@ -3205,7 +3233,41 @@ function renderThinkingWorkflowStageDiagnosticDataHTML(data, workflowDiscovery =
         sections.push(buildThinkingDiagnosticListHTML('Latest error', [data.latest_error]));
     }
 
+    if (Array.isArray(data.python_decision_classes) && data.python_decision_classes.length > 0) {
+        sections.push(buildThinkingDiagnosticListHTML('Python decision classes', data.python_decision_classes));
+    }
+    if (Array.isArray(data.python_decision_sources) && data.python_decision_sources.length > 0) {
+        sections.push(buildThinkingDiagnosticListHTML('Python decision sources', data.python_decision_sources));
+    }
+
     return renderThinkingDiagnosticPanelHTML({ facts, sections });
+}
+
+function buildThinkingStageAuthoritySummaryText(stageDiagnostic) {
+    if (!stageDiagnostic || typeof stageDiagnostic !== 'object') {
+        return '';
+    }
+
+    const parts = [];
+    if (stageDiagnostic.has_recorded_llm_exchange !== true) {
+        parts.push('No recorded LLM input/output');
+    }
+    if (Number.isFinite(stageDiagnostic.python_decision_count) && Number(stageDiagnostic.python_decision_count) > 0) {
+        const count = Number(stageDiagnostic.python_decision_count);
+        parts.push(count === 1 ? '1 Python decision' : `${count} Python decisions`);
+    }
+    if (
+        Number.isFinite(stageDiagnostic.possibly_inappropriate_python_code_use_count)
+        && Number(stageDiagnostic.possibly_inappropriate_python_code_use_count) > 0
+    ) {
+        const count = Number(stageDiagnostic.possibly_inappropriate_python_code_use_count);
+        parts.push(
+            count === 1
+                ? '1 possibly inappropriate Python decision'
+                : `${count} possibly inappropriate Python decisions`
+        );
+    }
+    return parts.join(' · ');
 }
 
 function buildThinkingActivityDiagnosticsHTML(entry) {
@@ -3559,7 +3621,13 @@ function buildThinkingWorkflowStageRows(request) {
             || 'Workflow step';
         const diagnosticData = buildThinkingWorkflowStageDiagnosticData(stageId, stageLabel, request);
         const detailPresentation = buildWorkflowStageDetailPresentation(stageId, request);
-        const detail = detailPresentation.text;
+        const authorityDetail = buildThinkingStageAuthoritySummaryText(diagnosticData);
+        const detail = authorityDetail
+            ? [detailPresentation.text, authorityDetail].filter(Boolean).join(' · ')
+            : detailPresentation.text;
+        const detailHtml = authorityDetail
+            ? [detailPresentation.html, escapeHtml(authorityDetail)].filter(Boolean).join(' · ')
+            : detailPresentation.html;
         let state = 'success';
 
         if (stageId === 'workflow_discovery') {
@@ -3585,7 +3653,7 @@ function buildThinkingWorkflowStageRows(request) {
             stageId,
             label: stageLabel,
             detail,
-            detailHtml: detailPresentation.html,
+            detailHtml,
             state,
             diagnosticKey: buildThinkingDiagnosticKey('stage', stageId),
             diagnosticData

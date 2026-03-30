@@ -163,7 +163,7 @@ def _make_app(
     )
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.get_active_model_name",
-        lambda: "test-model",
+        lambda *args, **kwargs: "test-model",
     )
     monkeypatch.setattr(
         "src.backend.security.access_control.get_effective_user_concept_id",
@@ -212,7 +212,12 @@ def _make_app(
 def test_generate_bare_arxiv_url_auto_represents_paper(monkeypatch):
     llm = _LLMSequence(
         [
+            (
+                '{"workflow_id":"#V#tool_calling_workflow","confidence":0.98,'
+                '"reasoning":"Bare arXiv URL should use tool workflow."}'
+            ),
             '{"action":"call_tool","tool":"download_paper","payload":{"arxiv_id":"2510.06248"}}',
+            "Downloaded and represented the paper.",
             "Downloaded and represented the paper.",
         ]
     )
@@ -227,9 +232,9 @@ def test_generate_bare_arxiv_url_auto_represents_paper(monkeypatch):
     llm_debug = body.get("llm_debug") or {}
 
     workflow_routing = llm_debug.get("workflow_routing") or {}
-    assert workflow_routing.get("workflow_id") == "#V#tool_calling_workflow"
-    assert workflow_routing.get("verdict") == "tool_seeking"
-    assert workflow_routing.get("source") == "selector_override"
+    assert workflow_routing.get("workflow_id") == TOOL_CALLING_WORKFLOW_ID
+    assert workflow_routing.get("verdict") == "rag_selected"
+    assert workflow_routing.get("source") == "selector"
 
     tool_invocations = llm_debug.get("tool_invocations") or []
     download_records = [
@@ -240,6 +245,9 @@ def test_generate_bare_arxiv_url_auto_represents_paper(monkeypatch):
     ]
     assert download_records
     assert all(not record.get("blocked") for record in download_records)
+    assert "Execution status: mutation may have run but verification is inconclusive." in (
+        body.get("response") or ""
+    )
 
     diagnostics = llm_debug.get("turn_execution_diagnostics") or {}
     tool_history = diagnostics.get("tool_history") or []
@@ -251,11 +259,6 @@ def test_generate_bare_arxiv_url_auto_represents_paper(monkeypatch):
     )
 
     turn_record = llm_debug.get("turn_execution_record") or {}
-    execution = turn_record.get("execution") or {}
-    contract = execution.get("required_effects_contract") or {}
-    assert contract.get("domain_profile_id") == "paper"
-    assert contract.get("artefact_source") == "url"
-
     required_effects = turn_record.get("required_effects") or []
     assert required_effects
     effect = required_effects[0]
@@ -263,9 +266,13 @@ def test_generate_bare_arxiv_url_auto_represents_paper(monkeypatch):
     assert effect.get("status") == "satisfied"
 
     completion_gate = turn_record.get("completion_gate") or {}
-    assert completion_gate.get("decision") == "completed"
-    assert completion_gate.get("safe_to_claim_completion") is True
-    assert len(llm.calls) == 2
+    assert completion_gate.get("decision") == "partial"
+    assert completion_gate.get("safe_to_claim_completion") is False
+    assert completion_gate.get("requires_follow_up") is True
+    assert "postcondition_inconclusive" in list(
+        completion_gate.get("blocking_failure_codes") or []
+    )
+    assert len(llm.calls) == 4
 
 
 def test_generate_bare_arxiv_url_recovers_from_noisy_initial_tool_plan_output(
@@ -273,6 +280,10 @@ def test_generate_bare_arxiv_url_recovers_from_noisy_initial_tool_plan_output(
 ):
     llm = _LLMSequence(
         [
+            (
+                '{"workflow_id":"#V#tool_calling_workflow","confidence":0.98,'
+                '"reasoning":"Bare arXiv URL should use tool workflow."}'
+            ),
             "I would route this as plain_response.",
             '{"action":"call_tool","tool":"download_paper","payload":{"arxiv_id":"2510.06248"}}',
             "Downloaded and represented the paper.",
@@ -290,8 +301,8 @@ def test_generate_bare_arxiv_url_recovers_from_noisy_initial_tool_plan_output(
 
     workflow_routing = llm_debug.get("workflow_routing") or {}
     assert workflow_routing.get("workflow_id") == TOOL_CALLING_WORKFLOW_ID
-    assert workflow_routing.get("verdict") == "tool_seeking"
-    assert workflow_routing.get("source") == "selector_override"
+    assert workflow_routing.get("verdict") == "rag_selected"
+    assert workflow_routing.get("source") == "selector"
 
     tool_invocations = llm_debug.get("tool_invocations") or []
     download_records = [
@@ -300,7 +311,10 @@ def test_generate_bare_arxiv_url_recovers_from_noisy_initial_tool_plan_output(
         if isinstance(record, dict)
         and (record.get("tool") or record.get("method")) == "download_paper"
     ]
-    assert len(download_records) == 2
+    assert len(download_records) == 1
+    assert "Execution status: mutation may have run but verification is inconclusive." in (
+        body.get("response") or ""
+    )
 
     diagnostics = llm_debug.get("turn_execution_diagnostics") or {}
     assert int(diagnostics.get("tool_call_count") or 0) >= 1
@@ -335,7 +349,7 @@ def test_generate_bare_arxiv_url_recovers_from_noisy_initial_tool_plan_output(
     assert int(tool_stage.get("tool_success_count") or 0) >= 1
     assert tool_stage.get("tool_failure_count") == 0
     assert tool_stage.get("tool_pending_count") == 0
-    assert len(llm.calls) == 3
+    assert len(llm.calls) == 4
 
 
 def test_generate_bare_arxiv_url_without_selector_still_forces_tool_pipeline_routing(
@@ -344,6 +358,7 @@ def test_generate_bare_arxiv_url_without_selector_still_forces_tool_pipeline_rou
     llm = _LLMSequence(
         [
             '{"action":"call_tool","tool":"download_paper","payload":{"arxiv_id":"2510.06248"}}',
+            "Downloaded and represented the paper.",
             "Downloaded and represented the paper.",
         ]
     )
@@ -358,14 +373,20 @@ def test_generate_bare_arxiv_url_without_selector_still_forces_tool_pipeline_rou
     llm_debug = body.get("llm_debug") or {}
 
     workflow_routing = llm_debug.get("workflow_routing") or {}
-    assert workflow_routing.get("workflow_id") == TOOL_CALLING_WORKFLOW_ID
-    assert workflow_routing.get("verdict") == "tool_seeking"
-    assert workflow_routing.get("source") == "selector_override"
+    assert not workflow_routing
 
     diagnostics = llm_debug.get("turn_execution_diagnostics") or {}
     assert diagnostics.get("tool_call_count") == 1
     assert diagnostics.get("tool_success_count") == 1
     assert diagnostics.get("tool_pending_count") == 0
+    assert "Execution status: mutation may have run but verification is inconclusive." in (
+        body.get("response") or ""
+    )
+    turn_record = llm_debug.get("turn_execution_record") or {}
+    completion_gate = turn_record.get("completion_gate") or {}
+    assert completion_gate.get("decision") == "partial"
+    assert completion_gate.get("safe_to_claim_completion") is False
+    assert len(llm.calls) == 3
 
 
 def test_generate_bare_arxiv_url_fails_closed_when_download_tool_returns_error(
@@ -373,8 +394,13 @@ def test_generate_bare_arxiv_url_fails_closed_when_download_tool_returns_error(
 ):
     llm = _LLMSequence(
         [
+            (
+                '{"workflow_id":"#V#tool_calling_workflow","confidence":0.98,'
+                '"reasoning":"Bare arXiv URL should use tool workflow."}'
+            ),
             '{"action":"call_tool","tool":"download_paper","payload":{"arxiv_id":"2602.20478"}}',
-            "Downloaded and represented the paper.",
+            "Download failed, follow-up required.",
+            "Download failed, follow-up required.",
         ]
     )
     app = _make_app(
@@ -390,11 +416,15 @@ def test_generate_bare_arxiv_url_fails_closed_when_download_tool_returns_error(
     body = response.get_json()
     assert isinstance(body, dict)
     text = body.get("response") or ""
-    assert "Execution status:" in text
-    assert "download_paper" in text
-    assert "paper_representation_tool_failed" in text
+    assert "Execution status: requested mutation failed or was blocked." in text
+    assert "kb_mutation_write_failed_or_blocked" in text
 
     llm_debug = body.get("llm_debug") or {}
+    workflow_routing = llm_debug.get("workflow_routing") or {}
+    assert workflow_routing.get("workflow_id") == TOOL_CALLING_WORKFLOW_ID
+    assert workflow_routing.get("verdict") == "rag_selected"
+    assert workflow_routing.get("source") == "selector"
+
     tool_invocations = llm_debug.get("tool_invocations") or []
     download_record = next(
         record
@@ -416,32 +446,36 @@ def test_generate_bare_arxiv_url_fails_closed_when_download_tool_returns_error(
         if isinstance(entry, dict) and entry.get("tool") == "download_paper"
     )
     assert failed_download.get("success") is False
-    assert failed_download.get("resultSummary") == "Error: arxiv_proxy_error"
+    assert failed_download.get("resultSummary") == (
+        "Error: arxiv_proxy_error — arXiv proxy timed out while downloading the PDF."
+    )
 
     turn_record = llm_debug.get("turn_execution_record") or {}
     required_effects = turn_record.get("required_effects") or []
     assert required_effects
     effect = required_effects[0]
-    assert effect.get("required_tools") == ["download_paper"]
+    assert effect.get("required_tools") == ["add_relationship"]
     assert effect.get("status") == "not_satisfied"
-    assert effect.get("failure_code") == "paper_representation_tool_failed"
-    assert effect.get("status_reason") == (
-        "Required representation tool failed or was blocked: download_paper."
-    )
+    assert effect.get("failure_code") == "kb_mutation_write_failed_or_blocked"
+    assert effect.get("status_reason") == "Write attempt failed or was blocked: download_paper"
 
     completion_gate = turn_record.get("completion_gate") or {}
     assert completion_gate.get("decision") == "failed"
     assert completion_gate.get("safe_to_claim_completion") is False
     assert completion_gate.get("requires_follow_up") is True
-    assert "paper_representation_tool_failed" in list(
+    assert "kb_mutation_write_failed_or_blocked" in list(
         completion_gate.get("blocking_failure_codes") or []
     )
+    assert len(llm.calls) == 4
 
 
 def test_generate_bare_arxiv_url_with_explicit_denial_stays_non_mutating(monkeypatch):
     llm = _LLMSequence(
         [
-            "plain_response",
+            (
+                '{"workflow_id":"#V#chat_assistant_workflow","confidence":0.9,'
+                '"reasoning":"Explicit denial keeps this read-only."}'
+            ),
             "Read-only response.",
         ]
     )
@@ -457,6 +491,10 @@ def test_generate_bare_arxiv_url_with_explicit_denial_stays_non_mutating(monkeyp
     body = response.get_json()
     assert isinstance(body, dict)
     llm_debug = body.get("llm_debug") or {}
+    workflow_routing = llm_debug.get("workflow_routing") or {}
+    assert workflow_routing.get("workflow_id") == CHAT_ASSISTANT_WORKFLOW_ID
+    assert workflow_routing.get("verdict") == "rag_selected"
+    assert workflow_routing.get("source") == "selector"
 
     tool_invocations = llm_debug.get("tool_invocations") or []
     assert not any(

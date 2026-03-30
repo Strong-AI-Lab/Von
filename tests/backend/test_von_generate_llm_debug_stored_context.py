@@ -34,7 +34,7 @@ def app(monkeypatch):
     )
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.get_active_model_name",
-        lambda: "test-model",
+        lambda *args, **kwargs: "test-model",
     )
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.get_runtime_code_version_info",

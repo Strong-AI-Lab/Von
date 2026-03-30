@@ -1100,7 +1100,7 @@ def test_presenter_mode_uses_shared_follow_up_summary_for_incomplete_tool_turns(
         in screen_text
     )
     assert "The tool path did not complete the requested paper-status analysis." in screen_text
-    assert "Tools ran to answer this request:" in screen_text
+    assert "Tool activity diagnostics:" in screen_text
     assert "search_concepts — ok" in screen_text
     assert "Plain response without presenter tags." not in screen_text
 
@@ -1228,8 +1228,10 @@ def test_presenter_mode_rejects_hallucinated_description_write_in_screen_backfil
     body = resp.get_json()
 
     screen_text = body["response_channels"]["screen"]
-    assert "Writes ledger (authoritative):" in screen_text
-    assert "Description updated: NO" in screen_text
+    assert "Write activity (authoritative):" in screen_text
+    assert "Relationship writes detected" in screen_text
+    assert "Description updated: YES" not in screen_text
+    assert "Description updated: NO" not in screen_text
 
     llm_debug = body["llm_debug"]
     assert llm_debug.get("screen_backfill_second_pass_attempted") is True

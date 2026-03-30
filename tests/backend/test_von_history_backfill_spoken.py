@@ -141,7 +141,7 @@ def test_backfill_spoken_generates_and_persists_presenter_channels(
     )
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.get_active_model_name",
-        lambda: "test-model",
+        lambda *args, **kwargs: "test-model",
     )
     monkeypatch.setattr(
         "src.backend.security.access_control.get_effective_user_concept_id",

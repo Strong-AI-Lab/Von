@@ -147,15 +147,16 @@ def test_turn_execution_critic_detects_unresolved_kb_mutation() -> None:
     assert isinstance(required_effects, list)
     assert len(required_effects) == 1
     assert required_effects[0]["status"] == "not_executed"
-    assert required_effects[0]["failure_code"] == "kb_mutation_not_executed"
-    assert required_effects[0]["failure_codes"] == ["kb_mutation_not_executed"]
+    assert required_effects[0]["effect_type"] == "tool_execution"
+    assert required_effects[0]["failure_code"] == "tool_dispatch_boundary_missing"
+    assert required_effects[0]["failure_codes"] == ["tool_dispatch_boundary_missing"]
 
     completion_gate = record.get("completion_gate")
     assert isinstance(completion_gate, dict)
     assert completion_gate.get("decision") == "escalation_required"
     assert completion_gate.get("safe_to_claim_completion") is False
     assert completion_gate.get("blocking_failure_codes") == [
-        "kb_mutation_not_executed"
+        "tool_dispatch_boundary_missing"
     ]
     evidence_payload = completion_gate.get("evidence_payload")
     assert isinstance(evidence_payload, dict)
@@ -376,15 +377,16 @@ def test_turn_execution_critic_flags_missing_non_kb_mutation_execution() -> None
     assert isinstance(required_effects, list)
     assert len(required_effects) == 1
     assert required_effects[0]["status"] == "not_executed"
-    assert required_effects[0]["failure_code"] == "kb_mutation_not_executed"
-    assert required_effects[0]["failure_codes"] == ["kb_mutation_not_executed"]
+    assert required_effects[0]["effect_type"] == "tool_execution"
+    assert required_effects[0]["failure_code"] == "tool_dispatch_boundary_missing"
+    assert required_effects[0]["failure_codes"] == ["tool_dispatch_boundary_missing"]
 
     completion_gate = record.get("completion_gate")
     assert isinstance(completion_gate, dict)
     assert completion_gate.get("decision") == "escalation_required"
     assert completion_gate.get("safe_to_claim_completion") is False
     assert completion_gate.get("blocking_failure_codes") == [
-        "kb_mutation_not_executed"
+        "tool_dispatch_boundary_missing"
     ]
 
 
@@ -418,12 +420,14 @@ def test_turn_execution_critic_treats_diagnostic_prompt_as_non_mutating() -> Non
 
     required_effects = record.get("required_effects")
     assert isinstance(required_effects, list)
-    assert required_effects == []
+    assert len(required_effects) == 1
+    assert required_effects[0]["effect_type"] == "tool_execution"
+    assert required_effects[0]["status"] == "not_executed"
 
     completion_gate = record.get("completion_gate")
     assert isinstance(completion_gate, dict)
-    assert completion_gate.get("decision") == "completed"
-    assert completion_gate.get("safe_to_claim_completion") is True
+    assert completion_gate.get("decision") == "escalation_required"
+    assert completion_gate.get("safe_to_claim_completion") is False
 
 
 def test_turn_execution_critic_flags_worker_unavailable_zero_execution() -> None:
@@ -522,20 +526,14 @@ def test_turn_execution_critic_flags_missing_scholarly_representation(monkeypatc
     assert isinstance(required_effects, list)
     assert len(required_effects) == 1
     effect = required_effects[0]
-    assert effect.get("effect_type") == "scholarly_representation"
+    assert effect.get("effect_type") == "tool_execution"
     assert effect.get("status") == "not_executed"
-    assert effect.get("required_tools") == ["interpret_file_copy"]
-    assert effect.get("targets") == [
-        "#V#uploaded_file_copy_76c1c13fed0140f496133d008b4cfad7"
-    ]
+    assert effect.get("failure_code") == "tool_dispatch_boundary_missing"
 
     completion_gate = record.get("completion_gate")
     assert isinstance(completion_gate, dict)
     assert completion_gate.get("decision") == "escalation_required"
-    assert (
-        completion_gate.get("decision_reason")
-        == "No required representation tool execution was observed."
-    )
+    assert completion_gate.get("decision_reason") == "Required tool execution was not observed."
     assert completion_gate.get("safe_to_claim_completion") is False
 
 
@@ -586,10 +584,7 @@ def test_turn_execution_critic_marks_scholarly_representation_satisfied(monkeypa
     assert isinstance(record, dict)
     required_effects = record.get("required_effects")
     assert isinstance(required_effects, list)
-    assert len(required_effects) == 1
-    effect = required_effects[0]
-    assert effect.get("effect_type") == "scholarly_representation"
-    assert effect.get("status") == "satisfied"
+    assert required_effects == []
 
     completion_gate = record.get("completion_gate")
     assert isinstance(completion_gate, dict)

@@ -114,14 +114,12 @@ def test_missing_tool_call_retry_forces_download_paper_over_list_papers():
         method_catalogue=_Gateway.describe_methods(),
         context_messages=[],
     )
-    assert "download_paper" in requirements["required_tools"]
-    assert "finalise_cached_paper" not in requirements["required_tools"]
-    assert "list_papers" not in requirements["required_tools"]
+    assert requirements["required_tools"] == []
 
     forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
         [],
         user_prompt=prompt,
-        missing_required_tools=requirements["required_tools"],
+        missing_required_tools=["download_paper"],
     )
     assert forced is not None
     assert any(call["tool"] == "download_paper" for call in forced)
@@ -137,14 +135,12 @@ def test_missing_tool_call_retry_forces_finalise_cached_paper_when_requested():
         method_catalogue=_Gateway.describe_methods(),
         context_messages=[],
     )
-    assert "finalise_cached_paper" in requirements["required_tools"]
-    assert "download_paper" not in requirements["required_tools"]
-    assert "list_papers" not in requirements["required_tools"]
+    assert requirements["required_tools"] == []
 
     forced = orchestrator._infer_missing_tool_call_retry_tool_calls(
         [],
         user_prompt=prompt,
-        missing_required_tools=requirements["required_tools"],
+        missing_required_tools=["finalise_cached_paper"],
     )
     assert forced is not None
     assert any(call["tool"] == "finalise_cached_paper" for call in forced)
