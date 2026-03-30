@@ -1353,13 +1353,6 @@ class InternalMCPChatOrchestrator:
     _WRITE_INTENT_SESSION_MEMORY_TTL_SECONDS = 900
     _WRITE_INTENT_SESSION_MEMORY_MAX_SESSIONS = 256
     _WRITE_INTENT_SESSION_MEMORY_FOLLOW_UP_TURNS = 2
-    _WRITE_CONTINUATION_PROMPT_PATTERN = re.compile(
-        r"^\s*(yes|yep|yeah|ok|okay|sure|do it|go ahead|proceed|continue|"
-        r"please do|sounds good|make it so|"
-        r"confirm(?:ed)?(?:\s+(?:structure|format|layout|wording|plan|approach|details?))|"
-        r"looks good|that works)\b",
-        flags=re.IGNORECASE,
-    )
 
     def __init__(
         self,
@@ -2368,35 +2361,47 @@ class InternalMCPChatOrchestrator:
 
         try:
             aux_log.append(
-                {
-                    "type": "missing_tool_call_detection",
-                    "path": assessment.path,
-                    "is_json_action": assessment.is_json_action,
-                    "fenced_json": assessment.fenced_json,
-                    "classifier_invoked": assessment.classifier_invoked,
-                    "classifier_has_verdict": assessment.classifier_has_verdict,
-                    "classifier_used": assessment.classifier_used,
-                    "classifier_verdict": (
-                        "yes"
-                        if assessment.classifier_verdict is True
-                        else (
-                            "no"
-                            if assessment.classifier_verdict is False
-                            else "unavailable"
-                        )
+                annotate_python_decision_event(
+                    {
+                        "type": "missing_tool_call_detection",
+                        "path": assessment.path,
+                        "is_json_action": assessment.is_json_action,
+                        "fenced_json": assessment.fenced_json,
+                        "classifier_invoked": assessment.classifier_invoked,
+                        "classifier_has_verdict": assessment.classifier_has_verdict,
+                        "classifier_used": assessment.classifier_used,
+                        "classifier_verdict": (
+                            "yes"
+                            if assessment.classifier_verdict is True
+                            else (
+                                "no"
+                                if assessment.classifier_verdict is False
+                                else "unavailable"
+                            )
+                        ),
+                        "retry_reason": assessment.retry_reason or "",
+                        "retry_reason_override_applied": bool(override_retry_reason),
+                        "parse_error": (
+                            str(assessment.tool_call_parse_error)
+                            if assessment.tool_call_parse_error is not None
+                            else ""
+                        ),
+                        "retry_attempts": retry_attempts,
+                        "retry_budget": retry_budget,
+                        "retries_remaining": retries_remaining_before,
+                        "allow_semantic_retry": allow_semantic_retry,
+                    },
+                    stage="tool_recovery",
+                    component="internal_mcp_orchestrator",
+                    function="_action_missing_tool_call_assess",
+                    decision_class="missing_tool_call_detection",
+                    decision_source="response_structure_check",
+                    changed_outcome=bool(assessment.retry_reason),
+                    reason_code=assessment.retry_reason or "no_retry_needed",
+                    possible_inappropriate_python_code_use=bool(
+                        assessment.classifier_used
                     ),
-                    "retry_reason": assessment.retry_reason or "",
-                    "retry_reason_override_applied": bool(override_retry_reason),
-                    "parse_error": (
-                        str(assessment.tool_call_parse_error)
-                        if assessment.tool_call_parse_error is not None
-                        else ""
-                    ),
-                    "retry_attempts": retry_attempts,
-                    "retry_budget": retry_budget,
-                    "retries_remaining": retries_remaining_before,
-                    "allow_semantic_retry": allow_semantic_retry,
-                }
+                )
             )
         except Exception:
             pass
@@ -2413,15 +2418,25 @@ class InternalMCPChatOrchestrator:
         if retry_suppressed:
             try:
                 aux_log.append(
-                    {
-                        "type": "missing_tool_call_retry",
-                        "mechanism": "budget",
-                        "stage": "skipped",
-                        "retry_reason": assessment.retry_reason or "",
-                        "retry_attempts": retry_attempts,
-                        "retry_budget": retry_budget,
-                        "retries_remaining": retries_remaining_before,
-                    }
+                    annotate_python_decision_event(
+                        {
+                            "type": "missing_tool_call_retry",
+                            "mechanism": "budget",
+                            "stage": "skipped",
+                            "retry_reason": assessment.retry_reason or "",
+                            "retry_attempts": retry_attempts,
+                            "retry_budget": retry_budget,
+                            "retries_remaining": retries_remaining_before,
+                        },
+                        stage="tool_recovery",
+                        component="internal_mcp_orchestrator",
+                        function="_action_missing_tool_call_assess",
+                        decision_class="missing_tool_call_retry",
+                        decision_source="retry_budget_check",
+                        changed_outcome=True,
+                        reason_code="retry_budget_exhausted",
+                        possible_inappropriate_python_code_use=False,
+                    )
                 )
             except Exception:
                 pass
@@ -2883,17 +2898,27 @@ class InternalMCPChatOrchestrator:
                 )
             try:
                 aux_log.append(
-                    {
-                        "type": "missing_tool_call_retry",
-                        "path": calling_path,
-                        "mechanism": "budget",
-                        "stage": "skipped",
-                        "retry_reason": data.get("missing_tool_call_retry_reason")
-                        or "",
-                        "retry_attempts": retry_attempts,
-                        "retry_budget": retry_budget,
-                        "retries_remaining": retries_remaining_before,
-                    }
+                    annotate_python_decision_event(
+                        {
+                            "type": "missing_tool_call_retry",
+                            "path": calling_path,
+                            "mechanism": "budget",
+                            "stage": "skipped",
+                            "retry_reason": data.get("missing_tool_call_retry_reason")
+                            or "",
+                            "retry_attempts": retry_attempts,
+                            "retry_budget": retry_budget,
+                            "retries_remaining": retries_remaining_before,
+                        },
+                        stage="tool_recovery",
+                        component="internal_mcp_orchestrator",
+                        function="_action_missing_tool_call_retry",
+                        decision_class="missing_tool_call_retry",
+                        decision_source="retry_budget_check",
+                        changed_outcome=True,
+                        reason_code="retry_budget_exhausted",
+                        possible_inappropriate_python_code_use=False,
+                    )
                 )
             except Exception:
                 pass
@@ -2960,18 +2985,28 @@ class InternalMCPChatOrchestrator:
 
             try:
                 aux_log.append(
-                    {
-                        "type": "missing_tool_call_retry",
-                        "path": calling_path,
-                        "mechanism": forced_mechanism,
-                        "stage": "response",
-                        "retry_reason": data.get("missing_tool_call_retry_reason")
-                        or "",
-                        "retry_attempts": retry_attempts,
-                        "retry_budget": retry_budget,
-                        "retries_remaining": retries_remaining_after,
-                        "response_preview": "(forced tool call)",
-                    }
+                    annotate_python_decision_event(
+                        {
+                            "type": "missing_tool_call_retry",
+                            "path": calling_path,
+                            "mechanism": forced_mechanism,
+                            "stage": "response",
+                            "retry_reason": data.get("missing_tool_call_retry_reason")
+                            or "",
+                            "retry_attempts": retry_attempts,
+                            "retry_budget": retry_budget,
+                            "retries_remaining": retries_remaining_after,
+                            "response_preview": "(forced tool call)",
+                        },
+                        stage="tool_recovery",
+                        component="internal_mcp_orchestrator",
+                        function="_action_missing_tool_call_retry",
+                        decision_class="missing_tool_call_retry",
+                        decision_source="explicit_identifier_parse",
+                        changed_outcome=True,
+                        reason_code="forced_tool_call_injected",
+                        possible_inappropriate_python_code_use=False,
+                    )
                 )
             except Exception:
                 pass
@@ -3029,17 +3064,27 @@ class InternalMCPChatOrchestrator:
 
         try:
             aux_log.append(
-                {
-                    "type": "missing_tool_call_retry",
-                    "path": calling_path,
-                    "mechanism": "workflow",
-                    "stage": "prompt",
-                    "retry_reason": data.get("missing_tool_call_retry_reason") or "",
-                    "retry_attempts": retry_attempts,
-                    "retry_budget": retry_budget,
-                    "retries_remaining": retries_remaining_after,
-                    "prompt_preview": prompt_text[:800],
-                }
+                annotate_python_decision_event(
+                    {
+                        "type": "missing_tool_call_retry",
+                        "path": calling_path,
+                        "mechanism": "workflow",
+                        "stage": "prompt",
+                        "retry_reason": data.get("missing_tool_call_retry_reason") or "",
+                        "retry_attempts": retry_attempts,
+                        "retry_budget": retry_budget,
+                        "retries_remaining": retries_remaining_after,
+                        "prompt_preview": prompt_text[:800],
+                    },
+                    stage="tool_recovery",
+                    component="internal_mcp_orchestrator",
+                    function="_action_missing_tool_call_retry",
+                    decision_class="missing_tool_call_retry",
+                    decision_source="workflow_retry_prompt",
+                    changed_outcome=True,
+                    reason_code="retry_prompt_issued",
+                    possible_inappropriate_python_code_use=False,
+                )
             )
         except Exception:
             pass
@@ -3106,21 +3151,31 @@ class InternalMCPChatOrchestrator:
 
         try:
             aux_log.append(
-                {
-                    "type": "missing_tool_call_retry",
-                    "path": calling_path,
-                    "mechanism": "workflow",
-                    "stage": "response",
-                    "retry_reason": data.get("missing_tool_call_retry_reason") or "",
-                    "retry_attempts": retry_attempts,
-                    "retry_budget": retry_budget,
-                    "retries_remaining": retries_remaining_after,
-                    "response_preview": (
-                        retry_response[:800]
-                        if isinstance(retry_response, str)
-                        else str(retry_response)[:800]
-                    ),
-                }
+                annotate_python_decision_event(
+                    {
+                        "type": "missing_tool_call_retry",
+                        "path": calling_path,
+                        "mechanism": "workflow",
+                        "stage": "response",
+                        "retry_reason": data.get("missing_tool_call_retry_reason") or "",
+                        "retry_attempts": retry_attempts,
+                        "retry_budget": retry_budget,
+                        "retries_remaining": retries_remaining_after,
+                        "response_preview": (
+                            retry_response[:800]
+                            if isinstance(retry_response, str)
+                            else str(retry_response)[:800]
+                        ),
+                    },
+                    stage="tool_recovery",
+                    component="internal_mcp_orchestrator",
+                    function="_action_missing_tool_call_retry",
+                    decision_class="missing_tool_call_retry",
+                    decision_source="workflow_retry_response",
+                    changed_outcome=False,
+                    reason_code="retry_response_received",
+                    possible_inappropriate_python_code_use=False,
+                )
             )
         except Exception:
             pass
@@ -3159,17 +3214,27 @@ class InternalMCPChatOrchestrator:
             data["missing_tool_call_retry_attempts"] = retry_attempts
             try:
                 aux_log.append(
-                    {
-                        "type": "missing_tool_call_retry",
-                        "path": calling_path,
-                        "mechanism": "no_progress_guard",
-                        "stage": "skipped",
-                        "retry_reason": data.get("missing_tool_call_retry_reason") or "",
-                        "retry_attempts": retry_attempts,
-                        "retry_budget": retry_budget,
-                        "retries_remaining": retries_remaining_after,
-                        "stop_reason": retry_stop_reason,
-                    }
+                    annotate_python_decision_event(
+                        {
+                            "type": "missing_tool_call_retry",
+                            "path": calling_path,
+                            "mechanism": "no_progress_guard",
+                            "stage": "skipped",
+                            "retry_reason": data.get("missing_tool_call_retry_reason") or "",
+                            "retry_attempts": retry_attempts,
+                            "retry_budget": retry_budget,
+                            "retries_remaining": retries_remaining_after,
+                            "stop_reason": retry_stop_reason,
+                        },
+                        stage="tool_recovery",
+                        component="internal_mcp_orchestrator",
+                        function="_action_missing_tool_call_retry",
+                        decision_class="missing_tool_call_retry",
+                        decision_source="stall_detection",
+                        changed_outcome=True,
+                        reason_code="no_state_change_guard_triggered",
+                        possible_inappropriate_python_code_use=False,
+                    )
                 )
             except Exception:
                 pass
@@ -6566,15 +6631,27 @@ class InternalMCPChatOrchestrator:
         if isinstance(raw_aux, list):
             try:
                 raw_aux.append(
-                    {
-                        "type": "turn_execution_critic",
-                        "workflow_id": KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
-                        "decision_preview": gate_decision,
-                        "requires_follow_up": gate_requires_follow_up,
-                        "required_effect_count": len(required_effects),
-                        "postcondition_check_count": len(postcondition_checks),
-                        "request_id": turn_execution_record.get("request_id"),
-                    }
+                    annotate_python_decision_event(
+                        {
+                            "type": "turn_execution_critic",
+                            "workflow_id": KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
+                            "decision_preview": gate_decision,
+                            "requires_follow_up": gate_requires_follow_up,
+                            "required_effect_count": len(required_effects),
+                            "postcondition_check_count": len(postcondition_checks),
+                            "request_id": turn_execution_record.get("request_id"),
+                        },
+                        stage="completion_gate",
+                        component="internal_mcp_orchestrator",
+                        function="_action_turn_execution_critic",
+                        decision_class="turn_execution_critic",
+                        decision_source="execution_postcondition_check",
+                        changed_outcome=gate_requires_follow_up,
+                        reason_code=(
+                            "follow_up_required" if gate_requires_follow_up else "completed"
+                        ),
+                        possible_inappropriate_python_code_use=False,
+                    )
                 )
             except Exception:
                 pass
@@ -7065,35 +7142,45 @@ class InternalMCPChatOrchestrator:
         if isinstance(aux_llm_calls, list):
             try:
                 aux_llm_calls.append(
-                    {
-                        "type": "turn_completion_gate",
-                        "workflow_id": TURN_COMPLETION_GATE_WORKFLOW_ID,
-                        "decision": decision,
-                        "decision_reason": decision_reason,
-                        "safe_to_claim_completion": safe_to_claim_completion,
-                        "requires_follow_up": requires_follow_up,
-                        "blocking_effect_ids": list(blocking_effect_ids),
-                        "blocking_failure_codes": list(blocking_failure_codes),
-                        "unresolved_preconditions": unresolved_preconditions,
-                        "terminal_outcome": terminal_outcome,
-                        "evidence_payload": completion_gate_evidence_payload,
-                        "repeat_iteration": repeat_iteration,
-                        "repeat_stop_reason": repeat_stop_reason,
-                        "loop_attempts": loop_attempts,
-                        "loop_max_attempts": loop_max_attempts,
-                        "loop_elapsed_ms": loop_elapsed_ms,
-                        "loop_max_elapsed_ms": loop_max_elapsed_ms,
-                        "loop_no_progress_streak": loop_no_progress_streak,
-                        "loop_no_progress_limit": loop_no_progress_limit,
-                        "loop_stall_events": loop_stall_events,
-                        "loop_stall_elapsed_ms": loop_stall_elapsed_ms,
-                        "loop_stall_max_elapsed_ms": loop_stall_max_elapsed_ms,
-                        "escalation_signal": escalation_signal,
-                        "escalation_reason": escalation_reason,
-                        "loop_retry_reason": loop_retry_reason,
-                        "workflow_introspection_autotrigger": introspection_autotrigger,
-                        "episode_evaluation_autotrigger": introspection_autotrigger,
-                    }
+                    annotate_python_decision_event(
+                        {
+                            "type": "turn_completion_gate",
+                            "workflow_id": TURN_COMPLETION_GATE_WORKFLOW_ID,
+                            "decision": decision,
+                            "decision_reason": decision_reason,
+                            "safe_to_claim_completion": safe_to_claim_completion,
+                            "requires_follow_up": requires_follow_up,
+                            "blocking_effect_ids": list(blocking_effect_ids),
+                            "blocking_failure_codes": list(blocking_failure_codes),
+                            "unresolved_preconditions": unresolved_preconditions,
+                            "terminal_outcome": terminal_outcome,
+                            "evidence_payload": completion_gate_evidence_payload,
+                            "repeat_iteration": repeat_iteration,
+                            "repeat_stop_reason": repeat_stop_reason,
+                            "loop_attempts": loop_attempts,
+                            "loop_max_attempts": loop_max_attempts,
+                            "loop_elapsed_ms": loop_elapsed_ms,
+                            "loop_max_elapsed_ms": loop_max_elapsed_ms,
+                            "loop_no_progress_streak": loop_no_progress_streak,
+                            "loop_no_progress_limit": loop_no_progress_limit,
+                            "loop_stall_events": loop_stall_events,
+                            "loop_stall_elapsed_ms": loop_stall_elapsed_ms,
+                            "loop_stall_max_elapsed_ms": loop_stall_max_elapsed_ms,
+                            "escalation_signal": escalation_signal,
+                            "escalation_reason": escalation_reason,
+                            "loop_retry_reason": loop_retry_reason,
+                            "workflow_introspection_autotrigger": introspection_autotrigger,
+                            "episode_evaluation_autotrigger": introspection_autotrigger,
+                        },
+                        stage="completion_gate",
+                        component="internal_mcp_orchestrator",
+                        function="_action_turn_execution_completion_gate",
+                        decision_class="turn_completion_gate",
+                        decision_source="execution_postcondition_check",
+                        changed_outcome=bool(requires_follow_up or repeat_iteration),
+                        reason_code=terminal_outcome,
+                        possible_inappropriate_python_code_use=False,
+                    )
                 )
             except Exception:
                 pass
@@ -14902,17 +14989,6 @@ class InternalMCPChatOrchestrator:
             seen.add(lowered)
             normalised.append(cleaned)
         return normalised
-
-    @classmethod
-    def _is_write_continuation_prompt(cls, prompt: str) -> bool:
-        if not isinstance(prompt, str):
-            return False
-        cleaned = prompt.strip()
-        if not cleaned:
-            return False
-        if len(cleaned) > 80:
-            return False
-        return bool(cls._WRITE_CONTINUATION_PROMPT_PATTERN.search(cleaned.lower()))
 
     def _get_topic_vocabulary_cache_key(self, keywords: list[str]) -> str:
         """Generate a cache key from topic keywords."""
