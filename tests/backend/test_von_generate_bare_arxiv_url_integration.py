@@ -417,7 +417,7 @@ def test_generate_bare_arxiv_url_fails_closed_when_download_tool_returns_error(
     assert isinstance(body, dict)
     text = body.get("response") or ""
     assert "Execution status: requested mutation failed or was blocked." in text
-    assert "kb_mutation_write_failed_or_blocked" in text
+    assert "kb_mutation_download_paper_failed" in text
 
     llm_debug = body.get("llm_debug") or {}
     workflow_routing = llm_debug.get("workflow_routing") or {}
@@ -454,16 +454,18 @@ def test_generate_bare_arxiv_url_fails_closed_when_download_tool_returns_error(
     required_effects = turn_record.get("required_effects") or []
     assert required_effects
     effect = required_effects[0]
-    assert effect.get("required_tools") == ["add_relationship"]
+    # Tool-authored effects reference the specific tool that failed.
+    assert effect.get("required_tools") == ["download_paper"]
+    assert effect.get("intent_origin") == "tool_authored"
     assert effect.get("status") == "not_satisfied"
-    assert effect.get("failure_code") == "kb_mutation_write_failed_or_blocked"
-    assert effect.get("status_reason") == "Write attempt failed or was blocked: download_paper"
+    assert effect.get("failure_code") == "kb_mutation_download_paper_failed"
+    assert "download_paper" in (effect.get("status_reason") or "")
 
     completion_gate = turn_record.get("completion_gate") or {}
     assert completion_gate.get("decision") == "failed"
     assert completion_gate.get("safe_to_claim_completion") is False
     assert completion_gate.get("requires_follow_up") is True
-    assert "kb_mutation_write_failed_or_blocked" in list(
+    assert "kb_mutation_download_paper_failed" in list(
         completion_gate.get("blocking_failure_codes") or []
     )
     assert len(llm.calls) == 4
