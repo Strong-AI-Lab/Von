@@ -196,6 +196,9 @@ from src.backend.integrations.internal_mcp.catalogue import (
 )
 from src.backend.integrations.internal_mcp.catalogue import _turn_execution_get
 from src.backend.integrations.internal_mcp.catalogue import (
+    _turn_execution_get_diagnostics,
+)
+from src.backend.integrations.internal_mcp.catalogue import (
     _turn_execution_get_critic_bundle,
 )
 from src.backend.integrations.internal_mcp.catalogue import _turn_execution_list
@@ -2929,6 +2932,16 @@ async def _handle_turn_execution_get(arguments: dict[str, Any]) -> list[TextCont
     )
 
 
+async def _handle_turn_execution_get_diagnostics(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _turn_execution_get_diagnostics,
+        arguments,
+        tool_family_label="TurnExecution",
+    )
+
+
 async def _handle_turn_execution_get_critic_bundle(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
@@ -3461,6 +3474,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "testing_cleanup_arxiv_paper_ingestion_artifacts": _handle_testing_cleanup_arxiv_paper_ingestion_artifacts,
     "turn_execution_list": _handle_turn_execution_list,
     "turn_execution_get": _handle_turn_execution_get,
+    "turn_execution_get_diagnostics": _handle_turn_execution_get_diagnostics,
     "turn_execution_get_critic_bundle": _handle_turn_execution_get_critic_bundle,
     "turn_execution_search_failures": _handle_turn_execution_search_failures,
     "turn_execution_build_benchmark": _handle_turn_execution_build_benchmark,

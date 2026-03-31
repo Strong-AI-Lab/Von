@@ -9168,6 +9168,63 @@ def _turn_execution_get(**kwargs):
     return _rag_get_item(**forwarded)
 
 
+def _turn_execution_get_diagnostics(**kwargs):
+    from ...services.turn_execution_diagnostics_service import (
+        TurnExecutionDiagnosticsServiceError,
+        get_turn_execution_diagnostics_payload,
+    )
+
+    request_id = kwargs.get("request_id")
+    session_id = kwargs.get("session_id")
+    target = request_id if request_id is not None else session_id
+    if not isinstance(target, str) or not target.strip():
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: request_id",
+            details={"missing": ["request_id"]},
+            suggestions=["Provide request_id (or session_id alias)"],
+        )
+
+    request_id_value = target.strip()
+    try:
+        payload = get_turn_execution_diagnostics_payload(
+            request_id=request_id_value,
+            namespace=kwargs.get("namespace"),
+        )
+    except TurnExecutionDiagnosticsServiceError as exc:
+        return make_error_response(
+            "turn_execution_diagnostics_lookup_failed",
+            str(exc),
+            details={
+                "request_id": request_id_value,
+                "namespace": kwargs.get("namespace"),
+            },
+        )
+
+    if not isinstance(payload, dict):
+        return make_error_response(
+            "not_found",
+            f"Turn execution diagnostics {request_id_value} not found",
+            details={
+                "request_id": request_id_value,
+                "namespace": kwargs.get("namespace"),
+            },
+            suggestions=["Check the request_id and namespace"],
+        )
+
+    payload["item_kind"] = "turn_execution_diagnostics"
+    payload["source_system"] = (
+        "mongo.turn_execution_records"
+        if payload.get("diagnostics_source") == "mongo.turn_execution_records"
+        else "mongo.chat_history"
+    )
+    return _with_rag_provenance(
+        payload=payload,
+        item_kind="turn_execution_diagnostics_item",
+        source_system=str(payload["source_system"]),
+    )
+
+
 def _turn_execution_get_critic_bundle(**kwargs):
     from ...services.episode_critic_evidence_service import (
         build_episode_critic_evidence_bundle,
@@ -21933,6 +21990,29 @@ def build_default_catalogue() -> MethodCatalogue:
             description=(
                 "Fetch a single turn execution record by request_id for detailed failure analysis, "
                 "including MCP-visible rag_indexing_state diagnostics."
+            ),
+        ),
+        MethodDefinition(
+            name="turn_execution_get_diagnostics",
+            handler=_turn_execution_get_diagnostics,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "request_id": (str, type(None)),
+                    "session_id": (str, type(None)),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "Get one full turn diagnostics payload by request_id "
+                    "(session_id accepted as alias)."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Fetch the full persisted turn diagnostics payload by request_id, including progress history, "
+                "activity history, workflow routing diagnostics, stage diagnostics, and timing breakdown."
             ),
         ),
         MethodDefinition(

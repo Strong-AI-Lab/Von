@@ -349,6 +349,197 @@
       }
     },
     {
+      "name": "episode_critique_build_benchmark",
+      "description": "Report bounded actor/critic benchmark metrics, recurrence and remediation proxies, and sampled meta-audit cases with fresh evidence-bundle receipts.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workflow_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "episode_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verdict": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verdicts": {
+            "type": "array",
+            "items": {}
+          },
+          "from_utc": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "to_utc": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scan_limit": {
+            "type": "integer"
+          },
+          "max_audit_cases": {
+            "type": "integer"
+          },
+          "neighbour_turn_count": {
+            "type": "integer"
+          },
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "baseline_precision_proxy_pct": {
+            "type": [
+              "integer",
+              "number"
+            ]
+          },
+          "baseline_recall_proxy_pct": {
+            "type": [
+              "integer",
+              "number"
+            ]
+          },
+          "baseline_post_remediation_recurrence_rate_pct": {
+            "type": [
+              "integer",
+              "number"
+            ]
+          },
+          "regression_tolerance_pct": {
+            "type": [
+              "integer",
+              "number"
+            ]
+          }
+        },
+        "required": [],
+        "additionalProperties": true,
+        "description": "Build bounded actor/critic quality metrics from episode_critique_memories and include sampled non-recursive meta-audit cases."
+      }
+    },
+    {
+      "name": "episode_critique_memory_get",
+      "description": "Fetch a single episode-critic memory artefact with verdict, implicated entities, evidence receipt hash, and remediation links.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "memory_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [],
+        "additionalProperties": true,
+        "description": "Get one episode critique memory by memory_id (session_id accepted as alias)."
+      }
+    },
+    {
+      "name": "episode_critique_memory_list",
+      "description": "List episode-critic memory artefacts, including verdicts, implicated workflows/tools/concepts, and remediation links.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "workflow_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "episode_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verdict": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verdicts": {
+            "type": "array",
+            "items": {}
+          },
+          "from_utc": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "to_utc": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [],
+        "additionalProperties": true,
+        "description": "List episode critique memories with structured filters. This is a convenience wrapper over rag_list_indexed(collection='episode_critique_memories')."
+      }
+    },
+    {
       "name": "experiment_compute_verdict",
       "description": "Compute the final experiment verdict and promotion recommendation for an experiment run.",
       "inputSchema": {
@@ -724,345 +915,6 @@
         "required": [],
         "additionalProperties": true,
         "description": "List experiment runs with structured filters. This is a convenience wrapper over rag_list_indexed(collection='experiment_runs')."
-      }
-    },
-    {
-      "name": "episode_critique_memory_get",
-      "description": "Fetch a single episode-critic memory artefact with verdict, implicated entities, evidence receipt hash, and remediation links.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "memory_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "session_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "namespace": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [],
-        "additionalProperties": true,
-        "description": "Get one episode critique memory by memory_id (session_id accepted as alias)."
-      }
-    },
-    {
-      "name": "episode_critique_build_benchmark",
-      "description": "Build bounded actor/critic benchmark metrics plus sampled non-recursive meta-audit cases from episode critique memories.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "namespace": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "workflow_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "request_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "episode_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "verdict": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "verdicts": {
-            "type": "array",
-            "items": {}
-          },
-          "from_utc": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "to_utc": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "scan_limit": {
-            "type": "integer"
-          },
-          "max_audit_cases": {
-            "type": "integer"
-          },
-          "neighbour_turn_count": {
-            "type": "integer"
-          },
-          "run_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "baseline_precision_proxy_pct": {
-            "type": [
-              "integer",
-              "number"
-            ]
-          },
-          "baseline_recall_proxy_pct": {
-            "type": [
-              "integer",
-              "number"
-            ]
-          },
-          "baseline_post_remediation_recurrence_rate_pct": {
-            "type": [
-              "integer",
-              "number"
-            ]
-          },
-          "regression_tolerance_pct": {
-            "type": [
-              "integer",
-              "number"
-            ]
-          }
-        },
-        "required": [],
-        "additionalProperties": true,
-        "description": "Build bounded actor/critic benchmark metrics from episode_critique_memories and include sampled non-recursive meta-audit cases."
-      }
-    },
-    {
-      "name": "episode_critique_memory_list",
-      "description": "List episode-critic memory artefacts, including verdicts, implicated workflows/tools/concepts, and remediation links.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "namespace": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "limit": {
-            "type": "integer"
-          },
-          "offset": {
-            "type": "integer"
-          },
-          "workflow_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "request_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "episode_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "verdict": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "verdicts": {
-            "type": "array",
-            "items": {}
-          },
-          "from_utc": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "to_utc": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [],
-        "additionalProperties": true,
-        "description": "List episode critique memories with structured filters. This is a convenience wrapper over rag_list_indexed(collection='episode_critique_memories')."
-      }
-    },
-    {
-      "name": "repo_dossier_file_snapshot",
-      "description": "Inspect one tracked repo file safely with bounded content, tracked blob receipt, and secret-aware sanitisation.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "path": {
-            "type": "string"
-          },
-          "revision": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "max_chars": {
-            "type": "integer"
-          },
-          "max_lines": {
-            "type": "integer"
-          },
-          "namespace": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "path"
-        ],
-        "additionalProperties": true,
-        "description": "Return a bounded snapshot of one tracked repo file from the working tree or a specific git revision. Blocks .env and secret-like paths."
-      }
-    },
-    {
-      "name": "repo_dossier_search",
-      "description": "Search tracked repo files with bounded match output and receipts suitable for critic-grounded diagnosis.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "query": {
-            "type": "string"
-          },
-          "path_prefixes": {
-            "type": "array",
-            "items": {}
-          },
-          "regex": {
-            "type": "boolean"
-          },
-          "limit": {
-            "type": "integer"
-          },
-          "namespace": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "query"
-        ],
-        "additionalProperties": true,
-        "description": "Run a bounded search across tracked repo files, optionally narrowed by repo-relative path prefixes."
-      }
-    },
-    {
-      "name": "repo_dossier_workflow_definition_get",
-      "description": "Inspect a workflow definition through the authoritative registry with state/action/transition summary and identity receipt.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "workflow_id": {
-            "type": "string"
-          },
-          "namespace": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "workflow_id"
-        ],
-        "additionalProperties": true,
-        "description": "Fetch an authoritative workflow definition summary and identity hash from the workflow registry."
-      }
-    },
-    {
-      "name": "repo_dossier_prompt_definition_get",
-      "description": "Inspect prompt definition text and supporting text-relation metadata with bounded output and receipt.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "prompt_concept_id": {
-            "type": "string"
-          },
-          "max_chars": {
-            "type": "integer"
-          },
-          "namespace": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "prompt_concept_id"
-        ],
-        "additionalProperties": true,
-        "description": "Fetch bounded authoritative prompt text for one prompt concept."
-      }
-    },
-    {
-      "name": "repo_dossier_git_metadata",
-      "description": "Inspect bounded git metadata for critic or maintenance workflows without exposing unrestricted shell access.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "paths": {
-            "type": "array",
-            "items": {}
-          },
-          "compare_base": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "commit_limit": {
-            "type": "integer"
-          },
-          "namespace": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [],
-        "additionalProperties": true,
-        "description": "Return bounded branch, status, recent-commit, and diff metadata for the repo or specific tracked paths."
       }
     },
     {
@@ -2492,6 +2344,154 @@
       }
     },
     {
+      "name": "repo_dossier_file_snapshot",
+      "description": "Inspect one tracked repo file safely with bounded content, tracked blob receipt, and secret-aware sanitisation.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "revision": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_chars": {
+            "type": "integer"
+          },
+          "max_lines": {
+            "type": "integer"
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": true,
+        "description": "Return a bounded snapshot of one tracked repo file from the working tree or a specific git revision. Blocks .env and secret-like paths."
+      }
+    },
+    {
+      "name": "repo_dossier_git_metadata",
+      "description": "Inspect bounded git metadata for critic or maintenance workflows without exposing unrestricted shell access.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "paths": {
+            "type": "array",
+            "items": {}
+          },
+          "compare_base": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "commit_limit": {
+            "type": "integer"
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [],
+        "additionalProperties": true,
+        "description": "Return bounded branch, status, recent-commit, and diff metadata for the repo or specific tracked paths."
+      }
+    },
+    {
+      "name": "repo_dossier_prompt_definition_get",
+      "description": "Inspect prompt definition text and supporting text-relation metadata with bounded output and receipt.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "prompt_concept_id": {
+            "type": "string"
+          },
+          "max_chars": {
+            "type": "integer"
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "prompt_concept_id"
+        ],
+        "additionalProperties": true,
+        "description": "Fetch bounded authoritative prompt text for one prompt concept."
+      }
+    },
+    {
+      "name": "repo_dossier_search",
+      "description": "Search tracked repo files with bounded match output and receipts suitable for critic-grounded diagnosis.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "path_prefixes": {
+            "type": "array",
+            "items": {}
+          },
+          "regex": {
+            "type": "boolean"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": true,
+        "description": "Run a bounded search across tracked repo files, optionally narrowed by repo-relative path prefixes."
+      }
+    },
+    {
+      "name": "repo_dossier_workflow_definition_get",
+      "description": "Inspect a workflow definition through the authoritative registry with state/action/transition summary and identity receipt.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "workflow_id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "workflow_id"
+        ],
+        "additionalProperties": true,
+        "description": "Fetch an authoritative workflow definition summary and identity hash from the workflow registry."
+      }
+    },
+    {
       "name": "resolve_concept_by_name",
       "description": "Resolve a Vontology concept deterministically from a user-provided surface form. Read-only: does not mutate concepts. Returns resolved/ambiguous/not_found with an audit trail. Supports language preferences, instance_of restriction, and optional code-string matching.",
       "inputSchema": {
@@ -3441,6 +3441,36 @@
         "required": [],
         "additionalProperties": true,
         "description": "Build one bounded episode-critic evidence bundle for a completed turn or workflow episode."
+      }
+    },
+    {
+      "name": "turn_execution_get_diagnostics",
+      "description": "Fetch the full persisted turn diagnostics payload by request_id, including progress history, activity history, workflow routing diagnostics, stage diagnostics, and timing breakdown.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [],
+        "additionalProperties": true,
+        "description": "Get one full turn diagnostics payload by request_id (session_id accepted as alias)."
       }
     },
     {

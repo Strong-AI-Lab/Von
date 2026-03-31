@@ -143,6 +143,67 @@ class _ChatHistoryCollection:
         return _Cursor(projected_docs)
 
 
+class _DiagnosticsChatHistoryCollection:
+    def __init__(self, docs: list[dict[str, Any]]):
+        self._docs = list(docs)
+
+    def find_one(self, query: dict[str, Any], projection: dict[str, Any] | None = None):
+        namespace = query.get("namespace")
+        history_filter = query.get("history")
+        elem_match = (
+            history_filter.get("$elemMatch")
+            if isinstance(history_filter, dict)
+            else None
+        )
+        requested_role = elem_match.get("role") if isinstance(elem_match, dict) else None
+        requested_request_id = (
+            elem_match.get("llm_debug_data.request_id")
+            if isinstance(elem_match, dict)
+            else None
+        )
+
+        for doc in self._docs:
+            if isinstance(namespace, str) and doc.get("namespace") != namespace:
+                continue
+
+            matched = False
+            for entry in doc.get("history") or []:
+                if not isinstance(entry, dict):
+                    continue
+                if isinstance(requested_role, str) and entry.get("role") != requested_role:
+                    continue
+                llm_debug = entry.get("llm_debug_data")
+                debug_request_id = (
+                    llm_debug.get("request_id")
+                    if isinstance(llm_debug, dict)
+                    else None
+                )
+                if (
+                    isinstance(requested_request_id, str)
+                    and debug_request_id != requested_request_id
+                ):
+                    continue
+                matched = True
+                break
+
+            if not matched:
+                continue
+
+            if not isinstance(projection, dict):
+                return doc
+
+            include_keys = {
+                key for key, include in projection.items() if include and key != "_id"
+            }
+            projected_doc: dict[str, Any] = {}
+            for key in include_keys:
+                if key in doc:
+                    projected_doc[key] = doc[key]
+            return projected_doc
+
+        return None
+
+
 class _DB:
     def __init__(self, collections: dict[str, Any]):
         self._collections = dict(collections)
@@ -616,6 +677,154 @@ def test_turn_execution_list_and_get_wrappers(monkeypatch):
     got = cat._turn_execution_get(namespace="#V#user@org", request_id="req-wrap-1")
     assert got["success"] is True
     assert got["request_id"] == "req-wrap-1"
+
+
+def test_turn_execution_get_diagnostics_returns_embedded_payload(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    chat_docs = [
+        {
+            "user_id": "#V#user",
+            "session_id": "chat-diag-1",
+            "namespace": "#V#user@org",
+            "organisation_concept_id": "#V#org",
+            "history": [
+                {"role": "user", "content": "Show the turn diagnostics"},
+                {
+                    "role": "assistant",
+                    "content": "Done",
+                    "timestamp": "2026-04-01T00:00:02Z",
+                    "llm_debug_data": {
+                        "request_id": "req-diag-1",
+                        "interaction_timestamp_utc": "2026-04-01T00:00:03Z",
+                        "code_version": "v20260401+g1234567",
+                        "code_version_details": {
+                            "schema_version": "runtime_code_version.v1",
+                            "version": "v20260401+g1234567",
+                        },
+                        "turn_execution_diagnostics": {
+                            "request_id": "req-diag-1",
+                            "generated_at_utc": "2026-04-01T00:00:03Z",
+                            "prompt_preview": "Show the turn diagnostics",
+                            "progress_events": [],
+                            "activity_history": [],
+                            "phase_history": [],
+                            "tool_history": [],
+                            "stage_diagnostics": [],
+                            "workflow_stage_model": {
+                                "schema_version": "conversation_turn_stage_model.v1",
+                                "stages": [],
+                            },
+                            "workflow_stage_path": {
+                                "schema_version": "conversation_turn_stage_path.v1",
+                                "path": [],
+                            },
+                            "timing_breakdown": {
+                                "schema_version": "conversation_turn_timing_breakdown.v1",
+                                "stages": [],
+                                "llm_calls_by_stage_model": [],
+                                "totals": {
+                                    "elapsed_ms": 42,
+                                    "observed_timeline_ms": 42,
+                                    "phase_elapsed_ms": 42,
+                                    "llm_elapsed_ms": 0,
+                                    "llm_call_count": 0,
+                                },
+                            },
+                        },
+                        "workflow_routing_diagnostics": {
+                            "schema_version": "workflow_routing_diagnostics.v1",
+                            "dispatch": {"dispatch_terminal_status": "completed"},
+                        },
+                    },
+                },
+            ],
+        }
+    ]
+
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_diagnostics_service.get_chat_history_collection_service",
+        lambda read_only=True: _DiagnosticsChatHistoryCollection(chat_docs),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_diagnostics_service.get_turn_execution_records_collection",
+        lambda: None,
+    )
+
+    result = cat._turn_execution_get_diagnostics(
+        namespace="#V#user@org",
+        request_id="req-diag-1",
+    )
+
+    assert result["success"] is True
+    assert result["schema_version"] == "turn_execution_diagnostics.v1"
+    assert result["request_id"] == "req-diag-1"
+    assert result["chat_session_id"] == "chat-diag-1"
+    assert result["source_system"] == "mongo.chat_history"
+    assert result["workflow_routing_diagnostics"]["schema_version"] == (
+        "workflow_routing_diagnostics.v1"
+    )
+    assert result["provenance"]["item_kind"] == "turn_execution_diagnostics_item"
+    assert result["provenance"]["source_system"] == "mongo.chat_history"
+
+
+def test_turn_execution_get_diagnostics_reconstructs_from_projection(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    turn_docs = [
+        {
+            "request_id": "req-lossy-1",
+            "session_id": "chat-lossy-1",
+            "namespace": "#V#user@org",
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "prompt": {"preview": "Attempted update"},
+            "workflow_selection": {
+                "selected_workflow_id": "#V#tool_calling_workflow",
+                "workflow_discovery": {"match_count": 1},
+            },
+            "workflow_routing_diagnostics": {
+                "schema_version": "workflow_routing_diagnostics.v1",
+                "dispatch": {"dispatch_terminal_status": "completed"},
+            },
+            "execution": {
+                "tool_invocations": [
+                    {"tool_name": "add_relationship", "status": "completed"}
+                ],
+                "workflow_stage_model": {
+                    "schema_version": "conversation_turn_stage_model.v1",
+                    "stages": [],
+                },
+                "workflow_stage_path": {
+                    "schema_version": "conversation_turn_stage_path.v1",
+                    "path": [],
+                },
+            },
+        }
+    ]
+
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_diagnostics_service.get_chat_history_collection_service",
+        lambda read_only=True: None,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_diagnostics_service.get_turn_execution_records_collection",
+        lambda: _TurnExecutionCollection(turn_docs),
+    )
+
+    result = cat._turn_execution_get_diagnostics(
+        namespace="#V#user@org",
+        request_id="req-lossy-1",
+    )
+
+    assert result["success"] is True
+    assert result["request_id"] == "req-lossy-1"
+    assert result["source_system"] == "mongo.turn_execution_records"
+    assert result["reconstruction"]["lossy"] is True
+    assert result["tool_call_count"] == 1
+    assert result["workflow_stage_path"]["schema_version"] == (
+        "conversation_turn_stage_path.v1"
+    )
 
 
 def test_turn_execution_search_failures_reports_modes_and_recommendations(monkeypatch):

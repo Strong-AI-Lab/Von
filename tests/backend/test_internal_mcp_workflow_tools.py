@@ -1242,6 +1242,64 @@ def test_turn_execution_get_critic_bundle_invokes_service(monkeypatch):
     assert payload["episode_locator"]["request_id"] == "req-bundle-1"
 
 
+def test_turn_execution_get_diagnostics_invokes_service(monkeypatch):
+    gateway = _build_gateway()
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_diagnostics_service.get_turn_execution_diagnostics_payload",
+        lambda **kwargs: {
+            "success": True,
+            "schema_version": "turn_execution_diagnostics.v1",
+            "request_id": kwargs.get("request_id"),
+            "generated_at_utc": "2026-04-01T00:00:00Z",
+            "progress_events": [],
+            "activity_history": [],
+            "phase_history": [],
+            "tool_history": [],
+            "stage_diagnostics": [],
+            "workflow_stage_model": {
+                "schema_version": "conversation_turn_stage_model.v1",
+                "stages": [],
+            },
+            "workflow_stage_path": {
+                "schema_version": "conversation_turn_stage_path.v1",
+                "path": [],
+            },
+            "timing_breakdown": {
+                "schema_version": "conversation_turn_timing_breakdown.v1",
+                "stages": [],
+                "llm_calls_by_stage_model": [],
+                "totals": {"elapsed_ms": None, "llm_elapsed_ms": 0, "llm_call_count": 0},
+            },
+        },
+    )
+
+    payload = gateway.invoke(
+        "turn_execution_get_diagnostics",
+        {"request_id": "req-diag-1"},
+    ).payload
+
+    assert payload["success"] is True
+    assert payload["request_id"] == "req-diag-1"
+    assert payload["schema_version"] == "turn_execution_diagnostics.v1"
+
+
+def test_turn_execution_get_diagnostics_returns_not_found_when_service_misses(monkeypatch):
+    gateway = _build_gateway()
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_diagnostics_service.get_turn_execution_diagnostics_payload",
+        lambda **kwargs: None,
+    )
+
+    payload = gateway.invoke(
+        "turn_execution_get_diagnostics",
+        {"request_id": "req-diag-missing"},
+    ).payload
+
+    assert payload["success"] is False
+    assert payload["error_code"] == "not_found"
+    assert payload["error_details"]["request_id"] == "req-diag-missing"
+
+
 def test_episode_critique_memory_list_forwards_to_rag_collection(monkeypatch):
     gateway = _build_gateway()
     monkeypatch.setattr(

@@ -1815,6 +1815,7 @@ def _build_turn_execution_diagnostics(
     )
 
     return {
+        "schema_version": "turn_execution_diagnostics.v1",
         "generated_at_utc": _progress_str(generated_at_utc) or _now_utc_iso(),
         "request_id": effective_request_id,
         "code_version": _progress_str(code_version_details.get("version")),

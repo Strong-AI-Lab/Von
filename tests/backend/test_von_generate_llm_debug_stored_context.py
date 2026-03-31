@@ -100,6 +100,7 @@ def test_generate_debug_stored_context_uses_persisted_history_for_authenticated_
 
     diagnostics = llm_debug.get("turn_execution_diagnostics")
     assert isinstance(diagnostics, dict)
+    assert diagnostics.get("schema_version") == "turn_execution_diagnostics.v1"
     assert diagnostics.get("request_id") == body.get("request_id")
     assert diagnostics.get("prompt_preview") == "Hello"
     assert llm_debug.get("code_version") == _VERSION_INFO["version"]
