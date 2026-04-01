@@ -1,8 +1,10 @@
 """Process hygiene helpers for MCP stdio servers.
 
-These servers should be one-process-per-parent-host. In practice, IDE restarts
-or wrapper failures can leave orphaned sibling processes. This guard best-effort
-terminates older sibling instances running the same server script.
+These servers may be launched under IDE-owned MCP hosts that legitimately keep
+multiple sibling sessions alive at once. Aggressively killing same-parent
+siblings can therefore drop active transports mid-tool-call. The duplicate
+termination guard remains available for explicit recovery/debug sessions, but it
+must be enabled intentionally rather than running by default.
 """
 
 from __future__ import annotations
@@ -82,7 +84,7 @@ def terminate_duplicate_sibling_servers(
     - this process is never targeted
     """
 
-    enabled = os.getenv("VON_MCP_TERMINATE_DUPLICATE_SIBLINGS", "1").strip().lower()
+    enabled = os.getenv("VON_MCP_TERMINATE_DUPLICATE_SIBLINGS", "0").strip().lower()
     if enabled not in {"1", "true", "yes", "on"}:
         return {"matched": 0, "terminated": 0, "killed": 0, "failed": 0}
 

@@ -40,7 +40,8 @@ project_root = (
 dotenv_path = project_root / ".env"
 load_dotenv(dotenv_path=dotenv_path)
 
-# Best-effort hygiene: terminate stale sibling servers left by previous IDE restarts.
+# Optional recovery hygiene: enable only when explicitly debugging stale
+# sibling MCP processes from previous IDE restarts.
 terminate_duplicate_sibling_servers(
     __file__, log_fn=lambda message: print(message, file=sys.stderr)
 )

@@ -230,3 +230,20 @@ def test_terminate_duplicate_sibling_servers_can_be_disabled(monkeypatch) -> Non
     assert result["matched"] == 0
     assert proc.terminated is False
 
+
+def test_terminate_duplicate_sibling_servers_defaults_to_disabled(monkeypatch) -> None:
+    proc = _DummyProcess(
+        pid=101,
+        ppid=50,
+        cmdline=["python", "src/backend/mcp_server/mcp_stdio_server.py"],
+    )
+    _install_fake_psutil(monkeypatch, [proc])
+    monkeypatch.delenv("VON_MCP_TERMINATE_DUPLICATE_SIBLINGS", raising=False)
+
+    result = process_guard.terminate_duplicate_sibling_servers(
+        "src/backend/mcp_server/mcp_stdio_server.py"
+    )
+
+    assert result == {"matched": 0, "terminated": 0, "killed": 0, "failed": 0}
+    assert proc.terminated is False
+

@@ -33,7 +33,8 @@ if project_root not in sys.path:
 
 from src.backend.mcp_server.process_guard import terminate_duplicate_sibling_servers
 
-# Best-effort hygiene: terminate stale sibling servers left by previous IDE restarts.
+# Optional recovery hygiene: enable only when explicitly debugging stale
+# sibling MCP processes from previous IDE restarts.
 terminate_duplicate_sibling_servers(
     __file__, log_fn=lambda message: print(message, file=sys.stderr)
 )
