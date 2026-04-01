@@ -1,5 +1,9 @@
 import { initializeDomElements, initializeInfoPopup, loadAndDisplayGlobalModelInFooter, setFooterServerReachability } from './domUtils.js';
-import { closeDynamicConceptTab, createOrActivateConceptTab } from './dynamicTabs.js';
+import {
+  closeDynamicConceptTab,
+  createOrActivateConceptTab,
+  restorePersistedConceptTabs
+} from './dynamicTabs.js';
 import { isExpertTabsEnabled } from './featureFlags.js';
 import { getLanguageDisplayName } from './languageConfig.js';
 import { escapeHtml } from './markdownUtils.js';
@@ -136,9 +140,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
+  const restoredConceptTabs = await restorePersistedConceptTabs();
+
   // Check URL hash for initial tab
   const hash = window.location.hash.substring(1);
-  let initialTabId = 'chatTab'; // Default to chatTab
+  let initialTabId = restoredConceptTabs.activeTabId || 'chatTab'; // Default to chatTab
 
   if (hash) {
     const potentialTab = document.getElementById(hash);

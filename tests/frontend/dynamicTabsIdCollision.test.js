@@ -33,6 +33,10 @@ jest.mock('../../src/frontend/web/von_interface/static/js/predicateView.js', () 
     initializePredicateView: jest.fn()
 }));
 
+jest.mock('../../src/frontend/web/von_interface/static/js/utils/toast.js', () => ({
+    showToast: jest.fn()
+}));
+
 jest.mock('../../src/frontend/web/von_interface/static/js/state.js', () => ({
     getConceptTypeDisplayNames: jest.fn(() => ({ singular: 'Concept', plural: 'Concepts' })),
     setCurrentConceptType: jest.fn(),
@@ -283,6 +287,160 @@ describe('notes and content editor markup hygiene', () => {
         expect(section.querySelectorAll('[style]')).toHaveLength(0);
         expect(section.querySelector('.concept-text-multi-header')).not.toBeNull();
         expect(section.querySelector('.concept-text-view')).not.toBeNull();
+    });
+});
+
+describe('persisted concept tab restore', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <div id="tabContainer" class="tab-container">
+                <div class="tab-button" data-tab="chatTab">Chat</div>
+                <div class="tab-button" data-tab="vontologyTab">Vontology</div>
+                <div class="tab-button" data-tab="importExportTab">Import/Export</div>
+            </div>
+            <div class="tab-content-area"></div>
+        `;
+        localStorage.clear();
+        sessionStorage.clear();
+        sessionStorage.setItem('current_user_namespace', '#V#tab_user@test_org');
+        localStorage.setItem('current_user_namespace', '#V#tab_user@test_org');
+        global.fetch = jest.fn(async (url) => {
+            const requestUrl = String(url);
+            if (requestUrl.startsWith('/api/concepts/')) {
+                return { ok: true, status: 200, json: async () => ({ concept_id: requestUrl.split('/').pop() }) };
+            }
+            if (requestUrl.startsWith('/api/settings/')) {
+                return { ok: true, status: 200, json: async () => ({ preferred_language: 'en-NZ' }) };
+            }
+            if (requestUrl.startsWith('/vontology/api/vontology/node_content')) {
+                return { ok: true, status: 200, json: async () => ({ names: [], is_a_type_of: [] }) };
+            }
+            return { ok: false, status: 404, text: async () => '' };
+        });
+    });
+
+    afterEach(() => {
+        jest.resetModules();
+        jest.restoreAllMocks();
+        localStorage.clear();
+        sessionStorage.clear();
+        delete global.fetch;
+    });
+
+    test('persists open concept tabs for the current namespace and restores their order and active tab', async () => {
+        const {
+            buildNamespaceScopedStorageKey
+        } = require('../../src/frontend/web/von_interface/static/js/utils/sessionScopedStorage.js');
+        let dynamicTabs = require(dynamicTabsModulePath);
+
+        dynamicTabs.initializeDynamicTabs();
+        dynamicTabs.createOrActivateConceptTab('#V#alpha', 'Alpha', false, { kind: 'type' });
+        dynamicTabs.createOrActivateConceptTab('#V#beta', 'Beta', true, { kind: 'type' });
+
+        const storageKey = buildNamespaceScopedStorageKey('von:openConceptTabs');
+        const storedSnapshot = JSON.parse(localStorage.getItem(storageKey) || 'null');
+        expect(storedSnapshot).toMatchObject({
+            activeConceptId: '#V#beta',
+            tabs: [
+                { conceptId: '#V#alpha', conceptName: 'Alpha', kind: 'type' },
+                { conceptId: '#V#beta', conceptName: 'Beta', kind: 'type' }
+            ]
+        });
+
+        jest.resetModules();
+        document.body.innerHTML = `
+            <div id="tabContainer" class="tab-container">
+                <div class="tab-button" data-tab="chatTab">Chat</div>
+                <div class="tab-button" data-tab="vontologyTab">Vontology</div>
+                <div class="tab-button" data-tab="importExportTab">Import/Export</div>
+            </div>
+            <div class="tab-content-area"></div>
+        `;
+
+        dynamicTabs = require(dynamicTabsModulePath);
+        dynamicTabs.initializeDynamicTabs();
+        const restored = await dynamicTabs.restorePersistedConceptTabs();
+        const restoredBetaInfo = dynamicTabs.getActiveDynamicTabs().find(
+            (entry) => entry.conceptId === '#V#beta'
+        );
+
+        expect(restored.restoredConceptIds).toEqual(['#V#alpha', '#V#beta']);
+        expect(restored.activeTabId).toBe(restoredBetaInfo.tabId);
+
+        const restoredButtons = Array.from(
+            document.querySelectorAll('#tabContainer .tab-button.closable[data-concept-id]')
+        ).map((button) => button.dataset.conceptId);
+        expect(restoredButtons).toEqual(['#V#alpha', '#V#beta']);
+    });
+
+    test('keeps last active state null when a non-concept tab becomes active', () => {
+        const {
+            buildNamespaceScopedStorageKey
+        } = require('../../src/frontend/web/von_interface/static/js/utils/sessionScopedStorage.js');
+        const dynamicTabs = require(dynamicTabsModulePath);
+
+        dynamicTabs.initializeDynamicTabs();
+        dynamicTabs.createOrActivateConceptTab('#V#alpha', 'Alpha', true, { kind: 'type' });
+        document.dispatchEvent(new CustomEvent('von:tab-activated', {
+            detail: { tabId: 'chatTab' }
+        }));
+
+        const storageKey = buildNamespaceScopedStorageKey('von:openConceptTabs');
+        const storedSnapshot = JSON.parse(localStorage.getItem(storageKey) || 'null');
+        expect(storedSnapshot.activeConceptId).toBeNull();
+    });
+
+    test('skips unavailable concepts during restore and cleans the persisted snapshot', async () => {
+        const { showToast } = require('../../src/frontend/web/von_interface/static/js/utils/toast.js');
+        const {
+            buildNamespaceScopedStorageKey
+        } = require('../../src/frontend/web/von_interface/static/js/utils/sessionScopedStorage.js');
+        const storageKey = buildNamespaceScopedStorageKey('von:openConceptTabs');
+        localStorage.setItem(storageKey, JSON.stringify({
+            version: 1,
+            activeConceptId: '#V#missing_tab',
+            tabs: [
+                { conceptId: '#V#valid_tab', conceptName: 'Valid tab', kind: 'type' },
+                { conceptId: '#V#missing_tab', conceptName: 'Missing tab', kind: 'type' }
+            ]
+        }));
+
+        global.fetch = jest.fn(async (url) => {
+            const requestUrl = String(url);
+            if (requestUrl.includes('/api/concepts/%23V%23missing_tab')) {
+                return { ok: false, status: 404, json: async () => ({}) };
+            }
+            if (requestUrl.startsWith('/api/concepts/')) {
+                return { ok: true, status: 200, json: async () => ({}) };
+            }
+            if (requestUrl.startsWith('/api/settings/')) {
+                return { ok: true, status: 200, json: async () => ({ preferred_language: 'en-NZ' }) };
+            }
+            if (requestUrl.startsWith('/vontology/api/vontology/node_content')) {
+                return { ok: true, status: 200, json: async () => ({ names: [], is_a_type_of: [] }) };
+            }
+            return { ok: false, status: 404, text: async () => '' };
+        });
+
+        const dynamicTabs = require(dynamicTabsModulePath);
+        dynamicTabs.initializeDynamicTabs();
+        const restored = await dynamicTabs.restorePersistedConceptTabs();
+
+        expect(restored.restoredConceptIds).toEqual(['#V#valid_tab']);
+        expect(restored.skippedConceptIds).toEqual(['#V#missing_tab']);
+        expect(showToast).toHaveBeenCalledWith(
+            'Skipped 1 unavailable concept tab while restoring this namespace: Missing tab',
+            'info',
+            { durationMs: 5000 }
+        );
+
+        const cleanedSnapshot = JSON.parse(localStorage.getItem(storageKey) || 'null');
+        expect(cleanedSnapshot).toMatchObject({
+            activeConceptId: null,
+            tabs: [
+                { conceptId: '#V#valid_tab', conceptName: 'Valid tab', kind: 'type' }
+            ]
+        });
     });
 });
 

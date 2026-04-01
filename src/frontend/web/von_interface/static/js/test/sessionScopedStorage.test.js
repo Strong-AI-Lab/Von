@@ -1,4 +1,5 @@
 import {
+    buildNamespaceScopedStorageKey,
     getSessionScopedNamespace,
     syncNamespaceFromLocalStorage,
 } from '../utils/sessionScopedStorage.js';
@@ -50,6 +51,22 @@ describe('sessionScopedStorage namespace repair', () => {
         );
         expect(localStorage.getItem('current_user_namespace')).toBe(
             '#V#michael_witbrock@university_of_auckland_strong_ai_lab',
+        );
+    });
+
+    test('buildNamespaceScopedStorageKey uses the repaired canonical namespace', () => {
+        localStorage.setItem(
+            'von_current_user',
+            JSON.stringify({ concept_id: '#V#michael_witbrock' }),
+        );
+        localStorage.setItem(
+            'von_current_org',
+            JSON.stringify({ concept_id: '#V#university_of_auckland_strong_ai_lab' }),
+        );
+        localStorage.setItem('current_user_namespace', '#V#michael_witbrock');
+
+        expect(buildNamespaceScopedStorageKey('von:openConceptTabs')).toBe(
+            'von:openConceptTabs:%23V%23michael_witbrock%40university_of_auckland_strong_ai_lab',
         );
     });
 });

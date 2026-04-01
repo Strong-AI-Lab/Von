@@ -44,6 +44,16 @@ function isOrgScopedNamespace(namespace) {
     return typeof namespace === 'string' && namespace.includes('@');
 }
 
+function encodeStorageScopeSegment(value) {
+    const raw = typeof value === 'string' ? value.trim() : '';
+    if (!raw) return '';
+    try {
+        return encodeURIComponent(raw);
+    } catch {
+        return raw.replace(/[^A-Za-z0-9._~-]+/g, '_');
+    }
+}
+
 export function deriveNamespaceFromStoredContext() {
     const local = typeof localStorage !== 'undefined' ? localStorage : null;
     const session = typeof sessionStorage !== 'undefined' ? sessionStorage : null;
@@ -164,6 +174,27 @@ export function getSessionScopedOrgId() {
  */
 export function getSessionScopedNamespace() {
     return repairPrimaryNamespaceStorage(resolvePreferredNamespaceFromStorage());
+}
+
+/**
+ * Build a localStorage/sessionStorage key scoped to the effective namespace.
+ * Uses the repaired canonical namespace so restart bootstrap and organisation
+ * repair logic do not drift apart from caller-specific storage keys.
+ * @param {string} prefix - Storage key prefix
+ * @param {string|null} namespace - Optional explicit namespace override
+ * @returns {string} Namespace-scoped storage key
+ */
+export function buildNamespaceScopedStorageKey(prefix, namespace = null) {
+    const base = typeof prefix === 'string' ? prefix.trim() : '';
+    if (!base) return '';
+    const effectiveNamespace =
+        typeof namespace === 'string' && namespace.trim()
+            ? namespace.trim()
+            : getSessionScopedNamespace();
+    if (!effectiveNamespace) {
+        return base;
+    }
+    return `${base}:${encodeStorageScopeSegment(effectiveNamespace)}`;
 }
 
 /**

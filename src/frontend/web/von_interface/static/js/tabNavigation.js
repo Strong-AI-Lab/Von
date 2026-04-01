@@ -87,6 +87,12 @@ export function activateTab(tabId) {
   } else {
     window.location.hash = tabId;
   }
+
+  try {
+    document.dispatchEvent(new CustomEvent('von:tab-activated', {
+      detail: { tabId }
+    }));
+  } catch (_) { /* ignore */ }
 }
 
 async function loadTabContent(tabId, contentElement) {

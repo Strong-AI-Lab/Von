@@ -15,7 +15,12 @@ import { activateTab } from './tabNavigation.js';
 import { createVontologyCartouche, normalisePotentialConceptId } from './utils/textDecorator.js';
 import { copyJsonTextWithButtonFeedback, resetCopyJsonButtonPreCopyState } from './utils/copyJsonButtonState.js';
 import { mountJsonInspector } from './utils/jsonInspector.js';
-import { getSessionScopedOrgId } from './utils/sessionScopedStorage.js';
+import { showToast } from './utils/toast.js';
+import {
+    buildNamespaceScopedStorageKey,
+    getSessionScopedNamespace,
+    getSessionScopedOrgId
+} from './utils/sessionScopedStorage.js';
 import { getKeyConceptIds, updateTabHeaderStarButtons, updateTreeKeyConceptBadge } from './vontology.js';
 
 // Track dynamically created concept tabs
@@ -24,11 +29,177 @@ let dynamicAnnotationTabs = new Map();
 let annotationTabCounter = 0;
 const annotationEnabled = isAnnotationEnabled();
 const TAB_CLOSE_ANIMATION_MS = 160;
+const OPEN_CONCEPT_TABS_STORAGE_PREFIX = 'von:openConceptTabs';
+const OPEN_CONCEPT_TABS_STORAGE_VERSION = 1;
+const MAX_RESTORE_NOTICE_ITEMS = 3;
 // Singleton context menu element for tab operations (created lazily)
 let tabContextMenu = null;
 let currentContextMenuTarget = null; // The tab button element for which menu opened
 let lastContextMenuOpenAt = 0;
 let lastContextMenuTriggerEl = null;
+let suppressConceptTabPersistence = false;
+
+function getOpenConceptTabsStorageKey(namespace = null) {
+    return buildNamespaceScopedStorageKey(OPEN_CONCEPT_TABS_STORAGE_PREFIX, namespace);
+}
+
+function normaliseStoredConceptTabEntry(entry) {
+    if (!entry || typeof entry !== 'object') return null;
+    const conceptId = typeof entry.conceptId === 'string' ? entry.conceptId.trim() : '';
+    if (!conceptId) return null;
+    return {
+        conceptId,
+        conceptName:
+            typeof entry.conceptName === 'string' && entry.conceptName.trim()
+                ? entry.conceptName.trim()
+                : conceptId,
+        kind:
+            typeof entry.kind === 'string' && entry.kind.trim()
+                ? entry.kind.trim()
+                : 'unknown'
+    };
+}
+
+function getPersistedConceptTabSnapshot(namespace = null) {
+    const storageKey = getOpenConceptTabsStorageKey(namespace);
+    if (!storageKey) return null;
+    try {
+        const raw = localStorage.getItem(storageKey);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') return null;
+        const rawTabs = Array.isArray(parsed.tabs) ? parsed.tabs : [];
+        const seen = new Set();
+        const tabs = [];
+        rawTabs.forEach((entry) => {
+            const normalised = normaliseStoredConceptTabEntry(entry);
+            if (!normalised || seen.has(normalised.conceptId)) {
+                return;
+            }
+            seen.add(normalised.conceptId);
+            tabs.push(normalised);
+        });
+        return {
+            version: parsed.version,
+            activeConceptId:
+                typeof parsed.activeConceptId === 'string' && parsed.activeConceptId.trim()
+                    ? parsed.activeConceptId.trim()
+                    : null,
+            tabs
+        };
+    } catch (error) {
+        console.warn('[dynamicTabs] Failed to parse persisted concept tab snapshot:', error);
+        return null;
+    }
+}
+
+function resolveActiveConceptId(namespace, activeTabId = null) {
+    const explicitTabId = typeof activeTabId === 'string' ? activeTabId.trim() : '';
+    if (explicitTabId) {
+        for (const info of dynamicConceptTabs.values()) {
+            if (info.tabId !== explicitTabId) continue;
+            if (namespace && info.namespace && info.namespace !== namespace) continue;
+            return info.conceptId;
+        }
+        return null;
+    }
+
+    const activeButton = document.querySelector('.tab-button.active[data-concept-id]');
+    const activeConceptId =
+        typeof activeButton?.dataset?.conceptId === 'string'
+            ? activeButton.dataset.conceptId.trim()
+            : '';
+    if (!activeConceptId) return null;
+    const info = dynamicConceptTabs.get(activeConceptId);
+    if (!info) return null;
+    if (namespace && info.namespace && info.namespace !== namespace) return null;
+    return activeConceptId;
+}
+
+function buildOpenConceptTabsSnapshot(namespace = null, activeTabId = null) {
+    const effectiveNamespace =
+        typeof namespace === 'string' && namespace.trim()
+            ? namespace.trim()
+            : getSessionScopedNamespace();
+    if (!effectiveNamespace) return null;
+
+    const tabs = Array.from(dynamicConceptTabs.values())
+        .filter((info) => {
+            const infoNamespace =
+                typeof info.namespace === 'string' && info.namespace.trim()
+                    ? info.namespace.trim()
+                    : effectiveNamespace;
+            return infoNamespace === effectiveNamespace;
+        })
+        .map((info) => ({
+            conceptId: info.conceptId,
+            conceptName:
+                typeof info.conceptName === 'string' && info.conceptName.trim()
+                    ? info.conceptName.trim()
+                    : info.conceptId,
+            kind:
+                typeof info.kind === 'string' && info.kind.trim()
+                    ? info.kind.trim()
+                    : 'unknown'
+        }));
+
+    const activeConceptId = resolveActiveConceptId(effectiveNamespace, activeTabId);
+    return {
+        namespace: effectiveNamespace,
+        tabs,
+        activeConceptId: tabs.some((entry) => entry.conceptId === activeConceptId)
+            ? activeConceptId
+            : null
+    };
+}
+
+function persistOpenConceptTabs({ namespace = null, activeTabId = null, removeWhenEmpty = false } = {}) {
+    if (suppressConceptTabPersistence) return;
+
+    const snapshot = buildOpenConceptTabsSnapshot(namespace, activeTabId);
+    if (!snapshot || !snapshot.namespace) return;
+
+    const storageKey = getOpenConceptTabsStorageKey(snapshot.namespace);
+    if (!storageKey) return;
+
+    if (!snapshot.tabs.length) {
+        if (!removeWhenEmpty) return;
+        try {
+            localStorage.removeItem(storageKey);
+        } catch (error) {
+            console.warn('[dynamicTabs] Failed to clear persisted concept tab snapshot:', error);
+        }
+        return;
+    }
+
+    try {
+        localStorage.setItem(storageKey, JSON.stringify({
+            version: OPEN_CONCEPT_TABS_STORAGE_VERSION,
+            namespace: snapshot.namespace,
+            activeConceptId: snapshot.activeConceptId,
+            tabs: snapshot.tabs
+        }));
+    } catch (error) {
+        console.warn('[dynamicTabs] Failed to persist concept tab snapshot:', error);
+    }
+}
+
+async function checkConceptRestoreAvailability(conceptId) {
+    const response = await fetch(`/api/concepts/${encodeURIComponent(conceptId)}`);
+    if (response.ok) return true;
+    if (response.status === 404) return false;
+    throw new Error(`HTTP ${response.status}`);
+}
+
+function formatRestoreSkipNotice(skippedEntries) {
+    const names = skippedEntries
+        .map((entry) => entry?.conceptName || entry?.conceptId || '')
+        .filter(Boolean)
+        .slice(0, MAX_RESTORE_NOTICE_ITEMS);
+    const noun = skippedEntries.length === 1 ? 'tab' : 'tabs';
+    const details = names.length ? `: ${names.join(', ')}` : '.';
+    return `Skipped ${skippedEntries.length} unavailable concept ${noun} while restoring this namespace${details}`;
+}
 
 // Listen for key concepts being loaded and refresh all star buttons
 if (typeof window !== 'undefined') {
@@ -707,6 +878,10 @@ export function createOrActivateConceptTab(conceptId, conceptName, activate = tr
         if (activate) {
             activateTab(existing.tabId);
         }
+        persistOpenConceptTabs({
+            activeTabId: activate ? existing.tabId : null,
+            removeWhenEmpty: true
+        });
         return existing.tabId;
     }
 
@@ -721,6 +896,11 @@ export function createOrActivateConceptTab(conceptId, conceptName, activate = tr
         activateTab(tabId);
     }
 
+    persistOpenConceptTabs({
+        activeTabId: activate ? tabId : null,
+        removeWhenEmpty: true
+    });
+
     return tabId;
 }
 
@@ -732,6 +912,7 @@ export function createOrActivateConceptTab(conceptId, conceptName, activate = tr
  */
 function createDynamicConceptTab(conceptId, conceptName, tabId, kind, opts = {}) {
     console.log(`[dynamicTabs] Creating new tab: ${tabId} for concept ${conceptId}`);
+    const currentNamespace = getSessionScopedNamespace();
 
     // Get display names for the concept
     const displayNames = getConceptTypeDisplayNames(conceptId);
@@ -783,6 +964,7 @@ function createDynamicConceptTab(conceptId, conceptName, tabId, kind, opts = {})
         conceptName: conceptName,
         displayNames: displayNames,
         kind: kind,
+        namespace: currentNamespace,
         button: tabButton,
         content: tabContent
     });
@@ -951,6 +1133,7 @@ function createTabButton(tabId, displayName, conceptId, kind, opts = {}) {
     tabButton.className = 'tab-button closable';
     tabButton.dataset.tab = tabId;
     tabButton.dataset.conceptId = conceptId;
+    tabButton.dataset.conceptName = displayName;
     tabButton.title = displayName;
     tabButton.setAttribute('aria-label', `Open concept tab: ${displayName}`);
     if (kind === 'type') {
@@ -1111,8 +1294,9 @@ function insertTabContent(tabContent) {
  * Closes and removes a dynamic concept tab
  * @param {string} conceptId - The concept ID of the tab to close
  */
-export function closeDynamicConceptTab(conceptId) {
+export function closeDynamicConceptTab(conceptId, options = {}) {
     console.log(`[dynamicTabs] Closing concept tab for: ${conceptId}`);
+    const shouldPersist = options.persist !== false;
 
     const tabInfo = dynamicConceptTabs.get(conceptId);
     if (!tabInfo) {
@@ -1156,6 +1340,12 @@ export function closeDynamicConceptTab(conceptId) {
     } catch (_) { /* ignore */ }
 
     removeTabElements(tabInfo.button, tabInfo.content);
+    if (shouldPersist) {
+        persistOpenConceptTabs({
+            activeTabId: isActive ? 'chatTab' : null,
+            removeWhenEmpty: true
+        });
+    }
 
     console.log(`[dynamicTabs] Successfully closed tab for concept: ${conceptId}`);
 }
@@ -1503,13 +1693,81 @@ export function handleVontologyNodeSelection(conceptId, conceptName, activate = 
 /**
  * Closes all dynamic concept tabs
  */
-export function closeAllDynamicConceptTabs() {
+export function closeAllDynamicConceptTabs(options = {}) {
     console.log('[dynamicTabs] Closing all dynamic concept tabs');
+    const shouldPersist = options.persist !== false;
 
     const conceptIds = Array.from(dynamicConceptTabs.keys());
     conceptIds.forEach(conceptId => {
-        closeDynamicConceptTab(conceptId);
+        closeDynamicConceptTab(conceptId, { persist: shouldPersist });
     });
+}
+
+export async function restorePersistedConceptTabs(namespace = null) {
+    const effectiveNamespace =
+        typeof namespace === 'string' && namespace.trim()
+            ? namespace.trim()
+            : getSessionScopedNamespace();
+    if (!effectiveNamespace) {
+        return { restoredConceptIds: [], skippedConceptIds: [], activeTabId: null };
+    }
+
+    const snapshot = getPersistedConceptTabSnapshot(effectiveNamespace);
+    if (!snapshot || !snapshot.tabs.length) {
+        return { restoredConceptIds: [], skippedConceptIds: [], activeTabId: null };
+    }
+
+    const restoredConceptIds = [];
+    const skippedEntries = [];
+    suppressConceptTabPersistence = true;
+    try {
+        for (const entry of snapshot.tabs) {
+            let available = true;
+            try {
+                available = await checkConceptRestoreAvailability(entry.conceptId);
+            } catch (error) {
+                console.warn('[dynamicTabs] Restore availability check failed; proceeding with restore.', {
+                    conceptId: entry.conceptId,
+                    error
+                });
+                available = true;
+            }
+            if (!available) {
+                skippedEntries.push(entry);
+                continue;
+            }
+            createOrActivateConceptTab(
+                entry.conceptId,
+                entry.conceptName || entry.conceptId,
+                false,
+                { kind: entry.kind || 'unknown' }
+            );
+            restoredConceptIds.push(entry.conceptId);
+        }
+    } finally {
+        suppressConceptTabPersistence = false;
+    }
+
+    const activeTabId =
+        snapshot.activeConceptId && dynamicConceptTabs.has(snapshot.activeConceptId)
+            ? dynamicConceptTabs.get(snapshot.activeConceptId).tabId
+            : null;
+
+    persistOpenConceptTabs({
+        namespace: effectiveNamespace,
+        activeTabId,
+        removeWhenEmpty: true
+    });
+
+    if (skippedEntries.length) {
+        showToast(formatRestoreSkipNotice(skippedEntries), 'info', { durationMs: 5000 });
+    }
+
+    return {
+        restoredConceptIds,
+        skippedConceptIds: skippedEntries.map((entry) => entry.conceptId),
+        activeTabId
+    };
 }
 
 // Close all tabs except the given conceptId
@@ -2054,7 +2312,7 @@ export function initializeDynamicTabs() {
     console.log('[dynamicTabs] Initializing dynamic tabs functionality');
 
     // Clear any existing dynamic tabs on initialization
-    closeAllDynamicConceptTabs();
+    closeAllDynamicConceptTabs({ persist: false });
 
     // Listen for global requests to open concept tabs (avoids circular imports)
     // detail: { conceptId: string, conceptName: string, kind?: 'type'|'individual', activate?: boolean }
@@ -2146,6 +2404,17 @@ export function initializeDynamicTabs() {
         } catch (e) {
             console.error('[dynamicTabs] Failed handling open-annotation-tab event:', e);
         }
+    });
+
+    document.addEventListener('von:tab-activated', (evt) => {
+        const tabId = typeof evt?.detail?.tabId === 'string' ? evt.detail.tabId.trim() : '';
+        if (!tabId || dynamicConceptTabs.size === 0) {
+            return;
+        }
+        persistOpenConceptTabs({
+            activeTabId: tabId,
+            removeWhenEmpty: false
+        });
     });
 
     // Global delegation for note annotate buttons (in case buttons injected without direct listeners)
@@ -6872,41 +7141,6 @@ async function getCurrentUserId() {
     }
 }
 
-// Simple toast notification helper
-function showToast(message, type = 'info') {
-    const toast = document.createElement('div');
-    toast.className = `toast toast-${type}`;
-    toast.textContent = message;
-    toast.style.cssText = `
-        position: fixed;
-        top: 20px;
-        right: 20px;
-        padding: 12px 20px;
-        border-radius: 4px;
-        color: white;
-        font-weight: 500;
-        z-index: 10000;
-        opacity: 0;
-        transition: opacity 0.3s ease;
-    `;
-
-    if (type === 'error') {
-        toast.style.backgroundColor = '#ef4444';
-    } else {
-        toast.style.backgroundColor = '#10b981';
-    }
-
-    document.body.appendChild(toast);
-
-    // Fade in
-    setTimeout(() => { toast.style.opacity = '1'; }, 10);
-
-    // Auto remove
-    setTimeout(() => {
-        toast.style.opacity = '0';
-        setTimeout(() => document.body.removeChild(toast), 300);
-    }, 3000);
-}
 
 // Explicit exports for tests / external modules that need to force relabeling
 export { initializeRelationshipsUI, relabelAllDynamicConceptTabs, reloadConceptTab, updateTabLabelWithShortestName };
