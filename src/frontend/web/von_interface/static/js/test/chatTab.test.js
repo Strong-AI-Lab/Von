@@ -2414,19 +2414,21 @@ describe('thinking card toggle accessibility', () => {
             <div id="scrollableField"></div>
             <div class="thinking-card-wrapper" id="thinkingCardWrapper" aria-hidden="true">
                 <div class="thinking-card" role="status" aria-live="polite">
-                    <div class="thinking-card-header" id="loadingIndicator">
-                        <span class="thinking-card-phase loading-indicator-text">Thinking...</span>
-                        <span id="thinkingCardStatusBadge" class="thinking-card-status active" aria-hidden="true">Active</span>
-                        <span class="thinking-card-meta" id="thinkingCardMeta"></span>
-                        <button id="thinkingCardToggleButton" type="button" aria-hidden="true" aria-expanded="true" aria-controls="loadingIndicatorDetail" aria-label="Collapse thinking details" title="Collapse thinking details">
+                    <div class="thinking-card-header" id="loadingIndicator" data-thinking-role="header">
+                        <span class="thinking-card-phase loading-indicator-text" data-thinking-role="phase">Thinking...</span>
+                        <span id="thinkingCardStatusBadge" class="thinking-card-status active" data-thinking-role="status" aria-hidden="true">Active</span>
+                        <span class="thinking-card-meta" id="thinkingCardMeta" data-thinking-role="meta"></span>
+                        <button id="thinkingCardToggleButton" type="button" data-thinking-role="toggle" aria-hidden="true" aria-expanded="true" aria-controls="loadingIndicatorDetail" aria-label="Collapse thinking details" title="Collapse thinking details">
                             <span class="thinking-card-toggle-icon" aria-hidden="true">⌄</span>
                             <span class="visually-hidden">Toggle thinking details</span>
                         </button>
-                        <button id="retryThinkingButton" type="button" aria-hidden="true">Retry</button>
-                        <button id="copyThinkingDiagnosticsButton" type="button" aria-hidden="true">Copy diagnostics</button>
-                        <button id="abortButton" type="button" aria-hidden="true"></button>
+                        <button type="button" class="thinking-card-size-button" data-thinking-role="size-decrease" aria-hidden="true">−</button>
+                        <button type="button" class="thinking-card-size-button" data-thinking-role="size-increase" aria-hidden="true">+</button>
+                        <button id="retryThinkingButton" type="button" data-thinking-role="retry" aria-hidden="true">Retry</button>
+                        <button id="copyThinkingDiagnosticsButton" type="button" data-thinking-role="copy" aria-hidden="true">Copy diagnostics</button>
+                        <button id="abortButton" type="button" data-thinking-role="abort" aria-hidden="true"></button>
                     </div>
-                    <div class="thinking-card-body" id="loadingIndicatorDetail" aria-live="polite"></div>
+                    <div class="thinking-card-body" id="loadingIndicatorDetail" data-thinking-role="detail" aria-live="polite"></div>
                 </div>
             </div>
             <button id="sendButton"></button>
@@ -2439,6 +2441,21 @@ describe('thinking card toggle accessibility', () => {
         jest.restoreAllMocks();
         delete global.fetch;
     });
+
+    function getRetainedThinkingCardElements() {
+        const wrapper = document.querySelector('.thinking-card-inline-slot .thinking-card-wrapper');
+        if (!wrapper) {
+            return null;
+        }
+        return {
+            wrapper,
+            toggleButton: wrapper.querySelector('[data-thinking-role="toggle"]'),
+            detail: wrapper.querySelector('[data-thinking-role="detail"]'),
+            copyButton: wrapper.querySelector('[data-thinking-role="copy"]'),
+            sizeIncreaseButton: wrapper.querySelector('[data-thinking-role="size-increase"]'),
+            sizeDecreaseButton: wrapper.querySelector('[data-thinking-role="size-decrease"]')
+        };
+    }
 
     test('keeps card expanded while active and disables collapse toggle', async () => {
         const { getUserContext } = require('../apiService.js');
@@ -2772,13 +2789,17 @@ describe('thinking card toggle accessibility', () => {
         await expect(sendPromise).resolves.toBeUndefined();
     });
 
-    test('shows finished run history collapsed and allows expanding afterwards', async () => {
+    test('retains finished run history inline per turn and allows expanding afterwards', async () => {
         const { getUserContext } = require('../apiService.js');
         getUserContext.mockReturnValue({
             user_id: 'user',
             org_id: 'org',
             language: 'en-NZ',
             gmail_profile: null
+        });
+        const writeText = jest.fn().mockResolvedValue(undefined);
+        Object.assign(navigator, {
+            clipboard: { writeText }
         });
 
         document.getElementById('promptInput').value = 'test prompt';
@@ -2826,28 +2847,37 @@ describe('thinking card toggle accessibility', () => {
 
         await expect(sendMessage()).resolves.toBeUndefined();
 
-        const wrapper = document.getElementById('thinkingCardWrapper');
-        const toggleButton = document.getElementById('thinkingCardToggleButton');
-        const detail = document.getElementById('loadingIndicatorDetail');
+        const activeWrapper = document.getElementById('thinkingCardWrapper');
+        const retained = getRetainedThinkingCardElements();
 
-        expect(wrapper.getAttribute('aria-hidden')).toBe('false');
-        expect(toggleButton.getAttribute('aria-hidden')).toBe('false');
-        expect(toggleButton.disabled).toBe(false);
-        expect(toggleButton.getAttribute('aria-expanded')).toBe('false');
-        expect(toggleButton.getAttribute('aria-label')).toBe('Expand thinking details');
-        expect(toggleButton.getAttribute('title')).toBe('Expand thinking details');
-        expect(detail.getAttribute('aria-hidden')).toBe('true');
-        expect(detail.innerHTML).toContain('search_knowledge_base');
+        expect(activeWrapper.getAttribute('aria-hidden')).toBe('true');
+        expect(retained).not.toBeNull();
+        expect(retained.toggleButton.getAttribute('aria-expanded')).toBe('false');
+        expect(retained.toggleButton.getAttribute('aria-label')).toBe('Expand thinking details');
+        expect(retained.toggleButton.getAttribute('title')).toBe('Expand thinking details');
+        expect(retained.detail.getAttribute('aria-hidden')).toBe('true');
+        expect(retained.detail.innerHTML).toContain('search_knowledge_base');
+        expect(retained.copyButton.getAttribute('aria-hidden')).toBe('false');
 
-        toggleButton.click();
+        retained.copyButton.click();
+        await Promise.resolve();
 
-        expect(toggleButton.getAttribute('aria-expanded')).toBe('true');
-        expect(toggleButton.getAttribute('aria-label')).toBe('Collapse thinking details');
-        expect(toggleButton.getAttribute('title')).toBe('Collapse thinking details');
-        expect(detail.getAttribute('aria-hidden')).toBe('false');
+        expect(writeText).toHaveBeenCalledTimes(1);
+        expect(JSON.parse(writeText.mock.calls[0][0])).toEqual(expect.objectContaining({
+            latest_progress: expect.objectContaining({
+                tool: 'search_knowledge_base'
+            })
+        }));
+
+        retained.toggleButton.click();
+
+        expect(retained.toggleButton.getAttribute('aria-expanded')).toBe('true');
+        expect(retained.toggleButton.getAttribute('aria-label')).toBe('Collapse thinking details');
+        expect(retained.toggleButton.getAttribute('title')).toBe('Collapse thinking details');
+        expect(retained.detail.getAttribute('aria-hidden')).toBe('false');
     });
 
-    test('preserves a finished card even when live progress never becomes visible', async () => {
+    test('retains a finished card inline even when live progress never becomes visible', async () => {
         const { getUserContext } = require('../apiService.js');
         getUserContext.mockReturnValue({
             user_id: 'user',
@@ -2898,14 +2928,159 @@ describe('thinking card toggle accessibility', () => {
 
         await expect(sendMessage()).resolves.toBeUndefined();
 
-        const wrapper = document.getElementById('thinkingCardWrapper');
-        const indicatorText = document.querySelector('.loading-indicator-text');
-        const detail = document.getElementById('loadingIndicatorDetail');
+        const activeWrapper = document.getElementById('thinkingCardWrapper');
+        const retained = getRetainedThinkingCardElements();
+        const indicatorText = retained.wrapper.querySelector('.loading-indicator-text');
 
-        expect(wrapper.getAttribute('aria-hidden')).toBe('false');
+        expect(activeWrapper.getAttribute('aria-hidden')).toBe('true');
+        expect(retained).not.toBeNull();
         expect(indicatorText.textContent).toBe('Complete');
-        expect(detail.innerHTML).toContain('Turn completed');
-        expect(detail.innerHTML).toContain('Response generated');
+        expect(retained.detail.innerHTML).toContain('Turn completed');
+        expect(retained.detail.innerHTML).toContain('Response generated');
+    });
+
+    test('keeps one retained thinking card per completed turn instead of replacing the previous turn', async () => {
+        const { getUserContext } = require('../apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/api/settings/')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ show_tool_use_during_thinking: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/progress/')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        status: 'completed',
+                        phase: 'tool_execute',
+                        phase_label: 'Executing tools',
+                        tool: 'search_knowledge_base',
+                        result_summary: 'Completed'
+                    })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        response: 'Done',
+                        llm_debug: { model: 'gpt-5.2' }
+                    })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        document.getElementById('promptInput').value = 'first prompt';
+        await expect(sendMessage()).resolves.toBeUndefined();
+
+        document.getElementById('promptInput').value = 'second prompt';
+        await expect(sendMessage()).resolves.toBeUndefined();
+
+        const retainedCards = Array.from(document.querySelectorAll('.thinking-card-inline-slot .thinking-card-wrapper'));
+        expect(retainedCards).toHaveLength(2);
+        retainedCards.forEach((card) => {
+            const toggleButton = card.querySelector('[data-thinking-role="toggle"]');
+            expect(toggleButton.getAttribute('aria-expanded')).toBe('false');
+        });
+    });
+
+    test('supports keyboard resizing on retained thinking cards within bounds', async () => {
+        const { getUserContext } = require('../apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/api/settings/')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ show_tool_use_during_thinking: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/progress/')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        status: 'completed',
+                        phase: 'tool_execute',
+                        phase_label: 'Executing tools',
+                        tool: 'search_knowledge_base',
+                        result_summary: 'Completed'
+                    })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        response: 'Done',
+                        llm_debug: { model: 'gpt-5.2' }
+                    })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        document.getElementById('promptInput').value = 'resize prompt';
+        await expect(sendMessage()).resolves.toBeUndefined();
+
+        const retained = getRetainedThinkingCardElements();
+        retained.toggleButton.click();
+
+        expect(retained.detail.style.height).toBe('120px');
+        expect(retained.sizeDecreaseButton.disabled).toBe(true);
+        expect(retained.sizeIncreaseButton.disabled).toBe(false);
+
+        retained.sizeIncreaseButton.click();
+        expect(retained.detail.style.height).toBe('200px');
+        expect(retained.sizeDecreaseButton.disabled).toBe(false);
+
+        retained.sizeIncreaseButton.click();
+        retained.sizeIncreaseButton.click();
+        retained.sizeIncreaseButton.click();
+        retained.sizeIncreaseButton.click();
+        expect(retained.detail.style.height).toBe('520px');
+        expect(retained.sizeIncreaseButton.disabled).toBe(true);
+
+        retained.sizeDecreaseButton.click();
+        retained.sizeDecreaseButton.click();
+        retained.sizeDecreaseButton.click();
+        retained.sizeDecreaseButton.click();
+        retained.sizeDecreaseButton.click();
+        expect(retained.detail.style.height).toBe('120px');
+        expect(retained.sizeDecreaseButton.disabled).toBe(true);
     });
 });
 
@@ -2917,19 +3092,21 @@ describe('copy diagnostics button visibility on preserved finished card', () => 
             <div id="scrollableField"></div>
             <div class="thinking-card-wrapper" id="thinkingCardWrapper" aria-hidden="true">
                 <div class="thinking-card" role="status" aria-live="polite">
-                    <div class="thinking-card-header" id="loadingIndicator">
-                        <span class="thinking-card-phase loading-indicator-text">Thinking...</span>
-                        <span id="thinkingCardStatusBadge" class="thinking-card-status active" aria-hidden="true">Active</span>
-                        <span class="thinking-card-meta" id="thinkingCardMeta"></span>
-                        <button id="thinkingCardToggleButton" type="button" aria-hidden="true" aria-expanded="true" aria-controls="loadingIndicatorDetail" aria-label="Collapse thinking details" title="Collapse thinking details">
+                    <div class="thinking-card-header" id="loadingIndicator" data-thinking-role="header">
+                        <span class="thinking-card-phase loading-indicator-text" data-thinking-role="phase">Thinking...</span>
+                        <span id="thinkingCardStatusBadge" class="thinking-card-status active" data-thinking-role="status" aria-hidden="true">Active</span>
+                        <span class="thinking-card-meta" id="thinkingCardMeta" data-thinking-role="meta"></span>
+                        <button id="thinkingCardToggleButton" type="button" data-thinking-role="toggle" aria-hidden="true" aria-expanded="true" aria-controls="loadingIndicatorDetail" aria-label="Collapse thinking details" title="Collapse thinking details">
                             <span class="thinking-card-toggle-icon" aria-hidden="true">⌄</span>
                             <span class="visually-hidden">Toggle thinking details</span>
                         </button>
-                        <button id="retryThinkingButton" type="button" aria-hidden="true">Retry</button>
-                        <button id="copyThinkingDiagnosticsButton" type="button" aria-hidden="true">Copy diagnostics</button>
-                        <button id="abortButton" type="button" aria-hidden="true"></button>
+                        <button type="button" class="thinking-card-size-button" data-thinking-role="size-decrease" aria-hidden="true">−</button>
+                        <button type="button" class="thinking-card-size-button" data-thinking-role="size-increase" aria-hidden="true">+</button>
+                        <button id="retryThinkingButton" type="button" data-thinking-role="retry" aria-hidden="true">Retry</button>
+                        <button id="copyThinkingDiagnosticsButton" type="button" data-thinking-role="copy" aria-hidden="true">Copy diagnostics</button>
+                        <button id="abortButton" type="button" data-thinking-role="abort" aria-hidden="true"></button>
                     </div>
-                    <div class="thinking-card-body" id="loadingIndicatorDetail" aria-live="polite"></div>
+                    <div class="thinking-card-body" id="loadingIndicatorDetail" data-thinking-role="detail" aria-live="polite"></div>
                 </div>
             </div>
             <button id="sendButton"></button>

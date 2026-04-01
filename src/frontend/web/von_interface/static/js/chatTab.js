@@ -680,38 +680,138 @@ const THINKING_STATUS_CLASS_NAMES = new Set([
 const DIAGNOSTICS_EXPORT_ENDPOINT = '/von/diagnostics/export';
 const DIAGNOSTICS_EXPORT_SHORTCUT_HINT = 'Ctrl+Shift+D';
 
-function getLoadingIndicatorTextEl() {
-    const loadingIndicator = document.getElementById('loadingIndicator');
+const THINKING_CARD_BODY_MIN_HEIGHT_PX = 120;
+const THINKING_CARD_BODY_DEFAULT_HEIGHT_PX = 220;
+const THINKING_CARD_BODY_MAX_HEIGHT_PX = 520;
+const THINKING_CARD_BODY_STEP_PX = 80;
+
+function getThinkingCardWrapperEl(cardRoot = null) {
+    if (cardRoot instanceof HTMLElement) {
+        return cardRoot;
+    }
+    return document.getElementById('thinkingCardWrapper');
+}
+
+function getThinkingCardElementByRole(role, cardRoot = null, fallbackId = '') {
+    const explicitRoot = cardRoot instanceof HTMLElement;
+    const wrapper = getThinkingCardWrapperEl(cardRoot);
+    if (!wrapper) {
+        return (!explicitRoot && fallbackId) ? document.getElementById(fallbackId) : null;
+    }
+    const selector = `[data-thinking-role="${role}"]`;
+    const element = wrapper.querySelector(selector);
+    if (element) {
+        return element;
+    }
+    return (!explicitRoot && fallbackId) ? document.getElementById(fallbackId) : null;
+}
+
+function getLoadingIndicatorTextEl(cardRoot = null) {
+    const loadingIndicator = getLoadingIndicatorEl(cardRoot);
     if (!loadingIndicator) {
         return null;
     }
-    return loadingIndicator.querySelector('.loading-indicator-text');
+    return loadingIndicator.querySelector('[data-thinking-role="phase"], .loading-indicator-text');
 }
 
-function getLoadingIndicatorEl() {
-    return document.getElementById('loadingIndicator');
+function getLoadingIndicatorEl(cardRoot = null) {
+    return getThinkingCardElementByRole('header', cardRoot, 'loadingIndicator');
 }
 
-function getLoadingIndicatorDetailEl() {
-    return document.getElementById('loadingIndicatorDetail');
+function getLoadingIndicatorDetailEl(cardRoot = null) {
+    return getThinkingCardElementByRole('detail', cardRoot, 'loadingIndicatorDetail');
 }
 
-function setLoadingIndicatorText(text) {
-    const el = getLoadingIndicatorTextEl();
+function getThinkingCardToggleButtonEl(cardRoot = null) {
+    return getThinkingCardElementByRole('toggle', cardRoot, 'thinkingCardToggleButton');
+}
+
+function getThinkingCardStatusBadgeEl(cardRoot = null) {
+    return getThinkingCardElementByRole('status', cardRoot, 'thinkingCardStatusBadge');
+}
+
+function getThinkingCardMetaEl(cardRoot = null) {
+    return getThinkingCardElementByRole('meta', cardRoot, 'thinkingCardMeta');
+}
+
+function getThinkingCardRetryButtonEl(cardRoot = null) {
+    return getThinkingCardElementByRole('retry', cardRoot, 'retryThinkingButton');
+}
+
+function getThinkingCardCopyButtonEl(cardRoot = null) {
+    return getThinkingCardElementByRole('copy', cardRoot, 'copyThinkingDiagnosticsButton');
+}
+
+function getThinkingCardAbortButtonEl(cardRoot = null) {
+    return getThinkingCardElementByRole('abort', cardRoot, 'abortButton');
+}
+
+function getThinkingCardSizeDecreaseButtonEl(cardRoot = null) {
+    return getThinkingCardElementByRole('size-decrease', cardRoot);
+}
+
+function getThinkingCardSizeIncreaseButtonEl(cardRoot = null) {
+    return getThinkingCardElementByRole('size-increase', cardRoot);
+}
+
+function clampThinkingCardBodyHeightPx(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+        return THINKING_CARD_BODY_DEFAULT_HEIGHT_PX;
+    }
+    return Math.max(
+        THINKING_CARD_BODY_MIN_HEIGHT_PX,
+        Math.min(THINKING_CARD_BODY_MAX_HEIGHT_PX, Math.round(numeric))
+    );
+}
+
+function ensureThinkingCardBodyHeightPx(request, detailEl = null) {
+    if (!request || typeof request !== 'object') {
+        const contentHeight = (detailEl instanceof HTMLElement && Number.isFinite(detailEl.scrollHeight))
+            ? detailEl.scrollHeight
+            : THINKING_CARD_BODY_DEFAULT_HEIGHT_PX;
+        return clampThinkingCardBodyHeightPx(
+            Math.min(
+                Math.max(contentHeight, THINKING_CARD_BODY_MIN_HEIGHT_PX),
+                THINKING_CARD_BODY_DEFAULT_HEIGHT_PX
+            )
+        );
+    }
+
+    const existingHeight = Number(request.thinkingCardBodyHeightPx);
+    if (Number.isFinite(existingHeight)) {
+        request.thinkingCardBodyHeightPx = clampThinkingCardBodyHeightPx(existingHeight);
+        return request.thinkingCardBodyHeightPx;
+    }
+
+    const contentHeight = (detailEl instanceof HTMLElement && Number.isFinite(detailEl.scrollHeight))
+        ? detailEl.scrollHeight
+        : THINKING_CARD_BODY_DEFAULT_HEIGHT_PX;
+    request.thinkingCardBodyHeightPx = clampThinkingCardBodyHeightPx(
+        Math.min(
+            Math.max(contentHeight, THINKING_CARD_BODY_MIN_HEIGHT_PX),
+            THINKING_CARD_BODY_DEFAULT_HEIGHT_PX
+        )
+    );
+    return request.thinkingCardBodyHeightPx;
+}
+
+function setLoadingIndicatorText(text, cardRoot = null) {
+    const el = getLoadingIndicatorTextEl(cardRoot);
     if (!el) {
         return;
     }
     el.textContent = String(text ?? '').trim() || DEFAULT_THINKING_TEXT;
 }
 
-function setLoadingIndicatorTooltip(text) {
-    const detailEl = getLoadingIndicatorDetailEl();
+function setLoadingIndicatorTooltip(text, cardRoot = null) {
+    const detailEl = getLoadingIndicatorDetailEl(cardRoot);
     if (detailEl) {
         return;
     }
 
     const value = String(text ?? '').trim();
-    const wrapper = getLoadingIndicatorEl();
+    const wrapper = getLoadingIndicatorEl(cardRoot);
     if (wrapper) {
         // Opt out of suppressTooltips.js for this element.
         // Important: set before `title`, otherwise the MutationObserver may strip it.
@@ -721,7 +821,7 @@ function setLoadingIndicatorTooltip(text) {
         wrapper.setAttribute('data-original-title', value);
     }
 
-    const textEl = getLoadingIndicatorTextEl();
+    const textEl = getLoadingIndicatorTextEl(cardRoot);
     if (textEl) {
         textEl.setAttribute('data-keep-title', 'true');
         textEl.title = value;
@@ -733,12 +833,11 @@ function setLoadingIndicatorTooltip(text) {
 /**
  * Update the thinking card body with tool history HTML.
  */
-function setLoadingIndicatorDetailHtml(html) {
-    const detailEl = getLoadingIndicatorDetailEl();
+function setLoadingIndicatorDetailHtml(html, request = getThinkingCardDisplayRequest(), cardRoot = null) {
+    const detailEl = getLoadingIndicatorDetailEl(cardRoot);
     if (!detailEl) {
         return;
     }
-    const request = getThinkingCardDisplayRequest();
     snapshotThinkingDiagnosticExpansionState(detailEl, request);
     const value = String(html ?? '').trim();
     detailEl.innerHTML = value;
@@ -749,7 +848,7 @@ function setLoadingIndicatorDetailHtml(html) {
     bindThinkingDiagnosticToggles(detailEl, request);
 
     // Update wrapper to show/hide tool list
-    const wrapper = document.getElementById('thinkingCardWrapper');
+    const wrapper = getThinkingCardWrapperEl(cardRoot);
     if (wrapper) {
         if (value) {
             wrapper.classList.add('has-tools');
@@ -758,15 +857,15 @@ function setLoadingIndicatorDetailHtml(html) {
         }
     }
 
-    syncThinkingCardExpandedStateToDom();
+    syncThinkingCardExpandedStateToDom(request, cardRoot);
 }
 
 /**
  * Legacy function - redirects to HTML version.
  */
-function _setLoadingIndicatorDetailText(text) {
+function _setLoadingIndicatorDetailText(text, cardRoot = null) {
     // For plain text, escape and wrap
-    const detailEl = getLoadingIndicatorDetailEl();
+    const detailEl = getLoadingIndicatorDetailEl(cardRoot);
     if (!detailEl) {
         return;
     }
@@ -778,7 +877,7 @@ function _setLoadingIndicatorDetailText(text) {
         detailEl.innerHTML = '';
     }
 
-    const wrapper = document.getElementById('thinkingCardWrapper');
+    const wrapper = getThinkingCardWrapperEl(cardRoot);
     if (wrapper) {
         if (value) {
             wrapper.classList.add('has-tools');
@@ -787,7 +886,7 @@ function _setLoadingIndicatorDetailText(text) {
         }
     }
 
-    syncThinkingCardExpandedStateToDom();
+    syncThinkingCardExpandedStateToDom(getThinkingCardDisplayRequest(), cardRoot);
 }
 
 function createThinkingCardDisplayState() {
@@ -972,10 +1071,6 @@ export function __testOnly_reduceThinkingCardDisplayState(state, event = {}) {
     return reduceThinkingCardDisplayState(state, event);
 }
 
-function getThinkingCardToggleButtonEl() {
-    return document.getElementById('thinkingCardToggleButton');
-}
-
 function ensureThinkingCardDisplayState(request) {
     if (!request || typeof request !== 'object') {
         return null;
@@ -1003,10 +1098,91 @@ function shouldDisableThinkingCardToggle(request) {
     return request === activeChatRequest && !isTerminalThinkingProgress(request.latestProgress);
 }
 
-function syncThinkingCardExpandedStateToDom(request = getThinkingCardDisplayRequest()) {
-    const wrapper = document.getElementById('thinkingCardWrapper');
-    const detailEl = getLoadingIndicatorDetailEl();
-    const toggleButton = getThinkingCardToggleButtonEl();
+function syncThinkingCardBodyHeightToDom(request = getThinkingCardDisplayRequest(), cardRoot = null) {
+    const wrapper = getThinkingCardWrapperEl(cardRoot);
+    const detailEl = getLoadingIndicatorDetailEl(cardRoot);
+    if (!wrapper || !detailEl) {
+        return;
+    }
+
+    const state = ensureThinkingCardDisplayState(request) || createThinkingCardDisplayState();
+    const shouldShowBody = wrapper.classList.contains('has-tools') && state.expanded !== false;
+    if (!shouldShowBody) {
+        if (!wrapper.classList.contains('has-tools')) {
+            detailEl.style.height = '';
+        }
+        return;
+    }
+
+    const nextHeightPx = ensureThinkingCardBodyHeightPx(request, detailEl);
+    detailEl.style.height = `${nextHeightPx}px`;
+}
+
+function updateThinkingCardResizeControls(request = getThinkingCardDisplayRequest(), cardRoot = null) {
+    const wrapper = getThinkingCardWrapperEl(cardRoot);
+    const detailEl = getLoadingIndicatorDetailEl(cardRoot);
+    const decreaseButton = getThinkingCardSizeDecreaseButtonEl(cardRoot);
+    const increaseButton = getThinkingCardSizeIncreaseButtonEl(cardRoot);
+    if (!decreaseButton && !increaseButton) {
+        return;
+    }
+
+    const visible = !!wrapper && wrapper.getAttribute('aria-hidden') !== 'true';
+    const state = ensureThinkingCardDisplayState(request) || createThinkingCardDisplayState();
+    const enabled = visible
+        && !!wrapper
+        && wrapper.classList.contains('has-tools')
+        && state.expanded !== false
+        && detailEl instanceof HTMLElement;
+    const currentHeight = enabled
+        ? clampThinkingCardBodyHeightPx(
+            Number.parseFloat(detailEl.style.height)
+            || detailEl.getBoundingClientRect().height
+            || ensureThinkingCardBodyHeightPx(request, detailEl)
+        )
+        : THINKING_CARD_BODY_DEFAULT_HEIGHT_PX;
+
+    [decreaseButton, increaseButton].forEach((button) => {
+        if (!(button instanceof HTMLButtonElement)) {
+            return;
+        }
+        button.setAttribute('aria-hidden', visible ? 'false' : 'true');
+        button.disabled = !enabled;
+    });
+
+    if (decreaseButton instanceof HTMLButtonElement) {
+        decreaseButton.disabled = !enabled || currentHeight <= THINKING_CARD_BODY_MIN_HEIGHT_PX;
+    }
+    if (increaseButton instanceof HTMLButtonElement) {
+        increaseButton.disabled = !enabled || currentHeight >= THINKING_CARD_BODY_MAX_HEIGHT_PX;
+    }
+}
+
+function adjustThinkingCardBodyHeight(request = getThinkingCardDisplayRequest(), deltaPx = 0, cardRoot = null) {
+    const detailEl = getLoadingIndicatorDetailEl(cardRoot);
+    if (!(detailEl instanceof HTMLElement)) {
+        return;
+    }
+
+    const baseHeight = (request && Number.isFinite(request.thinkingCardBodyHeightPx))
+        ? Number(request.thinkingCardBodyHeightPx)
+        : (
+            Number.parseFloat(detailEl.style.height)
+            || detailEl.getBoundingClientRect().height
+            || ensureThinkingCardBodyHeightPx(request, detailEl)
+        );
+    const nextHeightPx = clampThinkingCardBodyHeightPx(baseHeight + deltaPx);
+    if (request && typeof request === 'object') {
+        request.thinkingCardBodyHeightPx = nextHeightPx;
+    }
+    detailEl.style.height = `${nextHeightPx}px`;
+    updateThinkingCardResizeControls(request, cardRoot);
+}
+
+function syncThinkingCardExpandedStateToDom(request = getThinkingCardDisplayRequest(), cardRoot = null) {
+    const wrapper = getThinkingCardWrapperEl(cardRoot);
+    const detailEl = getLoadingIndicatorDetailEl(cardRoot);
+    const toggleButton = getThinkingCardToggleButtonEl(cardRoot);
     if (!wrapper) {
         return;
     }
@@ -1034,9 +1210,12 @@ function syncThinkingCardExpandedStateToDom(request = getThinkingCardDisplayRequ
             toggleButton.title = THINKING_CARD_TOGGLE_ARIA_LABEL_COLLAPSED;
         }
     }
+
+    syncThinkingCardBodyHeightToDom(request, cardRoot);
+    updateThinkingCardResizeControls(request, cardRoot);
 }
 
-function applyThinkingCardDisplayStateUpdate(request, event = {}) {
+function applyThinkingCardDisplayStateUpdate(request, event = {}, cardRoot = null) {
     if (!request || typeof request !== 'object') {
         return null;
     }
@@ -1046,13 +1225,13 @@ function applyThinkingCardDisplayStateUpdate(request, event = {}) {
     request.thinkingCardDisplayState = next;
 
     if (previous.expanded !== next.expanded || previous.autoFurlApplied !== next.autoFurlApplied) {
-        syncThinkingCardExpandedStateToDom(request);
+        syncThinkingCardExpandedStateToDom(request, cardRoot);
     }
 
     return next;
 }
 
-function toggleThinkingCardExpanded(request = getThinkingCardDisplayRequest()) {
+function toggleThinkingCardExpanded(request = getThinkingCardDisplayRequest(), cardRoot = null) {
     if (!request || typeof request !== 'object') {
         return;
     }
@@ -1061,11 +1240,11 @@ function toggleThinkingCardExpanded(request = getThinkingCardDisplayRequest()) {
         applyThinkingCardDisplayStateUpdate(request, {
             type: 'manual_set',
             expanded: true
-        });
+        }, cardRoot);
         return;
     }
 
-    applyThinkingCardDisplayStateUpdate(request, { type: 'manual_toggle' });
+    applyThinkingCardDisplayStateUpdate(request, { type: 'manual_toggle' }, cardRoot);
 }
 
 function cloneThinkingToolHistory(history) {
@@ -1289,14 +1468,14 @@ function applyThinkingProgressUpdate(request, nextProgress) {
     return true;
 }
 
-function refreshThinkingCardProgressUi(request) {
+function refreshThinkingCardProgressUi(request, cardRoot = null) {
     if (!request || typeof request !== 'object') {
         return;
     }
 
-    setLoadingIndicatorText(formatToolUseProgressText(request.latestProgress, request));
-    setLoadingIndicatorDetailHtml(renderThinkingCardBodyHTML(request));
-    updateThinkingCardMeta(request, request.latestProgress || null);
+    setLoadingIndicatorText(formatToolUseProgressText(request.latestProgress, request), cardRoot);
+    setLoadingIndicatorDetailHtml(renderThinkingCardBodyHTML(request), request, cardRoot);
+    updateThinkingCardMeta(request, request.latestProgress || null, cardRoot);
 }
 
 function createThinkingCardHistorySnapshot(request) {
@@ -1369,10 +1548,107 @@ function createThinkingCardHistorySnapshot(request) {
             : (Array.isArray(request.expandedThinkingDiagnosticKeys)
                 ? request.expandedThinkingDiagnosticKeys.slice()
                 : []),
+        thinkingCardBodyHeightPx: Number.isFinite(request.thinkingCardBodyHeightPx)
+            ? clampThinkingCardBodyHeightPx(request.thinkingCardBodyHeightPx)
+            : null,
         thinkingStartedAtMs: Number.isFinite(request.thinkingStartedAtMs) ? Number(request.thinkingStartedAtMs) : null,
         thinkingFinishedAtMs: Date.now(),
         thinkingCardDisplayState: completedDisplayState
     };
+}
+
+function getMessageContainerByTurnId(turnId) {
+    const cleanTurnId = String(turnId || '').trim();
+    if (!cleanTurnId) {
+        return null;
+    }
+    return document.querySelector(`.message-container[data-turn-id="${cssEscape(cleanTurnId)}"]`);
+}
+
+function getThinkingCardSlotForTurn(turnId) {
+    const messageContainer = getMessageContainerByTurnId(turnId);
+    if (!(messageContainer instanceof HTMLElement)) {
+        return null;
+    }
+    return messageContainer.querySelector('.thinking-card-inline-slot');
+}
+
+function buildRetainedThinkingCardDetailId(turnId) {
+    const cleanTurnId = String(turnId || '').trim().replace(/[^a-zA-Z0-9_-]+/g, '-');
+    return `thinkingCardDetailRetained-${cleanTurnId || `card-${Date.now()}`}`;
+}
+
+function createRetainedThinkingCardWrapper(turnId) {
+    const detailId = buildRetainedThinkingCardDetailId(turnId);
+    const wrapper = document.createElement('div');
+    wrapper.className = 'thinking-card-wrapper retained-thinking-card';
+    wrapper.setAttribute('aria-hidden', 'false');
+    wrapper.innerHTML = `
+        <div class="thinking-card" role="group" aria-label="Thinking details for this turn">
+            <div class="thinking-card-header" data-thinking-role="header">
+                <span class="thinking-card-dot" aria-hidden="true"></span>
+                <span class="thinking-card-phase loading-indicator-text" data-thinking-role="phase">Thinking...</span>
+                <span class="thinking-card-status active" data-thinking-role="status" aria-hidden="true">Active</span>
+                <span class="thinking-card-meta" data-thinking-role="meta"></span>
+                <button class="btn thinking-card-action thinking-card-toggle" type="button"
+                    data-thinking-role="toggle" aria-hidden="false" aria-expanded="true"
+                    aria-controls="${escapeHtml(detailId)}"
+                    aria-label="${escapeHtml(THINKING_CARD_TOGGLE_ARIA_LABEL_EXPANDED)}"
+                    title="${escapeHtml(THINKING_CARD_TOGGLE_ARIA_LABEL_EXPANDED)}">
+                    <span class="thinking-card-toggle-icon" aria-hidden="true">
+                        <svg viewBox="0 0 16 16" focusable="false">
+                            <path d="M4 6l4 4 4-4"></path>
+                        </svg>
+                    </span>
+                    <span class="visually-hidden">Toggle thinking details</span>
+                </button>
+                <button class="btn thinking-card-action thinking-card-size-button" type="button"
+                    data-thinking-role="size-decrease" aria-hidden="false"
+                    aria-label="Show fewer thinking details" title="Show fewer thinking details">−</button>
+                <button class="btn thinking-card-action thinking-card-size-button" type="button"
+                    data-thinking-role="size-increase" aria-hidden="false"
+                    aria-label="Show more thinking details" title="Show more thinking details">+</button>
+                <button class="btn thinking-card-action" type="button"
+                    data-thinking-role="copy" aria-hidden="false"
+                    aria-label="Copy diagnostics" title="Copy diagnostics">Copy diagnostics</button>
+            </div>
+            <div class="thinking-card-body" data-thinking-role="detail" id="${escapeHtml(detailId)}" aria-live="polite"></div>
+        </div>
+    `;
+    return wrapper;
+}
+
+function renderRetainedThinkingCardForTurn(request, turnId) {
+    if (!request || typeof request !== 'object') {
+        return false;
+    }
+
+    const slot = getThinkingCardSlotForTurn(turnId);
+    if (!(slot instanceof HTMLElement)) {
+        return false;
+    }
+
+    const detailHtml = renderThinkingCardBodyHTML(request);
+    if (!detailHtml) {
+        slot.replaceChildren();
+        return false;
+    }
+
+    let wrapper = slot.querySelector('.thinking-card-wrapper');
+    if (!(wrapper instanceof HTMLElement)) {
+        wrapper = createRetainedThinkingCardWrapper(turnId);
+        slot.replaceChildren(wrapper);
+    }
+
+    wrapper._thinkingCardRequest = request;
+    bindThinkingCardControls(wrapper, {
+        requestResolver: () => wrapper._thinkingCardRequest
+    });
+    setLoadingIndicatorText(formatToolUseProgressText(request.latestProgress, request), wrapper);
+    setLoadingIndicatorDetailHtml(detailHtml, request, wrapper);
+    updateThinkingCardMeta(request, request.latestProgress || null, wrapper);
+    syncThinkingCardExpandedStateToDom(request, wrapper);
+    return true;
 }
 
 function persistFinishedThinkingCard(request) {
@@ -1389,8 +1665,7 @@ function persistFinishedThinkingCard(request) {
     }
 
     lastFinishedThinkingCard = snapshot;
-    refreshThinkingCardProgressUi(snapshot);
-    return true;
+    return renderRetainedThinkingCardForTurn(snapshot, request.resultTurnId);
 }
 
 function createClientRequestId() {
@@ -1856,8 +2131,8 @@ export function __testOnly_shouldAcceptThinkingProgressUpdate(currentProgress = 
     return shouldAcceptThinkingProgressUpdate(currentProgress, nextProgress);
 }
 
-function updateThinkingCardStatusBadge(progress) {
-    const badgeEl = document.getElementById('thinkingCardStatusBadge');
+function updateThinkingCardStatusBadge(progress, cardRoot = null) {
+    const badgeEl = getThinkingCardStatusBadgeEl(cardRoot);
     if (!badgeEl) {
         return;
     }
@@ -1877,8 +2152,8 @@ function formatToolUseProgressText(progress, request = null) {
 /**
  * Update the thinking card meta element (elapsed time + liveness metadata).
  */
-function updateThinkingCardMeta(request, progress) {
-    const metaEl = document.getElementById('thinkingCardMeta');
+function updateThinkingCardMeta(request, progress, cardRoot = null) {
+    const metaEl = getThinkingCardMetaEl(cardRoot);
     if (!metaEl) return;
 
     const effectiveProgress = (progress && typeof progress === 'object')
@@ -1886,7 +2161,7 @@ function updateThinkingCardMeta(request, progress) {
         : ((request && request.latestProgress && typeof request.latestProgress === 'object')
             ? request.latestProgress
             : null);
-    updateThinkingCardStatusBadge(effectiveProgress);
+    updateThinkingCardStatusBadge(effectiveProgress, cardRoot);
 
     const bits = [];
 
@@ -2713,7 +2988,7 @@ function bindThinkingDiagnosticToggles(container, request = getThinkingCardDispl
         }
 
         detailsEl.addEventListener('toggle', () => {
-            const currentRequest = getThinkingCardDisplayRequest() || request;
+            const currentRequest = request || getThinkingCardDisplayRequest();
             const currentExpandedKeys = ensureThinkingDiagnosticExpansionState(currentRequest);
             if (detailsEl.open) {
                 currentExpandedKeys.add(key);
@@ -15154,6 +15429,8 @@ async function switchToChatSession(sessionId) {
 
     abortActiveHistoryRequest();
     abortActiveChatRequest();
+    lastFinishedThinkingCard = null;
+    setThinkingState(false, null);
 
     const scrollableField = document.getElementById('scrollableField');
     if (!scrollableField) {
@@ -16002,6 +16279,8 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
     scrollableField.innerHTML = '';
     transcriptTurns.length = 0;
     clearLlmDebugDataEntries();
+    lastFinishedThinkingCard = null;
+    setThinkingState(false, null);
 
     historyMessages.forEach((msg, index) => {
         if (msg.role === 'user' || msg.role === 'assistant') {
@@ -19781,16 +20060,18 @@ export function initializeChatTab() {
 
 function setThinkingState(isThinking, request = activeChatRequest, options = {}) {
     const preserveFinishedCard = !!options.preserveFinishedCard;
-    const wrapper = document.getElementById('thinkingCardWrapper');
-    const loadingIndicator = document.getElementById('loadingIndicator');
-    const loadingDetail = document.getElementById('loadingIndicatorDetail');
+    const wrapper = getThinkingCardWrapperEl();
+    const loadingIndicator = getLoadingIndicatorEl();
+    const loadingDetail = getLoadingIndicatorDetailEl();
     const toggleButton = getThinkingCardToggleButtonEl();
-    const abortButton = document.getElementById('abortButton');
-    const retryButton = document.getElementById('retryThinkingButton');
-    const copyDiagnosticsButton = document.getElementById('copyThinkingDiagnosticsButton');
-    const statusBadge = document.getElementById('thinkingCardStatusBadge');
+    const abortButton = getThinkingCardAbortButtonEl();
+    const retryButton = getThinkingCardRetryButtonEl();
+    const copyDiagnosticsButton = getThinkingCardCopyButtonEl();
+    const statusBadge = getThinkingCardStatusBadgeEl();
     const sendButton = document.getElementById('sendButton');
-    const metaEl = document.getElementById('thinkingCardMeta');
+    const metaEl = getThinkingCardMetaEl();
+    const sizeDecreaseButton = getThinkingCardSizeDecreaseButtonEl();
+    const sizeIncreaseButton = getThinkingCardSizeIncreaseButtonEl();
 
     if (isThinking && request) {
         request.thinkingCardDisplayState = reduceThinkingCardDisplayState(
@@ -19875,8 +20156,17 @@ function setThinkingState(isThinking, request = activeChatRequest, options = {})
         }
     }
 
+    [sizeDecreaseButton, sizeIncreaseButton].forEach((button) => {
+        if (!(button instanceof HTMLButtonElement)) {
+            return;
+        }
+        button.setAttribute('aria-hidden', (isThinking || preserveFinishedCard) ? 'false' : 'true');
+    });
+
     if (isThinking || preserveFinishedCard) {
         syncThinkingCardExpandedStateToDom(request);
+    } else {
+        updateThinkingCardResizeControls(request);
     }
 }
 
@@ -20258,39 +20548,84 @@ async function copyActiveThinkingDiagnostics(button = null, requestOverride = nu
     return copyTextToClipboard(text);
 }
 
-function ensureAbortButtonBound() {
-    const toggleButton = getThinkingCardToggleButtonEl();
-    const abortButton = document.getElementById('abortButton');
-    const retryButton = document.getElementById('retryThinkingButton');
-    const copyDiagnosticsButton = document.getElementById('copyThinkingDiagnosticsButton');
+function bindThinkingCardControls(cardRoot = null, options = {}) {
+    const explicitRoot = cardRoot instanceof HTMLElement;
+    const wrapper = getThinkingCardWrapperEl(cardRoot);
+    if (!wrapper && explicitRoot) {
+        return;
+    }
+    const rootRef = explicitRoot ? wrapper : null;
+
+    const requestResolver = (typeof options.requestResolver === 'function')
+        ? options.requestResolver
+        : (() => getThinkingCardDisplayRequest());
+    const bindAbort = options.bindAbort === true;
+    const bindRetry = options.bindRetry === true;
+
+    const toggleButton = getThinkingCardToggleButtonEl(rootRef);
+    const abortButton = getThinkingCardAbortButtonEl(rootRef);
+    const retryButton = getThinkingCardRetryButtonEl(rootRef);
+    const copyDiagnosticsButton = getThinkingCardCopyButtonEl(rootRef);
+    const sizeDecreaseButton = getThinkingCardSizeDecreaseButtonEl(rootRef);
+    const sizeIncreaseButton = getThinkingCardSizeIncreaseButtonEl(rootRef);
 
     if (toggleButton && toggleButton.dataset.bound !== '1') {
         toggleButton.dataset.bound = '1';
         toggleButton.addEventListener('click', () => {
-            toggleThinkingCardExpanded();
-        });
-    }
-
-    if (abortButton && abortButton.dataset.bound !== '1') {
-        abortButton.dataset.bound = '1';
-        abortButton.addEventListener('click', () => {
-            abortActiveChatRequest();
-        });
-    }
-
-    if (retryButton && retryButton.dataset.bound !== '1') {
-        retryButton.dataset.bound = '1';
-        retryButton.addEventListener('click', () => {
-            retryActiveChatRequest();
+            toggleThinkingCardExpanded(requestResolver(), rootRef);
         });
     }
 
     if (copyDiagnosticsButton && copyDiagnosticsButton.dataset.bound !== '1') {
         copyDiagnosticsButton.dataset.bound = '1';
         copyDiagnosticsButton.addEventListener('click', () => {
-            void copyActiveThinkingDiagnostics(copyDiagnosticsButton);
+            void copyActiveThinkingDiagnostics(copyDiagnosticsButton, requestResolver());
         });
     }
+
+    if (sizeDecreaseButton && sizeDecreaseButton.dataset.bound !== '1') {
+        sizeDecreaseButton.dataset.bound = '1';
+        sizeDecreaseButton.addEventListener('click', () => {
+            adjustThinkingCardBodyHeight(
+                requestResolver(),
+                -THINKING_CARD_BODY_STEP_PX,
+                rootRef
+            );
+        });
+    }
+
+    if (sizeIncreaseButton && sizeIncreaseButton.dataset.bound !== '1') {
+        sizeIncreaseButton.dataset.bound = '1';
+        sizeIncreaseButton.addEventListener('click', () => {
+            adjustThinkingCardBodyHeight(
+                requestResolver(),
+                THINKING_CARD_BODY_STEP_PX,
+                rootRef
+            );
+        });
+    }
+
+    if (bindAbort && abortButton && abortButton.dataset.bound !== '1') {
+        abortButton.dataset.bound = '1';
+        abortButton.addEventListener('click', () => {
+            abortActiveChatRequest();
+        });
+    }
+
+    if (bindRetry && retryButton && retryButton.dataset.bound !== '1') {
+        retryButton.dataset.bound = '1';
+        retryButton.addEventListener('click', () => {
+            retryActiveChatRequest();
+        });
+    }
+}
+
+function ensureAbortButtonBound() {
+    bindThinkingCardControls(null, {
+        requestResolver: () => getThinkingCardDisplayRequest(),
+        bindAbort: true,
+        bindRetry: true
+    });
 }
 
 function createQueuedChatPromptId() {
@@ -20507,7 +20842,6 @@ async function handleSendPrompt(options = {}) {
 
     // Refresh setting in the background; default is enabled.
     void refreshToolUseDuringThinkingSetting();
-    lastFinishedThinkingCard = null;
 
     const clientRequestId = createClientRequestId();
     const request = {
@@ -20603,7 +20937,8 @@ async function handleSendPrompt(options = {}) {
         // `response.json()` so we surface a friendly server error message instead
         // of falling through to the network-error catch path.
         if (!response || typeof response.json !== 'function') {
-            appendMessage('Error', 'Server error');
+            request.resultTurnId = `e-${Date.now()}`;
+            appendMessage('Error', 'Server error', request.resultTurnId);
             return;
         }
 
@@ -20662,6 +20997,7 @@ async function handleSendPrompt(options = {}) {
             }
 
             // Append assistant message with turnId and llm_debug flag
+            request.resultTurnId = assistantTurnId;
             appendMessage('Von', screenText, assistantTurnId, !!data.llm_debug, false, null, fastpathMeta, spokenText);
             // Annotate assistant turn and render suggestions when returned - only if toggle is enabled
             const annotationToggle = document.getElementById('annotationToggle');
@@ -20692,6 +21028,7 @@ async function handleSendPrompt(options = {}) {
                 setLlmDebugDataEntry(errorTurnId, data.llm_debug);
                 console.log('[chatTab] Stored LLM debug data for error turn:', errorTurnId);
             }
+            request.resultTurnId = errorTurnId;
             appendMessage('Error', data.error || 'An error occurred', errorTurnId, !!data.llm_debug);
         }
     } catch (error) {
@@ -20704,19 +21041,18 @@ async function handleSendPrompt(options = {}) {
             summary: 'Network error occurred'
         };
         console.error('Error:', error);
-        appendMessage('Error', 'Network error occurred');
+        request.resultTurnId = `e-${Date.now()}`;
+        appendMessage('Error', 'Network error occurred', request.resultTurnId);
     } finally {
         const isStillActive = activeChatRequest === request;
         if (isStillActive) {
             stopToolUseProgressPolling(request);
             stopThinkingTooltipTicker(request);
             const persisted = !request.aborted && persistFinishedThinkingCard(request);
-            if (persisted) {
-                setThinkingState(false, lastFinishedThinkingCard, { preserveFinishedCard: true });
-            } else {
+            if (!persisted) {
                 lastFinishedThinkingCard = null;
-                setThinkingState(false, request);
             }
+            setThinkingState(false, request);
             activeChatRequest = null;
         }
         updateHistoryLength();
@@ -21239,6 +21575,10 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
 
             messageHeader.appendChild(rightControls);
 
+            const thinkingCardSlot = turnId ? document.createElement('div') : null;
+            if (thinkingCardSlot) {
+                thinkingCardSlot.className = 'thinking-card-inline-slot';
+            }
             messageContent.appendChild(messageHeader);
             messageContent.appendChild(messageText);
             try {
@@ -21252,6 +21592,9 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                 appendQuickReplyButtons(messageContent, debugData?.buttonify);
             } catch (err) {
                 console.warn('[chatTab] Quick reply rendering failed:', err);
+            }
+            if (thinkingCardSlot) {
+                messageContent.appendChild(thinkingCardSlot);
             }
             messageContainer.appendChild(vonImage);
             messageContainer.appendChild(messageContent);
@@ -21356,6 +21699,11 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
 
             messageContainer.appendChild(messageHeader);
             messageContainer.appendChild(messageText);
+            if (turnId && sender === 'Error') {
+                const thinkingCardSlot = document.createElement('div');
+                thinkingCardSlot.className = 'thinking-card-inline-slot';
+                messageContainer.appendChild(thinkingCardSlot);
+            }
             if (turnId) messageContainer.dataset.turnId = turnId;
             scrollableField.appendChild(messageContainer);
         }

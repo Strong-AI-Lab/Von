@@ -78,13 +78,13 @@
 
     <div class="thinking-card-wrapper" id="thinkingCardWrapper" aria-hidden="true">
       <div class="thinking-card" role="status" aria-live="polite">
-        <div class="thinking-card-header" id="loadingIndicator">
+        <div class="thinking-card-header" id="loadingIndicator" data-thinking-role="header">
           <span class="thinking-card-dot" aria-hidden="true"></span>
-          <span class="thinking-card-phase loading-indicator-text">Thinking...</span>
-          <span id="thinkingCardStatusBadge" class="thinking-card-status active" aria-hidden="true">Active</span>
-          <span class="thinking-card-meta" id="thinkingCardMeta"></span>
+          <span class="thinking-card-phase loading-indicator-text" data-thinking-role="phase">Thinking...</span>
+          <span id="thinkingCardStatusBadge" class="thinking-card-status active" data-thinking-role="status" aria-hidden="true">Active</span>
+          <span class="thinking-card-meta" id="thinkingCardMeta" data-thinking-role="meta"></span>
           <button id="thinkingCardToggleButton" class="btn thinking-card-action thinking-card-toggle" type="button"
-            aria-hidden="true" aria-expanded="true" aria-controls="loadingIndicatorDetail"
+            data-thinking-role="toggle" aria-hidden="true" aria-expanded="true" aria-controls="loadingIndicatorDetail"
             aria-label="Collapse thinking details" title="Collapse thinking details">
             <span class="thinking-card-toggle-icon" aria-hidden="true">
               <svg viewBox="0 0 16 16" focusable="false">
@@ -93,17 +93,23 @@
             </span>
             <span class="visually-hidden">Toggle thinking details</span>
           </button>
-          <button id="retryThinkingButton" class="btn thinking-card-action" type="button" aria-hidden="true"
+          <button class="btn thinking-card-action thinking-card-size-button" type="button"
+            data-thinking-role="size-decrease" aria-hidden="true"
+            aria-label="Show fewer thinking details" title="Show fewer thinking details">−</button>
+          <button class="btn thinking-card-action thinking-card-size-button" type="button"
+            data-thinking-role="size-increase" aria-hidden="true"
+            aria-label="Show more thinking details" title="Show more thinking details">+</button>
+          <button id="retryThinkingButton" class="btn thinking-card-action" type="button" data-thinking-role="retry" aria-hidden="true"
             aria-label="Retry request" title="Retry request">Retry</button>
-          <button id="copyThinkingDiagnosticsButton" class="btn thinking-card-action" type="button" aria-hidden="true"
+          <button id="copyThinkingDiagnosticsButton" class="btn thinking-card-action" type="button" data-thinking-role="copy" aria-hidden="true"
             aria-label="Copy diagnostics" title="Copy diagnostics">Copy diagnostics</button>
-          <button id="abortButton" class="btn thinking-card-stop" type="button" aria-hidden="true"
+          <button id="abortButton" class="btn thinking-card-stop" type="button" data-thinking-role="abort" aria-hidden="true"
             aria-label="Stop generating" title="Stop generating">
             <span class="thinking-card-stop-icon" aria-hidden="true"></span>
             <span class="visually-hidden">Stop generating</span>
           </button>
         </div>
-        <div class="thinking-card-body" id="loadingIndicatorDetail" aria-live="polite"></div>
+        <div class="thinking-card-body" id="loadingIndicatorDetail" data-thinking-role="detail" aria-live="polite"></div>
       </div>
     </div>
 

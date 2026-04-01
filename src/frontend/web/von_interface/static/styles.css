@@ -6771,6 +6771,13 @@ footer {
     padding: 0;
 }
 
+.thinking-card-size-button {
+    width: 22px;
+    min-width: 22px;
+    padding: 0;
+    font-size: 0.88rem;
+}
+
 .thinking-card-toggle-icon {
     display: inline-flex;
     align-items: center;
@@ -6831,30 +6838,56 @@ footer {
     border-radius: 2px;
 }
 
+.thinking-card-inline-slot {
+    margin-top: 10px;
+}
+
+.thinking-card-inline-slot:empty {
+    display: none;
+}
+
+.retained-thinking-card {
+    margin-top: 4px;
+    padding-top: 10px;
+    border-top: 1px solid #e2e8f0;
+}
+
 .thinking-card-body {
     padding: 0 14px;
     font-size: 0.78rem;
     color: #475569;
     line-height: 1.45;
+    height: 0;
     max-height: 0;
     opacity: 0;
     overflow: hidden;
     background-color: #fff;
-    transition: max-height 0.22s ease, opacity 0.16s ease, padding 0.22s ease;
+    resize: none;
+    transition: height 0.22s ease, max-height 0.22s ease, opacity 0.16s ease, padding 0.22s ease;
 }
 
 .thinking-card-wrapper.has-tools.is-expanded .thinking-card-body {
-    max-height: 360px;
+    min-height: 120px;
+    max-height: 520px;
     opacity: 1;
     padding: 10px 14px;
     overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behaviour: contain;
 }
 
 .thinking-card-body:empty {
+    height: 0;
     max-height: 0;
     opacity: 0;
     padding: 0 14px;
     overflow: hidden;
+}
+
+@media (pointer: fine) {
+    .thinking-card-wrapper.has-tools.is-expanded .thinking-card-body {
+        resize: vertical;
+    }
 }
 
 /* Tool item styling within thinking card */
