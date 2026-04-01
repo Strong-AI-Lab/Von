@@ -593,6 +593,42 @@
       "content": "Represent an arXiv paper by extracting a canonical arXiv identifier, fetching authoritative arXiv metadata, deciding whether acquisition is required, invoking download_paper when needed, then delegating to the general scholarly-paper workflow with arXiv verification.",
       "description": "Canonical arXiv wrapper workflow that normalises an arXiv source, fetches authoritative arXiv metadata, acquires or finalises the paper artefact, delegates to the scholarly-paper workflow, and fails closed on incomplete representation.",
       "display_name": "arXiv Paper Representation Workflow",
+      "launch_input_contract": {
+        "schema_version": "workflow_launch_input_contract.v1",
+        "required_inputs": [
+          "prompt"
+        ],
+        "input_mappings": [
+          {
+            "target_context_key": "prompt",
+            "source_expression": "inputs.prompt",
+            "extractor": "identity",
+            "required": true,
+            "description": "Pass the raw arXiv request text into the normalisation step so it can derive a canonical identifier or source URI."
+          },
+          {
+            "target_context_key": "arxiv_id",
+            "source_expression": "inputs.arxiv_id",
+            "extractor": "identity",
+            "required": false,
+            "description": "Carry through an already-normalised arXiv identifier when the workflow is launched programmatically."
+          },
+          {
+            "target_context_key": "source_uri",
+            "source_expression": "inputs.source_uri",
+            "extractor": "identity",
+            "required": false,
+            "description": "Carry through an already-normalised arXiv source URL when the workflow is launched programmatically."
+          },
+          {
+            "target_context_key": "original_filename",
+            "source_expression": "inputs.original_filename",
+            "extractor": "identity",
+            "required": false,
+            "description": "Preserve an explicit filename hint when one is supplied."
+          }
+        ]
+      },
       "publication_spec": {
         "initial_state": "normalise_arxiv_source",
         "steps": [
@@ -605,13 +641,13 @@
               {
                 "concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_normalise_arxiv_source_arxiv_id_to_arxiv_id_parameter",
                 "context_key": "arxiv_id",
-                "required": true,
+                "required": false,
                 "tool_param": "arxiv_id"
               },
               {
                 "concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_normalise_arxiv_source_source_uri_to_source_uri_parameter",
                 "context_key": "source_uri",
-                "required": true,
+                "required": false,
                 "tool_param": "source_uri"
               },
               {

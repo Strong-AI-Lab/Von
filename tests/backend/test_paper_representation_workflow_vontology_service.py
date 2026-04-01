@@ -56,6 +56,35 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID
     )
     assert arxiv_definition is not None
+    arxiv_launch_contract = arxiv_definition.metadata.get("launch_input_contract")
+    assert isinstance(arxiv_launch_contract, dict)
+    assert arxiv_launch_contract.get("schema_version") == (
+        "workflow_launch_input_contract.v1"
+    )
+    assert arxiv_launch_contract.get("required_inputs") == ["prompt"]
+    input_mappings = arxiv_launch_contract.get("input_mappings")
+    assert isinstance(input_mappings, list)
+    assert any(
+        isinstance(item, dict)
+        and item.get("target_context_key") == "prompt"
+        and item.get("source_expression") == "inputs.prompt"
+        and item.get("required") is True
+        for item in input_mappings
+    )
+    assert any(
+        isinstance(item, dict)
+        and item.get("target_context_key") == "arxiv_id"
+        and item.get("source_expression") == "inputs.arxiv_id"
+        and item.get("required") is False
+        for item in input_mappings
+    )
+    assert any(
+        isinstance(item, dict)
+        and item.get("target_context_key") == "source_uri"
+        and item.get("source_expression") == "inputs.source_uri"
+        and item.get("required") is False
+        for item in input_mappings
+    )
 
     delegate_state_id = authority_service._step_concept_id(
         workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
@@ -81,6 +110,26 @@ def test_bootstrap_materialises_paper_representation_workflow_family(
         workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
         state_id="fetch_arxiv_metadata",
     )
+    normalise_state_id = authority_service._step_concept_id(
+        workflow_id=ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID,
+        state_id="normalise_arxiv_source",
+    )
+    normalise_action = arxiv_definition.states[normalise_state_id].actions[0]
+    assert normalise_action.inputs.get("arxiv_id") == {
+        "$context_key": "arxiv_id",
+        "$mapping_concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_normalise_arxiv_source_arxiv_id_to_arxiv_id_parameter",
+        "$required": False,
+    }
+    assert normalise_action.inputs.get("source_uri") == {
+        "$context_key": "source_uri",
+        "$mapping_concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_normalise_arxiv_source_source_uri_to_source_uri_parameter",
+        "$required": False,
+    }
+    assert normalise_action.inputs.get("prompt") == {
+        "$context_key": "prompt",
+        "$mapping_concept_id": "#V#workflow_mapping_arxiv_paper_representation_workflow_normalise_arxiv_source_prompt_to_prompt_parameter",
+        "$required": True,
+    }
     fetch_metadata_action = arxiv_definition.states[fetch_metadata_state_id].actions[0]
     assert fetch_metadata_action.action_id == "get_paper_metadata"
     assert fetch_metadata_action.inputs.get("arxiv_id") == {

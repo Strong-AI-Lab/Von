@@ -1,16 +1,21 @@
 """Routing-time policy for launchability-based custom workflow replacement.
 
 This module is intentionally narrow. It must not infer prompt meaning,
-authoring intent, or lexical fit from free text. The selector/LLM owns
-semantic workflow choice. Python may only help choose a replacement when:
+or open-ended lexical fit from free text. The selector/LLM owns semantic
+workflow choice. Python may only help choose a replacement when:
 
 - a custom workflow was already selected or discovered,
 - launchability is known from workflow/runtime checks, and
 - workflow-authored metadata provides explicit policy signals.
+
+Python may still detect explicit workflow/test/maintenance cues so that
+maintenance-style workflows are not silently promoted as replacements for
+ordinary user turns.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Sequence
 
@@ -18,6 +23,39 @@ _ROLE_EXECUTION = "execution"
 _ROLE_AUTHORING = "authoring"
 _ROLE_MAINTENANCE = "maintenance"
 _ROLE_UNKNOWN = "unknown"
+
+_WORKFLOW_CONTEXT_TOKENS = frozenset(
+    {
+        "benchmark",
+        "debug",
+        "diagnose",
+        "diagnostic",
+        "experiment",
+        "inspection",
+        "introspect",
+        "maintenance",
+        "regression",
+        "repair",
+        "test",
+        "testing",
+        "workflow",
+    }
+)
+
+_EXPLICIT_EXECUTION_TOKENS = frozenset(
+    {
+        "benchmark",
+        "debug",
+        "diagnose",
+        "execute",
+        "inspect",
+        "invoke",
+        "repair",
+        "run",
+        "test",
+        "testing",
+    }
+)
 
 _ROLE_SYNONYMS = {
     "execution": _ROLE_EXECUTION,
@@ -64,6 +102,26 @@ def _coerce_bool(value: Any) -> bool | None:
         if lowered in {"0", "false", "no", "off"}:
             return False
     return None
+
+
+def _tokenise_text(value: Any) -> tuple[str, ...]:
+    text = _safe_text(value).lower()
+    if not text:
+        return ()
+    return tuple(token for token in re.findall(r"[a-z0-9_#]+", text) if token)
+
+
+def _classify_turn_text(turn_text: Any) -> tuple[bool, bool]:
+    tokens = set(_tokenise_text(turn_text))
+    if not tokens:
+        return False, False
+    workflow_query_intent = any(
+        token in _WORKFLOW_CONTEXT_TOKENS for token in tokens
+    )
+    explicit_execution_request = workflow_query_intent and any(
+        token in _EXPLICIT_EXECUTION_TOKENS for token in tokens
+    )
+    return explicit_execution_request, workflow_query_intent
 
 
 def _normalise_role(value: Any) -> str | None:
@@ -176,9 +234,11 @@ def choose_custom_workflow_override_candidate(
     candidates: Sequence[Mapping[str, Any]],
     launchability_probes: Mapping[str, Mapping[str, Any]],
 ) -> WorkflowOverrideDecision:
-    """Return a launchable replacement candidate without prompt-semantic vetoes."""
+    """Return a launchable replacement candidate with narrow profile gating."""
 
-    del turn_text
+    explicit_execution_request, workflow_query_intent = _classify_turn_text(
+        turn_text
+    )
     candidate_assessments: list[WorkflowOverrideCandidateAssessment] = []
 
     for candidate in candidates:
@@ -222,6 +282,11 @@ def choose_custom_workflow_override_candidate(
         ):
             suitable = False
             suitability_reason = "authoring_intent_required_by_workflow_profile"
+        elif role == _ROLE_MAINTENANCE and not workflow_query_intent:
+            suitable = False
+            suitability_reason = (
+                "explicit_workflow_context_required_by_workflow_profile"
+            )
 
         candidate_assessments.append(
             WorkflowOverrideCandidateAssessment(
@@ -240,7 +305,10 @@ def choose_custom_workflow_override_candidate(
                 launch_input_resolution_status=launch_status or None,
                 pre_action_reason_code=pre_action_reason or None,
                 policy_flags=dict(policy_flags),
-                lexical_signals={},
+                lexical_signals={
+                    "explicit_execution_request": explicit_execution_request,
+                    "workflow_query_intent": workflow_query_intent,
+                },
             )
         )
 
@@ -261,8 +329,8 @@ def choose_custom_workflow_override_candidate(
             outcome="promote",
             reason_code="launchable_custom_workflow_found",
             explicit_authoring_request=False,
-            explicit_execution_request=False,
-            workflow_query_intent=False,
+            explicit_execution_request=explicit_execution_request,
+            workflow_query_intent=workflow_query_intent,
             candidate_assessments=tuple(candidate_assessments),
         )
 
@@ -271,6 +339,12 @@ def choose_custom_workflow_override_candidate(
         reason_code = "no_custom_workflow_candidates"
     elif not any(item.launchable for item in candidate_assessments):
         reason_code = "no_launchable_custom_workflow"
+    elif any(
+        item.suitability_reason
+        == "explicit_workflow_context_required_by_workflow_profile"
+        for item in candidate_assessments
+    ):
+        reason_code = "workflow_profile_requires_explicit_workflow_context"
     elif any(
         item.suitability_reason == "authoring_intent_required_by_workflow_profile"
         for item in candidate_assessments
@@ -282,8 +356,8 @@ def choose_custom_workflow_override_candidate(
         outcome="decline",
         reason_code=reason_code,
         explicit_authoring_request=False,
-        explicit_execution_request=False,
-        workflow_query_intent=False,
+        explicit_execution_request=explicit_execution_request,
+        workflow_query_intent=workflow_query_intent,
         candidate_assessments=tuple(candidate_assessments),
     )
 
