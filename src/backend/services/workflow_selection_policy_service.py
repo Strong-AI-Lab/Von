@@ -3,8 +3,9 @@
 The Phase 3 selector already finds a relevant candidate set. Phase 4 adds a
 lightweight learned policy on top of that recall step: selector experiences are
 converted into workflow-level reward priors, token-level affinity signals, and
-UCB-style exploration bonuses that can reorder or occasionally short-circuit the
-candidate list when evidence is strong.
+UCB-style exploration bonuses that can reorder the candidate list and provide
+selector guidance, while the selector LLM remains the semantic routing
+authority.
 """
 
 from __future__ import annotations
@@ -82,12 +83,9 @@ _DEFAULT_CONFIG: dict[str, float] = {
     "exploration_weight": 0.18,
     "cold_start_bonus": 0.12,
     "max_tokens_per_workflow": 48.0,
-    "direct_selection_min_attempts": 3.0,
-    "direct_selection_min_margin": 0.18,
-    "direct_selection_min_average_reward": 0.2,
 }
 
-_LEXICAL_DIRECT_STOPWORDS = frozenset(
+_LEXICAL_GUIDANCE_STOPWORDS = frozenset(
     {
         "a",
         "an",
@@ -383,7 +381,7 @@ def _filtered_selector_tokens(value: Any, *, limit: int = 24) -> tuple[str, ...]
     tokens: list[str] = []
     seen: set[str] = set()
     for token in extract_selection_query_tokens(_safe_str(value), limit=limit * 3):
-        if len(token) < 3 or token in _LEXICAL_DIRECT_STOPWORDS or token in seen:
+        if len(token) < 3 or token in _LEXICAL_GUIDANCE_STOPWORDS or token in seen:
             continue
         seen.add(token)
         tokens.append(token)
@@ -410,7 +408,7 @@ def _selector_query_phrases(value: Any, *, max_phrases: int = 12) -> tuple[str, 
     return tuple(phrases)
 
 
-def _recommend_direct_candidate_by_specificity(
+def _recommend_guidance_candidate_by_specificity(
     *,
     turn_text: str,
     candidate_workflows: Sequence[Mapping[str, Any]] | None,
@@ -477,7 +475,7 @@ def _recommend_direct_candidate_by_specificity(
     overlap_text = ", ".join(label_overlap[:4])
     phrase_text = ", ".join(phrase_hits[:3])
     reasoning = (
-        f"Direct lexical selector match favours {top['workflow_id']} "
+        f"Lexical selector guidance favours {top['workflow_id']} "
         f"(label overlap: {overlap_text or 'none'}"
     )
     if phrase_text:
@@ -491,7 +489,7 @@ def _recommend_direct_candidate_by_specificity(
         "workflow_id": top["workflow_id"],
         "confidence_score": round(confidence, 6),
         "reasoning": reasoning,
-        "selection_reason": "lexical_specificity_direct_candidate",
+        "selection_reason": "lexical_specificity_guidance_candidate",
         "candidate_scores": scores,
     }
 
@@ -502,9 +500,9 @@ def recommend_workflow_with_policy(
     candidate_workflows: Sequence[Mapping[str, Any]] | None,
     snapshot: WorkflowSelectionPolicySnapshot | None = None,
 ) -> dict[str, Any]:
-    """Return policy guidance for selector candidate ordering or direct selection."""
+    """Return soft policy guidance for selector candidate ordering and telemetry."""
 
-    lexical_direct = _recommend_direct_candidate_by_specificity(
+    lexical_guidance = _recommend_guidance_candidate_by_specificity(
         turn_text=turn_text,
         candidate_workflows=candidate_workflows,
     )
@@ -514,38 +512,24 @@ def recommend_workflow_with_policy(
         snapshot=snapshot,
     )
     policy = snapshot if snapshot is not None else get_live_selection_policy()
-    if lexical_direct is not None and (
-        policy is None
-        or not scores
-        or not (
-            int(scores[0]["attempts"]) >= int(
-                _coerce_float(
-                    policy.config.get(
-                        "direct_selection_min_attempts",
-                        _DEFAULT_CONFIG["direct_selection_min_attempts"],
-                    )
-                )
-            )
-            and _coerce_float(scores[0]["average_reward"])
-            >= _coerce_float(
-                policy.config.get(
-                    "direct_selection_min_average_reward",
-                    _DEFAULT_CONFIG["direct_selection_min_average_reward"],
-                )
-            )
-        )
-    ):
+    if lexical_guidance is not None and policy is None:
         return {
-            "policy_active": policy is not None,
-            "guidance_mode": "direct",
-            "recommended_workflow_id": lexical_direct["workflow_id"],
-            "confidence_score": lexical_direct["confidence_score"],
-            "reasoning": lexical_direct["reasoning"],
-            "snapshot_id": policy.snapshot_id if policy is not None else None,
+            "policy_active": False,
+            "guidance_mode": "prompt_guidance",
+            "recommended_workflow_id": lexical_guidance["workflow_id"],
+            "confidence_score": lexical_guidance["confidence_score"],
+            "reasoning": lexical_guidance["reasoning"],
+            "snapshot_id": None,
             "candidate_scores": scores,
-            "ranked_candidate_ids": [item["workflow_id"] for item in scores],
-            "direct_selection_basis": "lexical_specificity",
-            "selection_reason": lexical_direct["selection_reason"],
+            "ranked_candidate_ids": [
+                item["workflow_id"]
+                for item in lexical_guidance.get("candidate_scores", ())
+            ],
+            "guidance_basis": "lexical_specificity",
+            "selection_reason": lexical_guidance["selection_reason"],
+            "lexical_candidate_scores": list(
+                lexical_guidance.get("candidate_scores", ())
+            ),
         }
 
     if not scores or policy is None:
@@ -559,31 +543,6 @@ def recommend_workflow_with_policy(
     top_score = scores[0]
     second_score_value = _coerce_float(scores[1]["score"]) if len(scores) > 1 else -1.0
     margin = _coerce_float(top_score["score"]) - second_score_value
-    minimum_attempts = int(
-        _coerce_float(
-            policy.config.get(
-                "direct_selection_min_attempts",
-                _DEFAULT_CONFIG["direct_selection_min_attempts"],
-            )
-        )
-    )
-    minimum_margin = _coerce_float(
-        policy.config.get(
-            "direct_selection_min_margin",
-            _DEFAULT_CONFIG["direct_selection_min_margin"],
-        )
-    )
-    minimum_average_reward = _coerce_float(
-        policy.config.get(
-            "direct_selection_min_average_reward",
-            _DEFAULT_CONFIG["direct_selection_min_average_reward"],
-        )
-    )
-    direct_selection = (
-        int(top_score["attempts"]) >= minimum_attempts
-        and margin >= minimum_margin
-        and _coerce_float(top_score["average_reward"]) >= minimum_average_reward
-    )
     confidence = min(
         0.98,
         max(
@@ -597,7 +556,7 @@ def recommend_workflow_with_policy(
     )
     return {
         "policy_active": True,
-        "guidance_mode": "direct" if direct_selection else "prompt_guidance",
+        "guidance_mode": "prompt_guidance",
         "recommended_workflow_id": top_score["workflow_id"],
         "confidence_score": round(confidence, 6),
         "reasoning": reasoning,
@@ -606,6 +565,23 @@ def recommend_workflow_with_policy(
         "ranked_candidate_ids": [item["workflow_id"] for item in scores],
         "selected_workflow_attempts": int(top_score["attempts"]),
         "selected_exploration_bonus": _coerce_float(top_score["exploration_bonus"]),
+        "guidance_basis": "learned_policy",
+        "lexical_guidance_workflow_id": (
+            lexical_guidance["workflow_id"] if lexical_guidance is not None else None
+        ),
+        "lexical_guidance_confidence_score": (
+            lexical_guidance["confidence_score"]
+            if lexical_guidance is not None
+            else None
+        ),
+        "lexical_guidance_reasoning": (
+            lexical_guidance["reasoning"] if lexical_guidance is not None else None
+        ),
+        "lexical_candidate_scores": (
+            list(lexical_guidance.get("candidate_scores", ()))
+            if lexical_guidance is not None
+            else []
+        ),
     }
 
 

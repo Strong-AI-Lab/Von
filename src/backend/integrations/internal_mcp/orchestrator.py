@@ -21144,34 +21144,7 @@ class InternalMCPChatOrchestrator:
             try:
                 classifier_model = None
                 selector_candidate = None
-                if (
-                    isinstance(selector_policy.get("recommended_workflow_id"), str)
-                    and selector_policy.get("guidance_mode") == "direct"
-                ):
-                    _emit_progress_local(
-                        {
-                            "status": "thinking",
-                            "stage": "workflow_dispatch",
-                            "phase": "workflow_dispatch",
-                            "phase_label": "Applying learned workflow policy",
-                            "workflow_match_count": len(discovered_matches),
-                            "workflow_candidate_count": len(selector_candidate_matches)
-                            + len(excluded_discovered_matches),
-                            **_build_live_workflow_routing_payload(),
-                        }
-                    )
-                    selector_selection = self._workflow_selector.resolve_policy_selection(
-                        workflow_id=str(selector_policy.get("recommended_workflow_id")),
-                        prompt_id=selector_prompt.prompt_id,
-                        prompt_used=selector_prompt.prompt_text,
-                        discovered_workflow_ids=selector_prompt.discovered_workflow_ids,
-                        confidence_score=float(
-                            selector_policy.get("confidence_score", 0.0)
-                        ),
-                        reasoning=str(selector_policy.get("reasoning") or ""),
-                        selection_metadata=selector_policy,
-                    )
-                elif not selector_prompt.prompt_text:
+                if not selector_prompt.prompt_text:
                     _emit_progress_local(
                         {
                             "status": "thinking",

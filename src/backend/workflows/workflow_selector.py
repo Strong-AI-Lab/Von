@@ -112,6 +112,21 @@ class WorkflowSelector:
         """
         return True
 
+    @staticmethod
+    def _normalise_policy_recommendation(
+        policy_recommendation: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        recommendation = (
+            dict(policy_recommendation)
+            if isinstance(policy_recommendation, Mapping)
+            else {}
+        )
+        guidance_mode = str(recommendation.get("guidance_mode") or "").strip().lower()
+        if guidance_mode == "direct":
+            recommendation["guidance_mode"] = "prompt_guidance"
+            recommendation["hard_direct_guidance_removed"] = True
+        return recommendation
+
     # ------------------------------------------------------------------
     # High-level API
     # ------------------------------------------------------------------
@@ -130,26 +145,6 @@ class WorkflowSelector:
             discovered_workflows=discovered_workflows,
         )
         prompt_text = selection_prompt.prompt_text
-        selection_policy = (
-            dict(selection_prompt.policy_recommendation)
-            if isinstance(selection_prompt.policy_recommendation, Mapping)
-            else {}
-        )
-        if (
-            isinstance(selection_policy.get("recommended_workflow_id"), str)
-            and selection_policy.get("guidance_mode") == "direct"
-        ):
-            return self.resolve_policy_selection(
-                workflow_id=str(selection_policy.get("recommended_workflow_id")),
-                prompt_id=selection_prompt.prompt_id,
-                prompt_used=selection_prompt.prompt_text,
-                discovered_workflow_ids=selection_prompt.discovered_workflow_ids,
-                confidence_score=float(
-                    selection_policy.get("confidence_score", 0.0)
-                ),
-                reasoning=str(selection_policy.get("reasoning") or ""),
-                selection_metadata=selection_policy,
-            )
         if not prompt_text:
             return self.resolve_prompt_unavailable_selection(
                 selection_prompt=selection_prompt,
@@ -249,9 +244,11 @@ class WorkflowSelector:
                         entry[field_name] = value
                 candidate_entries.append(entry)
 
-        policy_recommendation = recommend_workflow_with_policy(
-            turn_text=turn_text,
-            candidate_workflows=candidate_entries,
+        policy_recommendation = self._normalise_policy_recommendation(
+            recommend_workflow_with_policy(
+                turn_text=turn_text,
+                candidate_workflows=candidate_entries,
+            )
         )
         ranked_candidate_ids = tuple(
             str(item)
@@ -513,49 +510,6 @@ class WorkflowSelector:
             reasoning=reasoning,
             selection_source="selector",
             selection_metadata=selection_metadata,
-        )
-
-    def resolve_policy_selection(
-        self,
-        *,
-        workflow_id: str,
-        prompt_id: Optional[str],
-        prompt_used: str | None,
-        discovered_workflow_ids: Sequence[str] = (),
-        confidence_score: float = 0.0,
-        reasoning: str = "",
-        selection_metadata: Mapping[str, Any] | None = None,
-    ) -> WorkflowSelection:
-        """Resolve a direct learned-policy recommendation into a selection."""
-
-        candidate_ids = tuple(
-            item for item in discovered_workflow_ids if isinstance(item, str) and item
-        )
-        clean_workflow_id = str(workflow_id or "").strip()
-        if clean_workflow_id not in candidate_ids:
-            clean_workflow_id = self._default_workflow_id
-            verdict = "rag_default"
-        else:
-            verdict = "policy_selected"
-
-        return WorkflowSelection(
-            workflow_id=clean_workflow_id,
-            verdict=verdict,
-            prompt_id=prompt_id,
-            prompt_used=prompt_used,
-            raw_response=f"policy::{clean_workflow_id}",
-            discovered_workflow_ids=candidate_ids,
-            confidence_score=max(0.0, min(1.0, float(confidence_score))),
-            reasoning=str(reasoning or ""),
-            selection_source="policy_direct",
-            selection_metadata={
-                "selection_resolution": (
-                    "policy_recommended_candidate"
-                    if verdict == "policy_selected"
-                    else "default_workflow_fallback"
-                ),
-                **dict(selection_metadata or {}),
-            },
         )
 
     def resolve_prompt_unavailable_selection(

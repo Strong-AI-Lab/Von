@@ -107,12 +107,12 @@ def test_selection_experience_finalisation_persists_outcome_and_reward() -> None
         query="Refresh my Jira todo list",
         candidate_workflow_ids=[CHAT_ASSISTANT_WORKFLOW_ID, TODO_REFRESH_WORKFLOW_ID],
         selected_workflow_id=TODO_REFRESH_WORKFLOW_ID,
-        verdict="policy_selected",
-        selection_source="policy_direct",
+        verdict="rag_selected",
+        selection_source="selector",
         selection_metadata={"selected_exploration_bonus": 0.12},
         confidence_score=0.91,
-        reasoning="Historical reward prior strongly favours the Jira refresh workflow.",
-        model_name="policy::unit-test",
+        reasoning="Selector chose the Jira refresh workflow.",
+        model_name="phase4-test-model",
         routing_duration_ms=10.0,
     )
 
@@ -142,7 +142,7 @@ def test_selection_experience_finalisation_persists_outcome_and_reward() -> None
     assert snapshot["aggregates"]["total_selections"] == 1
     assert snapshot["aggregates"]["completed_count"] == 1
     assert snapshot["aggregates"]["reward_sample_count"] == 1
-    assert snapshot["aggregates"]["policy_direct"] == 1
+    assert snapshot["aggregates"]["policy_direct"] == 0
 
 
 def test_policy_training_improves_held_out_benchmark_cases() -> None:
@@ -231,7 +231,7 @@ def test_policy_training_improves_held_out_benchmark_cases() -> None:
     assert evaluation["accuracy_improvement"] > 0.0
 
 
-def test_selector_uses_policy_guidance_for_candidate_ordering_and_direct_selection() -> None:
+def test_selector_uses_policy_guidance_for_candidate_ordering_without_direct_selection() -> None:
     for _ in range(4):
         _record_completed_example(
             query="Refresh my Jira todo list",
@@ -264,27 +264,15 @@ def test_selector_uses_policy_guidance_for_candidate_ordering_and_direct_selecti
 
     assert prompt.discovered_workflow_ids[0] == TODO_REFRESH_WORKFLOW_ID
     assert prompt.policy_recommendation["policy_active"] is True
-    assert prompt.policy_recommendation["guidance_mode"] == "direct"
+    assert prompt.policy_recommendation["guidance_mode"] == "prompt_guidance"
     assert (
         prompt.policy_recommendation["recommended_workflow_id"]
         == TODO_REFRESH_WORKFLOW_ID
     )
-
-    resolved = selector.resolve_policy_selection(
-        workflow_id=prompt.policy_recommendation["recommended_workflow_id"],
-        prompt_id=prompt.prompt_id,
-        prompt_used=prompt.prompt_text,
-        discovered_workflow_ids=prompt.discovered_workflow_ids,
-        confidence_score=prompt.policy_recommendation["confidence_score"],
-        reasoning=prompt.policy_recommendation["reasoning"],
-        selection_metadata=prompt.policy_recommendation,
-    )
-    assert resolved.workflow_id == TODO_REFRESH_WORKFLOW_ID
-    assert resolved.verdict == "policy_selected"
-    assert resolved.selection_source == "policy_direct"
+    assert prompt.policy_recommendation["guidance_basis"] == "learned_policy"
 
 
-def test_orchestrator_can_route_via_direct_policy_without_selector_llm(
+def test_orchestrator_uses_selector_llm_even_when_policy_guidance_is_strong(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     for _ in range(4):
@@ -309,7 +297,23 @@ def test_orchestrator_can_route_via_direct_policy_without_selector_llm(
     assert snapshot is not None
 
     orchestrator = _build_rag_first_orchestrator(monkeypatch)
-    llm = _CapturingLLM([])
+    llm = _CapturingLLM([TODO_REFRESH_WORKFLOW_ID])
+    captured_execute: dict[str, Any] = {}
+
+    def _execute_workflow(workflow_id: str, **kwargs: Any):
+        captured_execute["workflow_id"] = workflow_id
+        captured_execute["data"] = dict(kwargs.get("data") or {})
+        return type(
+            "_WorkflowResult",
+            (),
+            {
+                "completed": True,
+                "final_state": "completed",
+                "data": {"response_text": "Todo refresh complete."},
+            },
+        )()
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
     discovery_result = {
         "matches": [
             {
@@ -339,10 +343,12 @@ def test_orchestrator_can_route_via_direct_policy_without_selector_llm(
         workflow_discovery_result=discovery_result,
     )
 
-    assert llm.calls == []
+    assert llm.calls
+    assert llm.calls[0]["prompt"] == "Select workflow"
     assert result.workflow_routing is not None
     assert result.workflow_routing.workflow_id == TODO_REFRESH_WORKFLOW_ID
-    assert result.workflow_routing.source == "policy_direct"
+    assert result.workflow_routing.source == "selector"
+    assert captured_execute["workflow_id"] == TODO_REFRESH_WORKFLOW_ID
 
     selector_entry = next(
         (
@@ -353,9 +359,9 @@ def test_orchestrator_can_route_via_direct_policy_without_selector_llm(
         None,
     )
     assert selector_entry is not None
-    assert selector_entry.get("selection_source") == "policy_direct"
-    assert selector_entry.get("policy_guidance_mode") == "direct"
+    assert selector_entry.get("selection_source") == "selector"
 
     recent = experience_module.get_recent_experiences(limit=1)
     assert recent[0]["selected_workflow_id"] == TODO_REFRESH_WORKFLOW_ID
     assert recent[0]["outcome"] == "completed"
+    assert recent[0]["selection_source"] == "selector"

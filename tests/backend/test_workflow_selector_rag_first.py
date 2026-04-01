@@ -237,7 +237,7 @@ class TestRagFirstPrompt:
         assert prompt.prompt_text is not None
         assert "What is the meaning of life?" in prompt.prompt_text
 
-    def test_prompt_can_directly_recommend_specific_candidate_without_policy(self):
+    def test_prompt_can_emit_lexical_guidance_without_direct_selection(self):
         selector = _build_selector()
         prompt = selector.prepare_selection_prompt(
             turn_text=(
@@ -258,15 +258,12 @@ class TestRagFirstPrompt:
             ],
         )
 
-        assert prompt.policy_recommendation["guidance_mode"] == "direct"
+        assert prompt.policy_recommendation["guidance_mode"] == "prompt_guidance"
         assert (
             prompt.policy_recommendation["recommended_workflow_id"]
             == "#V#meeting_invitation_testing_workflow"
         )
-        assert (
-            prompt.policy_recommendation["direct_selection_basis"]
-            == "lexical_specificity"
-        )
+        assert prompt.policy_recommendation["guidance_basis"] == "lexical_specificity"
 
     def test_prompt_missing_candidate_list_fails_closed(self):
         selector = WorkflowSelector(
@@ -317,9 +314,10 @@ class TestRagFirstPrompt:
         assert result.selection_source == "selector_fail_closed"
         mock_llm.generate.assert_not_called()
 
-    def test_select_workflow_uses_direct_specificity_recommendation_without_llm(self):
+    def test_select_workflow_uses_llm_even_when_lexical_guidance_is_strong(self):
         selector = _build_selector()
         mock_llm = MagicMock()
+        mock_llm.generate.return_value = "#V#meeting_invitation_testing_workflow"
 
         result = selector.select_workflow(
             llm_client=mock_llm,
@@ -343,9 +341,69 @@ class TestRagFirstPrompt:
         )
 
         assert result.workflow_id == "#V#meeting_invitation_testing_workflow"
-        assert result.verdict == "policy_selected"
-        assert result.selection_source == "policy_direct"
-        mock_llm.generate.assert_not_called()
+        assert result.verdict == "rag_selected"
+        assert result.selection_source == "selector"
+        mock_llm.generate.assert_called_once()
+
+    def test_select_workflow_ignores_legacy_direct_policy_guidance(self, monkeypatch):
+        selector = _build_selector()
+        mock_llm = MagicMock()
+        mock_llm.generate.return_value = "#V#tool_calling_workflow"
+        monkeypatch.setattr(
+            "src.backend.workflows.workflow_selector.recommend_workflow_with_policy",
+            lambda **_kwargs: {
+                "policy_active": True,
+                "guidance_mode": "direct",
+                "recommended_workflow_id": "#V#chat_assistant_workflow",
+                "confidence_score": 0.93,
+                "reasoning": "legacy direct guidance",
+                "ranked_candidate_ids": [
+                    "#V#chat_assistant_workflow",
+                    "#V#tool_calling_workflow",
+                ],
+                "candidate_scores": [],
+            },
+        )
+
+        prompt = selector.prepare_selection_prompt(
+            turn_text="Find papers about AI",
+            discovered_workflows=[
+                {
+                    "concept_id": "#V#tool_calling_workflow",
+                    "name": "Tool Calling",
+                    "description": "General-purpose tool pipeline.",
+                },
+                {
+                    "concept_id": "#V#chat_assistant_workflow",
+                    "name": "Chat Assistant",
+                    "description": "Plain response.",
+                },
+            ],
+        )
+        assert prompt.policy_recommendation["guidance_mode"] == "prompt_guidance"
+        assert prompt.policy_recommendation["hard_direct_guidance_removed"] is True
+
+        result = selector.select_workflow(
+            llm_client=mock_llm,
+            model="test-model",
+            turn_text="Find papers about AI",
+            discovered_workflows=[
+                {
+                    "concept_id": "#V#tool_calling_workflow",
+                    "name": "Tool Calling",
+                    "description": "General-purpose tool pipeline.",
+                },
+                {
+                    "concept_id": "#V#chat_assistant_workflow",
+                    "name": "Chat Assistant",
+                    "description": "Plain response.",
+                },
+            ],
+        )
+
+        assert result.workflow_id == "#V#tool_calling_workflow"
+        assert result.verdict == "rag_selected"
+        mock_llm.generate.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
