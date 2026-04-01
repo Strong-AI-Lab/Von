@@ -1,4 +1,6 @@
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 import asyncio
@@ -77,3 +79,27 @@ def test_manifest_surface_matches_canonical_registry() -> None:
         assert _normalise_surface_payload(manifest_payload[name]) == _normalise_surface_payload(
             canonical_payload[name]
         ), f"Manifest tool contract drift for '{name}'"
+
+
+def test_manifest_regeneration_script_runs_from_repo_root_without_pythonpath() -> None:
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    manifest_path = project_root / "src" / "backend" / "mcp_server" / "vontology_mcp.json"
+    original_manifest = manifest_path.read_text(encoding="utf-8")
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "scripts/regenerate_vontology_mcp_manifest.py"],
+            cwd=project_root,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "Regenerated" in result.stdout
+    finally:
+        regenerated_manifest = manifest_path.read_text(encoding="utf-8")
+        if regenerated_manifest != original_manifest:
+            manifest_path.write_text(original_manifest, encoding="utf-8")
