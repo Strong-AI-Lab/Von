@@ -269,6 +269,9 @@ _TOOL_EXECUTION_FAILURE_REASON_MAP = {
     "tool_pipeline_setup_exception": "Tool-pipeline setup failed before the first action could start.",
     "tool_pipeline_execution_exception": "Tool-pipeline execution failed before the first tool action completed.",
 }
+_CUSTOM_WORKFLOW_EXECUTION_FAILURE_REASON = (
+    "Selected workflow execution did not complete successfully."
+)
 
 _REPRESENTATION_CONTRACT_SCHEMA_VERSION = "required_effects_contract.v1"
 _REPRESENTATION_ACTION_PATTERN = re.compile(
@@ -2493,6 +2496,107 @@ def _infer_tool_execution_required_effect(
     }
 
 
+def _infer_custom_workflow_required_effect(
+    *,
+    execution_summary: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(execution_summary, Mapping):
+        return None
+    if (_safe_str(execution_summary.get("selected_execution_mode")) or "").lower() != (
+        "custom_workflow"
+    ):
+        return None
+
+    dispatch_terminal_status = (
+        _safe_str(execution_summary.get("dispatch_terminal_status")) or ""
+    ).lower()
+    if dispatch_terminal_status != "failed":
+        return None
+
+    custom_workflow_execution = execution_summary.get("custom_workflow_execution")
+    custom_workflow_summary = (
+        custom_workflow_execution
+        if isinstance(custom_workflow_execution, Mapping)
+        else {}
+    )
+    action_started_count = _safe_non_negative_int(
+        custom_workflow_summary.get("action_started_count")
+    )
+    action_completed_count = _safe_non_negative_int(
+        custom_workflow_summary.get("action_completed_count")
+    )
+    action_failure_count = _safe_non_negative_int(
+        custom_workflow_summary.get("action_failure_count")
+    )
+    durable_side_effect_count = _safe_non_negative_int(
+        custom_workflow_summary.get("durable_side_effect_count")
+    )
+    terminal_effect_count = _safe_non_negative_int(
+        custom_workflow_summary.get("terminal_effect_count")
+    )
+
+    execution_progress_observed = any(
+        count > 0
+        for count in (
+            action_started_count,
+            action_completed_count,
+            action_failure_count,
+            durable_side_effect_count,
+            terminal_effect_count,
+        )
+    )
+
+    failure_codes: list[str] = []
+    primary_failure_code = _safe_str(
+        execution_summary.get("dispatch_terminal_failure_reason")
+    )
+    if primary_failure_code:
+        failure_codes.append(primary_failure_code)
+    zero_tool_reason_code = _safe_str(execution_summary.get("zero_tool_reason_code"))
+    if zero_tool_reason_code and zero_tool_reason_code not in failure_codes:
+        failure_codes.append(zero_tool_reason_code)
+    if not failure_codes:
+        failure_codes.append("custom_workflow_dispatch_failed")
+
+    status_reason = _safe_str(execution_summary.get("dispatch_terminal_failure_detail"))
+    if not status_reason:
+        dispatch_workflow_id = _safe_str(execution_summary.get("dispatch_workflow_id"))
+        failing_state_id = _safe_str(
+            execution_summary.get("dispatch_terminal_failing_state_id")
+        )
+        failing_action_id = _safe_str(
+            execution_summary.get("dispatch_terminal_failing_action_id")
+        )
+        if execution_progress_observed:
+            status_reason = _CUSTOM_WORKFLOW_EXECUTION_FAILURE_REASON
+        else:
+            workflow_label = dispatch_workflow_id or "Selected workflow"
+            status_reason = (
+                f"{workflow_label} failed before any workflow action could start."
+            )
+        if failing_state_id:
+            status_reason += f" Failing state: {failing_state_id}."
+        if failing_action_id:
+            status_reason += f" Failing action: {failing_action_id}."
+
+    return {
+        "effect_id": "effect_workflow_execution_1",
+        "intent_origin": "workflow_contract",
+        "effect_type": "workflow_execution",
+        "description": "Execute the selected custom workflow to a successful terminal state.",
+        "required_tools": [],
+        "targets": [],
+        "required_predicates": [],
+        "postcondition_required": True,
+        "postcondition_strategy": "workflow_terminal_success",
+        "status": "not_satisfied" if execution_progress_observed else "not_executed",
+        "status_reason": status_reason,
+        "failure_code": failure_codes[0],
+        "failure_codes": list(failure_codes),
+        "workflow_id": _safe_str(execution_summary.get("dispatch_workflow_id")),
+    }
+
+
 def _extract_file_copy_concept_ids_from_text(prompt_text: Any) -> list[str]:
     return extract_file_copy_concept_ids_from_text(prompt_text)
 
@@ -3386,6 +3490,22 @@ def _build_postcondition_checks(
                 check_status = "inconclusive"
                 evidence = "Tool execution verification outcome is inconclusive."
                 verification_mode = "execution_inconclusive"
+        elif effect_type == "workflow_execution":
+            if effect_status == "satisfied":
+                check_status = "verified"
+                evidence = "Required workflow execution was observed."
+                verification_mode = "workflow_terminal_success"
+            elif effect_status in {"not_satisfied", "not_executed"}:
+                check_status = "not_verified"
+                evidence = (
+                    _safe_str(effect.get("status_reason"))
+                    or _CUSTOM_WORKFLOW_EXECUTION_FAILURE_REASON
+                )
+                verification_mode = "workflow_terminal_failed"
+            else:
+                check_status = "inconclusive"
+                evidence = "Workflow execution verification outcome is inconclusive."
+                verification_mode = "workflow_terminal_inconclusive"
         elif _is_representation_effect_type(effect_type):
             representation_label = (
                 "Scholarly paper representation"
@@ -3442,6 +3562,8 @@ def _build_postcondition_checks(
                 "check_type": (
                     "tool_execution_observed"
                     if effect_type == "tool_execution"
+                    else "workflow_execution_observed"
+                    if effect_type == "workflow_execution"
                     else "scholarly_representation_observed"
                     if _is_representation_effect_type(effect_type)
                     else "predicate_exists"
@@ -3610,6 +3732,21 @@ def _derive_completion_gate(
             )
             if unresolved_effect_types == {"tool_execution"}:
                 decision_reason = "Required tool execution was not observed."
+            elif unresolved_effect_types == {"workflow_execution"}:
+                first_workflow_status_reason = next(
+                    (
+                        _safe_str(entry.get("status_reason"))
+                        for entry in unresolved_preconditions
+                        if (_safe_str(entry.get("effect_type")) or "")
+                        == "workflow_execution"
+                        and _safe_str(entry.get("status_reason"))
+                    ),
+                    None,
+                )
+                decision_reason = (
+                    first_workflow_status_reason
+                    or _CUSTOM_WORKFLOW_EXECUTION_FAILURE_REASON
+                )
             elif (
                 unresolved_effect_types == {"scholarly_representation"}
                 and not representation_failure_reason
@@ -3773,6 +3910,11 @@ def build_turn_execution_record(
         )
         if tool_execution_effect is not None:
             required_effects.append(tool_execution_effect)
+        custom_workflow_effect = _infer_custom_workflow_required_effect(
+            execution_summary=execution_summary
+        )
+        if custom_workflow_effect is not None:
+            required_effects.append(custom_workflow_effect)
 
     postcondition_checks = _build_postcondition_checks(
         required_effects=required_effects,

@@ -932,6 +932,79 @@ def test_turn_execution_search_failures_reports_modes_and_recommendations(monkey
     )
 
 
+def test_turn_execution_search_failures_flags_completed_record_with_failed_dispatch(
+    monkeypatch,
+):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    docs = [
+        {
+            "request_id": "req-false-success-1",
+            "session_id": "chat-false-success-1",
+            "namespace": "#V#user@org",
+            "created_at_utc": "2026-03-31T00:18:37Z",
+            "completion_gate": {
+                "decision": "completed",
+                "decision_reason": "No blocking effect detected.",
+                "safe_to_claim_completion": True,
+                "requires_follow_up": False,
+                "blocking_effect_ids": [],
+            },
+            "required_effects": [],
+            "workflow_selection": {
+                "selected_workflow_id": "#V#sail_phd_student_onboarding_workflow",
+                "selector_verdict": "rag_selected",
+            },
+            "workflow_routing_diagnostics": {
+                "dispatch": {
+                    "selected_execution_mode": "custom_workflow",
+                    "dispatch_terminal_status": "failed",
+                    "dispatch_terminal_failure_reason": (
+                        "metadata_validation_failed:"
+                        "metadata_write_context_key_missing:"
+                        "#V#onboarding_step_collect_student_info:"
+                        "#V#workflow_context_key_validated_type_name"
+                    ),
+                    "zero_tool_reason_code": (
+                        "custom_workflow_failed_before_tool_invocation"
+                    ),
+                }
+            },
+            "prompt": {"preview": "Show me all the SAIL PhD students"},
+            "critic": {"summary": {"not_verified_count": 0}},
+            "final_response": {
+                "completion_claim_detected": False,
+                "completion_claim_validated": True,
+            },
+        }
+    ]
+
+    coll = _TurnExecutionCollection(docs)
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        lambda: _DB({"turn_execution_records": coll}),
+    )
+
+    result = cat._turn_execution_search_failures(
+        namespace="#V#user@org",
+        limit=20,
+        offset=0,
+        include_completed=True,
+    )
+
+    assert result["success"] is True
+    assert result["returned_count"] == 1
+    assert result["likely_failure_count"] == 1
+    assert result["failure_mode_counts"]["false_completion_gate_state"] == 1
+    assert "req-false-success-1" in result["example_request_ids"]
+    item = result["items"][0]
+    assert item["failure_mode"] == "false_completion_gate_state"
+    assert item["likely_failure_to_act"] is True
+    assert any(
+        "completion-gate invariants" in rec for rec in result["recommendations"]
+    )
+
+
 def test_turn_execution_build_benchmark_returns_metrics_and_replay_cases(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue as cat
 

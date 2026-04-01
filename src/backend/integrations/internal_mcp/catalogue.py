@@ -8084,6 +8084,24 @@ def _classify_turn_execution_failure_mode(item: dict[str, Any]) -> str:
 
     completion_claim_detected = bool(item.get("completion_claim_detected", False))
     completion_claim_validated = bool(item.get("completion_claim_validated", True))
+    raw_workflow_routing_diagnostics = item.get("workflow_routing_diagnostics")
+    workflow_routing_diagnostics: dict[str, Any]
+    if isinstance(raw_workflow_routing_diagnostics, dict):
+        workflow_routing_diagnostics = raw_workflow_routing_diagnostics
+    else:
+        workflow_routing_diagnostics = {}
+    raw_dispatch = workflow_routing_diagnostics.get("dispatch")
+    dispatch: dict[str, Any]
+    if isinstance(raw_dispatch, dict):
+        dispatch = raw_dispatch
+    else:
+        dispatch = {}
+    dispatch_terminal_status = (
+        str(dispatch.get("dispatch_terminal_status") or "").strip().lower()
+    )
+    zero_tool_reason_code = (
+        str(dispatch.get("zero_tool_reason_code") or "").strip().lower()
+    )
 
     if decision == "failed":
         return "mutation_failed_or_blocked"
@@ -8096,6 +8114,10 @@ def _classify_turn_execution_failure_mode(item: dict[str, Any]) -> str:
             return "postcondition_inconclusive"
         return "partial_unspecified"
     if decision == "completed":
+        if dispatch_terminal_status == "failed":
+            return "false_completion_gate_state"
+        if zero_tool_reason_code == "custom_workflow_failed_before_tool_invocation":
+            return "false_completion_gate_state"
         if not safe_to_claim_completion:
             return "false_completion_gate_state"
         if unresolved_effect_count > 0:
@@ -8133,7 +8155,9 @@ def _derive_turn_execution_failure_recommendations(
         int(failure_mode_counts.get("postcondition_inconclusive", 0))
         + int(failure_mode_counts.get("unresolved_required_effects", 0))
     )
-    false_completion = int(failure_mode_counts.get("false_completion_claim", 0))
+    false_completion = int(failure_mode_counts.get("false_completion_claim", 0)) + int(
+        failure_mode_counts.get("false_completion_gate_state", 0)
+    )
 
     if mutation_not_executed > 0:
         recommendations.append(

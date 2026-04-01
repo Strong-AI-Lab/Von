@@ -592,6 +592,135 @@ def test_turn_execution_critic_marks_scholarly_representation_satisfied(monkeypa
     assert completion_gate.get("safe_to_claim_completion") is True
 
 
+def test_turn_execution_critic_blocks_failed_custom_workflow_dispatch() -> None:
+    orchestrator = _build_orchestrator()
+    request = _build_request(
+        action_id="turn_execution.critic",
+        data={
+            "prompt": "Show me all the SAIL PhD students.",
+            "final_response": "I reviewed the student list.",
+            "invocations": [],
+            "aux_llm_calls": [
+                {
+                    "type": "workflow_dispatch_boundary",
+                    "boundary": "execution_mode_selected",
+                    "status": "selected",
+                    "selected_execution_mode": "custom_workflow",
+                    "selected_workflow_id": "#V#sail_phd_student_onboarding_workflow",
+                    "dispatch_workflow_id": "#V#sail_phd_student_onboarding_workflow",
+                },
+                {
+                    "type": "workflow_dispatch_boundary",
+                    "boundary": "workflow_handoff",
+                    "status": "started",
+                    "selected_execution_mode": "custom_workflow",
+                    "selected_workflow_id": "#V#sail_phd_student_onboarding_workflow",
+                    "dispatch_workflow_id": "#V#sail_phd_student_onboarding_workflow",
+                },
+                {
+                    "type": "workflow_dispatch_boundary",
+                    "boundary": "workflow_terminal",
+                    "status": "failed",
+                    "selected_execution_mode": "custom_workflow",
+                    "selected_workflow_id": "#V#sail_phd_student_onboarding_workflow",
+                    "dispatch_workflow_id": "#V#sail_phd_student_onboarding_workflow",
+                    "completed": False,
+                    "reason": (
+                        "metadata_validation_failed:"
+                        "metadata_write_context_key_missing:"
+                        "#V#onboarding_step_collect_student_info:"
+                        "#V#workflow_context_key_validated_type_name"
+                    ),
+                    "detail": (
+                        "Workflow metadata validation failed before any action could "
+                        "start because context key "
+                        "#V#workflow_context_key_validated_type_name was missing."
+                    ),
+                    "failing_state_id": "#V#onboarding_step_collect_student_info",
+                    "failing_action_id": "tool.collect_student_info",
+                },
+                {
+                    "type": "workflow_execution",
+                    "workflow_id": "#V#sail_phd_student_onboarding_workflow",
+                    "final_state": "#V#onboarding_step_collect_student_info",
+                    "completed": False,
+                    "execution_summary": {
+                        "schema_version": "workflow_execution_summary.v1",
+                        "workflow_id": "#V#sail_phd_student_onboarding_workflow",
+                        "completed": False,
+                        "final_state": "#V#onboarding_step_collect_student_info",
+                        "step_result_envelope_count": 0,
+                        "action_started_count": 0,
+                        "action_completed_count": 0,
+                        "action_success_count": 0,
+                        "action_failure_count": 0,
+                        "action_unknown_count": 0,
+                        "first_failing_state_id": "#V#onboarding_step_collect_student_info",
+                        "first_failing_action_id": "tool.collect_student_info",
+                        "runtime_event_count": 0,
+                        "terminal_effect_count": 0,
+                        "terminal_effects": [],
+                        "durable_side_effect_count": 0,
+                        "durable_side_effects": [],
+                    },
+                },
+            ],
+            "turn_id": "req-turn-critic-custom-workflow-fail",
+            "conversation_session_id": "session-critic-custom-workflow-fail",
+            "workflow_discovery_result": {
+                "matches": [
+                    {"concept_id": "#V#sail_phd_student_onboarding_workflow"}
+                ]
+            },
+            "workflow_routing": {
+                "workflow_id": "#V#sail_phd_student_onboarding_workflow",
+                "verdict": "rag_selected",
+                "source": "selector",
+            },
+        },
+    )
+
+    result = orchestrator._action_turn_execution_critic(request)
+    assert result.ok
+
+    record = result.outputs.get("turn_execution_record")
+    assert isinstance(record, dict)
+    required_effects = record.get("required_effects")
+    assert isinstance(required_effects, list)
+    assert len(required_effects) == 1
+    effect = required_effects[0]
+    assert effect.get("effect_type") == "workflow_execution"
+    assert effect.get("status") == "not_executed"
+    assert effect.get("failure_code") == (
+        "metadata_validation_failed:"
+        "metadata_write_context_key_missing:"
+        "#V#onboarding_step_collect_student_info:"
+        "#V#workflow_context_key_validated_type_name"
+    )
+
+    postcondition_checks = record.get("postcondition_checks")
+    assert isinstance(postcondition_checks, list)
+    assert len(postcondition_checks) == 1
+    assert postcondition_checks[0].get("check_type") == "workflow_execution_observed"
+    assert postcondition_checks[0].get("status") == "not_verified"
+
+    completion_gate = record.get("completion_gate")
+    assert isinstance(completion_gate, dict)
+    assert completion_gate.get("decision") == "escalation_required"
+    assert completion_gate.get("safe_to_claim_completion") is False
+    assert completion_gate.get("requires_follow_up") is True
+    assert completion_gate.get("blocking_failure_codes") == [
+        "custom_workflow_failed_before_tool_invocation",
+        "metadata_validation_failed:"
+        "metadata_write_context_key_missing:"
+        "#V#onboarding_step_collect_student_info:"
+        "#V#workflow_context_key_validated_type_name",
+    ]
+    assert "before any action could start" in str(
+        completion_gate.get("decision_reason") or ""
+    )
+
+
 def test_turn_completion_gate_requests_repeat_when_budget_available() -> None:
     orchestrator = _build_orchestrator()
     request = _build_request(
