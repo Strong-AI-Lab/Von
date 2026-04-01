@@ -8222,6 +8222,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     turn_id=request_id,
                     workflow_discovery_result=workflow_discovery_result,
                     workflow_continuation_context=workflow_continuation_context,
+                    user_concept_id=user_concept_id,
+                    org_concept_id=org_concept_id,
                 )
                 llm_interaction["duration_ms"] = (
                     time.perf_counter() - orchestrator_start_perf

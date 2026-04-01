@@ -16,7 +16,8 @@ jest.mock('../../src/frontend/web/von_interface/static/js/domUtils.js', () => ({
         scrollableField: null
     },
     addMessageToChat: jest.fn(),
-    renderSpanSuggestions: jest.fn()
+    renderSpanSuggestions: jest.fn(),
+    getCurrentUserConceptId: jest.fn(() => null)
 }));
 
 describe('chat.js presenter mode request', () => {

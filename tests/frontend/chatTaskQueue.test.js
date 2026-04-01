@@ -10,7 +10,8 @@ jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => 
 
 jest.mock('../../src/frontend/web/von_interface/static/js/domUtils.js', () => ({
     elements: {},
-    renderSpanSuggestions: jest.fn()
+    renderSpanSuggestions: jest.fn(),
+    getCurrentUserConceptId: jest.fn(() => null)
 }));
 
 jest.mock('../../src/frontend/web/von_interface/static/js/utils/textDecorator.js', () => ({

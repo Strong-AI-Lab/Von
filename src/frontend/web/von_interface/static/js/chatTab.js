@@ -48,11 +48,18 @@ import { openSettingsTabAndFocus } from './utils/settingsNavigation.js';
 import { showToast } from './utils/toast.js';
 
 // Helper to build fetch headers with window session context (JVNAUTOSCI-1011)
+// JVNAUTOSCI-1651: Include X-User-Concept-ID so backend can resolve user
+// identity even when Flask session state is absent (e.g. after server restart).
 function buildChatFetchHeaders(extraHeaders = {}) {
-    return {
+    const headers = {
         [WINDOW_SESSION_HEADER]: getWindowSessionId(),
         ...extraHeaders
     };
+    const userConceptId = getCurrentUserConceptId();
+    if (userConceptId) {
+        headers['X-User-Concept-ID'] = userConceptId;
+    }
+    return headers;
 }
 
 // Store LLM debug data for each turn

@@ -3330,6 +3330,8 @@ class InternalMCPChatOrchestrator:
             default_gmail_profile=(
                 data.get("gmail_profile") or environment.default_gmail_profile
             ),
+            user_concept_id=environment.user_concept_id,
+            org_concept_id=environment.org_concept_id,
         )
         workflow_context.setdefault(
             "conversation_session_id", data.get("conversation_session_id")
@@ -15529,6 +15531,8 @@ class InternalMCPChatOrchestrator:
             max_tool_result_chars=self._max_tool_result_chars,
             max_tool_result_field_chars=self._max_tool_result_field_chars,
             default_gmail_profile=self._default_gmail_profile,
+            user_concept_id=data.get("user_concept_id"),
+            org_concept_id=data.get("org_concept_id"),
         )
 
         def _execute_workflow(definition: Any) -> tuple[Any | None, str | None]:
@@ -19760,6 +19764,8 @@ class InternalMCPChatOrchestrator:
             max_tool_result_chars=self._max_tool_result_chars,
             max_tool_result_field_chars=self._max_tool_result_field_chars,
             default_gmail_profile=self._default_gmail_profile,
+            user_concept_id=data.get("user_concept_id"),
+            org_concept_id=data.get("org_concept_id"),
         )
         try:
             result = self._workflow_executor.run(
@@ -19977,6 +19983,8 @@ class InternalMCPChatOrchestrator:
         workflow_discovery_result: Mapping[str, Any] | None = None,
         workflow_continuation_context: Mapping[str, Any] | None = None,
         workflow_gap_recovery_enabled: bool = True,
+        user_concept_id: Optional[str] = None,
+        org_concept_id: Optional[str] = None,
     ) -> OrchestratorResult:
         aux_llm_calls: List[Mapping[str, Any]] = []
         llm_calls: list[dict[str, Any]] = []
@@ -20348,8 +20356,11 @@ class InternalMCPChatOrchestrator:
             if trace_enabled and trace is not None:
                 trace.metadata["model_registry"] = dict(registry_summary)
 
-        user_concept_id = user_namespace
-        org_concept_id = None
+        # JVNAUTOSCI-1651: Use authenticated user/org IDs passed from the route
+        # handler. Fall back to user_namespace for backward compatibility with
+        # callers that do not yet provide the explicit IDs.
+        user_concept_id = user_concept_id or user_namespace
+        org_concept_id = org_concept_id  # may be None if caller did not provide it
 
         def _model_for_stage(stage: str) -> Optional[str]:
             return self._select_model_for_stage(
@@ -27161,6 +27172,8 @@ class InternalMCPChatOrchestrator:
                 max_tool_result_chars=self._max_tool_result_chars,
                 max_tool_result_field_chars=self._max_tool_result_field_chars,
                 default_gmail_profile=gmail_profile or self._default_gmail_profile,
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
             )
             routing_info_payload = (
                 asdict(routing_info) if routing_info is not None else None

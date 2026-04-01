@@ -58,6 +58,10 @@ class WorkflowEnvironment:
     max_tool_result_chars: int | None = None
     max_tool_result_field_chars: int | None = None
     default_gmail_profile: str | None = None
+    # JVNAUTOSCI-1651: Propagate authenticated user/org context so downstream
+    # LLM selection, namespace resolution, and access filtering work correctly.
+    user_concept_id: str | None = None
+    org_concept_id: str | None = None
 
 
 @dataclass(frozen=True)
