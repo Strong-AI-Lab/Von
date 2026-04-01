@@ -205,3 +205,111 @@ def test_episode_critic_bundle_supports_workflow_terminal_instances_without_turn
         result["observed_evidence"]["workflow_instance"]["status"]["instance_id"]
         == "wf-inst-1"
     )
+
+
+def test_episode_critic_bundle_surfaces_routing_quality_signals(monkeypatch):
+    from src.backend.services import episode_critic_evidence_service as svc
+
+    turn_record = {
+        "request_id": "req-critic-routing-1",
+        "session_id": "sess-critic-routing-1",
+        "namespace": "#V#user@org",
+        "user_id": "#V#user",
+        "workflow_selection": {
+            "selected_workflow_id": "#V#tool_calling_workflow",
+            "selector_verdict": "rag_selected",
+            "selector_source": "selector",
+            "selection_rationale": "selector_selected_discovered_candidate",
+        },
+        "workflow_routing_diagnostics": {
+            "selected_workflow_id": "#V#tool_calling_workflow",
+            "selector_verdict": "rag_selected",
+            "selector_source": "selector",
+            "selection_rationale": "selector_selected_discovered_candidate",
+            "selector": {
+                "prompt_id": "#V#chat_turn_classifier_prompt",
+                "requested_prompt_ids": ["#V#chat_turn_classifier_prompt"],
+            },
+            "discovery": {
+                "routing_match_ids": [
+                    "#V#arxiv_paper_representation_workflow",
+                    "#V#arxiv_paper_ingestion_testing_workflow",
+                ]
+            },
+            "dispatch": {
+                "selected_execution_mode": "tool_pipeline",
+                "dispatch_terminal_status": "follow_up_required",
+                "zero_tools_executed": True,
+                "failure_codes": ["tool_dispatch_handoff_zero_execution"],
+            },
+        },
+        "execution": {
+            "tool_invocations": [],
+            "required_effects_contract": {},
+        },
+        "required_effects": [],
+        "postcondition_checks": [],
+        "completion_gate": {
+            "decision": "escalation_required",
+            "requires_follow_up": True,
+            "blocking_failure_codes": ["tool_dispatch_handoff_zero_execution"],
+        },
+        "critic": {
+            "workflow_id": "#V#kb_mutation_postcondition_critic_workflow",
+        },
+    }
+
+    monkeypatch.setattr(svc, "_load_turn_execution_record", lambda **_: turn_record)
+    monkeypatch.setattr(svc, "_resolve_history_context", lambda **_: _history_context())
+    monkeypatch.setattr(
+        svc,
+        "get_latest_workflow_use_episode",
+        lambda **_: {
+            "episode_id": "wfep-routing-1",
+            "workflow_id": "#V#tool_calling_workflow",
+        },
+    )
+    monkeypatch.setattr(
+        svc,
+        "_resolve_workflow_definition_identity",
+        lambda **_: (
+            {
+                "workflow_id": "#V#tool_calling_workflow",
+                "definition_hash": "wf-routing-hash",
+                "source": "runtime_registry",
+            },
+            "workflow_registry",
+        ),
+    )
+
+    class _StubManager:
+        def get_instance(self, _instance_id):
+            return None
+
+        def list_instances(self, **_kwargs):
+            return []
+
+    monkeypatch.setattr(svc, "WorkflowInstanceManager", lambda: _StubManager())
+
+    result = svc.build_episode_critic_evidence_bundle(
+        request_id="req-critic-routing-1"
+    )
+
+    assert result["success"] is True
+    signals = result["expected_context"]["routing_quality_signals"]
+    assert signals["selected_workflow_id"] == "#V#tool_calling_workflow"
+    assert signals["selector_prompt_id"] == "#V#chat_turn_classifier_prompt"
+    assert signals["routing_match_ids"] == [
+        "#V#arxiv_paper_representation_workflow",
+        "#V#arxiv_paper_ingestion_testing_workflow",
+    ]
+    assert signals["unselected_routing_match_ids"] == [
+        "#V#arxiv_paper_representation_workflow",
+        "#V#arxiv_paper_ingestion_testing_workflow",
+    ]
+    assert signals["dispatch_zero_execution"] is True
+    assert (
+        "unselected_routing_matches_present" in signals["diagnostic_flags"]
+    )
+    assert "dispatch_zero_execution" in signals["diagnostic_flags"]
+    assert "completion_requires_follow_up" in signals["diagnostic_flags"]

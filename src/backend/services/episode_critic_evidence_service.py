@@ -958,6 +958,7 @@ def _build_expected_context(
                 "source_event_type": source_event_type,
                 "source_event_id": source_event_id,
             },
+            "routing_quality_signals": None,
             "workflow_stage_path": None,
             "workflow_definition_identity": _normalise_mapping(workflow_identity),
             "intended_effects": [],
@@ -1010,11 +1011,16 @@ def _build_expected_context(
     selection = _normalise_mapping(runtime_contract.get("selection")) or _normalise_mapping(
         turn_record.get("workflow_selection")
     ) or {}
+    routing_quality_signals = _build_routing_quality_signals(
+        turn_record=turn_record,
+        llm_debug=llm_debug,
+    )
 
     return {
         "selected_workflow": (
             selection
         ),
+        "routing_quality_signals": routing_quality_signals,
         "workflow_stage_path": (
             runtime.get("workflow_stage_path")
             if isinstance(runtime, Mapping) and runtime.get("workflow_stage_path") is not None
@@ -1049,6 +1055,130 @@ def _build_expected_context(
                 "completion_block_on_unresolved_effects"
             ),
         },
+    }
+
+
+def _build_routing_quality_signals(
+    *,
+    turn_record: Mapping[str, Any],
+    llm_debug: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    workflow_selection = _mapping_or_empty(turn_record.get("workflow_selection"))
+    routing_diagnostics = _mapping_or_empty(turn_record.get("workflow_routing_diagnostics"))
+    if not routing_diagnostics and isinstance(llm_debug, Mapping):
+        direct_routing = llm_debug.get("workflow_routing_diagnostics")
+        if isinstance(direct_routing, Mapping):
+            routing_diagnostics = _mapping_or_empty(direct_routing)
+        else:
+            diagnostics = _mapping_or_empty(llm_debug.get("turn_execution_diagnostics"))
+            routing_diagnostics = _mapping_or_empty(
+                diagnostics.get("workflow_routing_diagnostics")
+            )
+
+    selected_workflow_id = _safe_str(workflow_selection.get("selected_workflow_id")) or _safe_str(
+        routing_diagnostics.get("selected_workflow_id")
+    )
+    selected_workflow_lower = (selected_workflow_id or "").lower()
+
+    discovery = _mapping_or_empty(routing_diagnostics.get("discovery"))
+    selector = _mapping_or_empty(routing_diagnostics.get("selector"))
+    dispatch = _mapping_or_empty(routing_diagnostics.get("dispatch"))
+    completion_gate = _mapping_or_empty(turn_record.get("completion_gate"))
+
+    routing_match_ids = _normalise_string_list(discovery.get("routing_match_ids"))
+    if not routing_match_ids:
+        routing_match_ids = [
+            workflow_id
+            for workflow_id in (
+                _safe_str(item.get("concept_id"))
+                for item in _normalise_mapping_list(discovery.get("routing_matches"))
+            )
+            if workflow_id
+        ]
+
+    unselected_routing_match_ids = [
+        workflow_id
+        for workflow_id in routing_match_ids
+        if workflow_id.lower() != selected_workflow_lower
+    ]
+    selected_workflow_in_routing_matches = None
+    if selected_workflow_id and routing_match_ids:
+        selected_workflow_in_routing_matches = (
+            selected_workflow_id.lower()
+            in {workflow_id.lower() for workflow_id in routing_match_ids}
+        )
+
+    selection_rationale = _safe_str(workflow_selection.get("selection_rationale")) or _safe_str(
+        routing_diagnostics.get("selection_rationale")
+    )
+    selector_prompt_id = _safe_str(selector.get("prompt_id")) or _safe_str(
+        workflow_selection.get("prompt_id")
+    )
+    selector_requested_prompt_ids = _normalise_string_list(
+        selector.get("requested_prompt_ids")
+        or workflow_selection.get("requested_prompt_ids")
+    )
+    dispatch_failure_codes = _normalise_string_list(dispatch.get("failure_codes"))
+    completion_gate_failure_codes = _normalise_string_list(
+        completion_gate.get("blocking_failure_codes")
+    )
+
+    diagnostic_flags: list[str] = []
+    if unselected_routing_match_ids:
+        diagnostic_flags.append("unselected_routing_matches_present")
+    if selected_workflow_id and routing_match_ids and selected_workflow_in_routing_matches is False:
+        diagnostic_flags.append("selected_workflow_not_in_routing_matches")
+    if bool(dispatch.get("zero_tools_executed")):
+        diagnostic_flags.append("dispatch_zero_execution")
+    if dispatch_failure_codes:
+        diagnostic_flags.append("dispatch_failure_recorded")
+    if bool(completion_gate.get("requires_follow_up")):
+        diagnostic_flags.append("completion_requires_follow_up")
+    if completion_gate_failure_codes:
+        diagnostic_flags.append("completion_gate_failure_recorded")
+    if _safe_str(selector.get("prompt_failure_reason")):
+        diagnostic_flags.append("selector_prompt_failure_recorded")
+    if not selection_rationale:
+        diagnostic_flags.append("selection_rationale_missing")
+
+    if not any(
+        (
+            selected_workflow_id,
+            selector_prompt_id,
+            routing_match_ids,
+            unselected_routing_match_ids,
+            dispatch_failure_codes,
+            completion_gate_failure_codes,
+            diagnostic_flags,
+        )
+    ):
+        return None
+
+    return {
+        "selected_workflow_id": selected_workflow_id,
+        "selector_prompt_id": selector_prompt_id,
+        "selector_requested_prompt_ids": selector_requested_prompt_ids,
+        "selector_verdict": _safe_str(workflow_selection.get("selector_verdict"))
+        or _safe_str(routing_diagnostics.get("selector_verdict")),
+        "selector_source": _safe_str(workflow_selection.get("selector_source"))
+        or _safe_str(routing_diagnostics.get("selector_source")),
+        "selection_rationale": selection_rationale,
+        "routing_match_count": len(routing_match_ids),
+        "routing_match_ids": routing_match_ids,
+        "selected_workflow_in_routing_matches": selected_workflow_in_routing_matches,
+        "unselected_routing_match_ids": unselected_routing_match_ids,
+        "dispatch_selected_execution_mode": _safe_str(
+            dispatch.get("selected_execution_mode")
+        ),
+        "dispatch_terminal_status": _safe_str(dispatch.get("dispatch_terminal_status")),
+        "dispatch_zero_execution": bool(dispatch.get("zero_tools_executed")),
+        "dispatch_failure_codes": dispatch_failure_codes,
+        "completion_gate_decision": _safe_str(completion_gate.get("decision")),
+        "completion_gate_requires_follow_up": bool(
+            completion_gate.get("requires_follow_up")
+        ),
+        "completion_gate_blocking_failure_codes": completion_gate_failure_codes,
+        "diagnostic_flags": diagnostic_flags,
     }
 
 

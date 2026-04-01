@@ -90,6 +90,13 @@ def test_bootstrap_materialises_episode_evaluation_workflow_family(
         limit=5,
     )
     assert any((row or {}).get("text") for row in prompt_content_rows)
+    prompt_text = next(
+        ((row or {}).get("text") for row in prompt_content_rows if (row or {}).get("text")),
+        "",
+    )
+    assert isinstance(prompt_text, str)
+    assert "routing_quality_signals" in prompt_text
+    assert "workflow/routing selection defects" in prompt_text
 
     manager = get_instance_manager()
     turn_bindings = manager.list_event_bindings(
