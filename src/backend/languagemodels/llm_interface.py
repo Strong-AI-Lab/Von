@@ -1156,7 +1156,11 @@ class OpenAIClient(LLMInterface):
             logger.error(msg, exc_info=True)
             raise RuntimeError(msg)
         except openai.RateLimitError as e:
-            msg = f"OpenAI rate limit exceeded: {str(e)}"
+            _code = getattr(getattr(e, "body", None), "get", lambda *a: None)("code") if isinstance(getattr(e, "body", None), dict) else None
+            if _code == "insufficient_quota":
+                msg = f"OpenAI quota exhausted (insufficient_quota): {str(e)}"
+            else:
+                msg = f"OpenAI rate limit exceeded: {str(e)}"
             logger.error(msg, exc_info=True)
             raise RuntimeError(msg)
         except openai.BadRequestError as e:
@@ -1234,7 +1238,11 @@ class OpenAIClient(LLMInterface):
             error_msg = f"Invalid OpenAI API key: {str(e)}"
             logger.error(error_msg)
         except openai.RateLimitError as e:
-            error_msg = f"OpenAI rate limit exceeded: {str(e)}"
+            _code = e.body.get("code") if isinstance(getattr(e, "body", None), dict) else None
+            if _code == "insufficient_quota":
+                error_msg = f"OpenAI quota exhausted (insufficient_quota): {str(e)}"
+            else:
+                error_msg = f"OpenAI rate limit exceeded: {str(e)}"
             logger.error(error_msg)
         except openai.APIError as e:
             error_msg = f"OpenAI API error: {str(e)}"

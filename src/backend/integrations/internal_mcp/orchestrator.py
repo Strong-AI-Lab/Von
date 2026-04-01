@@ -10706,6 +10706,7 @@ class InternalMCPChatOrchestrator:
                 return response, model_name, telemetry
             except Exception as exc:
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
+                _fk = "quota_exhausted" if "insufficient_quota" in str(exc) else "candidate_error"
                 if callable(emit_progress):
                     emit_progress(
                         {
@@ -10716,7 +10717,7 @@ class InternalMCPChatOrchestrator:
                             "success": False,
                             "error": str(exc),
                             "error_class": type(exc).__name__,
-                            "failure_kind": "candidate_error",
+                            "failure_kind": _fk,
                             **attempt_meta,
                         }
                     )
@@ -10739,7 +10740,7 @@ class InternalMCPChatOrchestrator:
                     "model_resolved": model_name,
                     "error": str(exc),
                     "error_class": type(exc).__name__,
-                    "failure_kind": "candidate_error",
+                    "failure_kind": _fk,
                 }
                 errors.append(error_entry)
                 fallback_attempts.append(
@@ -10750,7 +10751,7 @@ class InternalMCPChatOrchestrator:
                         "status": "failed",
                         "error": str(exc),
                         "error_class": type(exc).__name__,
-                        "failure_kind": "candidate_error",
+                        "failure_kind": _fk,
                         "duration_ms": int(duration_ms),
                         "candidate": dict(telemetry)
                         if isinstance(telemetry, Mapping)
@@ -11205,6 +11206,7 @@ class InternalMCPChatOrchestrator:
                 return llm_response, model_name, telemetry
             except Exception as exc:
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
+                _fk = "quota_exhausted" if "insufficient_quota" in str(exc) else "candidate_error"
                 if callable(emit_progress):
                     emit_progress(
                         {
@@ -11215,7 +11217,7 @@ class InternalMCPChatOrchestrator:
                             "success": False,
                             "error": str(exc),
                             "error_class": type(exc).__name__,
-                            "failure_kind": "candidate_error",
+                            "failure_kind": _fk,
                             **attempt_meta,
                         }
                     )
@@ -11239,7 +11241,7 @@ class InternalMCPChatOrchestrator:
                         "model_resolved": model_name,
                         "error": str(exc),
                         "error_class": type(exc).__name__,
-                        "failure_kind": "candidate_error",
+                        "failure_kind": _fk,
                     }
                 )
                 fallback_attempts.append(
@@ -11250,7 +11252,7 @@ class InternalMCPChatOrchestrator:
                         "status": "failed",
                         "error": str(exc),
                         "error_class": type(exc).__name__,
-                        "failure_kind": "candidate_error",
+                        "failure_kind": _fk,
                         "duration_ms": int(duration_ms),
                         "candidate": dict(telemetry)
                         if isinstance(telemetry, Mapping)
