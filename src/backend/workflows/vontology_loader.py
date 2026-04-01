@@ -30,6 +30,7 @@ from .workflow_launch_input_contracts import (
     normalise_workflow_launch_input_contract,
 )
 from .workflow_action_contracts import resolve_workflow_action_target
+from .workflow_state_contracts import has_actionless_pre_action_contract
 from .write_tool_policy import (
     normalise_workflow_step_mutation_authority_spec,
 )
@@ -571,8 +572,11 @@ def detect_vacuous_workflow_steps(
 
     A step is considered vacuous when it contains no executable instruction:
       - no ``invokesAction`` target
-      - no preconditions/effects
-      - no variable read/write declarations
+      - no pre-action gate such as preconditions or context reads
+
+    Output-only metadata such as ``writes_context_keys`` does not make an
+    actionless step executable because those contracts are enforced only after
+    a step action (or subworkflow) runs.
 
     This intentionally surfaces steps that appear structurally wired but do not
     declare what they should do, enabling fast diagnosis from previous step
@@ -631,23 +635,19 @@ def detect_vacuous_workflow_steps(
         invokes_action = str(step.get("invokes_action", "") or "").strip()
         invokes_workflow = str(step.get("invokes_workflow", "") or "").strip()
         preconditions = step.get("preconditions") or []
-        effects = step.get("effects") or []
         reads_variables = step.get("reads_variables") or []
-        writes_variables = step.get("writes_variables") or []
-        context_input_mappings = step.get("context_input_mappings") or []
-        tool_output_context_mappings = step.get("tool_output_context_mappings") or []
-        writes_context_keys = step.get("writes_context_keys") or []
+        reads_context_keys = step.get("reads_context_keys") or []
 
         has_contract = bool(
             invokes_action
             or invokes_workflow
-            or preconditions
-            or effects
-            or reads_variables
-            or writes_variables
-            or context_input_mappings
-            or tool_output_context_mappings
-            or writes_context_keys
+            or has_actionless_pre_action_contract(
+                {
+                    "preconditions": preconditions,
+                    "reads_variables": reads_variables,
+                    "reads_context_keys": reads_context_keys,
+                }
+            )
         )
         if has_contract:
             continue

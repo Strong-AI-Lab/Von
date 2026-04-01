@@ -85,6 +85,39 @@ def test_validate_contract_rejects_non_terminal_vacuous_state() -> None:
     assert validation.get("vacuous_state_ids") == ["start"]
 
 
+def test_validate_contract_rejects_actionless_output_only_contract() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#test_output_only_state_workflow",
+        initial_state="start",
+        states={
+            "start": WorkflowStateSpec(
+                state_id="start",
+                metadata={
+                    "writes_context_keys": [
+                        "#V#workflow_context_key_validated_type_name"
+                    ]
+                },
+                transitions=(
+                    WorkflowTransitionSpec(
+                        to_state="complete",
+                        condition=lambda _ctx: True,
+                        reason="noop",
+                    ),
+                ),
+            ),
+            "complete": WorkflowStateSpec(state_id="complete", terminal=True),
+        },
+        termination_states=("complete",),
+        purpose="test",
+    )
+
+    validation = validate_workflow_definition_contract(definition=definition)
+
+    assert validation["valid"] is False
+    assert "workflow_step_contract_vacuous" in (validation.get("errors") or [])
+    assert validation.get("vacuous_state_ids") == ["start"]
+
+
 def _child_workflow_definition(
     *,
     workflow_id: str = "#V#child_workflow",

@@ -226,6 +226,77 @@ def test_verify_workflow_runnable_reports_previous_step_context_for_middle_vacui
     assert previous["link_predicate"] == "nextStep"
 
 
+def test_verify_workflow_runnable_rejects_actionless_output_only_contract() -> None:
+    graph = {
+        "workflow_id": "#V#candidate_workflow",
+        "initial_step": "#V#start",
+        "steps": [
+            {
+                "step_id": "#V#start",
+                "name": "Start",
+                "invokes_action": None,
+                "preconditions": [],
+                "effects": [],
+                "reads_variables": [],
+                "reads_context_keys": [],
+                "writes_variables": [],
+                "writes_context_keys": [
+                    "#V#workflow_context_key_validated_type_name"
+                ],
+            },
+            {
+                "step_id": "#V#complete",
+                "name": "Complete",
+                "invokes_action": None,
+            },
+        ],
+        "edges": [
+            {"from": "#V#start", "to": "#V#complete", "predicate": "nextStep"}
+        ],
+        "warnings": [],
+    }
+    definition = WorkflowDefinition(
+        workflow_id="#V#candidate_workflow",
+        initial_state="#V#start",
+        states={
+            "#V#start": WorkflowStateSpec(
+                state_id="#V#start",
+                metadata={
+                    "writes_context_keys": [
+                        "#V#workflow_context_key_validated_type_name"
+                    ]
+                },
+                transitions=(),
+            ),
+            "#V#complete": WorkflowStateSpec(
+                state_id="#V#complete",
+                terminal=True,
+            )
+        },
+        termination_states=("#V#complete",),
+    )
+
+    with patch(
+        "src.backend.workflows.durable.workflow_instance_submission_service.build_workflow_process_graph_from_definition",
+        return_value=graph,
+    ), patch(
+        "src.backend.workflows.durable.registry_factory.get_shared_workflow_registry_read_only",
+        return_value=_make_registry(definition),
+    ), patch(
+        "src.backend.workflows.durable.registry_factory.get_shared_durable_action_registry",
+        return_value=_make_action_registry(supports_action=True),
+    ):
+        verification = verify_workflow_runnable("#V#candidate_workflow")
+
+    assert verification.runnable_verification_success is False
+    assert "workflow_step_contract_integrity_issue" in verification.errors
+    assert verification.contract_validation is not None
+    assert "workflow_step_contract_vacuous" in (
+        verification.contract_validation.get("errors") or []
+    )
+    assert verification.contract_validation.get("vacuous_state_ids") == ["#V#start"]
+
+
 def test_verify_workflow_runnable_allows_workflows_with_contracts() -> None:
     graph = {
         "workflow_id": "#V#candidate_workflow",

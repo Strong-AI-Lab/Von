@@ -102,6 +102,7 @@ def _make_step(
     preconditions: List[str] | None = None,
     effects: List[str] | None = None,
     reads_variables: List[str] | None = None,
+    reads_context_keys: List[str] | None = None,
     writes_variables: List[str] | None = None,
     context_input_mappings: List[str] | None = None,
     tool_output_context_mappings: List[str] | None = None,
@@ -119,6 +120,7 @@ def _make_step(
         "preconditions": preconditions or [],
         "effects": effects or [],
         "reads_variables": reads_variables or [],
+        "reads_context_keys": reads_context_keys or [],
         "writes_variables": writes_variables or [],
         "context_input_mappings": context_input_mappings or [],
         "tool_output_context_mappings": tool_output_context_mappings or [],
@@ -2803,6 +2805,48 @@ class TestSubworkflowCompositionContracts:
                     next_step="#V#completed",
                 ),
                 _make_step("#V#completed"),
+            ],
+        )
+
+        issues = detect_vacuous_workflow_steps(
+            workflow_id="#V#parent_workflow",
+            graph=graph,
+        )
+
+        assert issues == []
+
+    def test_detect_vacuous_steps_rejects_output_only_contract_without_action(self):
+        graph = _make_graph(
+            initial_step="#V#start",
+            steps=[
+                _make_step(
+                    "#V#start",
+                    writes_context_keys=["#V#workflow_context_key_validated_type_name"],
+                )
+            ],
+        )
+
+        issues = detect_vacuous_workflow_steps(
+            workflow_id="#V#parent_workflow",
+            graph=graph,
+        )
+
+        assert len(issues) == 1
+        assert issues[0]["step_id"] == "#V#start"
+
+    def test_detect_vacuous_steps_allows_actionless_pre_action_gate(self):
+        graph = _make_graph(
+            initial_step="#V#start",
+            steps=[
+                _make_step(
+                    "#V#start",
+                    reads_context_keys=["member_name"],
+                    next_step="#V#complete",
+                ),
+                _make_step("#V#complete"),
+            ],
+            edges=[
+                {"from": "#V#start", "to": "#V#complete", "predicate": "next_step"}
             ],
         )
 

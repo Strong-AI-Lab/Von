@@ -29,6 +29,7 @@ from .execution_contracts import (
     WORKFLOW_CONTROL_JOIN_ACTION_IDS,
     WORKFLOW_FOR_EACH_ALLOWED_SUCCESS_POLICIES,
 )
+from .workflow_state_contracts import has_actionless_pre_action_contract
 from .write_tool_policy import (
     normalise_workflow_step_mutation_authority_spec,
 )
@@ -769,9 +770,9 @@ def validate_workflow_definition_contract(
             state_id in termination_states
         )
 
-        has_metadata_contract = any(
-            bool(metadata.get(key)) for key in _STATE_METADATA_CONTRACT_KEYS
-        )
+        # Actionless states are only meaningful when they gate on existing
+        # context before transition; output/mapping metadata requires an action.
+        has_metadata_contract = has_actionless_pre_action_contract(metadata)
         # Terminal sink states (for example an explicit "failed" state) may
         # intentionally omit actions/mappings while remaining structurally valid.
         if not actions and not has_metadata_contract and not is_terminal_state:

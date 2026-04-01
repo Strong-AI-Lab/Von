@@ -909,6 +909,48 @@ def test_classify_workflow_treats_completely_vacuous_steps_as_non_executable() -
     assert "first_step=#V#step_one" in str(detail)
 
 
+def test_classify_workflow_rejects_actionless_output_only_contract() -> None:
+    _classify_workflow_concept_executability.cache_clear()
+    graph = {
+        "workflow_id": "#V#wf_output_only",
+        "initial_step": "#V#step_one",
+        "steps": [
+            {
+                "step_id": "#V#step_one",
+                "name": "step one",
+                "invokes_action": None,
+                "preconditions": [],
+                "effects": [],
+                "reads_variables": [],
+                "reads_context_keys": [],
+                "writes_variables": [],
+                "writes_context_keys": [
+                    "#V#workflow_context_key_validated_type_name"
+                ],
+            }
+        ],
+        "edges": [],
+        "warnings": [],
+    }
+
+    with patch(
+        "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+        return_value=(graph, []),
+    ), patch(
+        "src.backend.workflows.vontology_loader.load_workflow_definition_from_vontology",
+        return_value=object(),
+    ):
+        is_executable, reason, detail = _classify_workflow_concept_executability(
+            "#V#wf_output_only"
+        )
+
+    assert is_executable is False
+    assert reason == EXECUTABILITY_WORKFLOW_STEP_COMPLETELY_VACUOUS
+    assert "count=1" in str(detail)
+    assert "total=1" in str(detail)
+    assert "first_step=#V#step_one" in str(detail)
+
+
 def test_classify_workflow_uses_registry_fallback_for_built_in_workflow() -> None:
     _classify_workflow_concept_executability.cache_clear()
     fake_definition = SimpleNamespace(
