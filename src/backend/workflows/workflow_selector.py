@@ -95,6 +95,176 @@ class WorkflowSelector:
     _JSON_CONFIDENCE_KEYS = ("confidence", "confidence_score", "score")
     _JSON_REASONING_KEYS = ("reasoning", "reason", "explanation", "rationale")
     _CANDIDATE_BOUNDARY_STRIP = " \t\r\n`'\".,;:!?()[]{}<>"
+
+    @staticmethod
+    def _humanise_candidate_signal(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        return " ".join(text.replace("_", " ").replace("-", " ").split())
+
+    @staticmethod
+    def _format_candidate_percentage(value: Any) -> str | None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if number < 0:
+            return None
+        if number <= 1.0:
+            return f"{number * 100:.0f}%"
+        return f"{number:.2f}"
+
+    @classmethod
+    def _build_candidate_evidence_items(
+        cls,
+        entry_row: Mapping[str, Any],
+        *,
+        policy_score: Mapping[str, Any] | None,
+        policy_active: bool,
+    ) -> list[str]:
+        evidence_items: list[str] = []
+
+        match_source = cls._humanise_candidate_signal(entry_row.get("match_source"))
+        if match_source:
+            evidence_items.append(f"source {match_source}")
+
+        candidate_source = cls._humanise_candidate_signal(
+            entry_row.get("candidate_source")
+        )
+        if candidate_source:
+            evidence_items.append(f"candidate source {candidate_source}")
+
+        relevance = cls._format_candidate_percentage(entry_row.get("relevance_score"))
+        if relevance:
+            evidence_items.append(f"relevance {relevance}")
+
+        confidence = cls._format_candidate_percentage(entry_row.get("confidence_score"))
+        if confidence:
+            evidence_items.append(f"confidence {confidence}")
+
+        if entry_row.get("routing_eligible") is True:
+            evidence_items.append("routing eligible")
+        elif entry_row.get("routing_eligible") is False:
+            evidence_items.append("routing ineligible")
+
+        if entry_row.get("is_executable") is True:
+            evidence_items.append("executable")
+        elif entry_row.get("is_executable") is False:
+            evidence_items.append("not executable")
+
+        executability_reason = cls._humanise_candidate_signal(
+            entry_row.get("executability_reason")
+        )
+        if executability_reason and executability_reason != "executable now":
+            evidence_items.append(f"executability {executability_reason}")
+
+        routing_exclusion_reason = cls._humanise_candidate_signal(
+            entry_row.get("routing_exclusion_reason")
+        )
+        if routing_exclusion_reason:
+            evidence_items.append(f"routing exclusion {routing_exclusion_reason}")
+
+        if entry_row.get("is_policy_safe") is True:
+            evidence_items.append("policy safe")
+        elif entry_row.get("is_policy_safe") is False:
+            evidence_items.append("policy unsafe")
+
+        if policy_score is not None and policy_active:
+            evidence_items.extend(
+                [
+                    f"policy prior {float(policy_score.get('average_reward', 0.0)):.2f}",
+                    f"exploration {float(policy_score.get('exploration_bonus', 0.0)):.2f}",
+                    f"evidence {int(policy_score.get('attempts', 0))}",
+                ]
+            )
+
+        return evidence_items
+
+    @staticmethod
+    def _candidate_entry_lookup(
+        candidate_entries: Sequence[Mapping[str, Any]] | None,
+    ) -> dict[str, Mapping[str, Any]]:
+        lookup: dict[str, Mapping[str, Any]] = {}
+        for entry in candidate_entries or ():
+            if not isinstance(entry, Mapping):
+                continue
+            concept_id = str(entry.get("concept_id") or "").strip()
+            if concept_id:
+                lookup[concept_id] = entry
+        return lookup
+
+    @classmethod
+    def _derive_disqualifying_reason_for_generic_selection(
+        cls,
+        *,
+        selected_workflow_id: str,
+        candidate_entries: Sequence[Mapping[str, Any]] | None,
+    ) -> str:
+        entry_lookup = cls._candidate_entry_lookup(candidate_entries)
+        selected_entry = entry_lookup.get(selected_workflow_id)
+        if not isinstance(selected_entry, Mapping):
+            return ""
+
+        selected_source = str(selected_entry.get("candidate_source") or "").strip()
+        selected_reason = str(selected_entry.get("candidate_reason") or "").strip()
+        if selected_source != "selector_default" and selected_reason != "builtin_selector_candidate":
+            return ""
+
+        disqualified_candidates: list[str] = []
+        for concept_id, entry in entry_lookup.items():
+            if concept_id == selected_workflow_id:
+                continue
+            candidate_source = str(entry.get("candidate_source") or "").strip()
+            if candidate_source != "workflow_discovery":
+                continue
+
+            routing_exclusion_reason = cls._humanise_candidate_signal(
+                entry.get("routing_exclusion_reason")
+            )
+            executability_reason = cls._humanise_candidate_signal(
+                entry.get("executability_reason")
+            )
+
+            if entry.get("routing_eligible") is False:
+                if routing_exclusion_reason:
+                    disqualified_candidates.append(
+                        f"{concept_id} routing exclusion {routing_exclusion_reason}"
+                    )
+                else:
+                    disqualified_candidates.append(
+                        f"{concept_id} is routing ineligible"
+                    )
+                continue
+            if entry.get("is_executable") is False:
+                if executability_reason:
+                    disqualified_candidates.append(
+                        f"{concept_id} executability {executability_reason}"
+                    )
+                else:
+                    disqualified_candidates.append(
+                        f"{concept_id} is not executable"
+                    )
+                continue
+
+            if routing_exclusion_reason:
+                disqualified_candidates.append(
+                    f"{concept_id} routing exclusion {routing_exclusion_reason}"
+                )
+                continue
+
+            if executability_reason and executability_reason != "executable now":
+                disqualified_candidates.append(
+                    f"{concept_id} executability {executability_reason}"
+                )
+
+        if not disqualified_candidates:
+            return ""
+        return (
+            "Generic fallback selected because "
+            + "; ".join(disqualified_candidates[:2])
+        )
+
     @property
     def rag_first(self) -> bool:
         """Retained for backwards-compatible introspection.
@@ -159,6 +329,7 @@ class WorkflowSelector:
             prompt_id=selection_prompt.prompt_id,
             prompt_used=selection_prompt.prompt_text,
             discovered_workflow_ids=selection_prompt.discovered_workflow_ids,
+            candidate_entries=selection_prompt.candidate_entries,
         )
 
     # ------------------------------------------------------------------
@@ -280,13 +451,13 @@ class WorkflowSelector:
             if entry_row["description"]:
                 candidate_line += f" — {entry_row['description']}"
             policy_score = policy_score_lookup.get(cid)
-            if policy_score is not None and policy_recommendation.get("policy_active"):
-                candidate_line += (
-                    " "
-                    f"[policy prior {float(policy_score.get('average_reward', 0.0)):.2f}; "
-                    f"exploration {float(policy_score.get('exploration_bonus', 0.0)):.2f}; "
-                    f"evidence {int(policy_score.get('attempts', 0))}]"
-                )
+            evidence_items = self._build_candidate_evidence_items(
+                entry_row,
+                policy_score=policy_score,
+                policy_active=bool(policy_recommendation.get("policy_active")),
+            )
+            if evidence_items:
+                candidate_line += f" [{'; '.join(evidence_items)}]"
             candidate_lines.append(candidate_line)
 
         # If no candidates were provided (e.g. empty capability index),
@@ -414,6 +585,7 @@ class WorkflowSelector:
         prompt_id: Optional[str],
         prompt_used: str | None,
         discovered_workflow_ids: Sequence[str] = (),
+        candidate_entries: Sequence[Mapping[str, Any]] | None = None,
     ) -> WorkflowSelection:
         """Resolve a raw LLM response into a workflow selection.
 
@@ -425,6 +597,7 @@ class WorkflowSelector:
             prompt_id=prompt_id,
             prompt_used=prompt_used,
             candidate_workflow_ids=discovered_workflow_ids,
+            candidate_entries=candidate_entries,
         )
 
     # ------------------------------------------------------------------
@@ -438,6 +611,7 @@ class WorkflowSelector:
         prompt_id: Optional[str],
         prompt_used: str | None,
         candidate_workflow_ids: Sequence[str] = (),
+        candidate_entries: Sequence[Mapping[str, Any]] | None = None,
     ) -> WorkflowSelection:
         """Resolve selection from RAG candidate list.
 
@@ -498,6 +672,17 @@ class WorkflowSelector:
                 if confidence_score > 0.0:
                     confidence_score = min(confidence_score, 0.3)
         selection_metadata["selected_workflow_id"] = workflow_id
+
+        if not reasoning:
+            derived_reason = self._derive_disqualifying_reason_for_generic_selection(
+                selected_workflow_id=workflow_id,
+                candidate_entries=candidate_entries,
+            )
+            if derived_reason:
+                reasoning = derived_reason
+                selection_metadata["derived_reasoning"] = (
+                    "generic_fallback_disqualification"
+                )
 
         return WorkflowSelection(
             workflow_id=workflow_id,

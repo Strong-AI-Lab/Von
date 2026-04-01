@@ -5371,6 +5371,175 @@ def test_explicit_workflow_prompt_is_not_python_reinterpreted_into_custom_dispat
     )
 
 
+def test_explicit_arxiv_representation_request_selects_representation_workflow_over_generic_tool_calling(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = "#V#arxiv_paper_representation_workflow"
+    _register_terminal_custom_workflow(
+        orchestrator,
+        workflow_id=selected_workflow_id,
+        purpose=(
+            "Canonical arXiv wrapper workflow that normalises an arXiv source, "
+            "fetches authoritative metadata, and delegates to scholarly-paper "
+            "representation."
+        ),
+    )
+
+    _stub_execute_workflow_result(
+        monkeypatch,
+        orchestrator,
+        expected_workflow_id=selected_workflow_id,
+        final_state="complete",
+        data={"response_text": "Executed via arXiv representation workflow."},
+    )
+
+    result = orchestrator.run(
+        prompt="Download and represent 2603.19312v1 arxiv",
+        context=[],
+        llm_client=_CapturingLLM(
+            [
+                json.dumps(
+                    {
+                        "workflow_id": selected_workflow_id,
+                        "confidence": 0.97,
+                        "reasoning": (
+                            "The request explicitly asks to download and represent "
+                            "an arXiv paper, and the specialised arXiv "
+                            "representation workflow is executable."
+                        ),
+                    }
+                )
+            ]
+        ),
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Arxiv Paper Representation Workflow",
+                    "description": (
+                        "Canonical arXiv wrapper workflow that normalises an arXiv "
+                        "source, fetches authoritative metadata, acquires or "
+                        "finalises the paper artefact, delegates to the scholarly-"
+                        "paper workflow, and fails closed on incomplete "
+                        "representation."
+                    ),
+                    "match_source": "capability_index",
+                    "confidence_score": 1.0,
+                    "relevance_score": 1.0,
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "candidate_source": "workflow_discovery",
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Arxiv Paper Representation Workflow",
+                    "description": (
+                        "Canonical arXiv wrapper workflow that normalises an arXiv "
+                        "source, fetches authoritative metadata, acquires or "
+                        "finalises the paper artefact, delegates to the scholarly-"
+                        "paper workflow, and fails closed on incomplete "
+                        "representation."
+                    ),
+                    "match_source": "capability_index",
+                    "confidence_score": 1.0,
+                    "relevance_score": 1.0,
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "executability_reason": "executable_now",
+                    "candidate_source": "workflow_discovery",
+                }
+            ],
+            "match_count": 1,
+        },
+    )
+
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.workflow_id == selected_workflow_id
+    assert result.workflow_routing.verdict == "rag_selected"
+    assert result.workflow_routing.source == "selector"
+    assert result.response_text == "Executed via arXiv representation workflow."
+
+    selector_entry = next(
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict) and entry.get("type") == "workflow_selector"
+    )
+    candidate_list_text = str(selector_entry.get("candidate_list", {}).get("text") or "")
+    assert selected_workflow_id in candidate_list_text
+    assert TOOL_CALLING_WORKFLOW_ID in candidate_list_text
+    assert "relevance 100%" in candidate_list_text
+    assert "confidence 100%" in candidate_list_text
+    assert "routing eligible" in candidate_list_text
+    assert "executable" in candidate_list_text
+    assert selector_entry.get("workflow_id") == selected_workflow_id
+
+
+def test_generic_tool_fallback_records_disqualifying_reason_for_specialised_candidate(
+    monkeypatch,
+):
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    selected_workflow_id = "#V#arxiv_paper_representation_workflow"
+
+    result = orchestrator.run(
+        prompt="Download and represent 2603.19312v1 arxiv",
+        context=[],
+        llm_client=_CapturingLLM(
+            [TOOL_CALLING_WORKFLOW_ID, "Fallback via generic tool pipeline."]
+        ),
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result={
+            "matches": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Arxiv Paper Representation Workflow",
+                    "description": "Canonical arXiv representation workflow.",
+                    "candidate_source": "workflow_discovery",
+                    "relevance_score": 1.0,
+                    "confidence_score": 1.0,
+                    "routing_eligible": True,
+                    "is_executable": False,
+                    "executability_reason": "launch_input_contract_unsatisfied",
+                }
+            ],
+            "candidates": [
+                {
+                    "concept_id": selected_workflow_id,
+                    "name": "Arxiv Paper Representation Workflow",
+                    "description": "Canonical arXiv representation workflow.",
+                    "candidate_source": "workflow_discovery",
+                    "relevance_score": 1.0,
+                    "confidence_score": 1.0,
+                    "routing_eligible": True,
+                    "is_executable": False,
+                    "executability_reason": "launch_input_contract_unsatisfied",
+                }
+            ],
+            "match_count": 1,
+        },
+    )
+
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
+    assert result.workflow_routing.verdict == "rag_selected"
+    assert result.workflow_routing.source == "selector"
+
+    selector_entry = next(
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict) and entry.get("type") == "workflow_selector"
+    )
+    reasoning = str(selector_entry.get("reasoning") or "")
+    assert "#V#arxiv_paper_representation_workflow" in reasoning
+    assert "launch input contract unsatisfied" in reasoning
+
+
 def test_same_session_follow_up_does_not_rehydrate_python_write_intent_memory(
     monkeypatch,
 ):

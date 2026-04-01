@@ -21196,6 +21196,14 @@ class InternalMCPChatOrchestrator:
                         prompt_id=selector_prompt.prompt_id,
                         prompt_used=selector_prompt_text,
                         discovered_workflow_ids=selector_prompt.discovered_workflow_ids,
+                        candidate_entries=(
+                            tuple(selector_prompt.candidate_entries)
+                            + tuple(
+                                item
+                                for item in excluded_discovered_matches
+                                if isinstance(item, Mapping)
+                            )
+                        ),
                     )
                 routing_duration_ms = (time.perf_counter() - selector_start) * 1000.0
                 selection_source = (

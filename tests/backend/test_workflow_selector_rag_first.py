@@ -223,6 +223,44 @@ class TestRagFirstPrompt:
             "Run the meeting invitation test"
         )
 
+    def test_prompt_carries_candidate_evidence_signals(self):
+        selector = _build_selector()
+        prompt = selector.prepare_selection_prompt(
+            turn_text="Download and represent 2603.19312v1 arxiv",
+            discovered_workflows=[
+                {
+                    "concept_id": "#V#arxiv_paper_representation_workflow",
+                    "name": "Arxiv Paper Representation Workflow",
+                    "description": "Canonical arXiv wrapper workflow.",
+                    "match_source": "capability_index",
+                    "candidate_source": "workflow_discovery",
+                    "relevance_score": 1.0,
+                    "confidence_score": 1.0,
+                    "routing_eligible": True,
+                    "is_executable": True,
+                    "is_policy_safe": True,
+                    "executability_reason": "executable_now",
+                },
+                {
+                    "concept_id": "#V#tool_calling_workflow",
+                    "name": "Tool Calling Workflow",
+                    "description": "General-purpose tool-calling pipeline.",
+                    "candidate_source": "selector_default",
+                    "routing_eligible": True,
+                    "is_executable": True,
+                },
+            ],
+        )
+
+        assert prompt.candidate_list_text is not None
+        assert "source capability index" in prompt.candidate_list_text
+        assert "candidate source workflow discovery" in prompt.candidate_list_text
+        assert "relevance 100%" in prompt.candidate_list_text
+        assert "confidence 100%" in prompt.candidate_list_text
+        assert "routing eligible" in prompt.candidate_list_text
+        assert "executable" in prompt.candidate_list_text
+        assert "policy safe" in prompt.candidate_list_text
+
     def test_prompt_includes_turn_text(self):
         selector = _build_selector()
         prompt = selector.prepare_selection_prompt(

@@ -239,6 +239,39 @@ class TestSelectionConfidenceReasoning:
         assert result.confidence_score == 0.0
         assert result.reasoning == ""
 
+    def test_generic_builtin_selection_derives_disqualifying_reason_from_candidate_evidence(
+        self,
+    ):
+        selector = _build_selector()
+        result = selector.resolve_selection(
+            raw_response=_TOOL_WORKFLOW,
+            prompt_id=None,
+            prompt_used="test",
+            discovered_workflow_ids=[_TOOL_WORKFLOW],
+            candidate_entries=[
+                {
+                    "concept_id": "#V#arxiv_paper_representation_workflow",
+                    "candidate_source": "workflow_discovery",
+                    "is_executable": False,
+                    "executability_reason": "launch_input_contract_unsatisfied",
+                },
+                {
+                    "concept_id": _TOOL_WORKFLOW,
+                    "candidate_source": "selector_default",
+                    "candidate_reason": "builtin_selector_candidate",
+                },
+            ],
+        )
+        assert result.workflow_id == _TOOL_WORKFLOW
+        assert result.verdict == "rag_selected"
+        assert "Generic fallback selected because" in result.reasoning
+        assert "#V#arxiv_paper_representation_workflow" in result.reasoning
+        assert "launch input contract unsatisfied" in result.reasoning
+        assert (
+            result.selection_metadata.get("derived_reasoning")
+            == "generic_fallback_disqualification"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Enhanced prompt format
