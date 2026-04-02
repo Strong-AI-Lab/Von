@@ -1599,6 +1599,22 @@ def verify_ollama_host():
 def get_available_people():
     """API endpoint to retrieve all available person entities for selection."""
     try:
+        if ConceptsRepository.collection() is None:
+            current_app.logger.warning(
+                "People selector unavailable: concepts collection could not be reached."
+            )
+            response = _jsonify_no_store(
+                {
+                    "error": "People are temporarily unavailable. Please retry shortly.",
+                    "retryable": True,
+                    "reason": "concepts_collection_unavailable",
+                    "retry_after_seconds": 5,
+                },
+                503,
+            )
+            response.headers["Retry-After"] = "5"
+            return response
+
         # Get all Von user entities by using the specific Von user concept ID
         concepts, total_count = list_concepts(
             concept_id="#V#von_user",  # Use the specific Von user concept ID
@@ -1633,7 +1649,13 @@ def get_available_people():
             )
 
         return (
-            jsonify({"people": people_options, "total_count": len(people_options)}),
+            jsonify(
+                {
+                    "people": people_options,
+                    "total_count": len(people_options),
+                    "available": True,
+                }
+            ),
             200,
         )
 
@@ -1651,6 +1673,22 @@ def get_available_people():
 def get_available_organisations():
     """API endpoint to retrieve all available organisation entities for selection."""
     try:
+        if ConceptsRepository.collection() is None:
+            current_app.logger.warning(
+                "Organisation selector unavailable: concepts collection could not be reached."
+            )
+            response = _jsonify_no_store(
+                {
+                    "error": "Organisations are temporarily unavailable. Please retry shortly.",
+                    "retryable": True,
+                    "reason": "concepts_collection_unavailable",
+                    "retry_after_seconds": 5,
+                },
+                503,
+            )
+            response.headers["Retry-After"] = "5"
+            return response
+
         # Get all Von user organisation entities using the specific concept
         concepts, total_count = list_concepts(
             concept_id="#V#von_user_organisation",  # Use the specific Von user organisation concept ID
@@ -1695,6 +1733,7 @@ def get_available_organisations():
                 {
                     "organisations": organisation_options,
                     "total_count": len(organisation_options),
+                    "available": True,
                 }
             ),
             200,

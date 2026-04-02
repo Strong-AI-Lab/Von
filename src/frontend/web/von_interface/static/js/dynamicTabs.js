@@ -4,6 +4,7 @@
 // Removed imported populateContentSection to avoid duplicate with local implementation below
 
 import { initializeAnnotationTab } from './annotationTab.js';
+import { getJsonDetailed } from './apiService.js';
 import { fetchConceptListWithSuffix, fetchSubtypesWithSuffix, initializeNamesForm, loadConceptAttributes, loadConceptNames, selectConceptWithSuffix } from './conceptTab.js';
 import { getCurrentUserConceptId } from './domUtils.js';
 import { isAnnotationEnabled } from './featureFlags.js';
@@ -16,6 +17,11 @@ import { createVontologyCartouche, normalisePotentialConceptId } from './utils/t
 import { copyJsonTextWithButtonFeedback, resetCopyJsonButtonPreCopyState } from './utils/copyJsonButtonState.js';
 import { mountJsonInspector } from './utils/jsonInspector.js';
 import { showToast } from './utils/toast.js';
+import {
+    armRetryableLoadState,
+    clearRetryableLoadState,
+    describeRetryableLoadFailure
+} from './utils/retryableLoadState.js';
 import {
     buildNamespaceScopedStorageKey,
     getSessionScopedNamespace,
@@ -6016,7 +6022,12 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
             };
 
             const clearResults = () => {
-                state.items = []; state.activeIndex = -1; results.classList.remove('open'); results.innerHTML = '';
+                state.items = [];
+                state.activeIndex = -1;
+                results.classList.remove('open');
+                results.innerHTML = '';
+                clearRetryableLoadState(results);
+                results.title = '';
             };
 
             const clearPredicateResults = () => {
@@ -6024,6 +6035,8 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
                 predicateState.activeIndex = -1;
                 predicateResults.classList.remove('open');
                 predicateResults.innerHTML = '';
+                clearRetryableLoadState(predicateResults);
+                predicateResults.title = '';
             };
 
             const setActive = (idx) => {
@@ -6042,7 +6055,12 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
 
             const render = (items) => {
                 results.innerHTML = '';
-                if (!items.length) { results.classList.remove('open'); return; }
+                if (!items.length) {
+                    clearRetryableLoadState(results);
+                    results.title = '';
+                    results.classList.remove('open');
+                    return;
+                }
                 const list = document.createElement('div');
                 list.setAttribute('role', 'listbox');
                 items.forEach((it, idx) => {
@@ -6064,12 +6082,19 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
                     list.appendChild(row);
                 });
                 results.appendChild(list);
+                clearRetryableLoadState(results);
+                results.title = '';
                 if (items.length) results.classList.add('open');
             };
 
             const renderPredicate = (items) => {
                 predicateResults.innerHTML = '';
-                if (!items.length) { predicateResults.classList.remove('open'); return; }
+                if (!items.length) {
+                    clearRetryableLoadState(predicateResults);
+                    predicateResults.title = '';
+                    predicateResults.classList.remove('open');
+                    return;
+                }
                 const list = document.createElement('div');
                 list.setAttribute('role', 'listbox');
                 items.forEach((it, idx) => {
@@ -6095,7 +6120,48 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
                     list.appendChild(row);
                 });
                 predicateResults.appendChild(list);
+                clearRetryableLoadState(predicateResults);
+                predicateResults.title = '';
                 if (items.length) predicateResults.classList.add('open');
+            };
+
+            const renderSearchFailure = (container, messageClassName, query, error, retryAction) => {
+                const failure = describeRetryableLoadFailure(
+                    error,
+                    'Concept suggestions are temporarily unavailable.'
+                );
+
+                container.innerHTML = '';
+                container.classList.add('open');
+                container.title = failure.message;
+
+                const row = document.createElement('div');
+                row.className = messageClassName;
+                row.textContent = failure.retryable
+                    ? `${failure.message} Click to retry.`
+                    : failure.message;
+
+                if (failure.retryable) {
+                    row.tabIndex = 0;
+                    row.addEventListener('click', () => {
+                        void retryAction(query);
+                    });
+                    row.addEventListener('keydown', (event) => {
+                        const key = String(event?.key || '');
+                        if (key === 'Enter' || key === ' ' || key === 'Spacebar') {
+                            event.preventDefault();
+                            void retryAction(query);
+                        }
+                    });
+
+                    armRetryableLoadState(container, () => retryAction(query), {
+                        backgroundDelayMs: Math.max(0, failure.retryAfterSeconds) * 1000
+                    });
+                } else {
+                    clearRetryableLoadState(container);
+                }
+
+                container.appendChild(row);
             };
 
             const performSearch = async (q) => {
@@ -6119,9 +6185,7 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
                 })();
                 const url = `/vontology/api/vontology/search?q=${encodeURIComponent(q)}&limit=12&fallback_substring=true${includeIndividuals ? '&include_individuals=true' : ''}`;
                 try {
-                    const resp = await fetch(url, { signal: ac.signal });
-                    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                    const data = await resp.json();
+                    const { data } = await getJsonDetailed(url, { signal: ac.signal });
                     let items = Array.isArray(data?.results) ? data.results : [];
                     // Reorder to prefer exact match and shorter names
                     const qc = q ? q.toLowerCase() : '';
@@ -6143,7 +6207,16 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
                     state.items = items;
                     render(state.items);
                 } catch (e) {
-                    if (e?.name === 'AbortError') return; clearResults();
+                    if (e?.name === 'AbortError') return;
+                    state.items = [];
+                    state.activeIndex = -1;
+                    renderSearchFailure(
+                        results,
+                        'vontology-search-item vontology-search-item-error',
+                        q,
+                        e,
+                        performSearch
+                    );
                 }
             };
 
@@ -6152,9 +6225,7 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
                 const ac = new AbortController(); predicateState.ac = ac;
                 const url = `/vontology/api/vontology/search?q=${encodeURIComponent(q)}&limit=12&fallback_substring=true&filter_kind=predicate&include_predicate_metadata=true`;
                 try {
-                    const resp = await fetch(url, { signal: ac.signal });
-                    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                    const data = await resp.json();
+                    const { data } = await getJsonDetailed(url, { signal: ac.signal });
                     let items = Array.isArray(data?.results) ? data.results : [];
                     items = items.filter((item) => item && item.kind === 'predicate');
                     const qc = q ? q.toLowerCase() : '';
@@ -6176,7 +6247,16 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
                     predicateState.items = items;
                     renderPredicate(predicateState.items);
                 } catch (e) {
-                    if (e?.name === 'AbortError') return; clearPredicateResults();
+                    if (e?.name === 'AbortError') return;
+                    predicateState.items = [];
+                    predicateState.activeIndex = -1;
+                    renderSearchFailure(
+                        predicateResults,
+                        'vontology-search-item vontology-search-item-error',
+                        q,
+                        e,
+                        performPredicateSearch
+                    );
                 }
             };
 
@@ -6208,12 +6288,12 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
             });
             targetInput.addEventListener('focus', () => {
                 // Only show results if not a text predicate and we have results
-                if (!isCurrentSelectionTextPredicate() && state.items.length) {
+                if (!isCurrentSelectionTextPredicate() && (state.items.length || results.childElementCount)) {
                     results.classList.add('open');
                 }
             });
             predicateInput.addEventListener('focus', () => {
-                if (isOtherPredicateSelected() && predicateState.items.length) {
+                if (isOtherPredicateSelected() && (predicateState.items.length || predicateResults.childElementCount)) {
                     predicateResults.classList.add('open');
                 }
             });

@@ -18,7 +18,11 @@ function getWindowSessionId() {
   let sessionId = sessionStorage.getItem(WINDOW_SESSION_KEY);
   if (!sessionId) {
     // Generate a new UUID-like session ID
-    sessionId = 'ws_' + crypto.randomUUID().replace(/-/g, '');
+    const randomId =
+      (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+        ? crypto.randomUUID().replace(/-/g, '')
+        : `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+    sessionId = 'ws_' + randomId;
     sessionStorage.setItem(WINDOW_SESSION_KEY, sessionId);
     console.debug('[windowSession] Generated new window session:', sessionId);
   }
@@ -51,6 +55,49 @@ export async function getJson(url) {
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
+}
+
+export async function getJsonDetailed(url, options = {}) {
+  const {
+    headers: extraHeaders = {},
+    method = 'GET',
+    ...fetchOptions
+  } = options || {};
+
+  const res = await fetch(url, {
+    method,
+    headers: buildHeaders(extraHeaders),
+    ...fetchOptions
+  });
+
+  let data = null;
+  try {
+    data = await res.json();
+  } catch (_) {
+    data = null;
+  }
+
+  if (!res.ok) {
+    const err = new Error(
+      (data && (data.error || data.message)) || `HTTP ${res.status}`
+    );
+    err.status = res.status;
+    err.payload = data;
+
+    const retryAfterHeader = res.headers.get('Retry-After');
+    const parsedRetryAfter = Number.parseInt(retryAfterHeader || '', 10);
+    if (Number.isFinite(parsedRetryAfter)) {
+      err.retryAfterSeconds = parsedRetryAfter;
+    }
+
+    throw err;
+  }
+
+  return {
+    data,
+    status: res.status,
+    headers: res.headers
+  };
 }
 
 export async function postJson(url, data) {

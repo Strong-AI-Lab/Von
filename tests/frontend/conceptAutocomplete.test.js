@@ -10,6 +10,7 @@ const { closeAutocomplete, initializeConceptAutocomplete } = conceptAutocomplete
 describe('conceptAutocomplete', () => {
     let textarea;
     let container;
+    const originalFetch = global.fetch;
 
     beforeEach(() => {
         // Create a mock container and textarea
@@ -26,6 +27,7 @@ describe('conceptAutocomplete', () => {
 
     afterEach(() => {
         closeAutocomplete();
+        global.fetch = originalFetch;
         document.body.removeChild(container);
     });
 
@@ -203,6 +205,57 @@ describe('conceptAutocomplete', () => {
             const ZWSP = '\u200B';
             expect(textarea.value).toBe(`Plan #V${ZWSP}#person and more`);
             done();
+        }, 300);
+    });
+
+    test('autocomplete shows a retryable error instead of silently hiding backend failures', (done) => {
+        initializeConceptAutocomplete(textarea);
+
+        global.fetch = jest
+            .fn()
+            .mockResolvedValueOnce({
+                ok: false,
+                status: 503,
+                json: () =>
+                    Promise.resolve({
+                        error: 'Concept search is temporarily unavailable.',
+                        retryable: true,
+                        retry_after_seconds: 0,
+                    }),
+                headers: {
+                    get: (name) => (name === 'Retry-After' ? '0' : null),
+                },
+            })
+            .mockResolvedValueOnce({
+                ok: true,
+                status: 200,
+                json: () =>
+                    Promise.resolve({
+                        results: [{ id: '#V#person', name: 'Person', kind: 'type' }],
+                    }),
+                headers: {
+                    get: () => null,
+                },
+            });
+
+        textarea.value = '#V#pe';
+        textarea.selectionStart = textarea.value.length;
+        textarea.selectionEnd = textarea.value.length;
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+
+        setTimeout(() => {
+            const dropdown = document.querySelector('.concept-autocomplete-dropdown');
+            const failureItem = dropdown?.querySelector('.concept-autocomplete-item-error');
+            expect(failureItem).toBeTruthy();
+            expect(failureItem.textContent).toContain('Click to retry');
+
+            failureItem.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+            setTimeout(() => {
+                const successItem = dropdown?.querySelector('.concept-autocomplete-item[data-concept-id="#V#person"]');
+                expect(successItem).toBeTruthy();
+                done();
+            }, 50);
         }, 300);
     });
 });

@@ -1,32 +1,24 @@
-import { getJson, postJson } from './apiService.js';
+import { getJsonDetailed, postJson } from './apiService.js';
+import {
+  armRetryableLoadState,
+  clearRetryableLoadState,
+  describeRetryableLoadFailure
+} from './utils/retryableLoadState.js';
 
 // Settings management functions
 export async function loadAvailableModels() {
-  try {
-    return await getJson('/api/settings/models/ollama');
-  } catch (err) {
-    console.error('Error loading Ollama models:', err);
-    return [];
-  }
+  const { data } = await getJsonDetailed('/api/settings/models/ollama');
+  return data;
 }
 
 export async function loadOllamaModelsFromAllHosts() {
-  try {
-    const response = await getJson('/api/settings/ollama/models');
-    return response.models || [];
-  } catch (err) {
-    console.error('Error loading Ollama models from all hosts:', err);
-    return [];
-  }
+  const { data } = await getJsonDetailed('/api/settings/ollama/models');
+  return data?.models || [];
 }
 
 export async function loadOllamaHosts() {
-  try {
-    return await getJson('/api/settings/ollama/hosts');
-  } catch (err) {
-    console.error('Error loading Ollama hosts:', err);
-    return { hosts: [], active_host: null };
-  }
+  const { data } = await getJsonDetailed('/api/settings/ollama/hosts');
+  return data;
 }
 
 export async function saveOllamaHosts(hosts, activeHost = null) {
@@ -53,12 +45,8 @@ export async function verifyOllamaHost(hostUrl) {
 }
 
 export async function loadAvailableOpenAIModels() {
-  try {
-    return await getJson('/api/settings/models/openai');
-  } catch (err) {
-    console.error('Error loading OpenAI models:', err);
-    return [];
-  }
+  const { data } = await getJsonDetailed('/api/settings/models/openai');
+  return data;
 }
 
 function renderOpenAiModelSelect(select, models = [], selectedModel = null) {
@@ -97,21 +85,13 @@ export function renderOpenAIModelOptions(selectElementId, models = [], selectedM
 }
 
 export async function loadAvailablePeople() {
-  try {
-    return await getJson('/api/settings/people');
-  } catch (err) {
-    console.error('Error loading people:', err);
-    return { people: [], total_count: 0 };
-  }
+  const { data } = await getJsonDetailed('/api/settings/people');
+  return data;
 }
 
 export async function loadAvailableOrganisations() {
-  try {
-    return await getJson('/api/settings/organisations');
-  } catch (err) {
-    console.error('Error loading organisations:', err);
-    return { organisations: [], total_count: 0 };
-  }
+  const { data } = await getJsonDetailed('/api/settings/organisations');
+  return data;
 }
 
 // Settings UI management functions
@@ -132,6 +112,90 @@ export function showStatusMessage(elementId, message, isError = false) {
   setTimeout(() => {
     element.style.display = 'none';
   }, 5000);
+}
+
+function setSelectSingleOption(select, text) {
+  if (!select) return;
+
+  select.innerHTML = '';
+  const option = document.createElement('option');
+  option.value = '';
+  option.textContent = text;
+  select.appendChild(option);
+}
+
+function clearSelectRetryState(select) {
+  clearRetryableLoadState(select);
+  if (select) {
+    select.title = '';
+  }
+}
+
+function renderRetryableSelectFailure(select, {
+  error,
+  fallbackMessage,
+  retryAction
+}) {
+  const failure = describeRetryableLoadFailure(error, fallbackMessage);
+  const optionText = failure.retryable
+    ? `${failure.message} Click to retry.`
+    : failure.message;
+
+  setSelectSingleOption(select, optionText);
+  select.title = failure.message;
+
+  if (failure.retryable) {
+    armRetryableLoadState(select, retryAction, {
+      backgroundDelayMs: Math.max(0, failure.retryAfterSeconds) * 1000
+    });
+  } else {
+    clearRetryableLoadState(select);
+  }
+}
+
+function renderRetryablePanelFailure(container, {
+  error,
+  fallbackMessage,
+  retryAction,
+  buttonLabel
+}) {
+  if (!container) return;
+
+  const failure = describeRetryableLoadFailure(error, fallbackMessage);
+  container.innerHTML = '';
+  container.title = failure.message;
+
+  const message = document.createElement('p');
+  message.style.color = '#666';
+  message.style.fontStyle = 'italic';
+  message.textContent = failure.retryable
+    ? `${failure.message} Auto-retrying shortly.`
+    : failure.message;
+  container.appendChild(message);
+
+  if (failure.retryable) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = buttonLabel;
+    button.style.padding = '4px 8px';
+    button.style.fontSize = '0.85em';
+    button.style.marginTop = '6px';
+    button.style.background = '#6c757d';
+    button.style.color = 'white';
+    button.style.border = 'none';
+    button.style.borderRadius = '3px';
+    button.style.cursor = 'pointer';
+    button.addEventListener('click', () => {
+      retryAction({ source: 'button' });
+    });
+    container.appendChild(button);
+
+    armRetryableLoadState(container, retryAction, {
+      backgroundDelayMs: Math.max(0, failure.retryAfterSeconds) * 1000
+    });
+  } else {
+    clearRetryableLoadState(container);
+  }
 }
 
 export async function populateModelDropdown(selectElementId, selectedModel = null) {
@@ -171,9 +235,14 @@ export async function populateModelDropdown(selectElementId, selectedModel = nul
         }
       }
     }
+    clearSelectRetryState(select);
   } catch (err) {
     console.error('Error populating Ollama model dropdown:', err);
-    select.innerHTML = '<option value="">Error loading Ollama models</option>';
+    renderRetryableSelectFailure(select, {
+      error: err,
+      fallbackMessage: 'Ollama models are temporarily unavailable.',
+      retryAction: () => populateModelDropdown(selectElementId, selectedModel)
+    });
   }
 }
 
@@ -184,9 +253,14 @@ export async function populateOpenAIModelDropdown(selectElementId, selectedModel
   try {
     const models = await loadAvailableOpenAIModels();
     renderOpenAiModelSelect(select, models, selectedModel);
+    clearSelectRetryState(select);
   } catch (err) {
     console.error('Error populating OpenAI model dropdown:', err);
-    select.innerHTML = '<option value="">Error loading OpenAI models</option>';
+    renderRetryableSelectFailure(select, {
+      error: err,
+      fallbackMessage: 'OpenAI models are temporarily unavailable.',
+      retryAction: () => populateOpenAIModelDropdown(selectElementId, selectedModel)
+    });
   }
 }
 
@@ -232,9 +306,14 @@ export async function populatePeopleDropdown(selectElementId, selectedPersonId =
         }
       }
     }
+    clearSelectRetryState(select);
   } catch (err) {
     console.error('Error populating people dropdown:', err);
-    select.innerHTML = '<option value="">Error loading people</option>';
+    renderRetryableSelectFailure(select, {
+      error: err,
+      fallbackMessage: 'People are temporarily unavailable.',
+      retryAction: () => populatePeopleDropdown(selectElementId, selectedPersonId)
+    });
   }
 }
 
@@ -279,9 +358,14 @@ export async function populateOrganisationsDropdown(selectElementId, selectedOrg
         }
       }
     }
+    clearSelectRetryState(select);
   } catch (err) {
     console.error('Error populating organisations dropdown:', err);
-    select.innerHTML = '<option value="">Error loading organisations</option>';
+    renderRetryableSelectFailure(select, {
+      error: err,
+      fallbackMessage: 'Organisations are temporarily unavailable.',
+      retryAction: () => populateOrganisationsDropdown(selectElementId, selectedOrgId)
+    });
   }
 }
 
@@ -289,6 +373,8 @@ export async function populateOrganisationsDropdown(selectElementId, selectedOrg
 export function renderOllamaHostsList(hosts, activeHost) {
   const hostsList = document.getElementById('ollamaHostsList');
   if (!hostsList) return;
+  clearRetryableLoadState(hostsList);
+  hostsList.title = '';
   
   if (!hosts || hosts.length === 0) {
     hostsList.innerHTML = '<p style="color: #666; font-style: italic;">No Ollama hosts configured</p>';
@@ -320,14 +406,25 @@ export function renderOllamaHostsList(hosts, activeHost) {
 }
 
 export async function loadAndRenderOllamaHosts() {
+  const hostsList = document.getElementById('ollamaHostsList');
   try {
     const data = await loadOllamaHosts();
     renderOllamaHostsList(data.hosts, data.active_host);
     return data;
   } catch (err) {
     console.error('Error loading Ollama hosts:', err);
-    showStatusMessage('settingsStatusMessage', 'Error loading Ollama hosts', true);
-    return { hosts: [], active_host: null };
+    renderRetryablePanelFailure(hostsList, {
+      error: err,
+      fallbackMessage: 'Ollama hosts are temporarily unavailable.',
+      retryAction: () => loadAndRenderOllamaHosts(),
+      buttonLabel: 'Retry host load'
+    });
+    showStatusMessage(
+      'settingsStatusMessage',
+      describeRetryableLoadFailure(err, 'Ollama hosts are temporarily unavailable.').message,
+      true
+    );
+    return null;
   }
 }
 
