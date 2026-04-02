@@ -127,6 +127,9 @@ from src.backend.integrations.internal_mcp.catalogue import (
     _turn_execution_build_benchmark,
 )
 from src.backend.integrations.internal_mcp.catalogue import (
+    _turn_execution_build_selector_benchmark,
+)
+from src.backend.integrations.internal_mcp.catalogue import (
     _turn_execution_backfill_from_chat_history,
 )
 from src.backend.integrations.internal_mcp.catalogue import _experiment_compute_verdict
@@ -3035,6 +3038,16 @@ async def _handle_turn_execution_build_benchmark(
     )
 
 
+async def _handle_turn_execution_build_selector_benchmark(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _turn_execution_build_selector_benchmark,
+        arguments,
+        tool_family_label="TurnExecution",
+    )
+
+
 async def _handle_turn_execution_backfill_from_chat_history(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
@@ -3542,6 +3555,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "turn_execution_get_critic_bundle": _handle_turn_execution_get_critic_bundle,
     "turn_execution_search_failures": _handle_turn_execution_search_failures,
     "turn_execution_build_benchmark": _handle_turn_execution_build_benchmark,
+    "turn_execution_build_selector_benchmark": _handle_turn_execution_build_selector_benchmark,
     "turn_execution_backfill_from_chat_history": _handle_turn_execution_backfill_from_chat_history,
     "turn_execution_namespace_coverage_report": _handle_turn_execution_namespace_coverage_report,
     "jira_search": _handle_jira_search,

@@ -9018,6 +9018,53 @@ def _turn_execution_build_benchmark(**kwargs):
     )
 
 
+def _turn_execution_build_selector_benchmark(**kwargs):
+    from ...services.workflow_selector_benchmark_service import (
+        build_selector_routing_benchmark_report,
+    )
+
+    inline_cases = kwargs.get("cases")
+    try:
+        result = build_selector_routing_benchmark_report(
+            cases=inline_cases if isinstance(inline_cases, list) else None,
+            case_set=kwargs.get("case_set"),
+            max_cases=kwargs.get("max_cases"),
+            bundle_path=kwargs.get("bundle_path"),
+        )
+    except ValueError as exc:
+        return make_error_response(
+            "selector_benchmark_invalid_input",
+            "Selector routing benchmark could not be built from the requested corpus.",
+            details={"error": str(exc)},
+        )
+    except Exception as exc:
+        return make_error_response(
+            "selector_benchmark_build_failed",
+            "Selector routing benchmark evaluation failed.",
+            details={"error": str(exc)},
+        )
+
+    if not isinstance(result, dict):
+        return result
+
+    corpus = result.get("corpus")
+    source = (
+        str(corpus.get("source")).strip()
+        if isinstance(corpus, Mapping) and isinstance(corpus.get("source"), str)
+        else "unknown"
+    )
+    source_system = (
+        "repo.selector_routing_benchmark_seed_bundle"
+        if source == "seed_bundle"
+        else "inline.selector_routing_benchmark_cases"
+    )
+    return _with_rag_provenance(
+        payload=result,
+        item_kind="selector_routing_benchmark_report",
+        source_system=source_system,
+    )
+
+
 def _episode_critique_build_benchmark(**kwargs):
     from ...services.episode_critique_benchmark_service import (
         build_episode_critique_benchmark_report,
@@ -22200,6 +22247,28 @@ def build_default_catalogue() -> MethodCatalogue:
             category="read",
             description=(
                 "Generate corpus-level turn execution reliability metrics, seeded replay cases, and capability-gap signals."
+            ),
+        ),
+        MethodDefinition(
+            name="turn_execution_build_selector_benchmark",
+            handler=_turn_execution_build_selector_benchmark,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "cases": (list,),
+                    "case_set": (str, type(None)),
+                    "max_cases": (int,),
+                    "bundle_path": (str, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "Build selector-routing benchmark metrics and replay cases from explicit corpus cases or the repo seed bundle."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Evaluate workflow selector routing against a reviewable benchmark corpus while emitting the shared execution-correctness outcome labels."
             ),
         ),
         MethodDefinition(

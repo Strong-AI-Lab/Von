@@ -1,0 +1,128 @@
+{
+  "schema_version": "selector_routing_benchmark.seed_bundle.v1",
+  "default_case_set": "phase1_seed",
+  "case_sets": {
+    "phase1_seed": [
+      {
+        "case_id": "tool_research_lookup_success",
+        "turn_text": "Look up recent papers on workflow gap recovery and summarise them.",
+        "candidate_workflows": [
+          {
+            "concept_id": "#V#chat_assistant_workflow",
+            "name": "Chat assistant workflow",
+            "description": "Generic plain-response handling."
+          },
+          {
+            "concept_id": "#V#tool_calling_workflow",
+            "name": "Tool calling workflow",
+            "description": "Routes the turn through tool-seeking execution."
+          }
+        ],
+        "expected_workflow_id": "#V#tool_calling_workflow",
+        "baseline_workflow_id": "#V#chat_assistant_workflow",
+        "selector_response": {
+          "workflow_id": "#V#tool_calling_workflow",
+          "confidence": 0.93,
+          "reasoning": "The user is explicitly asking for external retrieval and synthesis."
+        },
+        "notes": "Positive routing case for explicit external information seeking."
+      },
+      {
+        "case_id": "todo_refresh_success",
+        "turn_text": "Refresh my Jira todo list and tell me what changed.",
+        "candidate_workflows": [
+          {
+            "concept_id": "#V#tool_calling_workflow",
+            "name": "Tool calling workflow",
+            "description": "General tool-seeking path."
+          },
+          {
+            "concept_id": "#V#todo_refresh_workflow",
+            "name": "Todo refresh workflow",
+            "description": "Refreshes the authenticated Jira todo view."
+          }
+        ],
+        "expected_workflow_id": "#V#todo_refresh_workflow",
+        "baseline_workflow_id": "#V#tool_calling_workflow",
+        "selector_response": {
+          "workflow_id": "#V#todo_refresh_workflow",
+          "confidence": 0.9,
+          "reasoning": "The request is specifically about refreshing the user's Jira todo list."
+        },
+        "notes": "Positive routing case for a specialised workflow."
+      },
+      {
+        "case_id": "plain_conversation_success",
+        "turn_text": "Explain what the execution-correctness benchmark measures.",
+        "candidate_workflows": [
+          {
+            "concept_id": "#V#chat_assistant_workflow",
+            "name": "Chat assistant workflow",
+            "description": "Generic explanatory response."
+          },
+          {
+            "concept_id": "#V#tool_calling_workflow",
+            "name": "Tool calling workflow",
+            "description": "Routes the turn through tool execution."
+          }
+        ],
+        "expected_workflow_id": "#V#chat_assistant_workflow",
+        "baseline_workflow_id": "#V#chat_assistant_workflow",
+        "selector_response": "#V#chat_assistant_workflow",
+        "notes": "Positive plain-response route."
+      },
+      {
+        "case_id": "workflow_gap_recovery_safe_route",
+        "turn_text": "Create a new workflow to represent an unsupported lab artefact type.",
+        "candidate_workflows": [
+          {
+            "concept_id": "#V#chat_assistant_workflow",
+            "name": "Chat assistant workflow",
+            "description": "Generic response path."
+          },
+          {
+            "concept_id": "#V#workflow_discovery_gap_recovery_workflow",
+            "name": "Workflow discovery gap recovery workflow",
+            "description": "Escalates or prepares recovery when no safe executable route exists."
+          }
+        ],
+        "expected_workflow_id": "#V#workflow_discovery_gap_recovery_workflow",
+        "expected_routing_outcome": "abstain_escalate_no_safe_route",
+        "baseline_workflow_id": "#V#chat_assistant_workflow",
+        "selector_response": {
+          "workflow_id": "#V#workflow_discovery_gap_recovery_workflow",
+          "confidence": 0.78,
+          "reasoning": "No safe executable workflow is already available, so route to recovery."
+        },
+        "jira_issue_keys": [
+          "JVNAUTOSCI-1657"
+        ],
+        "notes": "Safe-routing case for abstain or no-safe-route handling."
+      },
+      {
+        "case_id": "known_plain_response_misroute",
+        "turn_text": "Find the latest workflow-authority changes in the repo and summarise them.",
+        "candidate_workflows": [
+          {
+            "concept_id": "#V#chat_assistant_workflow",
+            "name": "Chat assistant workflow",
+            "description": "Generic response path."
+          },
+          {
+            "concept_id": "#V#tool_calling_workflow",
+            "name": "Tool calling workflow",
+            "description": "Routes the turn through external or repo tool use."
+          }
+        ],
+        "expected_workflow_id": "#V#tool_calling_workflow",
+        "baseline_workflow_id": "#V#chat_assistant_workflow",
+        "selector_response": "#V#chat_assistant_workflow",
+        "jira_issue_keys": [
+          "JVNAUTOSCI-1638"
+        ],
+        "source_request_id": "req-selector-misroute-example",
+        "notes": "Intentional failure example so the corpus contains a known misrouting case."
+      }
+    ]
+  }
+}

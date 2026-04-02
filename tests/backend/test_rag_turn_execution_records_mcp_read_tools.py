@@ -1396,6 +1396,40 @@ def test_turn_execution_build_benchmark_hesitancy_signals_detect_plain_response_
     assert summary.get("fail_count", 0) >= 1
 
 
+def test_turn_execution_build_selector_benchmark_gateway_e2e():
+    gateway = _build_gateway()
+    payload = gateway.invoke(
+        "turn_execution_build_selector_benchmark",
+        {"case_set": "phase1_seed"},
+    ).payload
+
+    assert payload["success"] is True
+    metrics = payload.get("metrics")
+    assert isinstance(metrics, dict)
+    assert metrics.get("scanned_count") == 5
+    assert metrics.get("matched_case_count") == 4
+    assert metrics.get("selector_accuracy_pct") == 80.0
+    assert metrics.get("baseline_accuracy_pct") == 20.0
+    assert metrics.get("outcome_label_counts", {}).get("tool_or_workflow_misrouting") == 1
+    assert metrics.get("outcome_label_counts", {}).get("abstain_escalate_no_safe_route") == 1
+
+    corpus = payload.get("corpus")
+    assert isinstance(corpus, dict)
+    assert corpus.get("source") == "seed_bundle"
+    assert corpus.get("case_set") == "phase1_seed"
+
+    signals = payload.get("benchmark_signals")
+    assert isinstance(signals, list)
+    signal_by_id = {
+        signal.get("signal_id"): signal
+        for signal in signals
+        if isinstance(signal, dict)
+    }
+    assert signal_by_id["selector_benchmark_corpus_present"]["status"] == "pass"
+    assert signal_by_id["selector_accuracy_not_worse_than_baseline"]["status"] == "pass"
+    assert signal_by_id["abstain_cases_routed_safely"]["status"] == "pass"
+
+
 def test_turn_execution_backfill_wrapper_returns_provenance(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue as cat
 

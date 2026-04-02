@@ -3477,6 +3477,37 @@
             }
         },
         {
+            "name": "turn_execution_build_selector_benchmark",
+            "description": "Evaluate workflow selector routing against a reviewable benchmark corpus while emitting the shared execution-correctness outcome labels.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cases": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "case_set": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "max_cases": {
+                        "type": "integer"
+                    },
+                    "bundle_path": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Build selector-routing benchmark metrics and replay cases from explicit corpus cases or the repo seed bundle."
+            }
+        },
+        {
             "name": "turn_execution_get",
             "description": "Fetch a single turn execution record by request_id for detailed failure analysis, including MCP-visible rag_indexing_state diagnostics.",
             "inputSchema": {
