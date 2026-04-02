@@ -98,6 +98,7 @@ Supporting code notes:
 - `workflow_template_profile_service.py` now resolves workflow-template concepts and template/profile text relations from Vontology, and only hydrates them from the seed bundle when the authoritative template concepts are absent;
 - `workflow_prompt_authority_service.py` now provides only generic prompt-concept creation, validation, linking, and rendering support; workflow-governed prompt bodies themselves remain authoritative Vontology text relations rather than Python-authored defaults;
 - `workflow_repo_seed_bootstrap.py` now treats repo-side workflow bundles as seed fixtures only: a valid current Vontology workflow family is preserved rather than being overwritten back to seed parity;
+- `paper_representation_workflow_vontology_service.py` is therefore a startup-only seed publication/repair entry point for the current paper workflow family; live routing/execution must rely on the Vontology materialisation, and any repo-seed repair should be surfaced as drift diagnostics rather than treated as normal request-path authority;
 - generated review snapshots under `docs/generated/workflow_authority_review_snapshots/` are acceptable because they are explicitly non-authoritative derived artefacts;
 - use `pdm run python scripts/workflow_authority_review_snapshot.py export` to refresh local review snapshots and `pdm run python scripts/workflow_authority_review_snapshot.py diff` to compare the current authoritative KB state against the last generated local snapshot without restoring file authority.
 

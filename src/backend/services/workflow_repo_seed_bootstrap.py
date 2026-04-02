@@ -697,12 +697,24 @@ def _validate_existing_materialisation(
     target_workflow_ids: tuple[str, ...],
     supported_action_ids: tuple[str, ...],
     publication_specs: dict[str, Any],
-) -> tuple[bool, dict[str, dict[str, Any]]]:
+) -> tuple[bool, dict[str, dict[str, Any]], dict[str, Any]]:
     if not target_workflow_ids:
-        return False, {}
+        return (
+            False,
+            {},
+            {
+                "already_current": False,
+                "drift_detected": True,
+                "current_workflow_ids": [],
+                "drift_workflow_ids": [],
+                "issue_codes": ["no_target_workflow_ids"],
+                "workflow_status_by_id": {},
+            },
+        )
 
     cached_definitions: dict[str, Any | None] = {}
     validation_by_workflow_id: dict[str, dict[str, Any]] = {}
+    workflow_status_by_id: dict[str, dict[str, Any]] = {}
 
     def _cached_loader(candidate_workflow_id: str) -> Any | None:
         workflow_id = str(candidate_workflow_id or "").strip()
@@ -715,30 +727,51 @@ def _validate_existing_materialisation(
         return cached_definitions[workflow_id]
 
     for workflow_id in target_workflow_ids:
+        workflow_status: dict[str, Any] = {
+            "workflow_id": workflow_id,
+            "status": "current",
+            "issue_code": None,
+        }
         graph, graph_warnings = build_workflow_process_graph(workflow_id)
         if not isinstance(graph, dict):
-            return False, {}
+            workflow_status["status"] = "graph_missing"
+            workflow_status["issue_code"] = "graph_missing"
+            workflow_status_by_id[workflow_id] = workflow_status
+            continue
         warning_items = [
             str(item).strip()
             for item in (graph_warnings or [])
             if isinstance(item, str) and str(item).strip()
         ]
         if warning_items:
-            return False, {}
+            workflow_status["status"] = "graph_warnings"
+            workflow_status["issue_code"] = "graph_warnings"
+            workflow_status["warnings"] = list(warning_items)
+            workflow_status_by_id[workflow_id] = workflow_status
+            continue
 
         definition = _cached_loader(workflow_id)
         if definition is None:
-            return False, {}
+            workflow_status["status"] = "definition_missing"
+            workflow_status["issue_code"] = "definition_missing"
+            workflow_status_by_id[workflow_id] = workflow_status
+            continue
 
         publication_spec = publication_specs.get(workflow_id)
         if publication_spec is None:
-            return False, {}
+            workflow_status["status"] = "publication_spec_missing"
+            workflow_status["issue_code"] = "publication_spec_missing"
+            workflow_status_by_id[workflow_id] = workflow_status
+            continue
         if not _materialisation_matches_publication_spec(
             loaded_definition=definition,
             workflow_id=workflow_id,
             publication_spec=publication_spec,
         ):
-            return False, {}
+            workflow_status["status"] = "definition_mismatch"
+            workflow_status["issue_code"] = "definition_mismatch"
+            workflow_status_by_id[workflow_id] = workflow_status
+            continue
 
         validation = validate_workflow_definition_contract(
             definition=definition,
@@ -748,9 +781,49 @@ def _validate_existing_materialisation(
         )
         validation_by_workflow_id[workflow_id] = copy.deepcopy(validation)
         if not bool(validation.get("valid")):
-            return False, {}
+            workflow_status["status"] = "definition_invalid"
+            workflow_status["issue_code"] = "definition_invalid"
+            workflow_status["errors"] = [
+                str(item).strip()
+                for item in (validation.get("errors") or [])
+                if isinstance(item, str) and str(item).strip()
+            ]
+            workflow_status_by_id[workflow_id] = workflow_status
+            continue
 
-    return True, validation_by_workflow_id
+        workflow_status_by_id[workflow_id] = workflow_status
+
+    current_workflow_ids = [
+        workflow_id
+        for workflow_id, status in workflow_status_by_id.items()
+        if status.get("status") == "current"
+    ]
+    drift_workflow_ids = [
+        workflow_id
+        for workflow_id, status in workflow_status_by_id.items()
+        if status.get("status") != "current"
+    ]
+    issue_codes = sorted(
+        {
+            str(status.get("issue_code") or "").strip()
+            for status in workflow_status_by_id.values()
+            if str(status.get("issue_code") or "").strip()
+        }
+    )
+    already_current = bool(target_workflow_ids) and not drift_workflow_ids
+
+    return (
+        already_current,
+        validation_by_workflow_id,
+        {
+            "already_current": already_current,
+            "drift_detected": not already_current,
+            "current_workflow_ids": current_workflow_ids,
+            "drift_workflow_ids": drift_workflow_ids,
+            "issue_codes": issue_codes,
+            "workflow_status_by_id": workflow_status_by_id,
+        },
+    )
 
 
 def bootstrap_repo_seed_workflow_bundle(
@@ -759,7 +832,13 @@ def bootstrap_repo_seed_workflow_bundle(
     publish_context_manager_factory: Callable[[], Any] | None = None,
     force_republish: bool = False,
 ) -> dict[str, Any]:
-    """Publish and validate one repo-side workflow seed bundle."""
+    """Publish and validate one repo-side workflow seed bundle.
+
+    Repo-side bundles are startup seed fixtures only. Canonical runtime
+    workflow authority remains in Vontology; this helper only verifies whether
+    Vontology is already current and, when it is not, republishes the missing or
+    drifted materialisation through the shared publication pathway.
+    """
 
     bundle = authority_service.load_repo_seed_workflow_bundle(asset_path)
     managed_by = str(bundle.get("managed_by") or "").strip() or None
@@ -772,13 +851,18 @@ def bootstrap_repo_seed_workflow_bundle(
     step_text_relations = dict(bundle.get("step_text_relations") or {})
     supported_action_ids = tuple(bundle.get("supported_action_ids") or ())
     target_workflow_ids = tuple(publication_specs.keys())
-    already_current, existing_validation_by_workflow_id = (
+    already_current, existing_validation_by_workflow_id, materialisation_preflight = (
         _validate_existing_materialisation(
             target_workflow_ids=target_workflow_ids,
             supported_action_ids=supported_action_ids,
             publication_specs=publication_specs,
         )
     )
+    authority_contract = {
+        "canonical_source": "vontology",
+        "repo_seed_role": "startup_seed_publication_and_repair_only",
+        "request_path_dependency_allowed": False,
+    }
 
     typed_workflow_ids: list[str] = []
     typed_step_ids: list[str] = []
@@ -818,6 +902,25 @@ def bootstrap_repo_seed_workflow_bundle(
                 publication_purposes=publication_purposes,
             )
             publication_report["forced_republish"] = bool(force_republish)
+        publication_report["materialisation_status"] = (
+            "current"
+            if already_current and not force_republish
+            else "forced_republish"
+            if force_republish and not materialisation_preflight.get("drift_detected")
+            else "repaired_from_repo_seed"
+        )
+        publication_report["drift_detected"] = bool(
+            materialisation_preflight.get("drift_detected")
+        )
+        publication_report["current_workflow_ids"] = list(
+            materialisation_preflight.get("current_workflow_ids") or []
+        )
+        publication_report["drift_workflow_ids"] = list(
+            materialisation_preflight.get("drift_workflow_ids") or []
+        )
+        publication_report["issue_codes"] = list(
+            materialisation_preflight.get("issue_codes") or []
+        )
 
         for workflow_id, spec in publication_specs.items():
             type_ids = tuple(workflow_type_ids.get(workflow_id) or ())
@@ -929,6 +1032,8 @@ def bootstrap_repo_seed_workflow_bundle(
     return {
         "asset_path": str(bundle.get("asset_path") or Path(asset_path)),
         "family_id": bundle.get("family_id"),
+        "authority_contract": authority_contract,
+        "materialisation_preflight": materialisation_preflight,
         "workflow_ids": list(target_workflow_ids),
         "publication": publication_report,
         "typed_workflow_ids": typed_workflow_ids,

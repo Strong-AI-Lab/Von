@@ -5,6 +5,50 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 
+def test_build_durable_workflow_bootstrap_summary_surfaces_seed_repair_drift() -> None:
+    import src.backend.server.utils_flask as utils_flask
+
+    summary = utils_flask._build_durable_workflow_bootstrap_summary(
+        {
+            "paper_workflow_bootstrap": {
+                "success": True,
+                "publication": {
+                    "materialisation_status": "repaired_from_repo_seed",
+                    "drift_detected": True,
+                    "drift_workflow_ids": [
+                        "#V#arxiv_paper_representation_workflow",
+                    ],
+                },
+            },
+            "talk_workflow_bootstrap": {
+                "success": True,
+                "publication": {
+                    "materialisation_status": "current",
+                    "skip_reason": "existing_materialisation_valid",
+                    "drift_detected": False,
+                },
+            },
+        }
+    )
+
+    assert summary == {
+        "paper_workflow_bootstrap": {
+            "success": True,
+            "materialisation_status": "repaired_from_repo_seed",
+            "drift_detected": True,
+            "drift_workflow_ids": [
+                "#V#arxiv_paper_representation_workflow",
+            ],
+        },
+        "talk_workflow_bootstrap": {
+            "success": True,
+            "materialisation_status": "current",
+            "drift_detected": False,
+            "skip_reason": "existing_materialisation_valid",
+        },
+    }
+
+
 def test_start_durable_system_bootstraps_identity_schedule(monkeypatch) -> None:
     import src.backend.server.utils_flask as utils_flask
     from src.backend.workflows.durable import startup as durable_startup

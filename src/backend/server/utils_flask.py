@@ -95,6 +95,47 @@ _durable_workflow_registry = None
 _durable_action_registry = None
 
 
+def _build_durable_workflow_bootstrap_summary(
+    components: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    summary: dict[str, dict[str, Any]] = {}
+    if not isinstance(components, dict):
+        return summary
+
+    for key in (
+        "paper_workflow_bootstrap",
+        "episode_evaluation_workflow_bootstrap",
+        "talk_workflow_bootstrap",
+        "testing_workflow_bootstrap",
+    ):
+        report = components.get(key)
+        if not isinstance(report, dict):
+            continue
+        item: dict[str, Any] = {"success": bool(report.get("success", False))}
+        publication = report.get("publication")
+        if isinstance(publication, dict):
+            materialisation_status = str(
+                publication.get("materialisation_status") or ""
+            ).strip()
+            if materialisation_status:
+                item["materialisation_status"] = materialisation_status
+            if "drift_detected" in publication:
+                item["drift_detected"] = bool(publication.get("drift_detected"))
+            drift_workflow_ids = [
+                str(workflow_id).strip()
+                for workflow_id in (publication.get("drift_workflow_ids") or [])
+                if str(workflow_id).strip()
+            ]
+            if drift_workflow_ids:
+                item["drift_workflow_ids"] = drift_workflow_ids
+            skip_reason = str(publication.get("skip_reason") or "").strip()
+            if skip_reason:
+                item["skip_reason"] = skip_reason
+        summary[key] = item
+
+    return summary
+
+
 def _build_durable_workflow_registry():
     """Build the durable runtime registry without blocking on parity work."""
     from ..workflows.durable.registry_factory import (
@@ -340,6 +381,14 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
             app_logger.warning(
                 "[durable_workflows] paper workflow bootstrap failed: %s",
                 paper_workflow_bootstrap_report,
+            )
+        elif bool((paper_workflow_bootstrap_report.get("publication") or {}).get("drift_detected")):
+            app_logger.warning(
+                "[durable_workflows] paper workflow repo-seed repair applied for Vontology drift: %s",
+                (paper_workflow_bootstrap_report.get("publication") or {}).get(
+                    "drift_workflow_ids"
+                )
+                or (paper_workflow_bootstrap_report.get("workflow_ids") or []),
             )
         if not bool(
             episode_evaluation_workflow_bootstrap_report.get("success", False)
@@ -1007,6 +1056,9 @@ def create_flask_app(
                         "ready": True,
                         "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
                         "duration_ms": duration_ms,
+                        "workflow_bootstrap_summary": _build_durable_workflow_bootstrap_summary(
+                            components
+                        ),
                     }
                     try:
                         app.logger.info(

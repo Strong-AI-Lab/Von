@@ -203,11 +203,24 @@ def test_bootstrap_skips_republication_when_workflow_family_is_current(
     assert first_counts.get("workflows_published") == 2
 
     second_report = bootstrap_canonical_paper_representation_workflows()
+    second_authority = second_report.get("authority_contract") or {}
+    second_preflight = second_report.get("materialisation_preflight") or {}
     second_publication = second_report.get("publication") or {}
     second_counts = second_publication.get("counts") or {}
 
+    assert second_authority == {
+        "canonical_source": "vontology",
+        "repo_seed_role": "startup_seed_publication_and_repair_only",
+        "request_path_dependency_allowed": False,
+    }
+    assert second_preflight.get("already_current") is True
+    assert second_preflight.get("drift_detected") is False
+    assert second_preflight.get("drift_workflow_ids") == []
     assert second_publication.get("skipped") is True
     assert second_publication.get("skip_reason") == "existing_materialisation_valid"
+    assert second_publication.get("materialisation_status") == "current"
+    assert second_publication.get("drift_detected") is False
+    assert second_publication.get("issue_codes") == []
     assert second_counts.get("workflows_published") == 0
     assert second_counts.get("errors") == 0
     assert second_report.get("typed_workflow_ids") == []
@@ -250,10 +263,22 @@ def test_bootstrap_repairs_optional_input_mapping_drift(
     }
 
     repair_report = bootstrap_canonical_paper_representation_workflows()
+    repair_preflight = repair_report.get("materialisation_preflight") or {}
     repair_publication = repair_report.get("publication") or {}
     repair_counts = repair_publication.get("counts") or {}
 
+    assert repair_preflight.get("already_current") is False
+    assert repair_preflight.get("drift_detected") is True
+    assert ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID in (
+        repair_preflight.get("drift_workflow_ids") or []
+    )
+    assert repair_preflight.get("issue_codes") == ["definition_mismatch"]
     assert repair_publication.get("skipped") is not True
+    assert repair_publication.get("materialisation_status") == "repaired_from_repo_seed"
+    assert repair_publication.get("drift_detected") is True
+    assert ARXIV_PAPER_REPRESENTATION_WORKFLOW_ID in (
+        repair_publication.get("drift_workflow_ids") or []
+    )
     assert repair_counts.get("workflows_published") == 2
     assert repair_counts.get("errors") == 0
 

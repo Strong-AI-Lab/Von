@@ -1,4 +1,11 @@
-"""Materialise canonical scholarly-paper and arXiv workflows from repo seed bundles."""
+"""Seed-only startup publication support for the scholarly-paper workflow family.
+
+The paper repo bundle remains a reviewable bootstrap fixture, not request-time
+workflow authority. When the canonical Vontology materialisation is already
+current this path is a no-op; when startup detects missing or drifted
+materialisation it republishes through the shared seed-bootstrap helper and
+returns explicit diagnostics.
+"""
 
 from __future__ import annotations
 
@@ -21,7 +28,7 @@ _REPO_SEED_ASSET_PATH = (
 
 
 def bootstrap_canonical_paper_representation_workflows() -> dict[str, Any]:
-    """Publish and validate the canonical scholarly-paper workflow family."""
+    """Publish or repair the canonical scholarly-paper workflow family at startup."""
 
     return bootstrap_repo_seed_workflow_bundle(
         asset_path=_REPO_SEED_ASSET_PATH
