@@ -9,7 +9,12 @@
  * windows without interference.
  */
 
-import { getJson, getUserContext, postJson } from '../apiService.js';
+import { getJsonDetailed, getUserContext, postJson } from '../apiService.js';
+import {
+    armRetryableLoadState,
+    clearRetryableLoadState,
+    describeRetryableLoadFailure,
+} from '../utils/retryableLoadState.js';
 
 // JVNAUTOSCI-1011: Switch to sessionStorage for window-scoped org context
 const SS_ORG_CONTEXT = 'von_org_context';
@@ -31,36 +36,58 @@ export function normaliseOrganisationDisplayName(label) {
  * Load user's available organisations from backend
  */
 export async function loadMyOrganisations() {
-    try {
-        const ctx = getUserContext();
-        const userConceptId = ctx?.user_id;
-        const url = userConceptId
-            ? `/von/api/organisations/my_organisations?user_concept_id=${encodeURIComponent(userConceptId)}`
-            : '/von/api/organisations/my_organisations';
+    const ctx = getUserContext();
+    const userConceptId = ctx?.user_id;
+    const url = userConceptId
+        ? `/von/api/organisations/my_organisations?user_concept_id=${encodeURIComponent(userConceptId)}`
+        : '/von/api/organisations/my_organisations';
 
-        const response = await getJson(url);
-        return response.organisations || [];
-    } catch (err) {
-        console.error('Error loading organisations:', err);
-        return [];
-    }
+    const { data } = await getJsonDetailed(url);
+    return data?.organisations || [];
 }
 
 /**
  * Get current session context (user, org, role, namespace)
  */
 export async function getSessionContext() {
-    try {
-        return await getJson('/von/api/session/context');
-    } catch (err) {
-        console.error('Error getting session context:', err);
-        return {
-            authenticated: false,
-            user_id: null,
-            organisation_id: null,
-            role: null,
-            namespace: null
-        };
+    const { data } = await getJsonDetailed('/von/api/session/context');
+    return data;
+}
+
+function renderRetryableOrgSelectorFailure(container, containerId, error) {
+    if (!container) return;
+
+    const failure = describeRetryableLoadFailure(
+        error,
+        'Organisations are temporarily unavailable.'
+    );
+
+    container.innerHTML = '';
+
+    const message = document.createElement('span');
+    message.className = 'org-error';
+    message.textContent = failure.retryable
+        ? `${failure.message} Click to retry.`
+        : failure.message;
+    container.appendChild(message);
+    container.title = failure.message;
+
+    if (failure.retryable) {
+        const retryButton = document.createElement('button');
+        retryButton.type = 'button';
+        retryButton.className = 'org-retry-button';
+        retryButton.textContent = 'Retry';
+        retryButton.style.marginLeft = '8px';
+        retryButton.addEventListener('click', () => {
+            renderOrgSelector(containerId);
+        });
+        container.appendChild(retryButton);
+
+        armRetryableLoadState(container, () => renderOrgSelector(containerId), {
+            backgroundDelayMs: Math.max(0, failure.retryAfterSeconds) * 1000
+        });
+    } else {
+        clearRetryableLoadState(container);
     }
 }
 
@@ -134,6 +161,9 @@ export async function renderOrgSelector(containerId) {
             container.innerHTML = '<span class="org-info">No organisations</span>';
             return;
         }
+
+        clearRetryableLoadState(container);
+        container.title = '';
 
         // Build dropdown HTML
         let html = '<div class="org-selector-wrapper">';
@@ -252,7 +282,7 @@ export async function renderOrgSelector(containerId) {
 
     } catch (err) {
         console.error('Error rendering org selector:', err);
-        container.innerHTML = '<span class="org-error">Error loading organisations</span>';
+        renderRetryableOrgSelectorFailure(container, containerId, err);
     }
 }
 

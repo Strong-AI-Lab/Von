@@ -13,7 +13,13 @@
  * - Graceful fallback if search unavailable
  */
 
+import { getJsonDetailed } from '../apiService.js';
 import { makeNonTriggerVontologyId } from './promptCartoucheOverlay.js';
+import {
+    armRetryableLoadState,
+    clearRetryableLoadState,
+    describeRetryableLoadFailure
+} from '../utils/retryableLoadState.js';
 
 const TRIGGER_PATTERN = /#[Vv]#/;
 const DEBOUNCE_MS = 200;
@@ -38,6 +44,8 @@ function getOrCreateState(textarea) {
             triggerEndPos: null,
             searchTimeout: null,
             dropdownPointerDown: false,
+            searchController: null,
+            failureVisible: false,
         });
     }
     return textareaStates.get(textarea);
@@ -89,15 +97,24 @@ export function closeAutocomplete() {
     const dropdown = document.querySelector('.concept-autocomplete-dropdown');
     if (dropdown) {
         dropdown.style.display = 'none';
+        clearRetryableLoadState(dropdown);
+        dropdown.title = '';
     }
     if (activeTextarea) {
         const state = getOrCreateState(activeTextarea);
         state.isOpen = false;
         state.selectedIndex = -1;
         state.results = [];
+        state.failureVisible = false;
         state.triggerPos = null;
         state.triggerEndPos = null;
+        try {
+            state.searchController?.abort?.();
+        } catch (_) {
+            // Ignore best-effort shutdown failures.
+        }
     }
+    activeTextarea = null;
 }
 
 // Export for testing
@@ -109,6 +126,80 @@ export function buildConceptSearchUrl(query) {
     if (INCLUDE_INDIVIDUALS) params.set('include_individuals', 'true');
     if (FALLBACK_SUBSTRING) params.set('fallback_substring', 'true');
     return `${SEARCH_API}?${params.toString()}`;
+}
+
+function getDropdown() {
+    let dropdown = document.querySelector('.concept-autocomplete-dropdown');
+    if (!dropdown) {
+        dropdown = createDropdown();
+        document.body.appendChild(dropdown);
+    }
+    return dropdown;
+}
+
+function showDropdown(dropdown) {
+    if (!dropdown) {
+        return;
+    }
+    if (activeTextarea) {
+        const rect = activeTextarea.getBoundingClientRect();
+        dropdown.style.top = `${rect.bottom + window.scrollY}px`;
+        dropdown.style.left = `${rect.left + window.scrollX}px`;
+        dropdown.style.width = `${Math.max(rect.width, 250)}px`;
+    }
+    dropdown.style.display = 'block';
+}
+
+function renderFailureDropdown(query, originTextarea, error) {
+    const dropdown = getDropdown();
+    const state = originTextarea ? getOrCreateState(originTextarea) : null;
+    const failure = describeRetryableLoadFailure(
+        error,
+        'Concept search is temporarily unavailable.'
+    );
+
+    dropdown.innerHTML = '';
+    dropdown.title = failure.message;
+
+    const item = document.createElement('div');
+    item.className = 'concept-autocomplete-item concept-autocomplete-item-error';
+    item.style.padding = '8px 12px';
+    item.style.cursor = failure.retryable ? 'pointer' : 'default';
+    item.style.fontSize = '14px';
+    item.style.color = '#6b7280';
+    item.textContent = failure.retryable
+        ? `${failure.message} Click to retry.`
+        : failure.message;
+
+    if (failure.retryable) {
+        item.tabIndex = 0;
+        item.addEventListener('click', () => {
+            searchConcepts(query, originTextarea);
+        });
+        item.addEventListener('keydown', (event) => {
+            const key = String(event?.key || '');
+            if (key === 'Enter' || key === ' ' || key === 'Spacebar') {
+                event.preventDefault();
+                searchConcepts(query, originTextarea);
+            }
+        });
+
+        armRetryableLoadState(dropdown, () => searchConcepts(query, originTextarea), {
+            backgroundDelayMs: Math.max(0, failure.retryAfterSeconds) * 1000
+        });
+    } else {
+        clearRetryableLoadState(dropdown);
+    }
+
+    dropdown.appendChild(item);
+    showDropdown(dropdown);
+
+    if (state) {
+        state.results = [];
+        state.selectedIndex = -1;
+        state.failureVisible = true;
+        state.isOpen = true;
+    }
 }
 
 /**
@@ -123,7 +214,18 @@ async function searchConcepts(query, originTextarea) {
             return;
         }
 
-        const response = await fetch(buildConceptSearchUrl(query));
+        const state = getOrCreateState(originTextarea);
+        try {
+            state.searchController?.abort?.();
+        } catch (_) {
+            // Ignore stale controller shutdown failures.
+        }
+        const controller = new AbortController();
+        state.searchController = controller;
+
+        const { data } = await getJsonDetailed(buildConceptSearchUrl(query), {
+            signal: controller.signal
+        });
 
         // Race condition guard: if the active textarea changed while we were fetching, abort
         if (activeTextarea !== originTextarea) {
@@ -131,14 +233,7 @@ async function searchConcepts(query, originTextarea) {
             return;
         }
 
-        if (!response.ok) {
-            console.warn('Concept search failed:', response.status);
-            closeAutocomplete();
-            return;
-        }
-
-        const data = await response.json();
-        const results = Array.isArray(data.results) ? data.results : [];
+        const results = Array.isArray(data?.results) ? data.results : [];
 
         // Race condition guard again after parsing
         if (activeTextarea !== originTextarea) {
@@ -147,11 +242,16 @@ async function searchConcepts(query, originTextarea) {
         }
 
         // Update state for this textarea
-        const state = getOrCreateState(originTextarea);
         state.results = results;
         state.selectedIndex = -1;
+        state.failureVisible = false;
 
         if (results.length === 0) {
+            const dropdown = document.querySelector('.concept-autocomplete-dropdown');
+            if (dropdown) {
+                clearRetryableLoadState(dropdown);
+                dropdown.title = '';
+            }
             closeAutocomplete();
             return;
         }
@@ -159,8 +259,14 @@ async function searchConcepts(query, originTextarea) {
         // Render dropdown
         renderDropdown(results);
     } catch (err) {
+        if (err?.name === 'AbortError') {
+            return;
+        }
+        if (activeTextarea !== originTextarea) {
+            return;
+        }
         console.error('Concept search error:', err);
-        closeAutocomplete();
+        renderFailureDropdown(query, originTextarea, err);
     }
 }
 
@@ -232,14 +338,12 @@ function getStoredTriggerRange(text, state) {
  * Render the autocomplete dropdown
  */
 function renderDropdown(results) {
-    let dropdown = document.querySelector('.concept-autocomplete-dropdown');
-    if (!dropdown) {
-        dropdown = createDropdown();
-        document.body.appendChild(dropdown);
-    }
+    const dropdown = getDropdown();
 
     // Clear previous items
     dropdown.innerHTML = '';
+    clearRetryableLoadState(dropdown);
+    dropdown.title = '';
 
     // Get state for active textarea
     const state = activeTextarea ? getOrCreateState(activeTextarea) : null;
@@ -316,16 +420,11 @@ function renderDropdown(results) {
         dropdown.appendChild(item);
     });
 
-    // Position dropdown below the textarea
-    if (activeTextarea) {
-        const rect = activeTextarea.getBoundingClientRect();
-        dropdown.style.top = `${rect.bottom + window.scrollY}px`;
-        dropdown.style.left = `${rect.left + window.scrollX}px`;
-        dropdown.style.width = `${Math.max(rect.width, 250)}px`;
+    showDropdown(dropdown);
+    if (state) {
+        state.isOpen = true;
+        state.failureVisible = false;
     }
-
-    dropdown.style.display = 'block';
-    if (state) state.isOpen = true;
 }
 
 /**
@@ -514,6 +613,13 @@ export function initializeConceptAutocomplete(textareaElement) {
     // Set as active on focus to handle tab switches
     textareaElement.addEventListener('focus', () => {
         activeTextarea = textareaElement;
+        const state = getOrCreateState(textareaElement);
+        if (state.failureVisible) {
+            const dropdown = document.querySelector('.concept-autocomplete-dropdown');
+            if (dropdown && dropdown.childElementCount) {
+                showDropdown(dropdown);
+            }
+        }
     });
 
     // Close on blur
@@ -551,5 +657,10 @@ export function cleanupConceptAutocomplete() {
     if (activeTextarea) {
         const state = getOrCreateState(activeTextarea);
         clearTimeout(state.searchTimeout);
+        try {
+            state.searchController?.abort?.();
+        } catch (_) {
+            // Ignore best-effort shutdown failures.
+        }
     }
 }

@@ -1,5 +1,5 @@
 // Chat Tab Module
-import { annotateTurn, fetchWithTimeout, getUserContext, getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
+import { annotateTurn, fetchWithTimeout, getJsonDetailed, getUserContext, getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
 import { initializeConceptAutocomplete } from './components/conceptAutocomplete.js';
 import { initializeMessagePanel, loadUnreadCount } from './components/messagePanel.js';
 import { loadMyOrganisations } from './components/orgSelector.js';
@@ -23,6 +23,11 @@ import {
     resetCopyJsonButtonPreCopyState
 } from './utils/copyJsonButtonState.js';
 import { saveJsonTextViaDialog } from './utils/fileSave.js';
+import {
+    armRetryableLoadState,
+    clearRetryableLoadState,
+    describeRetryableLoadFailure
+} from './utils/retryableLoadState.js';
 import {
     CHAT_HISTORY_RECENT_LIMIT_STORAGE_KEY,
     CHAT_HISTORY_RECENT_WINDOW_DAYS_STORAGE_KEY,
@@ -13470,6 +13475,8 @@ function _buildChatSessionMetadataSuggestions({ inputEl, suggestionsEl, onPick, 
         state.activeIndex = -1;
         suggestionsEl.classList.remove('open');
         suggestionsEl.innerHTML = '';
+        clearRetryableLoadState(suggestionsEl);
+        suggestionsEl.title = '';
     };
 
     const setActive = (idx) => {
@@ -13486,6 +13493,8 @@ function _buildChatSessionMetadataSuggestions({ inputEl, suggestionsEl, onPick, 
     const render = (items) => {
         suggestionsEl.innerHTML = '';
         if (!items.length) {
+            clearRetryableLoadState(suggestionsEl);
+            suggestionsEl.title = '';
             suggestionsEl.classList.remove('open');
             return;
         }
@@ -13517,6 +13526,49 @@ function _buildChatSessionMetadataSuggestions({ inputEl, suggestionsEl, onPick, 
         });
 
         suggestionsEl.classList.add('open');
+        clearRetryableLoadState(suggestionsEl);
+        suggestionsEl.title = '';
+    };
+
+    const renderFailure = (query, error) => {
+        const failure = describeRetryableLoadFailure(
+            error,
+            'Concept suggestions are temporarily unavailable.'
+        );
+
+        state.items = [];
+        state.activeIndex = -1;
+        suggestionsEl.innerHTML = '';
+        suggestionsEl.classList.add('open');
+        suggestionsEl.title = failure.message;
+
+        const row = document.createElement('div');
+        row.className = 'chat-session-metadata-suggestion chat-session-metadata-suggestion-error';
+        row.textContent = failure.retryable
+            ? `${failure.message} Click to retry.`
+            : failure.message;
+
+        if (failure.retryable) {
+            row.tabIndex = 0;
+            row.addEventListener('click', () => {
+                void performSearch(query);
+            });
+            row.addEventListener('keydown', (event) => {
+                const key = String(event?.key || '');
+                if (key === 'Enter' || key === ' ' || key === 'Spacebar') {
+                    event.preventDefault();
+                    void performSearch(query);
+                }
+            });
+
+            armRetryableLoadState(suggestionsEl, () => performSearch(query), {
+                backgroundDelayMs: Math.max(0, failure.retryAfterSeconds) * 1000
+            });
+        } else {
+            clearRetryableLoadState(suggestionsEl);
+        }
+
+        suggestionsEl.appendChild(row);
     };
 
     const performSearch = async (query) => {
@@ -13534,19 +13586,14 @@ function _buildChatSessionMetadataSuggestions({ inputEl, suggestionsEl, onPick, 
 
         const url = `/vontology/api/vontology/search?q=${encodeURIComponent(q)}&limit=12&fallback_substring=true${includeIndividuals ? '&include_individuals=true' : ''}`;
         try {
-            const resp = await fetch(url, { signal: ac.signal });
-            if (!resp.ok) {
-                clearSuggestions();
-                return;
-            }
-            const data = await resp.json();
+            const { data } = await getJsonDetailed(url, { signal: ac.signal });
             const items = Array.isArray(data?.results) ? data.results : [];
             state.items = items;
             state.activeIndex = -1;
             render(items);
         } catch (err) {
             if (err?.name === 'AbortError') return;
-            clearSuggestions();
+            renderFailure(q, err);
         }
     };
 
@@ -13562,7 +13609,7 @@ function _buildChatSessionMetadataSuggestions({ inputEl, suggestionsEl, onPick, 
 
     inputEl.addEventListener('input', () => debouncedSearch());
     inputEl.addEventListener('focus', () => {
-        if (state.items.length) {
+        if (state.items.length || suggestionsEl.childElementCount) {
             suggestionsEl.classList.add('open');
         }
     });

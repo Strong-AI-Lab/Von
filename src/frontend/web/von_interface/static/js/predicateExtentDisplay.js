@@ -6,12 +6,18 @@
  */
 
 import { fetchPredicateExtent } from './predicateUtils.js';
+import { getJsonDetailed } from './apiService.js';
 import { selectBestNameForContext, selectShortestNameForContext } from './utils/nameSelection.js';
 import {
     createVontologyCartouche,
     getCartoucheAppearanceSettings,
     normalisePotentialConceptId
 } from './utils/textDecorator.js';
+import {
+    armRetryableLoadState,
+    clearRetryableLoadState,
+    describeRetryableLoadFailure
+} from './utils/retryableLoadState.js';
 
 const CONCEPT_SEARCH_API = '/vontology/api/vontology/search';
 const CONCEPT_SEARCH_LIMIT = 8;
@@ -192,9 +198,7 @@ export function createPredicateExtentDisplay(conceptId, container) {
 
     async function searchConcepts(query) {
         if (!query || query.trim().length < 1) return [];
-        const resp = await fetch(buildConceptSearchUrl(query));
-        if (!resp.ok) return [];
-        const data = await resp.json();
+        const { data } = await getJsonDetailed(buildConceptSearchUrl(query));
         return Array.isArray(data?.results) ? data.results : [];
     }
 
@@ -206,6 +210,8 @@ export function createPredicateExtentDisplay(conceptId, container) {
         const closeResults = () => {
             resultsEl.innerHTML = '';
             resultsEl.classList.remove('open');
+            clearRetryableLoadState(resultsEl);
+            resultsEl.title = '';
             active = false;
         };
 
@@ -217,6 +223,8 @@ export function createPredicateExtentDisplay(conceptId, container) {
             }
             resultsEl.classList.add('open');
             active = true;
+            clearRetryableLoadState(resultsEl);
+            resultsEl.title = '';
             items.forEach((item) => {
                 const row = document.createElement('div');
                 row.className = 'predicate-extent-search-item';
@@ -242,14 +250,69 @@ export function createPredicateExtentDisplay(conceptId, container) {
             });
         };
 
+        const renderFailure = (query, error) => {
+            const failure = describeRetryableLoadFailure(
+                error,
+                'Concept search is temporarily unavailable.'
+            );
+
+            resultsEl.innerHTML = '';
+            resultsEl.classList.add('open');
+            resultsEl.title = failure.message;
+            active = true;
+
+            const row = document.createElement('div');
+            row.className = 'predicate-extent-search-item';
+            row.style.color = '#6b7280';
+            row.textContent = failure.retryable
+                ? `${failure.message} Click to retry.`
+                : failure.message;
+
+            if (failure.retryable) {
+                row.tabIndex = 0;
+                row.addEventListener('click', () => {
+                    inputEl.focus();
+                    inputEl.dispatchEvent(new Event('input'));
+                });
+                row.addEventListener('keydown', (event) => {
+                    const key = String(event?.key || '');
+                    if (key === 'Enter' || key === ' ' || key === 'Spacebar') {
+                        event.preventDefault();
+                        inputEl.focus();
+                        inputEl.dispatchEvent(new Event('input'));
+                    }
+                });
+
+                armRetryableLoadState(resultsEl, () => searchConcepts(query).then(renderResults).catch((retryErr) => {
+                    console.error('Error retrying predicate extent concept search:', retryErr);
+                    renderFailure(query, retryErr);
+                }), {
+                    backgroundDelayMs: Math.max(0, failure.retryAfterSeconds) * 1000
+                });
+            } else {
+                clearRetryableLoadState(resultsEl);
+            }
+
+            resultsEl.appendChild(row);
+        };
+
         inputEl.addEventListener('input', () => {
             const query = inputEl.value || '';
             if (debounceId) {
                 clearTimeout(debounceId);
             }
             debounceId = setTimeout(async () => {
-                const results = await searchConcepts(query);
-                renderResults(results);
+                if (!query.trim()) {
+                    closeResults();
+                    return;
+                }
+                try {
+                    const results = await searchConcepts(query);
+                    renderResults(results);
+                } catch (error) {
+                    console.error('Error searching predicate extent concepts:', error);
+                    renderFailure(query, error);
+                }
             }, CONCEPT_SEARCH_DEBOUNCE_MS);
         });
 
