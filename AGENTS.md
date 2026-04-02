@@ -38,9 +38,9 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 25. **Definition of fully complete Jira task**: merged to `main`, Jira and linked issues updated, required Vontology workflow/state changes materialised, and for substantial tasks the reflection pass has produced any justified `AGENTS.md` or Jira guidance update.
 25A. **End-to-end Jira closure evidence must be direct**: when a task claims user-visible or end-to-end acceptance, do not mark it fixed/finished/Done on nearby commits, related-task work, or indirect unit tests alone; rerun the exact or nearest-real acceptance path and record that evidence in Jira before closure.
 26. **Fail closed when Vontology is unavailable for Vontology-governed behaviour**: do not silently fall back to in-code prompts, stale context reuse, or heuristic hacks. If required Vontology prompts/workflow data cannot be resolved, no-op that transformation and emit a clear user-visible and telemetry-visible reason.
-27. **Minimal-imposition principle**: exhaust existing context/data/search first; ask humans only when necessary, and then only for concise, low-effort, high-value inputs they are likely to know without extra work.
+27. **Minimal-imposition principle**: treat this as a strong default design and operating policy. Exhaust existing context/data/search first; ask humans only when necessary, and then only for concise, low-effort, high-value inputs they are likely to know without extra work. See `docs/engineering/minimal_imposition_design_principle.md` for the rationale and limits. This principle is close to policy, but it is not a mechanical override of explicit user instructions, security requirements, destructive-action safeguards, or stricter workflow/Vontology constraints.
 27A. **Minimal-imposition mutation policy**: low-risk additive Vontology writes should default-allow when evidence-backed inputs make the intended additive action clear and the user has not explicitly denied it.
-27B. **Canonical identifiers/URLs can be permission**: pasted canonical sources such as arXiv abstract URLs/IDs can constitute sufficient permission for low-risk additive representation work; do not require redundant verbs like `download`, `store`, or `represent`.
+27B. **Canonical identifiers/URLs can be permission**: pasted canonical sources such as arXiv abstract URLs/IDs can constitute sufficient permission for closely related low-risk additive representation work; do not require redundant verbs like `download`, `store`, or `represent`.
 27C. **Destructive actions require workflow confirmation**: deletes, removals, and other destructive mutations should branch to explicit workflow confirmation/escalation rather than being executed immediately.
 27D. **Human in the loop is not the default doctrine**: outside genuinely safety-critical cases, do not interrupt users or route to human approval without evidence that it is necessary.
 28. When the user asks whether something is "finished" or "complete", do not treat Jira status alone as the answer. Verify effective implementation state in both code and Vontology, then report whether it is unimplemented, partly implemented, or fully implemented (with concise evidence).
@@ -53,6 +53,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 - `docs/concept_refactoring.md` (or current plan doc): project roadmap for major work.
 - `docs/software_engineering.md`: conventions, debugging, and lessons learned.
 - `docs/engineering/security_considerations.md`: required security context.
+- `docs/engineering/minimal_imposition_design_principle.md`: design rationale and policy framing for minimal-imposition defaults, trade-offs, and limits.
 - `docs/engineering/von_workflow_language_manual.md`: primary reference for workflow-related tasks; use it to guide workflow design/changes and update it whenever workflow semantics, capabilities, or constraints change.
 - `docs/engineering/atlassian_mcp_recovery_runbook.md`: canonical Atlassian MCP recovery and credential reset procedure.
 - `docs/engineering/jira_components_taxonomy.md`: canonical candidate Jira Components taxonomy for Von issues.
@@ -75,7 +76,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 	7. If the reflection finds a recurring process/design gap, create or update a Jira issue instead of leaving the lesson as an unenforced observation.
 	8. Treat this reflection as part of acceptance, not optional retrospective polish.
 - For question-generation or elicitation flows, apply the minimal-imposition principle explicitly in prompts/fallbacks: avoid broad requests, and prefer one focused ask only when machine-side retrieval cannot close the gap.
-- For write-policy work, treat minimal imposition as a risk-class decision rule: additive low-risk Vontology mutations should usually proceed, while destructive mutations should route to explicit confirmation workflows.
+- For write-policy work, treat minimal imposition as a strong risk-class policy: additive low-risk Vontology mutations should usually proceed, while destructive mutations should route to explicit confirmation workflows.
 - **DRY refactoring discipline** (CRITICAL — WET code is unacceptable):
 	1. **Search first, always**: Before writing ANY function that might exist elsewhere, run `grep_search` or `semantic_search`. This is not optional.
 	2. **3-strike rule**: If you're about to write similar code for the 3rd time, STOP. Do not proceed. Create a central helper first.
