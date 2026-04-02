@@ -154,6 +154,19 @@ Two recent turn traces show a consistent failure mode: the system marks a turn a
     "response_sha256": "hex-string",
     "completion_claim_detected": true,
     "completion_claim_validated": false
+  },
+  "execution_correctness": {
+    "schema_version": "turn_execution_correctness.v1",
+    "overall_outcome": "successful_completion|false_success|unresolved_follow_up_needed|tool_or_workflow_misrouting|abstain_escalate_no_safe_route|mutation_failed_or_blocked|unknown",
+    "failure_mode": "completed_verified|false_completion_claim|false_completion_gate_state|mutation_not_executed|mutation_failed_or_blocked|postcondition_inconclusive|unresolved_required_effects|partial_unspecified|unvalidated_completion_claim|unknown",
+    "likely_failure_to_act": true,
+    "metric_labels": {
+      "successful_completion": false,
+      "false_success": false,
+      "unresolved_follow_up_needed": true,
+      "tool_or_workflow_misrouting": true,
+      "abstain_escalate_no_safe_route": false
+    }
   }
 }
 ```
@@ -163,6 +176,20 @@ Two recent turn traces show a consistent failure mode: the system marks a turn a
 1. Any `required_effects[*].effect_type` ending in `_mutation` must set `postcondition_required=true`.
 2. A turn cannot end with `completion_gate.decision="completed"` if any required effect is `not_satisfied`, `not_executed`, `inconclusive`, or missing checks.
 3. If a completion claim is detected in assistant text while mutation effects are unresolved, force `decision="escalation_required"` or `decision="partial"`.
+
+### 3.3 Shared execution-correctness label model
+
+To support JVNAUTOSCI-965 and downstream consumers such as `turn_execution_build_benchmark`, each turn record should also carry a compact `execution_correctness` summary. This is the shared label surface that Phase 1 reporting should consume, rather than re-deriving success/failure semantics independently in every benchmark or dashboard path.
+
+The minimum Phase 1 labels are:
+
+1. `successful_completion`
+2. `false_success`
+3. `unresolved_follow_up_needed`
+4. `tool_or_workflow_misrouting`
+5. `abstain_escalate_no_safe_route`
+
+The record should also preserve a more detailed `failure_mode` for triage and replay selection.
 
 ## 4. Storage Mapping
 
@@ -245,6 +272,7 @@ The existing `message.direct_created` binding to `#V#chat_assistant_workflow` sh
 4. `turn_execution_build_benchmark` (implemented)
 - Produces reproducible corpus-level metrics, seeded replay cases, and capability-gap signals.
 - Intended for ongoing reliability benchmarking and regression tracking.
+- Benchmark metrics should count the shared `execution_correctness.metric_labels` directly in addition to detailed failure modes, so selector-layer and turn-level reporting share one label vocabulary.
 - Adds Jira-linkable triage metadata (`triage_index` + per-case issue-key extraction) so replay evidence can be routed directly into issue triage workflows.
 - Supports optional baseline-rate comparison (`baseline_*_rate_pct` + `regression_tolerance_pct`) to flag metric regressions in automated benchmark runs.
 

@@ -399,6 +399,11 @@ def test_rag_list_indexed_supports_turn_execution_records(monkeypatch):
     assert item["request_id"] == "req-1"
     assert item["decision"] == "escalation_required"
     assert item["unresolved_effect_count"] == 1
+    assert item["overall_outcome"] == "unresolved_follow_up_needed"
+    assert item["failure_mode"] == "mutation_not_executed"
+    assert item["execution_correctness"]["metric_labels"][
+        "unresolved_follow_up_needed"
+    ] is True
     assert item["item_kind"] == "turn_execution_record"
     assert item["source_system"] == "mongo.turn_execution_records"
     assert item["workflow_routing_diagnostics"]["dispatch"]["failure_codes"] == [
@@ -464,6 +469,11 @@ def test_rag_get_item_supports_turn_execution_records(monkeypatch):
     assert result["request_id"] == "req-9"
     assert result["decision"] == "partial"
     assert result["requires_follow_up"] is True
+    assert result["overall_outcome"] == "unresolved_follow_up_needed"
+    assert result["failure_mode"] == "postcondition_inconclusive"
+    assert result["execution_correctness"]["metric_labels"][
+        "unresolved_follow_up_needed"
+    ] is True
     assert result["item_kind"] == "turn_execution_record"
     assert result["provenance"]["item_kind"] == "turn_execution_record_item"
     assert result["workflow_routing_diagnostics"]["selector"]["response"]["text"] == (
@@ -926,6 +936,11 @@ def test_turn_execution_search_failures_reports_modes_and_recommendations(monkey
     assert result["failure_mode_counts"]["mutation_failed_or_blocked"] == 1
     assert "req-fail-1" in result["example_request_ids"]
     assert "req-fail-2" in result["example_request_ids"]
+    first_item = result["items"][0]
+    assert isinstance(first_item.get("execution_correctness"), dict)
+    assert first_item["execution_correctness"]["metric_labels"][
+        "unresolved_follow_up_needed"
+    ] is True
     assert any(
         "route through #V#conversation_turn_execution_workflow" in rec
         for rec in result["recommendations"]
@@ -998,8 +1013,10 @@ def test_turn_execution_search_failures_flags_completed_record_with_failed_dispa
     assert result["failure_mode_counts"]["false_completion_gate_state"] == 1
     assert "req-false-success-1" in result["example_request_ids"]
     item = result["items"][0]
+    assert item["overall_outcome"] == "false_success"
     assert item["failure_mode"] == "false_completion_gate_state"
     assert item["likely_failure_to_act"] is True
+    assert item["execution_correctness"]["metric_labels"]["false_success"] is True
     assert any(
         "completion-gate invariants" in rec for rec in result["recommendations"]
     )
@@ -1106,6 +1123,14 @@ def test_turn_execution_build_benchmark_returns_metrics_and_replay_cases(monkeyp
     assert metrics["likely_failure_count"] == 2
     assert metrics["likely_failure_rate_pct"] == 66.67
     assert metrics["failure_mode_counts"]["mutation_not_executed"] == 1
+    assert metrics["metric_schema"]["summary_schema_version"] == (
+        "turn_execution_correctness.v1"
+    )
+    assert metrics["outcome_label_counts"]["successful_completion"] == 1
+    assert metrics["outcome_label_counts"]["unresolved_follow_up_needed"] == 2
+    assert (
+        metrics["outcome_label_rates_pct"]["successful_completion_rate_pct"] == 33.33
+    )
     assert isinstance(result.get("benchmark_fingerprint"), str)
     assert len(result["benchmark_fingerprint"]) == 16
 

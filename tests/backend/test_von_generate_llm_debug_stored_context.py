@@ -1,5 +1,8 @@
 import pytest
 from flask import Flask
+from src.backend.services.turn_execution_record_service import (
+    TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION,
+)
 
 _VERSION_INFO = {
     "schema_version": "runtime_code_version.v1",
@@ -116,6 +119,12 @@ def test_generate_debug_stored_context_uses_persisted_history_for_authenticated_
     turn_execution_record = llm_debug.get("turn_execution_record")
     assert isinstance(turn_execution_record, dict)
     assert turn_execution_record.get("schema_version") == "turn_execution_record.v1"
+    execution_correctness = turn_execution_record.get("execution_correctness")
+    assert isinstance(execution_correctness, dict)
+    assert (
+        execution_correctness.get("schema_version")
+        == TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION
+    )
     completion_gate = turn_execution_record.get("completion_gate")
     assert isinstance(completion_gate, dict)
     assert isinstance(completion_gate.get("decision"), str)

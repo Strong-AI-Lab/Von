@@ -1,4 +1,6 @@
 from src.backend.services.turn_execution_record_service import (
+    TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION,
+    build_turn_execution_correctness_summary,
     build_turn_execution_record,
     build_workflow_routing_diagnostics,
     _summarise_tool_execution_context,
@@ -917,3 +919,64 @@ def test_build_workflow_routing_diagnostics_preserves_local_handoff_failure_deta
     assert diagnostics["dispatch"]["zero_execution_primary_failure_code"] == (
         "tool_pipeline_setup_exception"
     )
+
+
+def test_build_turn_execution_correctness_summary_marks_successful_completion() -> None:
+    summary = build_turn_execution_correctness_summary(
+        completion_gate={
+            "decision": "completed",
+            "decision_reason": "No blocking effect detected.",
+            "safe_to_claim_completion": True,
+            "requires_follow_up": False,
+        },
+        required_effects=[],
+        critic_summary={"not_verified_count": 0, "inconclusive_count": 0},
+        final_response={
+            "completion_claim_detected": False,
+            "completion_claim_validated": True,
+        },
+        workflow_selection={
+            "selected_workflow_id": "#V#chat_assistant_workflow",
+            "selector_verdict": "plain_response",
+            "selector_source": "default",
+        },
+        workflow_routing_diagnostics={},
+    )
+
+    assert summary["schema_version"] == TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION
+    assert summary["overall_outcome"] == "successful_completion"
+    assert summary["failure_mode"] == "completed_verified"
+    assert summary["likely_failure_to_act"] is False
+    assert summary["metric_labels"]["successful_completion"] is True
+    assert summary["metric_labels"]["false_success"] is False
+
+
+def test_build_turn_execution_correctness_summary_marks_plain_response_misrouting() -> None:
+    summary = build_turn_execution_correctness_summary(
+        completion_gate={
+            "decision": "escalation_required",
+            "decision_reason": "Required mutation was not executed.",
+            "safe_to_claim_completion": False,
+            "requires_follow_up": True,
+        },
+        required_effects=[{"effect_id": "effect_1", "status": "not_executed"}],
+        critic_summary={"not_verified_count": 1},
+        final_response={
+            "completion_claim_detected": True,
+            "completion_claim_validated": False,
+        },
+        workflow_selection={
+            "selected_workflow_id": "#V#chat_assistant_workflow",
+            "selector_verdict": "plain_response",
+            "selector_source": "default",
+        },
+        workflow_routing_diagnostics={},
+    )
+
+    assert summary["schema_version"] == TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION
+    assert summary["failure_mode"] == "mutation_not_executed"
+    assert summary["overall_outcome"] == "tool_or_workflow_misrouting"
+    assert summary["likely_failure_to_act"] is True
+    assert summary["metric_labels"]["unresolved_follow_up_needed"] is True
+    assert summary["metric_labels"]["tool_or_workflow_misrouting"] is True
+    assert summary["selection_labels"]["plain_response_route_selected"] is True

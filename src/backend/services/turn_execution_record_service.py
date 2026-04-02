@@ -38,6 +38,7 @@ from ..workflows.conversation_turn_stage_model import (
 logger = logging.getLogger(__name__)
 
 TURN_EXECUTION_RECORD_SCHEMA_VERSION = "turn_execution_record.v1"
+TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION = "turn_execution_correctness.v1"
 WORKFLOW_ROUTING_DIAGNOSTICS_SCHEMA_VERSION = "workflow_routing_diagnostics.v1"
 TURN_EXECUTION_RECORDS_COLLECTION = "turn_execution_records"
 
@@ -253,6 +254,29 @@ _NEGATED_MUTATION_PREFIX_PATTERN = re.compile(
 )
 
 _TOOL_CALLING_SELECTOR_VERDICTS = {"tool_seeking", "tool_calling"}
+_PLAIN_RESPONSE_WORKFLOW_IDS = {
+    "#V#chat_assistant_workflow",
+    "#V#plain_response_workflow",
+}
+_ABSTAIN_OR_NO_SAFE_ROUTE_SELECTOR_VERDICTS = {
+    "abstain",
+    "escalate",
+    "escalation_required",
+    "no_safe_route",
+    "no_safe_route_available",
+    "no_safe_route_found",
+}
+_FALSE_SUCCESS_FAILURE_MODES = {
+    "false_completion_claim",
+    "false_completion_gate_state",
+}
+_EXECUTION_CORRECTNESS_METRIC_LABEL_NAMES = (
+    "successful_completion",
+    "false_success",
+    "unresolved_follow_up_needed",
+    "tool_or_workflow_misrouting",
+    "abstain_escalate_no_safe_route",
+)
 
 _SELECTOR_PROMPT_FAILURE_VERDICTS = {
     "selector_exception",
@@ -433,6 +457,284 @@ def _normalise_failure_codes(raw_codes: Any) -> list[str]:
         seen.add(lowered)
         ordered.append(code)
     return ordered
+
+
+def _classify_turn_execution_failure_mode(item: Mapping[str, Any]) -> str:
+    """Classify a turn execution record into a detailed failure mode."""
+
+    decision = (_safe_str(item.get("decision")) or "").lower()
+    unresolved_effect_count = _safe_non_negative_int(
+        item.get("unresolved_effect_count"),
+        default=0,
+    )
+    safe_to_claim_completion = bool(item.get("safe_to_claim_completion", True))
+
+    critic_summary_raw = item.get("critic_summary")
+    critic_summary = (
+        critic_summary_raw if isinstance(critic_summary_raw, Mapping) else {}
+    )
+    not_verified_count = _safe_non_negative_int(
+        critic_summary.get("not_verified_count"),
+        default=0,
+    )
+    inconclusive_count = _safe_non_negative_int(
+        critic_summary.get("inconclusive_count"),
+        default=0,
+    )
+    error_count = _safe_non_negative_int(
+        critic_summary.get("error_count"),
+        default=0,
+    )
+
+    completion_claim_detected = bool(item.get("completion_claim_detected", False))
+    completion_claim_validated = bool(item.get("completion_claim_validated", True))
+
+    workflow_routing_diagnostics_raw = item.get("workflow_routing_diagnostics")
+    workflow_routing_diagnostics = (
+        workflow_routing_diagnostics_raw
+        if isinstance(workflow_routing_diagnostics_raw, Mapping)
+        else {}
+    )
+    dispatch_raw = workflow_routing_diagnostics.get("dispatch")
+    dispatch = dispatch_raw if isinstance(dispatch_raw, Mapping) else {}
+    dispatch_terminal_status = (
+        str(dispatch.get("dispatch_terminal_status") or "").strip().lower()
+    )
+    zero_tool_reason_code = (
+        str(dispatch.get("zero_tool_reason_code") or "").strip().lower()
+    )
+
+    if decision == "failed":
+        return "mutation_failed_or_blocked"
+    if decision == "escalation_required":
+        return "mutation_not_executed"
+    if decision == "partial":
+        if unresolved_effect_count > 0:
+            return "unresolved_required_effects"
+        if (not_verified_count + inconclusive_count + error_count) > 0:
+            return "postcondition_inconclusive"
+        return "partial_unspecified"
+    if decision == "completed":
+        if dispatch_terminal_status == "failed":
+            return "false_completion_gate_state"
+        if zero_tool_reason_code == "custom_workflow_failed_before_tool_invocation":
+            return "false_completion_gate_state"
+        if not safe_to_claim_completion:
+            return "false_completion_gate_state"
+        if unresolved_effect_count > 0:
+            return "false_completion_claim"
+        if (not_verified_count + inconclusive_count + error_count) > 0:
+            return "false_completion_claim"
+        if completion_claim_detected and not completion_claim_validated:
+            return "unvalidated_completion_claim"
+        return "completed_verified"
+    if completion_claim_detected and not completion_claim_validated:
+        return "unvalidated_completion_claim"
+    return "unknown"
+
+
+def is_turn_execution_likely_failure_to_act(failure_mode: str) -> bool:
+    return failure_mode in {
+        "mutation_failed_or_blocked",
+        "mutation_not_executed",
+        "unresolved_required_effects",
+        "postcondition_inconclusive",
+        "false_completion_gate_state",
+        "false_completion_claim",
+        "unvalidated_completion_claim",
+        "partial_unspecified",
+    }
+
+
+def build_turn_execution_correctness_summary(
+    *,
+    completion_gate: Mapping[str, Any] | None,
+    required_effects: Sequence[Mapping[str, Any]] | None,
+    critic_summary: Mapping[str, Any] | None,
+    final_response: Mapping[str, Any] | None,
+    workflow_selection: Mapping[str, Any] | None,
+    workflow_routing_diagnostics: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    required_effect_list = [
+        dict(effect) for effect in (required_effects or ()) if isinstance(effect, Mapping)
+    ]
+    unresolved_effect_count = 0
+    for effect in required_effect_list:
+        status = (_safe_str(effect.get("status")) or "").lower()
+        if status in {"not_executed", "not_satisfied"}:
+            unresolved_effect_count += 1
+
+    critic_summary_payload = (
+        dict(critic_summary) if isinstance(critic_summary, Mapping) else {}
+    )
+    workflow_selection_payload = (
+        dict(workflow_selection) if isinstance(workflow_selection, Mapping) else {}
+    )
+    workflow_routing_payload = (
+        dict(workflow_routing_diagnostics)
+        if isinstance(workflow_routing_diagnostics, Mapping)
+        else {}
+    )
+    completion_gate_payload = (
+        dict(completion_gate) if isinstance(completion_gate, Mapping) else {}
+    )
+    final_response_payload = (
+        dict(final_response) if isinstance(final_response, Mapping) else {}
+    )
+
+    decision = _safe_str(completion_gate_payload.get("decision"))
+    requires_follow_up = bool(completion_gate_payload.get("requires_follow_up", False))
+    safe_to_claim_completion = bool(
+        completion_gate_payload.get("safe_to_claim_completion", not requires_follow_up)
+    )
+    selected_workflow_id = _safe_str(
+        workflow_selection_payload.get("selected_workflow_id")
+    )
+    selector_verdict = _safe_str(workflow_selection_payload.get("selector_verdict"))
+    selector_verdict_lower = (selector_verdict or "").lower()
+    selector_source = _safe_str(workflow_selection_payload.get("selector_source"))
+
+    failure_mode = _classify_turn_execution_failure_mode(
+        {
+            "decision": decision,
+            "unresolved_effect_count": unresolved_effect_count,
+            "safe_to_claim_completion": safe_to_claim_completion,
+            "critic_summary": critic_summary_payload,
+            "completion_claim_detected": final_response_payload.get(
+                "completion_claim_detected"
+            ),
+            "completion_claim_validated": final_response_payload.get(
+                "completion_claim_validated"
+            ),
+            "workflow_routing_diagnostics": workflow_routing_payload,
+        }
+    )
+    likely_failure_to_act = is_turn_execution_likely_failure_to_act(failure_mode)
+
+    plain_response_route_selected = (
+        (selected_workflow_id or "") in _PLAIN_RESPONSE_WORKFLOW_IDS
+        or selector_verdict_lower == "plain_response"
+    )
+    tool_route_selected = (
+        (selected_workflow_id or "") == "#V#tool_calling_workflow"
+        or selector_verdict_lower in _TOOL_CALLING_SELECTOR_VERDICTS
+    )
+    abstain_escalate_no_safe_route = (
+        selector_verdict_lower in _ABSTAIN_OR_NO_SAFE_ROUTE_SELECTOR_VERDICTS
+        or (
+            not selected_workflow_id
+            and (decision or "").lower() == "escalation_required"
+            and unresolved_effect_count == 0
+        )
+    )
+    tool_or_workflow_misrouting = bool(
+        likely_failure_to_act
+        and plain_response_route_selected
+        and not abstain_escalate_no_safe_route
+    )
+    false_success = failure_mode in _FALSE_SUCCESS_FAILURE_MODES
+    successful_completion = failure_mode == "completed_verified"
+
+    metric_labels = {
+        "successful_completion": successful_completion,
+        "false_success": false_success,
+        "unresolved_follow_up_needed": requires_follow_up,
+        "tool_or_workflow_misrouting": tool_or_workflow_misrouting,
+        "abstain_escalate_no_safe_route": abstain_escalate_no_safe_route,
+    }
+
+    overall_outcome = "unknown"
+    if metric_labels["false_success"]:
+        overall_outcome = "false_success"
+    elif metric_labels["tool_or_workflow_misrouting"]:
+        overall_outcome = "tool_or_workflow_misrouting"
+    elif metric_labels["abstain_escalate_no_safe_route"]:
+        overall_outcome = "abstain_escalate_no_safe_route"
+    elif failure_mode == "mutation_failed_or_blocked":
+        overall_outcome = "mutation_failed_or_blocked"
+    elif metric_labels["unresolved_follow_up_needed"]:
+        overall_outcome = "unresolved_follow_up_needed"
+    elif metric_labels["successful_completion"]:
+        overall_outcome = "successful_completion"
+
+    return {
+        "schema_version": TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION,
+        "overall_outcome": overall_outcome,
+        "failure_mode": failure_mode,
+        "likely_failure_to_act": likely_failure_to_act,
+        "metric_labels": metric_labels,
+        "selection_labels": {
+            "selected_workflow_id": selected_workflow_id,
+            "selector_verdict": selector_verdict,
+            "selector_source": selector_source,
+            "plain_response_route_selected": plain_response_route_selected,
+            "tool_route_selected": tool_route_selected,
+            "tool_or_workflow_misrouting": tool_or_workflow_misrouting,
+            "abstain_escalate_no_safe_route": abstain_escalate_no_safe_route,
+        },
+        "gate_labels": {
+            "decision": decision,
+            "requires_follow_up": requires_follow_up,
+            "safe_to_claim_completion": safe_to_claim_completion,
+            "completion_claim_detected": bool(
+                final_response_payload.get("completion_claim_detected", False)
+            ),
+            "completion_claim_validated": bool(
+                final_response_payload.get("completion_claim_validated", True)
+            ),
+        },
+        "evidence_counts": {
+            "required_effect_count": len(required_effect_list),
+            "unresolved_effect_count": unresolved_effect_count,
+            "critic_not_verified_count": _safe_non_negative_int(
+                critic_summary_payload.get("not_verified_count"),
+                default=0,
+            ),
+            "critic_inconclusive_count": _safe_non_negative_int(
+                critic_summary_payload.get("inconclusive_count"),
+                default=0,
+            ),
+            "critic_error_count": _safe_non_negative_int(
+                critic_summary_payload.get("error_count"),
+                default=0,
+            ),
+        },
+    }
+
+
+def ensure_turn_execution_record_execution_correctness(
+    record: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(record, Mapping):
+        return {}
+
+    payload = dict(record)
+    critic_raw = payload.get("critic")
+    critic_payload = dict(critic_raw) if isinstance(critic_raw, Mapping) else {}
+    critic_summary_raw = critic_payload.get("summary")
+    critic_summary = (
+        dict(critic_summary_raw) if isinstance(critic_summary_raw, Mapping) else {}
+    )
+
+    payload["execution_correctness"] = build_turn_execution_correctness_summary(
+        completion_gate=payload.get("completion_gate")
+        if isinstance(payload.get("completion_gate"), Mapping)
+        else None,
+        required_effects=payload.get("required_effects")
+        if isinstance(payload.get("required_effects"), list)
+        else None,
+        critic_summary=critic_summary,
+        final_response=payload.get("final_response")
+        if isinstance(payload.get("final_response"), Mapping)
+        else None,
+        workflow_selection=payload.get("workflow_selection")
+        if isinstance(payload.get("workflow_selection"), Mapping)
+        else None,
+        workflow_routing_diagnostics=payload.get("workflow_routing_diagnostics")
+        if isinstance(payload.get("workflow_routing_diagnostics"), Mapping)
+        else None,
+    )
+    return payload
 
 
 def _derive_actor_concept_from_namespace(namespace: Any) -> str | None:
@@ -4087,7 +4389,7 @@ def build_turn_execution_record(
             )
     execution_summary_with_contract["search_evidence_count"] = len(search_evidence_payload)
 
-    return {
+    record_payload = {
         "schema_version": TURN_EXECUTION_RECORD_SCHEMA_VERSION,
         "request_id": _safe_str(request_id),
         "session_id": _safe_str(session_id),
@@ -4135,6 +4437,7 @@ def build_turn_execution_record(
             "completion_claim_validated": bool(completion_claim["validated"]),
         },
     }
+    return ensure_turn_execution_record_execution_correctness(record_payload)
 
 
 def _ensure_turn_execution_indexes(collection) -> None:
@@ -4226,7 +4529,7 @@ def upsert_turn_execution_record_projection(
         return {"updated": False, "reason": "collection_unavailable"}
 
     now = _now_utc()
-    payload = dict(record)
+    payload = ensure_turn_execution_record_execution_correctness(record)
     payload["request_id"] = request_id
     if _safe_str(user_id):
         payload.setdefault("user_id", _safe_str(user_id))

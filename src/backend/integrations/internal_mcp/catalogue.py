@@ -8047,99 +8047,19 @@ def _with_rag_provenance(*, payload: dict, item_kind: str, source_system: str) -
 
 
 def _classify_turn_execution_failure_mode(item: dict[str, Any]) -> str:
-    """Classify a turn execution record into a reliability failure mode."""
-
-    decision_raw = item.get("decision")
-    decision = str(decision_raw).strip().lower() if decision_raw is not None else ""
-
-    unresolved_effect_count_raw = item.get("unresolved_effect_count")
-    try:
-        unresolved_effect_count = int(unresolved_effect_count_raw or 0)
-    except Exception:
-        unresolved_effect_count = 0
-
-    safe_to_claim_completion = bool(item.get("safe_to_claim_completion", True))
-
-    critic_summary_raw = item.get("critic_summary")
-    critic_summary: dict[str, Any]
-    if isinstance(critic_summary_raw, dict):
-        critic_summary = critic_summary_raw
-    else:
-        critic_summary = {}
-    try:
-        not_verified_count = int(critic_summary.get("not_verified_count") or 0)
-    except Exception:
-        not_verified_count = 0
-    try:
-        inconclusive_count = int(critic_summary.get("inconclusive_count") or 0)
-    except Exception:
-        inconclusive_count = 0
-    try:
-        error_count = int(critic_summary.get("error_count") or 0)
-    except Exception:
-        error_count = 0
-
-    completion_claim_detected = bool(item.get("completion_claim_detected", False))
-    completion_claim_validated = bool(item.get("completion_claim_validated", True))
-    raw_workflow_routing_diagnostics = item.get("workflow_routing_diagnostics")
-    workflow_routing_diagnostics: dict[str, Any]
-    if isinstance(raw_workflow_routing_diagnostics, dict):
-        workflow_routing_diagnostics = raw_workflow_routing_diagnostics
-    else:
-        workflow_routing_diagnostics = {}
-    raw_dispatch = workflow_routing_diagnostics.get("dispatch")
-    dispatch: dict[str, Any]
-    if isinstance(raw_dispatch, dict):
-        dispatch = raw_dispatch
-    else:
-        dispatch = {}
-    dispatch_terminal_status = (
-        str(dispatch.get("dispatch_terminal_status") or "").strip().lower()
-    )
-    zero_tool_reason_code = (
-        str(dispatch.get("zero_tool_reason_code") or "").strip().lower()
+    from ...services.turn_execution_record_service import (
+        _classify_turn_execution_failure_mode as _service_classifier,
     )
 
-    if decision == "failed":
-        return "mutation_failed_or_blocked"
-    if decision == "escalation_required":
-        return "mutation_not_executed"
-    if decision == "partial":
-        if unresolved_effect_count > 0:
-            return "unresolved_required_effects"
-        if (not_verified_count + inconclusive_count + error_count) > 0:
-            return "postcondition_inconclusive"
-        return "partial_unspecified"
-    if decision == "completed":
-        if dispatch_terminal_status == "failed":
-            return "false_completion_gate_state"
-        if zero_tool_reason_code == "custom_workflow_failed_before_tool_invocation":
-            return "false_completion_gate_state"
-        if not safe_to_claim_completion:
-            return "false_completion_gate_state"
-        if unresolved_effect_count > 0:
-            return "false_completion_claim"
-        if (not_verified_count + inconclusive_count + error_count) > 0:
-            return "false_completion_claim"
-        if completion_claim_detected and not completion_claim_validated:
-            return "unvalidated_completion_claim"
-        return "completed_verified"
-    if completion_claim_detected and not completion_claim_validated:
-        return "unvalidated_completion_claim"
-    return "unknown"
+    return _service_classifier(item)
 
 
 def _is_likely_failure_to_act(failure_mode: str) -> bool:
-    return failure_mode in {
-        "mutation_failed_or_blocked",
-        "mutation_not_executed",
-        "unresolved_required_effects",
-        "postcondition_inconclusive",
-        "false_completion_gate_state",
-        "false_completion_claim",
-        "unvalidated_completion_claim",
-        "partial_unspecified",
-    }
+    from ...services.turn_execution_record_service import (
+        is_turn_execution_likely_failure_to_act,
+    )
+
+    return is_turn_execution_likely_failure_to_act(failure_mode)
 
 
 def _derive_turn_execution_failure_recommendations(
@@ -8794,6 +8714,10 @@ def _build_turn_execution_benchmark_signals(
 
 
 def _turn_execution_build_benchmark(**kwargs):
+    from ...services.turn_execution_record_service import (
+        TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION,
+    )
+
     include_completed = bool(kwargs.get("include_completed", True))
     max_cases_raw = kwargs.get("max_cases")
     max_cases = 25
@@ -8919,6 +8843,36 @@ def _turn_execution_build_benchmark(**kwargs):
                 failure_mode_counts[key_text] = int(value)
             except Exception:
                 failure_mode_counts[key_text] = 0
+
+    outcome_label_counts = {
+        "successful_completion": 0,
+        "false_success": 0,
+        "unresolved_follow_up_needed": 0,
+        "tool_or_workflow_misrouting": 0,
+        "abstain_escalate_no_safe_route": 0,
+    }
+    overall_outcome_counts: dict[str, int] = {}
+    for item in sorted_items:
+        execution_correctness_raw = item.get("execution_correctness")
+        execution_correctness = (
+            execution_correctness_raw
+            if isinstance(execution_correctness_raw, Mapping)
+            else {}
+        )
+        metric_labels_raw = execution_correctness.get("metric_labels")
+        metric_labels = metric_labels_raw if isinstance(metric_labels_raw, Mapping) else {}
+        for label_name in outcome_label_counts:
+            if bool(metric_labels.get(label_name, False)):
+                outcome_label_counts[label_name] += 1
+        overall_outcome = (
+            str(execution_correctness.get("overall_outcome")).strip()
+            if isinstance(execution_correctness.get("overall_outcome"), str)
+            else ""
+        )
+        if overall_outcome:
+            overall_outcome_counts[overall_outcome] = (
+                overall_outcome_counts.get(overall_outcome, 0) + 1
+            )
     filters_payload = {
         "namespace": kwargs.get("namespace"),
         "limit": kwargs.get("limit"),
@@ -8986,6 +8940,16 @@ def _turn_execution_build_benchmark(**kwargs):
             ),
         },
         "failure_mode_counts": failure_mode_counts,
+        "outcome_label_counts": outcome_label_counts,
+        "outcome_label_rates_pct": {
+            f"{label_name}_rate_pct": _format_turn_execution_rate(count, scanned_count)
+            for label_name, count in outcome_label_counts.items()
+        },
+        "overall_outcome_counts": overall_outcome_counts,
+        "metric_schema": {
+            "summary_schema_version": TURN_EXECUTION_CORRECTNESS_SCHEMA_VERSION,
+            "outcome_labels": list(outcome_label_counts.keys()),
+        },
         "decision_counts": (
             result.get("decision_counts")
             if isinstance(result.get("decision_counts"), dict)
@@ -9651,6 +9615,10 @@ def _testing_cleanup_arxiv_paper_ingestion_artifacts(**kwargs):
 
 
 def _turn_execution_search_failures(**kwargs):
+    from ...services.turn_execution_record_service import (
+        build_turn_execution_correctness_summary,
+    )
+
     include_completed = bool(kwargs.get("include_completed", False))
     forwarded = dict(kwargs)
     forwarded["collection"] = "turn_execution_records"
@@ -9684,8 +9652,52 @@ def _turn_execution_search_failures(**kwargs):
         if not isinstance(raw_item, dict):
             continue
         item = dict(raw_item)
+        execution_correctness_raw = item.get("execution_correctness")
+        execution_correctness = (
+            dict(execution_correctness_raw)
+            if isinstance(execution_correctness_raw, dict)
+            else build_turn_execution_correctness_summary(
+                completion_gate={
+                    "decision": item.get("decision"),
+                    "decision_reason": item.get("decision_reason"),
+                    "safe_to_claim_completion": item.get(
+                        "safe_to_claim_completion"
+                    ),
+                    "requires_follow_up": item.get("requires_follow_up"),
+                },
+                required_effects=[
+                    {
+                        "effect_id": effect_id,
+                        "status": "not_executed",
+                    }
+                    for effect_id in (item.get("blocking_effect_ids") or [])
+                    if isinstance(effect_id, str) and effect_id.strip()
+                ],
+                critic_summary=item.get("critic_summary")
+                if isinstance(item.get("critic_summary"), Mapping)
+                else {},
+                final_response={
+                    "completion_claim_detected": item.get(
+                        "completion_claim_detected"
+                    ),
+                    "completion_claim_validated": item.get(
+                        "completion_claim_validated"
+                    ),
+                },
+                workflow_selection={
+                    "selected_workflow_id": item.get("selected_workflow_id"),
+                    "selector_verdict": item.get("selector_verdict"),
+                },
+                workflow_routing_diagnostics=item.get("workflow_routing_diagnostics")
+                if isinstance(item.get("workflow_routing_diagnostics"), Mapping)
+                else {},
+            )
+        )
+        item["execution_correctness"] = execution_correctness
         failure_mode = _classify_turn_execution_failure_mode(item)
         likely_failure = _is_likely_failure_to_act(failure_mode)
+        item["overall_outcome"] = execution_correctness.get("overall_outcome")
+        item["metric_labels"] = execution_correctness.get("metric_labels")
         item["failure_mode"] = failure_mode
         item["likely_failure_to_act"] = likely_failure
 
@@ -13600,6 +13612,10 @@ def _rag_list_indexed(**kwargs):
         )
 
     if collection == "turn_execution_records":
+        from ...services.turn_execution_record_service import (
+            build_turn_execution_correctness_summary,
+        )
+
         coll = db["turn_execution_records"]
 
         query: dict[str, Any] = {"namespace": ns}
@@ -13757,6 +13773,19 @@ def _rag_list_indexed(**kwargs):
                 if isinstance(final_response_payload_raw, dict)
                 else {}
             )
+            execution_correctness_raw = doc.get("execution_correctness")
+            execution_correctness: dict[str, Any] = (
+                dict(execution_correctness_raw)
+                if isinstance(execution_correctness_raw, dict)
+                else build_turn_execution_correctness_summary(
+                    completion_gate=completion_gate,
+                    required_effects=required_effects,
+                    critic_summary=critic_summary,
+                    final_response=final_response_payload,
+                    workflow_selection=workflow_selection,
+                    workflow_routing_diagnostics=workflow_routing_diagnostics,
+                )
+            )
             blocking_effect_ids_raw = completion_gate.get("blocking_effect_ids")
             blocking_effect_ids: list[str] = []
             if isinstance(blocking_effect_ids_raw, list):
@@ -13833,6 +13862,13 @@ def _rag_list_indexed(**kwargs):
                     "completion_claim_validated": final_response_payload.get(
                         "completion_claim_validated"
                     ),
+                    "overall_outcome": execution_correctness.get("overall_outcome"),
+                    "failure_mode": execution_correctness.get("failure_mode"),
+                    "likely_failure_to_act": execution_correctness.get(
+                        "likely_failure_to_act"
+                    ),
+                    "metric_labels": execution_correctness.get("metric_labels"),
+                    "execution_correctness": execution_correctness,
                     "repeat_iteration": repeat_iteration,
                     "loop_attempts": loop_attempts,
                     "loop_stop_reason": loop_stop_reason,
@@ -14443,6 +14479,10 @@ def _rag_get_item(**kwargs):
         )
 
     if collection == "turn_execution_records":
+        from ...services.turn_execution_record_service import (
+            build_turn_execution_correctness_summary,
+        )
+
         coll = db["turn_execution_records"]
         doc = coll.find_one({"request_id": session_id, "namespace": ns})
         if not doc:
@@ -14478,6 +14518,27 @@ def _rag_get_item(**kwargs):
             else []
         )
         critic_payload = doc.get("critic") if isinstance(doc.get("critic"), dict) else {}
+        critic_summary = (
+            critic_payload.get("summary")
+            if isinstance(critic_payload.get("summary"), dict)
+            else {}
+        )
+        final_response_payload = (
+            doc.get("final_response") if isinstance(doc.get("final_response"), dict) else {}
+        )
+        execution_correctness_raw = doc.get("execution_correctness")
+        execution_correctness = (
+            dict(execution_correctness_raw)
+            if isinstance(execution_correctness_raw, dict)
+            else build_turn_execution_correctness_summary(
+                completion_gate=completion_gate,
+                required_effects=required_effects,
+                critic_summary=critic_summary,
+                final_response=final_response_payload,
+                workflow_selection=workflow_selection,
+                workflow_routing_diagnostics=workflow_routing_diagnostics,
+            )
+        )
         rag_indexing_state_map, rag_indexing_lookup_warning = (
             _load_turn_execution_rag_indexing_state_map(
                 db=db,
@@ -14511,11 +14572,19 @@ def _rag_get_item(**kwargs):
             "blocking_effect_ids": completion_gate.get("blocking_effect_ids"),
             "selected_workflow_id": workflow_selection.get("selected_workflow_id"),
             "selector_verdict": workflow_selection.get("selector_verdict"),
+            "overall_outcome": execution_correctness.get("overall_outcome"),
+            "failure_mode": execution_correctness.get("failure_mode"),
+            "likely_failure_to_act": execution_correctness.get(
+                "likely_failure_to_act"
+            ),
+            "metric_labels": execution_correctness.get("metric_labels"),
+            "execution_correctness": execution_correctness,
             "workflow_routing_diagnostics": workflow_routing_diagnostics,
             "prompt_preview": prompt_payload.get("preview"),
             "required_effects": required_effects,
             "postcondition_checks": postcondition_checks,
             "critic": critic_payload,
+            "final_response": final_response_payload,
             "rag_indexing_state": rag_indexing_state,
             "item_kind": "turn_execution_record",
             "source_system": "mongo.turn_execution_records",
